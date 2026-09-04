@@ -399,6 +399,17 @@ interface ActiveSession {
   pendingWorktreeRebind?: string;
 }
 
+interface ProviderRetirement {
+  client: Driver;
+  entry: ActiveSession;
+  promise: Promise<void>;
+  /** A successful worktree handoff keeps the existing box slot and session lock for its replacement. */
+  preserveAdmission: boolean;
+  preserveLock: boolean;
+  /** While a handoff is healthy, prompts may join the replacement generation's pre-launch FIFO. */
+  acceptPromptsDuringHandoff: boolean;
+}
+
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
  * handshake; driver identity alone is never enough. */
 function canResumeSession(meta: SessionMeta): boolean {
@@ -600,9 +611,9 @@ export class SessionManager {
   /** Provider logout is asynchronous; fence prompts and other provider/worktree operations. */
   private readonly loggingOut = new Set<string>();
   /** Explicit stop waits for ACP session/close before this session may launch again. */
-  private readonly closing = new Map<string, { client: Driver; promise: Promise<void> }>();
+  private readonly closing = new Map<string, ProviderRetirement>();
   /** A turn-boundary worktree move owns a retiring provider even after it leaves `active`.
-   * Unlike `closing`, prompts may join its pre-launch FIFO while the same conversation reopens. */
+   * Unlike an ordinary close, prompts may join its pre-launch FIFO while the conversation reopens. */
   private readonly worktreeRebindings = new Map<string, {
     entry: ActiveSession;
     promise: Promise<void>;
@@ -610,6 +621,8 @@ export class SessionManager {
      * durable metadata again, but cleanup must keep fencing the cwd already handed to launch(). */
     launchingWorktreePath?: string;
   }>();
+  /** Deletions that installed their durable tombstone but remain fenced on exact-client exit. */
+  private readonly pendingDeletions = new Set<string>();
   private readonly deleting = new Set<string>();
   /** Process-lifetime tombstone: a late start command/continuation may never recreate a deleted id. */
   private readonly deleted = new Set<string>();
@@ -1988,7 +2001,16 @@ export class SessionManager {
       return false;
     }
     const closing = this.closing.get(spec.sessionId);
-    if (closing) await closing.promise;
+    if (closing) {
+      await closing.promise;
+      if (this.closing.get(spec.sessionId) === closing) {
+        const message = "the previous provider process could not be confirmed stopped";
+        this.emitEvent(spec.sessionId, { kind: "error", message });
+        this.emitStatus(spec.sessionId, "stopped", message);
+        durable?.failed(message, "COMMAND_CANCELLED");
+        return false;
+      }
+    }
     const rebinding = this.worktreeRebindings.get(spec.sessionId);
     // Once launch() publishes the replacement entry, an explicit Restart owns cancellation and
     // retirement directly. Waiting for the encompassing rebind promise could deadlock forever on
@@ -2917,7 +2939,7 @@ export class SessionManager {
         {
         onEvent: (p) => this.onDriverEvent(sessionId, p),
         onStderr: (t) => this.onDriverStderr(sessionId, t),
-        onExit: (code) => this.onDriverExit(sessionId, code),
+        onExit: (code) => this.onDriverExit(sessionId, code, client),
         onBackgroundWork: (update) => {
           // A retiring driver may emit an exit/null callback after a replacement owns the session.
           if (this.active.get(sessionId)?.client !== client) return;
@@ -3570,13 +3592,15 @@ export class SessionManager {
     const stoppedRebindInProgress = this.worktreeRebindings.has(sessionId) &&
       (rebindGeneration === undefined ||
         this.preLaunchAdmissionGenerations.get(sessionId) !== rebindGeneration);
+    const closing = this.closing.get(sessionId);
+    const providerCloseBlocksPrompt = !!closing && !closing.acceptPromptsDuringHandoff;
     // A prompt during a file rewind would snapshot (and run the agent over) a half-restored
     // tree — the reentrant store lock can't fence this same-process race, the set does.
     if (
       this.rewinding.has(sessionId) ||
       this.forking.has(sessionId) ||
       this.loggingOut.has(sessionId) ||
-      this.closing.has(sessionId) ||
+      providerCloseBlocksPrompt ||
       this.deleting.has(sessionId) ||
       stoppedRebindInProgress
     ) {
@@ -3586,13 +3610,13 @@ export class SessionManager {
           ? "conversation fork"
           : this.loggingOut.has(sessionId)
             ? "agent sign-out"
-            : this.closing.has(sessionId)
+            : providerCloseBlocksPrompt
               ? "provider session close"
               : this.deleting.has(sessionId)
                 ? "session deletion"
                 : "worktree rebind shutdown";
       this.emitEvent(sessionId, { kind: "error", message: `a ${operation} is in progress — retry in a moment` });
-      if (this.closing.has(sessionId) || this.deleting.has(sessionId) || stoppedRebindInProgress) {
+      if (providerCloseBlocksPrompt || this.deleting.has(sessionId) || stoppedRebindInProgress) {
         this.emitStatus(sessionId, this.store.readMeta(sessionId)?.status ?? "stopped");
       }
       durable?.failed(`a ${operation} is in progress`, "COMMAND_CANCELLED");
@@ -5008,6 +5032,10 @@ export class SessionManager {
       durable?.failed("session is not active on this runner", "SESSION_NOT_FOUND");
       return;
     }
+    if (this.closing.has(sessionId)) {
+      durable?.failed("the previous provider process could not be confirmed stopped", "COMMAND_CANCELLED");
+      return;
+    }
     if (syntheticRecovery && (meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta))) {
       this.log(`orphan recovery skipped for session without automatic recovery authority ${sessionId}`);
       return;
@@ -5455,8 +5483,24 @@ export class SessionManager {
     let preserveRebindLockForQueue = false;
     try {
       try {
-        await this.closeAndDispose(sessionId, entry.client, true);
+        const retirement = this.beginProviderRetirement(sessionId, entry, {
+          preserveAdmission: true,
+          preserveLock: true,
+          acceptPromptsDuringHandoff: true,
+        });
+        await retirement.promise;
+        if (this.closing.get(sessionId) === retirement) {
+          throw new Error("provider process retirement is unconfirmed");
+        }
       } catch (error) {
+        const retirement = this.closing.get(sessionId);
+        if (retirement?.client === entry.client) {
+          // The handoff will not continue. Keep both fences until this exact client reports exit,
+          // then let normal retirement completion release them for an explicit retry.
+          retirement.preserveAdmission = false;
+          retirement.preserveLock = false;
+          retirement.acceptPromptsDuringHandoff = false;
+        }
         this.log(`session ${sessionId} provider disposal failed during worktree rebind: ${errText(error)}`);
         this.emitEvent(sessionId, {
           kind: "error",
@@ -5465,8 +5509,6 @@ export class SessionManager {
         if (this.launchIsCurrent(sessionId, launchGeneration) &&
             this.store.readMeta(sessionId)?.status !== "stopped") this.emitStatus(sessionId, "idle");
         return;
-      } finally {
-        this.releaseActiveWorktreeLease(entry);
       }
       const fresh = this.store.readMeta(sessionId);
       if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
@@ -5524,11 +5566,13 @@ export class SessionManager {
         if (failedEntry?.launchGeneration === launchGeneration) {
           this.deleteActiveSession(sessionId, failedEntry, false);
           try {
-            await this.closeAndDispose(sessionId, failedEntry.client, true);
+            const retirement = this.beginProviderRetirement(sessionId, failedEntry);
+            await retirement.promise;
+            if (this.closing.get(sessionId) === retirement) {
+              throw new Error("provider process retirement is unconfirmed");
+            }
           } catch (disposeError) {
             this.log(`session ${sessionId} failed replacement disposal: ${errText(disposeError)}`);
-          } finally {
-            this.releaseActiveWorktreeLease(failedEntry);
           }
         }
         if (this.launchIsCurrent(sessionId, launchGeneration) &&
@@ -5550,8 +5594,15 @@ export class SessionManager {
         if (this.store.readMeta(sessionId)?.status === "stopped") {
           if (reboundEntry) {
             this.deleteActiveSession(sessionId, reboundEntry, false);
-            await this.closeAndDispose(sessionId, reboundEntry.client, true);
-            this.releaseActiveWorktreeLease(reboundEntry);
+            try {
+              const retirement = this.beginProviderRetirement(sessionId, reboundEntry);
+              await retirement.promise;
+              if (this.closing.get(sessionId) === retirement) {
+                throw new Error("provider process retirement is unconfirmed");
+              }
+            } catch (disposeError) {
+              this.log(`session ${sessionId} stopped replacement disposal failed: ${errText(disposeError)}`);
+            }
           }
           launched = false;
           return;
@@ -5575,6 +5626,7 @@ export class SessionManager {
     } finally {
       const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
+      const retirementPending = this.closing.has(sessionId);
       if (!launched && ownsGeneration && !superseded) {
         this.rejectPreLaunchQueue(
           sessionId,
@@ -5587,11 +5639,11 @@ export class SessionManager {
         this.preLaunchAdmissionGenerations.delete(sessionId);
       }
       this.finishLaunchGeneration(sessionId, launchGeneration);
-      if (!launched && !superseded) this.releaseAdmissionIfInactive(sessionId);
-      else if (!launched && this.store.readMeta(sessionId)?.status === "stopped") {
+      if (!launched && !superseded && !retirementPending) this.releaseAdmissionIfInactive(sessionId);
+      else if (!launched && !retirementPending && this.store.readMeta(sessionId)?.status === "stopped") {
         this.releaseAdmissionIfInactive(sessionId);
       }
-      if (rebindLockHeld && !preserveRebindLockForQueue) this.clearLock(sessionId);
+      if (rebindLockHeld && !preserveRebindLockForQueue && !retirementPending) this.clearLock(sessionId);
     }
   }
 
@@ -6817,23 +6869,75 @@ export class SessionManager {
     this.rejectQueued(entry.queue, "session stopped before queued command started");
     entry.queue.length = 0;
     this.emitQueue(sessionId); // clear any queued prompts from the dashboard
-    if (entry.client.close) {
-      let promise: Promise<void>;
-      promise = this.closeAndDispose(sessionId, entry.client, true).finally(() => {
-        if (this.closing.get(sessionId)?.promise === promise) this.closing.delete(sessionId);
-        this.releaseActiveWorktreeLease(entry);
-        this.releaseAdmission(sessionId);
-        this.clearLock(sessionId);
-      });
-      this.closing.set(sessionId, { client: entry.client, promise });
-    } else {
-      entry.client.dispose({ forceImmediate: true });
-      this.releaseActiveWorktreeLease(entry);
-      this.releaseAdmission(sessionId);
-      this.clearLock(sessionId);
-    }
+    this.beginProviderRetirement(sessionId, entry);
     // Worktree is intentionally kept so its diff remains reviewable.
     this.emitStatus(sessionId, "stopped");
+  }
+
+  private beginProviderRetirement(
+    sessionId: string,
+    entry: ActiveSession,
+    options: {
+      preserveAdmission?: boolean;
+      preserveLock?: boolean;
+      acceptPromptsDuringHandoff?: boolean;
+    } = {},
+  ): ProviderRetirement {
+    const existing = this.closing.get(sessionId);
+    if (existing) {
+      if (existing.client !== entry.client) {
+        throw new Error("cannot retire a different provider while an earlier retirement is pending");
+      }
+      return existing;
+    }
+    const retirement = {
+      client: entry.client,
+      entry,
+      promise: Promise.resolve(),
+      preserveAdmission: options.preserveAdmission ?? false,
+      preserveLock: options.preserveLock ?? false,
+      acceptPromptsDuringHandoff: options.acceptPromptsDuringHandoff ?? false,
+    };
+    this.closing.set(sessionId, retirement);
+    if (!entry.client.close) {
+      try {
+        entry.client.dispose({ forceImmediate: true });
+        this.completeProviderRetirement(sessionId, retirement);
+      } catch (error) {
+        this.log(`session ${sessionId} provider retirement remains unconfirmed: ${errText(error)}`);
+        // Keep `closing` installed as the exact-client fence, but preserve the synchronous Stop
+        // result contract so the control plane does not acknowledge an unconfirmed stop as success.
+        throw error;
+      }
+      return retirement;
+    }
+    retirement.promise = this.closeAndDispose(sessionId, entry.client, true).then(
+      () => this.completeProviderRetirement(sessionId, retirement),
+      (error) => {
+        // No exit proof exists. Retain every ownership boundary until this exact client later
+        // reports exit or runner shutdown successfully disposes it.
+        this.log(`session ${sessionId} provider retirement remains unconfirmed: ${errText(error)}`);
+      },
+    );
+    return retirement;
+  }
+
+  private completeProviderRetirement(
+    sessionId: string,
+    retirement: ProviderRetirement,
+  ): void {
+    if (this.closing.get(sessionId) !== retirement) return;
+    this.closing.delete(sessionId);
+    this.releaseActiveWorktreeLease(retirement.entry);
+    if (!retirement.preserveAdmission) this.releaseAdmission(sessionId);
+    if (!retirement.preserveLock) this.clearLock(sessionId);
+    if (!this.shuttingDown && this.pendingDeletions.delete(sessionId)) {
+      setImmediate(() => {
+        void this.delete(sessionId).catch((error) => {
+          this.log(`deferred deletion retry failed for ${sessionId}: ${errText(error)}`);
+        });
+      });
+    }
   }
 
   /** Permanently delete a session from the box store (the source of truth) so it cannot be
@@ -6888,38 +6992,58 @@ export class SessionManager {
       this.latestLaunchGenerations.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
       const rebinding = this.worktreeRebindings.get(sessionId);
-      if (!rebinding) this.releaseAdmissionIfInactive(sessionId);
       this.discardRecovery(sessionId);
       this.cancelApprovalTelemetry(sessionId);
-      const closing = this.closing.get(sessionId);
+      let closing = this.closing.get(sessionId);
       const entry = this.active.get(sessionId);
+      if (!closing && !rebinding) this.releaseAdmissionIfInactive(sessionId);
       this.clearSteeringState(sessionId, "session was deleted before steering settled");
       if (entry) {
-        this.deleteActiveSession(sessionId, entry);
+        this.deleteActiveSession(sessionId, entry, false);
         this.rejectQueued(entry.queue, "session was deleted before queued command started");
         entry.queue.length = 0;
+        if (!closing) {
+          try {
+            closing = this.beginProviderRetirement(sessionId, entry);
+          } catch (error) {
+            // A no-close driver disposes synchronously. If disposal throws, retain the same pending
+            // deletion intent used by the asynchronous-close path before control returns to the
+            // event loop, so an eventual exact-client exit automatically resumes cleanup.
+            closing = this.closing.get(sessionId);
+            if (closing?.client === entry.client) {
+              this.pendingDeletions.add(sessionId);
+              throw error;
+            }
+            // A pathological driver may synchronously emit exact exit and then throw from dispose.
+            // Retirement is already proven in that case, so continue the journaled deletion.
+            this.log(`session ${sessionId} disposal threw after exact exit proof: ${errText(error)}`);
+          }
+        }
       }
-      this.clearLock(sessionId);
-      // The row disappears before the first await below. This makes every lookup/open fail closed
-      // while slow provider, cloud, provider-state, and worktree cleanup continues asynchronously.
-      this.store.remove(sessionId);
-      // A replacement provider is published in `active` before initialization settles. Deletion
-      // disposes that exact entry below, so the encompassing rebind promise must no longer retain
-      // the session indefinitely when a broken initialize()/newSession() never resolves.
-      if (rebinding && entry) this.worktreeRebindings.delete(sessionId);
-
-      if (closing) await closing.promise;
+      if (closing) {
+        await closing.promise;
+        if (this.closing.get(sessionId) === closing) {
+          this.pendingDeletions.add(sessionId);
+          throw new Error("provider process retirement is unconfirmed; destructive cleanup remains fenced");
+        }
+      }
       // A replacement published by launch() is already in `entry`; deletion retires it directly
-      // below. Do not also wait for the encompassing rebind promise, because a broken driver may
+      // above. Do not also wait for the encompassing rebind promise, because a broken driver may
       // leave initialize()/newSession() pending even after its process has been disposed.
       if (rebinding && !entry) {
         await rebinding.promise;
         this.releaseAdmission(sessionId);
       }
-      if (entry) {
-        await this.closeAndDispose(sessionId, entry.client, true);
-        this.releaseAdmission(sessionId);
-      }
+      this.clearLock(sessionId);
+      // The process-local deletion fence and durable tombstone make lookups fail closed while
+      // provider retirement settles. Remove the row only after its exact client has retired so
+      // a failed attempt remains retryable with complete cleanup provenance.
+      this.store.remove(sessionId);
+      // A replacement provider is published in `active` before initialization settles. Deletion
+      // captured and retired that exact entry above, so the encompassing rebind promise must no
+      // longer retain the session indefinitely when initialize()/newSession() never resolves.
+      if (rebinding && entry) this.worktreeRebindings.delete(sessionId);
+      this.pendingDeletions.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
       // Checkpoint refs live in the SHARED repo odb (not the worktree dir) — drop them or the
       // anchored trees for a deleted session pin objects forever. Best-effort: the repo may be
@@ -7113,6 +7237,7 @@ export class SessionManager {
       this.rewinding.has(sessionId) ||
       this.loggingOut.has(sessionId) ||
       this.deleting.has(sessionId) ||
+      this.closing.has(sessionId) ||
       this.worktreeRebindings.has(sessionId)
     ) return false;
     this.rewinding.add(sessionId);
@@ -7126,8 +7251,13 @@ export class SessionManager {
   }
 
   async rewind(sessionId: string, turn: number, alreadyFenced = false): Promise<{ ok: boolean; error?: string }> {
-    if (this.loggingOut.has(sessionId)) return { ok: false, error: "agent sign-out is in progress" };
-    if (this.deleting.has(sessionId)) return { ok: false, error: "session deletion is in progress" };
+    const refuseBeforeRewind = (error: string): { ok: false; error: string } => {
+      if (alreadyFenced) this.releaseRewindFence(sessionId);
+      return { ok: false, error };
+    };
+    if (this.loggingOut.has(sessionId)) return refuseBeforeRewind("agent sign-out is in progress");
+    if (this.deleting.has(sessionId)) return refuseBeforeRewind("session deletion is in progress");
+    if (this.closing.has(sessionId)) return refuseBeforeRewind("provider retirement is still in progress");
     // Mark FIRST (synchronously): prompt() consults the set, and the shared lock is reentrant
     // for this process so it can't fence a same-runner prompt out of the restore window.
     if (!alreadyFenced && !this.fenceRewind(sessionId)) {
@@ -7313,9 +7443,9 @@ export class SessionManager {
     return captured?.tree ?? null;
   }
 
-  private onExit(sessionId: string, code: number | null): void {
+  private onExit(sessionId: string, code: number | null, expectedClient: Driver): void {
     const entry = this.active.get(sessionId);
-    if (!entry) return;
+    if (!entry || entry.client !== expectedClient) return;
     this.releaseAdmission(sessionId);
     this.clearLock(sessionId);
     const meta = this.store.readMeta(sessionId);
@@ -7399,14 +7529,24 @@ export class SessionManager {
   /** Driver callbacks are third-party process boundaries and must never surface an exception into
    * the driver's event loop. Event-history failures are contained by emitEvent; this guard also
    * prevents an unrelated exit-cleanup failure from becoming a process-wide uncaught exception. */
-  private onDriverExit(sessionId: string, code: number | null): void {
+  private onDriverExit(sessionId: string, code: number | null, expectedClient: Driver): void {
+    const closing = this.closing.get(sessionId);
+    if (closing?.client === expectedClient) {
+      try {
+        this.completeProviderRetirement(sessionId, closing);
+      } catch (error) {
+        this.log(`provider retirement cleanup failed for ${sessionId}: ${errText(error)}`);
+      }
+      return;
+    }
+    if (this.active.get(sessionId)?.client !== expectedClient) return;
     this.revokeSessionCommandAuthority(sessionId);
     try {
-      this.onExit(sessionId, code);
+      this.onExit(sessionId, code, expectedClient);
     } catch (error) {
       this.log(`agent exit cleanup failed for ${sessionId}: ${errText(error)}`);
       const entry = this.active.get(sessionId);
-      if (!entry) return;
+      if (!entry || entry.client !== expectedClient) return;
       const detail = `agent exit cleanup failed: ${errText(error)}`;
       const queued = entry.queue.splice(0);
       this.rejectQueued(queued, detail);
@@ -7570,16 +7710,22 @@ export class SessionManager {
       }
     }
     this.active.clear();
-    for (const { client } of this.closing.values()) {
+    const shutdownRetirementClients = new Set<Driver>();
+    for (const retirement of [...this.closing.values()]) {
+      shutdownRetirementClients.add(retirement.client);
+      retirement.preserveAdmission = false;
+      retirement.preserveLock = false;
+      retirement.acceptPromptsDuringHandoff = false;
       try {
-        client.dispose();
+        retirement.client.dispose();
+        this.completeProviderRetirement(retirement.entry.sessionId, retirement);
       } catch (error) {
         clean = false;
         this.log(`shutdown dispose failed for a closing session: ${errText(error)}`);
       }
     }
-    this.closing.clear();
     for (const { entry } of this.worktreeRebindings.values()) {
+      if (shutdownRetirementClients.has(entry.client)) continue;
       try {
         entry.client.dispose();
       } catch (error) {
@@ -7588,6 +7734,7 @@ export class SessionManager {
       }
     }
     this.worktreeRebindings.clear();
+    this.pendingDeletions.clear();
     this.deleting.clear();
     this.recoveryQueues.clear();
     this.preLaunchQueues.clear();

@@ -1786,7 +1786,7 @@ async function handleHostAction(msg: HostActionMessage): Promise<void> {
  * would put a shell/browser in the shared base checkout while the agent lands in the worktree. */
 function sessionFilesTarget(sessionId: string): { root: string; context: AgentContext; meta: SessionMeta } | "pending" | null {
   const meta = store.readMeta(sessionId);
-  if (!meta) return null;
+  if (!meta || store.isDeleted(sessionId)) return null;
   if (meta.worktreePending && !meta.worktreePath) return "pending";
   return { root: meta.worktreePath ?? meta.repoPath, context: meta.context, meta };
 }

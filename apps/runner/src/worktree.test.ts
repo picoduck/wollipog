@@ -1989,7 +1989,7 @@ test("a sibling runner lock prevents rebind from retiring the live provider", { 
   }
 });
 
-test("a throwing provider dispose cannot strand rebind generation or admission state", { skip: !haveGit() }, async () => {
+test("a throwing provider dispose fences rebind admission until the exact client exits", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-dispose-worktree-rebind-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
@@ -2009,11 +2009,17 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
     const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
     let disposeAttemptedResolve!: () => void;
     const disposeAttempted = new Promise<void>((resolve) => { disposeAttemptedResolve = resolve; });
+    let reportFirstExit!: (code: number | null) => void;
+    let firstClient: unknown;
     let launches = 0;
-    const factory = (_driver: unknown, launch: { cwd: string }) => {
+    const factory = (
+      _driver: unknown,
+      launch: { cwd: string },
+      callbacks: { onExit(code: number | null): void },
+    ) => {
       const launchNumber = ++launches;
       launchedCwds.push(launch.cwd);
-      return {
+      const client = {
         pid: launchNumber, initialize: async () => {}, newSession: async () => {},
         close: async () => {
           if (launchNumber === 1) {
@@ -2031,6 +2037,11 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
         },
         setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-session-id",
       };
+      if (launchNumber === 1) {
+        reportFirstExit = callbacks.onExit;
+        firstClient = client;
+      }
+      return client;
     };
     manager = new SessionManager((message) => sent.push(message as never), () => {}, store,
       "runner", undefined, factory as never, dataDir, 1);
@@ -2048,6 +2059,7 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
       launchGenerations: Map<string, number>;
       preLaunchAdmissionGenerations: Map<string, number>;
       worktreeRebindings: Map<string, unknown>;
+      closing: Map<string, { client: unknown }>;
     };
     await closeStarted;
     manager.stop(spec.sessionId);
@@ -2060,9 +2072,16 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
     "provider disposal failure must be visible to the session");
     assert.equal(internals.launchGenerations.has(spec.sessionId), false);
     assert.equal(internals.preLaunchAdmissionGenerations.has(spec.sessionId), false);
-    assert.equal(internals.admitted.has(spec.sessionId), false);
+    assert.equal(internals.closing.get(spec.sessionId)?.client, firstClient);
+    assert.equal(internals.admitted.has(spec.sessionId), true,
+      "a failed disposal must retain admission until exact exit proof");
     assert.equal(store.readMeta(spec.sessionId)?.status, "stopped",
       "rebind cleanup must not overwrite a concurrent stop with idle");
+    assert.equal(manager.prompt(spec.sessionId, "before exit proof"), false,
+      "a replacement must remain fenced while the retired provider may still be alive");
+    reportFirstExit(1);
+    assert.equal(internals.closing.has(spec.sessionId), false);
+    assert.equal(internals.admitted.has(spec.sessionId), false);
     assert.equal(manager.prompt(spec.sessionId, "after failure"), true);
     await waitForCondition(() => prompts.length === 1, "a later prompt remained stranded after disposal failure");
     assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
@@ -2169,7 +2188,9 @@ test("delete waits for a rebinding provider before removing its selected worktre
     let deletionSettled = false;
     const deletion = manager.delete(spec.sessionId).finally(() => { deletionSettled = true; });
     await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(store.readMeta(spec.sessionId), null, "delete must fail closed to new callers immediately");
+    assert.equal(store.isDeleted(spec.sessionId), true, "delete must fail closed to new callers immediately");
+    assert.equal(store.has(spec.sessionId), true,
+      "the tombstoned row retains cleanup provenance until the retiring provider settles");
     assert.equal(deletionSettled, false, "delete must still be waiting for the retiring provider");
     assert.equal(existsSync(requested.worktree.path), true,
       "the provider's selected worktree must survive until its close settles");

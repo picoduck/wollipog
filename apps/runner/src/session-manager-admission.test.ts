@@ -1325,6 +1325,313 @@ test("delete racing an attached-worktree restart never removes the operator-owne
   }
 });
 
+test("a delayed exit from a retired driver cannot tear down its replacement", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retired-driver-exit-"));
+  try {
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    const store = new SessionStore(join(root, "sessions"));
+    const exits: Array<(code: number | null) => void> = [];
+    let launches = 0;
+    const factory = (_driver: unknown, _launch: unknown, callbacks: { onExit(code: number | null): void }) => {
+      const launch = ++launches;
+      exits.push(callbacks.onExit);
+      return {
+        pid: launch, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => `provider-${launch}`,
+      };
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, root, 2,
+    );
+    const spec = launchSpec(repo, "retired-exit");
+    assert.equal(await manager.start(spec), true);
+    const first = (manager as unknown as { active: Map<string, { client: unknown }> }).active.get(spec.sessionId);
+    assert.ok(first);
+    assert.equal(await manager.start(spec), true);
+    const internals = manager as unknown as {
+      active: Map<string, { client: unknown }>;
+      admitted: Set<string>;
+      sessionCommandAuthority: {
+        refresh(sessionId: string, commands: Array<{ name: string; source: "project" }>, provenance: string):
+          Array<{ invocation?: { id: string; catalogRevision: string; executionMode: "passthrough" } }>;
+        resolve(request: {
+          sessionId: string;
+          providerCommandId: string;
+          catalogRevision: string;
+          expectedExecutionMode: "passthrough";
+        }): { ok: boolean };
+      };
+    };
+    const replacement = internals.active.get(spec.sessionId);
+    assert.ok(replacement && replacement.client !== first.client);
+    const [command] = internals.sessionCommandAuthority.refresh(
+      spec.sessionId,
+      [{ name: "deploy", source: "project" }],
+      "replacement-catalog",
+    );
+    assert.ok(command?.invocation);
+
+    exits[0]!(1);
+
+    assert.equal(internals.active.get(spec.sessionId), replacement);
+    assert.equal(internals.admitted.has(spec.sessionId), true);
+    assert.equal(internals.sessionCommandAuthority.resolve({
+      sessionId: spec.sessionId,
+      providerCommandId: command.invocation.id,
+      catalogRevision: command.invocation.catalogRevision,
+      expectedExecutionMode: command.invocation.executionMode,
+    }).ok, true, "the retired driver's exit must not revoke its replacement's command authority");
+    manager.stop(spec.sessionId);
+    await (manager as unknown as { closing: Map<string, { promise: Promise<void> }> })
+      .closing.get(spec.sessionId)?.promise;
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed close and dispose retain lifecycle fences until the exact client exits", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-retirement-fence-"));
+  try {
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "base"], { cwd: repo, stdio: "ignore" });
+    const store = new SessionStore(join(root, "sessions"));
+    const siblingStore = new SessionStore(join(root, "sessions"));
+    let reportExit!: (code: number | null) => void;
+    const client = {
+      pid: 1, initialize: async () => {}, newSession: async () => {},
+      close: async () => { throw new Error("close failed"); },
+      prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {},
+      dispose: () => { throw new Error("dispose failed"); },
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+    };
+    const factory = (_driver: unknown, _launch: unknown, callbacks: { onExit(code: number | null): void }) => {
+      reportExit = callbacks.onExit;
+      return client;
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
+    );
+    const spec = { ...launchSpec(repo, "retirement-fence"), useWorktree: true };
+    assert.equal(await manager.start(spec), true);
+    const worktreePath = store.readMeta(spec.sessionId)?.worktreePath;
+    assert.ok(worktreePath && existsSync(worktreePath));
+    const internals = manager as unknown as {
+      active: Map<string, { worktreeLeaseOwner?: string }>;
+      admitted: Set<string>;
+      closing: Map<string, { promise: Promise<void> }>;
+      lockOwner: string;
+    };
+    assert.ok(internals.active.get(spec.sessionId)?.worktreeLeaseOwner);
+    assert.equal(store.acquireLock(spec.sessionId, internals.lockOwner), true);
+
+    manager.stop(spec.sessionId);
+    const retirement = internals.closing.get(spec.sessionId);
+    assert.ok(retirement);
+    await retirement.promise;
+    assert.equal(internals.closing.get(spec.sessionId), retirement);
+    assert.equal(internals.admitted.has(spec.sessionId), true);
+    assert.equal(store.ownsLock(spec.sessionId, internals.lockOwner), true);
+    assert.equal(siblingStore.acquireWorktreeLease(spec.sessionId, "cleanup-contender"), false);
+    assert.equal(await manager.start(spec), false, "restart must remain fail-closed without exit proof");
+    await assert.rejects(manager.delete(spec.sessionId), /retirement is unconfirmed/);
+    assert.equal(store.has(spec.sessionId), true, "failed deletion retains complete cleanup provenance");
+    assert.equal(existsSync(worktreePath), true);
+
+    reportExit(1);
+    for (let attempt = 0; attempt < 500 &&
+        (store.has(spec.sessionId) || existsSync(worktreePath)); attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(internals.closing.has(spec.sessionId), false);
+    assert.equal(internals.admitted.has(spec.sessionId), false);
+    assert.equal(store.ownsLock(spec.sessionId, internals.lockOwner), false);
+    assert.equal(store.has(spec.sessionId), false,
+      "late exact-client exit must automatically resume the already-requested deletion");
+    assert.equal(existsSync(worktreePath), false,
+      "automatic deletion retry must finish its journaled worktree cleanup");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a synchronous no-close retirement failure is reported while retaining its lifecycle fence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-retirement-sync-failure-"));
+  try {
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    const store = new SessionStore(join(root, "sessions"));
+    let reportExit!: (code: number | null) => void;
+    const client = {
+      pid: 1, initialize: async () => {}, newSession: async () => {},
+      prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {},
+      dispose: () => { throw new Error("dispose failed"); },
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-sync-failure",
+    };
+    const factory = (_driver: unknown, _launch: unknown, callbacks: { onExit(code: number | null): void }) => {
+      reportExit = callbacks.onExit;
+      return client;
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
+    );
+    const spec = launchSpec(repo, "retirement-sync-failure");
+    assert.equal(await manager.start(spec), true);
+    const internals = manager as unknown as {
+      admitted: Set<string>;
+      closing: Map<string, { client: unknown }>;
+    };
+
+    assert.throws(() => manager.stop(spec.sessionId), /dispose failed/,
+      "Stop must report that provider retirement remains unconfirmed");
+    assert.equal(store.readMeta(spec.sessionId)?.status, "stopped");
+    assert.equal(internals.closing.get(spec.sessionId)?.client, client);
+    assert.equal(internals.admitted.has(spec.sessionId), true);
+    assert.equal(await manager.start(spec), false, "restart must remain fenced until exact exit proof");
+
+    reportExit(1);
+    assert.equal(internals.closing.has(spec.sessionId), false);
+    assert.equal(internals.admitted.has(spec.sessionId), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed synchronous retirement automatically resumes deletion after exact exit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-retirement-sync-delete-"));
+  try {
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "base"], { cwd: repo, stdio: "ignore" });
+    const store = new SessionStore(join(root, "sessions"));
+    let reportExit!: (code: number | null) => void;
+    const client = {
+      pid: 1, initialize: async () => {}, newSession: async () => {},
+      prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {},
+      dispose: () => { throw new Error("dispose failed"); },
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-sync-delete",
+    };
+    const factory = (_driver: unknown, _launch: unknown, callbacks: { onExit(code: number | null): void }) => {
+      reportExit = callbacks.onExit;
+      return client;
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
+    );
+    const spec = { ...launchSpec(repo, "retirement-sync-delete"), useWorktree: true };
+    assert.equal(await manager.start(spec), true);
+    const worktreePath = store.readMeta(spec.sessionId)?.worktreePath;
+    assert.ok(worktreePath && existsSync(worktreePath));
+    const internals = manager as unknown as {
+      admitted: Set<string>;
+      closing: Map<string, { client: unknown }>;
+      pendingDeletions: Set<string>;
+    };
+
+    await assert.rejects(manager.delete(spec.sessionId), /dispose failed/);
+    assert.equal(internals.closing.get(spec.sessionId)?.client, client);
+    assert.equal(internals.pendingDeletions.has(spec.sessionId), true);
+    assert.equal(store.has(spec.sessionId), true);
+    assert.equal(existsSync(worktreePath), true);
+
+    reportExit(1);
+    for (let attempt = 0; attempt < 500 &&
+        (store.has(spec.sessionId) || existsSync(worktreePath)); attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(internals.closing.has(spec.sessionId), false);
+    assert.equal(internals.pendingDeletions.has(spec.sessionId), false);
+    assert.equal(internals.admitted.has(spec.sessionId), false);
+    assert.equal(store.has(spec.sessionId), false);
+    assert.equal(existsSync(worktreePath), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("orphan recovery cannot release a lock retained by failed provider retirement", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retirement-orphan-fence-"));
+  try {
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    const store = new SessionStore(join(root, "sessions"));
+    let reportExit!: (code: number | null) => void;
+    const client = {
+      pid: 1, initialize: async () => {}, newSession: async () => {},
+      close: async () => { throw new Error("close failed"); },
+      prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {},
+      dispose: () => { throw new Error("dispose failed"); },
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-orphan",
+    };
+    const factory = (_driver: unknown, _launch: unknown, callbacks: { onExit(code: number | null): void }) => {
+      reportExit = callbacks.onExit;
+      return client;
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
+    );
+    const spec = { ...launchSpec(repo, "retirement-orphan-fence"), useWorktree: true };
+    assert.equal(await manager.start(spec), true);
+    store.patchMeta(spec.sessionId, {
+      agentSessionId: "provider-orphan",
+      orphanedWork: { pendingTaskIds: ["task-1"], markedAt: 1, reason: "process_exit" },
+    });
+    const internals = manager as unknown as {
+      runOrphanRecovery(sessionId: string): Promise<void>;
+      lockOwner: string;
+      rewinding: Set<string>;
+    };
+    assert.equal(store.acquireLock(spec.sessionId, internals.lockOwner), true);
+    assert.equal(manager.fenceRewind(spec.sessionId), true,
+      "the queued rewind acquires its in-memory fence before retirement begins");
+
+    await assert.rejects(manager.delete(spec.sessionId), /retirement is unconfirmed/);
+    assert.equal(store.ownsLock(spec.sessionId, internals.lockOwner), true);
+    assert.deepEqual(
+      await manager.rewind(spec.sessionId, 1, true),
+      { ok: false, error: "provider retirement is still in progress" },
+    );
+    assert.equal(internals.rewinding.has(spec.sessionId), false,
+      "a refused queued rewind must release its pre-acquired in-memory fence");
+    await internals.runOrphanRecovery(spec.sessionId);
+    assert.equal(
+      store.ownsLock(spec.sessionId, internals.lockOwner),
+      true,
+      "synthetic recovery must not release the retirement-owned cross-process lock",
+    );
+    assert.equal(manager.fenceRewind(spec.sessionId), false,
+      "rewind must not enter while provider retirement remains unconfirmed");
+    assert.deepEqual(
+      await manager.rewind(spec.sessionId, 1),
+      { ok: false, error: "provider retirement is still in progress" },
+    );
+    assert.equal(
+      store.ownsLock(spec.sessionId, internals.lockOwner),
+      true,
+      "rewind must not release the retirement-owned cross-process lock",
+    );
+
+    reportExit(1);
+    await manager.delete(spec.sessionId);
+    assert.equal(store.has(spec.sessionId), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("two runner processes sharing a data directory enforce one box-wide slot", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-admission-shared-"));
   try {
