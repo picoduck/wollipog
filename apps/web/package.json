@@ -34,7 +34,7 @@
     "@vitejs/plugin-react": "^6.1.0",
     "@wollipog/test-support": "workspace:*",
     "happy-dom": "^20.10.6",
-    "postcss": "^8.5.23",
+    "postcss": "^8.5.26",
     "typescript": "^5.7.3",
     "vite": "^8.2.2"
   }
