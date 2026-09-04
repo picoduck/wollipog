@@ -220,7 +220,7 @@ test("choice palette keys stay scoped to palette buttons and enforce multi-selec
     assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /at least 2/);
 
     const choices = [...container.querySelectorAll<HTMLButtonElement>(".composer-answer-choice")];
-    choices[0]!.focus();
+    await act(async () => { choices[0]!.focus(); });
     await act(async () => {
       choices[0]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
     });
@@ -260,7 +260,7 @@ test("single-choice palette exposes one tab stop with wrapping Arrow, Home, and 
     const choices = [...container.querySelectorAll<HTMLButtonElement>(".composer-answer-choice")];
     assert.deepEqual(choices.map((choice) => choice.tabIndex), [0, -1, -1]);
 
-    choices[0]!.focus();
+    await act(async () => { choices[0]!.focus(); });
     await act(async () => {
       choices[0]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }) as never);
     });
@@ -277,6 +277,66 @@ test("single-choice palette exposes one tab stop with wrapping Arrow, Home, and 
       choices[0]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }) as never);
     });
     assert.equal(domWindow.document.activeElement, choices[2]);
+
+    await act(async () => {
+      choices[2]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }) as never);
+    });
+    assert.equal(domWindow.document.activeElement, choices[1]);
+    const input = container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(input);
+    await act(async () => setInputValue(input, "3"));
+    assert.equal(choices.filter((choice) => choice.tabIndex === 0).length, 1,
+      "text updates cannot restore React's former tab stop alongside the roving target");
+    assert.equal(choices[2]!.getAttribute("aria-checked"), "true");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("palette clicks preserve exact numeric provider labels instead of reparsing them as ordinals", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  const client = {
+    ...api,
+    answerQuestion: async (_sessionId: string, body: Parameters<ApiClient["answerQuestion"]>[1]) => {
+      calls.push(structuredClone(body));
+      return {} as SessionView;
+    },
+  } as ApiClient;
+  const questions: AgentQuestion[] = [{
+    id: "port",
+    question: "Choose a port",
+    options: [{ label: "2" }, { label: "Second Option" }],
+  }];
+
+  try {
+    await act(async () => root.render(<Harness client={client} questions={questions} requestId="ask-palette" />));
+    const choices = [...container.querySelectorAll<HTMLButtonElement>(".composer-answer-choice")];
+    const input = container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(input);
+    await act(async () => { choices[0]!.click(); });
+    assert.equal(choices[0]!.getAttribute("aria-checked"), "true");
+    await act(async () => {
+      input.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+      await tick();
+    });
+    assert.deepEqual(calls, [{ requestId: "ask-palette", answers: { port: "2" }, action: "submit" }]);
+
+    await act(async () => root.render(<Harness
+      client={client}
+      questions={[{ ...questions[0]!, options: [{ label: "3000" }, { label: "8080" }] }]}
+      requestId="ask-replacement"
+    />));
+    const respond = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Respond");
+    assert.ok(respond);
+    await act(async () => { respond.click(); });
+    const replacementChoices = [...container.querySelectorAll<HTMLButtonElement>(".composer-answer-choice")];
+    await act(async () => { replacementChoices[1]!.click(); });
+    assert.equal(replacementChoices[1]!.getAttribute("aria-checked"), "true");
   } finally {
     await act(async () => root.unmount());
     container.remove();

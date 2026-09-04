@@ -24,6 +24,9 @@ test("question operations are exclusive per request and release for retry", () =
   release();
   const retryRelease = claimQuestionResponseOperation("session-lock", "request-lock");
   assert.ok(retryRelease);
+  release();
+  assert.equal(claimQuestionResponseOperation("session-lock", "request-lock"), null,
+    "a stale duplicate release cannot clear a newer operation claim");
   retryRelease();
 });
 

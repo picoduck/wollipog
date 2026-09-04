@@ -2026,7 +2026,10 @@ function SessionDetailLoaded({
     answerable: false,
   });
   const answerModeFocusRequestRef = useRef<"answer" | "message" | null>(null);
+  const answerFocusRequestIdRef = useRef<string | null>(pendingQuestion?.requestId ?? null);
   const composerAnswerActive = canAnswerPendingQuestion && answerModeRequestId === pendingQuestion.requestId;
+  const answerFocusedBeforeRender = typeof document !== "undefined" && answerInputRef.current !== null &&
+    answerInputRef.current.ownerDocument.activeElement === answerInputRef.current;
 
   const exitAnswerMode = useCallback(() => {
     answerModeFocusRequestRef.current = "message";
@@ -2043,6 +2046,14 @@ function SessionDetailLoaded({
   }, [canAnswerPendingQuestion, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
 
   useLayoutEffect(() => {
+    const liveRequestId = pendingQuestion?.requestId ?? null;
+    const requestChanged = answerFocusRequestIdRef.current !== liveRequestId;
+    answerFocusRequestIdRef.current = liveRequestId;
+    if (requestChanged && answerFocusedBeforeRender) {
+      answerModeFocusRequestRef.current = null;
+      focusComposerAtDraftEnd();
+      return;
+    }
     const requested = answerModeFocusRequestRef.current;
     if (composerAnswerActive && requested === "answer") {
       answerModeFocusRequestRef.current = null;
@@ -2051,7 +2062,7 @@ function SessionDetailLoaded({
       answerModeFocusRequestRef.current = null;
       focusComposerAtDraftEnd();
     }
-  }, [composerAnswerActive, focusComposerAtDraftEnd]);
+  }, [answerFocusedBeforeRender, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
 
   useEffect(() => {
     const previous = answerModeArrivalRef.current;
@@ -2068,6 +2079,7 @@ function SessionDetailLoaded({
     if (requestChanged || styleChanged || answerabilityChanged) {
       let cancelled = false;
       let frame: number | null = null;
+      let remainingHydrationFrames = 120;
       const chooseInitialMode = () => {
         if (cancelled) return;
         if (queuedEditRef.current) {
@@ -2077,6 +2089,11 @@ function SessionDetailLoaded({
         // The ordinary draft hydrates asynchronously. Deciding before that boundary would hide a
         // restored draft behind Answer Mode instead of showing the explicit waiting prompt.
         if (draftHydratedSessionRef.current !== sessionId) {
+          remainingHydrationFrames -= 1;
+          if (remainingHydrationFrames <= 0) {
+            setAnswerModeRequestId(null);
+            return;
+          }
           frame = window.requestAnimationFrame(chooseInitialMode);
           return;
         }
@@ -3100,6 +3117,7 @@ function SessionDetailLoaded({
       setError(availability.reason);
       return;
     }
+    if (composerAnswerActive) exitAnswerMode();
     const generation = viewGenerationRef.current;
     const displacedDraft = {
       text: draftState.current.text,

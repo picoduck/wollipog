@@ -9,13 +9,11 @@ import {
   clearQuestionDrafts,
   claimQuestionResponseOperation,
   isAnswerableAgentQuestion,
-  offeredQuestionChoices,
   questionDraftAnswers,
+  questionDraftSelections,
   questionDraftText,
-  resolveQuestionResponse,
   storedQuestionDrafts,
   storeQuestionDrafts,
-  toggleQuestionChoice,
   type QuestionResponseDraft,
 } from "../question-response.js";
 import { Spinner } from "./common.js";
@@ -92,6 +90,7 @@ export function ComposerQuestionResponse({
     values: storedQuestionDrafts(sessionId, requestId),
   }));
   const [questionIndex, setQuestionIndex] = useState(0);
+  const [paletteFocusIndex, setPaletteFocusIndex] = useState(0);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -103,6 +102,7 @@ export function ComposerQuestionResponse({
   useEffect(() => {
     setDraftState({ requestId, values: storedQuestionDrafts(sessionId, requestId) });
     setQuestionIndex(0);
+    setPaletteFocusIndex(0);
     setValidationError(null);
     setSubmissionError(null);
     setBusy(false);
@@ -147,7 +147,8 @@ export function ComposerQuestionResponse({
   const currentIndex = Math.min(questionIndex, questions.length - 1);
   const question = questions[currentIndex]!;
   const values = draftState.requestId === requestId ? draftState.values : {};
-  const rawValue = questionDraftText(Object.hasOwn(values, question.id) ? values[question.id] : undefined);
+  const currentDraft = Object.hasOwn(values, question.id) ? values[question.id] : undefined;
+  const rawValue = questionDraftText(currentDraft);
   const questionLabelId = `${ids}-composer-question`;
   const questionHelpId = `${ids}-composer-help`;
   const questionErrorId = `${ids}-composer-error`;
@@ -155,14 +156,17 @@ export function ComposerQuestionResponse({
   const unsupported = !isAnswerableAgentQuestion(question);
   const controlsDisabled = busy || !runnerOnline || unsupported;
 
-  const update = (raw: string): Record<string, QuestionResponseDraft> => {
-    const next = withDraft(values, question.id, { kind: "entry", value: raw });
+  const updateDraft = (draft: QuestionResponseDraft): Record<string, QuestionResponseDraft> => {
+    const next = withDraft(values, question.id, draft);
     setDraftState({ requestId, values: next });
     persistDrafts(sessionId, requestId, questions, next);
     setValidationError(null);
     setSubmissionError(null);
     return next;
   };
+
+  const update = (raw: string): Record<string, QuestionResponseDraft> =>
+    updateDraft({ kind: "entry", value: raw });
 
   const submitAnswers = async (next: Record<string, QuestionResponseDraft>) => {
     const resolved = questionDraftAnswers(questions, next);
@@ -176,7 +180,11 @@ export function ComposerQuestionResponse({
     if (operationPendingRef.current === requestId || !runnerOnline) return;
     const submittedRequestId = requestId;
     const releaseOperation = claimQuestionResponseOperation(sessionId, submittedRequestId);
-    if (!releaseOperation) return;
+    if (!releaseOperation) {
+      setSubmissionError("Another response is already being submitted for this question.");
+      focusSoon(inputRef);
+      return;
+    }
     operationPendingRef.current = submittedRequestId;
     setBusy(true);
     setSubmissionError(null);
@@ -202,17 +210,18 @@ export function ComposerQuestionResponse({
     }
   };
 
-  const accept = (raw = rawValue) => {
+  const accept = (next = values) => {
     if (controlsDisabled) return;
-    const next = update(raw);
-    const resolved = resolveQuestionResponse(question, raw);
-    if (resolved.error) {
-      setValidationError(resolved.error);
+    const resolved = questionDraftAnswers([question], next);
+    const error = resolved.errors[question.id];
+    if (error) {
+      setValidationError(error);
       focusSoon(inputRef);
       return;
     }
     if (currentIndex < questions.length - 1) {
       setQuestionIndex(currentIndex + 1);
+      setPaletteFocusIndex(0);
       setValidationError(null);
       focusSoon(inputRef);
       return;
@@ -221,8 +230,11 @@ export function ComposerQuestionResponse({
   };
 
   const setChoice = (label: string) => {
-    const next = toggleQuestionChoice(question, rawValue, label);
-    update(next);
+    const selected = questionDraftSelections(question, currentDraft);
+    const labels = question.multiSelect
+      ? selected.includes(label) ? selected.filter((candidate) => candidate !== label) : [...selected, label]
+      : [label];
+    return updateDraft({ kind: "choice", labels });
   };
 
   const onChoiceKeyDown = (event: KeyboardEvent<HTMLButtonElement>, label: string) => {
@@ -239,10 +251,7 @@ export function ComposerQuestionResponse({
           ? choices.length - 1
           : (index + (event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1) + choices.length) % choices.length;
       const target = choices[targetIndex];
-      if (!question.multiSelect && target) {
-        choices.forEach((choice) => { choice.tabIndex = -1; });
-        target.tabIndex = 0;
-      }
+      if (!question.multiSelect) setPaletteFocusIndex(targetIndex);
       target?.focus();
     } else if (event.key === " " || event.key.toLowerCase() === "x") {
       event.preventDefault();
@@ -250,7 +259,7 @@ export function ComposerQuestionResponse({
     } else if (event.key === "Enter") {
       event.preventDefault();
       if (question.multiSelect) accept();
-      else accept(label);
+      else accept(setChoice(label));
     } else if (event.key === "Escape") {
       event.preventDefault();
       onExit();
@@ -280,18 +289,21 @@ export function ComposerQuestionResponse({
           aria-label="Offered Choices"
         >
           {question.options.map((option, optionIndex) => {
-            const offeredChoices = offeredQuestionChoices(question, rawValue) ?? [];
-            const selected = offeredChoices.includes(option.label);
+            const selected = questionDraftSelections(question, currentDraft).includes(option.label);
             return (
               <button
                 type="button"
                 className={`composer-answer-choice${selected ? " on" : ""}`}
                 role={question.multiSelect ? "checkbox" : "radio"}
                 aria-checked={selected}
-                tabIndex={question.multiSelect ? 0 : selected || (offeredChoices.length === 0 && optionIndex === 0) ? 0 : -1}
+                tabIndex={question.multiSelect ? 0 : optionIndex === paletteFocusIndex ? 0 : -1}
                 disabled={controlsDisabled}
                 key={option.label}
-                onClick={() => setChoice(option.label)}
+                onClick={() => {
+                  setPaletteFocusIndex(optionIndex);
+                  setChoice(option.label);
+                }}
+                onFocus={() => setPaletteFocusIndex(optionIndex)}
                 onKeyDown={(event) => onChoiceKeyDown(event, option.label)}
               >
                 <span className="composer-answer-choice-number">{optionIndex + 1}</span>
@@ -311,7 +323,7 @@ export function ComposerQuestionResponse({
         autoComplete="off"
         maxLength={question.allowOther ? question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH : undefined}
         value={rawValue}
-        aria-describedby={`${questionHelpId}${validationError ? ` ${questionErrorId}` : ""}`}
+        aria-describedby={`${questionHelpId}${question.options.length > 0 ? ` ${choicesId}` : ""}${validationError ? ` ${questionErrorId}` : ""}`}
         aria-invalid={validationError ? true : undefined}
         disabled={controlsDisabled}
         placeholder={question.multiSelect
@@ -351,6 +363,7 @@ export function ComposerQuestionResponse({
           disabled={busy || currentIndex === 0}
           onClick={() => {
             setQuestionIndex(currentIndex - 1);
+            setPaletteFocusIndex(0);
             setValidationError(null);
             focusSoon(inputRef);
           }}

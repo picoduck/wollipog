@@ -490,7 +490,10 @@ export function SessionQuestionBanner({
       return;
     }
     const releaseOperation = claimQuestionResponseOperation(sessionId, requestId);
-    if (!releaseOperation) return;
+    if (!releaseOperation) {
+      setError("Another response is already being submitted for this question.");
+      return;
+    }
     operationPendingRef.current = true;
     setBusy("submit");
     setError(null);
@@ -510,7 +513,10 @@ export function SessionQuestionBanner({
   const dismiss = async () => {
     if (operationPendingRef.current || busy !== null || !runnerOnline) return;
     const releaseOperation = claimQuestionResponseOperation(sessionId, requestId);
-    if (!releaseOperation) return;
+    if (!releaseOperation) {
+      setError("Another response is already being submitted for this question.");
+      return;
+    }
     operationPendingRef.current = true;
     setBusy("dismiss");
     setError(null);

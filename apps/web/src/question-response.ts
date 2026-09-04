@@ -237,7 +237,12 @@ export function claimQuestionResponseOperation(sessionId: string, requestId: str
   const key = draftKey(sessionId, requestId);
   if (pendingQuestionOperations.has(key)) return null;
   pendingQuestionOperations.add(key);
-  return () => pendingQuestionOperations.delete(key);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    pendingQuestionOperations.delete(key);
+  };
 }
 
 /** Page-lifetime drafts let the question surface survive transcript virtualization. */

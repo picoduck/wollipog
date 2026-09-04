@@ -2802,7 +2802,7 @@ test("automatic Answer Mode transfers existing composer focus into the answer fi
   const fixture = await mountFixture(draft);
   try {
     await resolveDraft(draft, "");
-    fixture.composer.focus();
+    await act(async () => { fixture.composer.focus(); });
     await fixture.pushSession({
       pendingApproval: {
         requestId: "ask-focused-arrival",
@@ -2822,6 +2822,88 @@ test("automatic Answer Mode transfers existing composer focus into the answer fi
     assert.ok(answer);
     assert.equal(answer.ownerDocument.activeElement, answer,
       "unmounting the focused ordinary composer must not leave document.body owning keystrokes");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("external question resolution returns Answer Mode focus to ordinary composition", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { fixture.composer.focus(); });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-external-resolution",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    await act(async () => { answer.focus(); });
+
+    await fixture.pushSession({ pendingApproval: null });
+    await act(async () => { flushFrames(); });
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.ok(ordinary);
+    assert.equal(ordinary.ownerDocument.activeElement, ordinary,
+      "external resolution must not leave Session Reading shortcuts armed on document.body");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("editing a queued message exits Answer Mode before loading the editor", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-answer-mode",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_answer_mode",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: { promptId, text: "Exact queued content", images: [], editRevision: "qer_answer_mode" },
+      }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-queue-edit",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    assert.ok(fixture.container.querySelector(".composer-answer-input"));
+
+    const edit = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Edit Queued Message"]');
+    assert.ok(edit);
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+
+    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.equal(ordinary?.value, "Exact queued content");
+    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Editing Queued Message/);
   } finally {
     await unmountFixture(fixture);
     setQuestionResponseStyle("interactive", domWindow as never);
