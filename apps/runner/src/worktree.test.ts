@@ -1096,6 +1096,84 @@ test("a governance hold defers worktree rebind and its queued prompt until rearm
   }
 });
 
+test("a control-plane hold survives rebind and its release resumes an empty deferred rebind", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-control-plane-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releasePrompt = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    let promptStartedResolve!: () => void;
+    const promptStarted = new Promise<void>((resolve) => { promptStartedResolve = resolve; });
+    const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async (text: string) => {
+          prompts.push({ cwd: launch.cwd, text });
+          if (text === "first") {
+            promptStartedResolve();
+            await promptGate;
+          }
+          return "end_turn" as const;
+        },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_control_plane_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "first");
+    await promptStarted;
+    const firstRequested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/control-plane-held-rebind",
+    });
+    manager.prompt(spec.sessionId, "held");
+    manager.rearmGovernance(spec.sessionId, {}, "control_plane");
+    releasePrompt();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(launchedCwds, [repo], "the control-plane card must defer provider replacement");
+    assert.deepEqual(prompts, [{ cwd: repo, text: "first" }],
+      "queued work must remain parked behind the control-plane card");
+
+    manager.rearmGovernance(spec.sessionId, {});
+    await waitForCondition(() => prompts.length === 2, "card release did not resume the held FIFO after rebind");
+    assert.deepEqual(launchedCwds, [repo, firstRequested.worktree.path]);
+    assert.deepEqual(prompts[1], { cwd: firstRequested.worktree.path, text: "held" });
+    await waitForCondition(() => store.readMeta(spec.sessionId)?.status === "idle", "held prompt did not settle");
+
+    manager.rearmGovernance(spec.sessionId, {}, "control_plane");
+    const emptyRequested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/control-plane-empty-rebind",
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(launchedCwds.length, 2, "an empty held queue must still defer provider replacement");
+    manager.rearmGovernance(spec.sessionId, {});
+    await waitForCondition(() => launchedCwds.length === 3, "card release did not resume the empty rebind");
+    assert.equal(launchedCwds[2], emptyRequested.worktree.path);
+    assert.equal(prompts.length, 2, "an empty rebind must not invent a prompt");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    releasePrompt();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an interrupt hold defers worktree rebind until an explicit prompt resumes the queue", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-interrupt-worktree-rebind-"));
   const repo = join(root, "repo");

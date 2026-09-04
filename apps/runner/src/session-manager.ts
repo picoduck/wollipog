@@ -5368,7 +5368,7 @@ export class SessionManager {
       !entry.authenticationBlocked &&
       !entry.historyIntegrityFailure &&
       !entry.governanceTripped &&
-      !entry.holdQueuedPromptsAfterInterrupt &&
+      !this.queueHeld(entry) &&
       !this.hasPendingApproval(sessionId) &&
       !this.steerFences(entry).size &&
       !this.reservedPromotionPrecedesQueue(sessionId, entry);
@@ -6597,7 +6597,8 @@ export class SessionManager {
       if (holdFor === undefined && (entry.controlPlaneHold || this.recoveryHolds.has(sessionId))) {
         this.recoveryHolds.delete(sessionId);
         this.setControlPlaneHold(sessionId, entry, false);
-        if (!entry.running && !entry.governanceTripped && !this.queueHeld(entry) && entry.queue.length) this.scheduleDrain(sessionId);
+        if (!entry.running && !entry.governanceTripped && !this.queueHeld(entry) &&
+            (entry.queue.length || entry.pendingWorktreeRebind)) this.scheduleDrain(sessionId);
       }
       return;
     }
