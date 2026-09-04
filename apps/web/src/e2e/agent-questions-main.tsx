@@ -1,10 +1,11 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { SessionQuestionBanner } from "../components/SessionApproval.js";
-import { setQuestionResponseStyle } from "../question-response-style.js";
+import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
+import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
 import { inTypingContext } from "../shortcuts.js";
 import { isFollowTailResumeKey } from "../useFollowTail.js";
 import "../styles.css";
@@ -25,7 +26,7 @@ declare global {
 }
 
 const params = new URLSearchParams(window.location.search);
-setQuestionResponseStyle(params.get("style") === "text" ? "text" : "interactive");
+setQuestionResponseStyle(["composer", "text"].includes(params.get("style") ?? "") ? "composer" : "interactive");
 const initialOnline = params.get("offline") !== "1";
 const shouldFail = params.get("failure") === "1";
 const renderInFallbackSlot = params.get("slot") === "1";
@@ -144,12 +145,19 @@ const formQuestions: AgentQuestion[] = [
 window.agentQuestionCalls = [];
 
 function Fixture() {
+  const responseStyle = useQuestionResponseStyle();
   const [requestId, setRequestId] = useState("ask-1");
   const [questions, setQuestions] = useState(
     params.get("set") === "long" ? longQuestions : params.get("set") === "forms" ? formQuestions : shortQuestions,
   );
   const [runnerOnline, setRunnerOnline] = useState(initialOnline);
   const [resolved, setResolved] = useState(false);
+  const [answerActive, setAnswerActive] = useState(responseStyle === "composer");
+  const answerInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!resolved && responseStyle === "composer") setAnswerActive(true);
+  }, [requestId, resolved, responseStyle]);
 
   window.replaceAgentQuestion = () => {
     setRequestId("ask-2");
@@ -187,6 +195,24 @@ function Fixture() {
       showKeyHints={false}
     />
   );
+  const composerContent = !resolved && responseStyle === "composer" ? (
+    <div className="composer">
+      <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
+        <ComposerQuestionResponse
+          sessionId="agent-question-session"
+          requestId={requestId}
+          questions={questions}
+          runnerOnline={runnerOnline}
+          active={answerActive}
+          showWaiting
+          inputRef={answerInputRef}
+          onEnter={() => setAnswerActive(true)}
+          onExit={() => setAnswerActive(false)}
+          onSessionUpdate={() => setResolved(true)}
+        />
+      </div>
+    </div>
+  ) : null;
 
   return (
     <ApiProvider client={client}>
@@ -206,11 +232,11 @@ function Fixture() {
                 <div className="detail-reader">
                   <div className="detail-scroll">Activity Unavailable</div>
                 </div>
-                <div className="composer"><div className="composer-box">Composer</div></div>
+                {composerContent}
               </div>
             </div>
           </div>
-        ) : questionContent}
+        ) : <>{questionContent}{composerContent}</>}
       </main>
     </ApiProvider>
   );

@@ -105,6 +105,7 @@ import {
   type ConversationForkAvailability,
 } from "../session-actions.js";
 import { SessionApprovalRegion } from "./SessionApproval.js";
+import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { GovernanceAuditTrail } from "./GovernanceAuditTrail.js";
 import { SessionHeader } from "./SessionHeader.js";
 import { useInstanceScope } from "../instance-scope.js";
@@ -164,6 +165,7 @@ import {
   restoreRememberedComposerFocus,
 } from "../composer-focus.js";
 import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
+import { useQuestionResponseStyle } from "../question-response-style.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
@@ -762,6 +764,7 @@ function SessionDetailLoaded({
   const dragDepth = useRef(0); // enter/leave bubble from children — count depth so the overlay doesn't stick
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const answerInputRef = useRef<HTMLInputElement>(null);
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
@@ -1982,6 +1985,8 @@ function SessionDetailLoaded({
   // not bypassed by sending a prompt.
   const policyPaused = isPolicyApproval(session.pendingApproval);
   const canPrompt = runnerOnline && !terminal && !policyPaused;
+  const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
+  const questionResponseStyle = useQuestionResponseStyle();
   const steeringAvailabilityInput = {
     runnerProtocolVersion: runner?.protocolVersion,
     runnerOnline,
@@ -2002,6 +2007,67 @@ function SessionDetailLoaded({
     activeTurnId: session.activeTurnId,
   });
   const [activePane, setActivePane] = useState<"reader" | "composer">("reader");
+  const [answerModeRequestId, setAnswerModeRequestId] = useState<string | null>(null);
+  const answerModeArrivalRef = useRef({ requestId: null as string | null, style: questionResponseStyle });
+  const answerModeFocusRequestRef = useRef<"answer" | "message" | null>(null);
+  const composerAnswerActive = pendingQuestion !== null && answerModeRequestId === pendingQuestion.requestId;
+
+  const exitAnswerMode = useCallback(() => {
+    answerModeFocusRequestRef.current = "message";
+    setAnswerModeRequestId(null);
+  }, []);
+  const enterAnswerMode = useCallback(() => {
+    if (!pendingQuestion) {
+      focusComposerAtDraftEnd();
+      return;
+    }
+    setActivePane("composer");
+    answerModeFocusRequestRef.current = "answer";
+    setAnswerModeRequestId(pendingQuestion.requestId);
+  }, [focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+
+  useLayoutEffect(() => {
+    const requested = answerModeFocusRequestRef.current;
+    if (composerAnswerActive && requested === "answer") {
+      answerModeFocusRequestRef.current = null;
+      answerInputRef.current?.focus();
+    } else if (!composerAnswerActive && requested === "message") {
+      answerModeFocusRequestRef.current = null;
+      focusComposerAtDraftEnd();
+    }
+  }, [composerAnswerActive, focusComposerAtDraftEnd]);
+
+  useEffect(() => {
+    const previous = answerModeArrivalRef.current;
+    const requestId = pendingQuestion?.requestId ?? null;
+    const requestChanged = previous.requestId !== requestId;
+    const styleChanged = previous.style !== questionResponseStyle;
+    answerModeArrivalRef.current = { requestId, style: questionResponseStyle };
+    if (!requestId || questionResponseStyle !== "composer") {
+      if (!requestId || styleChanged) setAnswerModeRequestId(null);
+      return;
+    }
+    if (requestChanged || styleChanged) {
+      let cancelled = false;
+      let frame: number | null = null;
+      const chooseInitialMode = () => {
+        if (cancelled) return;
+        // The ordinary draft hydrates asynchronously. Deciding before that boundary would hide a
+        // restored draft behind Answer Mode instead of showing the explicit waiting prompt.
+        if (draftHydratedSessionRef.current !== sessionId) {
+          frame = window.requestAnimationFrame(chooseInitialMode);
+          return;
+        }
+        const hasOrdinaryDraft = Boolean(draftState.current.text.trim() || draftState.current.images.length || queuedEditRef.current);
+        setAnswerModeRequestId(hasOrdinaryDraft ? null : requestId);
+      };
+      chooseInitialMode();
+      return () => {
+        cancelled = true;
+        if (frame !== null) window.cancelAnimationFrame(frame);
+      };
+    }
+  }, [pendingQuestion?.requestId, questionResponseStyle, sessionId]);
 
   const clearStopTurnAttempt = useCallback(() => {
     stopTurnAttemptRef.current += 1;
@@ -2246,10 +2312,10 @@ function SessionDetailLoaded({
     deny: () => onDeny?.(),
     archive: () => onArchive?.(),
     snooze: () => onSnooze?.(),
-    reply: focusComposerAtDraftEnd,
+    reply: pendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
-  }), [focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze]);
+  }), [enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, pendingQuestion]);
   useSessionReadingKeys({
     enabled: mode === "expanded" && !isMobile,
     sessionId,
@@ -2504,7 +2570,6 @@ function SessionDetailLoaded({
   // "Agent is working" state (items 1 + 2): true the instant a send is optimistically pending
   // (before status flips) and for the whole turn while the runner reports running/starting.
   const showOptimistic = pending != null && timelineUserPrompts.length <= sendBaselineRef.current;
-  const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
   // A request id owns an immutable question schema. Keep the timeline context stable across
   // heartbeat, usage, and lifecycle snapshots that replace the surrounding SessionView.
   const timelinePendingQuestion = useMemo(() => pendingQuestion ? {
@@ -2556,12 +2621,12 @@ function SessionDetailLoaded({
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
   const planSupported = (agentCaps?.permissionModes ?? []).includes("plan");
   const composerCommands = useMemo(() => buildComposerCommandRegistry({
-    context: { planSupported, canStopTurn },
+    context: { planSupported, canStopTurn, canRespond: pendingQuestion !== null },
     providerCommands: mapProviderComposerCommands(
       agentCaps?.slashCommands ?? [],
       providerCommandAttachmentPolicy,
     ),
-  }), [agentCaps?.slashCommands, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
+  }), [agentCaps?.slashCommands, canStopTurn, pendingQuestion, planSupported, providerCommandAttachmentPolicy]);
   const slashTrigger = useMemo(
     () => composerSelection.start === composerSelection.end
       ? findComposerCommandTrigger(text, composerSelection.start)
@@ -2671,6 +2736,8 @@ function SessionDetailLoaded({
         ? !args || args === "on" || args === "off"
         : invocation.command.name === "stop" || invocation.command.name === "rename-session"
           ? !args
+          : invocation.command.name === "respond"
+            ? true
           : true;
       if (!validArguments) invocation = { kind: "plaintext", text: outgoing };
     }
@@ -2694,6 +2761,11 @@ function SessionDetailLoaded({
           setError(null);
           clearAppCommandText();
           await requestSessionRetitle();
+          return;
+        }
+        if (invocation.command.name === "respond") {
+          clearAppCommandText();
+          enterAnswerMode();
           return;
         }
         if (invocation.command.name === "plan") {
@@ -3882,15 +3954,15 @@ function SessionDetailLoaded({
               </div>
             )}
             <div
-              className={`composer-box${dragActive ? " drag-over" : ""}`}
+              className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}`}
               onDragEnter={(e) => {
-                if (!canPrompt) return;
+                if (!canPrompt || composerAnswerActive) return;
                 e.preventDefault();
                 dragDepth.current += 1; // dragenter/leave fire per child; count so leaving a child doesn't clear
                 setDragActive(true);
               }}
               onDragOver={(e) => {
-                if (canPrompt) e.preventDefault(); // required for the element to be a valid drop target
+                if (canPrompt && !composerAnswerActive) e.preventDefault(); // required for the element to be a valid drop target
               }}
               onDragLeave={() => {
                 dragDepth.current = Math.max(0, dragDepth.current - 1);
@@ -3900,11 +3972,26 @@ function SessionDetailLoaded({
                 e.preventDefault();
                 dragDepth.current = 0;
                 setDragActive(false);
-                if (!canPrompt) return;
+                if (!canPrompt || composerAnswerActive) return;
                 const files = Array.from(e.dataTransfer.files);
                 if (files.length) void addFiles(files);
               }}
             >
+              {pendingQuestion && (
+                <ComposerQuestionResponse
+                  sessionId={session.id}
+                  requestId={pendingQuestion.requestId}
+                  questions={pendingQuestion.questions ?? []}
+                  runnerOnline={runnerOnline}
+                  active={composerAnswerActive}
+                  showWaiting={questionResponseStyle === "composer"}
+                  inputRef={answerInputRef}
+                  onEnter={enterAnswerMode}
+                  onExit={exitAnswerMode}
+                  onSessionUpdate={loadSession}
+                />
+              )}
+              {!composerAnswerActive && <>
               {dragActive && (
                 <div className="composer-dropzone">
                   {selectedModelSupportsImages ? "Drop images to attach" : "Selected model does not support images"}
@@ -4095,6 +4182,7 @@ function SessionDetailLoaded({
                   )}
                 </div>
               </div>
+              </>}
             </div>
             {/* No context footer under the composer: project identity lives in the session bar's
                 breadcrumb, and git, agent, model, and host facts live in the pinned summary. */}

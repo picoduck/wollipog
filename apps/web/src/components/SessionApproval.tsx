@@ -431,6 +431,11 @@ export function SessionQuestionBanner({
     setError(null);
   }, [requestId, sessionId]);
 
+  useEffect(() => {
+    setDrafts({ requestId, values: storedQuestionDrafts(sessionId, requestId) });
+    setValidationAttempted(false);
+  }, [requestId, responseStyle, sessionId]);
+
   const draftValues = drafts.requestId === requestId ? drafts.values : {};
   const draftValue = (questionId: string) => Object.hasOwn(draftValues, questionId) ? draftValues[questionId] : undefined;
   const resolved = questionDraftAnswers(questions, draftValues);
@@ -516,7 +521,7 @@ export function SessionQuestionBanner({
       aria-label="Agent Questions"
       aria-busy={busy !== null}
       onKeyDown={(event) => {
-        if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
+        if (responseStyle !== "interactive" || event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
         event.preventDefault();
         void submit();
       }}
@@ -538,7 +543,7 @@ export function SessionQuestionBanner({
           >
             {busy === "dismiss" ? "Dismissing…" : "Dismiss"} {showKeyHints && busy === null && <kbd className="inbox-key-hint">D</kbd>}
           </button>
-          {questions.length > 0 && (
+          {responseStyle === "interactive" && questions.length > 0 && (
             <button
               className="btn sm primary"
               type="button"
@@ -555,7 +560,12 @@ export function SessionQuestionBanner({
       <div id={availabilityId} className="question-availability" role="status" aria-atomic="true">
         {runnerOnline ? "" : "Responses are unavailable until the runner reconnects."}
       </div>
-      {runnerOnline && busy === null && questions.length > 0 && !complete && (
+      {responseStyle === "composer" && (
+        <div className="question-submit-hint">
+          Respond through Answer Mode in the Session composer. Press R or use <code>/respond</code>.
+        </div>
+      )}
+      {responseStyle === "interactive" && runnerOnline && busy === null && questions.length > 0 && !complete && (
         <div className="question-submit-hint">
           {unsupportedQuestionFormat
             ? "This question format is unsupported. Dismiss the question to continue."
@@ -584,13 +594,6 @@ export function SessionQuestionBanner({
           ]
             .filter((value): value is string => value !== null);
           const inputDescriptionIds = [...controlDescriptionIds, showResponseError ? responseErrorId : null]
-            .filter((value): value is string => value !== null)
-            .join(" ");
-          const textInputDescriptionIds = [
-            ...controlDescriptionIds,
-            question.options.length > 0 ? offeredChoicesId : null,
-            showResponseError ? responseErrorId : null,
-          ]
             .filter((value): value is string => value !== null)
             .join(" ");
           return (
@@ -691,52 +694,16 @@ export function SessionQuestionBanner({
                   )}
                 </label>
               )}
-              {responseStyle === "text" && (
+              {responseStyle === "composer" && question.options.length > 0 && (
                 <>
-                  {question.options.length > 0 && (
-                    <ol className="question-text-options" id={offeredChoicesId} aria-label="Offered Choices">
-                      {question.options.map((option) => (
-                        <li key={option.label}>
-                          <span className="question-label">{option.label}</span>
-                          {option.description && <span className="question-desc">{option.description}</span>}
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                  <label className="question-input-label">
-                    <span id={responseLabelId}>Response</span>
-                    {question.required === false && <span className="muted sm"> (optional)</span>}
-                    <input
-                      className="input question-input question-text-input"
-                      data-session-request-control={`question:${question.id}:input`}
-                      aria-labelledby={`${questionLabelId} ${responseLabelId}`}
-                      aria-describedby={textInputDescriptionIds}
-                      aria-invalid={showResponseError ? true : undefined}
-                      aria-required={question.required !== false}
-                      required={question.required !== false}
-                      disabled={controlsDisabled}
-                      type={question.secret ? "password" : "text"}
-                      inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
-                      maxLength={question.allowOther ? question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH : undefined}
-                      value={rawValue}
-                      autoComplete="off"
-                      list={!question.secret && question.options.length > 0 ? `${labelPrefix}-choices-${questionIndex}` : undefined}
-                      placeholder={question.multiSelect ? "Numbers or labels, separated by commas" : question.options.length > 0 ? "Number or label" : undefined}
-                      onChange={(event) => updateDraft(question, { kind: "entry", value: event.target.value })}
-                    />
-                    {!question.secret && question.options.length > 0 && (
-                      <datalist id={`${labelPrefix}-choices-${questionIndex}`}>
-                        {question.options.map((option, optionIndex) => (
-                          <option key={option.label} value={option.label}>{optionIndex + 1}. {option.label}</option>
-                        ))}
-                      </datalist>
-                    )}
-                    {showResponseError && (
-                      <span className="form-error question-field-error" id={responseErrorId} role="alert">
-                        {responseError}
-                      </span>
-                    )}
-                  </label>
+                  <ol className="question-text-options" id={offeredChoicesId} aria-label="Offered Choices">
+                    {question.options.map((option) => (
+                      <li key={option.label}>
+                        <span className="question-label">{option.label}</span>
+                        {option.description && <span className="question-desc">{option.description}</span>}
+                      </li>
+                    ))}
+                  </ol>
                 </>
               )}
             </div>

@@ -319,7 +319,7 @@ async function startLiveStack(
   }
 }
 
-for (const style of ["interactive", "text"] as const) test(`Claude AskUserQuestion answers cross the live stack in ${style} style`, async ({ page }) => {
+for (const style of ["interactive", "composer"] as const) test(`Claude AskUserQuestion answers cross the live stack in ${style} style`, async ({ page }) => {
   test.setTimeout(120_000);
   const stack = await startLiveStack();
   try {
@@ -339,22 +339,23 @@ for (const style of ["interactive", "text"] as const) test(`Claude AskUserQuesti
     }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
 
-    const submit = page.getByRole("button", { name: "Submit" });
     await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
-    await expect(submit).toBeDisabled();
     if (style === "interactive") {
+      const submit = page.getByRole("button", { name: "Submit" });
+      await expect(submit).toBeDisabled();
       await page.getByRole("radio", { name: /Canary/ }).click();
       await expect(submit).toBeDisabled();
       await page.getByRole("checkbox", { name: /Unit Tests/ }).click();
       await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
+      await expect(submit).toBeEnabled();
+      await submit.click();
     } else {
-      const responses = page.locator(".question-text-input");
-      await expect(responses).toHaveCount(2);
-      await responses.nth(0).fill("1");
-      await responses.nth(1).fill("1, 2");
+      const response = page.locator(".composer-answer-input");
+      await response.fill("1");
+      await response.press("Enter");
+      await response.fill("1, 2");
+      await response.press("Enter");
     }
-    await expect(submit).toBeEnabled();
-    await submit.click();
     await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
 
     await expect.poll(async () => {
@@ -388,7 +389,7 @@ for (const style of ["interactive", "text"] as const) test(`Claude AskUserQuesti
   }
 });
 
-for (const style of ["interactive", "text"] as const) test(`Codex structured questions cross the live stack in ${style} style`, async ({ page }) => {
+for (const style of ["interactive", "composer"] as const) test(`Codex structured questions cross the live stack in ${style} style`, async ({ page }) => {
   test.setTimeout(120_000);
   const stack = await startLiveStack("codex");
   try {
@@ -408,20 +409,21 @@ for (const style of ["interactive", "text"] as const) test(`Codex structured que
     }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
 
-    const submit = page.getByRole("button", { name: "Submit" });
     await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
-    await expect(submit).toBeDisabled();
     if (style === "interactive") {
+      const submit = page.getByRole("button", { name: "Submit" });
+      await expect(submit).toBeDisabled();
       await page.getByRole("radio", { name: /Staging/ }).click();
       await page.getByLabel("Response").fill("Ship after checks pass");
+      await expect(submit).toBeEnabled();
+      await submit.click();
     } else {
-      const responses = page.locator(".question-text-input");
-      await expect(responses).toHaveCount(2);
-      await responses.nth(0).fill("1");
-      await responses.nth(1).fill("Ship after checks pass");
+      const response = page.locator(".composer-answer-input");
+      await response.fill("1");
+      await response.press("Enter");
+      await response.fill("Ship after checks pass");
+      await response.press("Enter");
     }
-    await expect(submit).toBeEnabled();
-    await submit.click();
     await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
 
     await expect.poll(async () => {

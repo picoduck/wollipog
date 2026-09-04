@@ -108,7 +108,7 @@ test("choice and Other draft intents validate to provider values without becomin
   };
   assert.deepEqual(questionDraftAnswers([numericOther], {
     workers: { kind: "other", value: "2" },
-  }).answers, { workers: "2" }, "Interactive Other does not apply Text Entry's ordinal syntax");
+  }).answers, { workers: "2" }, "Interactive Other does not apply Composer Response's ordinal syntax");
   assert.deepEqual(questionDraftAnswers([numericOther], {
     workers: { kind: "choice", labels: ["Two Workers"] },
   }).answers, { workers: "Two Workers" }, "fixed choices still retain exact provider labels");
@@ -120,7 +120,7 @@ test("Interactive choices retain exact provider labels without reparsing them as
     options: [{ label: "2" }, { label: "Second Option" }],
   };
   assert.deepEqual(resolveQuestionResponse(numeric, "2"), { answer: "Second Option" },
-    "Text Entry keeps displayed-number syntax");
+    "Composer Response keeps displayed-number syntax");
   assert.deepEqual(questionDraftAnswers([numeric], {
     language: { kind: "choice", labels: ["2"] },
   }).answers, { language: "2" }, "Interactive Form keeps the clicked label");

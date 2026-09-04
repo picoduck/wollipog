@@ -122,7 +122,7 @@ export function resolveQuestionResponse(question: AgentQuestion, rawValue: strin
   return freeTextError ? { error: `Response ${freeTextError}.` } : { answer: value };
 }
 
-/** Validate an explicit Interactive Form Other response without applying Text Entry's displayed
+/** Validate an explicit Interactive Form Other response without applying Composer Response's displayed
  * number or offered-label syntax. */
 function resolveQuestionOtherResponse(question: AgentQuestion, rawValue: string): ResolvedQuestionResponse {
   if (!isAnswerableAgentQuestion(question) || question.multiSelect || !question.allowOther) {
