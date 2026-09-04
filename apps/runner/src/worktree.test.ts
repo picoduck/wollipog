@@ -1627,6 +1627,130 @@ test("a selection made during replacement launch is fenced and receives a follow
   }
 });
 
+test("a queued prompt follows a newer selection made during rebind launch preparation", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-prelaunch-selection-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releasePreparation = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async (text: string) => { prompts.push({ cwd: launch.cwd, text }); return "end_turn" as const; },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_prelaunch_selection", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    let preparationStartedResolve!: () => void;
+    const preparationStarted = new Promise<void>((resolve) => { preparationStartedResolve = resolve; });
+    const preparationGate = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    let preparationCalls = 0;
+    (manager as unknown as {
+      prepareLaunch?: () => Promise<void>;
+    }).prepareLaunch = async () => {
+      if (++preparationCalls === 1) {
+        preparationStartedResolve();
+        await preparationGate;
+      }
+    };
+
+    const launching = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/prelaunch-selection-first",
+    });
+    await preparationStarted;
+    assert.equal(manager.prompt(spec.sessionId, "queued for newest worktree"), true);
+    const latest = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/prelaunch-selection-latest",
+    });
+    releasePreparation();
+
+    await waitForCondition(() => prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "queued prompt remained stalled after follow-up rebind");
+    assert.deepEqual(launchedCwds, [repo, launching.worktree.path, latest.worktree.path]);
+    assert.deepEqual(prompts, [{ cwd: latest.worktree.path, text: "queued for newest worktree" }]);
+    assert.equal(store.readMeta(spec.sessionId)?.status, "idle");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    releasePreparation();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a sibling runner lock prevents rebind from retiring the live provider", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-locked-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const siblingStore = new SessionStore(join(dataDir, "sessions"));
+    const sent: Array<{ type: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    let closeCalls = 0;
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {},
+        close: async () => { closeCalls += 1; },
+        prompt: async (text: string) => { prompts.push({ cwd: launch.cwd, text }); return "end_turn" as const; },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager((message) => sent.push(message as never), () => {}, store,
+      "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_locked_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    assert.equal(siblingStore.acquireLock(spec.sessionId, "sibling-runner"), true);
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/locked-rebind",
+    });
+    await waitForCondition(() => sent.some((message) =>
+      message.type === "session_event" && message.payload?.kind === "error" &&
+      /another dashboard/.test(message.payload.message ?? "")), "rebind did not report sibling lock ownership");
+    assert.equal(closeCalls, 0, "lock refusal must happen before retiring the live provider");
+    assert.deepEqual(launchedCwds, [repo]);
+
+    siblingStore.releaseLock(spec.sessionId, "sibling-runner");
+    assert.equal(manager.prompt(spec.sessionId, "retry after lock release"), true);
+    await waitForCondition(() => prompts.length === 1, "released sibling lock did not allow deferred rebind");
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    assert.deepEqual(prompts, [{ cwd: requested.worktree.path, text: "retry after lock release" }]);
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a throwing provider dispose cannot strand rebind generation or admission state", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-dispose-worktree-rebind-"));
   const repo = join(root, "repo");

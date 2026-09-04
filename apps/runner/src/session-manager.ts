@@ -5419,6 +5419,22 @@ export class SessionManager {
       return;
     }
 
+    let rebindLockHeld = false;
+    if (resumeId) {
+      if (!this.store.acquireLock(sessionId, this.lockOwner)) {
+        if (!this.emitEvent(sessionId, {
+          kind: "error",
+          message: "this session is being driven by another dashboard",
+        })) return;
+        this.emitStatus(sessionId, "idle");
+        this.rejectQueued(entry.queue, "session is being driven by another runner process");
+        entry.queue.length = 0;
+        this.emitQueue(sessionId);
+        return;
+      }
+      rebindLockHeld = true;
+    }
+
     const launchGeneration = this.beginLaunchGeneration(sessionId);
     this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
     const queued = entry.queue.splice(0);
@@ -5426,6 +5442,7 @@ export class SessionManager {
     this.deleteActiveSession(sessionId, entry, false);
     this.emitQueue(sessionId);
     let launched = false;
+    let preserveRebindLockForQueue = false;
     try {
       try {
         await this.closeAndDispose(sessionId, entry.client, true);
@@ -5463,8 +5480,9 @@ export class SessionManager {
         }
         const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
         this.activatePreLaunchQueue(sessionId);
+        preserveRebindLockForQueue = hasQueuedWork;
         if (!hasQueuedWork) this.emitStatus(sessionId, "idle");
-        if (!hasQueuedWork && reboundEntry?.pendingWorktreeRebind) {
+        if (reboundEntry?.pendingWorktreeRebind) {
           setImmediate(() => this.scheduleDrain(sessionId));
         }
       }
@@ -5487,6 +5505,7 @@ export class SessionManager {
       else if (!launched && this.store.readMeta(sessionId)?.status === "stopped") {
         this.releaseAdmissionIfInactive(sessionId);
       }
+      if (rebindLockHeld && !preserveRebindLockForQueue) this.clearLock(sessionId);
     }
   }
 
