@@ -1462,6 +1462,49 @@ test("failed close and dispose retain lifecycle fences until the exact client ex
   }
 });
 
+test("a synchronous no-close retirement failure is reported while retaining its lifecycle fence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-retirement-sync-failure-"));
+  try {
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    const store = new SessionStore(join(root, "sessions"));
+    let reportExit!: (code: number | null) => void;
+    const client = {
+      pid: 1, initialize: async () => {}, newSession: async () => {},
+      prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {},
+      dispose: () => { throw new Error("dispose failed"); },
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-sync-failure",
+    };
+    const factory = (_driver: unknown, _launch: unknown, callbacks: { onExit(code: number | null): void }) => {
+      reportExit = callbacks.onExit;
+      return client;
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
+    );
+    const spec = launchSpec(repo, "retirement-sync-failure");
+    assert.equal(await manager.start(spec), true);
+    const internals = manager as unknown as {
+      admitted: Set<string>;
+      closing: Map<string, { client: unknown }>;
+    };
+
+    assert.throws(() => manager.stop(spec.sessionId), /dispose failed/,
+      "Stop must report that provider retirement remains unconfirmed");
+    assert.equal(store.readMeta(spec.sessionId)?.status, "stopped");
+    assert.equal(internals.closing.get(spec.sessionId)?.client, client);
+    assert.equal(internals.admitted.has(spec.sessionId), true);
+    assert.equal(await manager.start(spec), false, "restart must remain fenced until exact exit proof");
+
+    reportExit(1);
+    assert.equal(internals.closing.has(spec.sessionId), false);
+    assert.equal(internals.admitted.has(spec.sessionId), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("orphan recovery cannot release a lock retained by failed provider retirement", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-retirement-orphan-fence-"));
   try {

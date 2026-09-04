@@ -234,3 +234,42 @@ test("shutdownAll disposes every driver even if one throws, and reports unclean 
   assert.deepEqual(disposed.sort(), ["s1", "s2"], "a throwing dispose must not abort disposal of the other drivers");
   assert.equal(clean, false, "an incomplete disposal reports unclean so the caller retains the provider-home lease");
 });
+
+test("shutdownAll does not restart a pending delete when a retiring provider exits", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-shutdown-pending-delete-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manager = new SessionManager(
+    () => {},
+    () => {},
+    new SessionStore(join(root, "sessions")),
+    "runner",
+    undefined,
+    undefined,
+    root,
+  );
+  const client = { dispose: () => {} };
+  const internals = manager as unknown as {
+    closing: Map<string, {
+      client: typeof client;
+      entry: { sessionId: string; client: typeof client; worktreeLeaseOwner?: string };
+      promise: Promise<void>;
+    }>;
+    pendingDeletions: Set<string>;
+    delete(sessionId: string): Promise<void>;
+  };
+  const sessionId = "shutdown-pending-delete";
+  internals.closing.set(sessionId, {
+    client,
+    entry: { sessionId, client },
+    promise: Promise.resolve(),
+  });
+  internals.pendingDeletions.add(sessionId);
+  let deleteAttempts = 0;
+  internals.delete = async () => { deleteAttempts++; };
+
+  manager.shutdownAll();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(deleteAttempts, 0, "shutdown must not schedule new asynchronous deletion work");
+  assert.equal(internals.pendingDeletions.size, 0);
+});

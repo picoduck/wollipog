@@ -6864,6 +6864,9 @@ export class SessionManager {
         this.completeProviderRetirement(sessionId, retirement);
       } catch (error) {
         this.log(`session ${sessionId} provider retirement remains unconfirmed: ${errText(error)}`);
+        // Keep `closing` installed as the exact-client fence, but preserve the synchronous Stop
+        // result contract so the control plane does not acknowledge an unconfirmed stop as success.
+        throw error;
       }
       return retirement;
     }
@@ -6887,7 +6890,7 @@ export class SessionManager {
     this.releaseActiveWorktreeLease(retirement.entry);
     this.releaseAdmission(sessionId);
     this.clearLock(sessionId);
-    if (this.pendingDeletions.delete(sessionId)) {
+    if (!this.shuttingDown && this.pendingDeletions.delete(sessionId)) {
       setImmediate(() => {
         void this.delete(sessionId).catch((error) => {
           this.log(`deferred deletion retry failed for ${sessionId}: ${errText(error)}`);
@@ -7658,6 +7661,7 @@ export class SessionManager {
       }
     }
     this.worktreeRebindings.clear();
+    this.pendingDeletions.clear();
     this.deleting.clear();
     this.recoveryQueues.clear();
     this.preLaunchQueues.clear();
