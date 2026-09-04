@@ -11,6 +11,7 @@ import { ControlPlaneDb, TRANSCRIPT_SHARE_TERMINAL_RETENTION_PER_SESSION } from 
 import type { HumanPrincipal } from "./identity.js";
 import {
   MAX_ACTIVE_TRANSCRIPT_SHARES_PER_SESSION,
+  MAX_ACTIVE_TRANSCRIPT_SHARE_BYTES_PER_SESSION,
   MAX_TRANSCRIPT_SHARE_READS_PER_TOKEN_PER_MINUTE,
   TranscriptShareReadLimiter,
   createAuthorizedTranscriptShare,
@@ -182,6 +183,38 @@ test("authorization, expiry bounds, active ceiling, and terminal retention are b
   }
 });
 
+test("share listing and revocation reject cross-organization principals before reading rows", () => {
+  const { db, principal } = fixture();
+  const outsider = { ...principal, organizationId: "org-other" };
+  let listReads = 0;
+  let revokeWrites = 0;
+  const originalList = db.listTranscriptShares.bind(db);
+  const originalRevoke = db.revokeTranscriptShare.bind(db);
+  db.listTranscriptShares = (...args) => {
+    listReads += 1;
+    return originalList(...args);
+  };
+  db.revokeTranscriptShare = (...args) => {
+    revokeWrites += 1;
+    return originalRevoke(...args);
+  };
+
+  assert.deepEqual(listAuthorizedTranscriptShares(db, outsider, "session-share", 1_000), {
+    ok: false,
+    status: 404,
+    error: "session not found",
+    code: "not_found",
+  });
+  assert.deepEqual(revokeAuthorizedTranscriptShare(db, outsider, "session-share", "shr_other", 1_000), {
+    ok: false,
+    status: 404,
+    error: "share not found",
+    code: "not_found",
+  });
+  assert.equal(listReads, 0, "denied listing cannot read share rows");
+  assert.equal(revokeWrites, 0, "denied revocation cannot mutate share rows");
+});
+
 test("share authorization accepts only the exact independent scheme and token shape", () => {
   const token = "a".repeat(43);
   assert.equal(extractTranscriptShareToken(`MAM-Share ${token}`), token);
@@ -280,4 +313,40 @@ test("active snapshot-byte quotas are atomic and revocation releases retained by
     () => db.createTranscriptShare({ ...input(4), projectionBytes: 1 }, 20, 100, 1_000),
     /must equal the positive UTF-8 projection size/,
   );
+});
+
+test("share creation translates the retained snapshot byte quota rejection", () => {
+  const { db, principal } = fixture();
+  const retainedProjection = "x".repeat(MAX_ACTIVE_TRANSCRIPT_SHARE_BYTES_PER_SESSION / 4);
+  for (let index = 0; index < 4; index += 1) {
+    const seeded = db.createTranscriptShare({
+      shareId: `quota-seed-${index}`,
+      tokenHash: hashToken(`quota-seed-token-${index}`),
+      sessionId: "session-share",
+      organizationId: principal.organizationId,
+      createdByUserId: principal.userId,
+      projectionJson: retainedProjection,
+      projectionBytes: Buffer.byteLength(retainedProjection),
+      snapshotThroughSeq: 0,
+      schemaVersion: 1,
+      createdAt: 1_000 + index,
+      expiresAt: 100_000,
+    }, MAX_ACTIVE_TRANSCRIPT_SHARES_PER_SESSION, MAX_ACTIVE_TRANSCRIPT_SHARE_BYTES_PER_SESSION,
+    MAX_ACTIVE_TRANSCRIPT_SHARE_BYTES_PER_SESSION * 2);
+    assert.notEqual(seeded, "byte_limit");
+  }
+
+  const result = createAuthorizedTranscriptShare(
+    db,
+    principal,
+    "session-share",
+    { expiresInSeconds: 300 },
+    2_000,
+  );
+  assert.deepEqual(result, {
+    ok: false,
+    status: 409,
+    error: "active transcript shares exceed the retained snapshot byte quota",
+    code: "share_storage_limit",
+  });
 });
