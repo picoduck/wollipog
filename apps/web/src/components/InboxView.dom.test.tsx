@@ -674,8 +674,10 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"],
     "desktop stability must not expire while the user is still browsing the Inbox");
   // This upsert changes only the preview and the activity instant, and the row prints neither
-  // distinctly since #664. That it was applied and held is exactly what the pending-order
-  // indicator asserted below proves, so there is nothing left for a text probe to add here.
+  // distinctly since #664. The probe that survives is the APPLIED ORDER asserted below: B leads
+  // it only because this batch set B to 70 and C to 60. Had the batch been dropped, the adopted
+  // order would be C, B, A off the earlier 50 and 40. The pending-order indicator would NOT have
+  // been enough — the first batch already raised it.
   const selectedBeforeApply = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
     .find((row) => row.textContent?.includes("Session B"));
   await act(async () => { selectedBeforeApply?.click(); });
