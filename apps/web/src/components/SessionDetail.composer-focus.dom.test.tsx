@@ -926,6 +926,70 @@ test("a transient identity failure retries without remounting the Session", asyn
   }
 });
 
+test("late identity hydration cannot replace an open unsent queued edit", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const delayedIdentity = deferred<Awaited<ReturnType<ApiClient["getIdentity"]>>>();
+  const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      getIdentity: async () => delayedIdentity.promise,
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: { promptId, text: "Original exact content", images: [], editRevision: "qer_exact" },
+      }),
+      editQueuedPrompt: async (_sessionId, _promptId, request) => {
+        edits.push(request);
+        throw new Error("The request timed out before confirmation.");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced local draft");
+    await flushAsyncWork();
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Original exact content");
+
+    await act(async () => {
+      delayedIdentity.resolve({
+        context: {
+          userId: "user-1",
+          userName: "Test User",
+          organizationId: "org-1",
+          organizationName: "Test Organization",
+          role: "owner",
+          deviceId: "device-1",
+          localBootstrap: false,
+        },
+        organizations: [],
+        memberships: [],
+        teams: [],
+      });
+      await delayedIdentity.promise;
+    });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Original exact content");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits[0]?.text, "Original exact content");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("identity hydration preserves an ordinary draft typed before durable recovery appears", async () => {
   const draft = deferred<ComposerDraft | null>();
   const delayedIdentity = deferred<Awaited<ReturnType<ApiClient["getIdentity"]>>>();

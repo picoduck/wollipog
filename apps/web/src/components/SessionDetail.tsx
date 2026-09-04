@@ -1172,6 +1172,14 @@ function SessionDetailLoaded({
         cancelled = true;
       };
     }
+    // Identity can settle after the user has already opened an ordinary queued edit. That edit
+    // owns the composer until it is saved or cancelled; a scope-only hydration rerun must not
+    // replace it with the displaced session draft.
+    if (queuedEditRef.current) {
+      return () => {
+        cancelled = true;
+      };
+    }
     void (async () => {
       let draft = await loadDraftForSession(sessionId, instanceScope);
       if (cancelled) return;
