@@ -1582,7 +1582,7 @@ test("orphan recovery cannot release a lock retained by failed provider retireme
     const manager = new SessionManager(
       () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
     );
-    const spec = launchSpec(repo, "retirement-orphan-fence");
+    const spec = { ...launchSpec(repo, "retirement-orphan-fence"), useWorktree: true };
     assert.equal(await manager.start(spec), true);
     store.patchMeta(spec.sessionId, {
       agentSessionId: "provider-orphan",
@@ -1601,6 +1601,17 @@ test("orphan recovery cannot release a lock retained by failed provider retireme
       store.ownsLock(spec.sessionId, internals.lockOwner),
       true,
       "synthetic recovery must not release the retirement-owned cross-process lock",
+    );
+    assert.equal(manager.fenceRewind(spec.sessionId), false,
+      "rewind must not enter while provider retirement remains unconfirmed");
+    assert.deepEqual(
+      await manager.rewind(spec.sessionId, 1),
+      { ok: false, error: "provider retirement is still in progress" },
+    );
+    assert.equal(
+      store.ownsLock(spec.sessionId, internals.lockOwner),
+      true,
+      "rewind must not release the retirement-owned cross-process lock",
     );
 
     reportExit(1);
