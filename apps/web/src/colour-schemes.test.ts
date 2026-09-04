@@ -137,8 +137,8 @@ const deltaE = (a: string, b: string, vision: Vision) => deltaEFromLab(lab(a, vi
 
 test("the CIEDE2000 implementation matches the published reference pairs", () => {
   // Sharma et al.'s first three supplementary test pairs. A colour-separation floor is only as
-  // trustworthy as its arithmetic; these catch the hue wrapping, chroma correction, and rotation
-  // terms that distinguish CIEDE2000 from a plausible-looking Euclidean approximation.
+  // trustworthy as its arithmetic; these catch the chroma correction and rotation terms that
+  // distinguish CIEDE2000 from a plausible-looking Euclidean approximation.
   const reference: Array<[Lab, Lab, number]> = [
     [[50, 2.6772, -79.7751], [50, 0, -82.7485], 2.0425],
     [[50, 3.1571, -77.2803], [50, 0, -82.7485], 2.8615],
@@ -233,6 +233,11 @@ test("the committed schemes are what the generator produces", () => {
 });
 
 test("usage chart series and hover fills stay distinct and visible in every palette", () => {
+  const restingRules = rulesWith(css, ["fill"])
+    .filter((rule) => rule.selector === ".usage-chart-segment");
+  assert.equal(restingRules.length, 1, "the usage resting fill must have one unambiguous declaration");
+  assert.equal(restingRules[0]!.declarations.fill, "var(--usage-series)",
+    "the resting chart mark must render the measured series colour without dilution");
   const hoverRules = rulesWith(css, ["fill"])
     .filter((rule) => rule.selector === ".usage-chart-column.is-hovered .usage-chart-segment");
   assert.equal(hoverRules.length, 1, "the usage hover fill must have one unambiguous declaration");
@@ -255,6 +260,13 @@ test("usage chart series and hover fills stay distinct and visible in every pale
         return value;
       };
       const series = [1, 2, 3, 4].map((slot) => requireLiteral(`--usage-series-${slot}`));
+      const sharedSeries = [1, 2, 3, 4].map((slot) => {
+        const value = literal(tokensFor("wollipog", theme), `--usage-series-${slot}`);
+        assert.ok(value, `wollipog/${theme}: --usage-series-${slot} must be a literal colour`);
+        return value;
+      });
+      assert.deepEqual(series, sharedSeries,
+        `${scheme}/${theme}: a driver must keep the same series colour when the scheme changes`);
       const text = requireLiteral("--text");
       for (const groundName of ["--bg", "--bg-elev"]) {
         const ground = requireLiteral(groundName);
