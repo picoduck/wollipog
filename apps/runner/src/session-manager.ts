@@ -6961,7 +6961,23 @@ export class SessionManager {
         this.deleteActiveSession(sessionId, entry, false);
         this.rejectQueued(entry.queue, "session was deleted before queued command started");
         entry.queue.length = 0;
-        closing ??= this.beginProviderRetirement(sessionId, entry);
+        if (!closing) {
+          try {
+            closing = this.beginProviderRetirement(sessionId, entry);
+          } catch (error) {
+            // A no-close driver disposes synchronously. If disposal throws, retain the same pending
+            // deletion intent used by the asynchronous-close path before control returns to the
+            // event loop, so an eventual exact-client exit automatically resumes cleanup.
+            closing = this.closing.get(sessionId);
+            if (closing?.client === entry.client) {
+              this.pendingDeletions.add(sessionId);
+              throw error;
+            }
+            // A pathological driver may synchronously emit exact exit and then throw from dispose.
+            // Retirement is already proven in that case, so continue the journaled deletion.
+            this.log(`session ${sessionId} disposal threw after exact exit proof: ${errText(error)}`);
+          }
+        }
       }
       if (closing) {
         await closing.promise;
