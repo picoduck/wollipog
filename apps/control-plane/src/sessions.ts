@@ -6477,9 +6477,23 @@ export class SessionsService {
     // authoritative session total and already includes delegated work, so accruing both would
     // inflate context meters and budget gates.
     if (payload.kind === "token_usage" && !payload.parentToolUseId) {
+      // v106 runners enforce this authoritative cumulative price during the live turn. The frame
+      // carries no provider credential or transcript content, and older runners retain their
+      // provider-reported local-cost behavior.
+      if (runnerSupportsProtocol(
+        this.db.getRunner(session.runnerId)?.protocolVersion,
+        "pricedSessionCost",
+      )) {
+        this.hub.sendToRunner(session.runnerId, {
+          type: "priced_session_cost",
+          sessionId,
+          costUsd: this.db.sessionCostUsd(sessionId),
+        });
+      }
       // Guardrail card gate: pause + ask once a policy rule trips. A v47 runner independently
-      // cancels the active turn at the normalized usage threshold. Also re-applied at turn-settle
-      // (onSessionStatus) so a trailing idle can't wipe it.
+      // cancels the active turn at the normalized usage threshold; v106 also applies that gate to
+      // the acknowledged control-plane price. Re-applied at turn-settle (onSessionStatus) so a
+      // trailing idle can't wipe it.
       // A mid-turn park is an attention moment — push it (no-op unless the gate flipped status).
       this.gateOnPolicy(sessionId, now);
       this.notifyTransition(session, sessionId);

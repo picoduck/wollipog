@@ -6709,6 +6709,21 @@ export class SessionManager {
     return "applied";
   }
 
+  /** Persist the control plane's cumulative priced cost and apply the existing hard budget to the
+   * active turn. Codex reports token usage without USD, so this acknowledgement is the first
+   * authoritative cost the runner can enforce. */
+  syncPricedSessionCost(sessionId: string, costUsd: number): void {
+    if (!Number.isFinite(costUsd) || costUsd < 0) return;
+    const updated = this.store.patchMeta(sessionId, { costUsd });
+    if (!updated) return;
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+
+    const entry = this.active.get(sessionId);
+    const budgetUsd = updated.config.costBudgetUsd;
+    if (!entry?.running || entry.governanceTripped || !budgetUsd || costUsd < budgetUsd) return;
+    this.tripGovernance(sessionId, entry, updated, "cost_budget");
+  }
+
   /** Apply the next absolute thresholds after a user continues. Held queued prompts resume only
    * after this message, so a mid-turn trip cannot leak work past the approval boundary. */
   rearmGovernance(
@@ -8545,6 +8560,15 @@ export class SessionManager {
     }
     if (!tripped) return;
 
+    this.tripGovernance(sessionId, entry, meta, tripped);
+  }
+
+  private tripGovernance(
+    sessionId: string,
+    entry: ActiveSession,
+    meta: SessionMeta,
+    tripped: NonNullable<ActiveSession["governanceTripped"]>,
+  ): void {
     entry.governanceTripped = tripped;
     const detail = tripped === "cost_budget"
       ? `Runner governance paused this turn at the $${meta.config.costBudgetUsd!.toFixed(2)} cost threshold.`

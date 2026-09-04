@@ -136,6 +136,30 @@ test("runner cost gate uses authoritative parentless usage and re-arm clears the
   }
 });
 
+test("runner cancels a Codex turn when the acknowledged priced cost crosses its budget", () => {
+  const h = harness({ costBudgetUsd: 0.003 });
+  try {
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "token_usage", inputTokens: 1_000, outputTokens: 100, model: "gpt-5.5-codex",
+    });
+    assert.equal(h.cancels(), 0, "unpriced provider usage cannot trip the local total by itself");
+
+    h.sm.syncPricedSessionCost("s_governance", 0.003);
+
+    assert.equal(h.store.readMeta("s_governance")!.costUsd, 0.003);
+    assert.equal(h.cancels(), 1);
+    assert.equal(h.entry.governanceTripped, "cost_budget");
+    const runtime = h.sent.find((message) => message.type === "session_runtime_updated");
+    assert.ok(runtime && runtime.type === "session_runtime_updated");
+    assert.equal(runtime.snapshot.costUsd, 0.003, "the runner reports the acknowledged total unchanged");
+
+    h.sm.syncPricedSessionCost("s_governance", 0.004);
+    assert.equal(h.cancels(), 1, "later acknowledgements cannot cancel the same turn twice");
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("a governance-cancelled prompt settles idle so the control plane can park its policy card", async () => {
   const h = harness({ maxToolCalls: 1 });
   try {
