@@ -87,6 +87,8 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
     ...api,
     subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
     usage: async (query: { days: number }) => {
       requestedRanges.push(query.days);
       return responses[calls++]!;
@@ -172,6 +174,8 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   const client = {
     ...api,
     usage: async () => response([]),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
     subscriptionUsage: async () => subscription("warning", 15),
     refreshSubscriptionUsage: async () => {
       refreshes++;
@@ -229,6 +233,8 @@ test("an unsplit response from an older plane is shown honestly and the window c
     ...api,
     subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: 20, updatedAt: 1 } }),
+    usageUsers: async () => ({ users: [{ userId: "u1", userName: "Ada", todayUsd: 21.5, last7DaysUsd: 40, last30DaysUsd: 90, dailyBudgetUsd: 20 }] }),
     usage: async () => unsplit,
   } as unknown as ApiClient;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -246,7 +252,8 @@ test("an unsplit response from an older plane is shown honestly and the window c
   assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 7 days/);
   assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /not split by driver/);
   assert.equal(container.querySelector(".usage-legend"), null, "no legend claims a split that does not exist");
-  const driverCells = [...container.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td.usage-cell-dim")].slice(0, 2));
+  const dayTable = container.querySelector(".usage-breakdown-section table")!;
+  const driverCells = [...dayTable.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td.usage-cell-dim")].slice(0, 2));
   assert.ok(driverCells.length >= 4);
   assert.ok(driverCells.every((cell) => cell.textContent === "—"), "unknown per-driver values read as dashes, not $0.00");
 
@@ -259,6 +266,11 @@ test("an unsplit response from an older plane is shown honestly and the window c
   const readout = container.querySelector(".usage-chart-readout")?.textContent ?? "";
   assert.match(readout, /Not split by this control plane/);
   assert.match(readout, /Total/);
+
+  const usersText = container.querySelector(".usage-users-section")?.textContent ?? "";
+  assert.match(usersText, /Ada · paused by daily budget/);
+  assert.match(usersText, /\$21\.50 of \$20\.00/);
+  assert.match(usersText, /Each user may spend \$20\.00 per UTC day/);
 
   await act(async () => root.unmount());
   container.remove();

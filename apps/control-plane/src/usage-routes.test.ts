@@ -202,3 +202,39 @@ test("usage responses carry rate-table status and members can force a bounded pr
   assert.equal((await bare.inject({ method: "GET", url: "/api/usage" })).json().pricing, undefined);
   assert.equal((await bare.inject({ method: "POST", url: "/api/usage/pricing/refresh" })).statusCode, 503);
 });
+
+test("the daily budget is readable by members, writable by admins, and per-user windows are scoped by role", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const principals = new Map<string, AuthPrincipal>([["viewer", human("viewer")], ["admin", human("admin")]]);
+  const app = Fastify();
+  registerUsageRoutes(app, db, (request) => {
+    const header = request.headers.authorization;
+    return typeof header === "string" ? principals.get(header.replace(/^Bearer /, "")) ?? null : null;
+  });
+  const auth = (token: string) => ({ authorization: `Bearer ${token}` });
+
+  assert.equal((await app.inject({ method: "GET", url: "/api/usage/daily-budget" })).statusCode, 403);
+  assert.deepEqual((await app.inject({ method: "GET", url: "/api/usage/daily-budget", headers: auth("viewer") })).json(), {
+    dailyBudget: { perUserUsd: null, updatedAt: null },
+  });
+  assert.equal((await app.inject({ method: "PUT", url: "/api/usage/daily-budget", headers: auth("viewer"), payload: { perUserUsd: 20 } })).statusCode, 403);
+  assert.equal((await app.inject({ method: "PUT", url: "/api/usage/daily-budget", headers: auth("admin"), payload: { perUserUsd: -1 } })).statusCode, 400);
+  assert.equal((await app.inject({ method: "PUT", url: "/api/usage/daily-budget", headers: auth("admin"), payload: { perUserUsd: "20" } })).statusCode, 400);
+  const saved = await app.inject({ method: "PUT", url: "/api/usage/daily-budget", headers: auth("admin"), payload: { perUserUsd: 20.004 } });
+  assert.equal(saved.statusCode, 200);
+  assert.equal(saved.json().dailyBudget.perUserUsd, 20);
+  assert.equal((await app.inject({ method: "PUT", url: "/api/usage/daily-budget", headers: auth("admin"), payload: { perUserUsd: null } })).json().dailyBudget.perUserUsd, null);
+
+  const bucket = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+  for (const user of ["viewer-user", "admin-user"]) {
+    db.raw().prepare(
+      `INSERT INTO usage_hourly
+         (bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, model, input_tokens, output_tokens, cost_microusd)
+       VALUES (?, 'org_personal', 'user', ?, 'r', '', 'a', 'claude-code', '', 1, 1, 2500000)`,
+    ).run(bucket, user);
+  }
+  const mine = (await app.inject({ method: "GET", url: "/api/usage/users", headers: auth("viewer") })).json().users;
+  assert.deepEqual(mine.map((row: { userId: string; todayUsd: number }) => [row.userId, row.todayUsd]), [["viewer-user", 2.5]], "a member sees only their own row");
+  const everyone = (await app.inject({ method: "GET", url: "/api/usage/users", headers: auth("admin") })).json().users;
+  assert.deepEqual(everyone.map((row: { userId: string }) => row.userId).sort(), ["admin-user", "viewer-user"]);
+});

@@ -299,7 +299,12 @@
 //      per-model ledger and serves it from GET /api/sessions/:id/usage. Codex app-server runners
 //      publish the provider context gauge (used tokens over the model window). Older runners
 //      omit the model and the control plane keys on the session's resolved model as before.
-export const PROTOCOL_VERSION = 104;
+// 105: cost governance. SessionConfig.costCheckpointsUsd parks a session once per checkpoint with
+//      a Continue/Stop card ahead of the hard budget; a budgeted session whose usage cannot be
+//      priced fails closed with a cost_unpriced card; an organization-wide per-user daily budget
+//      parks a user's sessions with a daily_budget card until the day rolls over or an owner or
+//      admin raises it. All control-plane owned; runners see the new config field as opaque.
+export const PROTOCOL_VERSION = 105;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -437,6 +442,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   usageTokenBuckets: 103,
   /** v104 runners stamp the producing model on token_usage. */
   usageEventModel: 104,
+  /** v105 runners honour `rearm_governance.holdFor: "control_plane"` as a queue-only hold. */
+  controlPlaneQueueHold: 105,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
 } as const;
@@ -921,6 +928,11 @@ export interface SessionConfig {
   /** Absolute distinct-tool-call threshold. A v47 runner cancels at the first observable crossing;
    * the control plane parks and asks. Absent ⇒ unlimited; ≤0 in setConfig clears the limit. */
   maxToolCalls?: number;
+  /** Ascending cost amounts (USD) below the hard budget at which the control plane parks the
+   * session once with a Continue/Stop card. Approving records the checkpoint; declining stops the
+   * turn without recording it, so the next turn over the same amount asks again. Empty ⇒ none.
+   * Control-plane owned; runners ignore it (v105+). */
+  costCheckpointsUsd?: number[];
 }
 
 /** A runner-local environment lookup. The referenced value is resolved only on the runner and is
@@ -1803,6 +1815,9 @@ export type ApprovalKind =
   | "permission"
   | "authentication"
   | "cost_budget"
+  | "cost_checkpoint"
+  | "cost_unpriced"
+  | "daily_budget"
   | "max_tool_calls"
   | "policy_hook"
   | "question";
@@ -2070,9 +2085,18 @@ export interface ReviewFindingsResponse {
  * policy engine can park the session. */
 export type PolicyRule =
   | { kind: "cost_budget"; budgetUsd: number }
-  | { kind: "max_tool_calls"; maxCalls: number };
+  | { kind: "max_tool_calls"; maxCalls: number }
+  /** A soft checkpoint below the budget: asks once, then is remembered on approval (v105). */
+  | { kind: "cost_checkpoint"; checkpointUsd: number }
+  /** A budgeted session whose recorded usage has no price fails closed rather than spending
+   * unbounded (v105). */
+  | { kind: "cost_unpriced" }
+  /** The organization's per-user daily allowance, measured across the owner's sessions (v105). */
+  | { kind: "daily_budget"; budgetUsd: number; spentUsd: number };
 
 export type PolicyRuleKind = PolicyRule["kind"];
+/** The rules a v47 runner enforces mid-turn; every other rule parks only on the control plane. */
+export type RunnerGuardrailKind = "cost_budget" | "max_tool_calls";
 
 /** The CP card decision remains "ok" or "ask"; active cancellation is runner-owned. */
 export interface PolicyDecision {
@@ -2082,7 +2106,7 @@ export interface PolicyDecision {
   title?: string;
 }
 
-export const GUARDRAIL_APPROVAL_KINDS = ["cost_budget", "max_tool_calls"] as const;
+export const GUARDRAIL_APPROVAL_KINDS = ["cost_budget", "max_tool_calls", "cost_checkpoint", "cost_unpriced", "daily_budget"] as const;
 export const POLICY_APPROVAL_KINDS = [...GUARDRAIL_APPROVAL_KINDS, "policy_hook"] as const;
 
 /** True for approvals the CONTROL PLANE owns. The card survives runner snapshots; v47 Continue
@@ -2460,6 +2484,23 @@ export interface SessionUsageResponse {
   totals: UsageAmount;
   byModel: SessionModelUsage[];
   pricing?: UsagePricingStatus;
+}
+
+/** The organization's per-user daily cost allowance (v105). `perUserUsd: null` ⇒ no daily budget. */
+export interface UsageDailyBudgetPolicy {
+  perUserUsd: number | null;
+  updatedAt: number | null;
+}
+
+/** One user's spend over the standard windows, from the owner-scoped usage buckets (v105). */
+export interface UserCostWindows {
+  userId: string;
+  userName: string;
+  todayUsd: number;
+  last7DaysUsd: number;
+  last30DaysUsd: number;
+  /** The organization's per-user daily budget, repeated for convenience; null ⇒ none. */
+  dailyBudgetUsd: number | null;
 }
 
 /** Provenance for the rate table so the UI can be honest about how good the estimates are. */
@@ -3153,6 +3194,12 @@ export interface SessionView {
   maxToolCallsStep?: number | null;
   /** Distinct tool calls recorded so far — populated only when `maxToolCalls` is set. */
   toolCallCount?: number;
+  /** Ascending cost checkpoints (USD) that park the session once each; null ⇒ none (v105+). */
+  costCheckpointsUsd?: number[] | null;
+  /** The highest checkpoint the user has approved; checkpoints at or below it never ask again. */
+  costCheckpointApprovedUsd?: number | null;
+  /** True once the user chose to continue a budgeted session whose usage cannot be priced. */
+  costUnpricedAcknowledged?: boolean;
   /** Prompts queued behind the running turn (ephemeral; absent/empty ⇒ nothing queued). */
   queued?: QueuedPromptView[];
   /** Durable user prompts rendered in the transcript while delivery remains incomplete/terminal. */
@@ -4658,7 +4705,10 @@ export interface RearmGovernanceMessage {
   sessionId: string;
   config: { costBudgetUsd?: number | null; maxToolCalls?: number | null };
   /** Another serialized rule is already tripped. Update thresholds but keep queued work held. */
-  holdFor?: PolicyRuleKind;
+  /** A runner-enforced threshold names itself. `control_plane` (v105+) holds the queue for a
+   * control-plane-only card (checkpoint, unpriced, daily budget) WITHOUT tripping the runner's
+   * governance: no turn is cancelled, no error is swallowed, queued prompts simply wait. */
+  holdFor?: RunnerGuardrailKind | "control_plane";
 }
 
 export interface ResolvePermissionMessage {

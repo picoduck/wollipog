@@ -10972,6 +10972,11 @@ body.shell-dock-dragging * {
 .usage-breakdown-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .usage-breakdown-heading h3 { margin: 0; }
 .usage-table td.usage-cell-dim { color: var(--text-dim); }
+.usage-users-section { margin-top: 20px; }
+.usage-users-section .usage-breakdown-heading { align-items: flex-start; }
+.usage-daily-budget { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.usage-daily-budget label { display: grid; gap: 4px; font-size: var(--text-sm); color: var(--text-dim); }
+.usage-daily-budget input { width: 120px; }
 
 @media (max-width: 860px) {
   .usage-overview { grid-template-columns: minmax(0, 1fr); }

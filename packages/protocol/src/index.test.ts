@@ -133,8 +133,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 104", () => {
-  assert.equal(PROTOCOL_VERSION, 104);
+test("PROTOCOL_VERSION is 105", () => {
+  assert.equal(PROTOCOL_VERSION, 105);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.usageEventModel, 104);
   assert.equal(runnerSupportsProtocol(103, "usageEventModel"), false);
   assert.equal(runnerSupportsProtocol(104, "usageEventModel"), true);

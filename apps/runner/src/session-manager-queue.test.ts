@@ -1119,3 +1119,75 @@ test("the queue byte budget rejects an oversized prompt with an error event", ()
     cleanup();
   }
 });
+
+test("a control-plane queue hold parks queued prompts without tripping governance", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-cp-hold-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle", config: { costBudgetUsd: 10 } }));
+  let settleFirst!: (value: "end_turn") => void;
+  const firstTurn = new Promise<"end_turn">((resolve) => { settleFirst = resolve; });
+  const ran: string[] = [];
+  const client = {
+    resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+    agentSessionId: () => "agent-1",
+    prompt: (text: string) => {
+      ran.push(text);
+      return text === "A" ? firstTurn : Promise.resolve("end_turn" as const);
+    },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (manager as any).active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  try {
+    manager.prompt("s_q", "A");
+    await waitFor(() => ran.length === 1);
+    manager.prompt("s_q", "B", undefined, undefined, { costBudgetUsd: 5 });
+    manager.prompt("s_q", "C", undefined, undefined, { costBudgetUsd: 10 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (manager as any).active.get("s_q");
+    manager.interruptTurn("s_q");
+    manager.rearmGovernance("s_q", {}, "control_plane");
+    assert.equal(entry.controlPlaneHold, true, "the queue is held by the card, on its own flag");
+    assert.equal(entry.governanceTripped, undefined, "but nothing tripped: a provider failure would still surface");
+    assert.deepEqual(entry.queue.map((queued: { config?: { costBudgetUsd?: number } }) => queued.config?.costBudgetUsd), [5, 10],
+      "a threshold-free hold leaves each queued prompt's own budget alone");
+    settleFirst("end_turn");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false, "the provider finished first, so the interrupt hold cleared");
+    assert.deepEqual(ran, ["A"], "but B still waits on the control-plane card");
+    manager.rearmGovernance("s_q", {});
+    await waitFor(() => ran.length === 3);
+    assert.deepEqual(ran, ["A", "B", "C"], "a threshold-free release drains the queue");
+    assert.deepEqual(entry.queue, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a control-plane hold survives a provider exit: recovery keeps the queue until the release", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-cp-hold-recovery-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle", driver: "codex-app-server", agentSessionId: "thread-1" }));
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.recoveryQueues.set("s_q", [{ id: "q1", text: "B", images: [], queuedAt: 1, config: { costBudgetUsd: 5 } }]);
+    manager.rearmGovernance("s_q", {}, "control_plane");
+    await internals.recoverQueuedAppServer("s_q");
+    assert.equal(internals.recoveryQueues.has("s_q"), true, "held: recovery leaves the queue parked");
+    assert.equal(internals.recoveryHolds.has("s_q"), true);
+    manager.rearmGovernance("s_q", { costBudgetUsd: 3 });
+    assert.equal(internals.recoveryHolds.has("s_q"), false, "a threshold-bearing release lifts the hold and re-enters recovery too");
+    assert.equal(internals.recoveryQueues.get("s_q")?.[0]?.config?.costBudgetUsd, 3, "and rewrites the recovered prompt's threshold");
+    manager.rearmGovernance("s_q", {}, "control_plane");
+    assert.equal(internals.recoveryHolds.has("s_q"), true);
+    internals.discardRecovery("s_q");
+    assert.equal(internals.recoveryHolds.has("s_q"), false, "discarding recovery forgets the hold with the queue");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

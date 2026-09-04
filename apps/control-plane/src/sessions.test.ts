@@ -11036,3 +11036,229 @@ test("a zero-cost runner snapshot whose priced token residual crosses the budget
   assert.equal(parked.status, "input_required", "the settled cost, not the runner's zero, decides the gate");
   assert.equal(parked.pendingApproval?.kind, "cost_budget");
 });
+
+/** The v105 governance tests only need the hub for seedSession's prompt delivery. */
+function hub_for(svc: SessionsService): FakeHub {
+  return (svc as unknown as { hub: FakeHub }).hub;
+}
+
+test("cost checkpoints park once each, approval advances, and a decline stops without recording", () => {
+  const { db, svc } = makeHarness();
+  const id = seedSession(svc, hub_for(svc), { prompt: "spend" });
+  db.setUsageRateTable(parseRateTable({ "claude-fable-5-1": { input_cost_per_token: 0.00001, output_cost_per_token: 0.00001 } }));
+  db.raw().prepare("UPDATE sessions SET model='claude-fable-5-1', driver='claude-code' WHERE id=?").run(id);
+  const configured = svc.setConfig(id, { costCheckpointsUsd: [1, 2.5], costBudgetUsd: 10 });
+  assert.ok(configured.ok, configured.error);
+  assert.deepEqual(db.getSession(id)!.costCheckpointsUsd, [1, 2.5]);
+
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 1.2 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(id, "idle");
+  let parked = db.getSession(id)!;
+  assert.equal(parked.pendingApproval?.kind, "cost_checkpoint");
+  assert.match(parked.pendingApproval?.title ?? "", /\$1\.20 of \$1\.00/);
+
+  const approved = svc.approve(id, parked.pendingApproval!.requestId, "continue");
+  assert.ok(approved.ok, approved.error);
+  assert.equal(db.getSession(id)!.costCheckpointApprovedUsd, 1);
+  assert.equal(db.getSession(id)!.pendingApproval, null, "the next checkpoint is not reached yet");
+
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 0.5 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.pendingApproval, null, "$1.70 sits between the approved checkpoint and the next");
+
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 1 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(id, "idle");
+  parked = db.getSession(id)!;
+  assert.equal(parked.pendingApproval?.kind, "cost_checkpoint");
+  assert.match(parked.pendingApproval?.title ?? "", /of \$2\.50/);
+  const declined = svc.approve(id, parked.pendingApproval!.requestId, "cancel");
+  assert.ok(declined.ok, declined.error);
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(db.getSession(id)!.costCheckpointApprovedUsd, 1, "declining records nothing");
+
+  // Restarted and idle again, the same checkpoint asks again.
+  db.updateSessionStatus(id, "idle", Date.now());
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_checkpoint");
+});
+
+test("a budgeted session whose usage cannot be priced fails closed until the user continues without the budget", () => {
+  const { db, svc } = makeHarness();
+  const id = seedSession(svc, hub_for(svc), { prompt: "spend" });
+  db.raw().prepare("UPDATE sessions SET model='mystery-model', driver='codex-app-server' WHERE id=?").run(id);
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 5 }).ok);
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 500, outputTokens: 20 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(id, "idle");
+  const parked = db.getSession(id)!;
+  assert.equal(parked.pendingApproval?.kind, "cost_unpriced");
+  assert.equal(parked.costUsd, 0);
+  assert.ok(svc.approve(id, parked.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.costUnpricedAcknowledged, true);
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 500, outputTokens: 20 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.pendingApproval, null, "acknowledged once, it does not ask again");
+});
+
+test("the per-user daily budget parks a user's sessions until the day rolls over or the budget is raised", () => {
+  const { db, svc } = makeHarness();
+  const id = seedSession(svc, hub_for(svc), { prompt: "spend" });
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(id);
+  db.setUsageDailyBudget("org_personal", 2, Date.now());
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(id, "idle");
+  let parked = db.getSession(id)!;
+  assert.equal(parked.pendingApproval?.kind, "daily_budget");
+  assert.match(parked.pendingApproval?.title ?? "", /Daily budget reached — \$2\.50 of \$2\.00/);
+  assert.equal(parked.pendingApproval?.options[0]?.name, "Check Again");
+
+  assert.ok(svc.approve(id, parked.pendingApproval!.requestId, "continue").ok);
+  parked = db.getSession(id)!;
+  assert.equal(parked.pendingApproval?.kind, "daily_budget", "still over: Check Again re-parks with a fresh card");
+
+  db.setUsageDailyBudget("org_personal", 50, Date.now());
+  assert.ok(svc.approve(id, parked.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.pendingApproval, null, "a raised budget releases the session");
+  assert.equal(db.getSession(id)!.status, "idle");
+});
+
+test("the daily budget gates prompt admission and a mid-turn checkpoint Continue keeps the session running", () => {
+  const { db, svc } = makeHarness();
+  const id = seedSession(svc, hub_for(svc), { prompt: "spend" });
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(id);
+  db.setUsageDailyBudget("org_personal", 2, Date.now());
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+  db.updateSessionStatus(id, "idle", Date.now());
+  db.setPendingApproval(id, null);
+  const refused = svc.prompt(id, "one more", []);
+  assert.equal(refused.ok, false);
+  assert.match(refused.error ?? "", /daily budget reached/);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "daily_budget", "the refusal parks the session with the card");
+
+  // Creation for the same owner is refused too.
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, useWorktree: false }, undefined, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "usr_local_owner" },
+  });
+  assert.equal(created.ok, false);
+  assert.match(created.error ?? "", /daily budget reached/);
+
+  // A checkpoint crossed mid-turn: Continue leaves the provider turn running rather than idle.
+  db.setUsageDailyBudget("org_personal", null, Date.now());
+  db.setPendingApproval(id, null);
+  db.updateSessionStatus(id, "running", Date.now());
+  assert.ok(svc.setConfig(id, { costCheckpointsUsd: [1] }).ok);
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 0.1 }, Date.now(), { accrueUsage: true });
+  (svc as unknown as { gateOnPolicy(id: string, now: number): boolean }).gateOnPolicy(id, Date.now());
+  const parked = db.getSession(id)!;
+  assert.equal(parked.pendingApproval?.kind, "cost_checkpoint");
+  assert.equal(parked.status, "input_required");
+  assert.ok(svc.approve(id, parked.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.status, "running", "no settle frame was swallowed, so the turn is still live");
+});
+
+test("a soft-card Continue that cannot reach the runner leaves the card and the approved level untouched", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "spend" });
+  db.raw().prepare("UPDATE sessions SET model='claude-fable-5-1', driver='claude-code' WHERE id=?").run(id);
+  assert.ok(svc.setConfig(id, { costCheckpointsUsd: [1, 2.5] }).ok);
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 1.2 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(id, "idle");
+  const parked = db.getSession(id)!;
+  assert.equal(parked.pendingApproval?.kind, "cost_checkpoint");
+  hub.deliver = false;
+  const failed = svc.approve(id, parked.pendingApproval!.requestId, "continue");
+  assert.equal(failed.ok, false);
+  assert.equal(failed.status, 409);
+  const after = db.getSession(id)!;
+  assert.equal(after.pendingApproval?.requestId, parked.pendingApproval!.requestId, "the card survives");
+  assert.equal(after.costCheckpointApprovedUsd, null, "nothing was approved");
+  hub.deliver = true;
+  assert.ok(svc.approve(id, parked.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.costCheckpointApprovedUsd, 1);
+  const rearm = hub.sentOfType("rearm_governance").at(-1)!;
+  assert.deepEqual(rearm.config, {}, "a soft card's re-arm carries no thresholds, so queued prompts keep their own budgets");
+  assert.equal("holdFor" in rearm, false, "nothing else trips, so the queue is released");
+});
+
+test("a run for an owner past the daily budget launches no member sessions", () => {
+  const { db, hub, svc } = makeHarness();
+  const seeded = seedSession(svc, hub, { prompt: "spend" });
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(seeded);
+  db.setUsageDailyBudget("org_personal", 1, Date.now());
+  db.appendEvent(seeded, { kind: "token_usage", inputTokens: 1, costUsd: 1.5 }, Date.now(), { accrueUsage: true });
+  // Member sessions inherit the workspace's ownership, so the workspace itself belongs to the user.
+  db.raw().prepare("UPDATE workspace_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE runner_id=? AND workspace_id=?").run(RUNNER_ID, WORKSPACE_ID);
+  hub.sentToRunner.length = 0;
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "spend more" });
+  assert.equal(run.ok, false);
+  assert.equal(run.status, 409);
+  assert.match(run.error ?? "", /daily budget reached/);
+  assert.equal(hub.sentOfType("start_session").length, 0, "no member session was launched");
+});
+
+test("a user-owned Project on an organization workspace still meets its owner's daily budget at creation", () => {
+  const { db, hub, svc } = makeHarness();
+  const local = db.localIdentityContext();
+  const project = db.listProjects(true)[0]!;
+  assert.equal(db.setResourceScope({
+    resource: "project", resourceId: project.id, now: 2,
+    scope: { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } },
+  }), true);
+  const location = db.getProject(project.id)!.locations[0]!;
+  // Spend through a user-owned session first.
+  const seeded = seedSession(svc, hub, { prompt: "spend" });
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id=? WHERE session_id=?").run(local.userId, seeded);
+  db.setUsageDailyBudget(local.organizationId, 1, Date.now());
+  db.appendEvent(seeded, { kind: "token_usage", inputTokens: 1, costUsd: 1.5 }, Date.now(), { accrueUsage: true });
+  hub.sentToRunner.length = 0;
+  // No explicit scope: the organization workspace confers one, but the Project narrows it to the user.
+  const created = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, projectId: project.id, projectLocationId: location.id, agentId: AGENT_ID,
+  });
+  assert.equal(created.ok, false);
+  assert.equal(created.status, 409);
+  assert.match(created.error ?? "", /daily budget reached/);
+  assert.equal(hub.sentOfType("start_session").length, 0);
+});
+
+test("a daily-budget breach parks every live session the owner has, not only the one that crossed it", () => {
+  const { db, hub, svc } = makeHarness();
+  const a = seedSession(svc, hub, { prompt: "spend" });
+  const b = seedSession(svc, hub, { prompt: "wait" });
+  for (const id of [a, b]) {
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(id);
+  }
+  db.updateSessionStatus(b, "idle", Date.now());
+  db.setUsageDailyBudget("org_personal", 2, Date.now());
+  db.appendEvent(a, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(a, "idle");
+  assert.equal(db.getSession(a)!.pendingApproval?.kind, "daily_budget");
+  assert.equal(db.getSession(b)!.pendingApproval?.kind, "daily_budget", "the sibling is parked too");
+  assert.equal(db.getSession(b)!.status, "input_required");
+});
+
+test("arming a soft guardrail on an unparked session that already exceeds it parks it at once", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "spend" });
+  db.raw().prepare("UPDATE sessions SET model='mystery-model', driver='codex-app-server' WHERE id=?").run(id);
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 500, outputTokens: 20 }, Date.now(), { accrueUsage: true });
+  db.updateSessionStatus(id, "idle", Date.now());
+  assert.equal(db.getSession(id)!.pendingApproval, null, "no budget yet, so unpriced usage is nobody's concern");
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 5 }).ok);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_unpriced", "the budget cannot see spend, so it fails closed immediately");
+  assert.equal(svc.prompt(id, "one more", []).ok, false, "and the next prompt waits on the card");
+
+  // A hard threshold armed on a live session stays the runner's to trip: no card appears here.
+  const other = seedSession(svc, hub, { prompt: "spend", id: undefined } as never);
+  db.appendEvent(other, { kind: "token_usage", inputTokens: 1, costUsd: 6 }, Date.now(), { accrueUsage: true });
+  db.updateSessionStatus(other, "running", Date.now());
+  assert.ok(svc.setConfig(other, { costBudgetUsd: 5 }).ok);
+  assert.equal(db.getSession(other)!.pendingApproval, null, "the runner receives the threshold and cancels at the crossing itself");
+  assert.equal(db.getSession(other)!.status, "running");
+});
+
+test("run member sessions persist the run's checkpoints", () => {
+  const { db, hub, svc } = makeHarness();
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "go", config: { costCheckpointsUsd: [0.5, 2] } });
+  assert.ok(run.ok && run.data, run.error);
+  assert.deepEqual(db.getSession(run.data!.sessions[0]!.id)!.costCheckpointsUsd, [0.5, 2]);
+});

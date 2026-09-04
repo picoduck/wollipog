@@ -105,7 +105,9 @@ function validProjectAssignment(value: Record<string, unknown>): boolean {
 
 function validConfig(value: unknown): boolean {
   if (value === undefined) return true;
-  if (!object(value) || !keysOnly(value, ["model", "effort", "permissionMode", "costBudgetUsd", "maxToolCalls"])) return false;
+  if (!object(value) || !keysOnly(value, ["model", "effort", "permissionMode", "costBudgetUsd", "maxToolCalls", "costCheckpointsUsd"])) return false;
+  if (value.costCheckpointsUsd !== undefined && (!Array.isArray(value.costCheckpointsUsd) ||
+      !value.costCheckpointsUsd.every((usd) => Number.isFinite(usd) && Number(usd) > 0))) return false;
   for (const key of ["model", "effort", "permissionMode"] as const) {
     if (value[key] !== undefined && !boundedString(value[key])) return false;
   }

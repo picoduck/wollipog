@@ -352,6 +352,10 @@ interface ActiveSession {
   /** A successful turn-only interruption preserves the remaining FIFO but does not run it until
    * a later explicit prompt unambiguously asks the session to continue. */
   holdQueuedPromptsAfterInterrupt?: boolean;
+  /** A control-plane card (checkpoint, unpriced, daily budget) is holding the queue. Its own flag,
+   * because the interrupt hold above is cleared when a provider completes before the interrupt
+   * takes effect, and that settle must not release work a card is still parking. */
+  controlPlaneHold?: boolean;
   /** Distinct invocation ids are rebuilt once from the durable event log when a tool guardrail is
    * armed, then maintained in memory on normalized tool events. */
   toolCallIds?: Set<string>;
@@ -574,6 +578,9 @@ export class SessionManager {
   /** Prompts known not to have reached turn/start when app-server crashed. A recovery launch
    * consumes these; the in-flight prompt is deliberately absent because delivery is ambiguous. */
   private readonly recoveryQueues = new Map<string, QueuedPrompt[]>();
+  /** Sessions whose control-plane hold outlived their process: recovery must not drain their
+   * queue, and the replacement entry inherits the hold, until the control plane releases it. */
+  private readonly recoveryHolds = new Set<string>();
   /** Prompts received after a session was materialized but before capacity admission. They must
    * join the original launch instead of starting a competing resume generation. Durable command
    * lifecycles make this in-memory FIFO recoverable after a runner restart. */
@@ -3036,6 +3043,10 @@ export class SessionManager {
       operation.fenceEntry = entry;
       operation.fenceInstalled = true;
     }
+    // A replacement process inherits the hold its predecessor was under. The marker itself stays
+    // until the recovered queue is consumed or the control plane releases it, so a failed
+    // initialization cannot strand a still-held recovery queue.
+    if (this.recoveryHolds.has(sessionId)) entry.controlPlaneHold = true;
     this.active.set(sessionId, entry);
     this.send({ type: "process_status", sessionId, processStatus: "running", pid: client.pid });
 
@@ -3979,7 +3990,7 @@ export class SessionManager {
     if (entry) {
       this.emitQueue(request.sessionId);
       if (entry.queue.length && !entry.running && !entry.governanceTripped &&
-          !entry.holdQueuedPromptsAfterInterrupt && !this.reservedPromotionPrecedesQueue(request.sessionId, entry)) {
+          !this.queueHeld(entry) && !this.reservedPromotionPrecedesQueue(request.sessionId, entry)) {
         this.scheduleDrain(request.sessionId);
       }
     }
@@ -4103,7 +4114,7 @@ export class SessionManager {
         message: "Wait for the current stop request to settle before steering.",
       };
     }
-    if (entry.holdQueuedPromptsAfterInterrupt) {
+    if (this.queueHeld(entry)) {
       return {
         eligible: false,
         reason: "policy_blocked",
@@ -4181,7 +4192,7 @@ export class SessionManager {
       );
     }
     if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
-    if (entry.cancelRequested || entry.interruptRequested || entry.holdQueuedPromptsAfterInterrupt) {
+    if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
     if (entry.governanceTripped) return this.handleDefiniteSteeringFailure(operation, "governance_blocked");
@@ -4223,7 +4234,7 @@ export class SessionManager {
       );
     }
     if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
-    if (entry.cancelRequested || entry.interruptRequested || entry.holdQueuedPromptsAfterInterrupt) {
+    if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
     if (entry.governanceTripped) return this.handleDefiniteSteeringFailure(operation, "governance_blocked");
@@ -4520,7 +4531,7 @@ export class SessionManager {
       }
       this.emitQueue(sessionId);
       if (!this.steerFences(entry).size && entry.queue.length &&
-          !entry.governanceTripped && !entry.holdQueuedPromptsAfterInterrupt) {
+          !entry.governanceTripped && !this.queueHeld(entry)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
@@ -4779,12 +4790,23 @@ export class SessionManager {
           editRevision: this.queuedPromptEditRevision(q),
         };
       }),
-      ...(entry?.holdQueuedPromptsAfterInterrupt ? { held: true } : {}),
+      ...(entry && this.queueHeld(entry) ? { held: true } : {}),
       ...(entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
     });
   }
 
   /** Publish both edges of the interruption hold so clients never infer it from queue contents. */
+  /** Either hold keeps queued prompts waiting; they are cleared independently. */
+  private queueHeld(entry: ActiveSession): boolean {
+    return Boolean(entry.holdQueuedPromptsAfterInterrupt || entry.controlPlaneHold);
+  }
+
+  private setControlPlaneHold(sessionId: string, entry: ActiveSession, held: boolean): void {
+    if (Boolean(entry.controlPlaneHold) === held) return;
+    entry.controlPlaneHold = held;
+    this.emitQueue(sessionId);
+  }
+
   private setInterruptQueueHold(sessionId: string, entry: ActiveSession, held: boolean): void {
     if (entry.holdQueuedPromptsAfterInterrupt === held) return;
     entry.holdQueuedPromptsAfterInterrupt = held;
@@ -4828,7 +4850,7 @@ export class SessionManager {
       reserved.cancelRequested = true;
       this.emitQueue(sessionId);
       if (!this.reservedPromotionPrecedesQueue(sessionId, entry) && entry.queue.length &&
-          !entry.running && !entry.governanceTripped && !entry.holdQueuedPromptsAfterInterrupt) {
+          !entry.running && !entry.governanceTripped && !this.queueHeld(entry)) {
         this.scheduleDrain(sessionId);
       }
       return;
@@ -5142,7 +5164,7 @@ export class SessionManager {
   /** Run queued prompts one at a time, holding the box lock only while turns are draining. */
   private async drain(sessionId: string): Promise<void> {
     const entry = this.active.get(sessionId);
-    if (!entry || entry.running || entry.governanceTripped || entry.holdQueuedPromptsAfterInterrupt ||
+    if (!entry || entry.running || entry.governanceTripped || this.queueHeld(entry) ||
         this.hasPendingApproval(sessionId) || this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
@@ -5236,7 +5258,7 @@ export class SessionManager {
           await this.waitForSteeringFences(entry);
           if (this.active.get(sessionId) !== entry) break;
         }
-        if (entry.governanceTripped || entry.holdQueuedPromptsAfterInterrupt) break;
+        if (entry.governanceTripped || this.queueHeld(entry)) break;
       }
     } finally {
       entry.running = false;
@@ -6327,13 +6349,50 @@ export class SessionManager {
   rearmGovernance(
     sessionId: string,
     config: { costBudgetUsd?: number | null; maxToolCalls?: number | null },
-    holdFor?: "cost_budget" | "max_tool_calls",
+    holdFor?: "cost_budget" | "max_tool_calls" | "control_plane",
   ): void {
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
     const costBudgetUsd = config.costBudgetUsd;
     const maxToolCalls = config.maxToolCalls;
-    if (costBudgetUsd === undefined && maxToolCalls === undefined) return;
+    // No live process: whatever the re-arm carries, the hold change applies to what recovery
+    // holds for this session, and a release re-enters recovery. Thresholds ride into the queued
+    // prompts' configs when the replacement process picks them up.
+    if (!this.active.get(sessionId)) {
+      // Recovered prompts carry their own configs, so the new thresholds are written into them
+      // here; the live-entry loop below never sees the recovery map.
+      for (const queued of this.recoveryQueues.get(sessionId) ?? []) {
+        const queuedConfig: SessionConfig = { ...(queued.config ?? this.store.readMeta(sessionId)?.config ?? {}) };
+        if (costBudgetUsd === null) delete queuedConfig.costBudgetUsd;
+        else if (costBudgetUsd !== undefined) queuedConfig.costBudgetUsd = costBudgetUsd;
+        if (maxToolCalls === null) delete queuedConfig.maxToolCalls;
+        else if (maxToolCalls !== undefined) queuedConfig.maxToolCalls = maxToolCalls;
+        queued.config = queuedConfig;
+      }
+      if (holdFor === "control_plane") this.recoveryHolds.add(sessionId);
+      else if (holdFor === undefined && this.recoveryHolds.delete(sessionId) && this.recoveryQueues.has(sessionId)) {
+        setImmediate(() => void this.recoverQueuedAppServer(sessionId));
+      }
+      if (costBudgetUsd === undefined && maxToolCalls === undefined) return;
+    }
+    // A threshold-free re-arm is a hold change alone (v105 control-plane cards): it must neither
+    // be ignored nor touch the per-prompt budgets queued prompts were queued with.
+    if (costBudgetUsd === undefined && maxToolCalls === undefined) {
+      const entry = this.active.get(sessionId);
+      if (!entry) return;
+      if (holdFor === "control_plane") {
+        this.setControlPlaneHold(sessionId, entry, true);
+        if (entry.running && entry.governanceTripped) entry.governanceRearmPending = "resume";
+        else if (!entry.running) entry.governanceTripped = undefined;
+        return;
+      }
+      if (holdFor === undefined && (entry.controlPlaneHold || this.recoveryHolds.has(sessionId))) {
+        this.recoveryHolds.delete(sessionId);
+        this.setControlPlaneHold(sessionId, entry, false);
+        if (!entry.running && !entry.governanceTripped && !this.queueHeld(entry) && entry.queue.length) this.scheduleDrain(sessionId);
+      }
+      return;
+    }
     if (costBudgetUsd !== undefined && costBudgetUsd !== null && (!Number.isFinite(costBudgetUsd) || costBudgetUsd <= 0)) return;
     if (maxToolCalls !== undefined && maxToolCalls !== null && (!Number.isInteger(maxToolCalls) || maxToolCalls <= 0)) return;
     const merged: SessionConfig = { ...meta.config };
@@ -6362,6 +6421,26 @@ export class SessionManager {
           .filter((event) => event.payload.kind === "tool_call")
           .map((event) => (event.payload as Extract<SessionEventPayload, { kind: "tool_call" }>).toolCallId),
       );
+    }
+    // A control-plane card holds the queue and nothing else: the live turn keeps running, no
+    // governance trip is recorded (a trip would make a later provider failure look like a
+    // governance settle), and any earlier hard trip is cleared because the thresholds it
+    // enforced have just been re-armed.
+    if (holdFor === "control_plane") {
+      this.setControlPlaneHold(sessionId, entry, true);
+      if (entry.running) {
+        if (entry.governanceTripped) entry.governanceRearmPending = "resume";
+        return;
+      }
+      entry.governanceTripped = undefined;
+      this.emitStatus(sessionId, "idle");
+      return;
+    }
+    // A threshold re-arm without a hold releases a control-plane hold too: the card it carried
+    // was answered by the same Continue that sent the new thresholds.
+    if (!holdFor) {
+      this.recoveryHolds.delete(sessionId);
+      this.setControlPlaneHold(sessionId, entry, false);
     }
     if (entry.running) {
       if (entry.governanceTripped) entry.governanceRearmPending = holdFor ?? "resume";
@@ -6932,6 +7011,7 @@ export class SessionManager {
         if (meta?.driver === "codex-app-server" && meta.agentSessionId) {
           this.stabilizeRecoveryQueue(sessionId, queued);
           this.recoveryQueues.set(sessionId, queued);
+          if (entry.controlPlaneHold) this.recoveryHolds.add(sessionId);
         } else {
           this.rejectQueued(
             queued,
@@ -6964,6 +7044,7 @@ export class SessionManager {
         if (queued.length) {
           this.stabilizeRecoveryQueue(sessionId, queued);
           this.recoveryQueues.set(sessionId, queued);
+          if (entry.controlPlaneHold) this.recoveryHolds.add(sessionId);
           setImmediate(() => void this.recoverQueuedAppServer(sessionId));
         }
       } else if (code && code !== 0) {
@@ -7007,12 +7088,19 @@ export class SessionManager {
     if (this.recoveryLaunching.has(sessionId)) return;
     const queued = this.recoveryQueues.get(sessionId);
     if (!queued) return;
+    // A control-plane card is still open: the prompts stay parked in the recovery map until the
+    // control plane releases the hold, which re-enters here.
+    if (this.recoveryHolds.has(sessionId) && !this.active.get(sessionId)) return;
     const alreadyActive = this.active.get(sessionId);
     if (alreadyActive) {
       // A non-recovery entrypoint won the race. Preserve the known-unsubmitted prompts ahead of
       // newer work instead of leaving a stale recovery map that would intercept every prompt.
       for (const prompt of queued) this.insertQueuedPrompt(sessionId, alreadyActive.queue, prompt);
       this.recoveryQueues.delete(sessionId);
+      if (this.recoveryHolds.has(sessionId)) {
+        this.recoveryHolds.delete(sessionId);
+        this.setControlPlaneHold(sessionId, alreadyActive, true);
+      }
       this.emitQueue(sessionId);
       this.scheduleDrain(sessionId);
       return;
@@ -7107,6 +7195,7 @@ export class SessionManager {
     if (queued) this.rejectQueued(queued, "session lifecycle discarded the recovered command queue");
     this.recoveryQueues.delete(sessionId);
     this.recoveryLaunching.delete(sessionId);
+    this.recoveryHolds.delete(sessionId);
   }
 
   /** Returns whether every provider driver was disposed cleanly. When false, some provider process
@@ -7885,7 +7974,7 @@ export class SessionManager {
       return;
     }
     const entry = this.active.get(sessionId);
-    if (entry?.holdQueuedPromptsAfterInterrupt || entry?.running || entry?.queue.some((prompt) => prompt.syntheticRecovery)) {
+    if ((entry && this.queueHeld(entry)) || entry?.running || entry?.queue.some((prompt) => prompt.syntheticRecovery)) {
       this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       return;
     }

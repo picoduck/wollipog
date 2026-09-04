@@ -5049,3 +5049,59 @@ test("the per-session per-model ledger attributes each record to the model that 
   assert.deepEqual(aggregate.byModel.map((row) => [row.key, row.inputTokens]), [["claude-fable-5-1", 120], ["gpt-5.5-codex", 50]], "the fleet buckets key on the same attribution");
   assert.deepEqual(db.sessionUsageByModel("missing"), { totals: { ...usage.totals, inputTokens: 0, outputTokens: 0, costUsd: 0, uncachedInputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 0, processedTokens: 0 }, byModel: [] });
 });
+
+test("per-user cost windows and the daily budget read the owner-scoped buckets in UTC days", () => {
+  const db = withRunner();
+  const now = Date.UTC(2026, 8, 3, 15);
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id='sess-1'").run();
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1, costUsd: 1.5 }, now - 3_600_000, { accrueUsage: true });
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1, costUsd: 4 }, now - 3 * 86_400_000, { accrueUsage: true });
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1, costUsd: 8 }, now - 20 * 86_400_000, { accrueUsage: true });
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1, costUsd: 16 }, now - 40 * 86_400_000, { accrueUsage: true });
+
+  assert.deepEqual(db.getUsageDailyBudget("org_personal"), { perUserUsd: null, updatedAt: null });
+  const windows = db.userCostWindows("org_personal", "usr_local_owner", now);
+  assert.equal(windows.todayUsd, 1.5);
+  assert.equal(windows.last7DaysUsd, 5.5);
+  assert.equal(windows.last30DaysUsd, 13.5, "the 40-day-old cost is outside every window");
+  assert.equal(windows.dailyBudgetUsd, null);
+
+  db.setUsageDailyBudget("org_personal", 20, now);
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).dailyBudgetUsd, 20);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.userId, row.todayUsd]), [["usr_local_owner", 1.5]]);
+  assert.deepEqual(db.sessionOwnerUser("sess-1"), { organizationId: "org_personal", userId: "usr_local_owner" });
+
+  // Shorten hourly retention so the 3-day and 20-day samples roll into daily buckets, then the
+  // windows must read them from usage_daily rather than lose them.
+  db.setUsageRetentionPolicy("org_personal", { hourlyDays: 1, dailyDays: 30 });
+  db.maintainUsageAggregation(now);
+  assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_daily").get()!.n, 2, "two samples rolled into days");
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).last7DaysUsd, 5.5, "a rolled-up day inside the window still counts");
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).last30DaysUsd, 13.5);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.todayUsd, row.last7DaysUsd, row.last30DaysUsd]), [[1.5, 5.5, 13.5]]);
+  db.setUsageDailyBudget("org_personal", null, now + 1);
+  assert.equal(db.getUsageDailyBudget("org_personal").perUserUsd, null);
+});
+
+test("a budgeted session whose usage cannot be priced reads as unpriced until a record is priced", () => {
+  const db = withRunner();
+  db.createSession(newSession({ driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  assert.equal(db.sessionUsageUnpriced("sess-1"), false, "no usage yet is not unpriced");
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5 }, 3_600_100, { accrueUsage: true });
+  assert.equal(db.sessionUsageUnpriced("sess-1"), true);
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5 }, 3_600_200, { accrueUsage: true });
+  assert.equal(db.sessionUsageUnpriced("sess-1"), false, "one priced record makes the cost a real lower bound");
+
+  db.updateSessionCostCheckpoints("sess-1", [1, 2.5], 3_600_300);
+  assert.deepEqual(db.getSession("sess-1")!.costCheckpointsUsd, [1, 2.5]);
+  db.approveSessionCostCheckpoint("sess-1", 1, 3_600_400);
+  db.approveSessionCostCheckpoint("sess-1", 0.5, 3_600_500);
+  assert.equal(db.getSession("sess-1")!.costCheckpointApprovedUsd, 1, "approval never moves backwards");
+  db.updateSessionCostCheckpoints("sess-1", null, 3_600_600);
+  assert.equal(db.getSession("sess-1")!.costCheckpointsUsd, null);
+  assert.equal(db.getSession("sess-1")!.costCheckpointApprovedUsd, null, "clearing the checkpoints forgets the approval");
+  db.acknowledgeSessionCostUnpriced("sess-1", 3_600_700);
+  assert.equal(db.getSession("sess-1")!.costUnpricedAcknowledged, true);
+});

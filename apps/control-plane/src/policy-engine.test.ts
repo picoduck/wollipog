@@ -8,6 +8,7 @@ import {
   evaluateHookApprovalPolicies,
   evaluatePolicies,
   firstAsk,
+  normalizeCostCheckpoints,
   networkPatternMatches,
   pathPatternMatches,
   parsePolicyHookRequest,
@@ -29,16 +30,19 @@ test("rulesFromSession: builds rules only for armed guardrails, in cost-first or
   assert.deepEqual(rulesFromSession({}), []);
   assert.deepEqual(rulesFromSession({ costBudgetUsd: null, maxToolCalls: null }), []);
   assert.deepEqual(rulesFromSession({ costBudgetUsd: 0, maxToolCalls: -1 }), []);
-  assert.deepEqual(rulesFromSession({ costBudgetUsd: 5 }), [{ kind: "cost_budget", budgetUsd: 5 }]);
+  // A budget always brings the unpriced fail-closed rule with it (v105): a budget that cannot see
+  // spend is no budget. It only asks when the ledger reports unpriced usage.
+  assert.deepEqual(rulesFromSession({ costBudgetUsd: 5 }), [{ kind: "cost_unpriced" }, { kind: "cost_budget", budgetUsd: 5 }]);
   assert.deepEqual(rulesFromSession({ maxToolCalls: 10 }), [{ kind: "max_tool_calls", maxCalls: 10 }]);
   assert.deepEqual(rulesFromSession({ costBudgetUsd: 5, maxToolCalls: 10 }), [
+    { kind: "cost_unpriced" },
     { kind: "cost_budget", budgetUsd: 5 },
     { kind: "max_tool_calls", maxCalls: 10 },
   ]);
 });
 
 test("evaluatePolicies: cost_budget asks at/over the budget, ok below", () => {
-  const rules = rulesFromSession({ costBudgetUsd: 5 });
+  const rules = rulesFromSession({ costBudgetUsd: 5, costUnpricedAcknowledged: true });
   assert.equal(evaluatePolicies(running({ costUsd: 4.99 }), rules)[0]!.decision, "ok");
   assert.equal(evaluatePolicies(running({ costUsd: 5 }), rules)[0]!.decision, "ask"); // >= triggers
   const over = evaluatePolicies(running({ costUsd: 6 }), rules)[0]!;
@@ -80,7 +84,7 @@ test("firstAsk: ask beats ok; cost_budget wins the slot when both trip", () => {
 });
 
 test("approvalForDecision: kind, requestId prefix, and the Continue/Stop options", () => {
-  const [cost] = evaluatePolicies(running({ costUsd: 6 }), rulesFromSession({ costBudgetUsd: 5 }));
+  const [cost] = evaluatePolicies(running({ costUsd: 6 }), rulesFromSession({ costBudgetUsd: 5, costUnpricedAcknowledged: true }));
   const a = approvalForDecision(cost!, "s1", 123);
   assert.equal(a.kind, "cost_budget");
   assert.equal(a.requestId, "cost-budget:s1:123");
@@ -296,4 +300,47 @@ test("policy validation rejects typo-broadened scopes, unknown conditions, and b
   assert.equal(validateGovernancePolicy({ ...input, effect: "ask", askTimeout: 30 }), null);
   assert.match(validateGovernancePolicy({ ...input, effect: "ask", askTimeout: 0 })!, /askTimeout/);
   assert.match(validateGovernancePolicy({ ...input, effect: "deny", askTimeout: 30 })!, /only valid/);
+});
+
+test("v105 rules: daily budget first, unpriced fail-closed, then the next checkpoint, then the budget", () => {
+  assert.deepEqual(rulesFromSession({ costBudgetUsd: 5, costCheckpointsUsd: [1, 2.5, 6] }), [
+    { kind: "cost_unpriced" },
+    { kind: "cost_checkpoint", checkpointUsd: 1 },
+    { kind: "cost_budget", budgetUsd: 5 },
+  ], "only the next unapproved checkpoint below the budget is a rule");
+  assert.deepEqual(rulesFromSession({ costBudgetUsd: 5, costCheckpointsUsd: [1, 2.5], costCheckpointApprovedUsd: 1 }), [
+    { kind: "cost_unpriced" },
+    { kind: "cost_checkpoint", checkpointUsd: 2.5 },
+    { kind: "cost_budget", budgetUsd: 5 },
+  ]);
+  assert.deepEqual(rulesFromSession({ costCheckpointsUsd: [2], costCheckpointApprovedUsd: 2, costUnpricedAcknowledged: true }), [],
+    "an approved last checkpoint and an acknowledged unpriced state leave nothing to ask");
+  assert.deepEqual(rulesFromSession({ dailyBudget: { budgetUsd: 20, spentUsd: 3 }, maxToolCalls: 4 }), [
+    { kind: "daily_budget", budgetUsd: 20, spentUsd: 3 },
+    { kind: "max_tool_calls", maxCalls: 4 },
+  ], "no unpriced rule without a session budget or checkpoint");
+  assert.deepEqual(normalizeCostCheckpoints(["2.5", 1, 1, -3, "x", 0.005]), [0.01, 1, 2.5]);
+  assert.equal(normalizeCostCheckpoints([]), null);
+  assert.equal(normalizeCostCheckpoints("1,2"), null);
+});
+
+test("evaluatePolicies: checkpoints, unpriced usage, and the daily budget each ask with their own card", () => {
+  const rules = rulesFromSession({ costBudgetUsd: 5, costCheckpointsUsd: [1], dailyBudget: { budgetUsd: 20, spentUsd: 20 } });
+  const decisions = evaluatePolicies(running({ costUsd: 1.2, unpriced: false }), rules);
+  assert.equal(firstAsk(decisions)!.rule.kind, "daily_budget", "the organization's allowance outranks the session's own rules");
+  assert.match(firstAsk(decisions)!.title ?? "", /Daily budget reached — \$20\.00 of \$20\.00/);
+
+  const unpriced = evaluatePolicies(running({ costUsd: 0, unpriced: true }), rulesFromSession({ costBudgetUsd: 5 }));
+  assert.equal(firstAsk(unpriced)!.rule.kind, "cost_unpriced");
+  assert.match(firstAsk(unpriced)!.title ?? "", /cannot be priced/);
+
+  const checkpoint = evaluatePolicies(running({ costUsd: 1.2 }), rulesFromSession({ costBudgetUsd: 5, costCheckpointsUsd: [1] }));
+  assert.equal(firstAsk(checkpoint)!.rule.kind, "cost_checkpoint");
+  assert.match(firstAsk(checkpoint)!.title ?? "", /Cost checkpoint — \$1\.20 of \$1\.00/);
+  assert.equal(firstAsk(evaluatePolicies(running({ costUsd: 0.5 }), rulesFromSession({ costBudgetUsd: 5, costCheckpointsUsd: [1] }))), null);
+
+  const card = approvalForDecision(firstAsk(checkpoint)!, "s1", 7);
+  assert.equal(card.kind, "cost_checkpoint");
+  assert.equal(card.requestId, "cost-checkpoint:s1:7");
+  assert.equal(approvalForDecision(firstAsk(decisions)!, "s1", 7).options[0]!.name, "Check Again");
 });

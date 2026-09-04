@@ -100,6 +100,8 @@ import type {
   UsageRetentionPolicy,
   UsagePricingStatus,
   SessionUsageResponse,
+  UsageDailyBudgetPolicy,
+  UserCostWindows,
   UserStatus,
   WorkspaceInfo,
   WorkflowArtifact,
@@ -323,6 +325,12 @@ export function createApiClient(transport: ApiTransport) {
     method: "POST",
   }),
 
+  usageDailyBudget: () => req<{ dailyBudget: UsageDailyBudgetPolicy }>("/api/usage/daily-budget"),
+  updateUsageDailyBudget: (perUserUsd: number | null) =>
+    req<{ dailyBudget: UsageDailyBudgetPolicy }>("/api/usage/daily-budget", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ perUserUsd }),
+    }),
+  usageUsers: () => req<{ users: UserCostWindows[] }>("/api/usage/users"),
   updateUsageRetention: (body: Pick<UsageRetentionPolicy, "hourlyDays" | "dailyDays">) =>
     req<{ retention: UsageRetentionPolicy }>("/api/usage/retention", {
       method: "PUT",
