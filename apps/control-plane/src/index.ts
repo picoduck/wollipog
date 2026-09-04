@@ -2338,6 +2338,14 @@ app.get("/api/sessions/:id/files", async (req, reply) => {
   return r.data;
 });
 
+// Per-session usage split by the model that produced it. Route access already resolved through
+// canAccessSession; the ledger stores only bounded model ids and counts.
+app.get("/api/sessions/:id/usage", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+  return { sessionId: id, ...db.sessionUsageByModel(id), pricing: usagePricing.status() };
+});
+
 app.get("/api/sessions/:id/file", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const q = req.query as { path?: unknown };

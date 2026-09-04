@@ -47,7 +47,9 @@ function sourceSlice(source: string, startAnchor: string, endAnchor: string): st
 
 // UsageChart draws DATA, not icons: its <svg> is a stacked-column chart whose geometry is computed
 // from usage buckets, so there is no glyph to route through Icons.tsx.
-const SVG_OWNERS = ["components/AgentIcon.tsx", "components/Icons.tsx", "components/UsageChart.tsx"];
+// ContextWindowMeter's ring is a data mark too: a progress arc whose length is the session's
+// context fill, not a glyph.
+const SVG_OWNERS = ["components/AgentIcon.tsx", "components/ContextWindowMeter.tsx", "components/Icons.tsx", "components/UsageChart.tsx"];
 
 test("the SVG ownership inventory covers every production SVG-owning file", () => {
   const actual = sourceFiles(SRC)

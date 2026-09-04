@@ -309,6 +309,9 @@ export class ClaudeCodeDriver implements Driver {
   private persistentGeneration = 0;
   /** Claude's total_cost_usd is cumulative within one streaming-input process. */
   private persistentLastCostUsd = 0;
+  /** The model on the most recent top-level assistant record; stamped on the turn's usage. Claude
+   * records the model per message, and the terminal `result` carries none. */
+  private turnModel: string | null = null;
   private persistentBuffer: BoundedNdjsonBuffer | null = null;
   /** Monotonic across persistent and one-shot transports so late lifecycle events cannot alias a
    * turn from the transport used before a circuit fallback. */
@@ -569,6 +572,9 @@ export class ClaudeCodeDriver implements Driver {
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
+    // Each turn names its own model: a turn that settles before any assistant record must not
+    // inherit the previous turn's, which after a model switch would misattribute it.
+    this.turnModel = null;
     const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
     if (capabilityError) {
       this.cb.onEvent({ kind: "error", message: capabilityError });
@@ -1969,6 +1975,7 @@ export class ClaudeCodeDriver implements Driver {
       }
 
       case "assistant": {
+        if (!parentId && typeof msg.message?.model === "string" && msg.message.model) this.turnModel = msg.message.model;
         const blocks: Json[] = msg.message?.content ?? [];
         for (const b of blocks) {
           if (b?.type !== "tool_use") continue;
@@ -2006,6 +2013,7 @@ export class ClaudeCodeDriver implements Driver {
             ...(typeof messageUsage.cache_creation_input_tokens === "number"
               ? { cacheCreationInputTokens: messageUsage.cache_creation_input_tokens }
               : {}),
+            ...(typeof msg.message?.model === "string" && msg.message.model ? { model: msg.message.model } : {}),
             parentToolUseId: parentId,
           });
         }
@@ -2044,6 +2052,7 @@ export class ClaudeCodeDriver implements Driver {
           ...(typeof usage.cache_creation_input_tokens === "number"
             ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
             : {}),
+          ...(this.turnModel && !parentId ? { model: this.turnModel } : {}),
           costUsd,
           ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}),
           ...pp,

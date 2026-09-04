@@ -2014,3 +2014,29 @@ test("diagnosticValue bounds every provider-controlled shape", () => {
   assert.equal(diagnosticValue(["a".repeat(50_000)]), "[object]");
   assert.equal(diagnosticValue("a".repeat(500)), `${"a".repeat(120)}…`);
 });
+
+test("usage carries the configured model and app-server's context window becomes the provider gauge", () => {
+  const h = makeHarness({ config: { model: "gpt-5.5-codex" } as DriverOptions["config"] });
+  const gauges: Array<{ contextTokensUsed: number; contextWindow: number }> = [];
+  (h.driver as any).cb.onAcpUsage = (usage: { contextTokensUsed: number; contextWindow: number }) => gauges.push(usage);
+  const notifications = new Map<string, (params: any) => void>();
+  (h.driver as any).registerHandlers({
+    onRequest: () => {},
+    onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
+  });
+  (h.driver as any).eventContext = () => ({ accepted: true });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "t1",
+    tokenUsage: { last: { inputTokens: 11_000, outputTokens: 600, cachedInputTokens: 9_000, reasoningOutputTokens: 200 }, modelContextWindow: 258_400 },
+  });
+  assert.deepEqual(gauges, [{ contextTokensUsed: 11_600, contextWindow: 258_400 }], "the last request plus its output is what sits in the window");
+  (h.driver as any).emitPendingTurnUsage();
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 11_000, outputTokens: 600, cachedInputTokens: 9_000, reasoningOutputTokens: 200, model: "gpt-5.5-codex",
+  }]);
+
+  const unpinned = makeHarness({ config: { model: "default" } as DriverOptions["config"] });
+  (unpinned.driver as any).pendingTurnUsage = { input: 1, output: 1 };
+  (unpinned.driver as any).emitPendingTurnUsage();
+  assert.equal("model" in unpinned.events[0]!, false, "an unpinned model is not guessed");
+});

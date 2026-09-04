@@ -5023,3 +5023,29 @@ test("usage aggregation splits each time bucket per driver for stacked series", 
   assert.equal(usage.totals.processedTokens, 39);
   assert.equal(usage.byDriver.reduce((sum, row) => sum + row.processedTokens, 0), 39);
 });
+
+test("the per-session per-model ledger attributes each record to the model that produced it", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 100, cachedInputTokens: 1000, outputTokens: 10, costUsd: 0.5, model: "claude-fable-5-1" }, 3_600_100, { accrueUsage: true });
+  // A v104 runner names the model on the record; a mid-session switch lands on the new one even
+  // though the session row still says claude-fable-5-1.
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5, model: "gpt-5.5-codex" }, 3_600_200, { accrueUsage: true });
+  // A pre-v104 record names no model and falls back to the session's resolved model.
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 20, outputTokens: 2, costUsd: 0.1 }, 3_600_300, { accrueUsage: true });
+
+  const usage = db.sessionUsageByModel("sess-1");
+  assert.deepEqual(usage.byModel.map((row) => [row.model, row.inputTokens, row.costUsd, row.costSource, row.processedTokens]), [
+    ["claude-fable-5-1", 120, 0.6, "providerReported", 1132],
+    ["gpt-5.5-codex", 50, 0.00015, "modelPriced", 55],
+  ]);
+  assert.equal(usage.totals.inputTokens, 170);
+  assert.equal(usage.totals.costUsd, 0.60015);
+  assert.equal(usage.totals.processedTokens, 1187);
+  assert.equal(db.getSession("sess-1")!.costUsd, 0.60015, "the session total and the per-model ledger move together");
+
+  const aggregate = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(aggregate.byModel.map((row) => [row.key, row.inputTokens]), [["claude-fable-5-1", 120], ["gpt-5.5-codex", 50]], "the fleet buckets key on the same attribution");
+  assert.deepEqual(db.sessionUsageByModel("missing"), { totals: { ...usage.totals, inputTokens: 0, outputTokens: 0, costUsd: 0, uncachedInputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 0, processedTokens: 0 }, byModel: [] });
+});

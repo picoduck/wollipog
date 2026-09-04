@@ -760,6 +760,7 @@ export class CodexAppServerDriver implements Driver {
       outputTokens: usage.output,
       cachedInputTokens: usage.cached,
       ...(typeof usage.reasoning === "number" ? { reasoningOutputTokens: usage.reasoning } : {}),
+      ...(this.eventModel()),
       parentToolUseId,
     });
   }
@@ -1009,6 +1010,13 @@ export class CodexAppServerDriver implements Driver {
         this.pendingSubagentUsage.set(String(p.threadId), u);
       } else if (!this.turnUsageClosed) {
         this.pendingTurnUsage = u;
+        // App-server reports the model's context window beside the usage. The last request's
+        // input (cache included) plus its output is what sits in the window now, which is the
+        // same figure the Codex CLI's own "context left" reads from.
+        const window = p?.tokenUsage?.modelContextWindow ?? p?.tokenUsage?.model_context_window;
+        if (typeof window === "number" && Number.isFinite(window) && window > 0 && (u.input != null || u.output != null)) {
+          this.cb.onAcpUsage?.({ contextTokensUsed: Math.max(0, (u.input ?? 0) + (u.output ?? 0)), contextWindow: Math.floor(window) });
+        }
       }
     });
     peer.onNotification("account/rateLimits/updated", (payload: Json) => {
@@ -1093,8 +1101,14 @@ export class CodexAppServerDriver implements Driver {
         outputTokens: u.output,
         cachedInputTokens: u.cached,
         ...(typeof u.reasoning === "number" ? { reasoningOutputTokens: u.reasoning } : {}),
+        ...(this.eventModel()),
       });
     }
+  }
+
+  /** The configured model, as the attribution for a usage record; app-server reports none itself. */
+  private eventModel(): { model?: string } {
+    return this.config.model && this.config.model !== "default" ? { model: this.config.model } : {};
   }
 
   private closeTurnUsage(): void {

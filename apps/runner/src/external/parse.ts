@@ -210,6 +210,7 @@ export function parseClaudeTranscript(content: string): SessionEventPayload[] {
           ...(typeof usage.cache_creation_input_tokens === "number"
             ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
             : {}),
+          ...(typeof message?.model === "string" && message.model ? { model: message.model } : {}),
           parentToolUseId: parentId,
         });
       }

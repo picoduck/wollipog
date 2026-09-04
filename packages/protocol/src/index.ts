@@ -294,7 +294,12 @@
 //      Usage aggregates gain the five token buckets, cost provenance, cache savings, a by-model
 //      breakdown, and rate-table status. Older runners keep sending the flat shape; the control
 //      plane prices it from input, cached input, and output alone.
-export const PROTOCOL_VERSION = 103;
+// 104: token_usage carries the model that produced the record, so a session that switches models
+//      attributes each turn to the model that ran it; the control plane keeps a per-session
+//      per-model ledger and serves it from GET /api/sessions/:id/usage. Codex app-server runners
+//      publish the provider context gauge (used tokens over the model window). Older runners
+//      omit the model and the control plane keys on the session's resolved model as before.
+export const PROTOCOL_VERSION = 104;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -430,6 +435,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionAgentControl: 100,
   /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
   usageTokenBuckets: 103,
+  /** v104 runners stamp the producing model on token_usage. */
+  usageEventModel: 104,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
 } as const;
@@ -2387,6 +2394,9 @@ export type SessionEventPayload =
       cacheCreationInputTokens?: number;
       /** Reasoning tokens already included in `outputTokens` (Codex), v103+. Never additive. */
       reasoningOutputTokens?: number;
+      /** Provider model id that produced this record (v104+). Absent from older runners; the
+       * control plane then attributes the record to the session's resolved model. */
+      model?: string;
       /** Provider-reported cost for this record. Absent when the provider bills opaquely; the
        * control plane then prices the tokens from its rate table. */
       costUsd?: number;
@@ -2436,6 +2446,20 @@ export interface UsageAmount {
   cacheSavingsUsd: number;
   costSource: UsageCostSource;
   unpricedRecords: number;
+}
+
+/** One model's share of a session's usage, from the per-session per-model ledger (v104+). */
+export interface SessionModelUsage extends UsageAmount {
+  model: string;
+}
+
+/** `GET /api/sessions/:id/usage`: a session's usage split by the model that produced it, plus the
+ * session's own totals for the same buckets. Sorted by processed tokens, most first. */
+export interface SessionUsageResponse {
+  sessionId: string;
+  totals: UsageAmount;
+  byModel: SessionModelUsage[];
+  pricing?: UsagePricingStatus;
 }
 
 /** Provenance for the rate table so the UI can be honest about how good the estimates are. */

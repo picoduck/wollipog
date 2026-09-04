@@ -183,6 +183,7 @@ export function SideChatPanel({
         {items.length ? (
           <EventTimeline
             items={items}
+            driver={sideChat.session.driver}
             sessionActive={isTimelineSessionActive(sideChat.session.status)}
             historyKey={`${sideChat.session.id}:${sideChat.session.eventEpoch ?? 0}`}
           />

@@ -229,6 +229,7 @@ export function SubagentsPanel({
             {output.length > 0 ? (
               <EventTimeline
                 items={output}
+                driver={session.driver}
                 scrollRef={outputScrollRef}
                 historyKey={`${session.id}:${session.eventEpoch ?? 0}:${selected.id}`}
                 sessionActive={["starting", "running", "waiting"].includes(selected.lifecycle)}

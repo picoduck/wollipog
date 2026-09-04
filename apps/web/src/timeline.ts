@@ -15,6 +15,50 @@ import type {
 } from "@wollipog/protocol";
 
 
+/** One turn's usage as the provider reported it: tokens by bucket and, when priced, its cost. */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationTokens: number;
+  costUsd?: number;
+  model?: string;
+}
+
+function turnUsageFrom(p: {
+  inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cacheCreationInputTokens?: number;
+  costUsd?: number; model?: string;
+}): TurnUsage | null {
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0);
+  const usage: TurnUsage = {
+    inputTokens: count(p.inputTokens),
+    outputTokens: count(p.outputTokens),
+    cachedInputTokens: count(p.cachedInputTokens),
+    cacheCreationTokens: count(p.cacheCreationInputTokens),
+    ...(typeof p.costUsd === "number" && Number.isFinite(p.costUsd) && p.costUsd >= 0 ? { costUsd: p.costUsd } : {}),
+    ...(typeof p.model === "string" && p.model ? { model: p.model } : {}),
+  };
+  const anyTokens = usage.inputTokens + usage.outputTokens + usage.cachedInputTokens + usage.cacheCreationTokens > 0;
+  return anyTokens || usage.costUsd != null ? usage : null;
+}
+
+/** A turn can settle usage in more than one event (a persistent process reports per result);
+ * later reports add to the earlier ones. */
+function mergeTurnUsage(current: TurnUsage | undefined, addition: TurnUsage): TurnUsage {
+  if (!current) return addition;
+  const cost = current.costUsd != null || addition.costUsd != null
+    ? { costUsd: (current.costUsd ?? 0) + (addition.costUsd ?? 0) }
+    : {};
+  return {
+    inputTokens: current.inputTokens + addition.inputTokens,
+    outputTokens: current.outputTokens + addition.outputTokens,
+    cachedInputTokens: current.cachedInputTokens + addition.cachedInputTokens,
+    cacheCreationTokens: current.cacheCreationTokens + addition.cacheCreationTokens,
+    ...cost,
+    ...(addition.model ?? current.model ? { model: addition.model ?? current.model } : {}),
+  };
+}
+
 export type TimelineItem =
   | {
       kind: "user_message";
@@ -29,6 +73,8 @@ export type TimelineItem =
       submissionId?: string;
       /** A canonical user message incorporated into an already-active turn. */
       deliveryIntent?: "steer";
+      /** The turn's provider-reported usage, stamped when its parentless token_usage lands. */
+      turnUsage?: TurnUsage;
       commandInvocation?: {
         invocationId: string;
         submissionId: string;
@@ -782,17 +828,22 @@ export class TimelineBuilder {
                 Number.isFinite(ev.ts) && ev.ts >= item.createdAt
                 ? ev.ts - item.createdAt
                 : undefined;
-              const durationMs = providerDuration ?? observedDuration;
-              if (durationMs != null) {
+              const durationMs = item.durationMs == null ? (providerDuration ?? observedDuration) : undefined;
+              const turnUsage = turnUsageFrom(p);
+              if (durationMs != null || turnUsage) {
                 this.items[this.activeUserIndex] = {
                   ...item,
-                  durationMs,
-                  durationSource: providerDuration != null ? "provider" : "observed",
+                  ...(durationMs != null
+                    ? { durationMs, durationSource: providerDuration != null ? "provider" as const : "observed" as const }
+                    : {}),
+                  ...(turnUsage ? { turnUsage: mergeTurnUsage(item.turnUsage, turnUsage) } : {}),
                 };
                 this.markDirty(this.activeUserIndex);
               }
             }
-            this.activeUserIndex = null;
+            // The prompt stays the turn's owner until the next prompt arrives: a persistent
+            // process can settle one turn in more than one usage report, and each must land on
+            // the same row. The duration is stamped once, by the first report that carries one.
           }
           break;
         }

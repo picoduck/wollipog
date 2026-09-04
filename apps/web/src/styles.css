@@ -3637,32 +3637,73 @@ textarea,
 /* Phase 5: plan-mode checkbox — a first-class toggle inside the session controls row */
 /* Phase 4: context-window meter (thread header, beside the token badge) */
 .context-meter {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   vertical-align: middle;
 }
-.context-meter .meter-bar {
-  width: 46px;
-  height: 5px;
-  border-radius: 3px;
-  background: var(--bg-elev-2);
-  overflow: hidden;
-}
-.context-meter .meter-fill {
-  display: block;
-  height: 100%;
-  background: var(--accent);
-  transition: width var(--dur-slow) var(--ease-out);
-}
-.context-meter.is-full .meter-fill {
-  background: var(--red);
-}
-.context-meter .meter-label {
-  font-size: 11px;
+.context-ring-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
   color: var(--text-faint);
+  cursor: pointer;
+  font: inherit;
+}
+.context-ring-button:hover, .context-ring-button:focus-visible, .context-meter.is-open .context-ring-button { color: var(--text-dim); }
+.context-ring-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.context-ring { display: block; }
+.context-ring-track { fill: none; stroke: var(--bg-elev-2); stroke-width: 2.5; }
+.context-ring-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dasharray var(--dur-slow) var(--ease-out), stroke var(--dur-slow) var(--ease-out);
+}
+.context-meter.is-full .context-ring-fill { stroke: var(--red); }
+.context-meter .meter-label {
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
+.context-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: var(--z-popover);
+  width: 280px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: var(--text-sm);
+  text-align: left;
+  white-space: normal;
+  /* Positioned against the viewport, so it must also be bounded by it: a session with many
+     model rows scrolls inside the panel instead of running off a short screen. */
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+}
+.context-popover-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.context-popover-head span { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.context-popover-bar { height: 5px; margin: 8px 0; border-radius: var(--radius-pill); background: var(--bg-elev-2); overflow: hidden; }
+.context-popover-bar span { display: block; height: 100%; background: var(--accent); }
+.context-meter.is-full .context-popover-bar span { background: var(--red); }
+.context-popover-facts, .context-popover-model dl { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin: 0; }
+.context-popover-facts div, .context-popover-model dl div { display: contents; }
+.context-popover-facts dt, .context-popover-model dt { color: var(--text-dim); }
+.context-popover-facts dd, .context-popover-model dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.context-popover-note { margin: 8px 0 0; color: var(--text-dim); }
+.context-popover-models { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); display: grid; gap: 8px; }
+.context-popover-label { color: var(--text-dim); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .04em; }
+.context-popover-model-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-xs); }
+.tl-turn-usage { color: var(--text-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* --------------------------- Image attachments -------------------------- */
 .image-strip {

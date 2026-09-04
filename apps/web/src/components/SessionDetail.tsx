@@ -3251,6 +3251,7 @@ function SessionDetailLoaded({
                 <>
                   {items.length > 0 && (
                     <EventTimeline
+                      driver={session.driver}
                       items={items}
                       sessionActive={isTimelineSessionActive(session.status)}
                       onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
