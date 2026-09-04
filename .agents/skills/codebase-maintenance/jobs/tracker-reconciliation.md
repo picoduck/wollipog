@@ -13,8 +13,12 @@ For each open issue, check whether it was already fixed incidentally by other wo
 **Repository hygiene.** Check for the residue of the issue workflow:
 
 - merged or deleted remote branches still present locally — `git branch -vv | grep ': gone]'`;
-- worktrees whose branch is merged or gone — `git worktree list` cross-referenced against
-  `git branch --merged main`;
+- worktrees whose branch is merged or gone — `git worktree list` cross-referenced against each
+  branch's pull request state (`gh pr list --head <branch> --state merged`). Do NOT use
+  `git branch --merged main`: `main` is governed by a squash merge queue, so a merged branch's tip
+  is never an ancestor of `main` and `--merged` never lists it (the first post-queue run had to
+  discover this and override the old instruction). For the same reason the cleanup command for a
+  merged branch is `git branch -D`, not `-d`;
 - local branches with no corresponding open PR that are fully merged into `main`;
 - open PRs with no linked issue, and issues claimed by an assignee with no activity for over a week.
 
@@ -25,6 +29,10 @@ For each open issue, check whether it was already fixed incidentally by other wo
 - Never delete a branch or worktree. This job reports; the human decides. A worktree that looks
   abandoned may hold uncommitted work — check with `git -C <worktree> status --porcelain` and say
   what you found.
+- Worktrees under `~/.wollipog-dev/` were created by Wollipog sessions and are tracked by the
+  control plane. Recommend retiring those with `wollipog worktree discard`, never with
+  `git worktree remove`, so the control plane's records stay consistent; only worktrees beside the
+  repository (`../wollipog-worktrees/`) are plain git worktrees.
 - Do not reopen issues or comment on them. Report only.
 
 ## Report

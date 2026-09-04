@@ -38,6 +38,12 @@ Hard rules:
    name the files rather than quietly reverting.
 4. Do not publish a GitHub issue. Drafting and publication are separated by the gate in
    `.github/ISSUE_REPORTING.md`, and an unattended run cannot satisfy it.
+5. The agent memory directory outside the repository is shared by every session on this machine
+   and is not part of the workspace, so rule 1 does not cover it. You MAY correct a memory there,
+   but only one this run has verified stale against the tracker or the code, only by recording
+   the verified fact (never speculation or planning notes), and only with a one-line disclosure in
+   the report naming the memory and the correction. A stale memory left standing is how a
+   reconciled issue gets filed a third time; an undisclosed edit is how a shared memory drifts.
 
 Promotion to Phase 2 (opening pull requests) is a deliberate change, not a judgment call a job may
 make on its own. See "Promotion Criteria" below.
