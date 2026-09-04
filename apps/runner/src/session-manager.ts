@@ -7532,7 +7532,11 @@ export class SessionManager {
   private onDriverExit(sessionId: string, code: number | null, expectedClient: Driver): void {
     const closing = this.closing.get(sessionId);
     if (closing?.client === expectedClient) {
-      this.completeProviderRetirement(sessionId, closing);
+      try {
+        this.completeProviderRetirement(sessionId, closing);
+      } catch (error) {
+        this.log(`provider retirement cleanup failed for ${sessionId}: ${errText(error)}`);
+      }
       return;
     }
     if (this.active.get(sessionId)?.client !== expectedClient) return;

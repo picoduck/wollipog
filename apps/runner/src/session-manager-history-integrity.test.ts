@@ -303,6 +303,30 @@ test("first exit append failure is contained before active ownership is removed"
   }
 });
 
+test("provider retirement cleanup failure never escapes the driver exit callback", () => {
+  const h = historyHarness(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const internals = h.manager as any;
+  const retirement = {
+    client: h.client,
+    entry: h.entry,
+    promise: Promise.resolve(),
+    preserveAdmission: false,
+    preserveLock: true,
+    acceptPromptsDuringHandoff: false,
+  };
+  internals.closing.set("s_integrity", retirement);
+  internals.admitted.add("s_integrity");
+  internals.drainAdmissionQueue = () => { throw new Error("unrelated queued session is corrupt"); };
+  try {
+    assert.doesNotThrow(() => internals.onDriverExit("s_integrity", 1, h.client));
+    assert.equal(internals.closing.has("s_integrity"), false);
+    assert.equal(internals.admitted.has("s_integrity"), false);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("governance secondary-event failure latches once and never escapes the driver callback", () => {
   const h = historyHarness(false);
   const current = lifecycle("cmd-governance-current");
