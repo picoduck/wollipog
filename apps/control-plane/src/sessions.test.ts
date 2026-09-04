@@ -2764,6 +2764,65 @@ test("prompt fails 404 for an unknown session", () => {
   assert.equal(res.status, 404);
 });
 
+test("accepted user prompts acknowledge only the exact fired reminder they observed", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  let now = Date.now();
+  const createFiredReminder = () => {
+    const scheduledFor = ++now;
+    const created = db.setSessionReminder({
+      sessionId: id,
+      userId,
+      scheduledFor,
+      timeZone: "UTC",
+      originalExpression: "in one minute",
+      wakePolicy: "regardless",
+      expectedRevision: 0,
+      now: scheduledFor - 1,
+    });
+    assert.equal(created.kind, "updated");
+    const fired = db.fireDueSessionReminders(scheduledFor);
+    assert.equal(fired.length, 1);
+    return fired[0]!.reminder;
+  };
+
+  createFiredReminder();
+  assert.equal(svc.promptFromUser(userId, id, "accepted prompt").ok, true);
+  assert.equal(db.getSessionReminder(id, userId), null);
+  assert.equal(hub.calls.some((call) => call.method === "sessionReminderRemoved" &&
+    call.args[0] === userId && call.args[1] === id), true);
+
+  const rejectedReminder = createFiredReminder();
+  hub.online = false;
+  assert.equal(svc.promptFromUser(userId, id, "offline prompt").ok, false);
+  assert.equal(db.getSessionReminder(id, userId)?.reminderId, rejectedReminder.reminderId,
+    "an unaccepted prompt must retain the returned indication");
+
+  hub.online = true;
+  const observedReminder = rejectedReminder;
+  hub.deliveryHandler = () => {
+    const rescheduled = db.setSessionReminder({
+      sessionId: id,
+      userId,
+      scheduledFor: now + 60_000,
+      timeZone: "UTC",
+      originalExpression: "in one minute",
+      wakePolicy: "regardless",
+      expectedRevision: observedReminder.revision,
+      expectedReminderId: observedReminder.reminderId,
+      now: ++now,
+    });
+    assert.equal(rescheduled.kind, "updated");
+    return true;
+  };
+  assert.equal(svc.promptFromUser(userId, id, "prompt racing a newer snooze").ok, true);
+  const newerReminder = db.getSessionReminder(id, userId);
+  assert.equal(newerReminder?.state, "pending");
+  assert.equal(newerReminder?.revision, observedReminder.revision + 1,
+    "acknowledgment of the older fired reminder cannot remove a newer snooze");
+});
+
 test("admission-queued prompts fail closed for a released v77 runner before mutation", () => {
   const { db, hub, svc } = makeHarness();
   db.registerRunner(runnerMeta(), Date.now(), 77);

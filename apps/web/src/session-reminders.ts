@@ -5,6 +5,7 @@ import {
   type SessionReminderView,
   type SessionView,
 } from "@wollipog/protocol";
+import { formatReminderInstant } from "./reminder-schedule.js";
 
 export type ReminderInboxMode = "ordinary" | "snoozed";
 
@@ -110,8 +111,20 @@ export function sortSessionsForReminders(
   });
 }
 
-export function reminderBadgeLabel(reminder: SessionReminderView, now = Date.now()): string {
+export function reminderBadgeLabel(reminder: SessionReminderView): string {
   if (reminder.state === "pending") return "Snoozed";
   if (reminder.wakeReason !== "scheduled") return "Activity Reminder";
-  return now - reminder.scheduledFor >= 60_000 ? "Overdue" : "Reminder Due";
+  return "Returned from Snooze";
+}
+
+export function reminderBadgeDescription(reminder: SessionReminderView): string {
+  const instant = formatReminderInstant(reminder.scheduledFor, reminder.timeZone);
+  if (reminder.state === "pending") return `Snoozed until ${instant}.`;
+  if (reminder.wakeReason === "scheduled") return `Returned from snooze. Snooze ended ${instant}.`;
+  return `Activity reminder scheduled for ${instant}.`;
+}
+
+export function reminderMenuActionLabel(reminder?: SessionReminderView): string {
+  if (!reminder) return "Snooze Session…";
+  return reminder.state === "fired" ? "Snooze Again…" : "Edit Reminder…";
 }

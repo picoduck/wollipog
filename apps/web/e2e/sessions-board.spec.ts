@@ -54,6 +54,21 @@ test("the reminder and mode controls use scoped badges and compact mobile icons"
   expect(geometry.contained).toBe(true);
 });
 
+test("a returned session explains its snooze and offers state-aware actions", async ({ page }) => {
+  await openHarness(page);
+  const row = page.locator(".inbox-row-shell", { hasText: "Review Session" });
+  const reminder = row.locator(".inbox-status-pill.reminder");
+  await expect(reminder).toHaveText("Returned from Snooze");
+  await expect(reminder).toHaveAttribute("aria-label", /Snooze ended/);
+  await expect(reminder).not.toContainText("Overdue");
+
+  await row.click({ button: "right" });
+  const menu = page.getByRole("menu", { name: "Session Actions for Review Session" });
+  await expect(menu.getByRole("menuitem", { name: "Snooze Again…" })).toBeVisible();
+  await menu.getByRole("menuitem", { name: "Dismiss Reminder" }).click();
+  await expect(reminder).toHaveCount(0);
+});
+
 test("the toggle switches modes, the URL follows, and archived sessions never reach the board", async ({ page }) => {
   await openHarness(page);
   await expect(page.locator(".inbox-list")).toBeVisible();

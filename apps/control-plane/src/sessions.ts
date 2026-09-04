@@ -2736,6 +2736,30 @@ export class SessionsService {
     return ok(this.db.getSession(id)!, 201);
   }
 
+  promptFromUser(
+    userId: string,
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[] = [],
+    slashCommand?: string,
+    config?: SessionConfig,
+  ): ServiceResult<SessionView> {
+    // Capture the exact fired row before admission. If another client snoozes again while the
+    // prompt is being delivered, its revision or identity changes and the acknowledgment cannot
+    // remove that newer intent.
+    const observedReminder = this.db.getSessionReminder(sessionId, userId);
+    const result = this.prompt(sessionId, text, images, slashCommand, config);
+    if (!result.ok || observedReminder?.state !== "fired") return result;
+    const removed = this.db.removeSessionReminder(
+      sessionId,
+      userId,
+      observedReminder.revision,
+      observedReminder.reminderId,
+    );
+    if (removed.kind === "removed") this.hub.sessionReminderRemoved(userId, sessionId);
+    return result;
+  }
+
   prompt(
     sessionId: string,
     text: string,

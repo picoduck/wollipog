@@ -3,7 +3,11 @@ import { memo } from "react";
 import { useLongPress } from "./interactions.js";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { relativeTime, statusMeta } from "../format.js";
-import { reminderBadgeLabel, snoozedSessionAttentionReason } from "../session-reminders.js";
+import {
+  reminderBadgeDescription,
+  reminderBadgeLabel,
+  snoozedSessionAttentionReason,
+} from "../session-reminders.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -133,7 +137,15 @@ function InboxRowInner({
               </span>
             )}
             {reminder && (
-              <span className="inbox-status-pill reminder">{reminderBadgeLabel(reminder, activityNow || Date.now())}</span>
+              <span
+                className="inbox-status-pill reminder"
+                title={reminderBadgeDescription(reminder)}
+                aria-label={`Reminder: ${reminder.state === "fired"
+                  ? reminderBadgeDescription(reminder)
+                  : reminderBadgeLabel(reminder)}`}
+              >
+                {reminderBadgeLabel(reminder)}
+              </span>
             )}
             {stalled && (
               <span className="inbox-status-pill stalled" aria-label="Stalled: No Activity for at Least 10 Minutes">

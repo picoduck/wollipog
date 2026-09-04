@@ -97,18 +97,34 @@ const sessions = [
   session("s-snoozed", "Snoozed Session", "review"),
 ];
 
-const reminders: SessionReminderView[] = [{
-  reminderId: "reminder-s-snoozed",
-  sessionId: "s-snoozed",
-  scheduledFor: Date.now() + 86_400_000,
-  timeZone: "UTC",
-  originalExpression: "tomorrow",
-  wakePolicy: "until_activity",
-  state: "pending",
-  revision: 1,
-  createdAt: 1,
-  updatedAt: 1,
-}];
+const reminders: SessionReminderView[] = [
+  {
+    reminderId: "reminder-s-snoozed",
+    sessionId: "s-snoozed",
+    scheduledFor: Date.now() + 86_400_000,
+    timeZone: "UTC",
+    originalExpression: "tomorrow",
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  },
+  {
+    reminderId: "reminder-s-review",
+    sessionId: "s-review",
+    scheduledFor: Date.now() - 60_000,
+    timeZone: "UTC",
+    originalExpression: "one minute ago",
+    wakePolicy: "regardless",
+    state: "fired",
+    revision: 2,
+    createdAt: 1,
+    updatedAt: Date.now() - 60_000,
+    firedAt: Date.now() - 60_000,
+    wakeReason: "scheduled",
+  },
+];
 
 function snapshot(): UiSnapshotMessage {
   return {
@@ -180,6 +196,16 @@ const client = {
     approved.pendingApproval = null;
     window.setTimeout(() => socket?.push({ type: "session_upsert", session: structuredClone(approved) }), 0);
     return structuredClone(approved);
+  },
+  removeReminder: async (sessionId: string) => {
+    const index = reminders.findIndex((reminder) => reminder.sessionId === sessionId);
+    if (index >= 0) reminders.splice(index, 1);
+    window.setTimeout(() => socket?.push({
+      type: "session_reminder_removed",
+      userId: "usr_local_owner",
+      sessionId,
+    }), 0);
+    return { removed: true as const };
   },
   session: async (id: string) => {
     const value = sessions.find((candidate) => candidate.id === id);
