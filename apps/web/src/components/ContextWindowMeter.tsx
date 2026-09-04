@@ -11,8 +11,9 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
 /**
  * Context-fill meter for the session header: a small ring that fills as the model's window is
- * consumed, and a popover with the figures behind it — percent, used over capacity, the session's
- * total processed tokens, the compaction note, and the usage split by the model that produced it.
+ * consumed, and a click-to-open popover with the figures behind it — percent, used over capacity,
+ * the session's total processed tokens, the compaction note, and the usage split by the model
+ * that produced it.
  * Reads the per-model `contextWindow` off the agent's advertised capabilities (protocol v11), or
  * the provider gauge when the runner publishes one. Renders nothing when the window is unknown.
  */
@@ -83,11 +84,13 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
     const onPointer = (event: PointerEvent) => {
       if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
     };
-    document.addEventListener("keydown", onKey);
-    document.addEventListener("pointerdown", onPointer);
+    // Capture phase, so a view-level Escape handler that stops propagation (the composer's, the
+    // menus') cannot swallow the key while this panel is the thing the user is trying to close.
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("pointerdown", onPointer, true);
     return () => {
-      document.removeEventListener("keydown", onKey);
-      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("pointerdown", onPointer, true);
     };
   }, [open]);
 
@@ -106,8 +109,6 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
     <span
       className={`context-meter${fill.isFull ? " is-full" : ""}${open ? " is-open" : ""}`}
       ref={rootRef}
-      onPointerEnter={() => setOpen(true)}
-      onPointerLeave={() => setOpen(false)}
     >
       <button
         ref={buttonRef}
@@ -117,10 +118,10 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
         aria-controls={panelId}
         aria-label={`Context Window ${fill.formatPct} Used`}
         title={summary}
-        // Opens, never toggles: a pointer click always arrives after the hover that already opened
-        // the panel, so a toggle would close it on the very click meant to pin it. Escape, an
-        // outside pointer, or leaving the meter closes it.
-        onClick={() => setOpen(true)}
+        // Click or keyboard only: the ring sits in a dense header, and a hover-opened panel was
+        // getting in the way of pointer travel to neighbouring controls. Escape or an outside
+        // pointer closes it as well.
+        onClick={() => setOpen((current) => !current)}
       >
         <svg className="context-ring" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
           <circle className="context-ring-track" cx="8" cy="8" r={RING_RADIUS} />
