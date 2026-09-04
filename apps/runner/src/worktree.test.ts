@@ -1508,6 +1508,8 @@ test("stop fences and cancels a worktree rebind while its old provider is closin
     });
     assert.equal(internals.liveWorktreeUsesPath(spec.sessionId, replacement.worktree.path), true,
       "cleanup must also fence a replacement selection made during the provider handoff");
+    assert.equal(manager.fenceRewind(spec.sessionId), false,
+      "rewind must not enter while the selected-worktree provider handoff is in progress");
     manager.stop(spec.sessionId);
     assert.equal(manager.prompt(spec.sessionId, "raced prompt"), false,
       "a prompt cannot bypass the invalidated rebind generation while its provider is retiring");

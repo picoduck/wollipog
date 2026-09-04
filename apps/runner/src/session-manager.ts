@@ -7000,7 +7000,12 @@ export class SessionManager {
    * prompts arriving during the wait must be rejected too, or their edits would be silently
    * overwritten when the queued rewind finally runs. Returns false if already fenced. */
   fenceRewind(sessionId: string): boolean {
-    if (this.rewinding.has(sessionId) || this.loggingOut.has(sessionId) || this.deleting.has(sessionId)) return false;
+    if (
+      this.rewinding.has(sessionId) ||
+      this.loggingOut.has(sessionId) ||
+      this.deleting.has(sessionId) ||
+      this.worktreeRebindings.has(sessionId)
+    ) return false;
     this.rewinding.add(sessionId);
     return true;
   }
