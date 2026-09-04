@@ -47,6 +47,32 @@ test("an immutable projection cannot accept a recovered edit", () => {
   assert.deepEqual(result, { status: "stale", reason: "This turn is already starting." });
 });
 
+test("an in-flight steering transition cannot race a recovered edit retry", () => {
+  const result = reconcileQueuedEditRecovery(
+    "queue-1",
+    "revision-1",
+    [{ ...unchanged, steeringState: "promoting" }],
+    true,
+  );
+  assert.deepEqual(result, {
+    status: "stale",
+    reason: "Resolve steering before editing this queued message.",
+  });
+});
+
+test("an explicit edit-disabled reason fails closed even if editable is true", () => {
+  const result = reconcileQueuedEditRecovery(
+    "queue-1",
+    "revision-1",
+    [{ ...unchanged, editDisabledReason: "This queued message is being consumed." }],
+    true,
+  );
+  assert.deepEqual(result, {
+    status: "stale",
+    reason: "This queued message is being consumed.",
+  });
+});
+
 test("offline and incomplete projections preserve recovery while authority is unavailable", () => {
   for (const queued of [undefined, [], [unchanged]]) {
     const result = reconcileQueuedEditRecovery("queue-1", "revision-1", queued, false);

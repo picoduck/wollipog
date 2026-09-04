@@ -615,6 +615,7 @@ test("a queued edit that fails after navigation restores its exact retry and kee
 test("a live queue revision change disables recovered retry while preserving content for a new message", async () => {
   const draft = deferred<ComposerDraft | null>();
   const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
+  const prompts: string[] = [];
   const fixture = await mountFixture(draft, {
     runnerProtocolVersion: 99,
     sessionPatch: {
@@ -639,6 +640,10 @@ test("a live queue revision change disables recovered retry while preserving con
       editQueuedPrompt: async (_sessionId, _promptId, request) => {
         edits.push(request);
         throw new Error("The request timed out before confirmation.");
+      },
+      prompt: async (_sessionId, text) => {
+        prompts.push(text);
+        return undefined as never;
       },
     },
   });
@@ -668,6 +673,21 @@ test("a live queue revision change disables recovered retry while preserving con
     });
     assert.equal(save.disabled, true);
     assert.match(fixture.container.querySelector(".queued-edit-reason")?.textContent ?? "", /changed elsewhere/i);
+    assert.equal(fixture.composer.value, "Recovered revision for reuse");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+
+    await act(async () => {
+      fireDomEvent.keyDown(fixture.composer, {
+        key: "Enter",
+        ctrlKey: false,
+        metaKey: false,
+        shiftKey: false,
+        altKey: false,
+      });
+    });
+    await flushAsyncWork();
+    assert.deepEqual(prompts, [], "Enter must not send a stale recovered edit as a new turn");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
     assert.equal(fixture.composer.value, "Recovered revision for reuse");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
 

@@ -2993,10 +2993,10 @@ function SessionDetailLoaded({
       e.preventDefault();
       return;
     }
-    if (queuedEdit && queuedEditRetryable && e.key === "Enter" && !e.metaKey && !e.ctrlKey && !composing) {
+    if (queuedEdit && e.key === "Enter" && !e.metaKey && !e.ctrlKey && !composing) {
       if (!enterKeystrokeSends(e.shiftKey)) return;
       e.preventDefault();
-      void saveQueuedPromptEdit();
+      if (queuedEditRetryable) void saveQueuedPromptEdit();
       return;
     }
     // Steering owns exact Ctrl+Enter before slash-palette selection. The composed slash text is

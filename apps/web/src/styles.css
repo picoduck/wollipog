@@ -2856,7 +2856,8 @@ textarea {
   }
   .queued-edit-actions {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-flow: column;
   }
   .queued-edit-actions .btn {
     min-height: 44px;

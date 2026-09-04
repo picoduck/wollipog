@@ -26,7 +26,18 @@ export function reconcileQueuedEditRecovery(
       reason: "This queued message is no longer waiting, so the recovered edit cannot be saved in place.",
     };
   }
-  if (target.liveQueueObserved !== true || target.editable !== true || !target.editRevision) {
+  if (target.steeringState) {
+    return {
+      status: "stale",
+      reason: "Resolve steering before editing this queued message.",
+    };
+  }
+  if (
+    target.liveQueueObserved !== true ||
+    target.editable !== true ||
+    Boolean(target.editDisabledReason) ||
+    !target.editRevision
+  ) {
     return {
       status: "stale",
       reason: target.editDisabledReason ??
