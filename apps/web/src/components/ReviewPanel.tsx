@@ -669,16 +669,22 @@ export function ReviewPanel({
           <div className="review-findings-list">
             {findings.filter((finding) => finding.status === "open" || finding.status === "sent").map((finding) => {
               const stale = shownDiff?.diffHash !== finding.diffHash;
-              const sourcePath = finding.remote?.subjectType === "remote" ? null : normalizeSourcePath(finding.filePath);
+              const remoteOnly = finding.remote?.subjectType === "remote";
+              const sourcePath = remoteOnly ? null : normalizeSourcePath(finding.filePath);
               const sourceLocation = sourcePath ? {
                 path: sourcePath,
                 ...(finding.remote?.subjectType === "file" || finding.side !== "right" ? {} : { line: finding.line }),
               } : null;
+              const findingLocation = remoteOnly
+                ? "Remote Discussion"
+                : `${finding.filePath}${finding.remote?.subjectType === "file" ? " (file comment)" : `:${finding.line}`}`;
               return (
                 <article className="review-finding-row" key={finding.findingId}>
                   <input
                     type="checkbox"
-                    aria-label={finding.remote?.subjectType === "file"
+                    aria-label={remoteOnly
+                      ? "Select Remote Discussion"
+                      : finding.remote?.subjectType === "file"
                       ? `Select file-level finding on ${finding.filePath}`
                       : `Select finding on ${finding.filePath} line ${finding.line}`}
                     checked={selectedFindings.has(finding.findingId)}
@@ -693,10 +699,10 @@ export function ReviewPanel({
                     <div className="review-finding-meta">
                       {sourceLocation ? (
                         <button type="button" className="source-path-link" onClick={() => onOpenSourceLocation(sourceLocation)}>
-                          <code>{finding.filePath}{finding.remote?.subjectType === "file" ? " (file comment)" : finding.remote?.subjectType === "remote" ? " (remote discussion)" : `:${finding.line}`}</code>
+                          <code>{findingLocation}</code>
                         </button>
                       ) : (
-                        <code>{finding.filePath}{finding.remote?.subjectType === "file" ? " (file comment)" : finding.remote?.subjectType === "remote" ? " (remote discussion)" : `:${finding.line}`}</code>
+                        <code>{findingLocation}</code>
                       )}
                       <span className={`review-severity review-severity-${finding.severity}`}>{titleCaseLabel(finding.severity)}</span>
                       {finding.required && <span className="review-required">Required</span>}
@@ -787,7 +793,7 @@ export function ReviewPanel({
             {busy === "pr" ? "Opening…" : `Push & Open ${requestName}`}
           </button>
         </div>
-        <div className="hint">Commits any pending changes, pushes the branch, and opens a {requestName} (falls back to a validated prefilled link when authenticated forge tooling is unavailable). If you've staged hunks selectively, use Commit first — Push &amp; Open {requestName} won't guess at a partial stage.</div>
+        <div className="hint">Commits any pending changes, pushes the branch, and opens a {requestName.toLowerCase()} (falls back to a validated prefilled link when authenticated forge tooling is unavailable). If you've staged hunks selectively, use Commit first — Push &amp; Open {requestName} won't guess at a partial stage.</div>
         {pr && (
           <div className="git-ok">
             ✓ {(pr.created ?? pr.createdWithGh) ? `${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"} opened` : `Branch pushed — click to open the ${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"}`}:{" "}

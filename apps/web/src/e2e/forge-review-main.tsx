@@ -39,6 +39,22 @@ const finding: ReviewFinding = {
   },
 };
 
+const remoteFinding: ReviewFinding = {
+  ...finding,
+  findingId: "rf_gitlab_remote_fixture",
+  filePath: "__remote__/gitlab-discussion-120",
+  line: 1,
+  body: "Confirm the release-note wording in this remote discussion.",
+  required: false,
+  remote: {
+    ...finding.remote!,
+    threadId: "discussion-20",
+    commentId: 120,
+    url: "https://gitlab.example.test/team/sub/wollipog/-/merge_requests/19#note_120",
+    subjectType: "remote",
+  },
+};
+
 const git: GitStatus = {
   status: { ...status }, observation: 1, observedAt: Date.now(), settled: true, busy: false,
   error: null, errorCode: null, refresh: async () => {}, refreshStatusOnly: async () => {},
@@ -48,8 +64,8 @@ const git: GitStatus = {
 const client: ApiClient = {
   ...api,
   reviewFindings: async () => ({
-    findings: [finding],
-    summary: { total: 1, unresolved: 1, requiredUnresolved: 1, sent: 0, resolved: 0, dismissed: 0, completion: "blocked" },
+    findings: [finding, remoteFinding],
+    summary: { total: 2, unresolved: 2, requiredUnresolved: 1, sent: 0, resolved: 0, dismissed: 0, completion: "blocked" },
   }),
   gitDiff: async () => ({
     diff: {

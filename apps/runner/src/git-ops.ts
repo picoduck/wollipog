@@ -1300,9 +1300,10 @@ export function summarizeCheckRollup(nodes: unknown): Omit<GitChecksSummary, "ur
 const GH_PR_CACHE_TTL_MS = 15_000;
 const ghPrCache = new Map<string, { at: number; pr: GitPrSummary | null; checks: GitChecksSummary | null }>();
 
-/** Test-only: drop the gh PR cache. */
+/** Test-only: drop forge summary caches. */
 export function clearGhPrCacheForTests(): void {
   ghPrCache.clear();
+  forgeSummaryCache.clear();
 }
 
 type JsonObject = Record<string, unknown>;
