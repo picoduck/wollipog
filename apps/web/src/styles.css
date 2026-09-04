@@ -8517,9 +8517,16 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .inbox-row-base {
-  flex: none;
+  /* Shrinkable, and FASTER than the branch. A `flex: none` base ref here reproduced the very bug
+     this row was restructured to remove: the branch collapsed to zero width before the base gave
+     up a pixel, and the PR pill was then pushed past the line's clip. Nothing on this line may be
+     unshrinkable except the pill, which is the item that has to survive. */
+  min-width: 0;
+  flex: 0 4 auto;
+  overflow: hidden;
   color: var(--text-faint);
   font-size: var(--text-2xs);
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .inbox-row-pr-pill {

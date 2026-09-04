@@ -10,7 +10,7 @@ const WIDTHS = [390, 1000, 1400] as const;
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-row-layout");
-  await expect(page.locator(".inbox-row")).toHaveCount(4);
+  await expect(page.locator(".inbox-row")).toHaveCount(5);
 });
 
 for (const width of WIDTHS) {
@@ -29,7 +29,7 @@ for (const width of WIDTHS) {
       };
     }));
 
-    expect(strips).toHaveLength(4);
+    expect(strips).toHaveLength(5);
     for (const strip of strips) {
       expect(strip.renderedBars).toBe(30);
       expect(strip.stripWidth).toBeGreaterThan(50);
@@ -87,7 +87,7 @@ test("only sessions with a worktree take a third line, and the list measures bot
     bottom: node.closest(".inbox-row-shell")!.getBoundingClientRect().bottom,
   })));
 
-  expect(rows.map((row) => row.hasWorktreeLine)).toEqual([true, true, false, false]);
+  expect(rows.map((row) => row.hasWorktreeLine)).toEqual([true, true, true, false, false]);
   const threeLine = rows.filter((row) => row.hasWorktreeLine);
   const twoLine = rows.filter((row) => !row.hasWorktreeLine);
   expect(Math.min(...threeLine.map((row) => row.height)))
@@ -108,6 +108,37 @@ test("the worktree line hides a default base ref and keeps a stacked one", async
   await expect(worktreeLines.nth(1).locator(".inbox-row-base")).toContainText("← fix/issue-664-restructure");
   await expect(worktreeLines.nth(1).locator(".inbox-row-pr-pill")).toHaveText("Merged PR");
 });
+
+// Regression, found by cross-model review: `.inbox-row-base` was `flex: none`, so the branch
+// collapsed to zero width before the base yielded a pixel and the PR pill was then pushed past the
+// line's clip — line three reproducing the very failure line two was restructured to remove.
+for (const width of [770, 800, 1000, 1400]) {
+  test(`a long base ref truncates instead of evicting the branch or the PR pill at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const line = page.locator(".inbox-row-worktree").nth(2);
+    const geometry = await line.evaluate((node) => {
+      const row = node.closest<HTMLElement>(".inbox-row")!;
+      const style = getComputedStyle(row);
+      const pill = node.querySelector<HTMLElement>(".inbox-row-pr-pill")!;
+      const branch = node.querySelector<HTMLElement>(".inbox-row-branch")!;
+      const base = node.querySelector<HTMLElement>(".inbox-row-base")!;
+      return {
+        branchWidth: branch.getBoundingClientRect().width,
+        baseWidth: base.getBoundingClientRect().width,
+        pillWidth: pill.getBoundingClientRect().width,
+        pillOverflowRight: pill.getBoundingClientRect().right
+          - (row.getBoundingClientRect().right - parseFloat(style.paddingRight)),
+      };
+    });
+
+    // The branch is the row's identity; it must never be the thing that disappears.
+    expect(geometry.branchWidth).toBeGreaterThan(80);
+    expect(geometry.pillWidth).toBeGreaterThan(20);
+    expect(geometry.pillOverflowRight).toBeLessThanOrEqual(0.5);
+    // The base ref yields width rather than taking it; it is the least important item on the line.
+    expect(geometry.baseWidth).toBeGreaterThan(0);
+  });
+}
 
 test("a phone drops the base ref from the worktree line but keeps branch and PR state", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 900 });

@@ -12,8 +12,14 @@ export function pullRequestStateLabel(state: WorktreePullRequestState): string {
  *
  * The protocol carries no repository default branch — `SessionWorktreeView` records only the ref
  * the caller passed at creation — and #664 is a web-only change, so the Inbox decides by name.
- * A repository whose default branch is something else keeps showing its base ref, which is the
- * safe direction to be wrong in: the row states more than it must, never less.
+ *
+ * This is a heuristic and it CAN be wrong in both directions. A repository whose default is
+ * `develop` still has its `origin/main` maintenance branch suppressed here, and a reader who
+ * assumes the default would infer the wrong ancestry. That is accepted rather than unnoticed: the
+ * session header spells the base ref out unconditionally, so the fact is one click away, and the
+ * alternative — printing `← origin/main` on nearly every row — spends the Inbox's scarcest
+ * resource on its least surprising fact. Give this a repository default branch to read and it
+ * should read it instead of guessing.
  */
 const CONVENTIONAL_DEFAULT_BRANCHES = new Set(["main", "master"]);
 
