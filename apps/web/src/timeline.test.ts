@@ -830,8 +830,9 @@ test("a later authentication recovery creates a new historical card after resolu
   );
 });
 
-test("review_decision renders as a standalone visible timeline item", () => {
+test("allowed review decisions collapse inside their turn work while preserving audit details", () => {
   const items = deriveTimeline([
+    ev({ kind: "user_message", text: "Inspect the repository" }),
     ev({
       kind: "review_decision",
       reviewId: "review-1",
@@ -840,18 +841,53 @@ test("review_decision renders as a standalone visible timeline item", () => {
       riskLevel: "low",
       rationale: "read-only operation",
     }),
+    ev({ kind: "tool_call", toolCallId: "tool-1", title: "Search", status: "completed" }),
   ]);
-  assert.equal(items.length, 1);
-  assert.deepEqual(items[0], {
+  assert.equal(items.length, 3);
+  assert.deepEqual(items[1], {
     kind: "review_decision",
-    id: items[0]!.id,
+    id: items[1]!.id,
     reviewId: "review-1",
     reviewer: { kind: "agent", id: "codex-guardian" },
     outcome: "allowed",
     riskLevel: "low",
     rationale: "read-only operation",
+    createdAt: items[1]!.id,
   });
-  assert.equal(groupTimeline(items)[0]!.kind, "item");
+  const groups = groupTimeline(items);
+  assert.deepEqual(groups.map((group) => group.kind), ["item", "work"]);
+  assert.deepEqual(groups[1]!.kind === "work" ? groups[1]!.items.map((item) => item.kind) : [], [
+    "review_decision",
+    "tool_call",
+  ]);
+});
+
+test("exceptional automated review outcomes stay prominent and split allowed summaries", () => {
+  const items = deriveTimeline([
+    ev({
+      kind: "review_decision",
+      reviewId: "allowed-before",
+      reviewer: { kind: "policy", id: "routine" },
+      outcome: "allowed",
+    }),
+    ev({
+      kind: "review_decision",
+      reviewId: "denied",
+      reviewer: { kind: "agent", id: "guardian" },
+      outcome: "denied",
+      riskLevel: "high",
+    }),
+    ev({
+      kind: "review_decision",
+      reviewId: "allowed-after",
+      reviewer: { kind: "policy", id: "routine" },
+      outcome: "allowed",
+    }),
+  ]);
+
+  const groups = groupTimeline(items);
+  assert.deepEqual(groups.map((group) => group.kind), ["work", "item", "work"]);
+  assert.equal(groups[1]!.kind === "item" ? groups[1]!.item.kind : null, "review_decision");
 });
 
 test("checkpoint + checkpoint_restored render as standalone divider items", () => {

@@ -155,6 +155,8 @@ export type TimelineItem =
       outcome: ReviewDecisionOutcome;
       riskLevel?: ReviewRiskLevel;
       rationale?: string;
+      /** Runner-recorded decision time. */
+      createdAt?: number;
     }
   | {
       kind: "permission";
@@ -234,6 +236,12 @@ export type TimelineGroup =
 /** Item kinds that are intermediate "work" — folded into a collapsed "Worked" block, Codex-style. */
 const WORK_KINDS = new Set(["agent_thought", "tool_call", "command_output", "stderr", "file_edit", "plan"]);
 
+/** Routine automated approvals belong to the surrounding work block. Exceptional review outcomes
+ * remain standalone so denials, escalations, timeouts, and aborts cannot disappear in a summary. */
+export function isCollapsibleWorkItem(item: TimelineItem): boolean {
+  return WORK_KINDS.has(item.kind) || (item.kind === "review_decision" && item.outcome === "allowed");
+}
+
 export function timelineBoundaryKey(item: TimelineItem): string {
   if (item.kind === "agent_message" || item.kind === "agent_thought" ||
       item.kind === "command_output" || item.kind === "stderr") {
@@ -252,7 +260,7 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
   let work: TimelineItem[] | null = null;
   let boundary = "head";
   for (const it of items) {
-    if (WORK_KINDS.has(it.kind)) {
+    if (isCollapsibleWorkItem(it)) {
       if (!work) {
         work = [];
         // A block belongs to the preceding standalone row (or the transcript head), not its
@@ -694,6 +702,7 @@ export class TimelineBuilder {
           outcome: p.outcome,
           riskLevel: p.riskLevel,
           rationale: p.rationale,
+          ...(Number.isFinite(ev.ts) ? { createdAt: ev.ts } : {}),
         }) - 1);
         break;
       case "command_output":
