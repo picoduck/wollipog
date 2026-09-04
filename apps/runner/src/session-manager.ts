@@ -4609,6 +4609,9 @@ export class SessionManager {
           ? allLines.slice(reference.startLine! - 1, reference.endLine).map((line, index) => `${reference.startLine! + index}: ${line}`).join("\n")
           : file.content ?? "";
       }
+      // `sections.join("\n")` contributes one byte between each JSON object. Reserve it before
+      // bounding the next object so the complete provider suffix cannot exceed the aggregate cap.
+      if (sections.length) remaining -= 1;
       if (remaining < 256) throw new Error("workspace references exceed the bounded provider context limit; remove one or attach a smaller selection");
       const section = boundedWorkspaceReferenceJson({
         kind: reference.kind,
