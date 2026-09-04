@@ -3068,7 +3068,7 @@ export class SessionsService {
     const parked = session.pendingApproval;
     // A soft rule armed on an unparked session that already exceeds it must park now: nothing on
     // the runner will cancel the turn, so the next prompt would otherwise be admitted first.
-    if (guardrailChanged && !parked) this.gateOnPolicy(sessionId, Date.now());
+    if (guardrailChanged && !parked) this.gateOnPolicy(sessionId, Date.now(), true, true);
     if (guardrailChanged && parked && isGuardrailApproval(parked)) {
       const now = Date.now();
       const configured = this.db.getSession(sessionId)!;
@@ -6200,7 +6200,7 @@ export class SessionsService {
     });
   }
 
-  private gateOnPolicy(sessionId: string, now: number, fanOut = true): boolean {
+  private gateOnPolicy(sessionId: string, now: number, fanOut = true, softOnly = false): boolean {
     const s = this.db.getSession(sessionId);
     if (!s || s.pendingApproval) return false;
     const rules = rulesFromSession(this.guardrailFields(s));
@@ -6211,6 +6211,10 @@ export class SessionsService {
     const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(sessionId);
     const ask = firstAsk(evaluatePolicies({ status: s.status, costUsd: s.costUsd, toolCallCount, unpriced }, rules));
     if (!ask) return false;
+    // A runner-enforced threshold armed on a live session is the runner's to trip: it receives
+    // the threshold with the config write, cancels at the crossing, and settles into this gate.
+    // Parking on it here would show a hard card the runner knows nothing about.
+    if (softOnly && runnerHoldFor(ask.rule.kind)) return false;
     const approval = approvalForDecision(ask, sessionId, now);
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // A control-plane-only card must also stop the runner draining queued prompts behind the

@@ -11187,6 +11187,14 @@ test("arming a soft guardrail on an unparked session that already exceeds it par
   assert.ok(svc.setConfig(id, { costBudgetUsd: 5 }).ok);
   assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_unpriced", "the budget cannot see spend, so it fails closed immediately");
   assert.equal(svc.prompt(id, "one more", []).ok, false, "and the next prompt waits on the card");
+
+  // A hard threshold armed on a live session stays the runner's to trip: no card appears here.
+  const other = seedSession(svc, hub, { prompt: "spend", id: undefined } as never);
+  db.appendEvent(other, { kind: "token_usage", inputTokens: 1, costUsd: 6 }, Date.now(), { accrueUsage: true });
+  db.updateSessionStatus(other, "running", Date.now());
+  assert.ok(svc.setConfig(other, { costBudgetUsd: 5 }).ok);
+  assert.equal(db.getSession(other)!.pendingApproval, null, "the runner receives the threshold and cancels at the crossing itself");
+  assert.equal(db.getSession(other)!.status, "running");
 });
 
 test("run member sessions persist the run's checkpoints", () => {
