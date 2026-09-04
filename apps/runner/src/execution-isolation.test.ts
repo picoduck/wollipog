@@ -214,6 +214,10 @@ test("strict sessions virtualize only Claude/Codex transcript roots under runner
   });
 });
 
+test("provider state requires a non-empty session identity", () => {
+  assert.throws(() => providerStateKey(""), /requires a non-empty session id/);
+});
+
 test("isolated provider state clone and cleanup stay inside hashed session partitions", async () => {
   const nativeCopies: unknown[] = [];
   const nativeRemovals: unknown[] = [];
