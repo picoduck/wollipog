@@ -1492,6 +1492,69 @@ test("the send button's press keeps focus in the composer", async () => {
   }
 });
 
+test("a stopped Session replaces Send with an accessible restart action until restart begins", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const restartResult = deferred<SessionView>();
+  const restarted: string[] = [];
+  const fixture = await mountFixture(draft, {
+    sessionPatch: { status: "stopped" },
+    client: {
+      restart: async (sessionId) => {
+        restarted.push(sessionId);
+        return restartResult.promise;
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    const restart = fixture.container.querySelector(
+      'button[aria-label="Restart Session"]',
+    ) as HTMLButtonElement | null;
+    assert.ok(restart, "a stopped Session exposes Restart Session in the composer action slot");
+    assert.equal(restart.tagName, "BUTTON", "the restart action keeps native keyboard activation");
+    assert.equal(restart.disabled, false);
+    assert.equal(fixture.container.querySelector('button[aria-label="Send"]'), null);
+
+    await act(async () => { restart.click(); });
+    assert.equal(restarted.length, 1);
+    assert.match(restarted[0]!, /^composer-focus-/);
+    assert.ok(fixture.container.querySelector('button[aria-label="Restarting Session"] .spinner'));
+
+    restartResult.resolve({ ...session(restarted[0]!), status: "starting" });
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector('button[aria-label="Send"]'),
+      "the restart response immediately restores the ordinary Send action");
+    assert.equal(fixture.container.querySelector('button[aria-label="Restart Session"]'), null);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a stopped Session with a failed Stop does not offer Restart in the composer", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    sessionPatch: {
+      status: "stopped",
+      stopOperation: {
+        operationId: "stop-operation-composer",
+        status: "stop_failed",
+        requestedAt: 1,
+        lastAttemptAt: 2,
+        attemptCount: 1,
+        capacityReleased: false,
+        failure: { code: "runner_rejected", message: "Stop failed.", failedAt: 3 },
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    assert.equal(fixture.container.querySelector('button[aria-label="Restart Session"]'), null,
+      "the composer mirrors the Runtime menu's failed-Stop restart fence");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("the stop-turn button's press keeps focus in the composer", async () => {
   const draft = deferred<ComposerDraft | null>();
   // An active turn with an EMPTY composer is what renders Stop Turn in the send slot — the state
