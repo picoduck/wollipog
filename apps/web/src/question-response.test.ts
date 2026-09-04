@@ -30,6 +30,18 @@ test("question operations are exclusive per request and release for retry", () =
   retryRelease();
 });
 
+test("a hung question operation lease expires without letting its stale release clear a retry", () => {
+  const firstRelease = claimQuestionResponseOperation("session-lease", "request-lease", 1_000);
+  assert.ok(firstRelease);
+  assert.equal(claimQuestionResponseOperation("session-lease", "request-lease", 60_999), null);
+  const retryRelease = claimQuestionResponseOperation("session-lease", "request-lease", 61_000);
+  assert.ok(retryRelease);
+  firstRelease();
+  assert.equal(claimQuestionResponseOperation("session-lease", "request-lease", 61_001), null,
+    "the superseded operation cannot release the active retry's claim");
+  retryRelease();
+});
+
 const single: AgentQuestion = {
   id: "language",
   question: "Language?",
@@ -41,6 +53,16 @@ test("text responses resolve displayed numbers and case-insensitive exact labels
   assert.deepEqual(resolveQuestionResponse(single, "typescript"), { answer: "TypeScript" });
   assert.match(resolveQuestionResponse(single, "py").error ?? "", /unambiguous option label/);
   assert.match(resolveQuestionResponse(single, "rust").error ?? "", /displayed number/);
+});
+
+test("formatted single-choice labels with punctuation can return through typed-entry parsing", () => {
+  const question: AgentQuestion = {
+    ...single,
+    options: [{ label: "Yes, do it" }, { label: 'Say "later"' }, { label: "8080" }],
+  };
+  assert.deepEqual(resolveQuestionResponse(question, '"Yes, do it"'), { answer: "Yes, do it" });
+  assert.deepEqual(resolveQuestionResponse(question, '"Say ""later"""'), { answer: 'Say "later"' });
+  assert.deepEqual(resolveQuestionResponse(question, '"8080"'), { answer: "8080" });
 });
 
 test("multi-select text responses deterministically resolve comma-separated choices", () => {

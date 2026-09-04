@@ -2041,9 +2041,14 @@ function SessionDetailLoaded({
       return;
     }
     setActivePane("composer");
+    if (composerAnswerActive) {
+      answerModeFocusRequestRef.current = null;
+      answerInputRef.current?.focus();
+      return;
+    }
     answerModeFocusRequestRef.current = "answer";
     setAnswerModeRequestId(pendingQuestion.requestId);
-  }, [canAnswerPendingQuestion, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+  }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
 
   useLayoutEffect(() => {
     const liveRequestId = pendingQuestion?.requestId ?? null;
@@ -2071,12 +2076,14 @@ function SessionDetailLoaded({
     const requestChanged = previous.requestId !== requestId;
     const styleChanged = previous.style !== questionResponseStyle;
     const answerabilityChanged = previous.answerable !== answerable;
-    answerModeArrivalRef.current = { requestId, style: questionResponseStyle, answerable };
+    const nextArrival = { requestId, style: questionResponseStyle, answerable };
     if (!requestId || questionResponseStyle !== "composer" || !answerable) {
+      answerModeArrivalRef.current = nextArrival;
       if (!requestId || styleChanged || answerabilityChanged) setAnswerModeRequestId(null);
       return;
     }
     if (requestChanged || styleChanged || answerabilityChanged) {
+      answerModeArrivalRef.current = nextArrival;
       let cancelled = false;
       let frame: number | null = null;
       let remainingHydrationFrames = 120;
@@ -2110,8 +2117,12 @@ function SessionDetailLoaded({
       return () => {
         cancelled = true;
         if (frame !== null) window.cancelAnimationFrame(frame);
+        // StrictMode simulates an unmount/remount without recreating refs. Restore the observation
+        // only when this effect still owns it so the replacement effect can make the decision.
+        if (answerModeArrivalRef.current === nextArrival) answerModeArrivalRef.current = previous;
       };
     }
+    answerModeArrivalRef.current = nextArrival;
   }, [composerQuestions.length, pendingQuestion?.requestId, questionResponseStyle, sessionId]);
 
   const clearStopTurnAttempt = useCallback(() => {

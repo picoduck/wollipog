@@ -195,6 +195,7 @@ interface FixtureOptions {
   sessionCapabilities?: SessionView["agentCapabilities"];
   sessionPatch?: Partial<SessionView>;
   runnerProtocolVersion?: number;
+  strictMode?: boolean;
 }
 
 function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
@@ -299,7 +300,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     sessionId = currentSession.id,
     showDetail = true,
   ) => {
-    root.render(
+    const content = (
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
           {options.mainEventPayloads && (
@@ -318,8 +319,9 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
             />
           )}
         </StoreProvider>
-      </ApiProvider>,
+      </ApiProvider>
     );
+    root.render(options.strictMode ? <React.StrictMode>{content}</React.StrictMode> : content);
   };
   const rerenderWithDraftLoader = async (loader: ComposerDraftLoader) => {
     await act(async () => renderWithDraftLoader(loader));
@@ -2822,6 +2824,72 @@ test("automatic Answer Mode transfers existing composer focus into the answer fi
     assert.ok(answer);
     assert.equal(answer.ownerDocument.activeElement, answer,
       "unmounting the focused ordinary composer must not leave document.body owning keystrokes");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("StrictMode retains deferred automatic Answer Mode entry", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    strictMode: true,
+    sessionPatch: {
+      pendingApproval: {
+        requestId: "ask-strict-arrival",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { flushFrames(); });
+    assert.ok(fixture.container.querySelector(".composer-answer-input"),
+      "StrictMode's effect cleanup cannot consume the only arrival decision");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("R focuses the answer field when automatic Answer Mode is already active", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-active-r",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{
+          id: "target",
+          question: "Choose a target",
+          options: [{ label: "Staging" }, { label: "Production" }],
+        }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(answer);
+    assert.ok(reader);
+    await act(async () => { reader.focus(); });
+    assert.notEqual(answer.ownerDocument.activeElement, answer);
+
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "r", bubbles: true }) as never);
+      flushFrames();
+    });
+    assert.equal(answer.ownerDocument.activeElement, answer,
+      "R must disarm bare reading shortcuts even when Answer Mode does not need a state transition");
   } finally {
     await unmountFixture(fixture);
     setQuestionResponseStyle("interactive", domWindow as never);

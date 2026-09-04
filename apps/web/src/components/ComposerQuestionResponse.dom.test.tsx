@@ -288,6 +288,8 @@ test("single-choice palette exposes one tab stop with wrapping Arrow, Home, and 
     assert.equal(choices.filter((choice) => choice.tabIndex === 0).length, 1,
       "text updates cannot restore React's former tab stop alongside the roving target");
     assert.equal(choices[2]!.getAttribute("aria-checked"), "true");
+    assert.equal(choices[2]!.tabIndex, 0,
+      "the selected radio remains the palette's single keyboard tab stop");
   } finally {
     await act(async () => root.unmount());
     container.remove();

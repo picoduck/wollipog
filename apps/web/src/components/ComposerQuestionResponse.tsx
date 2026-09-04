@@ -165,8 +165,16 @@ export function ComposerQuestionResponse({
     return next;
   };
 
-  const update = (raw: string): Record<string, QuestionResponseDraft> =>
-    updateDraft({ kind: "entry", value: raw });
+  const update = (raw: string): Record<string, QuestionResponseDraft> => {
+    const draft = { kind: "entry", value: raw } as const;
+    const next = updateDraft(draft);
+    if (!question.multiSelect) {
+      const selected = questionDraftSelections(question, draft)[0];
+      const selectedIndex = question.options.findIndex((option) => option.label === selected);
+      if (selectedIndex >= 0) setPaletteFocusIndex(selectedIndex);
+    }
+    return next;
+  };
 
   const submitAnswers = async (next: Record<string, QuestionResponseDraft>) => {
     const resolved = questionDraftAnswers(questions, next);

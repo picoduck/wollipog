@@ -299,6 +299,21 @@ test("Composer Response keeps the transcript card as context without card-owned 
   }
 });
 
+test("Composer Response does not advertise Answer Mode without a question schema", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderBanner(root, [], true);
+    assert.doesNotMatch(container.textContent ?? "", /Press R|\/respond/);
+  } finally {
+    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("Interactive Form accumulates bounded multi-select choices and recovers after exceeding the maximum", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

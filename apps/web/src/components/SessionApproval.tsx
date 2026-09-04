@@ -578,7 +578,7 @@ export function SessionQuestionBanner({
       <div id={availabilityId} className="question-availability" role="status" aria-atomic="true">
         {runnerOnline ? "" : "Responses are unavailable until the runner reconnects."}
       </div>
-      {responseStyle === "composer" && (
+      {responseStyle === "composer" && questions.length > 0 && (
         <div className="question-submit-hint">
           Respond through Answer Mode in the Session composer. Press R or use <code>/respond</code>.
         </div>
