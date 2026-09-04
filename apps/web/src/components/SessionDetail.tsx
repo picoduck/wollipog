@@ -2804,9 +2804,10 @@ function SessionDetailLoaded({
     }
     try {
       const { reference } = await api.createWorkspaceReference(sessionId, target);
-      addWorkspaceReference(reference);
-      setError(null);
-      showToast(`Attached ${reference.path}.`);
+      const outcome = addWorkspaceReference(reference);
+      if (outcome !== "limit") setError(null);
+      if (outcome === "added") showToast(`Attached ${reference.path}.`);
+      if (outcome === "duplicate") showToast(`${reference.path} is already attached.`);
       window.requestAnimationFrame(() => inputRef.current?.focus());
     } catch (cause) {
       setError((cause as Error).message);

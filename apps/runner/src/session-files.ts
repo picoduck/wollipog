@@ -385,7 +385,8 @@ function nativeSearch(root: string, query: string): WorkspaceReferenceSearch {
 export function wslListArgs(distro: string, root: string, rel: string): string[] {
   const script =
     'r=$(readlink -f -- "$1") || exit 3; rel=$2; [ -n "$rel" ] || rel=.; t=$(readlink -f -- "$1/$rel") || exit 3; case "$t" in "$r"|"$r"/*) ;; *) exit 5;; esac; cd "$t" || exit 3; ' +
-    'for e in * .[!.]* ..?*; do [ -e "$e" ] || continue; [ "$e" = .git ] && continue; [ -L "$e" ] && continue; ' +
+    'for e in * .[!.]* ..?*; do [ -e "$e" ] || continue; [ "$e" = .git ] && continue; ' +
+    'if [ -L "$e" ]; then x=$(readlink -f -- "$e") || continue; case "$x" in "$r"|"$r"/*) ;; *) printf "f\\t\\t%s\\n" "$e"; continue;; esac; fi; ' +
     'if [ -d "$e" ]; then printf "d\\t\\t%s\\n" "$e"; ' +
     'else s=$(stat -c %s -- "$e" 2>/dev/null); printf "f\\t%s\\t%s\\n" "$s" "$e"; fi; done';
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", root, rel];
@@ -399,24 +400,39 @@ export function wslReadArgs(distro: string, root: string, rel: string, cap: numb
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", root, rel, String(cap)];
 }
 
-async function wslSearch(distro: string, root: string, query: string): Promise<WorkspaceReferenceSearch> {
+export function wslSearchArgs(distro: string, root: string, visitCap: number): string[] {
   const script =
     'r=$(readlink -f -- "$1") || exit 3; cd "$r" || exit 3; ' +
-    'find . -path ./.git -prune -o -type l -prune -o \( -type f -o -type d \) -print 2>/dev/null | head -n "$3"';
-  const r = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", script, "sh", root, query, String(WORKSPACE_SEARCH_VISIT_CAP)], {
+    'find . -path ./.git -prune -o -type l -prune -o \\( -type f -o -type d \\) -printf "%y\\t%P\\n" 2>/dev/null | head -n "$2"';
+  return ["-d", distro, "--exec", "sh", "-c", script, "sh", root, String(visitCap + 1)];
+}
+
+async function wslSearch(distro: string, root: string, query: string): Promise<WorkspaceReferenceSearch> {
+  const r = await run("wsl.exe", wslSearchArgs(distro, root, WORKSPACE_SEARCH_VISIT_CAP), {
     timeoutMs: 15_000,
     maxBuffer: 2 * 1024 * 1024,
   });
   if (r.code !== 0) throw new Error(`cannot search the workspace in ${distro}`);
+  return parseWslWorkspaceReferenceSearch(r.stdout, query);
+}
+
+export function parseWslWorkspaceReferenceSearch(
+  output: string,
+  query: string,
+  visitCap = WORKSPACE_SEARCH_VISIT_CAP,
+): WorkspaceReferenceSearch {
   const matches: WorkspaceReferenceCandidate[] = [];
-  for (const raw of r.stdout.split("\n")) {
-    const path = raw.replace(/\r$/, "").replace(/^\.\//, "");
+  const rows = output.split("\n").filter(Boolean);
+  for (const raw of rows.slice(0, visitCap)) {
+    const [type, ...pathParts] = raw.replace(/\r$/, "").split("\t");
+    const path = pathParts.join("\t");
     if (!path || !path.toLocaleLowerCase().includes(query)) continue;
-    if (matches.length >= MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS) break;
-    const check = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", '[ -d "$1/$2" ]', "sh", root, path], { timeoutMs: 5_000 });
-    matches.push({ path, isDirectory: check.code === 0 });
+    matches.push({ path, isDirectory: type === "d" });
   }
-  return { results: matches, truncated: r.stdout.split("\n").length >= WORKSPACE_SEARCH_VISIT_CAP };
+  return {
+    results: matches.slice(0, MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS),
+    truncated: rows.length > visitCap || matches.length > MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS,
+  };
 }
 
 async function wslRootFingerprint(distro: string, root: string): Promise<string> {

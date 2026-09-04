@@ -2521,12 +2521,16 @@ export class SessionsService {
     const images = snapshotCommand?.type === "start_session" ? (snapshotCommand.initialImages ?? []) : (req.images ?? []);
     const imageValidation = validateImagesForDriver(images, launch.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
-    if (images.length) {
+    if (images.some(isWorkspaceReference)) {
+      const unsupported = this.capabilityFailure(req.runnerId, "workspaceReferences", "Workspace references");
+      if (unsupported) return unsupported;
+    }
+    if (images.some((image) => !isWorkspaceReference(image))) {
       const unsupported = this.capabilityFailure(req.runnerId, "promptImageReferences", "Prompt image attachments");
       if (unsupported) return unsupported;
-      if (delivery && !snapshotCommand) {
-        return fail("pre-staged session creation cannot carry unexternalized prompt images", 409);
-      }
+    }
+    if (images.length && delivery && !snapshotCommand) {
+      return fail("pre-staged session creation cannot carry unexternalized prompt attachments", 409);
     }
     const agentCapabilities = snapshotSpec?.capabilities ??
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;

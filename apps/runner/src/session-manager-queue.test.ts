@@ -860,6 +860,8 @@ test("referenced images stay metadata-only in durable events and materialize onl
 test("workspace references resolve bounded real content only at the provider boundary", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-workspace-ref-"));
   writeFileSync(join(root, "source.ts"), "first line\nprovider-only secret\nthird line\n");
+  writeFileSync(join(root, "large-a.txt"), "a".repeat(512 * 1024 - 1_000));
+  writeFileSync(join(root, "large-b.txt"), "b".repeat(5_000));
   mkdirSync(join(root, "docs"));
   writeFileSync(join(root, "docs", "guide.md"), "guide");
   const store = new SessionStore(root);
@@ -869,6 +871,10 @@ test("workspace references resolve bounded real content only at the provider bou
     path: "source.ts", kind: "lines", startLine: 2, endLine: 2,
   });
   const directoryReference = await createWorkspaceReference({ kind: "native" }, root, { path: "docs", kind: "directory" });
+  const largeReferences = await Promise.all([
+    createWorkspaceReference({ kind: "native" }, root, { path: "large-a.txt", kind: "file" }),
+    createWorkspaceReference({ kind: "native" }, root, { path: "large-b.txt", kind: "file" }),
+  ]);
   const providerTexts: string[] = [];
   const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
   const client = {
@@ -897,12 +903,21 @@ test("workspace references resolve bounded real content only at the provider bou
     assert.equal(durable.includes("provider-only secret"), false, "workspace content must remain provider-only");
     assert.equal(durable.includes(fileReference.artifactId), true, "durable history retains only reference metadata");
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (manager as any).runPrompt("s_q", {
+      id: "bounded-workspace-prompt", text: "bounded", images: largeReferences,
+    });
+    assert.equal(providerTexts.length, 2);
+    const boundedSuffix = providerTexts[1]!.slice("bounded".length);
+    assert.ok(Buffer.byteLength(boundedSuffix, "utf8") <= 512 * 1024, "the full provider suffix stays within the aggregate cap");
+    assert.match(boundedSuffix, /"truncated": true/, "the final reference is truncated instead of overflowing the aggregate cap");
+
     writeFileSync(join(root, "source.ts"), "changed after attachment\n");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (manager as any).runPrompt("s_q", {
       id: "stale-workspace-prompt", text: "inspect stale", images: [fileReference],
     });
-    assert.equal(providerTexts.length, 1, "a changed target must fail before provider delivery");
+    assert.equal(providerTexts.length, 2, "a changed target must fail before provider delivery");
     assert.match(JSON.stringify(store.readEvents("s_q")), /missing, changed, or belongs to a different workspace/);
   } finally {
     rmSync(root, { recursive: true, force: true });

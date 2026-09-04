@@ -114,15 +114,16 @@ export function usePastedImages(
     const currentReferences = imagesRef.current.filter(isWorkspaceReference);
     if (currentReferences.length >= MAX_WORKSPACE_REFERENCES) {
       onError?.(`At most ${MAX_WORKSPACE_REFERENCES} workspace references may be attached.`);
-      return;
+      return "limit" as const;
     }
     if (currentReferences.some((candidate) => candidate.targetFingerprint === reference.targetFingerprint &&
         candidate.kind === reference.kind && candidate.startLine === reference.startLine &&
-        candidate.endLine === reference.endLine && candidate.side === reference.side)) return;
+        candidate.endLine === reference.endLine && candidate.side === reference.side)) return "duplicate" as const;
     onUserChange?.();
     const next = [...imagesRef.current, reference];
     imagesRef.current = next;
     setImages(next);
+    return "added" as const;
   }, [onError, onUserChange]);
 
   return { images, onPaste, addFiles, addWorkspaceReference, remove, clear, replace };

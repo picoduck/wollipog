@@ -8,11 +8,13 @@ import {
   createWorkspaceReference,
   listSessionFiles,
   normalizeRelPath,
+  parseWslWorkspaceReferenceSearch,
   readSessionFile,
   searchWorkspaceReferences,
   workspaceReferenceDiffContent,
   wslListArgs,
   wslReadArgs,
+  wslSearchArgs,
 } from "./session-files.js";
 
 const NATIVE = { kind: "native" } as const;
@@ -233,4 +235,27 @@ test("wslListArgs/wslReadArgs: paths ride as positional args, never inside the s
   const read = wslReadArgs("Ubuntu", "/r", "f.txt", 2048);
   assert.equal(read[9], "2048"); // cap as $3
   assert.ok(read[5]!.includes('"$3"'));
+  const list = wslListArgs("Ubuntu", "/r", "sub");
+  assert.match(list[5]!, /\[ -L "\$e" \].*readlink -f.*case "\$x"/, "symlinks are resolved and contained rather than hidden");
+});
+
+test("wslSearchArgs: preserves find grouping and emits type metadata in one bounded process", () => {
+  const args = wslSearchArgs("Ubuntu", "/home/u/repo", 20_000);
+  assert.deepEqual(args.slice(0, 5), ["-d", "Ubuntu", "--exec", "sh", "-c"]);
+  assert.match(args[5]!, /\\\( -type f -o -type d \\\)/, "the shell receives escaped find grouping");
+  assert.match(args[5]!, /-printf "%y\\t%P\\n"/, "one traversal returns both type and path");
+  assert.equal(args[7], "/home/u/repo");
+  assert.equal(args[8], "20001", "one sentinel row distinguishes a capped traversal");
+});
+
+test("WSL search parsing bounds matches and reports both result and traversal truncation", () => {
+  const matches = Array.from({ length: 51 }, (_, index) => `${index % 2 ? "d" : "f"}\tsrc/item-${index}\n`).join("");
+  const resultBound = parseWslWorkspaceReferenceSearch(matches, "src");
+  assert.equal(resultBound.results.length, 50);
+  assert.equal(resultBound.results[1]?.isDirectory, true);
+  assert.equal(resultBound.truncated, true);
+
+  const visitBound = parseWslWorkspaceReferenceSearch("f\tone\nf\ttwo\nf\tthree\n", "o", 2);
+  assert.deepEqual(visitBound.results.map((candidate) => candidate.path), ["one", "two"]);
+  assert.equal(visitBound.truncated, true);
 });
