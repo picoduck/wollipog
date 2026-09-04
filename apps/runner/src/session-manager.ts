@@ -578,6 +578,9 @@ export class SessionManager {
   /** Prompts known not to have reached turn/start when app-server crashed. A recovery launch
    * consumes these; the in-flight prompt is deliberately absent because delivery is ambiguous. */
   private readonly recoveryQueues = new Map<string, QueuedPrompt[]>();
+  /** Sessions whose control-plane hold outlived their process: recovery must not drain their
+   * queue, and the replacement entry inherits the hold, until the control plane releases it. */
+  private readonly recoveryHolds = new Set<string>();
   /** Prompts received after a session was materialized but before capacity admission. They must
    * join the original launch instead of starting a competing resume generation. Durable command
    * lifecycles make this in-memory FIFO recoverable after a runner restart. */
@@ -3040,6 +3043,11 @@ export class SessionManager {
       operation.fenceEntry = entry;
       operation.fenceInstalled = true;
     }
+    // A replacement process inherits the hold its predecessor was under.
+    if (this.recoveryHolds.has(sessionId)) {
+      this.recoveryHolds.delete(sessionId);
+      entry.controlPlaneHold = true;
+    }
     this.active.set(sessionId, entry);
     this.send({ type: "process_status", sessionId, processStatus: "running", pid: client.pid });
 
@@ -4107,7 +4115,7 @@ export class SessionManager {
         message: "Wait for the current stop request to settle before steering.",
       };
     }
-    if (entry.holdQueuedPromptsAfterInterrupt) {
+    if (this.queueHeld(entry)) {
       return {
         eligible: false,
         reason: "policy_blocked",
@@ -4185,7 +4193,7 @@ export class SessionManager {
       );
     }
     if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
-    if (entry.cancelRequested || entry.interruptRequested || entry.holdQueuedPromptsAfterInterrupt) {
+    if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
     if (entry.governanceTripped) return this.handleDefiniteSteeringFailure(operation, "governance_blocked");
@@ -4227,7 +4235,7 @@ export class SessionManager {
       );
     }
     if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
-    if (entry.cancelRequested || entry.interruptRequested || entry.holdQueuedPromptsAfterInterrupt) {
+    if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
     if (entry.governanceTripped) return this.handleDefiniteSteeringFailure(operation, "governance_blocked");
@@ -6352,7 +6360,14 @@ export class SessionManager {
     // be ignored nor touch the per-prompt budgets queued prompts were queued with.
     if (costBudgetUsd === undefined && maxToolCalls === undefined) {
       const entry = this.active.get(sessionId);
-      if (!entry) return;
+      if (!entry) {
+        // No live process: the hold applies to whatever recovery holds for this session.
+        if (holdFor === "control_plane") this.recoveryHolds.add(sessionId);
+        else if (holdFor === undefined && this.recoveryHolds.delete(sessionId) && this.recoveryQueues.has(sessionId)) {
+          setImmediate(() => void this.recoverQueuedAppServer(sessionId));
+        }
+        return;
+      }
       if (holdFor === "control_plane") {
         this.setControlPlaneHold(sessionId, entry, true);
         if (entry.running && entry.governanceTripped) entry.governanceRearmPending = "resume";
@@ -6980,6 +6995,7 @@ export class SessionManager {
         if (meta?.driver === "codex-app-server" && meta.agentSessionId) {
           this.stabilizeRecoveryQueue(sessionId, queued);
           this.recoveryQueues.set(sessionId, queued);
+          if (entry.controlPlaneHold) this.recoveryHolds.add(sessionId);
         } else {
           this.rejectQueued(
             queued,
@@ -7012,6 +7028,7 @@ export class SessionManager {
         if (queued.length) {
           this.stabilizeRecoveryQueue(sessionId, queued);
           this.recoveryQueues.set(sessionId, queued);
+          if (entry.controlPlaneHold) this.recoveryHolds.add(sessionId);
           setImmediate(() => void this.recoverQueuedAppServer(sessionId));
         }
       } else if (code && code !== 0) {
@@ -7055,12 +7072,19 @@ export class SessionManager {
     if (this.recoveryLaunching.has(sessionId)) return;
     const queued = this.recoveryQueues.get(sessionId);
     if (!queued) return;
+    // A control-plane card is still open: the prompts stay parked in the recovery map until the
+    // control plane releases the hold, which re-enters here.
+    if (this.recoveryHolds.has(sessionId) && !this.active.get(sessionId)) return;
     const alreadyActive = this.active.get(sessionId);
     if (alreadyActive) {
       // A non-recovery entrypoint won the race. Preserve the known-unsubmitted prompts ahead of
       // newer work instead of leaving a stale recovery map that would intercept every prompt.
       for (const prompt of queued) this.insertQueuedPrompt(sessionId, alreadyActive.queue, prompt);
       this.recoveryQueues.delete(sessionId);
+      if (this.recoveryHolds.has(sessionId)) {
+        this.recoveryHolds.delete(sessionId);
+        this.setControlPlaneHold(sessionId, alreadyActive, true);
+      }
       this.emitQueue(sessionId);
       this.scheduleDrain(sessionId);
       return;
@@ -7933,7 +7957,7 @@ export class SessionManager {
       return;
     }
     const entry = this.active.get(sessionId);
-    if (entry?.holdQueuedPromptsAfterInterrupt || entry?.running || entry?.queue.some((prompt) => prompt.syntheticRecovery)) {
+    if ((entry && this.queueHeld(entry)) || entry?.running || entry?.queue.some((prompt) => prompt.syntheticRecovery)) {
       this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       return;
     }

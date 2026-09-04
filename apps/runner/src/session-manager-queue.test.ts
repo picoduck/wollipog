@@ -1166,3 +1166,23 @@ test("a control-plane queue hold parks queued prompts without tripping governanc
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a control-plane hold survives a provider exit: recovery keeps the queue until the release", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-cp-hold-recovery-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle", driver: "codex-app-server", agentSessionId: "thread-1" }));
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.recoveryQueues.set("s_q", [{ id: "q1", text: "B", images: [], queuedAt: 1 }]);
+    manager.rearmGovernance("s_q", {}, "control_plane");
+    await internals.recoverQueuedAppServer("s_q");
+    assert.equal(internals.recoveryQueues.has("s_q"), true, "held: recovery leaves the queue parked");
+    assert.equal(internals.recoveryHolds.has("s_q"), true);
+    manager.rearmGovernance("s_q", {});
+    assert.equal(internals.recoveryHolds.has("s_q"), false, "the release lifts the hold and re-enters recovery");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
