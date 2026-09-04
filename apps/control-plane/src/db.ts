@@ -8413,6 +8413,21 @@ export class ControlPlaneDb {
         ).run(now);
         this.stmt("INSERT INTO usage_aggregation_meta (id, baseline_seeded_at) VALUES (1, ?)").run(now);
       }
+      // v104: the per-session per-model ledger starts from the lifetime state already recorded,
+      // attributed to the session's resolved model, so an upgraded deployment shows existing
+      // sessions' usage in the popover instead of nothing until their next turn. Idempotent: a
+      // session already present in the ledger is left alone.
+      this.stmt(
+        `INSERT OR IGNORE INTO usage_session_models
+           (session_id, model, driver, input_tokens, output_tokens, cost_microusd,
+            ${USAGE_LEDGER_V103_COLUMNS.join(", ")}, updated_at)
+         SELECT state.session_id, COALESCE(NULLIF(s.resolved_model, ''), s.model, ''), s.driver,
+                state.input_tokens, state.output_tokens, state.cost_microusd,
+                ${USAGE_LEDGER_V103_COLUMNS.map((column) => `state.${column}`).join(", ")}, ?
+           FROM usage_session_state state JOIN sessions s ON s.id=state.session_id
+          WHERE NOT EXISTS (SELECT 1 FROM usage_session_models m WHERE m.session_id=state.session_id)
+            AND (state.input_tokens > 0 OR state.output_tokens > 0 OR state.cost_microusd > 0)`,
+      ).run(now);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

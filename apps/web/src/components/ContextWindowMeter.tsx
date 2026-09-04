@@ -29,6 +29,8 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
     contextWindow,
   });
   const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState<{ top: number; left: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   const [breakdown, setBreakdown] = useState<SessionUsageResponse | null>(null);
   const [breakdownError, setBreakdownError] = useState<string | null>(null);
   const panelId = useId();
@@ -51,6 +53,29 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
     if (open) void loadBreakdown();
   }, [open, loadBreakdown]);
 
+  // The meter lives inside clipped strips (preview meta, the transcript status strip), so the
+  // panel is positioned against the viewport from the button's rectangle rather than flowing
+  // inside an ancestor that would cut it off. Placed below when there is room, else above.
+  useEffect(() => {
+    if (!open) { setPlacement(null); return; }
+    const place = () => {
+      const rect = buttonRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = 280;
+      const height = 320;
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+      const below = rect.bottom + 6 + height <= window.innerHeight;
+      setPlacement({ top: below ? rect.bottom + 6 : Math.max(8, rect.top - 6 - height), left });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
   // Escape and an outside pointer close the popover, so a hover-opened panel never traps focus.
   useEffect(() => {
     if (!open) return;
@@ -69,7 +94,10 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
   if (!fill.known) return null;
 
   const used = session.contextTokensUsed ?? (session.tokensIn + session.tokensOut);
-  const processed = session.tokensIn + session.tokensOut;
+  // The ledger's figure counts every cache bucket; the runner totals are the floor until it loads.
+  const processed = breakdown && loadedFor.current === session.id
+    ? Math.max(breakdown.totals.processedTokens, session.tokensIn + session.tokensOut)
+    : session.tokensIn + session.tokensOut;
   const dash = (fill.fillPct / 100) * RING_CIRCUMFERENCE;
   const summary = `${used.toLocaleString()} / ${contextWindow!.toLocaleString()} context tokens (${fill.formatPct})`;
   const byModel = breakdown?.byModel ?? [];
@@ -82,6 +110,7 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
       onPointerLeave={() => setOpen(false)}
     >
       <button
+        ref={buttonRef}
         type="button"
         className="context-ring-button"
         aria-expanded={open}
@@ -109,7 +138,13 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
         <span className="meter-label">{fill.formatPct}</span>
       </button>
       {open && (
-        <div className="context-popover" id={panelId} role="group" aria-label="Context Window">
+        <div
+          className="context-popover"
+          id={panelId}
+          role="group"
+          aria-label="Context Window"
+          style={placement ? { position: "fixed", top: placement.top, left: placement.left } : undefined}
+        >
           <div className="context-popover-head">
             <strong>Context Window</strong>
             <span>{fill.formatPct} · {formatTokens(used)} / {formatTokens(contextWindow!)}</span>
@@ -130,7 +165,10 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
                 <div className="context-popover-model" key={row.model}>
                   <span className="context-popover-model-name" title={row.model}>{row.model}</span>
                   <dl>
-                    <div><dt>Input</dt><dd>{formatTokens(row.uncachedInputTokens || row.inputTokens)}</dd></div>
+                    {/* A row with a cache split reports the uncached part as Input (zero is a real
+                        value for a fully cached Codex turn); a legacy row without one reports what
+                        the provider called input. */}
+                    <div><dt>Input</dt><dd>{formatTokens(row.cachedInputTokens + row.cacheCreationTokens > 0 ? row.uncachedInputTokens : row.inputTokens)}</dd></div>
                     <div><dt>Output</dt><dd>{formatTokens(row.outputTokens)}</dd></div>
                     {row.cachedInputTokens > 0 && <div><dt>Cache Read</dt><dd>{formatTokens(row.cachedInputTokens)}</dd></div>}
                     {row.cacheCreationTokens > 0 && <div><dt>Cache Write</dt><dd>{formatTokens(row.cacheCreationTokens)}</dd></div>}

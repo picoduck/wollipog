@@ -572,6 +572,9 @@ export class ClaudeCodeDriver implements Driver {
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
+    // Each turn names its own model: a turn that settles before any assistant record must not
+    // inherit the previous turn's, which after a model switch would misattribute it.
+    this.turnModel = null;
     const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
     if (capabilityError) {
       this.cb.onEvent({ kind: "error", message: capabilityError });
@@ -2049,7 +2052,7 @@ export class ClaudeCodeDriver implements Driver {
           ...(typeof usage.cache_creation_input_tokens === "number"
             ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
             : {}),
-          ...(this.turnModel ? { model: this.turnModel } : {}),
+          ...(this.turnModel && !parentId ? { model: this.turnModel } : {}),
           costUsd,
           ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}),
           ...pp,

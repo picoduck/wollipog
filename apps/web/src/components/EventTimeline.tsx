@@ -1,3 +1,4 @@
+import type { AgentDriverKind } from "@wollipog/protocol";
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
@@ -126,6 +127,7 @@ export const EventTimeline = memo(function EventTimeline({
   onVisibleAnchorChange,
   onAnchorLost,
   sessionActive = false,
+  driver,
   ariaLabel = "Session Activity",
   onOpenSubagent,
   revealRequest,
@@ -152,6 +154,8 @@ export const EventTimeline = memo(function EventTimeline({
   onAnchorLost?: (anchor: VirtualScrollAnchor) => void;
   /** True only while this session has a nonterminal turn that can still produce activity. */
   sessionActive?: boolean;
+  /** The session's driver, for driver-aware token arithmetic on the turn rows. */
+  driver?: AgentDriverKind;
   /** Accessible name when the timeline is reused outside the parent transcript. */
   ariaLabel?: string;
   /** Open an agent task in the dedicated panel without changing its disclosure state. */
@@ -182,6 +186,7 @@ export const EventTimeline = memo(function EventTimeline({
       onVisibleAnchorChange={onVisibleAnchorChange}
       onAnchorLost={onAnchorLost}
       sessionActive={sessionActive}
+      driver={driver}
       ariaLabel={ariaLabel}
       onOpenSubagent={onOpenSubagent}
       revealRequest={scopedRevealRequest}
@@ -207,6 +212,7 @@ function EventTimelineBody({
   onVisibleAnchorChange,
   onAnchorLost,
   sessionActive,
+  driver,
   ariaLabel,
   onOpenSubagent,
   revealRequest,
@@ -228,6 +234,7 @@ function EventTimelineBody({
   onVisibleAnchorChange?: (anchor: VirtualScrollAnchor) => void;
   onAnchorLost?: (anchor: VirtualScrollAnchor) => void;
   sessionActive: boolean;
+  driver?: AgentDriverKind;
   ariaLabel: string;
   onOpenSubagent?: (toolCallId: string) => void;
   revealRequest?: TimelineRevealRequest | null;
@@ -397,7 +404,7 @@ function EventTimelineBody({
     </div>
   );
   return (
-    <TimelineClockProvider enabled={sessionActive} sessionActive={sessionActive}>
+    <TimelineClockProvider enabled={sessionActive} sessionActive={sessionActive} driver={driver}>
       {timeline}
     </TimelineClockProvider>
   );
@@ -411,15 +418,22 @@ export function timelineMediaSettled(item: TimelineItem, sessionActive: boolean)
   return !sessionActive || !timelineItemIsStreaming(item);
 }
 
-function TimelineClockProvider({ enabled, sessionActive, children }: {
+/** The session's driver, for driver-aware token arithmetic on the turn rows; provided once by the
+ * timeline so the memoised rows need no extra prop. */
+const TimelineDriverContext = createContext<AgentDriverKind | undefined>(undefined);
+
+function TimelineClockProvider({ enabled, sessionActive, driver, children }: {
   enabled: boolean;
   sessionActive: boolean;
+  driver?: AgentDriverKind;
   children: ReactNode;
 }) {
   const now = useTimelineClock(enabled);
   return (
     <TimelineActivityContext.Provider value={sessionActive}>
-      <TimelineClockContext.Provider value={now}>{children}</TimelineClockContext.Provider>
+      <TimelineDriverContext.Provider value={driver}>
+        <TimelineClockContext.Provider value={now}>{children}</TimelineClockContext.Provider>
+      </TimelineDriverContext.Provider>
     </TimelineActivityContext.Provider>
   );
 }
@@ -1947,8 +1961,10 @@ function ActivityTimestampMeta({
 /** "12.4K tok · $0.03": the turn's processed tokens and, when priced, its cost. Tokens are input
  * across every cache bucket plus output; the tooltip lists the buckets so the compact figure never
  * hides where they went. */
-function turnUsageLabel(usage: TurnUsage): { text: string; title: string } {
-  const processed = usage.inputTokens + usage.cachedInputTokens + usage.cacheCreationTokens + usage.outputTokens;
+function turnUsageLabel(usage: TurnUsage, driver: AgentDriverKind | undefined): { text: string; title: string } {
+  // Codex reports input inclusive of its cache reads; Anthropic reports the uncached part.
+  const inclusiveInput = driver === "codex" || driver === "codex-app-server";
+  const processed = usage.inputTokens + (inclusiveInput ? 0 : usage.cachedInputTokens) + usage.cacheCreationTokens + usage.outputTokens;
   const cost = usage.costUsd != null ? formatCost(usage.costUsd) : "";
   const parts = [`${formatTokens(processed)} tok`];
   if (cost) parts.push(cost);
@@ -1991,7 +2007,8 @@ function MessageMeta({
   forkAvailability?: ConversationForkAvailability;
 }) {
   const duration = durationMs != null ? formatDuration(durationMs) : "";
-  const usage = turnUsage ? turnUsageLabel(turnUsage) : null;
+  const driver = useContext(TimelineDriverContext);
+  const usage = turnUsage ? turnUsageLabel(turnUsage, driver) : null;
   const timestamp = Number.isFinite(createdAt);
   if (!timestamp && !duration && !usage && !copyText && !onEditAndResend && !onEditInFork && !forkAvailability) return null;
   return (

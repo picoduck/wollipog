@@ -1143,8 +1143,8 @@ test("a turn's parentless usage is stamped on its user message and later reports
   ]);
   const users = items.filter((item) => item.kind === "user_message") as Array<Extract<TimelineItem, { kind: "user_message" }>>;
   assert.deepEqual(users[0]!.turnUsage, {
-    inputTokens: 100, outputTokens: 40, cachedInputTokens: 900, cacheCreationTokens: 50, costUsd: 0.02, model: "claude-fable-5-1",
-  }, "subagent usage never lands on the turn; the parentless report does");
+    inputTokens: 110, outputTokens: 44, cachedInputTokens: 900, cacheCreationTokens: 50, costUsd: 0.02, model: "claude-fable-5-1",
+  }, "subagent usage never lands on the turn; every parentless report for the turn adds to it");
   assert.deepEqual(users[1]!.turnUsage, { inputTokens: 7, outputTokens: 3, cachedInputTokens: 0, cacheCreationTokens: 0 });
   assert.equal("costUsd" in users[1]!.turnUsage!, false, "an unpriced turn carries no cost rather than $0");
 });

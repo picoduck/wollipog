@@ -828,7 +828,7 @@ export class TimelineBuilder {
                 Number.isFinite(ev.ts) && ev.ts >= item.createdAt
                 ? ev.ts - item.createdAt
                 : undefined;
-              const durationMs = providerDuration ?? observedDuration;
+              const durationMs = item.durationMs == null ? (providerDuration ?? observedDuration) : undefined;
               const turnUsage = turnUsageFrom(p);
               if (durationMs != null || turnUsage) {
                 this.items[this.activeUserIndex] = {
@@ -841,7 +841,9 @@ export class TimelineBuilder {
                 this.markDirty(this.activeUserIndex);
               }
             }
-            this.activeUserIndex = null;
+            // The prompt stays the turn's owner until the next prompt arrives: a persistent
+            // process can settle one turn in more than one usage report, and each must land on
+            // the same row. The duration is stamped once, by the first report that carries one.
           }
           break;
         }
