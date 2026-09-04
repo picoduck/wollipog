@@ -21,7 +21,6 @@ import {
   runnerSupportsProtocol,
   providerSupportsConversationFork,
   type PromptImageInput,
-  type QueuedPromptDraft,
   type QueuedPromptView,
   type SessionConfig,
   type SessionReminderView,
@@ -179,7 +178,22 @@ import {
 } from "../session-project-assignment.js";
 import { durableInboxProjectKey, INBOX_NO_PROJECT_SPLIT_KEY } from "../inbox.js";
 import { ChoiceCards, type ChoiceCardOption } from "./ui/ChoiceControls.js";
-import { reconcileQueuedEditRecovery } from "../queued-edit-recovery.js";
+import {
+  clearDurableQueuedEditRecoveriesForAccount,
+  clearDurableQueuedEditRecovery,
+  clearRuntimeQueuedEditRecoveriesForInstance,
+  clearRuntimeQueuedEditRecovery,
+  cloneQueuedPromptEditRecovery,
+  loadDurableQueuedEditRecovery,
+  loadRuntimeQueuedEditRecovery,
+  queuedEditRecoveryAccountKey,
+  reconcileQueuedEditRecovery,
+  saveDurableQueuedEditRecovery,
+  storeRuntimeQueuedEditRecovery,
+  type QueuedEditRecoveryScope,
+  type QueuedPromptEditRecovery,
+  type QueuedPromptEditState,
+} from "../queued-edit-recovery.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
@@ -198,16 +212,6 @@ const OPENING_HISTORY_HEADROOM_PX = EARLIER_ACTIVITY_TRIGGER_PX;
 type EarlierActivityIntent = "single-scroll" | "touch-traversal";
 
 type ComposerMutationKind = "send" | "steer" | "promote" | "edit" | "stop";
-interface QueuedPromptEditState extends QueuedPromptDraft {
-  submissionId?: string;
-  submissionFingerprint?: string;
-  displacedDraft: { text: string; images: PromptImageInput[] };
-}
-interface QueuedPromptEditRecovery {
-  edit: QueuedPromptEditState;
-  draft: { text: string; images: PromptImageInput[] };
-  error?: string;
-}
 type ComposerMutationEntry = {
   token: symbol;
   kind: ComposerMutationKind;
@@ -217,7 +221,6 @@ type ComposerMutationEntry = {
 };
 const composerMutationRegistry = new Map<string, ComposerMutationEntry>();
 const composerMutationRecoveries = new Map<string, { text: string; images: PromptImageInput[] }>();
-const queuedPromptEditRecoveries = new Map<string, QueuedPromptEditRecovery>();
 const MAX_COMPOSER_MUTATION_RECOVERIES = 20;
 const composerMutationListeners = new Map<string, Set<() => void>>();
 
@@ -225,26 +228,23 @@ function composerMutationKey(instanceScope: string, sessionId: string): string {
   return `${instanceScope}\u0000${sessionId}`;
 }
 
-function notifyComposerMutation(key: string): void {
-  for (const listener of composerMutationListeners.get(key) ?? []) listener();
+/** Forget page-lifetime composer state when an authenticated instance is retired or replaced. */
+export function clearSessionDetailComposerRuntimeForInstance(instanceScope: string): void {
+  const prefix = `${instanceScope}\u0000`;
+  const affected = new Set<string>();
+  for (const registry of [composerMutationRegistry, composerMutationRecoveries]) {
+    for (const key of registry.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      registry.delete(key);
+      affected.add(key);
+    }
+  }
+  clearRuntimeQueuedEditRecoveriesForInstance(instanceScope);
+  for (const key of affected) notifyComposerMutation(key);
 }
 
-function cloneQueuedPromptEditRecovery(recovery: QueuedPromptEditRecovery): QueuedPromptEditRecovery {
-  return {
-    ...recovery,
-    edit: {
-      ...recovery.edit,
-      images: recovery.edit.images.map((image) => ({ ...image })),
-      displacedDraft: {
-        text: recovery.edit.displacedDraft.text,
-        images: recovery.edit.displacedDraft.images.map((image) => ({ ...image })),
-      },
-    },
-    draft: {
-      text: recovery.draft.text,
-      images: recovery.draft.images.map((image) => ({ ...image })),
-    },
-  };
+function notifyComposerMutation(key: string): void {
+  for (const listener of composerMutationListeners.get(key) ?? []) listener();
 }
 
 function queuedPromptEditMutationRecovery(
@@ -273,20 +273,6 @@ function updateQueuedPromptEditMutationRecovery(
   if (next === current) return;
   composerMutationRegistry.set(key, next);
   notifyComposerMutation(key);
-}
-
-function storeQueuedPromptEditRecovery(key: string, recovery: QueuedPromptEditRecovery): void {
-  queuedPromptEditRecoveries.delete(key);
-  queuedPromptEditRecoveries.set(key, cloneQueuedPromptEditRecovery(recovery));
-  while (queuedPromptEditRecoveries.size > MAX_COMPOSER_MUTATION_RECOVERIES) {
-    const oldest = queuedPromptEditRecoveries.keys().next().value as string | undefined;
-    if (oldest === undefined) break;
-    queuedPromptEditRecoveries.delete(oldest);
-  }
-}
-
-function clearQueuedPromptEditRecovery(key: string): void {
-  queuedPromptEditRecoveries.delete(key);
 }
 
 function reserveComposerMutation(
@@ -618,6 +604,8 @@ function SessionDetailLoaded({
   const [queuedEditBusy, setQueuedEditBusy] = useState(false);
   const [queuedEdit, setQueuedEdit] = useState<QueuedPromptEditState | null>(null);
   const [queuedEditRecovered, setQueuedEditRecovered] = useState(false);
+  const [queuedEditAccountKey, setQueuedEditAccountKey] = useState<string | null>(null);
+  const queuedEditAccountKeyRef = useRef<string | null>(null);
   const queuedEditRef = useRef<QueuedPromptEditState | null>(null);
   queuedEditRef.current = queuedEdit;
   useEffect(() => {
@@ -625,6 +613,46 @@ function SessionDetailLoaded({
     setQueuedEditBusy(false);
     setQueuedEditRecovered(false);
   }, [sessionId]);
+  useEffect(() => {
+    if (mode !== "expanded" || conn !== "online") return;
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    let retryDelayMs = 1_000;
+    const loadIdentity = () => {
+      void api.getIdentity().then(({ context }) => {
+        if (cancelled) return;
+        const nextAccountKey = queuedEditRecoveryAccountKey(context.organizationId, context.userId);
+        const priorAccountKey = queuedEditAccountKeyRef.current;
+        if (priorAccountKey && priorAccountKey !== nextAccountKey) {
+          clearDurableQueuedEditRecoveriesForAccount(instanceScope, priorAccountKey);
+          clearSessionDetailComposerRuntimeForInstance(instanceScope);
+          queuedEditRef.current = null;
+          setQueuedEdit(null);
+          setQueuedEditBusy(false);
+          setQueuedEditRecovered(false);
+          setError(null);
+        }
+        queuedEditAccountKeyRef.current = nextAccountKey;
+        setQueuedEditAccountKey(nextAccountKey);
+      }).catch(() => {
+        if (cancelled) return;
+        // Do not guess an account scope. Retry with bounded backoff so a transient identity error
+        // cannot disable queued editing for the lifetime of an otherwise-online view.
+        retryTimer = window.setTimeout(loadIdentity, retryDelayMs);
+        retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
+      });
+    };
+    loadIdentity();
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [api, conn, instanceScope, mode]);
+  const queuedEditRecoveryScope = useMemo<QueuedEditRecoveryScope | null>(() =>
+    queuedEditAccountKey
+      ? { instanceScope, accountKey: queuedEditAccountKey, sessionId }
+      : null,
+  [instanceScope, queuedEditAccountKey, sessionId]);
   const queueSteeringInFlightRef = useRef(new Set<string>());
   const steeringResolutionInFlightRef = useRef(new Set<string>());
   const [queueSteeringPending, setQueueSteeringPending] = useState<ReadonlySet<string>>(() => new Set());
@@ -735,6 +763,7 @@ function SessionDetailLoaded({
   }>());
   const composerDraftLoaderRef = useRef(composerDraftLoader);
   composerDraftLoaderRef.current = composerDraftLoader;
+  const draftHydrationKeyRef = useRef<string | null>(null);
   const draftHydratedSessionRef = useRef<string | null>(null);
   const suppressedDraftRef = useRef<{ sessionId: string; revision?: string } | null>(null);
   const pendingHydrationCaretRef = useRef<{
@@ -973,6 +1002,22 @@ function SessionDetailLoaded({
     updateComposerSelection(caret);
     setSlashDismissedFor(`${next}\u0000${caret}`);
   }, [updateComposerSelection]);
+  const persistQueuedPromptEditRecovery = useCallback((recovery: QueuedPromptEditRecovery): boolean =>
+    queuedEditRecoveryScope !== null &&
+      saveDurableQueuedEditRecovery(queuedEditRecoveryScope, recovery),
+  [queuedEditRecoveryScope]);
+  const storeQueuedPromptEditRecovery = useCallback((
+    key: string,
+    recovery: QueuedPromptEditRecovery,
+  ): boolean => {
+    if (!queuedEditRecoveryScope) return false;
+    storeRuntimeQueuedEditRecovery(key, queuedEditRecoveryScope.accountKey, recovery);
+    return persistQueuedPromptEditRecovery(recovery);
+  }, [persistQueuedPromptEditRecovery, queuedEditRecoveryScope]);
+  const clearQueuedPromptEditRecovery = useCallback((key: string): void => {
+    clearRuntimeQueuedEditRecovery(key);
+    if (queuedEditRecoveryScope) clearDurableQueuedEditRecovery(queuedEditRecoveryScope);
+  }, [queuedEditRecoveryScope]);
   const restoreQueuedPromptEditRecovery = useCallback((
     recovery: QueuedPromptEditRecovery,
     pending: boolean,
@@ -1080,16 +1125,57 @@ function SessionDetailLoaded({
     // for this session transition so inline test/app wrappers cannot restart hydration on every
     // render, while a deliberate loader replacement made with the next session is still observed.
     const loadDraftForSession = composerDraftLoaderRef.current;
-    draftDirty.current = false;
-    composerComposingRef.current = false;
-    draftHydratedSessionRef.current = null;
-    suppressedDraftRef.current = null;
-    pendingHydrationCaretRef.current = null;
-    pendingHydrationCommitRef.current = null;
+    const hydrationKeyChanged = draftHydrationKeyRef.current !== mutationKey;
+    if (hydrationKeyChanged) {
+      draftHydrationKeyRef.current = mutationKey;
+      draftDirty.current = false;
+      composerComposingRef.current = false;
+      draftHydratedSessionRef.current = null;
+      suppressedDraftRef.current = null;
+      pendingHydrationCaretRef.current = null;
+      pendingHydrationCommitRef.current = null;
+    }
     const pendingQueuedEdit = queuedPromptEditMutationRecovery(activeComposerMutation);
-    const queuedEditRecovery = pendingQueuedEdit ?? queuedPromptEditRecoveries.get(mutationKey);
+    const runtimeQueuedEdit = queuedEditRecoveryScope
+      ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+      : undefined;
+    const storedQueuedEdit = queuedEditRecoveryScope
+      ? loadDurableQueuedEditRecovery(queuedEditRecoveryScope)
+      : undefined;
+    const durableQueuedEdit = storedQueuedEdit && !storedQueuedEdit.error
+      ? { ...storedQueuedEdit, error: "The prior queued message edit outcome was not recorded. Check the current queue before retrying." }
+      : storedQueuedEdit;
+    let queuedEditRecovery = pendingQueuedEdit ?? runtimeQueuedEdit ?? durableQueuedEdit;
+    if (queuedEditRecovery && !pendingQueuedEdit && draftDirty.current && queuedEditRef.current === null) {
+      const displacedDraft = {
+        text: draftState.current.text,
+        images: draftState.current.images.map((image) => ({ ...image })),
+      };
+      queuedEditRecovery = {
+        ...queuedEditRecovery,
+        edit: { ...queuedEditRecovery.edit, displacedDraft },
+      };
+      // Identity can settle after the user has already begun a new ordinary draft. Keep that work
+      // in both draft storage and the recovery's displaced-draft slot before showing the recovery.
+      void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+      if (queuedEditRecoveryScope) {
+        saveDurableQueuedEditRecovery(queuedEditRecoveryScope, queuedEditRecovery);
+        storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
+      }
+    }
     if (queuedEditRecovery) {
+      if (!runtimeQueuedEdit && queuedEditRecoveryScope) {
+        storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
+      }
       restoreQueuedPromptEditRecovery(queuedEditRecovery, pendingQueuedEdit !== undefined);
+      return () => {
+        cancelled = true;
+      };
+    }
+    // Identity can settle after the user has already opened an ordinary queued edit. That edit
+    // owns the composer until it is saved or cancelled; a scope-only hydration rerun must not
+    // replace it with the displaced session draft.
+    if (queuedEditRef.current) {
       return () => {
         cancelled = true;
       };
@@ -1146,7 +1232,7 @@ function SessionDetailLoaded({
     return () => {
       cancelled = true;
     };
-  }, [instanceScope, mutationKey, sessionId, replace, restoreQueuedPromptEditRecovery,
+  }, [instanceScope, mutationKey, queuedEditRecoveryScope, sessionId, replace, restoreQueuedPromptEditRecovery,
     setProgrammaticComposerText]);
 
   useLayoutEffect(() => {
@@ -1180,7 +1266,10 @@ function SessionDetailLoaded({
 
   useEffect(() => {
     if (activeComposerMutation) return;
-    const queuedEditRecovery = queuedPromptEditRecoveries.get(mutationKey);
+    const queuedEditRecovery = (queuedEditRecoveryScope
+      ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+      : undefined) ??
+      (queuedEditRecoveryScope ? loadDurableQueuedEditRecovery(queuedEditRecoveryScope) : undefined);
     if (queuedEditRecovery) {
       suppressedDraftRef.current = null;
       const preserveDraft = draftDirty.current &&
@@ -1239,8 +1328,8 @@ function SessionDetailLoaded({
       cancelled = true;
       if (!completed && suppressedDraftRef.current === null) suppressedDraftRef.current = suppressed;
     };
-  }, [activeComposerMutation, instanceScope, mutationKey, sessionId, replace,
-    restoreQueuedPromptEditRecovery, setProgrammaticComposerText]);
+  }, [activeComposerMutation, instanceScope, mutationKey, queuedEditRecoveryScope, sessionId, replace,
+    restoreQueuedPromptEditRecovery, setProgrammaticComposerText, storeQueuedPromptEditRecovery]);
 
   // Coalesce rapid edits so typing beside a large base64 attachment does not rewrite it on every
   // keystroke. Dirty edits save even while hydration is pending; unmount cleanup below flushes
@@ -1249,7 +1338,9 @@ function SessionDetailLoaded({
     if (!draftDirty.current) return;
     const timer = window.setTimeout(() => {
       if (queuedEditRef.current) {
-        const recovery = queuedPromptEditRecoveries.get(mutationKey);
+        const recovery = queuedEditRecoveryScope
+          ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+          : undefined;
         if (recovery) {
           storeQueuedPromptEditRecovery(mutationKey, {
             ...recovery,
@@ -1259,11 +1350,13 @@ function SessionDetailLoaded({
         } else {
           const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
           if (pending) {
-            updateQueuedPromptEditMutationRecovery(mutationKey, {
+            const updated = {
               ...pending,
               edit: queuedEditRef.current,
               draft: draftState.current,
-            });
+            };
+            updateQueuedPromptEditMutationRecovery(mutationKey, updated);
+            persistQueuedPromptEditRecovery(updated);
           }
         }
         return;
@@ -1277,13 +1370,16 @@ function SessionDetailLoaded({
       void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [images, instanceScope, mutationKey, sessionId, text]);
+  }, [images, instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope, sessionId,
+    storeQueuedPromptEditRecovery, text]);
 
   useEffect(
     () => () => {
       if (!draftDirty.current) return;
       if (queuedEditRef.current) {
-        const recovery = queuedPromptEditRecoveries.get(mutationKey);
+        const recovery = queuedEditRecoveryScope
+          ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+          : undefined;
         if (recovery) {
           storeQueuedPromptEditRecovery(mutationKey, {
             ...recovery,
@@ -1293,11 +1389,13 @@ function SessionDetailLoaded({
         } else {
           const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
           if (pending) {
-            updateQueuedPromptEditMutationRecovery(mutationKey, {
+            const updated = {
               ...pending,
               edit: queuedEditRef.current,
               draft: draftState.current,
-            });
+            };
+            updateQueuedPromptEditMutationRecovery(mutationKey, updated);
+            persistQueuedPromptEditRecovery(updated);
           }
         }
         return;
@@ -1310,7 +1408,8 @@ function SessionDetailLoaded({
       }
       void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
     },
-    [instanceScope, mutationKey, sessionId],
+    [instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope, sessionId,
+      storeQueuedPromptEditRecovery],
   );
 
   // Mark the session seen while it is open so the inbox unread badge stays current.
@@ -2894,36 +2993,84 @@ function SessionDetailLoaded({
       images: images.map((image) => ({ ...image })),
     };
     if (!submittedDraft.text && submittedDraft.images.length === 0) return;
-    const submissionFingerprint = JSON.stringify(submittedDraft);
-    const submissionId = queuedEdit.submissionId && queuedEdit.submissionFingerprint === submissionFingerprint
-      ? queuedEdit.submissionId
-      : browserRandomUUID();
-    const editForAttempt = queuedEdit.submissionId === submissionId
-      ? queuedEdit
-      : { ...queuedEdit, submissionId, submissionFingerprint };
-    if (editForAttempt !== queuedEdit) {
-      queuedEditRef.current = editForAttempt;
-      setQueuedEdit((current) => current?.promptId === queuedEdit.promptId ? editForAttempt : current);
+    if (!queuedEditRecoveryScope) {
+      setError("Queued message edit was not sent because authenticated recovery storage is not ready.");
+      return;
     }
-    const recovery: QueuedPromptEditRecovery = { edit: editForAttempt, draft: submittedDraft };
+    let recovery: QueuedPromptEditRecovery = { edit: queuedEdit, draft: submittedDraft };
     const mutation = reserveComposerMutation(mutationKey, "edit", submittedDraft, recovery);
     if (!mutation) return;
-    clearQueuedPromptEditRecovery(mutationKey);
     const generation = viewGenerationRef.current;
     let editAccepted = false;
     setQueuedEditBusy(true);
     setError(null);
     try {
+      // Browser paste data is base64 and can legitimately exceed localStorage quotas. Upload every
+      // image first, then persist the compact immutable references before submitting the edit.
+      // Artifact creation is not a queued-edit submission and references remain safe to retry.
+      const editImageCount = queuedEdit.images.length;
+      const displacedImageCount = queuedEdit.displacedDraft.images.length;
+      let preparedImages: PromptImageInput[];
+      try {
+        preparedImages = await api.preparePromptImages(sessionId, [
+          ...queuedEdit.images,
+          ...queuedEdit.displacedDraft.images,
+          ...submittedDraft.images,
+        ]);
+      } catch (cause) {
+        if (viewGenerationRef.current === generation) {
+          setError(`Queued message edit was not sent. ${(cause as Error).message}`);
+        }
+        return;
+      }
+      const preparedEditImages = preparedImages.slice(0, editImageCount);
+      const preparedDisplacedImages = preparedImages.slice(
+        editImageCount,
+        editImageCount + displacedImageCount,
+      );
+      const preparedDraft = {
+        text: submittedDraft.text,
+        images: preparedImages.slice(editImageCount + displacedImageCount),
+      };
+      const submissionFingerprint = JSON.stringify(preparedDraft);
+      const submissionId = queuedEdit.submissionId && queuedEdit.submissionFingerprint === submissionFingerprint
+        ? queuedEdit.submissionId
+        : browserRandomUUID();
+      const editForAttempt: QueuedPromptEditState = {
+        ...queuedEdit,
+        images: preparedEditImages,
+        displacedDraft: {
+          ...queuedEdit.displacedDraft,
+          images: preparedDisplacedImages,
+        },
+        submissionId,
+        submissionFingerprint,
+      };
+      recovery = { edit: editForAttempt, draft: preparedDraft };
+      updateQueuedPromptEditMutationRecovery(mutationKey, recovery);
+      updateComposerMutationDraft(mutationKey, mutation.token, preparedDraft);
+      if (viewGenerationRef.current === generation) {
+        queuedEditRef.current = editForAttempt;
+        setQueuedEdit(editForAttempt);
+        draftState.current = preparedDraft;
+        replace(preparedDraft.images);
+      }
+      if (!persistQueuedPromptEditRecovery(recovery)) {
+        if (viewGenerationRef.current === generation) {
+          setError("Queued message edit was not sent because its recovery could not be saved safely.");
+        }
+        return;
+      }
       await api.editQueuedPrompt(sessionId, queuedEdit.promptId, {
         submissionId,
         expectedRevision: queuedEdit.editRevision,
-        text: submittedDraft.text,
-        images: submittedDraft.images,
+        text: preparedDraft.text,
+        images: preparedDraft.images,
       });
       editAccepted = true;
       clearQueuedPromptEditRecovery(mutationKey);
       if (viewGenerationRef.current !== generation) return;
-      const displaced = queuedEdit.displacedDraft;
+      const displaced = editForAttempt.displacedDraft;
       markDraftDirty();
       queuedEditRef.current = null;
       setQueuedEdit(null);

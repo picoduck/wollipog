@@ -9,6 +9,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { COMPOSER_FOCUS_DIAGNOSTIC_EVENT } from "../composer-focus.js";
 import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
+import { LOCAL_INSTANCE_SCOPE } from "../instance-storage.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import {
   deleteComposerDraftIfMatches,
@@ -17,8 +18,14 @@ import {
 } from "../composer-drafts.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
+import {
+  QUEUED_EDIT_RECOVERY_MAX_BYTES,
+  loadDurableQueuedEditRecovery,
+  loadRuntimeQueuedEditRecovery,
+  queuedEditRecoveryAccountKey,
+} from "../queued-edit-recovery.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
-import { SessionDetail } from "./SessionDetail.js";
+import { clearSessionDetailComposerRuntimeForInstance, SessionDetail } from "./SessionDetail.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const VIEWPORT_HEIGHT = 1_200;
@@ -167,9 +174,13 @@ interface Fixture {
   rerenderWithDraftLoader: (loader: ComposerDraftLoader) => Promise<void>;
   rerenderSessionWithDraftLoader: (sessionId: string, loader: ComposerDraftLoader) => Promise<void>;
   remountWithDraftLoader: (loader: ComposerDraftLoader) => Promise<HTMLTextAreaElement>;
+  fullReloadWithDraftLoader: (loader: ComposerDraftLoader) => Promise<HTMLTextAreaElement>;
+  sessionId: string;
   alternateSessionId: string;
+  instanceScope: string;
   pushSession: (patch: Partial<SessionView>) => Promise<void>;
   pushEvent: (payload: SessionEvent["payload"]) => Promise<void>;
+  closeSocket: (code: number) => Promise<void>;
 }
 
 type ComposerDraftLoader = (sessionId: string, instanceScope: string) => Promise<ComposerDraft | null>;
@@ -240,6 +251,24 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     ...api,
     // The authoritative snapshot below wins before the routed-session fallback needs to settle.
     session: () => new Promise<never>(() => {}),
+    getIdentity: async () => ({
+      context: {
+        userId: "user-1",
+        userName: "Test User",
+        organizationId: "org-1",
+        organizationName: "Test Organization",
+        role: "owner" as const,
+        deviceId: "device-1",
+        localBootstrap: false,
+      },
+      organizations: [],
+      memberships: [],
+      teams: [],
+    }),
+    preparePromptImages: async (
+      _sessionId: string,
+      images: Parameters<ApiClient["preparePromptImages"]>[1],
+    ) => images,
     ...options.client,
   } as unknown as ApiClient;
   const rightPanel = {
@@ -263,23 +292,29 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   let detailMount = 0;
-  const renderWithDraftLoader = (loader: ComposerDraftLoader, sessionId = currentSession.id) => {
+  const renderWithDraftLoader = (
+    loader: ComposerDraftLoader,
+    sessionId = currentSession.id,
+    showDetail = true,
+  ) => {
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
           {options.mainEventPayloads && (
             <EventSeeder sessionId={currentSession.id} payloads={options.mainEventPayloads} />
           )}
-          <SessionDetail
-            key={detailMount}
-            sessionId={sessionId}
-            rightPanel={rightPanel}
-            onOpenTerminal={() => {}}
-            pinnedOpen={false}
-            focusComposer
-            composerDraftLoader={loader}
-            composerDraftCleanup={options.composerDraftCleanup}
-          />
+          {showDetail && (
+            <SessionDetail
+              key={detailMount}
+              sessionId={sessionId}
+              rightPanel={rightPanel}
+              onOpenTerminal={() => {}}
+              pinnedOpen={false}
+              focusComposer
+              composerDraftLoader={loader}
+              composerDraftCleanup={options.composerDraftCleanup}
+            />
+          )}
         </StoreProvider>
       </ApiProvider>,
     );
@@ -299,6 +334,18 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     const remounted = container.querySelector(".composer-input") as HTMLTextAreaElement | null;
     assert.ok(remounted, "the remounted SessionDetail composer is available");
     return remounted;
+  };
+  const fullReloadWithDraftLoader = async (loader: ComposerDraftLoader) => {
+    await act(async () => renderWithDraftLoader(loader, currentSession.id, false));
+    clearSessionDetailComposerRuntimeForInstance(LOCAL_INSTANCE_SCOPE);
+    detailMount += 1;
+    await act(async () => {
+      renderWithDraftLoader(loader);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const reloaded = container.querySelector(".composer-input") as HTMLTextAreaElement | null;
+    assert.ok(reloaded, "the fully reloaded SessionDetail composer is available");
+    return reloaded;
   };
   await act(async () => {
     renderWithDraftLoader(() => draft.promise);
@@ -329,7 +376,10 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     rerenderWithDraftLoader,
     rerenderSessionWithDraftLoader,
     remountWithDraftLoader,
+    fullReloadWithDraftLoader,
+    sessionId: currentSession.id,
     alternateSessionId: alternateSession.id,
+    instanceScope: LOCAL_INSTANCE_SCOPE,
     pushSession: async (patch) => {
       Object.assign(currentSession, patch);
       await act(async () => { socket.push({ type: "session_upsert", session: { ...currentSession } }); });
@@ -343,6 +393,9 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
           event: { id: seq, sessionId: currentSession.id, seq, ts: seq + 1, payload },
         });
       });
+    },
+    closeSocket: async (code) => {
+      await act(async () => { socket.onclose?.({ code }); });
     },
   };
 }
@@ -407,6 +460,12 @@ async function waitForComposerSendToSettle(fixture: Fixture, timeoutMs = 5_000):
 }
 
 const submittedImage = { mimeType: "image/png", data: "aW1hZ2U=" } as const;
+const preparedImageReference = {
+  artifactId: "art-prepared-image",
+  mimeType: "image/png",
+  sizeBytes: 5,
+  sha256: "a".repeat(64),
+} as const;
 
 test("queued message editing loads exact content and Cancel Edit restores the displaced draft", async () => {
   const draft = deferred<ComposerDraft | null>();
@@ -708,6 +767,376 @@ test("a live queue revision change disables recovered retry while preserving con
   }
 });
 
+test("a failed queued edit survives a simulated full runtime reload with its exact retry identity", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      preparePromptImages: async (_sessionId, images) => images.map(() => preparedImageReference),
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: {
+          promptId,
+          text: "Original exact content",
+          images: [submittedImage],
+          editRevision: "qer_exact",
+        },
+      }),
+      editQueuedPrompt: async (_sessionId, _promptId, request) => {
+        edits.push(request);
+        throw new Error("The request timed out before confirmation.");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced local draft");
+    await flushAsyncWork();
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.value = "Durable recovered content";
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 1);
+
+    const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(reloaded.value, "Durable recovered content");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Recovered Queued Message/);
+
+    const retry = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { retry.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 2);
+    assert.equal(edits[1]?.submissionId, edits[0]?.submissionId);
+    assert.equal(edits[1]?.expectedRevision, "qer_exact");
+    assert.deepEqual(edits[1]?.images, [preparedImageReference]);
+
+    await fixture.closeSocket(1008);
+    await flushAsyncWork();
+    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Recovered Queued Message/);
+    assert.ok(loadDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.sessionId,
+    }), "a temporary re-pairing state must not erase durable recovery");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a recovery persistence refusal blocks submission and releases the edit lock", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: { promptId, text: "Original exact content", images: [], editRevision: "qer_exact" },
+      }),
+      editQueuedPrompt: async (_sessionId, _promptId, request) => {
+        edits.push(request);
+        throw new Error("The request timed out before confirmation.");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await flushAsyncWork();
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.value = "x".repeat(QUEUED_EDIT_RECOVERY_MAX_BYTES);
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.deepEqual(edits, []);
+    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /could not be saved safely/i);
+
+    await act(async () => {
+      fixture.composer.value = "Small retry after storage refusal";
+      fireDomEvent.change(fixture.composer);
+    });
+    await flushAsyncWork();
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 1, "the failed persistence reservation must not wedge later saves");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a transient identity failure retries without remounting the Session", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  let identityCalls = 0;
+  const fixture = await mountFixture(draft, {
+    client: {
+      getIdentity: async () => {
+        identityCalls += 1;
+        if (identityCalls === 1) throw new Error("temporary identity failure");
+        return {
+          context: {
+            userId: "user-1",
+            userName: "Test User",
+            organizationId: "org-1",
+            organizationName: "Test Organization",
+            role: "owner" as const,
+            deviceId: "device-1",
+            localBootstrap: false,
+          },
+          organizations: [],
+          memberships: [],
+          teams: [],
+        };
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Ordinary draft");
+    await flushAsyncWork(1_100);
+    assert.equal(identityCalls, 2);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("late identity hydration cannot replace an open unsent queued edit", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const delayedIdentity = deferred<Awaited<ReturnType<ApiClient["getIdentity"]>>>();
+  const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      getIdentity: async () => delayedIdentity.promise,
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: { promptId, text: "Original exact content", images: [], editRevision: "qer_exact" },
+      }),
+      editQueuedPrompt: async (_sessionId, _promptId, request) => {
+        edits.push(request);
+        throw new Error("The request timed out before confirmation.");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced local draft");
+    await flushAsyncWork();
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Original exact content");
+
+    await act(async () => {
+      delayedIdentity.resolve({
+        context: {
+          userId: "user-1",
+          userName: "Test User",
+          organizationId: "org-1",
+          organizationName: "Test Organization",
+          role: "owner",
+          deviceId: "device-1",
+          localBootstrap: false,
+        },
+        organizations: [],
+        memberships: [],
+        teams: [],
+      });
+      await delayedIdentity.promise;
+    });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Original exact content");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits[0]?.text, "Original exact content");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("identity hydration preserves an ordinary draft typed before durable recovery appears", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const delayedIdentity = deferred<Awaited<ReturnType<ApiClient["getIdentity"]>>>();
+  const identity = {
+    context: {
+      userId: "user-1",
+      userName: "Test User",
+      organizationId: "org-1",
+      organizationName: "Test Organization",
+      role: "owner" as const,
+      deviceId: "device-1",
+      localBootstrap: false,
+    },
+    organizations: [],
+    memberships: [],
+    teams: [],
+  };
+  let identityCalls = 0;
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      getIdentity: async () => {
+        identityCalls += 1;
+        return identityCalls === 1 ? identity : delayedIdentity.promise;
+      },
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: {
+          promptId,
+          text: "Original exact content",
+          images: [],
+          editRevision: "qer_exact",
+        },
+      }),
+      editQueuedPrompt: async () => {
+        throw new Error("The request timed out before confirmation.");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Earlier displaced draft");
+    await flushAsyncWork();
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.value = "Recovered queued edit";
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+
+    const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    await act(async () => {
+      reloaded.value = "New ordinary draft typed during sign-in";
+      fireDomEvent.change(reloaded);
+    });
+    assert.equal(loadRuntimeQueuedEditRecovery(
+      `${fixture.instanceScope}\u0000${fixture.sessionId}`,
+      queuedEditRecoveryAccountKey("org-1", "user-1"),
+    ), undefined);
+
+    await act(async () => {
+      delayedIdentity.resolve(identity);
+      await delayedIdentity.promise;
+    });
+    await flushAsyncWork();
+    assert.equal(reloaded.value, "Recovered queued edit");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+
+    const dismiss = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Dismiss Recovery") as HTMLButtonElement | undefined;
+    assert.ok(dismiss);
+    await act(async () => { dismiss.click(); });
+    await flushAsyncWork();
+    assert.equal(reloaded.value, "New ordinary draft typed during sign-in");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a queued edit interrupted by runtime reload returns as unconfirmed recovery", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const editResult = deferred<Awaited<ReturnType<ApiClient["editQueuedPrompt"]>>>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: {
+          promptId,
+          text: "Original exact content",
+          images: [],
+          editRevision: "qer_exact",
+        },
+      }),
+      editQueuedPrompt: async () => editResult.promise,
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced local draft");
+    await flushAsyncWork();
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.value = "Indeterminate submission";
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.ok(save.querySelector(".spinner"));
+
+    const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    editResult.reject(new Error("The reloaded page interrupted the request."));
+    await flushAsyncWork();
+    assert.equal(reloaded.value, "Indeterminate submission");
+    assert.equal(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'), null);
+    assert.match(
+      fixture.container.querySelector(".composer-error")?.textContent ?? "",
+      /outcome was not recorded/i,
+    );
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a queued edit accepted after navigation restores only the displaced draft", async () => {
   const draft = deferred<ComposerDraft | null>();
   const editResult = deferred<Awaited<ReturnType<ApiClient["editQueuedPrompt"]>>>();
@@ -769,6 +1198,7 @@ test("a queued edit accepted after navigation restores only the displaced draft"
     assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
     assert.equal(fixture.container.querySelector(".composer-error"), null);
 
+    clearSessionDetailComposerRuntimeForInstance(fixture.instanceScope);
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "Displaced local draft");
@@ -834,6 +1264,12 @@ test("a queued edit accepted after navigation clears the composer when its displ
     });
     await flushAsyncWork();
     assert.equal(pending.value, "");
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+
+    clearSessionDetailComposerRuntimeForInstance(fixture.instanceScope);
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "");
     assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
   } finally {
     await unmountFixture(fixture);
