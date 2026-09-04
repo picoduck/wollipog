@@ -270,6 +270,74 @@ test("explicit question dismissal records cancelled telemetry and a dismissed li
   }
 });
 
+test("startup preserves a stranded question as a dismissible recovery and resolves it exactly once", () => {
+  const { sm, sent, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "question-before-restart",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+    // Reproduce the metadata left by the affected older startup path: history still contains the
+    // unresolved request, but the actionable card and waiting status were erased.
+    store.patchMeta("s_perm", { status: "idle", pendingApproval: null });
+
+    sm.reconcileStore();
+
+    const recovered = store.readMeta("s_perm")!;
+    assert.equal(recovered.status, "input_required");
+    assert.equal(recovered.questionRecoveryReconciled, true);
+    assert.deepEqual(recovered.pendingApproval, {
+      requestId: "question-before-restart",
+      title: "Which target?",
+      options: [],
+      kind: "question",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+      recoveryReason: "provider_restart",
+    });
+
+    sm.answerQuestion("s_perm", "question-before-restart", {}, "dismiss");
+    sm.answerQuestion("s_perm", "question-before-restart", {}, "dismiss");
+
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+    assert.deepEqual((eventsOf(sent, "question_resolved")[0] as { payload: unknown }).payload, {
+      kind: "question_resolved",
+      requestId: "question-before-restart",
+      answered: false,
+      resolutionReason: "dismissed",
+    });
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("startup never resurrects a question that already has a durable resolution", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "resolved-before-restart",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_resolved",
+      requestId: "resolved-before-restart",
+      answered: true,
+      resolutionReason: "submitted",
+    });
+    (sm as any).emitStatus("s_perm", "idle");
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
 test("authentication requests persist as sign-in input without exposing a distinct routing path", () => {
   const { sm, store, cleanup } = makeHarness(true);
   try {

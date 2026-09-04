@@ -120,6 +120,8 @@ export interface SessionMeta {
   costUsd: number;
   preview: string | null;
   pendingApproval: PendingApproval | null;
+  /** One-time upgrade scan repaired any question that an older startup path stranded in history. */
+  questionRecoveryReconciled?: true;
   /** Runner-only structural identity for the provider installation + credential home/source. */
   providerCredentialScopeId?: string;
   /** Runner-only account/credential digest observed while provider-native status was authenticated. */

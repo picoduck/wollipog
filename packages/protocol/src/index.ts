@@ -1618,6 +1618,7 @@ export interface PolicyHookEvaluationResponse {
 export type SessionAttentionKind =
   | "approval_required"
   | "answer_required"
+  | "recovery_required"
   | "authentication_required"
   | "review_requested"
   | "input_required";
@@ -1633,6 +1634,13 @@ export function sessionAttentionStatus(
   session: Pick<SessionView, "status" | "pendingApproval">,
 ): SessionAttentionStatus | null {
   const pending = session.pendingApproval;
+  if (pending?.kind === "question" && pending.recoveryReason === "provider_restart") {
+    return {
+      kind: "recovery_required",
+      label: "Recovery Required",
+      description: "The runner restarted while the agent was waiting for an answer. Resolve the preserved question before continuing.",
+    };
+  }
   if (pending?.kind === "question") {
     return {
       kind: "answer_required",
@@ -1839,6 +1847,9 @@ export interface PendingApproval {
   kind?: ApprovalKind;
   /** The structured questions when kind === "question". */
   questions?: AgentQuestion[];
+  /** The provider-owned response callback ended with its process. The question remains visible and
+   * dismissible, but must not accept an answer that can no longer reach the exact request. */
+  recoveryReason?: "provider_restart";
   /** What is being approved, when the driver can say (kind "permission"). */
   context?: ApprovalContext;
   /** Content-safe provenance for a CP-owned Claude hook ask. */

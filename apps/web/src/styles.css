@@ -9956,6 +9956,16 @@ body.shell-dock-dragging * {
   font-size: var(--text-sm);
   line-height: 1.4;
 }
+.question-recovery {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--amber);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+  color: var(--text-dim);
+  font-size: var(--text-base);
+  line-height: 1.45;
+}
 .question-availability:empty {
   margin-top: 0;
 }

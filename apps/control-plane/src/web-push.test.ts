@@ -626,6 +626,16 @@ test("pushDecision fires on the attention transitions and stays quiet otherwise"
     pendingApproval: { requestId: "r", title: "Which DB?", options: [], kind: "question" },
   } as Partial<SessionView>));
   assert.match(q!.body, /^Answer required/);
+  const recovery = pushDecision(prev("running"), view("input_required", {
+    pendingApproval: {
+      requestId: "recovered",
+      title: "Which DB?",
+      options: [],
+      kind: "question",
+      recoveryReason: "provider_restart",
+    },
+  } as Partial<SessionView>));
+  assert.match(recovery!.body, /^Recovery required/);
   const auth = pushDecision(prev("running"), view("input_required", {
     pendingApproval: { requestId: "auth", title: "Sign in to Gemini CLI", options: [], kind: "authentication" },
   } as Partial<SessionView>));

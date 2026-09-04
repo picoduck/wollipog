@@ -1399,6 +1399,35 @@ export class SessionManager {
     );
   }
 
+  /** Recover the newest question that durable history still shows as unresolved. A later user turn
+   * or permission request proves the old question is no longer the active interaction, even when
+   * an older runner failed to append an explicit replacement resolution. */
+  private unresolvedQuestionFromHistory(sessionId: string): SessionMeta["pendingApproval"] {
+    let pending: SessionMeta["pendingApproval"] = null;
+    for (const event of this.store.readEvents(sessionId)) {
+      const payload = event.payload;
+      if (payload.kind === "question_request") {
+        pending = {
+          requestId: payload.requestId,
+          title: payload.questions[0]?.question ?? "The agent has a question",
+          options: [],
+          kind: "question",
+          questions: payload.questions,
+        };
+      } else if (payload.kind === "question_resolved" && pending?.requestId === payload.requestId) {
+        pending = null;
+      } else if (pending && (
+        payload.kind === "user_message" || payload.kind === "agent_message" ||
+        payload.kind === "agent_thought" || payload.kind === "tool_call" ||
+        payload.kind === "permission_request" || payload.kind === "conversation_checkpoint" ||
+        payload.kind === "turn_interrupted"
+      )) {
+        pending = null;
+      }
+    }
+    return pending;
+  }
+
   /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
    * snapshots we report are honest — they remain resumable. */
   reconcileStore(): void {
@@ -1464,6 +1493,18 @@ export class SessionManager {
       if (reconciled.status !== "stopped" && automatic && this.queuedBackgroundJobIds(reconciled).length) {
         this.scheduleBackgroundContinuation(m.sessionId);
       }
+      const terminal = reconciled.status === "completed" || reconciled.status === "failed" ||
+        reconciled.status === "stopped";
+      let historicalQuestion: SessionMeta["pendingApproval"] = null;
+      if (!terminal && !reconciled.pendingApproval && reconciled.questionRecoveryReconciled !== true) {
+        historicalQuestion = this.unresolvedQuestionFromHistory(m.sessionId);
+        reconciled = this.store.patchMeta(m.sessionId, { questionRecoveryReconciled: true }) ?? reconciled;
+      }
+      const recoverableQuestion = terminal
+        ? null
+        : reconciled.pendingApproval?.kind === "question"
+          ? reconciled.pendingApproval
+          : historicalQuestion;
       if (reconciled.providerAuthBlock && reconciled.status === "stopped") {
         // Terminal operator intent dominates a stale/incomplete recovery generation.
         this.store.patchMeta(m.sessionId, {
@@ -1483,9 +1524,22 @@ export class SessionManager {
           status: "input_required",
           pendingApproval: projection,
         });
+      } else if (terminal) {
+        if (reconciled.pendingApproval) this.store.patchMeta(m.sessionId, { pendingApproval: null });
+      } else if (recoverableQuestion) {
+        // A provider response callback cannot survive process loss. Preserve the exact durable
+        // question and request identity as an explicit recovery card instead of making the
+        // transcript claim it is awaiting an answer while the session silently becomes idle.
+        this.store.patchMeta(m.sessionId, {
+          status: "input_required",
+          pendingApproval: {
+            ...recoverableQuestion,
+            recoveryReason: "provider_restart",
+          },
+        });
       } else if (reconciled.status === "starting" || reconciled.status === "running" ||
           reconciled.status === "queued" || reconciled.status === "input_required") {
-        // The process that owned any pending approval is gone — clear the stale card too.
+        // The process that owned any other pending approval is gone — clear the stale card too.
         this.store.patchMeta(m.sessionId, { status: "idle", pendingApproval: null });
       }
       // A crash mid-worktree-setup leaves the pending flag stranded; nothing will resolve it
@@ -7410,6 +7464,18 @@ export class SessionManager {
         answered,
         resolutionReason: answered ? "submitted" : "dismissed",
       });
+      return;
+    }
+    const recovered = this.store.readMeta(sessionId)?.pendingApproval;
+    if (recovered?.kind === "question" && recovered.requestId === requestId &&
+        recovered.recoveryReason === "provider_restart" && action === "dismiss") {
+      this.emitEvent(sessionId, {
+        kind: "question_resolved",
+        requestId,
+        answered: false,
+        resolutionReason: "dismissed",
+      });
+      this.emitStatus(sessionId, "idle");
       return;
     }
     this.approvalStarted.delete(`${sessionId}:${requestId}`);
