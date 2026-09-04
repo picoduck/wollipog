@@ -296,6 +296,12 @@ test("Untracked capability and push receipt badges expose honest Title Case boun
       [...container.querySelectorAll(".background-work-badge")].map((badge) => badge.textContent),
       ["Detached Work: Untracked", "Push Service Accepted", "Notification Displayed", "Notification Clicked"],
     );
+    assert.deepEqual(
+      [...container.querySelectorAll(".background-work-badge[data-attention]")]
+        .map((badge) => badge.getAttribute("data-attention")),
+      ["false", "false", "false"],
+      "settled notification history retains its non-attention styling hook",
+    );
     assert.match(container.querySelector(".background-work-untracked")?.getAttribute("title") ?? "", /cannot promise/i);
   } finally {
     await act(async () => { root.unmount(); });

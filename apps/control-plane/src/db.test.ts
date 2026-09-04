@@ -2747,6 +2747,9 @@ test("managed background job views are bounded, prioritize active work, and omit
   assert.equal(listed?.backgroundJobsTruncated, undefined);
   assert.equal(listed?.backgroundJobsAvailable, true,
     "bulk projections retain the compact signal needed to load the inspection payload on demand");
+  db.createSession(newSession({ id: "background-empty" }));
+  assert.equal(db.getSession("background-empty")?.backgroundJobsAvailable, false,
+    "current control planes explicitly distinguish an empty inventory from an unsupported projection");
   assert.ok(view.some((job) => job.id === "job-000"), "unresolved active work survives history truncation");
   const safeKeys = new Set([
     "id", "parentTurnId", "launchType", "registeredAt", "lastObservedAt", "sourcePresent",

@@ -179,6 +179,8 @@ export function RightPanel({
   earlierActivityUnloaded = false,
   parentTurnEventIds = EMPTY_PARENT_TURN_EVENTS,
   onOpenParentTurn = () => undefined,
+  backgroundInventoryError = null,
+  onRetryBackgroundInventory,
 }: {
   state: RightPanelState;
   session: SessionView;
@@ -198,6 +200,8 @@ export function RightPanel({
   /** Loaded parent turns that can be revealed directly in the virtual transcript. */
   parentTurnEventIds?: ReadonlyMap<string, number>;
   onOpenParentTurn?: (eventId: number) => void;
+  backgroundInventoryError?: string | null;
+  onRetryBackgroundInventory?: () => void;
 }) {
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const filesSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionFiles");
@@ -407,6 +411,8 @@ export function RightPanel({
                 runnerProtocolVersion={runnerProtocolVersion}
                 parentTurnEventIds={parentTurnEventIds}
                 onOpenParentTurn={onOpenParentTurn}
+                inventoryError={backgroundInventoryError}
+                onRetryInventory={onRetryBackgroundInventory}
               />
             )}
             {state.mode !== "files" && state.mode !== "review" && state.mode !== "browser" &&

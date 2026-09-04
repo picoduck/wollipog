@@ -13480,8 +13480,8 @@ export class ControlPlaneDb {
           backgroundJobsAvailable: true,
           backgroundJobs,
           ...(this.managedBackgroundJobsTruncated(row.id) ? { backgroundJobsTruncated: true } : {}),
-        } : {};
-      })() : this.managedBackgroundJobsPresent(row.id) ? { backgroundJobsAvailable: true } : {}),
+        } : { backgroundJobsAvailable: false };
+      })() : { backgroundJobsAvailable: this.managedBackgroundJobsPresent(row.id) }),
       status,
       column,
       runId: row.run_id,

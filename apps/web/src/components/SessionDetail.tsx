@@ -769,27 +769,38 @@ function SessionDetailLoaded({
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
   const backgroundInventoryRequestRef = useRef<string | null>(null);
+  const [backgroundInventoryError, setBackgroundInventoryError] = useState<string | null>(null);
+  const [backgroundInventoryAttempt, setBackgroundInventoryAttempt] = useState(0);
+  const retryBackgroundInventory = useCallback(() => {
+    backgroundInventoryRequestRef.current = null;
+    setBackgroundInventoryError(null);
+    setBackgroundInventoryAttempt((attempt) => attempt + 1);
+  }, []);
   useEffect(() => {
-    if (!rightPanel.open || rightPanel.mode !== "background" ||
+    if (mode !== "expanded" || !rightPanel.open || rightPanel.mode !== "background" ||
         session.backgroundJobsAvailable !== true || session.backgroundJobs !== undefined) {
-      if (!rightPanel.open || rightPanel.mode !== "background") {
+      if (session.backgroundJobs !== undefined || mode !== "expanded" ||
+          !rightPanel.open || rightPanel.mode !== "background") {
         backgroundInventoryRequestRef.current = null;
+        setBackgroundInventoryError(null);
       }
       return;
     }
     const requestKey = `${session.id}:${recoveryGeneration}`;
     if (backgroundInventoryRequestRef.current === requestKey) return;
     backgroundInventoryRequestRef.current = requestKey;
+    setBackgroundInventoryError(null);
     let current = true;
     void api.session(session.id)
       .then(({ session: loaded }) => {
         if (current) loadSession(loaded);
       })
       .catch((cause: unknown) => {
-        if (current) setError((cause as Error).message);
+        if (current) setBackgroundInventoryError((cause as Error).message);
       });
     return () => { current = false; };
-  }, [api, loadSession, recoveryGeneration, rightPanel.mode, rightPanel.open, session, setError]);
+  }, [api, backgroundInventoryAttempt, loadSession, mode, recoveryGeneration,
+    rightPanel.mode, rightPanel.open, session]);
   const composerComposingRef = useRef(false);
   const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
   const composerExplicitFocusTransferRef = useRef(false);
@@ -4312,6 +4323,8 @@ function SessionDetailLoaded({
           items={items}
           parentTurnEventIds={backgroundParentTurnEventIds}
           onOpenParentTurn={revealBackgroundParentTurn}
+          backgroundInventoryError={backgroundInventoryError}
+          onRetryBackgroundInventory={retryBackgroundInventory}
         />}
       </div>
       {mode === "expanded" && messageAction && (

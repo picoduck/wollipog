@@ -51,6 +51,8 @@ test("job and delivery presentation keep current lifecycle separate from deliver
   assert.equal(backgroundJobCurrentState({ ...baseJob, sourcePresent: false }, "running", true, true), "Status Unverified");
   assert.equal(backgroundJobCurrentState({ ...baseJob, terminalStatus: "failed" }, undefined, false, true), "Failed");
   assert.equal(backgroundJobCurrentState(baseJob, "orphaned", true, true), "Orphaned");
+  assert.equal(backgroundJobCurrentState(baseJob, undefined, true, true), "Status Unverified",
+    "a source-present row cannot claim Running without a current aggregate lifecycle");
   assert.equal(backgroundJobDeliveryStage(baseJob), "Not Started");
   assert.equal(backgroundJobDeliveryStage({ ...baseJob, terminalObservedAt: 3_000, continuationRequired: true }), "Continuation Pending");
   assert.equal(backgroundJobDeliveryStage({ ...baseJob, continuationAcceptedAt: 4_000 }), "Continuation Accepted");
@@ -267,6 +269,44 @@ test("unknown parent sentinels stay separate and aggregate-only states explain m
       />,
     ));
     assert.match(container.textContent ?? "", /Loading Background Work/);
+    assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
+
+    let retries = 0;
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundJobsAvailable: true,
+          backgroundWorkTracking: "managed",
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+        inventoryError="offline"
+        onRetryInventory={() => { retries += 1; }}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Background Work Unavailable/);
+    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    assert.equal(retries, 1);
+
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Background Work Status Unverified/);
+    assert.match(container.textContent ?? "", /control plane does not expose/);
     assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
 
     await act(async () => root.render(

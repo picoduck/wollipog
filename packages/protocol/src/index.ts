@@ -3178,7 +3178,7 @@ export interface SessionView {
   backgroundDeliveries?: BackgroundDeliveryView[];
   /** Bounded durable job inventory. Omitted by control planes that predate the panel contract. */
   backgroundJobs?: ManagedBackgroundJobView[];
-  /** True when job history exists but this compact session-list projection omitted the inventory. */
+  /** Whether job history exists. Compact session-list projections omit the inventory itself. */
   backgroundJobsAvailable?: boolean;
   /** True when older managed-job history exists beyond the projected bounded window. */
   backgroundJobsTruncated?: boolean;

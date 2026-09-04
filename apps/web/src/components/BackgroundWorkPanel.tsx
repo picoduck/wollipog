@@ -28,7 +28,11 @@ export function backgroundJobCurrentState(
   if (job.terminalStatus === "failed") return "Failed";
   if (job.terminalStatus === "killed") return "Killed";
   if (backgroundWorkState === "orphaned" && job.sourcePresent) return "Orphaned";
-  return inventorySupported && runnerOnline && job.sourcePresent ? "Running" : "Status Unverified";
+  const aggregateCurrent = backgroundWorkState === "running" ||
+    backgroundWorkState === "continuation_pending";
+  return aggregateCurrent && inventorySupported && runnerOnline && job.sourcePresent
+    ? "Running"
+    : "Status Unverified";
 }
 
 export function backgroundJobDeliveryStage(job: ManagedBackgroundJobView): string {
@@ -91,12 +95,16 @@ export function BackgroundWorkPanel({
   runnerProtocolVersion,
   parentTurnEventIds,
   onOpenParentTurn,
+  inventoryError,
+  onRetryInventory,
 }: {
   session: SessionView;
   runnerOnline: boolean;
   runnerProtocolVersion: number | null | undefined;
   parentTurnEventIds: ReadonlyMap<string, number>;
   onOpenParentTurn: (eventId: number) => void;
+  inventoryError?: string | null;
+  onRetryInventory?: () => void;
 }) {
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
   const jobs = session.backgroundJobs ?? [];
@@ -106,6 +114,9 @@ export function BackgroundWorkPanel({
   const aggregateState = session.backgroundWorkState === "resumed"
     ? undefined
     : session.backgroundWorkState;
+  const inventoryPending = session.backgroundJobsAvailable === true && session.backgroundJobs === undefined;
+  const inventoryProjectionUnknown = session.backgroundJobsAvailable === undefined &&
+    session.backgroundWorkTracking === "managed" && aggregateState === undefined;
 
   return (
     <div className="background-work-panel">
@@ -132,18 +143,27 @@ export function BackgroundWorkPanel({
 
       {groups.length === 0 ? (
         <div className="background-work-empty" role="status">
-          <strong>{session.backgroundJobsAvailable && session.backgroundJobs === undefined
-            ? "Loading Background Work"
+          <strong>{inventoryPending
+            ? inventoryError ? "Background Work Unavailable" : "Loading Background Work"
+            : inventoryProjectionUnknown
+              ? "Background Work Status Unverified"
             : aggregateState
             ? aggregateState === "orphaned" ? "Background Work Orphaned" : "Background Work Status Available"
             : "No Background Work Recorded"}</strong>
-          <p>{session.backgroundJobsAvailable && session.backgroundJobs === undefined
-            ? "Loading the durable per-job history for this session."
+          <p>{inventoryPending
+            ? inventoryError
+              ? "The durable per-job history could not be loaded."
+              : "Loading the durable per-job history for this session."
+            : inventoryProjectionUnknown
+              ? "This control plane does not expose whether durable per-job history is available."
             : aggregateState
             ? "The runner reports current background work, but per-job lifecycle evidence is unavailable."
             : inventorySupported
               ? "Managed jobs will appear here when the runner reports them."
               : "Update the runner to inspect individual jobs."}</p>
+          {inventoryPending && inventoryError && onRetryInventory && (
+            <button type="button" className="btn ghost sm" onClick={onRetryInventory}>Retry Loading</button>
+          )}
         </div>
       ) : (
         <div className="background-work-groups" role="list" aria-label="Background Work Jobs">
@@ -194,7 +214,7 @@ export function BackgroundWorkPanel({
                     </span>
                   )}
                 </div>
-                <div className="background-work-barrier" aria-label="Barrier Status">
+                <div className="background-work-barrier" role="group" aria-label="Barrier Status">
                   <span>Barrier</span>
                   <strong>{!group.parentTurnKnown
                     ? "Status Unverified"
