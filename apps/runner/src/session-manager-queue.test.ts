@@ -1144,18 +1144,22 @@ test("a control-plane queue hold parks queued prompts without tripping governanc
   try {
     manager.prompt("s_q", "A");
     await waitFor(() => ran.length === 1);
-    manager.prompt("s_q", "B");
+    manager.prompt("s_q", "B", undefined, undefined, { costBudgetUsd: 5 });
+    manager.prompt("s_q", "C", undefined, undefined, { costBudgetUsd: 10 });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const entry = (manager as any).active.get("s_q");
-    manager.rearmGovernance("s_q", { costBudgetUsd: 10 }, "control_plane");
+    manager.rearmGovernance("s_q", {}, "control_plane");
     assert.equal(entry.holdQueuedPromptsAfterInterrupt, true, "the queue is held");
     assert.equal(entry.governanceTripped, undefined, "but nothing tripped: a provider failure would still surface");
+    assert.deepEqual(entry.queue.map((queued: { config?: { costBudgetUsd?: number } }) => queued.config?.costBudgetUsd), [5, 10],
+      "a threshold-free hold leaves each queued prompt's own budget alone");
     settleFirst("end_turn");
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.deepEqual(ran, ["A"], "B waits on the control-plane card");
-    manager.rearmGovernance("s_q", { costBudgetUsd: 10 });
-    await waitFor(() => ran.length === 2);
-    assert.deepEqual(ran, ["A", "B"], "a release re-arm drains the queue");
+    manager.rearmGovernance("s_q", {});
+    await waitFor(() => ran.length === 3);
+    assert.deepEqual(ran, ["A", "B", "C"], "a threshold-free release drains the queue");
+    assert.deepEqual(entry.queue, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

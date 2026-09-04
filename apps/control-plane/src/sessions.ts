@@ -2576,15 +2576,6 @@ export class SessionsService {
           : "cloud target cost policy is missing", 400);
       }
     }
-    const effectiveScope = this.db.effectiveSessionScope(
-      req.runnerId, snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId), scope,
-    );
-    if (effectiveScope?.owner.kind === "user") {
-      const daily = this.dailyBudgetForOwner(effectiveScope.organizationId, effectiveScope.owner.userId);
-      if (daily && daily.spentUsd >= daily.budgetUsd) {
-        return fail(`daily budget reached — $${daily.spentUsd.toFixed(2)} of $${daily.budgetUsd.toFixed(2)} today; new sessions wait for the day to roll over or an owner or admin to raise it`, 409);
-      }
-    }
     const workspaceId = snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId);
     const requestedProject = this.requestedProjectAssignment(
       req, req.runnerId, workspaceId, allowProjectWithoutLocation,
@@ -2609,6 +2600,13 @@ export class SessionsService {
       }
       sessionScope ??= projectSessionScope.data;
     }
+    // The owner's daily allowance is checked against the scope the session will ACTUALLY carry:
+    // the explicit one, the Project's, or what the workspace/runner confers — resolved above, so
+    // a user-owned Project on an organization workspace cannot slip past its owner's budget.
+    const admissionDenied = this.dailyBudgetAdmissionError(
+      this.db.effectiveSessionScope(req.runnerId, workspaceId, sessionScope),
+    );
+    if (admissionDenied) return fail(admissionDenied, 409);
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
       workspaceId,
@@ -3075,12 +3073,8 @@ export class SessionsService {
       const thresholdPatch: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
       if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
       if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
-      // A checkpoint-only edit still has to move the runner's hold, and the runner ignores a
-      // re-arm whose patch is empty, so the current thresholds ride along unchanged.
-      if (Object.keys(thresholdPatch).length === 0) {
-        thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
-        thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
-      }
+      // A checkpoint-only edit sends an empty threshold patch: a v105 runner still applies the
+      // hold change, and queued prompts keep the per-prompt budgets they were queued with.
       const runner = this.db.getRunner(session.runnerId);
       if (runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
         const sent = this.hub.sendToRunner(session.runnerId, {
@@ -5927,6 +5921,10 @@ export class SessionsService {
       return fail(sessionScope.error ?? "run session ownership is unavailable", sessionScope.status);
     }
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
+    // Every member session carries the run's scope, so an owner over their daily allowance
+    // cannot launch a fleet of new turns through a run either.
+    const runAdmissionDenied = this.dailyBudgetAdmissionError(sessionScope.data);
+    if (runAdmissionDenied) return fail(runAdmissionDenied, 409);
 
     // Resolve every agent before creating the run so we never persist an empty run.
     const resolved: { agentId: string; launch: AgentLaunch }[] = [];
@@ -6128,6 +6126,14 @@ export class SessionsService {
     return owner ? this.dailyBudgetForOwner(owner.organizationId, owner.userId) : null;
   }
 
+  /** The 409 message when a user-owned scope's daily allowance is spent, else null. */
+  private dailyBudgetAdmissionError(scope: ResourceScope | null | undefined): string | null {
+    if (scope?.owner.kind !== "user") return null;
+    const daily = this.dailyBudgetForOwner(scope.organizationId, scope.owner.userId);
+    if (!daily || daily.spentUsd < daily.budgetUsd) return null;
+    return `daily budget reached — $${daily.spentUsd.toFixed(2)} of $${daily.budgetUsd.toFixed(2)} today; new sessions wait for the day to roll over or an owner or admin to raise it`;
+  }
+
   private dailyBudgetForOwner(organizationId: string, userId: string): { budgetUsd: number; spentUsd: number } | null {
     const budget = this.db.getUsageDailyBudget(organizationId).perUserUsd;
     if (budget == null || budget <= 0) return null;
@@ -6167,10 +6173,12 @@ export class SessionsService {
     if (holdFor === "control_plane" && !runnerSupportsProtocol(runner?.protocolVersion, "controlPlaneQueueHold")) {
       holdFor = undefined;
     }
+    // No threshold rides along: a re-arm's thresholds are applied to every queued prompt, and a
+    // soft card changes none of them. A v105 runner applies a hold change on its own.
     return this.hub.sendToRunner(session.runnerId, {
       type: "rearm_governance",
       sessionId: session.id,
-      config: { costBudgetUsd: session.costBudgetUsd ?? null, maxToolCalls: session.maxToolCalls ?? null },
+      config: {},
       ...(holdFor ? { holdFor } : {}),
     });
   }

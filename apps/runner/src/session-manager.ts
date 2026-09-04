@@ -6333,7 +6333,24 @@ export class SessionManager {
     if (!meta) return;
     const costBudgetUsd = config.costBudgetUsd;
     const maxToolCalls = config.maxToolCalls;
-    if (costBudgetUsd === undefined && maxToolCalls === undefined) return;
+    // A threshold-free re-arm is a hold change alone (v105 control-plane cards): it must neither
+    // be ignored nor touch the per-prompt budgets queued prompts were queued with.
+    if (costBudgetUsd === undefined && maxToolCalls === undefined) {
+      const entry = this.active.get(sessionId);
+      if (!entry) return;
+      if (holdFor === "control_plane") {
+        this.setInterruptQueueHold(sessionId, entry, true);
+        if (entry.running && entry.governanceTripped) entry.governanceRearmPending = "resume";
+        else if (!entry.running) entry.governanceTripped = undefined;
+        return;
+      }
+      if (holdFor === undefined && entry.holdQueuedPromptsAfterInterrupt) {
+        entry.interruptRequested = false;
+        this.setInterruptQueueHold(sessionId, entry, false);
+        if (!entry.running && !entry.governanceTripped && entry.queue.length) this.scheduleDrain(sessionId);
+      }
+      return;
+    }
     if (costBudgetUsd !== undefined && costBudgetUsd !== null && (!Number.isFinite(costBudgetUsd) || costBudgetUsd <= 0)) return;
     if (maxToolCalls !== undefined && maxToolCalls !== null && (!Number.isInteger(maxToolCalls) || maxToolCalls <= 0)) return;
     const merged: SessionConfig = { ...meta.config };

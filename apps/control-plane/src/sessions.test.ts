@@ -11116,5 +11116,22 @@ test("a soft-card Continue that cannot reach the runner leaves the card and the 
   assert.ok(svc.approve(id, parked.pendingApproval!.requestId, "continue").ok);
   assert.equal(db.getSession(id)!.costCheckpointApprovedUsd, 1);
   const rearm = hub.sentOfType("rearm_governance").at(-1)!;
-  assert.deepEqual(rearm.config, { costBudgetUsd: null, maxToolCalls: null }, "the re-arm carries the current thresholds");
+  assert.deepEqual(rearm.config, {}, "a soft card's re-arm carries no thresholds, so queued prompts keep their own budgets");
+  assert.equal("holdFor" in rearm, false, "nothing else trips, so the queue is released");
+});
+
+test("a run for an owner past the daily budget launches no member sessions", () => {
+  const { db, hub, svc } = makeHarness();
+  const seeded = seedSession(svc, hub, { prompt: "spend" });
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(seeded);
+  db.setUsageDailyBudget("org_personal", 1, Date.now());
+  db.appendEvent(seeded, { kind: "token_usage", inputTokens: 1, costUsd: 1.5 }, Date.now(), { accrueUsage: true });
+  // Member sessions inherit the workspace's ownership, so the workspace itself belongs to the user.
+  db.raw().prepare("UPDATE workspace_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE runner_id=? AND workspace_id=?").run(RUNNER_ID, WORKSPACE_ID);
+  hub.sentToRunner.length = 0;
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "spend more" });
+  assert.equal(run.ok, false);
+  assert.equal(run.status, 409);
+  assert.match(run.error ?? "", /daily budget reached/);
+  assert.equal(hub.sentOfType("start_session").length, 0, "no member session was launched");
 });
