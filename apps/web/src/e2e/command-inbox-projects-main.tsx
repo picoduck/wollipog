@@ -206,7 +206,9 @@ function initialModel(): FixtureModel {
           pullRequest: { url: "https://github.com/picoduck/wollipog/pull/665", state: "merged" },
         }],
       }],
-      ["session-no-worktree", "A Session With No Worktree and a Title That Also Runs Well Past Any Viewport Width", {}],
+      // Session titles are derived from the opening prompt, so they get long. This one is long
+      // enough to clip at 1400px, which is where the strip used to look safe.
+      ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {}],
       ["session-plain", "Plain", {}],
     ];
     initial.sessions = rows.map(([id, title, extra], index) => {

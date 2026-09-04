@@ -43,22 +43,35 @@ for (const width of WIDTHS) {
 
   test(`a long title fades instead of displacing the strip at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    const titles = await page.locator(".inbox-row-title").evaluateAll((nodes) => nodes.map((node) => ({
-      text: node.textContent ?? "",
-      clipped: node.scrollWidth > node.clientWidth + 1,
-      mask: getComputedStyle(node).maskImage || getComputedStyle(node).webkitMaskImage,
-      overflowX: getComputedStyle(node).overflowX,
-      left: node.getBoundingClientRect().left,
-    })));
+    const titles = await page.locator(".inbox-row").evaluateAll((rows) => rows.map((row) => {
+      const node = row.querySelector<HTMLElement>(".inbox-row-title")!;
+      const strip = row.querySelector<HTMLElement>(".inbox-row-activity")!;
+      const style = getComputedStyle(node);
+      return {
+        text: node.textContent ?? "",
+        clipped: node.scrollWidth > node.clientWidth + 1,
+        mask: style.maskImage || style.webkitMaskImage,
+        overflowX: style.overflowX,
+        textOverflow: style.textOverflow,
+        left: node.getBoundingClientRect().left,
+        right: node.getBoundingClientRect().right,
+        stripLeft: strip.getBoundingClientRect().left,
+      };
+    }));
 
     // The full title stays in the DOM for assistive technology and for the row's accessible name.
     expect(titles[0]!.text).toContain("Always Visible");
-    // Fade, not ellipsis: a mask is applied and `text-overflow` is never asked to draw a glyph.
     for (const title of titles) {
+      // Fade, not ellipsis: a mask draws the truncation and `text-overflow` is never asked to.
       expect(title.mask).toContain("linear-gradient");
       expect(title.overflowX).toBe("hidden");
+      expect(title.textOverflow).toBe("clip");
+      // The title yields to the strip rather than growing under it.
+      expect(title.right).toBeLessThanOrEqual(title.stripLeft + 1);
     }
-    expect(titles.some((title) => title.clipped)).toBe(true);
+    // A title long enough to overrun this viewport is present at every width under test, so the
+    // fade is actually exercised and not merely declared.
+    expect(titles.filter((title) => title.clipped).length).toBeGreaterThan(0);
     // Every title starts on the same reading axis, whatever the row's signals or worktree line.
     expect(Math.max(...titles.map((t) => t.left)) - Math.min(...titles.map((t) => t.left)))
       .toBeLessThanOrEqual(1);
