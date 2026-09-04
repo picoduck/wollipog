@@ -1527,7 +1527,7 @@ const TimelineRow = memo(function TimelineRow({
   const mediaSettled = timelineMediaSettled(item, sessionActive);
   switch (item.kind) {
     case "checkpoint":
-      // Thin turn divider; the Rewind affordance shows on hover (session detail only).
+      // Thin turn divider; the Rewind affordance stays discoverable whenever it is available.
       return (
         <div className="tl-checkpoint" title={`Files snapshot taken at the start of turn ${item.turn}`}>
           <span className="checkpoint-line" />
