@@ -530,7 +530,7 @@ test("a queued edit that fails after navigation restores its exact retry and kee
         hasImages: true,
         liveQueueObserved: true,
         editable: true,
-        editRevision: "qer_projection",
+        editRevision: "qer_exact",
       }],
     },
     client: {
@@ -594,7 +594,7 @@ test("a queued edit that fails after navigation restores its exact retry and kee
       "the recovered byte-identical edit must preserve its idempotency identity");
 
     const cancel = [...fixture.container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Cancel Edit") as HTMLButtonElement | undefined;
+      .find((button) => button.textContent === "Dismiss Recovery") as HTMLButtonElement | undefined;
     assert.ok(cancel);
     await act(async () => { cancel.click(); });
     await flushAsyncWork();
@@ -607,6 +607,102 @@ test("a queued edit that fails after navigation restores its exact retry and kee
     assert.equal(remounted.value, "Displaced local draft");
     assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
       "explicit cancellation must retire the failed edit recovery");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a live queue revision change disables recovered retry while preserving content for a new message", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
+  const prompts: string[] = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        hasImages: true,
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: {
+          promptId,
+          text: "Original exact content",
+          images: [submittedImage],
+          editRevision: "qer_exact",
+        },
+      }),
+      editQueuedPrompt: async (_sessionId, _promptId, request) => {
+        edits.push(request);
+        throw new Error("The request timed out before confirmation.");
+      },
+      prompt: async (_sessionId, text) => {
+        prompts.push(text);
+        return undefined as never;
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced local draft");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.value = "Recovered revision for reuse";
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 1);
+    assert.equal(save.disabled, false, "the unchanged authoritative target remains retryable");
+
+    await fixture.pushSession({
+      queued: [{
+        id: "queue-1",
+        text: "Changed on another client",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_newer",
+      }],
+    });
+    assert.equal(save.disabled, true);
+    assert.match(fixture.container.querySelector(".queued-edit-reason")?.textContent ?? "", /changed elsewhere/i);
+    assert.equal(fixture.composer.value, "Recovered revision for reuse");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+
+    await act(async () => {
+      fireDomEvent.keyDown(fixture.composer, {
+        key: "Enter",
+        ctrlKey: false,
+        metaKey: false,
+        shiftKey: false,
+        altKey: false,
+      });
+    });
+    await flushAsyncWork();
+    assert.deepEqual(prompts, [], "Enter must not send a stale recovered edit as a new turn");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.equal(fixture.composer.value, "Recovered revision for reuse");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+
+    const reuse = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Use as New Message") as HTMLButtonElement | undefined;
+    assert.ok(reuse);
+    await act(async () => { reuse.click(); });
+    await flushAsyncWork(450);
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assert.equal(fixture.composer.value, "Recovered revision for reuse");
+
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "Recovered revision for reuse");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
   } finally {
     await unmountFixture(fixture);
   }
@@ -815,7 +911,7 @@ test("a failed queued edit keeps its draft and uses idempotency only for byte-id
         text: "Queued",
         liveQueueObserved: true,
         editable: true,
-        editRevision: "qer_projection",
+        editRevision: "qer_exact",
       }],
     },
     client: {
@@ -829,7 +925,7 @@ test("a failed queued edit keeps its draft and uses idempotency only for byte-id
       }),
       editQueuedPrompt: async (_sessionId, _promptId, request) => {
         edits.push(request);
-        throw new Error("The queued message changed before this edit was saved.");
+        throw new Error("The request timed out before confirmation.");
       },
     },
   });
@@ -858,7 +954,7 @@ test("a failed queued edit keeps its draft and uses idempotency only for byte-id
     assert.equal(fixture.composer.value, "Revised exact content");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
     assert.ok(fixture.container.querySelector(".queued-edit-banner"));
-    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /changed before/i);
+    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /timed out/i);
 
     await act(async () => { save.click(); });
     await flushAsyncWork();
