@@ -58,6 +58,7 @@ const PodMemberTimeline = memo(function PodMemberTimeline({
   title: string;
   status: SessionView["status"];
 }) {
+  const driver = useStoreSelector((state) => state.sessions.get(sessionId)?.driver);
   const events = useStoreSelector((state) => selectComparisonEvents(state, sessionId));
   const history = useStoreSelector((state) => selectComparisonHistory(state, sessionId));
   const conn = useStoreSelector((state) => state.conn);
@@ -72,6 +73,7 @@ const PodMemberTimeline = memo(function PodMemberTimeline({
       {presentation.body === "timeline" ? (
         <EventTimeline
           items={items}
+          driver={driver}
           sessionActive={isTimelineSessionActive(status)}
           scrollRef={scrollRef}
           historyKey={`${sessionId}:${eventEpoch}`}

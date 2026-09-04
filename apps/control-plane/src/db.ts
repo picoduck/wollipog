@@ -8426,7 +8426,8 @@ export class ControlPlaneDb {
                 ${USAGE_LEDGER_V103_COLUMNS.map((column) => `state.${column}`).join(", ")}, ?
            FROM usage_session_state state JOIN sessions s ON s.id=state.session_id
           WHERE NOT EXISTS (SELECT 1 FROM usage_session_models m WHERE m.session_id=state.session_id)
-            AND (state.input_tokens > 0 OR state.output_tokens > 0 OR state.cost_microusd > 0)`,
+            AND (state.input_tokens > 0 OR state.output_tokens > 0 OR state.cost_microusd > 0
+                 OR ${USAGE_LEDGER_V103_COLUMNS.map((column) => `state.${column} > 0`).join(" OR ")})`,
       ).run(now);
       this.db.exec("COMMIT");
     } catch (error) {

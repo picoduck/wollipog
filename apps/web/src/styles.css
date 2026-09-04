@@ -3685,6 +3685,10 @@ textarea,
   font-size: var(--text-sm);
   text-align: left;
   white-space: normal;
+  /* Positioned against the viewport, so it must also be bounded by it: a session with many
+     model rows scrolls inside the panel instead of running off a short screen. */
+  max-height: calc(100vh - 16px);
+  overflow: auto;
 }
 .context-popover-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
 .context-popover-head span { color: var(--text-dim); font-variant-numeric: tabular-nums; }

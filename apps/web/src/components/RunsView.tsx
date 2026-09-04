@@ -51,6 +51,7 @@ function MemberColumn({ sessionId }: { sessionId: string }) {
         {presentation.body === "timeline" ? (
           <EventTimeline
             items={items}
+            driver={session.driver}
             sessionActive={isTimelineSessionActive(session.status)}
             scrollRef={scrollRef}
             historyKey={`${sessionId}:${session.eventEpoch ?? 0}`}
