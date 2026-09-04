@@ -1,4 +1,4 @@
-import type { PromptImageInput, QueuedPromptDraft, QueuedPromptView } from "@wollipog/protocol";
+import { isWorkspaceReference, validateWorkspaceReference, type PromptImageInput, type QueuedPromptDraft, type QueuedPromptView } from "@wollipog/protocol";
 import {
   type KeyValueStorage,
   instanceStorageKey,
@@ -140,6 +140,7 @@ export function clearRuntimeQueuedEditRecoveriesForInstance(instanceScope: strin
 
 function validImage(value: unknown): value is PromptImageInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (isWorkspaceReference(value)) return validateWorkspaceReference(value).ok;
   const image = value as Record<string, unknown>;
   if (typeof image.mimeType !== "string" || !image.mimeType.startsWith("image/")) return false;
   if (typeof image.data === "string") return true;

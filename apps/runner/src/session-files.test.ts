@@ -5,9 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   READ_FILE_CAP,
+  createWorkspaceReference,
   listSessionFiles,
   normalizeRelPath,
   readSessionFile,
+  searchWorkspaceReferences,
+  workspaceReferenceDiffContent,
   wslListArgs,
   wslReadArgs,
 } from "./session-files.js";
@@ -127,6 +130,86 @@ test("nativeRead: content, size, binary detection, cap, and guards", async () =>
     await assert.rejects(() => readSessionFile(NATIVE, root, "../etc"), /invalid path/);
     await assert.rejects(() => readSessionFile(NATIVE, root, "missing.txt"), /cannot read file/);
     await assert.rejects(() => readSessionFile(NATIVE, root, "sub"), /not a file|cannot read file/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace reference search is bounded to the session root and skips symlinks", async (t) => {
+  const root = makeFixture();
+  const outside = mkdtempSync(join(tmpdir(), "wollipog-files-outside-"));
+  try {
+    writeFileSync(join(outside, "secret-match.txt"), "secret");
+    try {
+      symlinkSync(outside, join(root, "outside-link"), "dir");
+    } catch {
+      t.skip("symlinks unavailable (Windows without developer mode)");
+      return;
+    }
+    const found = await searchWorkspaceReferences(NATIVE, root, "inner");
+    assert.deepEqual(found.results, [{ path: "sub/inner.md", isDirectory: false }]);
+    const escaped = await searchWorkspaceReferences(NATIVE, root, "secret-match");
+    assert.deepEqual(escaped.results, []);
+    await assert.rejects(() => readSessionFile(NATIVE, root, "outside-link/secret-match.txt"), /cannot read file/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("workspace references bind root, target content, ranges, and diff identity", async () => {
+  const root = makeFixture();
+  try {
+    const first = await createWorkspaceReference(NATIVE, root, {
+      path: "sub/inner.md", kind: "lines", startLine: 1, endLine: 1,
+    });
+    assert.equal(first.path, "sub/inner.md");
+    assert.equal(first.kind, "lines");
+    writeFileSync(join(root, "sub", "inner.md"), "# changed\n");
+    const changed = await createWorkspaceReference(NATIVE, root, {
+      path: "sub/inner.md", kind: "lines", startLine: 1, endLine: 1,
+    });
+    assert.notEqual(changed.targetFingerprint, first.targetFingerprint);
+    const diff = await createWorkspaceReference(NATIVE, root, {
+      path: "deleted.ts", kind: "diff", startLine: 7, endLine: 9,
+      side: "left", diffScope: "uncommitted", diffHash: "c".repeat(64),
+    });
+    assert.equal(diff.side, "left");
+    assert.equal(diff.diffHash, "c".repeat(64));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("diff references resolve the exact selected side and reject gaps", async () => {
+  const root = makeFixture();
+  try {
+    const diffHash = "d".repeat(64);
+    const right = await createWorkspaceReference(NATIVE, root, {
+      path: "sub/inner.md", kind: "diff", startLine: 10, endLine: 12,
+      side: "right", diffScope: "uncommitted", diffHash,
+    });
+    const diff = {
+      scope: "uncommitted" as const,
+      diffHash,
+      stats: { filesChanged: 1, insertions: 1, deletions: 1 },
+      files: [{
+        path: "sub/inner.md",
+        status: "modified" as const,
+        binary: false,
+        hunks: [{
+          header: "@@ -10,3 +10,3 @@", oldStart: 10, oldCount: 3, newStart: 10, newCount: 3,
+          lines: [
+            { status: " " as const, text: "same" },
+            { status: "-" as const, text: "old" },
+            { status: "+" as const, text: "new" },
+            { status: " " as const, text: "tail" },
+          ],
+        }],
+      }],
+    };
+    assert.equal(workspaceReferenceDiffContent(diff, right), "10  same\n11 +new\n12  tail");
+    assert.throws(() => workspaceReferenceDiffContent(diff, { ...right, startLine: 9 }), /every selected diff line/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -2,17 +2,27 @@
  * Files panel: list / read files under a session's root (worktreePath ?? repoPath from box meta).
  * The dashboard only ever names ROOT-RELATIVE paths (POSIX `/` separators on the wire); this module
  * validates them (no absolute paths, no `..` escape) before touching the filesystem, natively or in
- * a WSL distro. Symlinks inside the root can still point out of it — acceptable: the loopback
- * dashboard user owns the box, the guard is against accidents, not an adversary.
+ * a WSL distro. Canonical-path checks reject symlinks that escape the exact session root.
  */
 
-import { readdirSync, readSync, openSync, closeSync, fstatSync, statSync } from "node:fs";
-import { join } from "node:path";
-import type { AgentContext, SessionFileEntry } from "@wollipog/protocol";
+import { createReadStream, readdirSync, readSync, openSync, closeSync, fstatSync, statSync, realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { join, sep } from "node:path";
+import {
+  MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS,
+  type AgentContext,
+  type CreateWorkspaceReferenceRequest,
+  type GitDiffInfo,
+  type SessionFileEntry,
+  type WorkspaceReference,
+  type WorkspaceReferenceCandidate,
+} from "@wollipog/protocol";
 import { run } from "./discovery/resolve.js";
 
 /** Cap on returned file content — enough for any source/doc file the viewer should render. */
 export const READ_FILE_CAP = 512 * 1024;
+const WORKSPACE_SEARCH_VISIT_CAP = 20_000;
+const WORKSPACE_DIRECTORY_ENTRY_CAP = 2_000;
 
 export interface SessionFileListing {
   path: string;
@@ -25,6 +35,16 @@ export interface SessionFileContent {
   size: number;
   truncated: boolean;
   binary: boolean;
+}
+
+export interface WorkspaceReferenceSearch {
+  results: WorkspaceReferenceCandidate[];
+  truncated: boolean;
+}
+
+export interface WorkspaceDirectoryTree {
+  content: string;
+  truncated: boolean;
 }
 
 /** Normalize a root-relative wire path: `\` → `/`, collapse empty/`.` segments. Returns null for
@@ -57,10 +77,201 @@ export async function readSessionFile(context: AgentContext, root: string, rel: 
   return context.kind === "wsl" ? wslRead(context.distro, root, norm) : nativeRead(root, norm);
 }
 
+/** Search names only, bounded by both visited entries and returned matches. */
+export async function searchWorkspaceReferences(
+  context: AgentContext,
+  root: string,
+  query: string,
+): Promise<WorkspaceReferenceSearch> {
+  const normalized = query.trim().toLocaleLowerCase();
+  if (!normalized || normalized.length > 256 || /[\0\r\n]/.test(normalized)) {
+    throw new Error("enter 1-256 searchable characters");
+  }
+  return context.kind === "wsl"
+    ? wslSearch(context.distro, root, normalized)
+    : nativeSearch(root, normalized);
+}
+
+/** Build the bounded directory-tree context a provider will actually receive. */
+export async function workspaceDirectoryTree(
+  context: AgentContext,
+  root: string,
+  directory: string,
+): Promise<WorkspaceDirectoryTree> {
+  const pending = [directory];
+  const lines: string[] = [];
+  let visited = 0;
+  let truncated = false;
+  while (pending.length && visited < WORKSPACE_DIRECTORY_ENTRY_CAP) {
+    const current = pending.shift()!;
+    let listing: SessionFileListing;
+    try {
+      listing = await listSessionFiles(context, root, current);
+    } catch (error) {
+      if (current === directory) throw error;
+      lines.push(`${current}/ [unavailable]`);
+      continue;
+    }
+    for (const entry of listing.entries) {
+      if (visited >= WORKSPACE_DIRECTORY_ENTRY_CAP) {
+        truncated = true;
+        break;
+      }
+      visited += 1;
+      lines.push(entry.isDir ? `${entry.path}/` : `${entry.path}${entry.size === undefined ? "" : ` (${entry.size} bytes)`}`);
+      if (entry.isDir) pending.push(entry.path);
+    }
+  }
+  if (pending.length) truncated = true;
+  return { content: lines.join("\n"), truncated };
+}
+
+/** Resolve exactly one immutable diff-side selection into provider text. */
+export function workspaceReferenceDiffContent(diff: GitDiffInfo, reference: WorkspaceReference): string {
+  const file = diff.files.find((candidate) => candidate.path === reference.path ||
+    (reference.side === "left" && candidate.oldPath === reference.path));
+  if (!file || reference.startLine === undefined || reference.endLine === undefined || !reference.side) {
+    throw new Error(`${reference.path} is no longer present in the selected diff`);
+  }
+  const matched = new Set<number>();
+  const selected: string[] = [];
+  for (const hunk of file.hunks) {
+    let left = hunk.oldStart;
+    let right = hunk.newStart;
+    for (const line of hunk.lines) {
+      const lineNumber = reference.side === "left" ? left : right;
+      const existsOnSide = reference.side === "left" ? line.status !== "+" : line.status !== "-";
+      if (existsOnSide && lineNumber >= reference.startLine && lineNumber <= reference.endLine) {
+        matched.add(lineNumber);
+        selected.push(`${lineNumber} ${line.status}${line.text}`);
+      }
+      if (line.status !== "+") left += 1;
+      if (line.status !== "-") right += 1;
+    }
+  }
+  for (let line = reference.startLine; line <= reference.endLine; line += 1) {
+    if (!matched.has(line)) throw new Error(`${reference.path} no longer contains every selected diff line`);
+  }
+  return selected.join("\n");
+}
+
+/** Mint a content-free attachment. Diff targets are already validated against git by the caller;
+ * their exact diff identity is the target fingerprint, so deleted/left-side paths remain valid. */
+export async function createWorkspaceReference(
+  context: AgentContext,
+  root: string,
+  target: CreateWorkspaceReferenceRequest,
+): Promise<WorkspaceReference> {
+  const rel = normalizeRelPath(target.path);
+  if (!rel) throw new Error("invalid workspace reference path");
+  validateReferenceRange(target);
+  const rootFingerprint = context.kind === "wsl"
+    ? await wslRootFingerprint(context.distro, root)
+    : nativeRootFingerprint(root);
+  if (target.kind === "file" || target.kind === "lines") {
+    const file = await readSessionFile(context, root, rel);
+    if (file.binary) throw new Error("binary files cannot be attached as prompt text");
+    const availableLines = (file.content ?? "").split(/\r?\n/).length;
+    if (target.kind === "lines" && target.endLine! > availableLines) {
+      throw new Error(file.truncated
+        ? "the selected lines are beyond the bounded file preview"
+        : "the selected lines are no longer present in the file");
+    }
+  }
+  const directoryTree = target.kind === "directory"
+    ? await workspaceDirectoryTree(context, root, rel)
+    : null;
+  const targetFingerprint = target.kind === "diff"
+    ? hashText([rootFingerprint, rel, target.diffScope, target.diffHash, target.side, target.startLine, target.endLine].join("\0"))
+    : target.kind === "directory"
+      ? hashText(`directory\0${rootFingerprint}\0${rel}\0${directoryTree!.truncated}\0${directoryTree!.content}`)
+    : context.kind === "wsl"
+      ? await wslTargetFingerprint(context.distro, root, rel, false)
+      : await nativeTargetFingerprint(root, rel, false);
+  return {
+    artifactId: `workspace:${randomUUID()}`,
+    mimeType: "application/vnd.wollipog.workspace-reference+json",
+    sizeBytes: 0,
+    sha256: targetFingerprint,
+    referenceVersion: 1,
+    kind: target.kind,
+    path: rel,
+    rootFingerprint,
+    targetFingerprint,
+    ...(target.startLine === undefined ? {} : { startLine: target.startLine }),
+    ...(target.endLine === undefined ? {} : { endLine: target.endLine }),
+    ...(target.side === undefined ? {} : { side: target.side }),
+    ...(target.diffHash === undefined ? {} : { diffHash: target.diffHash }),
+    ...(target.diffScope === undefined ? {} : { diffScope: target.diffScope }),
+  };
+}
+
+function validateReferenceRange(target: CreateWorkspaceReferenceRequest): void {
+  const ranged = target.kind === "lines" || target.kind === "diff";
+  if (ranged && (!Number.isSafeInteger(target.startLine) || !Number.isSafeInteger(target.endLine) ||
+      target.startLine! < 1 || target.endLine! < target.startLine! || target.endLine! > 1_000_000)) {
+    throw new Error("the selected line range is invalid");
+  }
+  if (!ranged && (target.startLine !== undefined || target.endLine !== undefined)) {
+    throw new Error("line ranges require a line reference");
+  }
+  if (target.kind === "diff" &&
+      ((target.side !== "left" && target.side !== "right") ||
+       !target.diffHash || !/^[a-f0-9]{64}$/.test(target.diffHash) ||
+       (target.diffScope !== "uncommitted" && target.diffScope !== "all_branch" && target.diffScope !== "last_turn"))) {
+    throw new Error("the diff reference identity is invalid");
+  }
+}
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function canonicalNativeTarget(root: string, rel = ""): { root: string; target: string } {
+  const canonicalRoot = realpathSync(root);
+  const target = realpathSync(rel ? join(canonicalRoot, ...rel.split("/")) : canonicalRoot);
+  if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${sep}`)) {
+    throw new Error(`workspace path escapes the session root: ${rel || "."}`);
+  }
+  return { root: canonicalRoot, target };
+}
+
+function nativeRootFingerprint(root: string): string {
+  const canonical = canonicalNativeTarget(root);
+  const stat = statSync(canonical.root);
+  return hashText(`native\0${canonical.root}\0${stat.dev}\0${stat.ino}`);
+}
+
+async function hashNativeFile(path: string): Promise<string> {
+  return new Promise((resolveHash, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(path);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolveHash(hash.digest("hex")));
+  });
+}
+
+async function nativeTargetFingerprint(root: string, rel: string, expectDirectory: boolean): Promise<string> {
+  const canonical = canonicalNativeTarget(root, rel);
+  const stat = statSync(canonical.target);
+  if (expectDirectory ? !stat.isDirectory() : !stat.isFile()) {
+    throw new Error(expectDirectory ? `not a directory: ${rel}` : `not a file: ${rel}`);
+  }
+  return expectDirectory
+    ? hashText(`directory\0${rel}\0${stat.dev}\0${stat.ino}\0${stat.mtimeMs}`)
+    : hashText(`file\0${rel}\0${stat.dev}\0${stat.ino}\0${stat.size}\0${await hashNativeFile(canonical.target)}`);
+}
+
 /* --------------------------------- native --------------------------------- */
 
 function nativeList(root: string, rel: string): SessionFileListing {
-  const abs = rel ? join(root, ...rel.split("/")) : root;
+  let abs: string;
+  try {
+    abs = canonicalNativeTarget(root, rel).target;
+  } catch {
+    throw new Error(`cannot read directory: ${rel || "."}`);
+  }
   let dirents;
   try {
     dirents = readdirSync(abs, { withFileTypes: true });
@@ -91,7 +302,12 @@ function nativeList(root: string, rel: string): SessionFileListing {
 }
 
 function nativeRead(root: string, rel: string): SessionFileContent {
-  const abs = join(root, ...rel.split("/"));
+  let abs: string;
+  try {
+    abs = canonicalNativeTarget(root, rel).target;
+  } catch {
+    throw new Error(`cannot read file: ${rel}`);
+  }
   // Regular-file check BEFORE open: openSync on a writer-less FIFO blocks synchronously on POSIX
   // (freezing the runner event loop); statSync never blocks. The post-open fstat guard stays as a
   // race backstop for the boring cases.
@@ -132,6 +348,35 @@ function nativeRead(root: string, rel: string): SessionFileContent {
   }
 }
 
+function nativeSearch(root: string, query: string): WorkspaceReferenceSearch {
+  const canonicalRoot = canonicalNativeTarget(root).root;
+  const pending = [""];
+  const results: WorkspaceReferenceCandidate[] = [];
+  let visited = 0;
+  while (pending.length && visited < WORKSPACE_SEARCH_VISIT_CAP && results.length < MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS) {
+    const rel = pending.shift()!;
+    const abs = rel ? join(canonicalRoot, ...rel.split("/")) : canonicalRoot;
+    let entries;
+    try {
+      entries = readdirSync(abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (++visited > WORKSPACE_SEARCH_VISIT_CAP) break;
+      if (entry.name === ".git" || entry.isSymbolicLink()) continue;
+      const path = rel ? `${rel}/${entry.name}` : entry.name;
+      const isDirectory = entry.isDirectory();
+      if (entry.name.toLocaleLowerCase().includes(query) || path.toLocaleLowerCase().includes(query)) {
+        results.push({ path, isDirectory });
+        if (results.length >= MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS) break;
+      }
+      if (isDirectory) pending.push(path);
+    }
+  }
+  return { results, truncated: pending.length > 0 || visited >= WORKSPACE_SEARCH_VISIT_CAP };
+}
+
 /* ---------------------------------- WSL ----------------------------------- */
 
 /** wsl.exe argv for listing. Paths ride as POSITIONAL args ($1=root, $2=rel), NEVER interpolated
@@ -139,8 +384,8 @@ function nativeRead(root: string, rel: string): SessionFileContent {
  * `d|f <TAB> size <TAB> name`. Exported for injection-shape tests. */
 export function wslListArgs(distro: string, root: string, rel: string): string[] {
   const script =
-    'cd "$1" 2>/dev/null || exit 3; [ -z "$2" ] || cd "./$2" 2>/dev/null || exit 3; ' +
-    'for e in * .[!.]* ..?*; do [ -e "$e" ] || continue; [ "$e" = .git ] && continue; ' +
+    'r=$(readlink -f -- "$1") || exit 3; rel=$2; [ -n "$rel" ] || rel=.; t=$(readlink -f -- "$1/$rel") || exit 3; case "$t" in "$r"|"$r"/*) ;; *) exit 5;; esac; cd "$t" || exit 3; ' +
+    'for e in * .[!.]* ..?*; do [ -e "$e" ] || continue; [ "$e" = .git ] && continue; [ -L "$e" ] && continue; ' +
     'if [ -d "$e" ]; then printf "d\\t\\t%s\\n" "$e"; ' +
     'else s=$(stat -c %s -- "$e" 2>/dev/null); printf "f\\t%s\\t%s\\n" "$s" "$e"; fi; done';
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", root, rel];
@@ -149,9 +394,50 @@ export function wslListArgs(distro: string, root: string, rel: string): string[]
 /** wsl.exe argv for reading: prints `<size>\n` then up to $3 content bytes. */
 export function wslReadArgs(distro: string, root: string, rel: string, cap: number): string[] {
   const script =
-    'cd "$1" 2>/dev/null || exit 3; f="./$2"; [ -f "$f" ] || exit 4; ' +
+    'r=$(readlink -f -- "$1") || exit 3; f=$(readlink -f -- "$1/$2") || exit 4; case "$f" in "$r"/*) ;; *) exit 5;; esac; [ -f "$f" ] || exit 4; ' +
     's=$(stat -c %s -- "$f" 2>/dev/null || echo 0); printf "%s\\n" "$s"; head -c "$3" -- "$f"';
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", root, rel, String(cap)];
+}
+
+async function wslSearch(distro: string, root: string, query: string): Promise<WorkspaceReferenceSearch> {
+  const script =
+    'r=$(readlink -f -- "$1") || exit 3; cd "$r" || exit 3; ' +
+    'find . -path ./.git -prune -o -type l -prune -o \( -type f -o -type d \) -print 2>/dev/null | head -n "$3"';
+  const r = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", script, "sh", root, query, String(WORKSPACE_SEARCH_VISIT_CAP)], {
+    timeoutMs: 15_000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  if (r.code !== 0) throw new Error(`cannot search the workspace in ${distro}`);
+  const matches: WorkspaceReferenceCandidate[] = [];
+  for (const raw of r.stdout.split("\n")) {
+    const path = raw.replace(/\r$/, "").replace(/^\.\//, "");
+    if (!path || !path.toLocaleLowerCase().includes(query)) continue;
+    if (matches.length >= MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS) break;
+    const check = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", '[ -d "$1/$2" ]', "sh", root, path], { timeoutMs: 5_000 });
+    matches.push({ path, isDirectory: check.code === 0 });
+  }
+  return { results: matches, truncated: r.stdout.split("\n").length >= WORKSPACE_SEARCH_VISIT_CAP };
+}
+
+async function wslRootFingerprint(distro: string, root: string): Promise<string> {
+  const script = 'r=$(readlink -f -- "$1") || exit 3; i=$(stat -Lc "%d:%i" -- "$r") || exit 3; printf "%s\\0%s" "$r" "$i"';
+  const r = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", script, "sh", root], { timeoutMs: 10_000 });
+  if (r.code !== 0) throw new Error(`cannot identify the session root in ${distro}`);
+  return hashText(`wsl:${distro}\0${r.stdout}`);
+}
+
+async function wslTargetFingerprint(distro: string, root: string, rel: string, expectDirectory: boolean): Promise<string> {
+  const script =
+    'r=$(readlink -f -- "$1") || exit 3; t=$(readlink -f -- "$1/$2") || exit 4; case "$t" in "$r"/*) ;; *) exit 5;; esac; ' +
+    (expectDirectory
+      ? '[ -d "$t" ] || exit 4; stat -Lc "directory\\0%d\\0%i\\0%Y" -- "$t"'
+      : '[ -f "$t" ] || exit 4; printf "file\\0"; stat -Lc "%d\\0%i\\0%s\\0" -- "$t"; sha256sum -- "$t" | cut -d" " -f1');
+  const r = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", script, "sh", root, rel], {
+    timeoutMs: 30_000,
+    maxBuffer: 64 * 1024,
+  });
+  if (r.code !== 0) throw new Error(`workspace target is missing, changed, or outside the session root: ${rel}`);
+  return hashText(`${rel}\0${r.stdout}`);
 }
 
 async function wslList(distro: string, root: string, rel: string): Promise<SessionFileListing> {

@@ -5,6 +5,7 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type CreateReviewFindingRequest,
+  type CreateWorkspaceReferenceRequest,
   type GitCommitInfo,
   type GitDiffInfo,
   type GitDiffScope,
@@ -41,12 +42,14 @@ export function ReviewPanel({
   runnerProtocolVersion,
   git,
   onOpenSourceLocation,
+  onAttachWorkspaceReference,
 }: {
   session: SessionView;
   runnerOnline: boolean;
   runnerProtocolVersion: number | null | undefined;
   git: GitStatus;
   onOpenSourceLocation: (location: SourceLocation) => void;
+  onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
 }) {
   const api = useApi();
   const { confirm } = useFeedback();
@@ -594,6 +597,7 @@ export function ReviewPanel({
             staging={staging}
             layout={layout}
             onOpenSourceLocation={onOpenSourceLocation}
+            onAttachWorkspaceReference={onAttachWorkspaceReference}
             review={{
               findings,
               creating: creatingFinding,

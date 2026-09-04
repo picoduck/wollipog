@@ -5,6 +5,7 @@ import {
   runnerSupportsProtocol,
   type SessionView,
   type SourceLocation,
+  type CreateWorkspaceReferenceRequest,
 } from "@wollipog/protocol";
 import {
   RIGHT_PANEL_DEFAULT_WIDTH,
@@ -175,6 +176,7 @@ export function RightPanel({
   git,
   onOpenTerminal,
   onInsertSideChatDraft,
+  onAttachWorkspaceReference,
   items,
   earlierActivityUnloaded = false,
   parentTurnEventIds = EMPTY_PARENT_TURN_EVENTS,
@@ -194,6 +196,7 @@ export function RightPanel({
   onOpenTerminal: () => void;
   /** Explicitly prepares the primary composer; never sends it. */
   onInsertSideChatDraft: (text: string) => void;
+  onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   items: TimelineItem[];
   /** The transcript is showing a bounded window with older turns still unloaded. */
   earlierActivityUnloaded?: boolean;
@@ -367,6 +370,7 @@ export function RightPanel({
                   location={sourceLocation}
                   onOpenLocation={onOpenSourceLocation}
                   onClearLocation={onClearSourceLocation}
+                  onAttachWorkspaceReference={onAttachWorkspaceReference}
                 />
               ) : (
                 <div className="hint warn">{filesHint}</div>
@@ -378,6 +382,7 @@ export function RightPanel({
                 runnerProtocolVersion={runnerProtocolVersion}
                 git={git}
                 onOpenSourceLocation={onOpenSourceLocation}
+                onAttachWorkspaceReference={onAttachWorkspaceReference}
               />
             )}
             {state.mode === "browser" && <BrowserPanel session={session} />}

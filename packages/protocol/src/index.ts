@@ -310,6 +310,9 @@
 //      Settled managed work also clears its current-state badge, while the control plane projects a
 //      bounded, privacy-safe job inventory for the inspectable Background Work panel. The runner
 //      input remains compatible with v82 inventories; pre-v106 `resumed` is a legacy sentinel.
+//      Provider-neutral workspace references are runner-minted, root-scoped, revision-bound
+//      prompt attachments. Search and minting remain bounded inside the session execution root;
+//      pre-v106 runners reject the structured attachment instead of silently dropping it.
 export const PROTOCOL_VERSION = 106;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
@@ -409,6 +412,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   policyHookAsk: 66,
   sessionStartFencedShells: 67,
   sessionFiles: 16,
+  workspaceReferences: 106,
   sessionShells: 17,
   hostActions: 22,
   queuedPromptCancellation: 23,
@@ -2157,6 +2161,90 @@ export interface PromptImageReference {
   sha256: string;
 }
 
+/** Metadata-only prompt attachment resolved by the owning runner against the exact session root.
+ * It deliberately extends the existing attachment-reference envelope so drafts, durable queues,
+ * and mixed control-plane versions preserve it atomically with image attachments. The MIME type
+ * distinguishes it before any artifact lookup: workspace contents never cross the control plane. */
+export const WORKSPACE_REFERENCE_MIME_TYPE = "application/vnd.wollipog.workspace-reference+json" as const;
+export const MAX_WORKSPACE_REFERENCES = 20;
+export const MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS = 50;
+
+export interface WorkspaceReference extends PromptImageReference {
+  artifactId: `workspace:${string}`;
+  mimeType: typeof WORKSPACE_REFERENCE_MIME_TYPE;
+  /** Workspace-reference schema, independent of the runner protocol version. */
+  referenceVersion: 1;
+  kind: "file" | "directory" | "lines" | "diff";
+  /** Session-root-relative POSIX path. */
+  path: string;
+  /** Hash of the canonical session root identity; prevents a queued reference retargeting. */
+  rootFingerprint: string;
+  /** File/directory identity at mint time. Also mirrored in `sha256` for envelope integrity. */
+  targetFingerprint: string;
+  startLine?: number;
+  endLine?: number;
+  /** Diff-only side and immutable change-set identity. */
+  side?: "left" | "right";
+  diffHash?: string;
+  diffScope?: GitDiffScope;
+}
+
+export interface WorkspaceReferenceCandidate {
+  path: string;
+  isDirectory: boolean;
+}
+
+export interface CreateWorkspaceReferenceRequest {
+  path: string;
+  kind: WorkspaceReference["kind"];
+  startLine?: number;
+  endLine?: number;
+  side?: WorkspaceReference["side"];
+  diffHash?: string;
+  diffScope?: WorkspaceReference["diffScope"];
+}
+
+export function isWorkspaceReference(value: unknown): value is WorkspaceReference {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) &&
+    (value as { mimeType?: unknown }).mimeType === WORKSPACE_REFERENCE_MIME_TYPE);
+}
+
+export function validateWorkspaceReference(value: unknown): { ok: true; value: WorkspaceReference } | { ok: false; error: string } {
+  if (!isWorkspaceReference(value)) return { ok: false, error: "workspace reference is malformed" };
+  const reference = value as unknown as Record<string, unknown>;
+  const allowed = new Set([
+    "artifactId", "mimeType", "sizeBytes", "sha256", "referenceVersion", "kind", "path",
+    "rootFingerprint", "targetFingerprint", "startLine", "endLine", "side", "diffHash", "diffScope",
+  ]);
+  if (Object.keys(reference).some((key) => !allowed.has(key))) {
+    return { ok: false, error: "workspace reference contains unsupported fields" };
+  }
+  const kind = reference.kind;
+  const path = reference.path;
+  const lineStart = reference.startLine;
+  const lineEnd = reference.endLine;
+  const lineKind = kind === "lines" || kind === "diff";
+  const diffKind = kind === "diff";
+  if (reference.referenceVersion !== 1 || typeof reference.artifactId !== "string" ||
+      !reference.artifactId.startsWith("workspace:") || reference.artifactId.length > 128 ||
+      reference.sizeBytes !== 0 || typeof path !== "string" || !path || path.length > 4096 ||
+      path.startsWith("/") || path.includes("\\") || path.split("/").some((part) => !part || part === "." || part === "..") ||
+      (kind !== "file" && kind !== "directory" && kind !== "lines" && kind !== "diff") ||
+      typeof reference.rootFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(reference.rootFingerprint) ||
+      typeof reference.targetFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(reference.targetFingerprint) ||
+      reference.sha256 !== reference.targetFingerprint ||
+      (lineKind && (!Number.isSafeInteger(lineStart) || !Number.isSafeInteger(lineEnd) ||
+        (lineStart as number) < 1 || (lineEnd as number) < (lineStart as number) || (lineEnd as number) > 1_000_000)) ||
+      (!lineKind && (lineStart !== undefined || lineEnd !== undefined)) ||
+      (diffKind && (reference.side !== "left" && reference.side !== "right")) ||
+      (diffKind && (typeof reference.diffHash !== "string" || !/^[a-f0-9]{64}$/.test(reference.diffHash))) ||
+      (diffKind && reference.diffScope !== "uncommitted" && reference.diffScope !== "all_branch" && reference.diffScope !== "last_turn") ||
+      (!diffKind && (reference.side !== undefined || reference.diffHash !== undefined || reference.diffScope !== undefined))) {
+    return { ok: false, error: "workspace reference has invalid identity or range metadata" };
+  }
+  return { ok: true, value };
+}
+
 /** Ordered UTF-8 artifact chunk for a large event field. Current control planes create these
  * references; runners retain their original inline source log for rolling compatibility. */
 export interface EventPayloadReference {
@@ -2269,16 +2357,22 @@ export function validatePromptImageInputs(
   allowedMimeTypes: readonly string[] = PROMPT_IMAGE_MIME_TYPES,
 ): PromptImageValidation {
   if (!Array.isArray(images)) return { ok: false, error: "images must be an array" };
-  if (images.length > MAX_PROMPT_IMAGES) {
-    return { ok: false, error: `at most ${MAX_PROMPT_IMAGES} images may be attached` };
-  }
   const inline: PromptImage[] = [];
+  let imageCount = 0;
+  let referenceCount = 0;
   const allowedMimeSet = new Set<string>(allowedMimeTypes);
   for (let i = 0; i < images.length; i++) {
     const image = images[i]!;
     if (!image || typeof image !== "object" || Array.isArray(image)) {
       return { ok: false, error: `image ${i + 1} is malformed` };
     }
+    if (isWorkspaceReference(image)) {
+      referenceCount += 1;
+      const validation = validateWorkspaceReference(image);
+      if (!validation.ok) return { ok: false, error: `attachment ${i + 1}: ${validation.error}` };
+      continue;
+    }
+    imageCount += 1;
     if (!isPromptImageReference(image)) {
       if (Object.keys(image).some((key) => key !== "mimeType" && key !== "data") ||
           typeof image.mimeType !== "string" || typeof image.data !== "string") {
@@ -2302,6 +2396,12 @@ export function validatePromptImageInputs(
     if (!/^[a-f0-9]{64}$/.test(image.sha256)) {
       return { ok: false, error: `image ${i + 1} has an invalid SHA-256 digest` };
     }
+  }
+  if (imageCount > MAX_PROMPT_IMAGES) {
+    return { ok: false, error: `at most ${MAX_PROMPT_IMAGES} images may be attached` };
+  }
+  if (referenceCount > MAX_WORKSPACE_REFERENCES) {
+    return { ok: false, error: `at most ${MAX_WORKSPACE_REFERENCES} workspace references may be attached` };
   }
   return validatePromptImages(inline, allowedMimeTypes);
 }
@@ -4438,6 +4538,8 @@ export type RunnerToControlPlane =
   | ListDirectoryResultMessage
   | ListSessionFilesResultMessage
   | ReadSessionFileResultMessage
+  | SearchWorkspaceReferencesResultMessage
+  | CreateWorkspaceReferenceResultMessage
   | ShellOpenResultMessage
   | ShellOutputMessage
   | ShellExitMessage
@@ -5257,6 +5359,40 @@ export interface ReadSessionFileRequestMessage {
   path: string;
 }
 
+/** Bounded filename search under the exact session root. The runner never follows directory
+ * symlinks and returns at most MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS candidates. */
+export interface SearchWorkspaceReferencesRequestMessage {
+  type: "search_workspace_references";
+  requestId: string;
+  sessionId: string;
+  query: string;
+}
+
+export interface SearchWorkspaceReferencesResultMessage {
+  type: "search_workspace_references_result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  results?: WorkspaceReferenceCandidate[];
+  truncated?: boolean;
+}
+
+/** Mint an immutable metadata-only attachment after runner-side path and diff validation. */
+export interface CreateWorkspaceReferenceRequestMessage {
+  type: "create_workspace_reference";
+  requestId: string;
+  sessionId: string;
+  target: CreateWorkspaceReferenceRequest;
+}
+
+export interface CreateWorkspaceReferenceResultMessage {
+  type: "create_workspace_reference_result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  reference?: WorkspaceReference;
+}
+
 /* --------------------------- per-session shells --------------------------- */
 
 export type ShellKind = "shell" | "agent_tui";
@@ -5714,6 +5850,8 @@ export type ControlPlaneToRunner =
   | ListDirectoryRequestMessage
   | ListSessionFilesRequestMessage
   | ReadSessionFileRequestMessage
+  | SearchWorkspaceReferencesRequestMessage
+  | CreateWorkspaceReferenceRequestMessage
   | ShellOpenMessage
   | ShellInputMessage
   | ShellResizeMessage

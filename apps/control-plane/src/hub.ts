@@ -28,6 +28,8 @@ import type {
   QueuedPromptView,
   ReadQueuedPromptResultMessage,
   ReadSessionFileResultMessage,
+  SearchWorkspaceReferencesResultMessage,
+  CreateWorkspaceReferenceResultMessage,
   ReprocessSessionResultMessage,
   ResolveSteeringAttemptResultMessage,
   RewindResultMessage,
@@ -179,6 +181,8 @@ export type RunnerRequestResult =
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
   | ReadSessionFileResultMessage
+  | SearchWorkspaceReferencesResultMessage
+  | CreateWorkspaceReferenceResultMessage
   | RewindResultMessage
   | ShellOpenResultMessage
   | HostActionResultMessage

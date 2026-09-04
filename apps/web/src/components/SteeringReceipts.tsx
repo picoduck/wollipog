@@ -149,7 +149,7 @@ function SteeringReceiptCard({
       {(attempt.text || attempt.hasImages) && (
         <div className="steering-receipt-content">
           {attempt.text && <span className="steering-receipt-text">{attempt.text}</span>}
-          {attempt.hasImages && <span className="steering-receipt-image">Image Attached</span>}
+          {attempt.hasImages && <span className="steering-receipt-image">Attachment Included</span>}
         </div>
       )}
       {(durableDetail || (localPendingDetail && localPendingDetail !== durableDetail)) && (

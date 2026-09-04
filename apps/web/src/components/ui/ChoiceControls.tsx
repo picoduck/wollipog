@@ -8,6 +8,81 @@ import {
 } from "../interactions.js";
 
 /**
+ * An always-open listbox owned by another control, such as an autocomplete textbox.
+ *
+ * The owner keeps DOM focus and drives the active index; this primitive only centralizes the
+ * listbox/option semantics so data pickers do not grow their own incompatible choice markup.
+ */
+export function InlineListbox<T>({
+  id,
+  label,
+  options,
+  activeIndex,
+  getKey,
+  renderOption,
+  onSelect,
+  className,
+  before,
+  after,
+}: {
+  id: string;
+  label: string;
+  options: readonly T[];
+  activeIndex: number;
+  getKey: (option: T) => string;
+  renderOption: (option: T) => ReactNode;
+  onSelect: (option: T) => void;
+  className?: string;
+  before?: ReactNode;
+  after?: ReactNode;
+}) {
+  return (
+    <div className={className} role="listbox" id={id} aria-label={label}>
+      {before}
+      {options.map((option, index) => (
+        <button
+          type="button"
+          role="option"
+          id={`${id}-${index}`}
+          aria-selected={index === activeIndex}
+          tabIndex={-1}
+          className={`ui-inline-listbox-option${index === activeIndex ? " is-active" : ""}`}
+          key={getKey(option)}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => onSelect(option)}
+        >
+          {renderOption(option)}
+        </button>
+      ))}
+      {after}
+    </div>
+  );
+}
+
+/** A labelled binary choice with the platform checkbox interaction contract. */
+export function Checkbox({
+  checked,
+  disabled,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <input
+      type="checkbox"
+      checked={checked}
+      disabled={disabled}
+      aria-label={label}
+      onChange={(event) => onChange(event.target.checked)}
+    />
+  );
+}
+
+/**
  * Picking one of N, as three primitives instead of seventeen.
  *
  * §11.1 counted seventeen ways this app asks the same question, and the problem is not that any one

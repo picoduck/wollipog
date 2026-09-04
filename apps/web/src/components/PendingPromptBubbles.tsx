@@ -83,7 +83,7 @@ export function PendingPromptBubbles({
             </span>
           </div>
           <div id={detailsId}>
-            {prompt.hasImages && <div className="pending-prompt-attachment">Image Attachment</div>}
+            {prompt.hasImages && <div className="pending-prompt-attachment">Attachment</div>}
             {prompt.text && <div className="bubble-text">{prompt.text}</div>}
             {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
           </div>

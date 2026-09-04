@@ -20,6 +20,7 @@ import type {
   CreateAutomationTriggerRequest,
   CreateRunRequest,
   CreateSessionRequest,
+  CreateWorkspaceReferenceRequest,
   AddProjectLocationRequest,
   CreateProjectLocationRequest,
   MoveProjectLocationRequest,
@@ -104,6 +105,8 @@ import type {
   UserCostWindows,
   UserStatus,
   WorkspaceInfo,
+  WorkspaceReference,
+  WorkspaceReferenceCandidate,
   WorkflowArtifact,
   WorkflowArtifactPage,
   WorkflowDefinition,
@@ -1006,6 +1009,17 @@ export function createApiClient(transport: ApiTransport) {
   readSessionFile: (sessionId: string, path: string) =>
     req<{ path: string; content?: string; size?: number; truncated?: boolean; binary?: boolean }>(
       `/api/sessions/${encodeURIComponent(sessionId)}/file?${new URLSearchParams({ path }).toString()}`,
+    ),
+
+  searchWorkspaceReferences: (sessionId: string, query: string) =>
+    req<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({ q: query }).toString()}`,
+    ),
+
+  createWorkspaceReference: (sessionId: string, target: CreateWorkspaceReferenceRequest) =>
+    req<{ reference: WorkspaceReference }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references`,
+      { method: "POST", body: JSON.stringify(target) },
     ),
 
   // Shells panel: durable metadata plus bounded sequence-addressed history.

@@ -29,6 +29,7 @@ import type {
   PromptImage,
   PromptImageInput,
   PromptImageReference,
+  WorkspaceReference,
   QueuedPromptDraft,
   QueuedPromptEditFailureReason,
   ReadQueuedPromptMessage,
@@ -49,6 +50,7 @@ import type {
 } from "@wollipog/protocol";
 import {
   isPromptImageReference,
+  isWorkspaceReference,
   PROTOCOL_VERSION,
   providerSupportsConversationFork,
   runnerSupportsProtocol,
@@ -94,7 +96,8 @@ import {
   type CheckpointRefOwnershipClaim,
   type CheckpointRefOwnershipRecord,
 } from "./checkpoint-ref-ownership.js";
-import { anchorForkRef, anchorTurnRef, captureWorktreeTree, deleteTurnRef, deleteTurnRefs, isMissingGitRepositoryError, readTurnRef, resetWorktreeIndex, restoreWorktreeToTree, synchronizeCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
+import { anchorForkRef, anchorTurnRef, captureWorktreeTree, deleteTurnRef, deleteTurnRefs, gitDiff, isMissingGitRepositoryError, readTurnRef, resetWorktreeIndex, restoreWorktreeToTree, synchronizeCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
+import { createWorkspaceReference, readSessionFile, workspaceDirectoryTree, workspaceReferenceDiffContent } from "./session-files.js";
 import {
   SessionStore,
   isAdoptedSession,
@@ -532,6 +535,33 @@ const STEERING_SUBMISSION_TIMEOUT_MS = 10_000;
 const MAX_STEERING_TERMINALS_PER_SESSION = 1_024;
 const MAX_UNRESOLVED_STEERING_ATTEMPTS_PER_SESSION = 50;
 const MAX_STEERING_RESULT_MESSAGE_CHARS = 4_096;
+const MAX_WORKSPACE_REFERENCE_CONTEXT_BYTES = 512 * 1024;
+
+function boundedWorkspaceReferenceJson(
+  metadata: Record<string, unknown>,
+  content: string,
+  maxBytes: number,
+  alreadyTruncated: boolean,
+): string {
+  const serialize = (value: string, truncated: boolean) => JSON.stringify({ ...metadata, content: value, truncated }, null, 2);
+  const complete = serialize(content, alreadyTruncated);
+  if (Buffer.byteLength(complete, "utf8") <= maxBytes) return complete;
+  let low = 0;
+  let high = content.length;
+  let best = "";
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = serialize(content.slice(0, middle), true);
+    if (Buffer.byteLength(candidate, "utf8") <= maxBytes) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (!best) throw new Error("workspace reference metadata exceeds the provider context limit");
+  return best;
+}
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -4417,7 +4447,10 @@ export class SessionManager {
       : source?.text ?? request.text ?? "";
     const imageInputs = source?.images ?? request.images ?? [];
     const materialized = await this.awaitSteeringDeadline(
-      this.materializeSteeringImages(request.sessionId, imageInputs),
+      Promise.all([
+        this.materializeSteeringImages(request.sessionId, imageInputs),
+        this.resolveWorkspaceReferenceText(entry, imageInputs),
+      ]),
       operation.deadlineAt,
       operation.lifecyclePromise,
     );
@@ -4457,11 +4490,12 @@ export class SessionManager {
     }
 
     operation.providerStarted = true;
+    const [steeringImages, steeringReferenceText] = materialized.value!;
     const providerPromise = entry.client.steer({
       submissionId: request.submissionId,
       deadlineAt: operation.deadlineAt,
-      text: displayText,
-      images: materialized.value,
+      text: `${displayText}${steeringReferenceText}`,
+      images: steeringImages,
     });
     const provider = await this.awaitSteeringDeadline(providerPromise, operation.deadlineAt, operation.lifecyclePromise);
     if (provider.cancelled) {
@@ -4512,17 +4546,82 @@ export class SessionManager {
   }
 
   private async materializeSteeringImages(sessionId: string, inputs: PromptImageInput[]): Promise<PromptImage[]> {
-    const references = inputs.filter(isPromptImageReference);
+    const references = inputs.filter((input): input is PromptImageReference =>
+      isPromptImageReference(input) && !isWorkspaceReference(input));
     const resolved = references.length
       ? await (this.resolvePromptImages?.(sessionId, references) ?? Promise.reject(new Error("prompt image references are unsupported by this runner")))
       : [];
     if (resolved.length !== references.length) throw new Error("prompt image resolver returned an unexpected result count");
     let referenceIndex = 0;
-    const images = inputs.map((image) => isPromptImageReference(image) ? resolved[referenceIndex++]! : image);
+    const images = inputs.filter((image) => !isWorkspaceReference(image))
+      .map((image) => isPromptImageReference(image) ? resolved[referenceIndex++]! : image);
     if (images.some((image) => !image || typeof image.data !== "string")) {
       throw new Error("prompt image resolver returned an incomplete result");
     }
     return images;
+  }
+
+  private async resolveWorkspaceReferenceText(entry: ActiveSession, inputs: PromptImageInput[]): Promise<string> {
+    const references = inputs.filter(isWorkspaceReference);
+    if (!references.length) return "";
+    const meta = this.store.readMeta(entry.sessionId);
+    if (!meta) throw new Error("the session disappeared while workspace references were being validated");
+    const prefix = "\n\nWorkspace references (content was resolved by the runner inside this session's exact execution root):\n";
+    const sections: string[] = [];
+    let remaining = MAX_WORKSPACE_REFERENCE_CONTEXT_BYTES - Buffer.byteLength(prefix, "utf8");
+    for (const reference of references) {
+      let diff: Awaited<ReturnType<typeof gitDiff>> | null = null;
+      if (reference.kind === "diff") {
+        diff = await withGitExecutionContext(entry.context, () => gitDiff(entry.cwd, reference.diffScope!, {
+          useWorktree: Boolean(entry.worktree),
+          lastTurnBaseTree: meta.lastTurnBaseTree,
+        }));
+        if (diff.diffHash !== reference.diffHash) {
+          throw new Error(`${reference.path} changed since it was attached; refresh Review and attach the selected lines again`);
+        }
+      }
+      const current = await createWorkspaceReference(entry.context, entry.cwd, {
+        path: reference.path,
+        kind: reference.kind,
+        startLine: reference.startLine,
+        endLine: reference.endLine,
+        side: reference.side,
+        diffHash: reference.diffHash,
+        diffScope: reference.diffScope,
+      });
+      if (current.rootFingerprint !== reference.rootFingerprint || current.targetFingerprint !== reference.targetFingerprint) {
+        throw new Error(`${reference.path} is missing, changed, or belongs to a different workspace; remove it and attach it again`);
+      }
+      let content: string;
+      let contentTruncated = false;
+      if (reference.kind === "directory") {
+        const tree = await workspaceDirectoryTree(entry.context, entry.cwd, reference.path);
+        content = tree.content;
+        contentTruncated = tree.truncated;
+      } else if (reference.kind === "diff") {
+        content = workspaceReferenceDiffContent(diff!, reference);
+      } else {
+        const file = await readSessionFile(entry.context, entry.cwd, reference.path);
+        if (file.binary) throw new Error(`${reference.path} is binary and cannot be included as prompt text`);
+        contentTruncated = reference.kind === "file" && file.truncated;
+        const allLines = (file.content ?? "").split(/\r?\n/);
+        content = reference.kind === "lines"
+          ? allLines.slice(reference.startLine! - 1, reference.endLine).map((line, index) => `${reference.startLine! + index}: ${line}`).join("\n")
+          : file.content ?? "";
+      }
+      if (remaining < 256) throw new Error("workspace references exceed the bounded provider context limit; remove one or attach a smaller selection");
+      const section = boundedWorkspaceReferenceJson({
+        kind: reference.kind,
+        path: reference.path,
+        ...(reference.startLine === undefined ? {} : { startLine: reference.startLine, endLine: reference.endLine }),
+        ...(reference.side === undefined ? {} : { side: reference.side === "left" ? "base" : "worktree" }),
+        ...(reference.diffScope === undefined ? {} : { diffScope: reference.diffScope, diffIdentity: reference.diffHash }),
+        revision: reference.targetFingerprint,
+      }, content, remaining, contentTruncated);
+      sections.push(section);
+      remaining -= Buffer.byteLength(section, "utf8");
+    }
+    return `${prefix}${sections.join("\n")}`;
   }
 
   private awaitSteeringDeadline<T>(
@@ -4852,7 +4951,7 @@ export class SessionManager {
       text: request.text,
       // A control-plane retry can externalize identical inline bytes into a fresh artifact ID.
       // Hash immutable content identity so that storage allocation does not defeat idempotency.
-      images: request.images.map((image) => isPromptImageReference(image) ? {
+      images: request.images.map((image) => isWorkspaceReference(image) ? image : isPromptImageReference(image) ? {
         mimeType: image.mimeType,
         sizeBytes: image.sizeBytes,
         sha256: image.sha256,
@@ -5911,8 +6010,10 @@ export class SessionManager {
     // second prompt for the generation already owned by this dequeued turn.
     if (backgroundJobIds?.length) entry.currentBackgroundJobIds = [...backgroundJobIds];
     let images: PromptImage[];
+    let workspaceReferenceText = "";
     try {
-      const references = imageInputs.filter(isPromptImageReference);
+      const references = imageInputs.filter((input): input is PromptImageReference =>
+        isPromptImageReference(input) && !isWorkspaceReference(input));
       const resolved = references.length
         ? await (this.resolvePromptImages?.(sessionId, references) ?? Promise.reject(new Error("prompt image references are unsupported by this runner")))
         : [];
@@ -5920,12 +6021,14 @@ export class SessionManager {
         throw new Error("prompt image resolver returned an unexpected result count");
       }
       let referenceIndex = 0;
-      images = imageInputs.map((image) => isPromptImageReference(image) ? resolved[referenceIndex++]! : image);
+      images = imageInputs.filter((image) => !isWorkspaceReference(image))
+        .map((image) => isPromptImageReference(image) ? resolved[referenceIndex++]! : image);
       if (images.some((image) => !image || typeof image.data !== "string")) {
         throw new Error("prompt image resolver returned an incomplete result");
       }
+      workspaceReferenceText = await this.resolveWorkspaceReferenceText(entry, imageInputs);
     } catch (error) {
-      const detail = `prompt image materialization failed: ${errText(error)}`;
+      const detail = `prompt attachment validation failed: ${errText(error)}`;
       this.emitEvent(sessionId, { kind: "error", message: detail });
       this.emitStatus(sessionId, "idle");
       durable?.failed(detail, "INVALID_COMMAND");
@@ -6083,7 +6186,7 @@ export class SessionManager {
     }
     try {
       let stop: Awaited<ReturnType<Driver["prompt"]>>;
-      stop = await entry.client.prompt(text, images, slashCommand);
+      stop = await entry.client.prompt(`${text}${workspaceReferenceText}`, images, slashCommand);
       if (entry.historyIntegrityFailure) return;
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
       if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {

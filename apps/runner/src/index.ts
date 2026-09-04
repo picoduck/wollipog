@@ -30,10 +30,12 @@ import {
   type GitActionRequestMessage,
   type HeartbeatMessage,
   type HostActionMessage,
+  type CreateWorkspaceReferenceRequestMessage,
   type ListDirectoryRequestMessage,
   type ListSessionFilesRequestMessage,
   type OS,
   type ReadSessionFileRequestMessage,
+  type SearchWorkspaceReferencesRequestMessage,
   type RegisterMessage,
   type ReprocessSessionMessage,
   type RunnerMetadata,
@@ -83,6 +85,7 @@ import {
 } from "./agent-control.js";
 import {
   GitOpError,
+  gitDiff,
   resolveGitActionExecution,
   runGitAction,
   runPodReconcile,
@@ -121,7 +124,12 @@ import {
 } from "./external/acp-sessions.js";
 import { listDirectory } from "./fs-browse.js";
 import { discoverEditors, runHostAction } from "./host-actions.js";
-import { listSessionFiles, readSessionFile } from "./session-files.js";
+import {
+  createWorkspaceReference,
+  listSessionFiles,
+  readSessionFile,
+  searchWorkspaceReferences,
+} from "./session-files.js";
 import { ShellManager } from "./shell-manager.js";
 import { agentTuiLaunch } from "./agent-tui.js";
 import { capabilitiesFor } from "./catalog.js";
@@ -1707,6 +1715,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "read_session_file":
       runCommandTask("read_session_file", handleReadSessionFile(msg));
       break;
+    case "search_workspace_references":
+      runCommandTask("search_workspace_references", handleSearchWorkspaceReferences(msg));
+      break;
+    case "create_workspace_reference":
+      runCommandTask("create_workspace_reference", handleCreateWorkspaceReference(msg));
+      break;
     case "shell_open": {
       runCommandTask("shell_open", handleShellOpenCommand(msg, {
         waitForSessionStart: (sessionId) => sessionStarts.wait(sessionId),
@@ -1821,6 +1835,71 @@ async function handleReadSessionFile(msg: ReadSessionFileRequestMessage): Promis
     sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: true, ...file });
   } catch (err) {
     sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: false, error: errText(err) });
+  }
+}
+
+async function handleSearchWorkspaceReferences(msg: SearchWorkspaceReferencesRequestMessage): Promise<void> {
+  const target = sessionFilesTarget(msg.sessionId);
+  if (!target || target === "pending") {
+    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
+    return sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false, error });
+  }
+  try {
+    const found = await searchWorkspaceReferences(target.context, target.root, msg.query);
+    sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: true, ...found });
+  } catch (err) {
+    sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false, error: errText(err) });
+  }
+}
+
+function diffContainsTarget(
+  diff: Awaited<ReturnType<typeof gitDiff>>,
+  target: CreateWorkspaceReferenceRequestMessage["target"],
+): boolean {
+  const file = diff.files.find((candidate) => candidate.path === target.path ||
+    (target.side === "left" && candidate.oldPath === target.path));
+  if (!file || target.startLine === undefined || target.endLine === undefined || !target.side) return false;
+  const seen = new Set<number>();
+  for (const hunk of file.hunks) {
+    let left = hunk.oldStart;
+    let right = hunk.newStart;
+    for (const line of hunk.lines) {
+      if (line.status !== "+") {
+        if (target.side === "left") seen.add(left);
+        left += 1;
+      }
+      if (line.status !== "-") {
+        if (target.side === "right") seen.add(right);
+        right += 1;
+      }
+    }
+  }
+  for (let line = target.startLine; line <= target.endLine; line += 1) {
+    if (!seen.has(line)) return false;
+  }
+  return true;
+}
+
+async function handleCreateWorkspaceReference(msg: CreateWorkspaceReferenceRequestMessage): Promise<void> {
+  const target = sessionFilesTarget(msg.sessionId);
+  if (!target || target === "pending") {
+    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
+    return sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: false, error });
+  }
+  try {
+    if (msg.target.kind === "diff") {
+      const current = await withGitExecutionContext(target.context, () => gitDiff(target.root, msg.target.diffScope!, {
+        useWorktree: Boolean(target.meta.worktreePath),
+        lastTurnBaseTree: target.meta.lastTurnBaseTree,
+      }));
+      if (current.diffHash !== msg.target.diffHash || !diffContainsTarget(current, msg.target)) {
+        throw new Error("the diff changed or the selected lines are no longer present — refresh Review and attach them again");
+      }
+    }
+    const reference = await createWorkspaceReference(target.context, target.root, msg.target);
+    sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: true, reference });
+  } catch (err) {
+    sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: false, error: errText(err) });
   }
 }
 

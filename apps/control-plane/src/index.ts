@@ -58,6 +58,7 @@ import {
   type DispatchWorkflowNodeRequest,
   type CreateWorkflowArtifactRequest,
   type CreateSessionRequest,
+  type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
   type UpdateProjectRequest,
   type AddProjectLocationRequest,
@@ -1293,6 +1294,8 @@ app.register(async (instance) => {
       case "list_directory_result":
       case "list_session_files_result":
       case "read_session_file_result":
+      case "search_workspace_references_result":
+      case "create_workspace_reference_result":
       case "shell_open_result":
       case "rewind_result":
       case "fork_result":
@@ -2360,6 +2363,29 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
   const r = await svc.readSessionFile(id, q.path);
   if (!r.ok) return reply.code(r.status).send({ error: r.error });
   return r.data;
+});
+
+app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const q = req.query as { q?: unknown };
+  if (typeof q.q !== "string" || !q.q.trim() || q.q.length > 256) {
+    return reply.code(400).send({ error: "q must contain 1-256 characters" });
+  }
+  const r = await svc.searchWorkspaceReferences(id, q.q);
+  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  return r.data;
+});
+
+app.post("/api/sessions/:id/workspace-references", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const body = (req.body ?? {}) as Partial<CreateWorkspaceReferenceRequest>;
+  if (typeof body.path !== "string" || !body.path ||
+      (body.kind !== "file" && body.kind !== "directory" && body.kind !== "lines" && body.kind !== "diff")) {
+    return reply.code(400).send({ error: "path and a valid reference kind are required" });
+  }
+  const r = await svc.createWorkspaceReference(id, body as CreateWorkspaceReferenceRequest);
+  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  return { reference: r.data };
 });
 
 // Drop one not-yet-started queued prompt (the running turn is unaffected). The runner echoes the
