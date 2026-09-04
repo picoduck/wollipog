@@ -825,7 +825,7 @@ export class SessionManager {
       if (!resumable) {
         throw new Error("session disappeared while its requested worktree was activating");
       }
-      if (!resumable.agentSessionId && (resumable.turnCount ?? 0) > 0) {
+      if (!resumable.agentSessionId && resumable.seq > 0) {
         throw new Error("the running provider has not established a resumable conversation; retry worktree selection after this turn");
       }
       if (resumable.agentSessionId && !canResumeSession(resumable)) {
@@ -5415,7 +5415,10 @@ export class SessionManager {
     this.captureAgentSessionId(sessionId, entry.client);
     const resumable = this.store.readMeta(sessionId);
     const resumeId = resumable?.agentSessionId ?? undefined;
-    const hasConversation = (resumable?.turnCount ?? 0) > 0;
+    // Root-cwd sessions do not create worktree checkpoints, so turnCount remains zero even after
+    // provider-visible events. Event sequence is the established resume predicate used by the
+    // normal stopped-session path and prevents a failed first conversation from becoming fresh.
+    const hasConversation = (resumable?.seq ?? 0) > 0;
     if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
       entry.pendingWorktreeRebind = undefined;
       this.emitEvent(sessionId, {
@@ -5475,7 +5478,8 @@ export class SessionManager {
           kind: "error",
           message: "the selected worktree no longer has a durable session identity",
         });
-        this.emitStatus(sessionId, "idle");
+        if (this.launchIsCurrent(sessionId, launchGeneration) &&
+            this.store.readMeta(sessionId)?.status !== "stopped") this.emitStatus(sessionId, "idle");
         return;
       }
       let verifiedWorktreePath: string;
@@ -5507,7 +5511,40 @@ export class SessionManager {
       if (rebinding?.entry === entry) {
         rebinding.launchingWorktreePath = verifiedWorktreePath;
       }
-      launched = await this.launch({ ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration);
+      try {
+        launched = await this.launch(
+          { ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration,
+        );
+      } catch (error) {
+        // launch() contains expected preparation/driver failures. This final boundary keeps an
+        // unexpected cleanup/reporting exception from rejecting the rebind promise into callers
+        // such as delete(), and retires any same-generation entry it published before throwing.
+        this.log(`session ${sessionId} provider launch failed during worktree rebind: ${errText(error)}`);
+        const failedEntry = this.active.get(sessionId);
+        if (failedEntry?.launchGeneration === launchGeneration) {
+          this.deleteActiveSession(sessionId, failedEntry, false);
+          try {
+            await this.closeAndDispose(sessionId, failedEntry.client, true);
+          } catch (disposeError) {
+            this.log(`session ${sessionId} failed replacement disposal: ${errText(disposeError)}`);
+          } finally {
+            this.releaseActiveWorktreeLease(failedEntry);
+          }
+        }
+        if (this.launchIsCurrent(sessionId, launchGeneration) &&
+            this.store.readMeta(sessionId)?.status !== "stopped") {
+          try {
+            this.emitEvent(sessionId, {
+              kind: "error",
+              message: `provider could not resume in the selected worktree: ${errText(error)}`,
+            });
+            this.emitStatus(sessionId, "failed", errText(error));
+          } catch (reportError) {
+            this.log(`session ${sessionId} worktree rebind failure reporting failed: ${errText(reportError)}`);
+          }
+        }
+        return;
+      }
       if (launched) {
         const reboundEntry = this.active.get(sessionId);
         if (this.store.readMeta(sessionId)?.status === "stopped") {
