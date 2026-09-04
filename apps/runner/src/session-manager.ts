@@ -1001,7 +1001,9 @@ export class SessionManager {
     const rebinding = rebind?.entry;
     const rebindingSelection = rebinding ? this.store.readMeta(sessionId)?.worktreePath : undefined;
     return (!!active && (sameWorktreePath(active.context, active.cwd, path) ||
-      (!!active.worktree && sameWorktreePath(active.context, active.worktree.path, path)))) ||
+      (!!active.worktree && sameWorktreePath(active.context, active.worktree.path, path)) ||
+      (!!active.pendingWorktreeRebind &&
+        sameWorktreePath(active.context, active.pendingWorktreeRebind, path)))) ||
       (!!rebinding && (sameWorktreePath(rebinding.context, rebinding.cwd, path) ||
         (!!rebinding.worktree && sameWorktreePath(rebinding.context, rebinding.worktree.path, path)))) ||
       (!!rebinding && !!rebindingSelection && sameWorktreePath(rebinding.context, rebindingSelection, path)) ||
@@ -5351,6 +5353,8 @@ export class SessionManager {
   private worktreeRebindCanProceed(sessionId: string, entry: ActiveSession): boolean {
     return !entry.running &&
       this.active.get(sessionId) === entry &&
+      !entry.authenticationBlocked &&
+      !entry.historyIntegrityFailure &&
       !entry.governanceTripped &&
       !entry.holdQueuedPromptsAfterInterrupt &&
       !this.hasPendingApproval(sessionId) &&
@@ -5401,14 +5405,16 @@ export class SessionManager {
     if (queued.length) this.preLaunchQueues.set(sessionId, queued);
     this.deleteActiveSession(sessionId, entry, false);
     this.emitQueue(sessionId);
-    try {
-      await this.closeAndDispose(sessionId, entry.client, true);
-    } finally {
-      this.releaseActiveWorktreeLease(entry);
-    }
-
     let launched = false;
     try {
+      try {
+        await this.closeAndDispose(sessionId, entry.client, true);
+      } catch (error) {
+        this.log(`session ${sessionId} provider disposal failed during worktree rebind: ${errText(error)}`);
+        return;
+      } finally {
+        this.releaseActiveWorktreeLease(entry);
+      }
       const fresh = this.store.readMeta(sessionId);
       if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
       const rebinding = this.worktreeRebindings.get(sessionId);

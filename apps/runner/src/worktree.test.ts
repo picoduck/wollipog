@@ -1166,6 +1166,122 @@ test("an interrupt hold defers worktree rebind until an explicit prompt resumes 
   }
 });
 
+test("an authentication hold defers worktree rebind and preserves its FIFO until an explicit prompt", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-auth-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releasePrompt = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    let promptStartedResolve!: () => void;
+    const promptStarted = new Promise<void>((resolve) => { promptStartedResolve = resolve; });
+    const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async (text: string) => {
+          prompts.push({ cwd: launch.cwd, text });
+          if (text === "first") {
+            promptStartedResolve();
+            await promptGate;
+          }
+          return "end_turn" as const;
+        },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_auth_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "first");
+    await promptStarted;
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/auth-rebind",
+    });
+    manager.prompt(spec.sessionId, "held");
+    const internals = manager as unknown as {
+      active: Map<string, { authenticationBlocked?: boolean }>;
+    };
+    internals.active.get(spec.sessionId)!.authenticationBlocked = true;
+    releasePrompt();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(launchedCwds, [repo], "authentication containment must defer provider replacement");
+    assert.deepEqual(prompts, [{ cwd: repo, text: "first" }], "held work must remain intact");
+    manager.prompt(spec.sessionId, "resume");
+    await waitForCondition(() => prompts.length === 3, "explicit auth revalidation did not resume the FIFO");
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    assert.deepEqual(prompts.slice(1), [
+      { cwd: requested.worktree.path, text: "held" },
+      { cwd: requested.worktree.path, text: "resume" },
+    ]);
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    releasePrompt();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("history-integrity containment prevents an implicit worktree rebind", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-history-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+        resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_history_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    const internals = manager as unknown as {
+      active: Map<string, { historyIntegrityFailure?: string; pendingWorktreeRebind?: string }>;
+    };
+    internals.active.get(spec.sessionId)!.historyIntegrityFailure = "contained history failure";
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/history-rebind",
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(launchedCwds, [repo], "history containment must not relaunch the provider");
+    assert.equal(internals.active.get(spec.sessionId)?.pendingWorktreeRebind, requested.worktree.path,
+      "the selection remains pending for an explicit recovery path");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("stop fences and cancels a worktree rebind while its old provider is closing", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-stop-worktree-rebind-"));
   const repo = join(root, "repo");
@@ -1292,7 +1408,31 @@ test("a selection made during replacement launch is fenced and receives a follow
     await assert.rejects(manager.discardWorktree(spec.sessionId, launching.worktree.path),
       /still active in a provider process/,
       "cleanup must fence the target already captured by an in-flight launch");
+    const internals = manager as unknown as {
+      active: Map<string, {
+        governanceTripped?: "cost_budget" | "max_tool_calls";
+        pendingWorktreeRebind?: string;
+      }>;
+      liveWorktreeUsesPath: (sessionId: string, path: string) => boolean;
+    };
     releaseLaunch();
+    for (let attempt = 0; attempt < 500 &&
+        internals.active.get(spec.sessionId)?.pendingWorktreeRebind !== latest.worktree.path; attempt++) {
+      await Promise.resolve();
+    }
+    const rebound = internals.active.get(spec.sessionId);
+    assert.equal(rebound?.pendingWorktreeRebind, latest.worktree.path);
+    rebound!.governanceTripped = "max_tool_calls";
+    store.patchMeta(spec.sessionId, { status: "idle", worktreePending: false });
+    assert.equal(internals.liveWorktreeUsesPath(spec.sessionId, latest.worktree.path), true,
+      "the pending target itself must remain fenced after launch status settles");
+    await assert.rejects(manager.discardWorktree(spec.sessionId, latest.worktree.path),
+      /still active in a provider process/,
+      "cleanup must fence the newest target while its follow-up rebind is deferred");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(launchedCwds, [repo, launching.worktree.path],
+      "the governance boundary must defer the follow-up handoff");
+    manager.rearmGovernance(spec.sessionId, { maxToolCalls: 2 });
     await waitForCondition(() => launchedCwds.length === 3, "latest selection did not trigger a follow-up rebind");
     assert.deepEqual(launchedCwds, [repo, launching.worktree.path, latest.worktree.path]);
     assert.equal(store.readMeta(spec.sessionId)?.worktreePath, latest.worktree.path);
@@ -1301,6 +1441,71 @@ test("a selection made during replacement launch is fenced and receives a follow
   } finally {
     releaseClose();
     releaseLaunch();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a throwing provider dispose cannot strand rebind generation or admission state", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-dispose-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const prompts: string[] = [];
+    let disposeAttemptedResolve!: () => void;
+    const disposeAttempted = new Promise<void>((resolve) => { disposeAttemptedResolve = resolve; });
+    let launches = 0;
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      const launchNumber = ++launches;
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: launchNumber, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async (text: string) => { prompts.push(text); return "end_turn" as const; },
+        cancel: () => {},
+        dispose: () => {
+          if (launchNumber === 1) {
+            disposeAttemptedResolve();
+            throw new Error("dispose failed");
+          }
+        },
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_dispose_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/dispose-rebind",
+    });
+    const internals = manager as unknown as {
+      admitted: Set<string>;
+      launchGenerations: Map<string, number>;
+      preLaunchAdmissionGenerations: Map<string, number>;
+      worktreeRebindings: Map<string, unknown>;
+    };
+    await disposeAttempted;
+    await waitForCondition(() => !internals.worktreeRebindings.has(spec.sessionId),
+      "failed provider disposal did not settle the rebind");
+    assert.equal(internals.launchGenerations.has(spec.sessionId), false);
+    assert.equal(internals.preLaunchAdmissionGenerations.has(spec.sessionId), false);
+    assert.equal(internals.admitted.has(spec.sessionId), false);
+    assert.equal(manager.prompt(spec.sessionId, "after failure"), true);
+    await waitForCondition(() => prompts.length === 1, "a later prompt remained stranded after disposal failure");
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
