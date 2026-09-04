@@ -114,6 +114,28 @@ test("stale replay-safe ownership is reclaimed but a started command becomes unc
   }
 });
 
+test("same-owner handle loss makes a started command uncertain instead of replayable", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-local-handle-loss-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    const first = store.claim(message());
+    assert.equal(first.kind, "new");
+    if (first.kind !== "new") return;
+    assert.equal(first.handle.started(7).state, "started");
+    store.releaseHandle("cmd_test");
+
+    const retried = store.claim(message());
+    assert.equal(retried.kind, "duplicate");
+    if (retried.kind !== "duplicate") return;
+    assert.equal(retried.receipt.state, "uncertain");
+    assert.match(retried.receipt.error ?? "", /lost the local command handle/);
+    assert.equal(store.read("cmd_test")?.state, "uncertain");
+    assert.notEqual(store.read("cmd_test")?.state, "accepted");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a stale queued command resets to accepted when a new process reclaims it", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-command-queued-reclaim-"));
   let now = 1;
@@ -236,6 +258,81 @@ test("malformed durable envelopes fail closed without throwing", () => {
     const bodyRejected = store.claim(message(hiddenBody, { commandId: "cmd_hidden" }));
     assert.notEqual(bodyRejected.kind, "busy");
     if (bodyRejected.kind !== "busy") assert.equal(bodyRejected.receipt.code, "INVALID_COMMAND");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable command identities reject invalid command and execution ids", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-invalid-identity-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    const invalidIds = ["bad/id", "", "x".repeat(129)];
+    for (const field of ["commandId", "executionId"] as const) {
+      for (const value of invalidIds) {
+        const rejected = store.claim(message(startCommand(), { [field]: value }));
+        assert.equal(rejected.kind, "conflict");
+        if (rejected.kind !== "conflict") continue;
+        assert.equal(rejected.receipt.code, "INVALID_COMMAND");
+        assert.match(rejected.receipt.error ?? "", /identity is invalid/);
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable command expiry rejects elapsed and non-finite horizons", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-expired-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 100 });
+    for (const expiresAt of [100, 99, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const rejected = store.claim(message(startCommand(), { expiresAt }));
+      assert.equal(rejected.kind, "conflict");
+      if (rejected.kind !== "conflict") continue;
+      assert.equal(rejected.receipt.code, "COMMAND_EXPIRED");
+      assert.match(rejected.receipt.error ?? "", /has expired/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable command payload digests reject invalid shapes before comparison", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-invalid-digest-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    for (const payloadDigest of ["a".repeat(63), "A".repeat(64)]) {
+      const rejected = store.claim(message(startCommand(), { payloadDigest }));
+      assert.equal(rejected.kind, "conflict");
+      if (rejected.kind !== "conflict") continue;
+      assert.equal(rejected.receipt.code, "INVALID_COMMAND");
+      assert.match(rejected.receipt.error ?? "", /digest is invalid/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable command kinds outside the supported set are rejected", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-unsupported-kind-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    let typeReads = 0;
+    const command = {
+      ...startCommand(),
+      get type() {
+        typeReads += 1;
+        return typeReads <= 2 ? "start_session" : "unsupported";
+      },
+    };
+    const rejected = store.claim({ ...message(), command: command as StartSessionMessage });
+    assert.equal(rejected.kind, "conflict");
+    if (rejected.kind !== "conflict") {
+      assert.fail("unsupported command kind was not rejected");
+    }
+    assert.equal(rejected.receipt.code, "INVALID_COMMAND");
+    assert.match(rejected.receipt.error ?? "", /kind is unsupported/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
