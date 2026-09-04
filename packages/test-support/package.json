@@ -1,0 +1,23 @@
+{
+  "name": "@wollipog/test-support",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/bounded-child-process.ts",
+  "types": "src/bounded-child-process.ts",
+  "exports": {
+    "./bounded-child-process": {
+      "types": "./src/bounded-child-process.ts",
+      "default": "./src/bounded-child-process.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.3"
+  }
+}

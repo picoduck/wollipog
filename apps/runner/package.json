@@ -21,6 +21,7 @@
     "@agentclientprotocol/sdk": "1.2.1",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.13",
+    "@wollipog/test-support": "workspace:*",
     "esbuild": "^0.25.0",
     "postject": "^1.0.0-alpha.6",
     "tsx": "^4.19.2",

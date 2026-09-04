@@ -11,6 +11,9 @@ importers:
       '@playwright/test':
         specifier: 1.61.1
         version: 1.61.1
+      '@wollipog/test-support':
+        specifier: workspace:*
+        version: link:packages/test-support
       concurrently:
         specifier: ^9.2.4
         version: 9.2.4
@@ -42,6 +45,9 @@ importers:
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.2
+      '@wollipog/test-support':
+        specifier: workspace:*
+        version: link:../../packages/test-support
       tsx:
         specifier: ^4.19.2
         version: 4.22.4
@@ -84,6 +90,9 @@ importers:
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
+      '@wollipog/test-support':
+        specifier: workspace:*
+        version: link:../../packages/test-support
       esbuild:
         specifier: ^0.25.0
         version: 0.25.12
@@ -151,6 +160,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.1.0
         version: 6.1.1(vite@8.2.2(@types/node@24.13.2)(esbuild@0.28.1)(tsx@4.22.4))
+      '@wollipog/test-support':
+        specifier: workspace:*
+        version: link:../../packages/test-support
       happy-dom:
         specifier: ^20.10.6
         version: 20.10.6
@@ -165,6 +177,15 @@ importers:
         version: 8.2.2(@types/node@24.13.2)(esbuild@0.28.1)(tsx@4.22.4)
 
   packages/protocol:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.2
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/test-support:
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
