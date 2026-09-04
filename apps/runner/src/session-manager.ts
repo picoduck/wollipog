@@ -101,6 +101,7 @@ import {
   metaToSnapshot,
   type DurableBackgroundJob,
   type SessionMeta,
+  type StoredEvent,
 } from "./session-store.js";
 import { SessionCommandAuthorityRegistry } from "./session-command-authority.js";
 import type {
@@ -1402,23 +1403,28 @@ export class SessionManager {
   /** Recover the newest question that durable history still shows as unresolved. A later user turn
    * or permission request proves the old question is no longer the active interaction, even when
    * an older runner failed to append an explicit replacement resolution. */
-  private unresolvedQuestionFromHistory(sessionId: string): SessionMeta["pendingApproval"] {
-    const durableTail = this.store.logTailSeq(sessionId);
-    if (durableTail === 0) return null;
+  private unresolvedQuestionFromHistory(sessionId: string): {
+    scanned: boolean;
+    question: SessionMeta["pendingApproval"];
+  } {
+    const tail = this.store.logTailSeqResult(sessionId);
+    if (!tail.ok) return { scanned: false, question: null };
+    const durableTail = tail.seq;
+    if (durableTail === 0) return { scanned: true, question: null };
     let cursor = durableTail;
     let logEpoch: number | undefined;
     let throughSeq: number | undefined;
     const resolved = new Set<string>();
     while (cursor > 0) {
       let span = Math.min(200, cursor);
-      let events: ReturnType<SessionStore["readEvents"]> | null = null;
+      let events: StoredEvent[] | null = null;
       while (span > 0) {
         const page = this.store.readEventPage(sessionId, {
           afterSeq: cursor - span,
           limit: span,
           ...(logEpoch === undefined ? {} : { logEpoch, throughSeq: throughSeq! }),
         });
-        if (!page.ok) return null;
+        if (!page.ok) return { scanned: false, question: null };
         if (logEpoch === undefined) {
           logEpoch = page.page.logEpoch;
           throughSeq = page.page.throughSeq;
@@ -1431,7 +1437,7 @@ export class SessionManager {
           events = page.events;
           break;
         }
-        if (span === 1) return null;
+        if (span === 1) return { scanned: false, question: null };
         span = Math.max(1, Math.floor(span / 2));
       }
       if (!events) continue;
@@ -1444,13 +1450,16 @@ export class SessionManager {
         if (payload.kind === "question_request") {
           // A resolved newer question replaced every older pending question, so once its request
           // is reached there is nothing earlier that can still be actionable.
-          if (resolved.has(payload.requestId)) return null;
+          if (resolved.has(payload.requestId)) return { scanned: true, question: null };
           return {
-            requestId: payload.requestId,
-            title: payload.questions[0]?.question ?? "The agent has a question",
-            options: [],
-            kind: "question",
-            questions: payload.questions,
+            scanned: true,
+            question: {
+              requestId: payload.requestId,
+              title: payload.questions[0]?.question ?? "The agent has a question",
+              options: [],
+              kind: "question",
+              questions: payload.questions,
+            },
           };
         }
         if (
@@ -1458,11 +1467,11 @@ export class SessionManager {
           payload.kind === "agent_thought" || payload.kind === "tool_call" ||
           payload.kind === "permission_request" || payload.kind === "conversation_checkpoint" ||
           payload.kind === "turn_interrupted"
-        ) return null;
+        ) return { scanned: true, question: null };
       }
       cursor = events[0]!.seq - 1;
     }
-    return null;
+    return { scanned: true, question: null };
   }
 
   /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
@@ -1533,9 +1542,13 @@ export class SessionManager {
       const terminal = reconciled.status === "completed" || reconciled.status === "failed" ||
         reconciled.status === "stopped";
       let historicalQuestion: SessionMeta["pendingApproval"] = null;
-      if (!terminal && !reconciled.pendingApproval && reconciled.questionRecoveryReconciled !== true) {
-        historicalQuestion = this.unresolvedQuestionFromHistory(m.sessionId);
-        reconciled = this.store.patchMeta(m.sessionId, { questionRecoveryReconciled: true }) ?? reconciled;
+      if (!terminal && !reconciled.providerAuthBlock && !reconciled.pendingApproval &&
+          reconciled.questionRecoveryReconciled !== true) {
+        const recovery = this.unresolvedQuestionFromHistory(m.sessionId);
+        historicalQuestion = recovery.question;
+        if (recovery.scanned) {
+          reconciled = this.store.patchMeta(m.sessionId, { questionRecoveryReconciled: true }) ?? reconciled;
+        }
       }
       const recoverableQuestion = terminal
         ? null

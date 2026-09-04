@@ -336,6 +336,34 @@ test("startup preserves a still-pending question through the primary metadata pa
   }
 });
 
+test("startup retries historical question recovery after a transient history read failure", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "question-after-read-retry",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+    store.patchMeta("s_perm", { status: "idle", pendingApproval: null });
+    const logTailSeqResult = store.logTailSeqResult.bind(store);
+    store.logTailSeqResult = () => ({ ok: false });
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.questionRecoveryReconciled, undefined);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+
+    store.logTailSeqResult = logTailSeqResult;
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.questionRecoveryReconciled, true);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "question-after-read-retry");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryReason, "provider_restart");
+  } finally {
+    cleanup();
+  }
+});
+
 test("recovered dismissal preserves a newer running turn status", () => {
   const { sm, sent, store, cleanup } = makeHarness(false);
   try {
