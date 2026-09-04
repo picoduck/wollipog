@@ -272,7 +272,7 @@ test("keyboard choice selection clears an Other draft and submits the visible fi
   }
 });
 
-test("style changes preserve compatible drafts and submit exact labels with Ctrl+Enter", async () => {
+test("Composer Response keeps the transcript card as context without card-owned response fields", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -281,53 +281,17 @@ test("style changes preserve compatible drafts and submit exact labels with Ctrl
     question: "Choose a language",
     options: [{ label: "TypeScript" }, { label: "Python" }],
   }];
-  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
-  const client = {
-    ...api,
-    answerQuestion: async (_sessionId: string, action: Parameters<ApiClient["answerQuestion"]>[1]) => {
-      calls.push(structuredClone(action));
-      return {} as SessionView;
-    },
-  } as ApiClient;
 
   try {
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
-    await renderBanner(root, questions, true, client);
-    const firstChoice = container.querySelector<HTMLButtonElement>('[role="radio"]');
-    assert.ok(firstChoice);
-    await act(async () => { firstChoice.click(); });
-
-    await act(async () => { setQuestionResponseStyle("text", domWindow as never); });
-    const input = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(input);
-    assert.equal(input.value, "TypeScript");
-    assert.ok(input.list, "fixed choices expose native keyboard autocomplete suggestions");
-    const offeredChoices = container.querySelector<HTMLOListElement>(".question-text-options");
-    assert.ok(offeredChoices?.id);
-    assert.ok(input.getAttribute("aria-describedby")?.split(" ").includes(offeredChoices.id),
-      "the response field describes the visible number and label choices");
-    assert.deepEqual([...offeredChoices.querySelectorAll("li")].map((item) => item.textContent?.trim()), [
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderBanner(root, questions, true);
+    assert.equal(container.querySelector(".question-input"), null);
+    assert.equal(container.querySelector(".approval-actions button")?.textContent?.trim(), "Dismiss D");
+    assert.match(container.textContent ?? "", /Respond through Answer Mode in the Session composer/);
+    assert.deepEqual([...container.querySelectorAll(".question-text-options li")].map((item) => item.textContent?.trim()), [
       "TypeScript",
       "Python",
     ]);
-
-    await act(async () => { setInputValue(input, "2"); });
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
-    assert.equal(container.querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim(), "●Python");
-
-    await act(async () => { setQuestionResponseStyle("text", domWindow as never); });
-    const textInput = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(textInput);
-    textInput.focus();
-    await act(async () => {
-      textInput.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
-        key: "Enter",
-        ctrlKey: true,
-        bubbles: true,
-      }) as never);
-      await tick();
-    });
-    assert.deepEqual(calls, [{ requestId: "question-1", answers: { language: "Python" }, action: "submit" }]);
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     await act(async () => { root.unmount(); });
@@ -335,105 +299,17 @@ test("style changes preserve compatible drafts and submit exact labels with Ctrl
   }
 });
 
-test("invalid text submission preserves responses, explains every error, and focuses the first invalid field", async () => {
+test("Composer Response does not advertise Answer Mode without a question schema", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const questions: AgentQuestion[] = [
-    { id: "language", question: "Choose a language", options: [{ label: "TypeScript" }, { label: "Python" }] },
-    {
-      id: "checks",
-      question: "Choose two checks",
-      multiSelect: true,
-      minSelections: 2,
-      options: [{ label: "Unit Tests" }, { label: "Browser Tests" }],
-    },
-  ];
-
   try {
-    setQuestionResponseStyle("text", domWindow as never);
-    await renderBanner(root, questions, true);
-    const inputs = [...container.querySelectorAll<HTMLInputElement>(".question-text-input")];
-    assert.equal(inputs.length, 2);
-    await act(async () => {
-      setInputValue(inputs[0]!, "not offered");
-      setInputValue(inputs[1]!, "1");
-    });
-    inputs[1]!.focus();
-    await act(async () => {
-      inputs[1]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
-        key: "Enter",
-        metaKey: true,
-        bubbles: true,
-      }) as never);
-      await tick();
-    });
-
-    assert.equal(inputs[0]!.value, "not offered");
-    assert.equal(inputs[1]!.value, "1");
-    assert.equal(container.querySelectorAll(".question-field-error").length, 2);
-    assert.match(container.textContent ?? "", /displayed number or unambiguous option label/);
-    assert.match(container.textContent ?? "", /Select at least 2 options/);
-    assert.equal(domWindow.document.activeElement, inputs[0]);
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderBanner(root, [], true);
+    assert.doesNotMatch(container.textContent ?? "", /Press R|\/respond/);
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
-test("a replacement request clears text drafts even when question ids repeat", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  const questions: AgentQuestion[] = [{
-    id: "language",
-    question: "Choose a language",
-    options: [{ label: "TypeScript" }, { label: "Python" }],
-  }];
-
-  try {
-    setQuestionResponseStyle("text", domWindow as never);
-    await renderBanner(root, questions, true, api, "question-old");
-    const input = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(input);
-    await act(async () => { setInputValue(input, "1"); });
-    assert.equal(input.value, "1");
-
-    await renderBanner(root, questions, true, api, "question-new");
-    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "");
-    assert.equal(submitButton(container).disabled, true);
-  } finally {
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
-    await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
-test("text drafts survive unmount and remount for transcript virtualization", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const questions: AgentQuestion[] = [{
-    id: "language",
-    question: "Choose a language",
-    options: [{ label: "TypeScript" }, { label: "Python" }],
-  }];
-
-  try {
-    setQuestionResponseStyle("text", domWindow as never);
-    const firstRoot = createRoot(container);
-    await renderBanner(firstRoot, questions, true, api, "question-virtualized");
-    const input = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(input);
-    await act(async () => { setInputValue(input, "2"); });
-    await act(async () => { firstRoot.unmount(); });
-
-    const secondRoot = createRoot(container);
-    await renderBanner(secondRoot, questions, true, api, "question-virtualized");
-    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "2");
-    await act(async () => { secondRoot.unmount(); });
-  } finally {
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     container.remove();
   }
 });
@@ -610,9 +486,10 @@ test("Interactive numeric Other submits prose without applying hidden ordinal sy
   }
 });
 
-test("secret drafts survive mounted style changes but are not recovered after virtualization", async () => {
+test("Composer Response never renders secret entry controls in the transcript card", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
+  const root = createRoot(container);
   const questions: AgentQuestion[] = [{
     id: "token",
     question: "Enter the token",
@@ -622,26 +499,13 @@ test("secret drafts survive mounted style changes but are not recovered after vi
   }];
 
   try {
-    setQuestionResponseStyle("text", domWindow as never);
-    const firstRoot = createRoot(container);
-    await renderBanner(firstRoot, questions, true, api, "question-virtualized");
-    let input = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(input);
-    await act(async () => { setInputValue(input!, "page-only-secret"); });
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
-    input = container.querySelector<HTMLInputElement>(".question-input");
-    assert.equal(input?.value, "page-only-secret", "mounted style changes preserve the secret response");
-    await act(async () => { setQuestionResponseStyle("text", domWindow as never); });
-    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "page-only-secret");
-    await act(async () => { firstRoot.unmount(); });
-
-    const secondRoot = createRoot(container);
-    await renderBanner(secondRoot, questions, true, api, "question-virtualized");
-    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "");
-    assert.equal(submitButton(container).disabled, true);
-    await act(async () => { secondRoot.unmount(); });
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderBanner(root, questions, true, api, "question-virtualized");
+    assert.equal(container.querySelector("input"), null);
+    assert.match(container.textContent ?? "", /Respond through Answer Mode/);
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
+    await act(async () => { root.unmount(); });
     container.remove();
   }
 });

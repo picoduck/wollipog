@@ -6,7 +6,9 @@ import { ApiProvider } from "../api-context.js";
 import { createBrowserApiTransport } from "../api-transport.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import { SessionApprovalRegion } from "../components/SessionApproval.js";
+import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
 import type { TimelineItem } from "../timeline.js";
+import { useQuestionResponseStyle } from "../question-response-style.js";
 import "../styles.css";
 
 const params = new URLSearchParams(window.location.hash.slice(1));
@@ -16,6 +18,7 @@ const sessionId = params.get("sessionId") ?? "";
 const showQueuedPrompts = params.get("queued") === "1";
 
 function LiveQuestionFixture() {
+  const responseStyle = useQuestionResponseStyle();
   const client = useMemo(() => createApiClient(createBrowserApiTransport({
     instanceId: "agent-question-live-e2e",
     origin,
@@ -25,6 +28,8 @@ function LiveQuestionFixture() {
   const [error, setError] = useState<string | null>(null);
   const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
   const fallbackFocusRef = useRef<HTMLTextAreaElement>(null);
+  const answerInputRef = useRef<HTMLInputElement>(null);
+  const [answerActive, setAnswerActive] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const questionEventRef = useRef<Extract<TimelineItem, { kind: "question" }> | null>(null);
   const transcriptContext = useMemo<TimelineItem[]>(() => Array.from({ length: 48 }, (_, index) => (
@@ -48,6 +53,10 @@ function LiveQuestionFixture() {
   }, [client]);
 
   const pendingQuestion = session?.pendingApproval?.kind === "question" ? session.pendingApproval : null;
+  useEffect(() => {
+    if (pendingQuestion && responseStyle === "composer") setAnswerActive(true);
+    else if (!pendingQuestion) setAnswerActive(false);
+  }, [pendingQuestion?.requestId, responseStyle]);
   const handleQuestionAvailabilityChange = useCallback((requestId: string, available: boolean) => {
     setInlineQuestionRequestId((current) => available
       ? current === requestId ? current : requestId
@@ -123,8 +132,22 @@ function LiveQuestionFixture() {
                     ))}
                   </div>
                 )}
-                <div className="composer-box">
-                  <textarea ref={fallbackFocusRef} className="composer-input" placeholder="Do anything" />
+                <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
+                  {pendingQuestion && (
+                    <ComposerQuestionResponse
+                      sessionId={session.id}
+                      requestId={pendingQuestion.requestId}
+                      questions={pendingQuestion.questions ?? []}
+                      runnerOnline
+                      active={answerActive}
+                      showWaiting={responseStyle === "composer"}
+                      inputRef={answerInputRef}
+                      onEnter={() => setAnswerActive(true)}
+                      onExit={() => setAnswerActive(false)}
+                      onSessionUpdate={setSession}
+                    />
+                  )}
+                  {!answerActive && <textarea ref={fallbackFocusRef} className="composer-input" placeholder="Do anything" />}
                 </div>
               </div>
             </div>

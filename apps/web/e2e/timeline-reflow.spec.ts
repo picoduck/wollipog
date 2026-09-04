@@ -607,7 +607,7 @@ test("timeline reader disables browser-native scroll anchoring", async ({ page }
 });
 
 for (const width of [320, 390]) {
-  for (const questionStyle of ["interactive", "text"] as const) {
+  for (const questionStyle of ["interactive", "composer"] as const) {
     test(`structured transcript rows stay inside a ${width}px phone reader with ${questionStyle} questions`, async ({ page }) => {
       await page.addInitScript((style) => {
         localStorage.setItem("wollipog.question-response-style", style);

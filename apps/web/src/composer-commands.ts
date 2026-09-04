@@ -16,6 +16,7 @@ export type ComposerCommandGroupId = "app" | "provider";
 export interface ComposerCommandContext {
   planSupported: boolean;
   canStopTurn: boolean;
+  canRespond?: boolean;
 }
 
 export interface ProviderComposerCommand {
@@ -172,6 +173,22 @@ function appCommands(context: ComposerCommandContext): ComposerCommand[] {
       available: context.planSupported,
       ...(context.planSupported ? {} : { disabledReason: "Plan mode is unavailable for this provider." }),
       argumentHint: "[on|off]",
+      attachmentPolicy: "preserve",
+      groupId: appGroup.id,
+      groupLabel: appGroup.label,
+    },
+    {
+      id: "app:respond",
+      name: "respond",
+      label: commandLabel("respond"),
+      displayName: "Respond to Question",
+      invocationAlias: "respond",
+      description: "Enter Answer Mode for the pending structured question.",
+      source: "app",
+      sourceLabel: "App",
+      executionMode: "app",
+      available: context.canRespond === true,
+      ...(context.canRespond === true ? {} : { disabledReason: "There is no pending question." }),
       attachmentPolicy: "preserve",
       groupId: appGroup.id,
       groupLabel: appGroup.label,

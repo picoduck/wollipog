@@ -11,6 +11,7 @@ import { COMPOSER_FOCUS_DIAGNOSTIC_EVENT } from "../composer-focus.js";
 import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
 import { LOCAL_INSTANCE_SCOPE } from "../instance-storage.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
+import { setQuestionResponseStyle } from "../question-response-style.js";
 import {
   deleteComposerDraftIfMatches,
   loadComposerDraft,
@@ -194,6 +195,7 @@ interface FixtureOptions {
   sessionCapabilities?: SessionView["agentCapabilities"];
   sessionPatch?: Partial<SessionView>;
   runnerProtocolVersion?: number;
+  strictMode?: boolean;
 }
 
 function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
@@ -298,7 +300,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     sessionId = currentSession.id,
     showDetail = true,
   ) => {
-    root.render(
+    const content = (
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
           {options.mainEventPayloads && (
@@ -317,8 +319,9 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
             />
           )}
         </StoreProvider>
-      </ApiProvider>,
+      </ApiProvider>
     );
+    root.render(options.strictMode ? <React.StrictMode>{content}</React.StrictMode> : content);
   };
   const rerenderWithDraftLoader = async (loader: ComposerDraftLoader) => {
     await act(async () => renderWithDraftLoader(loader));
@@ -2673,6 +2676,376 @@ test("SessionDetail prepares Edit & Resend text with accessible focus and an end
     );
   } finally {
     domWindow.document.removeEventListener("focusin", onFocusIn);
+    await unmountFixture(fixture);
+  }
+});
+
+test("a pending Composer Response preserves an ordinary draft and R enters and exits Answer Mode", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "ordinary message draft");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
+    });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-r",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{
+          id: "target",
+          question: "Choose a target",
+          options: [{ label: "Staging" }, { label: "Production" }],
+        }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.ok(ordinary);
+    assert.equal(ordinary.value, "ordinary message draft");
+    assert.match(fixture.container.querySelector(".composer-question-waiting")?.textContent ?? "", /Question Waiting/);
+    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(reader);
+    reader.focus();
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "r", bubbles: true }) as never);
+      flushFrames();
+    });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    assert.equal(answer.ownerDocument.activeElement, answer);
+    assert.match(fixture.container.querySelector(".composer-answer")?.textContent ?? "", /Answering Question 1 of 1/);
+    assert.equal(fixture.container.querySelector(".composer-input"), null);
+
+    await act(async () => {
+      answer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+      flushFrames();
+    });
+    const restored = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.ok(restored);
+    assert.equal(restored.value, "ordinary message draft");
+    assert.equal(restored.ownerDocument.activeElement, restored);
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("an empty pending question payload never blanks the ordinary composer", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-empty",
+        title: "Question details are loading",
+        options: [],
+        kind: "question",
+        questions: [],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.ok(fixture.container.querySelector(".composer-input"),
+      "an unanswerable approval keeps ordinary message composition available");
+    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("Composer Response recovers an omitted approval schema from the matching timeline question", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushEvent({
+      kind: "question_request",
+      requestId: "ask-timeline-schema",
+      questions: [{
+        id: "target",
+        question: "Choose a target",
+        options: [{ label: "Staging" }, { label: "Production" }],
+      }],
+    });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-timeline-schema",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.match(fixture.container.querySelector(".composer-answer")?.textContent ?? "", /Choose a target/);
+    assert.ok(fixture.container.querySelector(".composer-answer-input"));
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("automatic Answer Mode transfers existing composer focus into the answer field", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { fixture.composer.focus(); });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-focused-arrival",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{
+          id: "target",
+          question: "Choose a target",
+          options: [{ label: "Staging" }, { label: "Production" }],
+        }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    assert.equal(answer.ownerDocument.activeElement, answer,
+      "unmounting the focused ordinary composer must not leave document.body owning keystrokes");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("StrictMode retains deferred automatic Answer Mode entry", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    strictMode: true,
+    sessionPatch: {
+      pendingApproval: {
+        requestId: "ask-strict-arrival",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { flushFrames(); });
+    assert.ok(fixture.container.querySelector(".composer-answer-input"),
+      "StrictMode's effect cleanup cannot consume the only arrival decision");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("R focuses the answer field when automatic Answer Mode is already active", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-active-r",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{
+          id: "target",
+          question: "Choose a target",
+          options: [{ label: "Staging" }, { label: "Production" }],
+        }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(answer);
+    assert.ok(reader);
+    await act(async () => { reader.focus(); });
+    assert.notEqual(answer.ownerDocument.activeElement, answer);
+
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "r", bubbles: true }) as never);
+      flushFrames();
+    });
+    assert.equal(answer.ownerDocument.activeElement, answer,
+      "R must disarm bare reading shortcuts even when Answer Mode does not need a state transition");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("external question resolution returns Answer Mode focus to ordinary composition", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { fixture.composer.focus(); });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-external-resolution",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    await act(async () => { answer.focus(); });
+
+    await fixture.pushSession({ pendingApproval: null });
+    await act(async () => { flushFrames(); });
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.ok(ordinary);
+    assert.equal(ordinary.ownerDocument.activeElement, ordinary,
+      "external resolution must not leave Session Reading shortcuts armed on document.body");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("editing a queued message exits Answer Mode before loading the editor", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-answer-mode",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_answer_mode",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: { promptId, text: "Exact queued content", images: [], editRevision: "qer_answer_mode" },
+      }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-queue-edit",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    assert.ok(fixture.container.querySelector(".composer-answer-input"));
+
+    const edit = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Edit Queued Message"]');
+    assert.ok(edit);
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+
+    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.equal(ordinary?.value, "Exact queued content");
+    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Editing Queued Message/);
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("the /respond app command enters Answer Mode and submits without sending an ordinary prompt", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("interactive", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const answers: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  const prompts: unknown[] = [];
+  const fixture = await mountFixture(draft, {
+    client: {
+      answerQuestion: async (sessionId, body) => {
+        answers.push(structuredClone(body));
+        return session(sessionId);
+      },
+      prompt: async (...args: unknown[]) => {
+        prompts.push(args);
+        return session("unexpected-prompt");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-command",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{
+          id: "target",
+          question: "Choose a target",
+          options: [{ label: "Staging" }, { label: "Production" }],
+        }],
+      },
+    });
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.ok(ordinary);
+    await act(async () => {
+      ordinary.value = "/respond 2";
+      fireDomEvent.change(ordinary);
+      ordinary.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+    });
+    assert.equal(ordinary.value, "/respond 2", "an unsupported direct answer remains available to edit");
+    assert.match(fixture.container.textContent ?? "", /Direct \/respond answers are not supported/);
+    assert.equal(prompts.length, 0);
+    await act(async () => {
+      ordinary.value = "/respond";
+      fireDomEvent.change(ordinary);
+      ordinary.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+      flushFrames();
+    });
+    await act(async () => {
+      ordinary.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+    });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    assert.equal(prompts.length, 0);
+    await act(async () => {
+      answer.value = "2";
+      fireDomEvent.change(answer);
+      answer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
+    });
+    assert.deepEqual(answers, [{
+      requestId: "ask-command",
+      answers: { target: "Production" },
+      action: "submit",
+    }]);
+    assert.equal(prompts.length, 0);
+  } finally {
     await unmountFixture(fixture);
   }
 });

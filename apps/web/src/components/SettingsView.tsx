@@ -401,9 +401,9 @@ export function BehaviorPanel({
             description: "Choose options directly with keyboard-accessible form controls. Stored on this device.",
           },
           {
-            value: "text",
-            label: "Text Entry",
-            description: "Enter displayed numbers or option labels in one response field per question. Stored on this device.",
+            value: "composer",
+            label: "Composer Response",
+            description: "Answer pending questions through a distinct mode in the Session composer. Stored on this device.",
           },
         ]}
         value={questionResponseStyle}
