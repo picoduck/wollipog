@@ -172,7 +172,7 @@ test("driver event and stderr integrity failures are contained and exit preserve
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (h.manager as any).onDriverStderr("s_integrity", "late stderr");
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (h.manager as any).onExit("s_integrity", 1);
+      (h.manager as any).onExit("s_integrity", 1, h.client);
     });
     assert.equal(h.store.readMeta("s_integrity")?.status, "failed");
     assert.deepEqual(readFileSync(h.eventsPath), before, "callbacks and exit never append after the latch");
@@ -289,7 +289,7 @@ test("first exit append failure is contained before active ownership is removed"
     assert.doesNotThrow(() => {
       // Exercise the actual driver callback boundary, not only the exit implementation.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (h.manager as any).onDriverExit("s_integrity", 1);
+      (h.manager as any).onDriverExit("s_integrity", 1, h.client);
     });
     assert.equal(h.cancelCalls(), 1);
     assert.equal(h.store.readMeta("s_integrity")?.status, "failed");
@@ -376,7 +376,7 @@ test("generic exit cleanup leaves the in-flight durable solely to runPrompt", as
     (h.manager as any).onExit = () => { throw new Error("exit cleanup failed"); };
     assert.doesNotThrow(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (h.manager as any).onDriverExit("s_integrity", 1);
+      (h.manager as any).onDriverExit("s_integrity", 1, h.client);
     });
     assert.deepEqual(current.transitions, ["started"], "exit cleanup must not pre-settle runPrompt ownership");
     resolvePrompt("end_turn");

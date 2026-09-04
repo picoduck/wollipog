@@ -961,7 +961,7 @@ test("process exit clears the queue overlay (queued prompts died with the entry)
     sm.prompt("s_q", "doomed");
     assert.equal(queues().at(-1)!.queue.length, 1);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (sm as any).onExit("s_q", 1);
+    (sm as any).onExit("s_q", 1, (sm as any).active.get("s_q").client);
     assert.equal(queues().at(-1)!.queue.length, 0, "exit must report an empty queue");
   } finally {
     cleanup();

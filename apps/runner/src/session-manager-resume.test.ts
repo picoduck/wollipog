@@ -212,6 +212,13 @@ function harness(
   };
 }
 
+function exitActive(manager: SessionManager, sessionId: string, code: number | null): void {
+  const internals = manager as any;
+  const client = internals.active.get(sessionId)?.client;
+  assert.ok(client, `expected an active provider for ${sessionId}`);
+  internals.onExit(sessionId, code, client);
+}
+
 test("provider auth failure stops the turn, parks exact recovery context, and holds FIFO until explicit retry", async () => {
   let h!: ReturnType<typeof harness>;
   let attempts = 0;
@@ -3589,7 +3596,11 @@ test("ACP delete fences prompt and restart through close and removes the row", a
     h.manager.prompt("resume-session", "must not relaunch during delete");
     await h.manager.start(spec);
     assert.equal(h.launches.length, 1);
-    assert.equal(h.store.has("resume-session"), false, "the row is tombstoned before slow close settles");
+    assert.equal(
+      h.store.has("resume-session"),
+      true,
+      "the durable row remains available as retirement provenance until slow close settles",
+    );
     release();
     await deletion;
     assert.equal(h.store.has("resume-session"), false);
@@ -3656,11 +3667,16 @@ test("delete during driver initialization cannot resurrect a process or leak its
     const launch = h.manager.start(launchSpec(h.root));
     await tick();
     const deletion = h.manager.delete("resume-session");
-    assert.equal(h.store.has("resume-session"), false, "delete removes the durable row synchronously");
+    assert.equal(
+      h.store.has("resume-session"),
+      true,
+      "delete preserves the durable row until the initializing provider is retired",
+    );
     assert.equal(h.manager.sessionCanOpen("resume-session"), false);
     releaseInitialize();
     assert.equal(await launch, false);
     await deletion;
+    assert.equal(h.store.has("resume-session"), false);
     // The in-memory tombstone intentionally outlives async cleanup; its expiry releases the
     // generation, while the durable exact-id fence continues rejecting delayed/replayed starts.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3926,7 +3942,7 @@ test("app-server crash resumes queued-but-unsubmitted prompts and never replays 
       running: true,
       queue: [{ id: "safe-queued", text: "not submitted", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     await tick();
     await tick();
@@ -4042,7 +4058,7 @@ test("a prompt arriving during crash recovery stays behind the older recovered q
       running: true,
       queue: [{ id: "older", text: "older recovered", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick(); // recovery launch has installed an active entry and is awaiting initialize
     h.manager.prompt("resume-session", "new during recovery");
     const recovering = (h.manager as any).recoveryQueues.get("resume-session");
@@ -4152,7 +4168,7 @@ test("a retryable recovery conflict retains unsubmitted prompts for a later retr
       running: true,
       queue: [{ id: "held", text: "keep me", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     await tick();
     const held = (h.manager as any).recoveryQueues.get("resume-session");
@@ -4177,7 +4193,7 @@ test("Stop before scheduled recovery prevents relaunch and clears held prompts",
       running: true,
       queue: [{ id: "held", text: "must not run", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     h.manager.stop("resume-session");
     await tick();
     await tick();
@@ -4206,7 +4222,7 @@ test("Stop during recovery initialization cancels that launch without leaving a 
       running: true,
       queue: [{ id: "held", text: "must not run", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     h.manager.stop("resume-session");
     releaseInitialize();
@@ -4246,7 +4262,7 @@ test("explicit Restart clears a retained recovery queue after a retryable confli
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "discarded by restart", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     await tick();
     assert.equal((h.manager as any).recoveryQueues.has("resume-session"), true);
@@ -4276,7 +4292,7 @@ test("Restart superseding recovery initialization keeps the Restart lease", asyn
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "old held", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     assert.equal(h.launches.length, 1, "recovery launch is waiting in initialize");
 
@@ -4326,7 +4342,7 @@ test("Restart superseding deferred queued recovery keeps the replacement admissi
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "discarded by restart", images: [], durable }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await entered[0]!.promise;
 
     const restart = h.manager.start(launchSpec(h.root));
@@ -4406,7 +4422,7 @@ test("Restart superseding capacity-queued recovery keeps the replacement admissi
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "discarded by restart", images: [], durable }],
     });
-    internals.onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     assert.deepEqual(
       internals.admissionQueue.map((entry: { request: { sessionId: string } }) => entry.request.sessionId),
@@ -4469,7 +4485,7 @@ test("cancelling capacity-queued recovery releases its lock while retaining the 
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "retry later", images: [] }],
     });
-    internals.onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     assert.deepEqual(
       internals.admissionQueue.map((entry: { request: { sessionId: string } }) => entry.request.sessionId),
@@ -4507,7 +4523,7 @@ test("cancelling recovery after immediate admission releases its pre-provider lo
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "retry later", images: [] }],
     });
-    internals.onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     await tick();
 
@@ -4537,7 +4553,7 @@ test("cancelling recovery during deferred launch preparation releases its lock",
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "retry later", images: [] }],
     });
-    internals.onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await entered.promise;
     h.manager.cancel("resume-session");
     gate.resolve();
