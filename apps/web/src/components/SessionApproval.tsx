@@ -330,7 +330,10 @@ export function SessionApprovalBanner({
     >
       <div className="approval-main">
         <span className="approval-icon" aria-hidden="true">
-          {approval.kind === "cost_budget" ? "💰" : approval.kind === "max_tool_calls" ? "🧰" : approval.kind === "authentication" ? "🔑" : "🔐"}
+          {approval.kind === "cost_budget" || approval.kind === "cost_checkpoint" ? "💰"
+            : approval.kind === "daily_budget" ? "📅"
+              : approval.kind === "cost_unpriced" ? "❓"
+                : approval.kind === "max_tool_calls" ? "🧰" : approval.kind === "authentication" ? "🔑" : "🔐"}
         </span>
         <span className="approval-text">
           {approval.title}

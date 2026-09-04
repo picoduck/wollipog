@@ -38,6 +38,16 @@ Maintenance uses the trusted control-plane clock. Runner event timestamps select
 
 Maintenance transactionally rolls expired UTC hours into UTC days before deleting those hours, then prunes expired daily buckets and advances the advertised coverage frontier. Late hourly observations are added to the existing daily rollup on the next maintenance pass. If retention is later expanded, the service never claims coverage for data that shortening permanently deleted. A query overlapping already-rolled hours automatically returns a complete daily series instead of silently undercounting.
 
+## Cost governance
+
+Three control-plane guardrails read the ledger; none needs runner support.
+
+- **Checkpoints.** `SessionConfig.costCheckpointsUsd` is an ascending list of amounts below the hard budget. When the session's cost first crosses the next unapproved checkpoint the session parks with a `cost_checkpoint` card. Continue records that checkpoint as approved, so it never asks again and the following checkpoint becomes the rule; Stop ends the turn without recording it, so the same checkpoint asks again on the next turn that crosses it.
+- **Fail closed on unpriced usage.** A session with a budget or checkpoints whose recorded usage has tokens but no price (no provider cost and no rate) parks with a `cost_unpriced` card instead of comparing the budget against zero forever. Continue acknowledges it for the session.
+- **Per-user daily budget.** `PUT /api/usage/daily-budget` (owner or admin) sets one amount per user for the organization; `GET /api/usage/daily-budget` reads it. A user-owned session whose owner has spent that much today, summed from the owner-scoped buckets in UTC days, parks with a `daily_budget` card. Its Continue option re-checks the allowance and clears only once the day rolled over or the budget was raised; Stop ends the turn. `GET /api/usage/users` returns today, 7-day, and 30-day spend per user: every user for owners and admins, only the caller for other members. Organization- and team-owned sessions carry no personal allowance.
+
+Precedence when several rules trip at once: daily budget, unpriced, next checkpoint, budget, tool-call limit.
+
 ## Model rate table
 
 The control plane loads per-token rates from a public price list (LiteLLM's `model_prices_and_context_window.json` by default) once a day, caches the document beside the database, and serves the cached copy when a refresh fails. `CONTROL_PLANE_USAGE_PRICING_URL` overrides the source or, set to `off`, disables outbound fetches entirely; `CONTROL_PLANE_USAGE_PRICING_CACHE` overrides the cache path. Every `GET /api/usage` response carries `pricing` with the table's status (`fresh`, `cached`, or `unavailable`), source, fetch time, and known-model count. Rates are applied at ingestion only; recorded buckets are never re-priced.

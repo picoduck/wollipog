@@ -45,7 +45,7 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
     assert.deepEqual(JSON.parse(stdout), {
       sessions: [{
         id: "s_child", title: "Child", status: "running", runnerId: "r1", workspaceId: null,
-        agentId: null, runId: null, costBudgetUsd: null, maxToolCalls: null, pendingApproval: null,
+        agentId: null, runId: null, costBudgetUsd: null, costCheckpointsUsd: null, costCheckpointApprovedUsd: null, maxToolCalls: null, pendingApproval: null,
         archived: false,
       }],
     });

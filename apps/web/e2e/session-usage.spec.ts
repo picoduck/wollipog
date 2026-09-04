@@ -45,6 +45,16 @@ test("the warning state above the threshold", async ({ page }) => {
   await page.screenshot({ path: `${SHOT}/desktop-warning.png` });
 });
 
+test("a cost checkpoint parks the session with a Continue/Stop card", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780&approval=checkpoint");
+  const card = page.locator(".approval-bar").first();
+  await expect(card).toContainText("Cost checkpoint — $2.61 of $2.50. Continue?");
+  await expect(card.getByRole("button", { name: "Continue" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Stop" })).toBeVisible();
+  await page.screenshot({ path: `${SHOT}/desktop-checkpoint-card.png` });
+});
+
 test("mobile: the ring and per-turn usage stay reachable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/session-usage-e2e.html?width=390&height=800");

@@ -5,7 +5,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
-import {
+import { type PolicyRuleKind, type RunnerGuardrailKind,
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
   PROMPT_IMAGE_MIME_TYPES,
@@ -115,7 +115,7 @@ import {
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
-import {
+import { normalizeCostCheckpoints,
   approvalForDecision,
   conductorSafetyPolicy,
   evaluateApprovalPolicies,
@@ -2561,6 +2561,11 @@ export class SessionsService {
       config.maxToolCalls = Math.floor(config.maxToolCalls);
       if (config.maxToolCalls <= 0) delete config.maxToolCalls;
     }
+    if (config.costCheckpointsUsd !== undefined) {
+      const checkpoints = normalizeCostCheckpoints(config.costCheckpointsUsd);
+      if (checkpoints) config.costCheckpointsUsd = checkpoints;
+      else delete config.costCheckpointsUsd;
+    }
     if (executionTarget.adapter === "cloud") {
       const policy = executionTarget.policy?.cost;
       const budget = config.costBudgetUsd;
@@ -2674,6 +2679,9 @@ export class SessionsService {
     }
     if (config.maxToolCalls && Math.floor(config.maxToolCalls) > 0) {
       this.db.updateSessionMaxToolCalls(id, Math.floor(config.maxToolCalls), now);
+    }
+    if (config.costCheckpointsUsd?.length) {
+      this.db.updateSessionCostCheckpoints(id, config.costCheckpointsUsd, now);
     }
     if (!snapshotCommand && images.length) {
       const externalized = this.externalizePromptImages(id, images);
@@ -3028,20 +3036,25 @@ export class SessionsService {
       const floored = Math.floor(config.maxToolCalls);
       this.db.updateSessionMaxToolCalls(sessionId, floored > 0 ? floored : null, Date.now());
     }
+    if (config.costCheckpointsUsd !== undefined) {
+      // An empty list clears the checkpoints and the approved level with them.
+      this.db.updateSessionCostCheckpoints(sessionId, normalizeCostCheckpoints(config.costCheckpointsUsd), Date.now());
+    }
     // A guardrail change while parked on a policy card must re-evaluate: drop the (possibly
     // stale) card and re-gate — re-parks with a fresh card if a rule still trips, otherwise
     // unlocks the composer. Without this, raising a limit leaves the session 409-locked behind
     // a card whose rule no longer trips, and Continue would blind-clear the new limit.
-    const guardrailChanged = config.costBudgetUsd !== undefined || config.maxToolCalls !== undefined;
+    const guardrailChanged = config.costBudgetUsd !== undefined || config.maxToolCalls !== undefined ||
+      config.costCheckpointsUsd !== undefined;
     const parked = session.pendingApproval;
     if (guardrailChanged && parked && isGuardrailApproval(parked)) {
       const now = Date.now();
       const configured = this.db.getSession(sessionId)!;
-      const holdFor = firstAsk(evaluatePolicies({
+      const holdFor = runnerHoldFor(firstAsk(evaluatePolicies({
         status: "idle",
         costUsd: configured.costUsd,
         toolCallCount: configured.toolCallCount ?? 0,
-      }, rulesFromSession(configured)))?.rule.kind;
+      }, rulesFromSession(configured)))?.rule.kind);
       const thresholdPatch: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
       if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
       if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
@@ -4106,6 +4119,36 @@ export class SessionsService {
       return ok(this.db.getSession(sessionId)!);
     }
 
+    // The v105 soft cards have no runner-side threshold to re-arm: Continue records what the user
+    // accepted (the checkpoint, or that the budget cannot see spend) and re-gates so the next
+    // tripped rule parks immediately; a daily-budget Continue only re-checks the allowance.
+    if (pending.kind === "cost_checkpoint" || pending.kind === "cost_unpriced" || pending.kind === "daily_budget") {
+      if (optionId === "continue") {
+        if (pending.kind === "cost_checkpoint") {
+          const next = rulesFromSession(session).find((rule) => rule.kind === "cost_checkpoint");
+          if (next && next.kind === "cost_checkpoint") this.db.approveSessionCostCheckpoint(sessionId, next.checkpointUsd, now);
+        } else if (pending.kind === "cost_unpriced") {
+          this.db.acknowledgeSessionCostUnpriced(sessionId, now);
+        }
+        this.db.setPendingApproval(sessionId, null);
+        this.db.updateSessionStatus(sessionId, "idle", now);
+        this.recordGovernanceAudit(session, pending, "resolution", "allowed", actor, now, { optionId });
+        this.gateOnPolicy(sessionId, now);
+        this.reconcilePolicyHookTimeouts(now, sessionId);
+        this.clearSettledPolicyResumeStatus(sessionId);
+      } else {
+        // Declining stops the turn and records nothing, so the same checkpoint asks again on the
+        // next turn that crosses it.
+        this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
+        this.db.setPendingApproval(sessionId, null);
+        this.sendStopCommand(session.runnerId, sessionId);
+        this.db.updateSessionStatus(sessionId, "stopped", now);
+        this.recordGovernanceAudit(session, pending, "resolution", "dismissed", actor, now, { optionId });
+      }
+      this.hub.sessionChangedById(sessionId);
+      return ok(this.db.getSession(sessionId)!);
+    }
+
     // Continue advances the absolute threshold by the original allowance window. A v47 runner may
     // have cancelled the in-flight turn and held queued prompts at the threshold, so deliver its
     // re-arm BEFORE mutating CP state. Older runners retain the between-turn behavior and receive
@@ -4127,11 +4170,11 @@ export class SessionsService {
           costBudgetUsd: nextConfig.costBudgetUsd ?? session.costBudgetUsd,
           maxToolCalls: nextConfig.maxToolCalls ?? session.maxToolCalls,
         });
-        const holdFor = firstAsk(evaluatePolicies({
+        const holdFor = runnerHoldFor(firstAsk(evaluatePolicies({
           status: "idle",
           costUsd: session.costUsd,
           toolCallCount: session.toolCallCount ?? 0,
-        }, prospectiveRules))?.rule.kind;
+        }, prospectiveRules))?.rule.kind);
         if (runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
           const sent = this.hub.sendToRunner(session.runnerId, {
             type: "rearm_governance",
@@ -6039,14 +6082,26 @@ export class SessionsService {
    * updateSessionStatus() clears the card as the session lands on idle. Rules are pure and the
    * inputs re-derived each call, so re-application is idempotent. Returns true if it gated.
    */
+  /** The owner's daily allowance and spend, when the session belongs to a user in an
+   * organization that set one. */
+  private dailyBudgetFor(sessionId: string): { budgetUsd: number; spentUsd: number } | null {
+    const owner = this.db.sessionOwnerUser(sessionId);
+    if (!owner) return null;
+    const budget = this.db.getUsageDailyBudget(owner.organizationId).perUserUsd;
+    if (budget == null || budget <= 0) return null;
+    return { budgetUsd: budget, spentUsd: this.db.userCostWindows(owner.organizationId, owner.userId).todayUsd };
+  }
+
   private gateOnPolicy(sessionId: string, now: number): boolean {
     const s = this.db.getSession(sessionId);
     if (!s || s.pendingApproval) return false;
-    const rules = rulesFromSession(s);
+    const rules = rulesFromSession({ ...s, dailyBudget: this.dailyBudgetFor(sessionId) });
     if (rules.length === 0) return false;
     // sessionView already computed the count when the guardrail is armed — don't re-query.
     const toolCallCount = s.toolCallCount ?? 0;
-    const ask = firstAsk(evaluatePolicies({ status: s.status, costUsd: s.costUsd, toolCallCount }, rules));
+    // The unpriced check costs a ledger read, so it runs only when a rule can act on it.
+    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(sessionId);
+    const ask = firstAsk(evaluatePolicies({ status: s.status, costUsd: s.costUsd, toolCallCount, unpriced }, rules));
     if (!ask) return false;
     const approval = approvalForDecision(ask, sessionId, now);
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
@@ -7277,4 +7332,8 @@ export class SessionsService {
       return fail((err as Error).message, 504);
     }
   }
+}
+
+function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | undefined {
+  return kind === "cost_budget" || kind === "max_tool_calls" ? kind : undefined;
 }

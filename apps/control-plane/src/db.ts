@@ -95,6 +95,8 @@ import {
   type UsageAggregationResponse,
   type UsageAmount,
   type SessionModelUsage,
+  type UsageDailyBudgetPolicy,
+  type UserCostWindows,
   type UsageRetentionPolicy,
   type SubscriptionUsageResponse,
   type SubscriptionUsageSnapshot,
@@ -1654,6 +1656,12 @@ CREATE TABLE IF NOT EXISTS usage_session_state (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS usage_daily_budget (
+  organization_id TEXT PRIMARY KEY,
+  per_user_usd    REAL,
+  updated_at      INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS usage_session_models (
   session_id          TEXT NOT NULL,
   model               TEXT NOT NULL,
@@ -1981,6 +1989,9 @@ interface SessionRow {
   adopted: number;
   cost_budget_usd: number | null;
   cost_budget_step_usd: number | null;
+  cost_checkpoints_usd: string | null;
+  cost_checkpoint_approved_usd: number | null;
+  cost_unpriced_ack: number | null;
   max_tool_calls: number | null;
   max_tool_calls_step: number | null;
   workspace_path: string | null;
@@ -3837,6 +3848,11 @@ export class ControlPlaneDb {
       "cost_budget_usd REAL",
       // Fixed allowance retained while Continue advances the absolute threshold.
       "cost_budget_step_usd REAL",
+      // v105 cost governance: ascending soft checkpoints (JSON array of USD), the highest one the
+      // user approved, and whether they chose to continue a budgeted session that cannot be priced.
+      "cost_checkpoints_usd TEXT",
+      "cost_checkpoint_approved_usd REAL",
+      "cost_unpriced_ack INTEGER NOT NULL DEFAULT 0",
       // Phase 8 (guardrails): max distinct tool calls. NULL ⇒ unlimited. CP-only, never
       // overwritten by a runner snapshot.
       "max_tool_calls INTEGER",
@@ -10497,6 +10513,111 @@ export class ControlPlaneDb {
   }
 
   /** Cost budget lives in its own column so prompt()/createSession config writes never clobber it. */
+  private static parseCheckpoints(raw: string | null): number[] | null {
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return null;
+      const values = parsed.filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+      return values.length > 0 ? values : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Soft cost checkpoints. `null` clears them and forgets the approved level with them. */
+  updateSessionCostCheckpoints(id: string, checkpointsUsd: number[] | null, now: number): void {
+    this.stmt(
+      `UPDATE sessions SET cost_checkpoints_usd=?, cost_checkpoint_approved_usd=CASE WHEN ? IS NULL THEN NULL ELSE cost_checkpoint_approved_usd END, updated_at=? WHERE id=?`,
+    ).run(checkpointsUsd ? JSON.stringify(checkpointsUsd) : null, checkpointsUsd ? 1 : null, now, id);
+  }
+
+  /** Remembers the highest checkpoint the user approved so it never asks again. */
+  approveSessionCostCheckpoint(id: string, checkpointUsd: number, now: number): void {
+    this.stmt(
+      `UPDATE sessions SET cost_checkpoint_approved_usd=MAX(COALESCE(cost_checkpoint_approved_usd, 0), ?), updated_at=? WHERE id=?`,
+    ).run(checkpointUsd, now, id);
+  }
+
+  acknowledgeSessionCostUnpriced(id: string, now: number): void {
+    this.stmt("UPDATE sessions SET cost_unpriced_ack=1, updated_at=? WHERE id=?").run(now, id);
+  }
+
+  /** True when the session has recorded tokens but no record could be priced: a budget on such a
+   * session would compare against zero forever. */
+  sessionUsageUnpriced(id: string): boolean {
+    const row = this.stmt(
+      `SELECT input_tokens + output_tokens AS tokens, cost_microusd, cost_remainder_picousd, unpriced_records
+         FROM usage_session_state WHERE session_id=?`,
+    ).get(id) as { tokens: number; cost_microusd: number; cost_remainder_picousd: number; unpriced_records: number } | undefined;
+    if (!row) return false;
+    return Number(row.tokens) > 0 && Number(row.unpriced_records) > 0 && Number(row.cost_microusd) === 0 && Number(row.cost_remainder_picousd) === 0;
+  }
+
+  getUsageDailyBudget(organizationId: string): UsageDailyBudgetPolicy {
+    const row = this.stmt("SELECT per_user_usd, updated_at FROM usage_daily_budget WHERE organization_id=?")
+      .get(organizationId) as { per_user_usd: number | null; updated_at: number } | undefined;
+    return { perUserUsd: row?.per_user_usd ?? null, updatedAt: row?.updated_at ?? null };
+  }
+
+  setUsageDailyBudget(organizationId: string, perUserUsd: number | null, now: number): UsageDailyBudgetPolicy {
+    this.stmt(
+      `INSERT INTO usage_daily_budget (organization_id, per_user_usd, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(organization_id) DO UPDATE SET per_user_usd=excluded.per_user_usd, updated_at=excluded.updated_at`,
+    ).run(organizationId, perUserUsd, now);
+    return { perUserUsd, updatedAt: now };
+  }
+
+  /** The user who owns a session, when it is user-owned; organization and team sessions have no
+   * personal daily allowance. */
+  sessionOwnerUser(sessionId: string): { organizationId: string; userId: string } | null {
+    const row = this.stmt(
+      "SELECT organization_id, owner_kind, owner_id FROM session_ownership WHERE session_id=?",
+    ).get(sessionId) as { organization_id: string; owner_kind: string; owner_id: string } | undefined;
+    return row && row.owner_kind === "user" ? { organizationId: row.organization_id, userId: row.owner_id } : null;
+  }
+
+  /** A user's cost since a UTC instant, summed from the owner-scoped buckets (hourly rows plus any
+   * daily rollups that start inside the window). Cost only; the ledger is content-free. */
+  private userCostSinceMicrousd(organizationId: string, userId: string, since: number): number {
+    const row = this.stmt(
+      `SELECT COALESCE((SELECT SUM(cost_microusd) FROM usage_hourly
+                         WHERE organization_id=? AND owner_kind='user' AND owner_id=? AND bucket_ts>=?), 0)
+            + COALESCE((SELECT SUM(cost_microusd) FROM usage_daily
+                         WHERE organization_id=? AND owner_kind='user' AND owner_id=? AND bucket_ts>=?), 0) AS microusd`,
+    ).get(organizationId, userId, since, organizationId, userId, since) as { microusd: number };
+    return Number(row.microusd ?? 0);
+  }
+
+  /** Today, the last 7 days, and the last 30 days for one user, in UTC days. */
+  userCostWindows(organizationId: string, userId: string, now = Date.now()): UserCostWindows {
+    const dayStart = Math.floor(now / 86_400_000) * 86_400_000;
+    const name = (this.stmt("SELECT display_name FROM identity_users WHERE user_id=?").get(userId) as { display_name: string } | undefined)?.display_name;
+    return {
+      userId,
+      userName: name ?? userId,
+      todayUsd: this.userCostSinceMicrousd(organizationId, userId, dayStart) / 1_000_000,
+      last7DaysUsd: this.userCostSinceMicrousd(organizationId, userId, dayStart - 6 * 86_400_000) / 1_000_000,
+      last30DaysUsd: this.userCostSinceMicrousd(organizationId, userId, dayStart - 29 * 86_400_000) / 1_000_000,
+      dailyBudgetUsd: this.getUsageDailyBudget(organizationId).perUserUsd,
+    };
+  }
+
+  /** Every user with usage in the last 30 days, most spend today first. */
+  listUserCostWindows(organizationId: string, now = Date.now()): UserCostWindows[] {
+    const since = Math.floor(now / 86_400_000) * 86_400_000 - 29 * 86_400_000;
+    const users = this.stmt(
+      `SELECT DISTINCT owner_id FROM (
+         SELECT owner_id FROM usage_hourly WHERE organization_id=? AND owner_kind='user' AND bucket_ts>=?
+         UNION ALL
+         SELECT owner_id FROM usage_daily WHERE organization_id=? AND owner_kind='user' AND bucket_ts>=?
+       ) LIMIT 500`,
+    ).all(organizationId, since, organizationId, since) as unknown as Array<{ owner_id: string }>;
+    return users
+      .map((row) => this.userCostWindows(organizationId, row.owner_id, now))
+      .sort((a, b) => b.todayUsd - a.todayUsd || b.last30DaysUsd - a.last30DaysUsd || a.userId.localeCompare(b.userId));
+  }
+
   updateSessionCostBudget(id: string, budgetUsd: number | null, now: number, stepUsd = budgetUsd): void {
     this.stmt("UPDATE sessions SET cost_budget_usd=?, cost_budget_step_usd=?, updated_at=? WHERE id=?")
       .run(budgetUsd, stepUsd, now, id);
@@ -13269,6 +13390,9 @@ export class ControlPlaneDb {
       adopted: row.adopted === 1,
       costBudgetUsd: row.cost_budget_usd ?? null,
       costBudgetStepUsd: row.cost_budget_step_usd ?? row.cost_budget_usd ?? null,
+      costCheckpointsUsd: ControlPlaneDb.parseCheckpoints(row.cost_checkpoints_usd),
+      costCheckpointApprovedUsd: row.cost_checkpoint_approved_usd ?? null,
+      costUnpricedAcknowledged: row.cost_unpriced_ack === 1,
       maxToolCalls: row.max_tool_calls ?? null,
       maxToolCallsStep: row.max_tool_calls_step ?? row.max_tool_calls ?? null,
       // Lazy: sessions without the guardrail never pay the COUNT (same class as messageCount).

@@ -4,7 +4,9 @@ import type {
   SubscriptionUsageResponse,
   SubscriptionUsageSourceView,
   UsageAggregationResponse,
+  UsageDailyBudgetPolicy,
   UsageRetentionPolicy,
+  UserCostWindows,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useHasStore, useStoreSelector } from "../store.js";
@@ -94,6 +96,12 @@ export function UsageView() {
   const daysRef = useRef(days);
   const [knownRetention, setKnownRetention] = useState<UsageRetentionPolicy | null>(null);
   const [offlineMachines, setOfflineMachines] = useState<string[]>([]);
+  const [users, setUsers] = useState<UserCostWindows[] | null>(null);
+  const [dailyBudget, setDailyBudget] = useState<UsageDailyBudgetPolicy | null>(null);
+  const [dailyBudgetDraft, setDailyBudgetDraft] = useState("");
+  const [dailyBudgetStatus, setDailyBudgetStatus] = useState<string | null>(null);
+  const [dailyBudgetFailed, setDailyBudgetFailed] = useState(false);
+  const [dailyBudgetSaving, setDailyBudgetSaving] = useState(false);
   const [subscriptionData, setSubscriptionData] = useState<SubscriptionUsageResponse | null>(null);
   const [subscriptionLoading, setSubscriptionLoading] = useState(true);
   const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
@@ -150,6 +158,46 @@ export function UsageView() {
   useEffect(() => {
     void loadSubscriptions();
   }, [loadSubscriptions]);
+
+  const loadUsers = useCallback(async () => {
+    try {
+      const [budget, list] = await Promise.all([api.usageDailyBudget(), api.usageUsers()]);
+      setDailyBudget(budget.dailyBudget);
+      setDailyBudgetDraft(budget.dailyBudget.perUserUsd == null ? "" : String(budget.dailyBudget.perUserUsd));
+      setUsers(list.users);
+    } catch (cause) {
+      setDailyBudgetFailed(true);
+      setDailyBudgetStatus(cause instanceof Error ? cause.message : "Unable to load per-user usage");
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void loadUsers();
+  }, [loadUsers]);
+
+  const saveDailyBudget = async () => {
+    const trimmed = dailyBudgetDraft.trim();
+    const value = trimmed === "" ? null : Number(trimmed);
+    if (value !== null && (!Number.isFinite(value) || value <= 0)) {
+      setDailyBudgetFailed(true);
+      setDailyBudgetStatus("Enter a positive dollar amount, or leave it empty to remove the budget.");
+      return;
+    }
+    setDailyBudgetSaving(true);
+    setDailyBudgetStatus(null);
+    setDailyBudgetFailed(false);
+    try {
+      const result = await api.updateUsageDailyBudget(value);
+      setDailyBudget(result.dailyBudget);
+      setDailyBudgetStatus(result.dailyBudget.perUserUsd == null ? "Daily budget removed." : "Daily budget saved.");
+      await loadUsers();
+    } catch (cause) {
+      setDailyBudgetFailed(true);
+      setDailyBudgetStatus(cause instanceof Error ? cause.message : "Unable to save the daily budget");
+    } finally {
+      setDailyBudgetSaving(false);
+    }
+  };
 
   useEffect(() => {
     const timer = window.setInterval(() => setSubscriptionNow(Date.now()), 30_000);
@@ -536,6 +584,78 @@ export function UsageView() {
               );
             })}
           </div>
+
+          {users && (
+            <section className="usage-users-section" aria-labelledby="usage-users-heading">
+              <div className="usage-breakdown-heading">
+                <div>
+                  <h3 id="usage-users-heading">By User</h3>
+                  <p className="usage-headline-note">
+                    {dailyBudget?.perUserUsd != null
+                      ? `Each user may spend ${formatMoney(dailyBudget.perUserUsd)} per UTC day across their sessions; new turns pause past it.`
+                      : "No per-user daily budget is set."}
+                  </p>
+                </div>
+                {data.canManageRetention && (
+                  <form
+                    className="usage-daily-budget"
+                    onSubmit={(event) => { event.preventDefault(); void saveDailyBudget(); }}
+                  >
+                    <label>
+                      Daily Budget per User ($)
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        placeholder="none"
+                        value={dailyBudgetDraft}
+                        onChange={(event) => setDailyBudgetDraft(event.target.value)}
+                      />
+                    </label>
+                    <button type="submit" className="btn primary" disabled={dailyBudgetSaving}>
+                      {dailyBudgetSaving ? "Saving…" : "Save Daily Budget"}
+                    </button>
+                  </form>
+                )}
+              </div>
+              {dailyBudgetStatus && (
+                <div className="usage-save-status" role={dailyBudgetFailed ? "alert" : "status"}>{dailyBudgetStatus}</div>
+              )}
+              <div className="usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-users-caption">
+                <table className="usage-table">
+                  <caption id="usage-users-caption">Cost by User in UTC Days</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">User</th>
+                      <th scope="col">Today</th>
+                      <th scope="col">Last 7 Days</th>
+                      <th scope="col">Last 30 Days</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.length === 0 ? (
+                      <tr><td colSpan={4} className="usage-empty">No user-owned usage in the last 30 days.</td></tr>
+                    ) : users.map((row) => {
+                      const over = row.dailyBudgetUsd != null && row.todayUsd >= row.dailyBudgetUsd;
+                      return (
+                        <tr key={row.userId}>
+                          <th scope="row">{row.userName}{over ? " · paused by daily budget" : ""}</th>
+                          <td>
+                            {formatMoney(row.todayUsd)}
+                            {row.dailyBudgetUsd != null && (
+                              <span className="usage-cell-dim"> of {formatMoney(row.dailyBudgetUsd)}</span>
+                            )}
+                          </td>
+                          <td className="usage-cell-dim">{formatMoney(row.last7DaysUsd)}</td>
+                          <td className="usage-cell-dim">{formatMoney(row.last30DaysUsd)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
 
           {data.canManageRetention && (
             <section className="runner-card usage-retention" aria-labelledby="usage-retention-heading">

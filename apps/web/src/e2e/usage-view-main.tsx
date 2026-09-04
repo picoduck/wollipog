@@ -114,8 +114,20 @@ const response: UsageAggregationResponse = {
 
 const subscription: SubscriptionUsageResponse = { sources: [], staleAfterMs: 600_000, generatedAt: END };
 
+let dailyBudget: { perUserUsd: number | null; updatedAt: number | null } = { perUserUsd: 25, updatedAt: END };
+const users = [
+  { userId: "u-ada", userName: "Ada", todayUsd: 26.4, last7DaysUsd: 112.2, last30DaysUsd: 401.7 },
+  { userId: "u-grace", userName: "Grace", todayUsd: 9.8, last7DaysUsd: 61.3, last30DaysUsd: 240.1 },
+  { userId: "u-linus", userName: "Linus", todayUsd: 0, last7DaysUsd: 4.5, last30DaysUsd: 38.9 },
+];
 const client = {
   ...api,
+  usageDailyBudget: async () => ({ dailyBudget }),
+  updateUsageDailyBudget: async (perUserUsd: number | null) => {
+    dailyBudget = { perUserUsd, updatedAt: END };
+    return { dailyBudget };
+  },
+  usageUsers: async () => ({ users: users.map((user) => ({ ...user, dailyBudgetUsd: dailyBudget.perUserUsd })) }),
   usage: async () => response,
   subscriptionUsage: async () => subscription,
   refreshSubscriptionUsage: async () => subscription,

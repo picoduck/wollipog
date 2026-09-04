@@ -84,6 +84,42 @@ export function registerUsageRoutes(
     };
   });
 
+  // The organization's per-user daily allowance. Members can read it (it is what parks their
+  // sessions); only owners and admins set it. `null` clears it.
+  app.get("/api/usage/daily-budget", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human") {
+      return reply.code(403).send({ error: "usage accounting is available to organization members only" });
+    }
+    return { dailyBudget: db.getUsageDailyBudget(principal.organizationId) };
+  });
+
+  app.put("/api/usage/daily-budget", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    const body = (request.body ?? {}) as { perUserUsd?: unknown };
+    const value = body.perUserUsd;
+    if (value !== null && (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1_000_000)) {
+      return reply.code(400).send({ error: "perUserUsd must be a positive number of dollars, or null to clear" });
+    }
+    return { dailyBudget: db.setUsageDailyBudget(principal.organizationId, value === null ? null : Math.round(value * 100) / 100, Date.now()) };
+  });
+
+  // Per-user spend windows. Owners and admins see every user with usage; a member sees only
+  // their own row, which is also what the daily budget gates on.
+  app.get("/api/usage/users", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human") {
+      return reply.code(403).send({ error: "usage accounting is available to organization members only" });
+    }
+    const users = canAdministerIdentity(principal.role)
+      ? db.listUserCostWindows(principal.organizationId)
+      : [db.userCostWindows(principal.organizationId, principal.userId)];
+    return { users };
+  });
+
   app.put("/api/usage/retention", async (request, reply) => {
     const principal = requestPrincipal(request);
     if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {

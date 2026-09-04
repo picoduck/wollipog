@@ -22,7 +22,7 @@ test("desktop: metric toggle flips every figure, the chart answers hover and foc
   await expect(headline).not.toHaveText(cost ?? "");
   await expect(headline).toContainText("M");
   await expect(page.locator(".usage-chart-section h3")).toContainText("Processed Tokens");
-  await expect(page.locator(".usage-table thead")).toContainText("Cost");
+  await expect(page.locator(".usage-breakdown-section .usage-table thead")).toContainText("Cost");
   await page.screenshot({ path: `${SHOT}/desktop-dark-tokens.png`, fullPage: true });
   await page.getByRole("radio", { name: "Cost" }).click();
 
@@ -43,11 +43,28 @@ test("desktop: metric toggle flips every figure, the chart answers hover and foc
   await expect(legend).toHaveCount(3);
 
   await page.getByRole("radio", { name: "Model" }).click();
-  await expect(page.locator(".usage-table caption")).toHaveText("Usage by Model");
+  await expect(page.locator(".usage-breakdown-section .usage-table caption")).toHaveText("Usage by Model");
   await expect(page.locator(".usage-table tbody th").first()).toContainText("claude-fable-5-1");
   await page.screenshot({ path: `${SHOT}/desktop-dark-model.png`, fullPage: true });
   await page.getByRole("radio", { name: "Day" }).click();
-  await expect(page.locator(".usage-table caption")).toContainText("Daily Usage in UTC");
+  await expect(page.locator(".usage-breakdown-section .usage-table caption")).toContainText("Daily Usage in UTC");
+});
+
+test("per-user daily budget: the By User table names who is paused and admins can change the amount", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.goto("/usage-view-e2e.html");
+  const section = page.locator(".usage-users-section");
+  await expect(section).toContainText("Ada · paused by daily budget");
+  await expect(section).toContainText("$26.40 of $25.00");
+  await expect(section).toContainText("Each user may spend $25.00 per UTC day");
+  await section.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${SHOT}/desktop-dark-users.png`, fullPage: true });
+
+  await page.getByLabel("Daily Budget per User ($)").fill("30");
+  await page.getByRole("button", { name: "Save Daily Budget" }).click();
+  await expect(section).toContainText("Daily budget saved.");
+  await expect(section).not.toContainText("paused by daily budget");
+  await expect(section).toContainText("$26.40 of $30.00");
 });
 
 test("light theme and the coverage notice for unpriced records and a cached rate table", async ({ page }) => {

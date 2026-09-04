@@ -4686,6 +4686,11 @@ function ComposerPlusMenu({
               hint="pause + ask when spend reaches this"
               onCommit={(v) => onApply({ costBudgetUsd: v })}
             />
+            <CheckpointsInput
+              value={session.costCheckpointsUsd ?? null}
+              approvedUsd={session.costCheckpointApprovedUsd ?? null}
+              onCommit={(list) => onApply({ costCheckpointsUsd: list })}
+            />
             <GuardrailInput
               prefix="#"
               step="1"
@@ -4700,6 +4705,47 @@ function ComposerPlusMenu({
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Soft cost checkpoints as a comma-separated dollar list ("1, 2.5"). Each parks the session once
+ * with a Continue/Stop card ahead of the hard budget; an empty commit clears them.
+ */
+function CheckpointsInput({
+  value,
+  approvedUsd,
+  onCommit,
+}: {
+  value: number[] | null;
+  approvedUsd: number | null;
+  onCommit: (list: number[]) => void;
+}) {
+  const live = (value ?? []).join(", ");
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    if (draft === null) return;
+    const list = draft.split(/[\s,]+/).map(Number).filter((usd) => Number.isFinite(usd) && usd > 0);
+    setDraft(null);
+    if (list.join(",") !== (value ?? []).join(",")) onCommit(list);
+  };
+  return (
+    <div className="plus-budget">
+      <span className="plus-budget-prefix">$…</span>
+      <input
+        type="text"
+        inputMode="decimal"
+        placeholder="none"
+        aria-label="Cost Checkpoints"
+        value={draft ?? live}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }}
+      />
+      <span className="plus-budget-hint">
+        {"pause + ask once at each amount"}{approvedUsd != null ? ` · approved through $${approvedUsd.toFixed(2)}` : ""}
+      </span>
     </div>
   );
 }

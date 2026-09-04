@@ -158,6 +158,8 @@ function mapSession(s: Json): Json {
     runId: s?.runId ?? null,
     costUsd: s?.costUsd,
     costBudgetUsd: s?.costBudgetUsd ?? null,
+    costCheckpointsUsd: s?.costCheckpointsUsd ?? null,
+    costCheckpointApprovedUsd: s?.costCheckpointApprovedUsd ?? null,
     maxToolCalls: s?.maxToolCalls ?? null,
     toolCallCount: s?.toolCallCount,
     // Title only — the options/requestId belong to the human's card, not the conductor.

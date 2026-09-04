@@ -26,6 +26,19 @@ export interface PolicyInput {
   status: SessionStatus;
   costUsd: number;
   toolCallCount: number;
+  /** Tokens are recorded but none of them could be priced, so `costUsd` says nothing (v105). */
+  unpriced?: boolean;
+}
+
+/** The guardrail fields a session carries, as the rule builder reads them (v105 adds the soft
+ * checkpoints, the unpriced acknowledgement, and the owner's daily allowance). */
+export interface GuardrailFields {
+  costBudgetUsd?: number | null;
+  maxToolCalls?: number | null;
+  costCheckpointsUsd?: number[] | null;
+  costCheckpointApprovedUsd?: number | null;
+  costUnpricedAcknowledged?: boolean;
+  dailyBudget?: { budgetUsd: number; spentUsd: number } | null;
 }
 
 export interface ApprovalPolicyInput {
@@ -338,13 +351,38 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
 
 /**
  * Build the rule list from a session's flattened guardrail fields. The fixed order here IS the
- * precedence order when several rules trip at once (cost first — it's the one spending money).
+ * precedence order when several rules trip at once: the organization's daily allowance first (it
+ * outranks anything the session set for itself), then the unpriced fail-closed check (a budget
+ * that cannot see spend is no budget), then the next soft checkpoint, then the hard budget, then
+ * the tool-call limit.
  */
-export function rulesFromSession(s: { costBudgetUsd?: number | null; maxToolCalls?: number | null }): PolicyRule[] {
+export function rulesFromSession(s: GuardrailFields): PolicyRule[] {
   const rules: PolicyRule[] = [];
-  if (s.costBudgetUsd != null && s.costBudgetUsd > 0) rules.push({ kind: "cost_budget", budgetUsd: s.costBudgetUsd });
+  if (s.dailyBudget && s.dailyBudget.budgetUsd > 0) {
+    rules.push({ kind: "daily_budget", budgetUsd: s.dailyBudget.budgetUsd, spentUsd: s.dailyBudget.spentUsd });
+  }
+  const hasBudget = s.costBudgetUsd != null && s.costBudgetUsd > 0;
+  const checkpoints = (s.costCheckpointsUsd ?? []).filter((usd) => Number.isFinite(usd) && usd > 0).sort((a, b) => a - b);
+  if ((hasBudget || checkpoints.length > 0) && !s.costUnpricedAcknowledged) rules.push({ kind: "cost_unpriced" });
+  const approved = s.costCheckpointApprovedUsd ?? 0;
+  // Only the next unapproved checkpoint is a rule: approving it advances `approved`, and the one
+  // after it becomes the rule on the next evaluation.
+  const next = checkpoints.find((usd) => usd > approved && (!hasBudget || usd < s.costBudgetUsd!));
+  if (next != null) rules.push({ kind: "cost_checkpoint", checkpointUsd: next });
+  if (hasBudget) rules.push({ kind: "cost_budget", budgetUsd: s.costBudgetUsd! });
   if (s.maxToolCalls != null && s.maxToolCalls > 0) rules.push({ kind: "max_tool_calls", maxCalls: s.maxToolCalls });
   return rules;
+}
+
+/** Validate and normalize a checkpoint list from user input: finite, positive, ascending, unique,
+ * at most eight. Returns null when nothing usable remains. */
+export function normalizeCostCheckpoints(input: unknown): number[] | null {
+  if (!Array.isArray(input)) return null;
+  const values = [...new Set(input
+    .map((value) => (typeof value === "string" ? Number(value) : value))
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0)
+    .map((value) => Math.round(value * 100) / 100))].sort((a, b) => a - b);
+  return values.length > 0 ? values.slice(0, 8) : null;
 }
 
 /**
@@ -375,6 +413,36 @@ export function evaluatePolicies(input: PolicyInput, rules: PolicyRule[]): Polic
       }
       return { rule, decision: "ok" };
     }
+    if (rule.kind === "cost_checkpoint") {
+      if (input.costUsd >= rule.checkpointUsd) {
+        return {
+          rule,
+          decision: "ask",
+          title: `Cost checkpoint — $${input.costUsd.toFixed(2)} of $${rule.checkpointUsd.toFixed(2)}. Continue?`,
+        };
+      }
+      return { rule, decision: "ok" };
+    }
+    if (rule.kind === "cost_unpriced") {
+      if (input.unpriced) {
+        return {
+          rule,
+          decision: "ask",
+          title: "Usage cannot be priced — this model has no rate, so the cost budget cannot be enforced. Continue without it?",
+        };
+      }
+      return { rule, decision: "ok" };
+    }
+    if (rule.kind === "daily_budget") {
+      if (rule.spentUsd >= rule.budgetUsd) {
+        return {
+          rule,
+          decision: "ask",
+          title: `Daily budget reached — $${rule.spentUsd.toFixed(2)} of $${rule.budgetUsd.toFixed(2)} today across your sessions. New turns pause until the day rolls over or an owner or admin raises it.`,
+        };
+      }
+      return { rule, decision: "ok" };
+    }
     // max_tool_calls
     if (input.toolCallCount >= rule.maxCalls) {
       return {
@@ -398,13 +466,15 @@ export function firstAsk(decisions: PolicyDecision[]): PolicyDecision | null {
 
 /** The approval card for an ask — same shape/options the shipped Phase 7 cost gate used. */
 export function approvalForDecision(d: PolicyDecision, sessionId: string, now: number): PendingApproval {
-  const prefix = d.rule.kind === "cost_budget" ? "cost-budget" : "max-tool-calls";
+  const prefix = d.rule.kind.replaceAll("_", "-");
   return {
     requestId: `${prefix}:${sessionId}:${now}`,
     kind: d.rule.kind,
     title: d.title ?? "Guardrail reached. Continue?",
     options: [
-      { optionId: "continue", name: "Continue", kind: "allow_once" },
+      // For daily_budget, Continue re-checks the allowance rather than overriding it: the card
+      // clears only once the day rolled over or an owner or admin raised the budget.
+      { optionId: "continue", name: d.rule.kind === "daily_budget" ? "Check Again" : "Continue", kind: "allow_once" },
       { optionId: "cancel", name: "Stop", kind: "reject_once" },
     ],
   };

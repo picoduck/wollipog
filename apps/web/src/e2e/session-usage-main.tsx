@@ -88,6 +88,20 @@ const session: SessionView = {
 };
 const driverName = params.get("driver") === "claude-code" ? "claude-code" : "codex-app-server";
 session.driver = driverName as SessionView["driver"];
+if (params.get("approval") === "checkpoint") {
+  session.status = "input_required";
+  session.costCheckpointsUsd = [1, 2.5];
+  session.costCheckpointApprovedUsd = 1;
+  session.pendingApproval = {
+    requestId: "cost-checkpoint:session-usage-e2e:1",
+    kind: "cost_checkpoint",
+    title: "Cost checkpoint — $2.61 of $2.50. Continue?",
+    options: [
+      { optionId: "continue", name: "Continue", kind: "allow_once" },
+      { optionId: "cancel", name: "Stop", kind: "reject_once" },
+    ],
+  };
+}
 
 const snapshotMessage: ControlPlaneToUi = {
   type: "snapshot",
