@@ -66,7 +66,8 @@ A queued-message edit is written to browser recovery storage before Wollipog sub
 or interrupted request therefore retains the exact text, attachments, queue identity, expected
 revision, idempotency identity, and displaced ordinary draft across page reloads and installed-app
 restarts. Recovery is partitioned by organization user, control-plane instance, and Session. It is
-removed after definitive success, explicit dismissal or reuse, sign-out, or instance removal.
+removed after definitive success, explicit dismissal or reuse, an authenticated account change,
+or instance removal. A temporary pairing interruption preserves it.
 
 Recovered edits are retried only when an authoritative live queue still exposes the same prompt ID
 at the same editable revision. Offline or incomplete projections leave recovery intact, while a

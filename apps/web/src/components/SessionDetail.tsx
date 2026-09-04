@@ -614,37 +614,35 @@ function SessionDetailLoaded({
     setQueuedEditRecovered(false);
   }, [sessionId]);
   useEffect(() => {
-    if (conn === "unauthorized") {
-      const priorAccountKey = queuedEditAccountKeyRef.current;
-      if (priorAccountKey) {
-        clearDurableQueuedEditRecoveriesForAccount(instanceScope, priorAccountKey);
-      }
-      clearSessionDetailComposerRuntimeForInstance(instanceScope);
-      queuedEditAccountKeyRef.current = null;
-      setQueuedEditAccountKey(null);
-      queuedEditRef.current = null;
-      setQueuedEdit(null);
-      setQueuedEditRecovered(false);
-      return;
-    }
-    if (conn !== "online") return;
+    if (mode !== "expanded" || conn !== "online") return;
     let cancelled = false;
-    void api.getIdentity().then(({ context }) => {
-      if (cancelled) return;
-      const nextAccountKey = queuedEditRecoveryAccountKey(context.organizationId, context.userId);
-      const priorAccountKey = queuedEditAccountKeyRef.current;
-      if (priorAccountKey && priorAccountKey !== nextAccountKey) {
-        clearDurableQueuedEditRecoveriesForAccount(instanceScope, priorAccountKey);
-        clearSessionDetailComposerRuntimeForInstance(instanceScope);
-      }
-      queuedEditAccountKeyRef.current = nextAccountKey;
-      setQueuedEditAccountKey(nextAccountKey);
-    }).catch(() => {
-      // Do not guess an account scope. Ordinary drafts remain available and queued edits are not
-      // submitted until authenticated recovery storage can be established.
-    });
-    return () => { cancelled = true; };
-  }, [api, conn, instanceScope]);
+    let retryTimer: number | undefined;
+    let retryDelayMs = 1_000;
+    const loadIdentity = () => {
+      void api.getIdentity().then(({ context }) => {
+        if (cancelled) return;
+        const nextAccountKey = queuedEditRecoveryAccountKey(context.organizationId, context.userId);
+        const priorAccountKey = queuedEditAccountKeyRef.current;
+        if (priorAccountKey && priorAccountKey !== nextAccountKey) {
+          clearDurableQueuedEditRecoveriesForAccount(instanceScope, priorAccountKey);
+          clearSessionDetailComposerRuntimeForInstance(instanceScope);
+        }
+        queuedEditAccountKeyRef.current = nextAccountKey;
+        setQueuedEditAccountKey(nextAccountKey);
+      }).catch(() => {
+        if (cancelled) return;
+        // Do not guess an account scope. Retry with bounded backoff so a transient identity error
+        // cannot disable queued editing for the lifetime of an otherwise-online view.
+        retryTimer = window.setTimeout(loadIdentity, retryDelayMs);
+        retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
+      });
+    };
+    loadIdentity();
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [api, conn, instanceScope, mode]);
   const queuedEditRecoveryScope = useMemo<QueuedEditRecoveryScope | null>(() =>
     queuedEditAccountKey
       ? { instanceScope, accountKey: queuedEditAccountKey, sessionId }
@@ -1140,7 +1138,7 @@ function SessionDetailLoaded({
       ? loadDurableQueuedEditRecovery(queuedEditRecoveryScope)
       : undefined;
     const durableQueuedEdit = storedQueuedEdit && !storedQueuedEdit.error
-      ? { ...storedQueuedEdit, error: "Queued message edit was interrupted before confirmation." }
+      ? { ...storedQueuedEdit, error: "The prior queued message edit outcome was not recorded. Check the current queue before retrying." }
       : storedQueuedEdit;
     let queuedEditRecovery = pendingQueuedEdit ?? runtimeQueuedEdit ?? durableQueuedEdit;
     if (queuedEditRecovery && !pendingQueuedEdit && draftDirty.current && queuedEditRef.current === null) {

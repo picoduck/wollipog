@@ -154,11 +154,16 @@ export function parseQueuedPromptEditRecovery(value: unknown): QueuedPromptEditR
   });
 }
 
-function parseRegistry(raw: string | null, now: number): StoredQueuedEditRegistry {
-  if (!raw) return { version: 1, entries: [] };
+function parseRegistry(
+  raw: string | null,
+  now: number,
+): { registry: StoredQueuedEditRegistry; cleaned: boolean } {
+  if (!raw) return { registry: { version: 1, entries: [] }, cleaned: false };
   try {
     const parsed = JSON.parse(raw) as { version?: unknown; entries?: unknown };
-    if (parsed.version !== 1 || !Array.isArray(parsed.entries)) return { version: 1, entries: [] };
+    if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
+      return { registry: { version: 1, entries: [] }, cleaned: true };
+    }
     const entries = parsed.entries.flatMap((value): StoredQueuedEditRecovery[] => {
       if (!value || typeof value !== "object" || Array.isArray(value)) return [];
       const entry = value as Partial<StoredQueuedEditRecovery>;
@@ -176,9 +181,12 @@ function parseRegistry(raw: string | null, now: number): StoredQueuedEditRegistr
       }];
     });
     entries.sort((left, right) => left.updatedAt - right.updatedAt);
-    return { version: 1, entries: entries.slice(-QUEUED_EDIT_RECOVERY_MAX_ENTRIES) };
+    return {
+      registry: { version: 1, entries: entries.slice(-QUEUED_EDIT_RECOVERY_MAX_ENTRIES) },
+      cleaned: entries.length !== parsed.entries.length || entries.length > QUEUED_EDIT_RECOVERY_MAX_ENTRIES,
+    };
   } catch {
-    return { version: 1, entries: [] };
+    return { registry: { version: 1, entries: [] }, cleaned: true };
   }
 }
 
@@ -187,7 +195,7 @@ function encodedBytes(value: string): number {
 }
 
 function readRegistry(instanceScope: string, storage: KeyValueStorage | undefined, now: number): StoredQueuedEditRegistry {
-  return parseRegistry(loadInstanceStorageValue(STORAGE_KEY, instanceScope, storage), now);
+  return parseRegistry(loadInstanceStorageValue(STORAGE_KEY, instanceScope, storage), now).registry;
 }
 
 function writeRegistry(
@@ -207,10 +215,15 @@ export function loadDurableQueuedEditRecovery(
   storage?: KeyValueStorage,
   now = Date.now(),
 ): QueuedPromptEditRecovery | undefined {
-  const registry = readRegistry(scope.instanceScope, storage, now);
+  const raw = loadInstanceStorageValue(STORAGE_KEY, scope.instanceScope, storage);
+  const { registry, cleaned } = parseRegistry(raw, now);
   const entry = registry.entries.find((candidate) =>
     candidate.accountKey === scope.accountKey && candidate.sessionId === scope.sessionId);
-  writeRegistry(scope.instanceScope, registry, storage);
+  // Reads stay read-only in the common case. Rewrite only when parsing pruned expired, malformed,
+  // or over-limit input, so opening a composer cannot synchronously churn a multi-megabyte value.
+  if (cleaned) {
+    writeRegistry(scope.instanceScope, registry, storage);
+  }
   return entry ? cloneQueuedPromptEditRecovery(entry.recovery) : undefined;
 }
 
@@ -232,7 +245,11 @@ export function saveDurableQueuedEditRecovery(
     entry.accountKey !== scope.accountKey || entry.sessionId !== scope.sessionId);
   entries.push(nextEntry);
   entries.sort((left, right) => left.updatedAt - right.updatedAt);
-  while (entries.length > QUEUED_EDIT_RECOVERY_MAX_ENTRIES) entries.shift();
+  while (entries.length > QUEUED_EDIT_RECOVERY_MAX_ENTRIES) {
+    const oldestOther = entries.findIndex((entry) => entry !== nextEntry);
+    if (oldestOther < 0) return false;
+    entries.splice(oldestOther, 1);
+  }
   let serialized = JSON.stringify({ version: 1, entries } satisfies StoredQueuedEditRegistry);
   while (encodedBytes(serialized) > QUEUED_EDIT_RECOVERY_MAX_BYTES) {
     const oldestOther = entries.findIndex((entry) => entry !== nextEntry);

@@ -31,8 +31,12 @@ const unchanged: QueuedPromptView = {
 
 class MemoryStorage implements KeyValueStorage {
   readonly values = new Map<string, string>();
+  setCalls = 0;
   getItem(key: string) { return this.values.get(key) ?? null; }
-  setItem(key: string, value: string) { this.values.set(key, value); }
+  setItem(key: string, value: string) {
+    this.setCalls += 1;
+    this.values.set(key, value);
+  }
   removeItem(key: string) { this.values.delete(key); }
 }
 
@@ -149,10 +153,12 @@ test("a different entry cannot inherit recovery through matching content or posi
 test("durable recovery round-trips exact retry, attachment, and displaced-draft state", () => {
   const storage = new MemoryStorage();
   assert.equal(saveDurableQueuedEditRecovery(scope(), recovery, storage, 1_000), true);
+  const writesBeforeLoad = storage.setCalls;
   const restored = loadDurableQueuedEditRecovery(scope(), storage, 2_000);
   assert.deepEqual(restored, recovery);
   assert.notEqual(restored, recovery);
   assert.notEqual(restored?.draft.images, recovery.draft.images);
+  assert.equal(storage.setCalls, writesBeforeLoad, "a clean recovery read must not rewrite storage");
 });
 
 test("durable recovery is isolated by account, instance, and Session", () => {
@@ -171,7 +177,7 @@ test("page-lifetime recovery also requires the exact authenticated account", () 
   clearRuntimeQueuedEditRecovery("instance-1\u0000session-1");
 });
 
-test("success, explicit dismissal, account sign-out, and instance removal clear durable recovery", () => {
+test("success, explicit dismissal, account change, and instance removal clear durable recovery", () => {
   const storage = new MemoryStorage();
   saveDurableQueuedEditRecovery(scope(), recovery, storage, 1_000);
   assert.equal(clearDurableQueuedEditRecovery(scope(), storage, 2_000), true);
@@ -200,6 +206,20 @@ test("durable recovery expires safely and remains count bounded", () => {
   }
   assert.equal(loadDurableQueuedEditRecovery(scope("session-0"), storage, 20_000), undefined);
   assert.ok(loadDurableQueuedEditRecovery(scope(`session-${QUEUED_EDIT_RECOVERY_MAX_ENTRIES}`), storage, 20_000));
+});
+
+test("count eviction always retains the entry being saved after the clock moves backward", () => {
+  const storage = new MemoryStorage();
+  for (let index = 0; index < QUEUED_EDIT_RECOVERY_MAX_ENTRIES; index += 1) {
+    assert.equal(saveDurableQueuedEditRecovery(
+      scope(`future-${index}`),
+      recovery,
+      storage,
+      10_000 + index,
+    ), true);
+  }
+  assert.equal(saveDurableQueuedEditRecovery(scope("current"), recovery, storage, 1_000), true);
+  assert.deepEqual(loadDurableQueuedEditRecovery(scope("current"), storage, 2_000), recovery);
 });
 
 test("oversize and unavailable storage fail without touching an ordinary draft", () => {

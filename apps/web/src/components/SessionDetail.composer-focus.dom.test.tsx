@@ -18,7 +18,11 @@ import {
 } from "../composer-drafts.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
-import { loadRuntimeQueuedEditRecovery, queuedEditRecoveryAccountKey } from "../queued-edit-recovery.js";
+import {
+  loadDurableQueuedEditRecovery,
+  loadRuntimeQueuedEditRecovery,
+  queuedEditRecoveryAccountKey,
+} from "../queued-edit-recovery.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { clearSessionDetailComposerRuntimeForInstance, SessionDetail } from "./SessionDetail.js";
 
@@ -175,6 +179,7 @@ interface Fixture {
   instanceScope: string;
   pushSession: (patch: Partial<SessionView>) => Promise<void>;
   pushEvent: (payload: SessionEvent["payload"]) => Promise<void>;
+  closeSocket: (code: number) => Promise<void>;
 }
 
 type ComposerDraftLoader = (sessionId: string, instanceScope: string) => Promise<ComposerDraft | null>;
@@ -383,6 +388,9 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
           event: { id: seq, sessionId: currentSession.id, seq, ts: seq + 1, payload },
         });
       });
+    },
+    closeSocket: async (code) => {
+      await act(async () => { socket.onclose?.({ code }); });
     },
   };
 }
@@ -805,6 +813,49 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
     assert.equal(edits[1]?.submissionId, edits[0]?.submissionId);
     assert.equal(edits[1]?.expectedRevision, "qer_exact");
     assert.deepEqual(edits[1]?.images, [submittedImage]);
+
+    await fixture.closeSocket(1008);
+    await flushAsyncWork();
+    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Recovered Queued Message/);
+    assert.ok(loadDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.sessionId,
+    }), "a temporary re-pairing state must not erase durable recovery");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a transient identity failure retries without remounting the Session", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  let identityCalls = 0;
+  const fixture = await mountFixture(draft, {
+    client: {
+      getIdentity: async () => {
+        identityCalls += 1;
+        if (identityCalls === 1) throw new Error("temporary identity failure");
+        return {
+          context: {
+            userId: "user-1",
+            userName: "Test User",
+            organizationId: "org-1",
+            organizationName: "Test Organization",
+            role: "owner" as const,
+            deviceId: "device-1",
+            localBootstrap: false,
+          },
+          organizations: [],
+          memberships: [],
+          teams: [],
+        };
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Ordinary draft");
+    await flushAsyncWork(1_100);
+    assert.equal(identityCalls, 2);
   } finally {
     await unmountFixture(fixture);
   }
@@ -950,7 +1001,7 @@ test("a queued edit interrupted by runtime reload returns as unconfirmed recover
     assert.equal(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'), null);
     assert.match(
       fixture.container.querySelector(".composer-error")?.textContent ?? "",
-      /interrupted before confirmation|not confirmed.*interrupted/i,
+      /outcome was not recorded/i,
     );
   } finally {
     await unmountFixture(fixture);
