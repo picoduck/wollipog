@@ -5074,7 +5074,7 @@ test("per-user cost windows and the daily budget read the owner-scoped buckets i
 
   // Shorten hourly retention so the 3-day and 20-day samples roll into daily buckets, then the
   // windows must read them from usage_daily rather than lose them.
-  db.setUsageRetentionPolicy("org_personal", { hourlyDays: 1, dailyDays: 30 });
+  db.setUsageRetentionPolicy("org_personal", { hourlyDays: 1, dailyDays: 30 }, now);
   db.maintainUsageAggregation(now);
   assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_daily").get()!.n, 2, "two samples rolled into days");
   assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).last7DaysUsd, 5.5, "a rolled-up day inside the window still counts");
