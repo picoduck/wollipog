@@ -1591,11 +1591,20 @@ test("orphan recovery cannot release a lock retained by failed provider retireme
     const internals = manager as unknown as {
       runOrphanRecovery(sessionId: string): Promise<void>;
       lockOwner: string;
+      rewinding: Set<string>;
     };
     assert.equal(store.acquireLock(spec.sessionId, internals.lockOwner), true);
+    assert.equal(manager.fenceRewind(spec.sessionId), true,
+      "the queued rewind acquires its in-memory fence before retirement begins");
 
     await assert.rejects(manager.delete(spec.sessionId), /retirement is unconfirmed/);
     assert.equal(store.ownsLock(spec.sessionId, internals.lockOwner), true);
+    assert.deepEqual(
+      await manager.rewind(spec.sessionId, 1, true),
+      { ok: false, error: "provider retirement is still in progress" },
+    );
+    assert.equal(internals.rewinding.has(spec.sessionId), false,
+      "a refused queued rewind must release its pre-acquired in-memory fence");
     await internals.runOrphanRecovery(spec.sessionId);
     assert.equal(
       store.ownsLock(spec.sessionId, internals.lockOwner),

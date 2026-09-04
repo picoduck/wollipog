@@ -7251,9 +7251,13 @@ export class SessionManager {
   }
 
   async rewind(sessionId: string, turn: number, alreadyFenced = false): Promise<{ ok: boolean; error?: string }> {
-    if (this.loggingOut.has(sessionId)) return { ok: false, error: "agent sign-out is in progress" };
-    if (this.deleting.has(sessionId)) return { ok: false, error: "session deletion is in progress" };
-    if (this.closing.has(sessionId)) return { ok: false, error: "provider retirement is still in progress" };
+    const refuseBeforeRewind = (error: string): { ok: false; error: string } => {
+      if (alreadyFenced) this.releaseRewindFence(sessionId);
+      return { ok: false, error };
+    };
+    if (this.loggingOut.has(sessionId)) return refuseBeforeRewind("agent sign-out is in progress");
+    if (this.deleting.has(sessionId)) return refuseBeforeRewind("session deletion is in progress");
+    if (this.closing.has(sessionId)) return refuseBeforeRewind("provider retirement is still in progress");
     // Mark FIRST (synchronously): prompt() consults the set, and the shared lock is reentrant
     // for this process so it can't fence a same-runner prompt out of the restore window.
     if (!alreadyFenced && !this.fenceRewind(sessionId)) {
