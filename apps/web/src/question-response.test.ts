@@ -3,6 +3,7 @@ import test from "node:test";
 import type { AgentQuestion } from "@wollipog/protocol";
 import {
   clearQuestionDrafts,
+  claimQuestionResponseOperation,
   isAnswerableAgentQuestion,
   offeredQuestionChoices,
   questionAnswers,
@@ -12,6 +13,19 @@ import {
   storeQuestionDrafts,
   toggleQuestionChoice,
 } from "./question-response.js";
+
+test("question operations are exclusive per request and release for retry", () => {
+  const release = claimQuestionResponseOperation("session-lock", "request-lock");
+  assert.ok(release);
+  assert.equal(claimQuestionResponseOperation("session-lock", "request-lock"), null);
+  const otherRelease = claimQuestionResponseOperation("session-lock", "other-request");
+  assert.ok(otherRelease);
+  otherRelease();
+  release();
+  const retryRelease = claimQuestionResponseOperation("session-lock", "request-lock");
+  assert.ok(retryRelease);
+  retryRelease();
+});
 
 const single: AgentQuestion = {
   id: "language",

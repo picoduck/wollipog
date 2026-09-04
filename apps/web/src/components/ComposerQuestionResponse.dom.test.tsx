@@ -207,9 +207,13 @@ test("choice palette keys stay scoped to palette buttons and enforce multi-selec
     await act(async () => root.render(<Harness client={client} questions={questions} requestId="ask-palette" />));
     const input = container.querySelector<HTMLInputElement>(".composer-answer-input");
     assert.ok(input);
+    input.focus();
     await act(async () => setInputValue(input, "1"));
     assert.equal(input.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never), true,
       "printable-entry focus retains ordinary arrow-key behavior");
+    assert.equal(input.value, "1", "palette navigation cannot rewrite text-field input");
+    assert.equal((domWindow.document.activeElement as unknown) === (input as unknown), true,
+      "palette navigation cannot steal text-field focus");
     await act(async () => {
       input.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
     });
@@ -234,6 +238,45 @@ test("choice palette keys stay scoped to palette buttons and enforce multi-selec
       answers: { checks: ["Unit Tests", "Browser Tests"] },
       action: "submit",
     }]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("single-choice palette exposes one tab stop with wrapping Arrow, Home, and End navigation", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const client = { ...api } as ApiClient;
+  const questions: AgentQuestion[] = [{
+    id: "target",
+    question: "Choose a target",
+    options: [{ label: "Development" }, { label: "Staging" }, { label: "Production" }],
+  }];
+
+  try {
+    await act(async () => root.render(<Harness client={client} questions={questions} requestId="ask-palette" />));
+    const choices = [...container.querySelectorAll<HTMLButtonElement>(".composer-answer-choice")];
+    assert.deepEqual(choices.map((choice) => choice.tabIndex), [0, -1, -1]);
+
+    choices[0]!.focus();
+    await act(async () => {
+      choices[0]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }) as never);
+    });
+    assert.equal(domWindow.document.activeElement, choices[2]);
+    assert.deepEqual(choices.map((choice) => choice.tabIndex), [-1, -1, 0]);
+
+    await act(async () => {
+      choices[2]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Home", bubbles: true }) as never);
+    });
+    assert.equal(domWindow.document.activeElement, choices[0]);
+    assert.deepEqual(choices.map((choice) => choice.tabIndex), [0, -1, -1]);
+
+    await act(async () => {
+      choices[0]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }) as never);
+    });
+    assert.equal(domWindow.document.activeElement, choices[2]);
   } finally {
     await act(async () => root.unmount());
     container.remove();

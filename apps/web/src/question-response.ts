@@ -225,10 +225,19 @@ export function questionDraftAnswers(
 }
 
 const questionDraftStore = new Map<string, Record<string, QuestionResponseDraft>>();
+const pendingQuestionOperations = new Set<string>();
 const QUESTION_DRAFT_LIMIT = 50;
 
 function draftKey(sessionId: string, requestId: string): string {
   return `${sessionId}\u0000${requestId}`;
+}
+
+/** Prevent two mounted response surfaces from delivering the same live request concurrently. */
+export function claimQuestionResponseOperation(sessionId: string, requestId: string): (() => void) | null {
+  const key = draftKey(sessionId, requestId);
+  if (pendingQuestionOperations.has(key)) return null;
+  pendingQuestionOperations.add(key);
+  return () => pendingQuestionOperations.delete(key);
 }
 
 /** Page-lifetime drafts let the question surface survive transcript virtualization. */

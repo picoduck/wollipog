@@ -7,6 +7,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject 
 import { useApi } from "../api-context.js";
 import {
   clearQuestionDrafts,
+  claimQuestionResponseOperation,
   isAnswerableAgentQuestion,
   offeredQuestionChoices,
   questionDraftAnswers,
@@ -174,6 +175,8 @@ export function ComposerQuestionResponse({
     }
     if (operationPendingRef.current === requestId || !runnerOnline) return;
     const submittedRequestId = requestId;
+    const releaseOperation = claimQuestionResponseOperation(sessionId, submittedRequestId);
+    if (!releaseOperation) return;
     operationPendingRef.current = submittedRequestId;
     setBusy(true);
     setSubmissionError(null);
@@ -193,6 +196,7 @@ export function ComposerQuestionResponse({
         focusSoon(inputRef);
       }
     } finally {
+      releaseOperation();
       if (operationPendingRef.current === submittedRequestId) operationPendingRef.current = null;
       if (liveRequestRef.current === submittedRequestId) setBusy(false);
     }
@@ -227,10 +231,19 @@ export function ComposerQuestionResponse({
     if (!plain) return;
     const choices = [...event.currentTarget.parentElement!.querySelectorAll<HTMLButtonElement>("button")];
     const index = choices.indexOf(event.currentTarget);
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"].includes(event.key)) {
       event.preventDefault();
-      const offset = event.key === "ArrowDown" ? 1 : -1;
-      choices[(index + offset + choices.length) % choices.length]?.focus();
+      const targetIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? choices.length - 1
+          : (index + (event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1) + choices.length) % choices.length;
+      const target = choices[targetIndex];
+      if (!question.multiSelect && target) {
+        choices.forEach((choice) => { choice.tabIndex = -1; });
+        target.tabIndex = 0;
+      }
+      target?.focus();
     } else if (event.key === " " || event.key.toLowerCase() === "x") {
       event.preventDefault();
       setChoice(label);
@@ -267,13 +280,15 @@ export function ComposerQuestionResponse({
           aria-label="Offered Choices"
         >
           {question.options.map((option, optionIndex) => {
-            const selected = (offeredQuestionChoices(question, rawValue) ?? []).includes(option.label);
+            const offeredChoices = offeredQuestionChoices(question, rawValue) ?? [];
+            const selected = offeredChoices.includes(option.label);
             return (
               <button
                 type="button"
                 className={`composer-answer-choice${selected ? " on" : ""}`}
                 role={question.multiSelect ? "checkbox" : "radio"}
                 aria-checked={selected}
+                tabIndex={question.multiSelect ? 0 : selected || (offeredChoices.length === 0 && optionIndex === 0) ? 0 : -1}
                 disabled={controlsDisabled}
                 key={option.label}
                 onClick={() => setChoice(option.label)}

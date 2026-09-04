@@ -9,6 +9,7 @@ import { EventTimeline } from "./EventTimeline.js";
 import { SessionApprovalRegion } from "./SessionApproval.js";
 import { handleMenuKeyDown, useAccessibleMenu } from "./interactions.js";
 import { clearQuestionDrafts } from "../question-response.js";
+import { setQuestionResponseStyle } from "../question-response-style.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -350,6 +351,25 @@ test("approval replacement and resolution preserve owned keyboard focus", async 
   assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
   await act(async () => { root.unmount(); });
   container.remove();
+});
+
+test("Composer Response replacement falls back instead of focusing Dismiss", async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<ApprovalHarness requestId="ask-a" />); });
+    container.querySelector<HTMLButtonElement>('[data-session-request-control="dismiss"]')!.focus();
+
+    await act(async () => { root.render(<ApprovalHarness requestId="ask-b" />); });
+    assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
 });
 
 test("question focus and draft survive transcript hydration without exposing a second live form", async () => {

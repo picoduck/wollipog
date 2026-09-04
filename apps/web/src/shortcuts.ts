@@ -511,7 +511,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-reply",
     group: "Session Reading",
     label: "Reply to Session",
-    description: "Focus the session composer",
+    description: "Focus the composer, entering Answer Mode for a pending question",
     scope: "Session Reading",
     binding: { key: "r", bare: true },
   },

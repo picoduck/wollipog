@@ -9,6 +9,7 @@ import {
 import { useApi } from "../api-context.js";
 import {
   clearQuestionDrafts,
+  claimQuestionResponseOperation,
   isAnswerableAgentQuestion,
   questionDraftAnswers,
   questionDraftSelections,
@@ -191,7 +192,12 @@ function enabledRequestControl(
   const controls = [...region?.querySelectorAll<HTMLElement>(
     'button:not(:disabled):not([aria-disabled="true"]), [role="radio"][tabindex="0"]:not(:disabled):not([aria-disabled="true"]), [role="checkbox"]:not(:disabled):not([aria-disabled="true"]), input:not(:disabled)',
   ) ?? []];
-  return controls.find((control) => control.dataset.sessionRequestControl === preferredControl) ?? controls[0] ?? null;
+  // Composer Response owns entry outside this request region. On replacement, do not turn the
+  // card's destructive Dismiss action into the implicit focus target for the user's next Enter.
+  const eligible = region?.querySelector(".question-style-composer")
+    ? controls.filter((control) => control.dataset.sessionRequestControl !== "dismiss")
+    : controls;
+  return eligible.find((control) => control.dataset.sessionRequestControl === preferredControl) ?? eligible[0] ?? null;
 }
 
 /** Persistent focus and live-announcement owner for approvals in either presentation. */
@@ -483,6 +489,8 @@ export function SessionQuestionBanner({
       });
       return;
     }
+    const releaseOperation = claimQuestionResponseOperation(sessionId, requestId);
+    if (!releaseOperation) return;
     operationPendingRef.current = true;
     setBusy("submit");
     setError(null);
@@ -493,6 +501,7 @@ export function SessionQuestionBanner({
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
+      releaseOperation();
       operationPendingRef.current = false;
       setBusy(null);
     }
@@ -500,6 +509,8 @@ export function SessionQuestionBanner({
 
   const dismiss = async () => {
     if (operationPendingRef.current || busy !== null || !runnerOnline) return;
+    const releaseOperation = claimQuestionResponseOperation(sessionId, requestId);
+    if (!releaseOperation) return;
     operationPendingRef.current = true;
     setBusy("dismiss");
     setError(null);
@@ -510,6 +521,7 @@ export function SessionQuestionBanner({
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
+      releaseOperation();
       operationPendingRef.current = false;
       setBusy(null);
     }

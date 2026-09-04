@@ -1986,6 +1986,18 @@ function SessionDetailLoaded({
   const policyPaused = isPolicyApproval(session.pendingApproval);
   const canPrompt = runnerOnline && !terminal && !policyPaused;
   const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
+  const composerQuestions = (() => {
+    const approvalQuestions = pendingQuestion?.questions ?? [];
+    if (approvalQuestions.length > 0 || !pendingQuestion) return approvalQuestions;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item?.kind === "question" && item.requestId === pendingQuestion.requestId && item.answered === undefined) {
+        return item.questions;
+      }
+    }
+    return approvalQuestions;
+  })();
+  const canAnswerPendingQuestion = pendingQuestion !== null && composerQuestions.length > 0;
   const questionResponseStyle = useQuestionResponseStyle();
   const steeringAvailabilityInput = {
     runnerProtocolVersion: runner?.protocolVersion,
@@ -2008,23 +2020,27 @@ function SessionDetailLoaded({
   });
   const [activePane, setActivePane] = useState<"reader" | "composer">("reader");
   const [answerModeRequestId, setAnswerModeRequestId] = useState<string | null>(null);
-  const answerModeArrivalRef = useRef({ requestId: null as string | null, style: questionResponseStyle });
+  const answerModeArrivalRef = useRef({
+    requestId: null as string | null,
+    style: questionResponseStyle,
+    answerable: false,
+  });
   const answerModeFocusRequestRef = useRef<"answer" | "message" | null>(null);
-  const composerAnswerActive = pendingQuestion !== null && answerModeRequestId === pendingQuestion.requestId;
+  const composerAnswerActive = canAnswerPendingQuestion && answerModeRequestId === pendingQuestion.requestId;
 
   const exitAnswerMode = useCallback(() => {
     answerModeFocusRequestRef.current = "message";
     setAnswerModeRequestId(null);
   }, []);
   const enterAnswerMode = useCallback(() => {
-    if (!pendingQuestion) {
+    if (!canAnswerPendingQuestion) {
       focusComposerAtDraftEnd();
       return;
     }
     setActivePane("composer");
     answerModeFocusRequestRef.current = "answer";
     setAnswerModeRequestId(pendingQuestion.requestId);
-  }, [focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+  }, [canAnswerPendingQuestion, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
 
   useLayoutEffect(() => {
     const requested = answerModeFocusRequestRef.current;
@@ -2040,18 +2056,24 @@ function SessionDetailLoaded({
   useEffect(() => {
     const previous = answerModeArrivalRef.current;
     const requestId = pendingQuestion?.requestId ?? null;
+    const answerable = composerQuestions.length > 0;
     const requestChanged = previous.requestId !== requestId;
     const styleChanged = previous.style !== questionResponseStyle;
-    answerModeArrivalRef.current = { requestId, style: questionResponseStyle };
-    if (!requestId || questionResponseStyle !== "composer") {
-      if (!requestId || styleChanged) setAnswerModeRequestId(null);
+    const answerabilityChanged = previous.answerable !== answerable;
+    answerModeArrivalRef.current = { requestId, style: questionResponseStyle, answerable };
+    if (!requestId || questionResponseStyle !== "composer" || !answerable) {
+      if (!requestId || styleChanged || answerabilityChanged) setAnswerModeRequestId(null);
       return;
     }
-    if (requestChanged || styleChanged) {
+    if (requestChanged || styleChanged || answerabilityChanged) {
       let cancelled = false;
       let frame: number | null = null;
       const chooseInitialMode = () => {
         if (cancelled) return;
+        if (queuedEditRef.current) {
+          setAnswerModeRequestId(null);
+          return;
+        }
         // The ordinary draft hydrates asynchronously. Deciding before that boundary would hide a
         // restored draft behind Answer Mode instead of showing the explicit waiting prompt.
         if (draftHydratedSessionRef.current !== sessionId) {
@@ -2059,6 +2081,12 @@ function SessionDetailLoaded({
           return;
         }
         const hasOrdinaryDraft = Boolean(draftState.current.text.trim() || draftState.current.images.length || queuedEditRef.current);
+        if (!hasOrdinaryDraft && inputRef.current?.ownerDocument.activeElement === inputRef.current) {
+          // Auto-entry normally leaves focus alone. If it removes the currently focused ordinary
+          // composer, transfer that existing focus into Answer Mode so bare reading shortcuts do
+          // not become armed while the user keeps typing.
+          answerModeFocusRequestRef.current = "answer";
+        }
         setAnswerModeRequestId(hasOrdinaryDraft ? null : requestId);
       };
       chooseInitialMode();
@@ -2067,7 +2095,7 @@ function SessionDetailLoaded({
         if (frame !== null) window.cancelAnimationFrame(frame);
       };
     }
-  }, [pendingQuestion?.requestId, questionResponseStyle, sessionId]);
+  }, [composerQuestions.length, pendingQuestion?.requestId, questionResponseStyle, sessionId]);
 
   const clearStopTurnAttempt = useCallback(() => {
     stopTurnAttemptRef.current += 1;
@@ -2312,10 +2340,10 @@ function SessionDetailLoaded({
     deny: () => onDeny?.(),
     archive: () => onArchive?.(),
     snooze: () => onSnooze?.(),
-    reply: pendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
+    reply: canAnswerPendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
-  }), [enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, pendingQuestion]);
+  }), [canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze]);
   useSessionReadingKeys({
     enabled: mode === "expanded" && !isMobile,
     sessionId,
@@ -2621,12 +2649,12 @@ function SessionDetailLoaded({
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
   const planSupported = (agentCaps?.permissionModes ?? []).includes("plan");
   const composerCommands = useMemo(() => buildComposerCommandRegistry({
-    context: { planSupported, canStopTurn, canRespond: pendingQuestion !== null },
+    context: { planSupported, canStopTurn, canRespond: canAnswerPendingQuestion },
     providerCommands: mapProviderComposerCommands(
       agentCaps?.slashCommands ?? [],
       providerCommandAttachmentPolicy,
     ),
-  }), [agentCaps?.slashCommands, canStopTurn, pendingQuestion, planSupported, providerCommandAttachmentPolicy]);
+  }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
   const slashTrigger = useMemo(
     () => composerSelection.start === composerSelection.end
       ? findComposerCommandTrigger(text, composerSelection.start)
@@ -2736,8 +2764,6 @@ function SessionDetailLoaded({
         ? !args || args === "on" || args === "off"
         : invocation.command.name === "stop" || invocation.command.name === "rename-session"
           ? !args
-          : invocation.command.name === "respond"
-            ? true
           : true;
       if (!validArguments) invocation = { kind: "plaintext", text: outgoing };
     }
@@ -2764,6 +2790,10 @@ function SessionDetailLoaded({
           return;
         }
         if (invocation.command.name === "respond") {
+          if (args) {
+            setError("Direct /respond answers are not supported. Use /respond to enter Answer Mode.");
+            return;
+          }
           clearAppCommandText();
           enterAnswerMode();
           return;
@@ -3981,7 +4011,7 @@ function SessionDetailLoaded({
                 <ComposerQuestionResponse
                   sessionId={session.id}
                   requestId={pendingQuestion.requestId}
-                  questions={pendingQuestion.questions ?? []}
+                  questions={composerQuestions}
                   runnerOnline={runnerOnline}
                   active={composerAnswerActive}
                   showWaiting={questionResponseStyle === "composer"}

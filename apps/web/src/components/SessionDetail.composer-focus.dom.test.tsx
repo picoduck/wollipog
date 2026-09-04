@@ -2736,6 +2736,98 @@ test("a pending Composer Response preserves an ordinary draft and R enters and e
   }
 });
 
+test("an empty pending question payload never blanks the ordinary composer", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-empty",
+        title: "Question details are loading",
+        options: [],
+        kind: "question",
+        questions: [],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.ok(fixture.container.querySelector(".composer-input"),
+      "an unanswerable approval keeps ordinary message composition available");
+    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("Composer Response recovers an omitted approval schema from the matching timeline question", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushEvent({
+      kind: "question_request",
+      requestId: "ask-timeline-schema",
+      questions: [{
+        id: "target",
+        question: "Choose a target",
+        options: [{ label: "Staging" }, { label: "Production" }],
+      }],
+    });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-timeline-schema",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.match(fixture.container.querySelector(".composer-answer")?.textContent ?? "", /Choose a target/);
+    assert.ok(fixture.container.querySelector(".composer-answer-input"));
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("automatic Answer Mode transfers existing composer focus into the answer field", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    fixture.composer.focus();
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-focused-arrival",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{
+          id: "target",
+          question: "Choose a target",
+          options: [{ label: "Staging" }, { label: "Production" }],
+        }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    assert.equal(answer.ownerDocument.activeElement, answer,
+      "unmounting the focused ordinary composer must not leave document.body owning keystrokes");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
 test("the /respond app command enters Answer Mode and submits without sending an ordinary prompt", { timeout: 5_000 }, async () => {
   setQuestionResponseStyle("interactive", domWindow as never);
   const draft = deferred<ComposerDraft | null>();
@@ -2770,6 +2862,14 @@ test("the /respond app command enters Answer Mode and submits without sending an
     });
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
     assert.ok(ordinary);
+    await act(async () => {
+      ordinary.value = "/respond 2";
+      fireDomEvent.change(ordinary);
+      ordinary.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+    });
+    assert.equal(ordinary.value, "/respond 2", "an unsupported direct answer remains available to edit");
+    assert.match(fixture.container.textContent ?? "", /Direct \/respond answers are not supported/);
+    assert.equal(prompts.length, 0);
     await act(async () => {
       ordinary.value = "/respond";
       fireDomEvent.change(ordinary);
