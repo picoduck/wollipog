@@ -399,6 +399,17 @@ interface ActiveSession {
   pendingWorktreeRebind?: string;
 }
 
+interface ProviderRetirement {
+  client: Driver;
+  entry: ActiveSession;
+  promise: Promise<void>;
+  /** A successful worktree handoff keeps the existing box slot and session lock for its replacement. */
+  preserveAdmission: boolean;
+  preserveLock: boolean;
+  /** While a handoff is healthy, prompts may join the replacement generation's pre-launch FIFO. */
+  acceptPromptsDuringHandoff: boolean;
+}
+
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
  * handshake; driver identity alone is never enough. */
 function canResumeSession(meta: SessionMeta): boolean {
@@ -600,13 +611,9 @@ export class SessionManager {
   /** Provider logout is asynchronous; fence prompts and other provider/worktree operations. */
   private readonly loggingOut = new Set<string>();
   /** Explicit stop waits for ACP session/close before this session may launch again. */
-  private readonly closing = new Map<string, {
-    client: Driver;
-    entry: ActiveSession;
-    promise: Promise<void>;
-  }>();
+  private readonly closing = new Map<string, ProviderRetirement>();
   /** A turn-boundary worktree move owns a retiring provider even after it leaves `active`.
-   * Unlike `closing`, prompts may join its pre-launch FIFO while the same conversation reopens. */
+   * Unlike an ordinary close, prompts may join its pre-launch FIFO while the conversation reopens. */
   private readonly worktreeRebindings = new Map<string, {
     entry: ActiveSession;
     promise: Promise<void>;
@@ -3585,13 +3592,15 @@ export class SessionManager {
     const stoppedRebindInProgress = this.worktreeRebindings.has(sessionId) &&
       (rebindGeneration === undefined ||
         this.preLaunchAdmissionGenerations.get(sessionId) !== rebindGeneration);
+    const closing = this.closing.get(sessionId);
+    const providerCloseBlocksPrompt = !!closing && !closing.acceptPromptsDuringHandoff;
     // A prompt during a file rewind would snapshot (and run the agent over) a half-restored
     // tree — the reentrant store lock can't fence this same-process race, the set does.
     if (
       this.rewinding.has(sessionId) ||
       this.forking.has(sessionId) ||
       this.loggingOut.has(sessionId) ||
-      this.closing.has(sessionId) ||
+      providerCloseBlocksPrompt ||
       this.deleting.has(sessionId) ||
       stoppedRebindInProgress
     ) {
@@ -3601,13 +3610,13 @@ export class SessionManager {
           ? "conversation fork"
           : this.loggingOut.has(sessionId)
             ? "agent sign-out"
-            : this.closing.has(sessionId)
+            : providerCloseBlocksPrompt
               ? "provider session close"
               : this.deleting.has(sessionId)
                 ? "session deletion"
                 : "worktree rebind shutdown";
       this.emitEvent(sessionId, { kind: "error", message: `a ${operation} is in progress — retry in a moment` });
-      if (this.closing.has(sessionId) || this.deleting.has(sessionId) || stoppedRebindInProgress) {
+      if (providerCloseBlocksPrompt || this.deleting.has(sessionId) || stoppedRebindInProgress) {
         this.emitStatus(sessionId, this.store.readMeta(sessionId)?.status ?? "stopped");
       }
       durable?.failed(`a ${operation} is in progress`, "COMMAND_CANCELLED");
@@ -5474,8 +5483,24 @@ export class SessionManager {
     let preserveRebindLockForQueue = false;
     try {
       try {
-        await this.closeAndDispose(sessionId, entry.client, true);
+        const retirement = this.beginProviderRetirement(sessionId, entry, {
+          preserveAdmission: true,
+          preserveLock: true,
+          acceptPromptsDuringHandoff: true,
+        });
+        await retirement.promise;
+        if (this.closing.get(sessionId) === retirement) {
+          throw new Error("provider process retirement is unconfirmed");
+        }
       } catch (error) {
+        const retirement = this.closing.get(sessionId);
+        if (retirement?.client === entry.client) {
+          // The handoff will not continue. Keep both fences until this exact client reports exit,
+          // then let normal retirement completion release them for an explicit retry.
+          retirement.preserveAdmission = false;
+          retirement.preserveLock = false;
+          retirement.acceptPromptsDuringHandoff = false;
+        }
         this.log(`session ${sessionId} provider disposal failed during worktree rebind: ${errText(error)}`);
         this.emitEvent(sessionId, {
           kind: "error",
@@ -5484,8 +5509,6 @@ export class SessionManager {
         if (this.launchIsCurrent(sessionId, launchGeneration) &&
             this.store.readMeta(sessionId)?.status !== "stopped") this.emitStatus(sessionId, "idle");
         return;
-      } finally {
-        this.releaseActiveWorktreeLease(entry);
       }
       const fresh = this.store.readMeta(sessionId);
       if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
@@ -5543,11 +5566,13 @@ export class SessionManager {
         if (failedEntry?.launchGeneration === launchGeneration) {
           this.deleteActiveSession(sessionId, failedEntry, false);
           try {
-            await this.closeAndDispose(sessionId, failedEntry.client, true);
+            const retirement = this.beginProviderRetirement(sessionId, failedEntry);
+            await retirement.promise;
+            if (this.closing.get(sessionId) === retirement) {
+              throw new Error("provider process retirement is unconfirmed");
+            }
           } catch (disposeError) {
             this.log(`session ${sessionId} failed replacement disposal: ${errText(disposeError)}`);
-          } finally {
-            this.releaseActiveWorktreeLease(failedEntry);
           }
         }
         if (this.launchIsCurrent(sessionId, launchGeneration) &&
@@ -5569,8 +5594,15 @@ export class SessionManager {
         if (this.store.readMeta(sessionId)?.status === "stopped") {
           if (reboundEntry) {
             this.deleteActiveSession(sessionId, reboundEntry, false);
-            await this.closeAndDispose(sessionId, reboundEntry.client, true);
-            this.releaseActiveWorktreeLease(reboundEntry);
+            try {
+              const retirement = this.beginProviderRetirement(sessionId, reboundEntry);
+              await retirement.promise;
+              if (this.closing.get(sessionId) === retirement) {
+                throw new Error("provider process retirement is unconfirmed");
+              }
+            } catch (disposeError) {
+              this.log(`session ${sessionId} stopped replacement disposal failed: ${errText(disposeError)}`);
+            }
           }
           launched = false;
           return;
@@ -5594,6 +5626,7 @@ export class SessionManager {
     } finally {
       const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
+      const retirementPending = this.closing.has(sessionId);
       if (!launched && ownsGeneration && !superseded) {
         this.rejectPreLaunchQueue(
           sessionId,
@@ -5606,11 +5639,11 @@ export class SessionManager {
         this.preLaunchAdmissionGenerations.delete(sessionId);
       }
       this.finishLaunchGeneration(sessionId, launchGeneration);
-      if (!launched && !superseded) this.releaseAdmissionIfInactive(sessionId);
-      else if (!launched && this.store.readMeta(sessionId)?.status === "stopped") {
+      if (!launched && !superseded && !retirementPending) this.releaseAdmissionIfInactive(sessionId);
+      else if (!launched && !retirementPending && this.store.readMeta(sessionId)?.status === "stopped") {
         this.releaseAdmissionIfInactive(sessionId);
       }
-      if (rebindLockHeld && !preserveRebindLockForQueue) this.clearLock(sessionId);
+      if (rebindLockHeld && !preserveRebindLockForQueue && !retirementPending) this.clearLock(sessionId);
     }
   }
 
@@ -6844,7 +6877,12 @@ export class SessionManager {
   private beginProviderRetirement(
     sessionId: string,
     entry: ActiveSession,
-  ): { client: Driver; entry: ActiveSession; promise: Promise<void> } {
+    options: {
+      preserveAdmission?: boolean;
+      preserveLock?: boolean;
+      acceptPromptsDuringHandoff?: boolean;
+    } = {},
+  ): ProviderRetirement {
     const existing = this.closing.get(sessionId);
     if (existing) {
       if (existing.client !== entry.client) {
@@ -6856,6 +6894,9 @@ export class SessionManager {
       client: entry.client,
       entry,
       promise: Promise.resolve(),
+      preserveAdmission: options.preserveAdmission ?? false,
+      preserveLock: options.preserveLock ?? false,
+      acceptPromptsDuringHandoff: options.acceptPromptsDuringHandoff ?? false,
     };
     this.closing.set(sessionId, retirement);
     if (!entry.client.close) {
@@ -6883,13 +6924,13 @@ export class SessionManager {
 
   private completeProviderRetirement(
     sessionId: string,
-    retirement: { client: Driver; entry: ActiveSession; promise: Promise<void> },
+    retirement: ProviderRetirement,
   ): void {
     if (this.closing.get(sessionId) !== retirement) return;
     this.closing.delete(sessionId);
     this.releaseActiveWorktreeLease(retirement.entry);
-    this.releaseAdmission(sessionId);
-    this.clearLock(sessionId);
+    if (!retirement.preserveAdmission) this.releaseAdmission(sessionId);
+    if (!retirement.preserveLock) this.clearLock(sessionId);
     if (!this.shuttingDown && this.pendingDeletions.delete(sessionId)) {
       setImmediate(() => {
         void this.delete(sessionId).catch((error) => {
@@ -7659,7 +7700,12 @@ export class SessionManager {
       }
     }
     this.active.clear();
+    const shutdownRetirementClients = new Set<Driver>();
     for (const retirement of [...this.closing.values()]) {
+      shutdownRetirementClients.add(retirement.client);
+      retirement.preserveAdmission = false;
+      retirement.preserveLock = false;
+      retirement.acceptPromptsDuringHandoff = false;
       try {
         retirement.client.dispose();
         this.completeProviderRetirement(retirement.entry.sessionId, retirement);
@@ -7669,6 +7715,7 @@ export class SessionManager {
       }
     }
     for (const { entry } of this.worktreeRebindings.values()) {
+      if (shutdownRetirementClients.has(entry.client)) continue;
       try {
         entry.client.dispose();
       } catch (error) {
