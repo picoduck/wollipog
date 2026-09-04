@@ -819,6 +819,12 @@ export function InboxView({
     });
   }, [api, reminders, showUndo]);
 
+  const dismissReturnedReminder = useCallback(async (sessionId: string) => {
+    const current = reminders.get(sessionId);
+    if (current?.state !== "fired") return;
+    await removeReminder(sessionId, current.revision, current.reminderId);
+  }, [reminders, removeReminder]);
+
   const archive = useCallback(async (sessionId: string) => {
     const session = sessions.get(sessionId);
     if (!session) return;
@@ -1290,6 +1296,11 @@ export function InboxView({
                 onArchive={() => { void archive(surfaceSessionId); }}
                 {...(sessionRemindersSupported ? {
                   onSnooze: () => setSnoozeSessionId(surfaceSessionId),
+                  reminder: reminders.get(surfaceSessionId),
+                  onDismissReminder: () => {
+                    void dismissReturnedReminder(surfaceSessionId)
+                      .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
+                  },
                 } : {})}
                 onPreviewNavigationReady={expanded ? undefined : registerPreviewNavigation}
                 onPreviewForkReady={expanded ? undefined : setPreviewForkControls}
@@ -1318,6 +1329,7 @@ export function InboxView({
           state={sessionMenu}
           sessionTitle={sessions.get(sessionMenu.sessionId)!.title}
           snoozeAvailable={sessionRemindersSupported}
+          reminder={reminders.get(sessionMenu.sessionId)}
           onClose={() => setSessionMenu(null)}
           onRename={(sessionId) => {
             // The dialog snapshots focus AFTER the menu item unmounts, so it needs a durable
@@ -1329,6 +1341,10 @@ export function InboxView({
             const restore = sessionMenu.restoreTarget;
             setSnoozeReturnFocusRef({ get current() { return restore(); } });
             setSnoozeSessionId(sessionId);
+          }}
+          onDismissReminder={(sessionId) => {
+            void dismissReturnedReminder(sessionId)
+              .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
           }}
           onArchive={(sessionId) => { void archive(sessionId); }}
         />

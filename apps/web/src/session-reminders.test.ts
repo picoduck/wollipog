@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import {
+  reminderBadgeDescription,
   reminderBadgeLabel,
+  reminderMenuActionLabel,
   sessionVisibleForReminderMode,
   snoozedSessionAttentionReason,
   sortSessionsForReminders,
@@ -89,6 +91,10 @@ test("fired reminders return to the top with a text-backed reason until dismisse
   const fired = reminder("due", { state: "fired", wakeReason: "scheduled", firedAt: 2_000 });
   const reminders = new Map([["due", fired]]);
   assert.deepEqual(sortSessionsForReminders([normal, due], reminders, "ordinary").map(({ id }) => id), ["due", "normal"]);
-  assert.equal(reminderBadgeLabel(fired, 2_030), "Reminder Due");
+  assert.equal(reminderBadgeLabel(fired), "Returned from Snooze");
+  assert.match(reminderBadgeDescription(fired), /Returned from snooze\. Snooze ended/);
   assert.equal(reminderBadgeLabel({ ...fired, wakeReason: "agent_response" }), "Activity Reminder");
+  assert.equal(reminderMenuActionLabel(), "Snooze Session…");
+  assert.equal(reminderMenuActionLabel(reminder("pending")), "Edit Reminder…");
+  assert.equal(reminderMenuActionLabel(fired), "Snooze Again…");
 });

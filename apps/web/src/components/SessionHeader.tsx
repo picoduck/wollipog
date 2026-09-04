@@ -3,6 +3,7 @@ import {
   isTerminal,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
+  type SessionReminderView,
   type SessionView,
   type TranscriptShareView,
 } from "@wollipog/protocol";
@@ -15,6 +16,7 @@ import { discardComposerDraft } from "../composer-drafts.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { absoluteViewUrl } from "../navigation.js";
+import { reminderMenuActionLabel } from "../session-reminders.js";
 import { safeExternalHref } from "../external-href.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
 import type { SessionChangeStatus } from "../session-status.js";
@@ -54,6 +56,8 @@ export function SessionHeader({
   exportReady,
   onArchive,
   onSnooze,
+  reminder,
+  onDismissReminder,
   forkAvailability,
   onFork,
   projectCrumb,
@@ -75,6 +79,8 @@ export function SessionHeader({
   exportReady: boolean;
   onArchive?: () => void;
   onSnooze?: () => void;
+  reminder?: SessionReminderView;
+  onDismissReminder?: () => void;
   forkAvailability?: ConversationForkAvailability;
   onFork?: () => void;
   /** The interactive Project chip, rendered as the breadcrumb's first segment. */
@@ -624,7 +630,21 @@ export function SessionHeader({
                         onSnooze();
                       }}
                     >
-                      Snooze Session…
+                      {reminderMenuActionLabel(reminder)}
+                    </button>
+                  )}
+                  {reminder?.state === "fired" && onDismissReminder && (
+                    <button
+                      className="menu-item"
+                      type="button"
+                      role="menuitem"
+                      disabled={busy}
+                      onClick={() => {
+                        closeMenu(true);
+                        onDismissReminder();
+                      }}
+                    >
+                      Dismiss Reminder
                     </button>
                   )}
                   <button

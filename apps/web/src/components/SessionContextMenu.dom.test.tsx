@@ -3,6 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
+import type { SessionReminderView } from "@wollipog/protocol";
 import { SessionContextMenu, type SessionContextMenuState } from "./SessionContextMenu.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -25,11 +26,12 @@ interface Log {
   restored: number;
   renamed: string[];
   snoozed: string[];
+  dismissed: string[];
   archived: string[];
 }
 
-async function mount(overrides: { snoozeAvailable?: boolean } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
-  const log: Log = { closed: 0, restored: 0, renamed: [], snoozed: [], archived: [] };
+async function mount(overrides: { snoozeAvailable?: boolean; reminder?: SessionReminderView } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
+  const log: Log = { closed: 0, restored: 0, renamed: [], snoozed: [], dismissed: [], archived: [] };
   const restoreHost = domWindow.document.createElement("button") as unknown as HTMLElement;
   domWindow.document.body.append(restoreHost as never);
   restoreHost.addEventListener("focus", () => { log.restored += 1; });
@@ -47,9 +49,11 @@ async function mount(overrides: { snoozeAvailable?: boolean } = {}): Promise<{ r
         state={state}
         sessionTitle="Fix the Parser"
         snoozeAvailable={overrides.snoozeAvailable ?? true}
+        {...(overrides.reminder ? { reminder: overrides.reminder } : {})}
         onClose={() => { log.closed += 1; }}
         onRename={(id) => log.renamed.push(id)}
         onSnooze={(id) => log.snoozed.push(id)}
+        onDismissReminder={(id) => log.dismissed.push(id)}
         onArchive={(id) => log.archived.push(id)}
       />,
     );
@@ -69,12 +73,35 @@ test("the menu names its session, offers the three actions, and takes initial fo
   try {
     assert.equal(menu.getAttribute("aria-label"), "Session Actions for Fix the Parser");
     const items = [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
-    assert.deepEqual(items, ["Rename Session…", "Snooze…", "Archive"]);
+    assert.deepEqual(items, ["Rename Session…", "Snooze Session…", "Archive"]);
     assert.equal(domWindow.document.activeElement?.textContent, "Rename Session…",
       "the virtualized collections never focus rows, so the menu takes focus itself");
     assert.ok(menu.querySelector(".menu-item.menu-danger")?.textContent === "Archive");
     assert.ok(domWindow.document.querySelector(".menu-backdrop"),
       "the backdrop enrolls the menu in the shell's Escape ladder");
+  } finally {
+    await unmount(root);
+  }
+});
+
+test("returned reminders expose Snooze Again and direct dismissal", async () => {
+  const scheduledFor = Date.now() - 60_000;
+  const fired: SessionReminderView = {
+    reminderId: "reminder-1", sessionId: "s-1", scheduledFor, timeZone: "UTC",
+    originalExpression: "one minute ago", wakePolicy: "regardless", state: "fired",
+    revision: 2, createdAt: scheduledFor - 1_000, updatedAt: scheduledFor,
+    firedAt: scheduledFor, wakeReason: "scheduled",
+  };
+  const { root, log, menu } = await mount({ reminder: fired });
+  try {
+    const items = [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
+    assert.deepEqual(items, ["Rename Session…", "Snooze Again…", "Dismiss Reminder", "Archive"]);
+    await act(async () => {
+      [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+        .find((item) => item.textContent === "Dismiss Reminder")!.click();
+    });
+    assert.deepEqual(log.dismissed, ["s-1"]);
+    assert.equal(log.restored, 1);
   } finally {
     await unmount(root);
   }
@@ -125,7 +152,7 @@ test("Escape and arrow roving come from the collection-owned keyboard handler", 
     await act(async () => {
       menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
     });
-    assert.equal(domWindow.document.activeElement?.textContent, "Snooze…");
+    assert.equal(domWindow.document.activeElement?.textContent, "Snooze Session…");
     await act(async () => {
       menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
     });

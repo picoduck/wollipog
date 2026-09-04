@@ -24,6 +24,7 @@ import {
   type QueuedPromptDraft,
   type QueuedPromptView,
   type SessionConfig,
+  type SessionReminderView,
   type SessionView,
   type SourceLocation,
 } from "@wollipog/protocol";
@@ -397,6 +398,8 @@ export type SessionDetailProps = {
   onDeny?: () => void;
   onArchive?: () => void;
   onSnooze?: () => void;
+  reminder?: SessionReminderView;
+  onDismissReminder?: () => void;
   /** App-shell control cluster (editor, pinned/terminal/panel toggles) rendered in the unified
    * session bar when it replaces the app-level top bar on desktop. */
   topbarControls?: ReactNode;
@@ -525,6 +528,8 @@ function SessionDetailLoaded({
   onDeny,
   onArchive,
   onSnooze,
+  reminder,
+  onDismissReminder,
   topbarControls,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
@@ -3069,6 +3074,8 @@ function SessionDetailLoaded({
           onBack={onBack ?? (() => navigate({ name: "inbox" }))}
           onArchive={onArchive}
           onSnooze={onSnooze}
+          reminder={reminder}
+          onDismissReminder={onDismissReminder}
           forkAvailability={latestForkAvailability}
           onFork={() => {
             if (latestForkAvailability.available) void onFork(latestForkAvailability.forkTurn);

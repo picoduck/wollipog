@@ -36,6 +36,7 @@ export function SnoozeDialog({
   const focusExpressionAfterReloadRef = useRef(false);
   const localTimeZone = browserTimeZone();
   const timeZone = loadedReminder && !scheduleTouched ? loadedReminder.timeZone : localTimeZone;
+  const returnedReminder = loadedReminder?.state === "fired" ? loadedReminder : undefined;
   const conflict = submitting ? null : reminderConflict(loadedReminder, reminder);
   const parsed = useMemo(() => {
     if (loadedReminder && !scheduleTouched) return storedReminderSchedule(loadedReminder);
@@ -125,7 +126,11 @@ export function SnoozeDialog({
       </>}
     >
       <form id="snooze-session-form" className="snooze-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-        <p id="snooze-description">Snoozing changes Inbox visibility only. Running work and lifecycle state continue unchanged.</p>
+        <p id="snooze-description">
+          {returnedReminder
+            ? `This session returned from snooze after ${formatReminderInstant(returnedReminder.scheduledFor, returnedReminder.timeZone)}. Choose a new time to snooze it again.`
+            : "Snoozing changes Inbox visibility only. Running work and lifecycle state continue unchanged."}
+        </p>
         {conflict && (
           <div className="snooze-conflict" role="alert" aria-live="assertive">
             <strong>Stored Reminder Changed</strong>

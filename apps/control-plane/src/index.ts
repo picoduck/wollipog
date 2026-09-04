@@ -3116,7 +3116,10 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
   if (!text && images.length === 0 && !slashCommand) {
     return reply.code(400).send({ error: "text, an image, or a slash command is required" });
   }
-  return respond(reply, svc.prompt(id, text, images, slashCommand, body?.config));
+  const human = requestHuman(req);
+  return respond(reply, human
+    ? svc.promptFromUser(human.userId, id, text, images, slashCommand, body?.config)
+    : svc.prompt(id, text, images, slashCommand, body?.config));
 });
 
 app.post("/api/sessions/:id/command-invocations", async (req, reply) => {

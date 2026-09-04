@@ -10,7 +10,11 @@ import { useLongPress } from "./interactions.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
-import { reminderBadgeLabel, snoozedSessionAttentionReason } from "../session-reminders.js";
+import {
+  reminderBadgeDescription,
+  reminderBadgeLabel,
+  snoozedSessionAttentionReason,
+} from "../session-reminders.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
 const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 230 : session.preview ? 155 : 120;
@@ -423,7 +427,13 @@ function SessionCard({
           </span>
         )}
         {reminder && (
-          <span className="inbox-status-pill reminder" aria-label={`Reminder: ${reminderBadgeLabel(reminder)}`}>
+          <span
+            className="inbox-status-pill reminder"
+            title={reminderBadgeDescription(reminder)}
+            aria-label={`Reminder: ${reminder.state === "fired"
+              ? reminderBadgeDescription(reminder)
+              : reminderBadgeLabel(reminder)}`}
+          >
             {reminderBadgeLabel(reminder)}
           </span>
         )}
