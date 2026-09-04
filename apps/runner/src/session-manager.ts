@@ -5021,6 +5021,10 @@ export class SessionManager {
       durable?.failed("session is not active on this runner", "SESSION_NOT_FOUND");
       return;
     }
+    if (this.closing.has(sessionId)) {
+      durable?.failed("the previous provider process could not be confirmed stopped", "COMMAND_CANCELLED");
+      return;
+    }
     if (syntheticRecovery && (meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta))) {
       this.log(`orphan recovery skipped for session without automatic recovery authority ${sessionId}`);
       return;
