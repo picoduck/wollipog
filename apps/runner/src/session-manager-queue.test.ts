@@ -1119,3 +1119,44 @@ test("the queue byte budget rejects an oversized prompt with an error event", ()
     cleanup();
   }
 });
+
+test("a control-plane queue hold parks queued prompts without tripping governance", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-cp-hold-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle", config: { costBudgetUsd: 10 } }));
+  let settleFirst!: (value: "end_turn") => void;
+  const firstTurn = new Promise<"end_turn">((resolve) => { settleFirst = resolve; });
+  const ran: string[] = [];
+  const client = {
+    resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+    agentSessionId: () => "agent-1",
+    prompt: (text: string) => {
+      ran.push(text);
+      return text === "A" ? firstTurn : Promise.resolve("end_turn" as const);
+    },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (manager as any).active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  try {
+    manager.prompt("s_q", "A");
+    await waitFor(() => ran.length === 1);
+    manager.prompt("s_q", "B");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (manager as any).active.get("s_q");
+    manager.rearmGovernance("s_q", { costBudgetUsd: 10 }, "control_plane");
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, true, "the queue is held");
+    assert.equal(entry.governanceTripped, undefined, "but nothing tripped: a provider failure would still surface");
+    settleFirst("end_turn");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(ran, ["A"], "B waits on the control-plane card");
+    manager.rearmGovernance("s_q", { costBudgetUsd: 10 });
+    await waitFor(() => ran.length === 2);
+    assert.deepEqual(ran, ["A", "B"], "a release re-arm drains the queue");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

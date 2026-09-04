@@ -5,7 +5,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
-import { type PolicyRuleKind, type RunnerGuardrailKind,
+import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
   PROMPT_IMAGE_MIME_TYPES,
@@ -2576,8 +2576,11 @@ export class SessionsService {
           : "cloud target cost policy is missing", 400);
       }
     }
-    if (scope?.owner.kind === "user") {
-      const daily = this.dailyBudgetForOwner(scope.organizationId, scope.owner.userId);
+    const effectiveScope = this.db.effectiveSessionScope(
+      req.runnerId, snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId), scope,
+    );
+    if (effectiveScope?.owner.kind === "user") {
+      const daily = this.dailyBudgetForOwner(effectiveScope.organizationId, effectiveScope.owner.userId);
       if (daily && daily.spentUsd >= daily.budgetUsd) {
         return fail(`daily budget reached — $${daily.spentUsd.toFixed(2)} of $${daily.budgetUsd.toFixed(2)} today; new sessions wait for the day to roll over or an owner or admin to raise it`, 409);
       }
@@ -3072,6 +3075,12 @@ export class SessionsService {
       const thresholdPatch: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
       if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
       if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
+      // A checkpoint-only edit still has to move the runner's hold, and the runner ignores a
+      // re-arm whose patch is empty, so the current thresholds ride along unchanged.
+      if (Object.keys(thresholdPatch).length === 0) {
+        thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
+        thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
+      }
       const runner = this.db.getRunner(session.runnerId);
       if (runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
         const sent = this.hub.sendToRunner(session.runnerId, {
@@ -4141,20 +4150,24 @@ export class SessionsService {
     // tripped rule parks immediately; a daily-budget Continue only re-checks the allowance.
     if (pending.kind === "cost_checkpoint" || pending.kind === "cost_unpriced" || pending.kind === "daily_budget") {
       if (optionId === "continue") {
-        if (pending.kind === "cost_checkpoint") {
-          const next = rulesFromSession(session).find((rule) => rule.kind === "cost_checkpoint");
-          if (next && next.kind === "cost_checkpoint") this.db.approveSessionCostCheckpoint(sessionId, next.checkpointUsd, now);
-        } else if (pending.kind === "cost_unpriced") {
-          this.db.acknowledgeSessionCostUnpriced(sessionId, now);
-        }
-        // A v47 runner may be holding its queue from an earlier hard threshold; tell it what to
-        // do now that this card is answered, before the control-plane state moves.
-        const settled = this.db.getSession(sessionId)!;
-        const holdFor = this.runnerHoldAfter(settled, this.guardrailFields(settled));
+        // Work out what this Continue would record, and what the runner should hold for after it,
+        // BEFORE anything persists: a failed delivery must leave the card and the policy state
+        // exactly as they were, or a retry would find and approve the NEXT checkpoint.
+        const next = pending.kind === "cost_checkpoint"
+          ? rulesFromSession(session).find((rule): rule is Extract<PolicyRule, { kind: "cost_checkpoint" }> => rule.kind === "cost_checkpoint")
+          : undefined;
+        const prospective: GuardrailFields = {
+          ...this.guardrailFields(session),
+          ...(next ? { costCheckpointApprovedUsd: Math.max(session.costCheckpointApprovedUsd ?? 0, next.checkpointUsd) } : {}),
+          ...(pending.kind === "cost_unpriced" ? { costUnpricedAcknowledged: true } : {}),
+        };
+        const holdFor = this.runnerHoldAfter(session, prospective);
         if (!this.rearmRunnerAfterCard(session, holdFor)) {
           this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, now, { optionId });
           return fail("runner is offline", 409);
         }
+        if (next) this.db.approveSessionCostCheckpoint(sessionId, next.checkpointUsd, now);
+        else if (pending.kind === "cost_unpriced") this.db.acknowledgeSessionCostUnpriced(sessionId, now);
         this.db.setPendingApproval(sessionId, null);
         // These cards never cancelled the provider turn: a session parked mid-turn is still
         // running, and only one parked at a settle frame goes back to idle.
@@ -6126,11 +6139,11 @@ export class SessionsService {
     return { ...session, dailyBudget: this.dailyBudgetFor(session.id) };
   }
 
-  /** What to tell a v47 runner to hold its queue for after a threshold change. A runner-enforced
-   * rule names itself; a control-plane-only rule (checkpoint, unpriced, daily budget) still needs
-   * the queue held until its card resolves, so it holds under the cost threshold's name rather
-   * than releasing work the card is about to park. */
-  private runnerHoldAfter(session: SessionView, fields: GuardrailFields): RunnerGuardrailKind | undefined {
+  /** What to tell a runner to hold its queue for after a threshold change. A runner-enforced rule
+   * names itself. A control-plane-only rule (checkpoint, unpriced, daily budget) asks a v105 runner
+   * for a queue-only hold; an older runner has no such hold and is released, so its queued turns
+   * run past a soft card (they still stop at the runner-owned thresholds). */
+  private runnerHoldAfter(session: SessionView, fields: GuardrailFields): RunnerHoldKind | undefined {
     const rules = rulesFromSession(fields);
     const ask = firstAsk(evaluatePolicies({
       status: "idle",
@@ -6139,14 +6152,21 @@ export class SessionsService {
       unpriced: rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(session.id),
     }, rules))?.rule.kind;
     if (!ask) return undefined;
-    return runnerHoldFor(ask) ?? "cost_budget";
+    const hard = runnerHoldFor(ask);
+    if (hard) return hard;
+    const runner = this.db.getRunner(session.runnerId);
+    return runnerSupportsProtocol(runner?.protocolVersion, "controlPlaneQueueHold") ? "control_plane" : undefined;
   }
 
-  /** Releases or re-holds a v47 runner's queue after a control-plane card resolves; older runners
-   * pick the thresholds up with the next prompt. */
-  private rearmRunnerAfterCard(session: SessionView, holdFor: RunnerGuardrailKind | undefined): boolean {
+  /** Releases or re-holds a runner's queue around a control-plane card. Re-sends the CURRENT
+   * thresholds, which a runner applies idempotently, so the hold flag always travels with a
+   * non-empty patch. Older runners pick the thresholds up with the next prompt. */
+  private rearmRunnerAfterCard(session: SessionView, holdFor: RunnerHoldKind | undefined): boolean {
     const runner = this.db.getRunner(session.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) return true;
+    if (holdFor === "control_plane" && !runnerSupportsProtocol(runner?.protocolVersion, "controlPlaneQueueHold")) {
+      holdFor = undefined;
+    }
     return this.hub.sendToRunner(session.runnerId, {
       type: "rearm_governance",
       sessionId: session.id,
@@ -6168,6 +6188,9 @@ export class SessionsService {
     if (!ask) return false;
     const approval = approvalForDecision(ask, sessionId, now);
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
+    // A control-plane-only card must also stop the runner draining queued prompts behind the
+    // turn it parks; the runner-owned thresholds already tripped on the runner itself.
+    if (!runnerHoldFor(ask.rule.kind)) this.rearmRunnerAfterCard(s, "control_plane");
     this.db.setPendingApproval(sessionId, approval);
     this.db.updateSessionStatus(sessionId, "input_required", now);
     this.recordGovernanceAudit(s, approval, "policy_decision", "asked", { kind: "policy", id: ask.rule.kind }, now, {
@@ -7396,6 +7419,8 @@ export class SessionsService {
     }
   }
 }
+
+type RunnerHoldKind = RunnerGuardrailKind | "control_plane";
 
 function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | undefined {
   return kind === "cost_budget" || kind === "max_tool_calls" ? kind : undefined;

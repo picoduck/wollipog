@@ -9314,6 +9314,17 @@ export class ControlPlaneDb {
 
   /* ----------------------------- Sessions -------------------------------- */
 
+  /** The scope a new session will carry: the explicit one, else what the workspace or runner
+   * confers. Exposed so admission checks can look at the owner BEFORE the session exists. */
+  effectiveSessionScope(runnerId: string, workspaceId: string | null, explicit?: ResourceScope): ResourceScope | null {
+    if (explicit) return explicit;
+    try {
+      return this.inheritedSessionScope(runnerId, workspaceId);
+    } catch {
+      return null;
+    }
+  }
+
   private inheritedSessionScope(runnerId: string, workspaceId: string | null): ResourceScope {
     const runnerScope = this.runnerScope(runnerId);
     const scope = workspaceId ? this.workspaceScope(runnerId, workspaceId) ?? runnerScope : runnerScope;

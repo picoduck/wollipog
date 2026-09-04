@@ -442,6 +442,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   usageTokenBuckets: 103,
   /** v104 runners stamp the producing model on token_usage. */
   usageEventModel: 104,
+  /** v105 runners honour `rearm_governance.holdFor: "control_plane"` as a queue-only hold. */
+  controlPlaneQueueHold: 105,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
 } as const;
@@ -4703,8 +4705,10 @@ export interface RearmGovernanceMessage {
   sessionId: string;
   config: { costBudgetUsd?: number | null; maxToolCalls?: number | null };
   /** Another serialized rule is already tripped. Update thresholds but keep queued work held. */
-  /** Only the runner-enforced thresholds can hold a turn; the v105 soft cards are CP-owned. */
-  holdFor?: RunnerGuardrailKind;
+  /** A runner-enforced threshold names itself. `control_plane` (v105+) holds the queue for a
+   * control-plane-only card (checkpoint, unpriced, daily budget) WITHOUT tripping the runner's
+   * governance: no turn is cancelled, no error is swallowed, queued prompts simply wait. */
+  holdFor?: RunnerGuardrailKind | "control_plane";
 }
 
 export interface ResolvePermissionMessage {

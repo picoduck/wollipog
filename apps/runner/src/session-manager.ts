@@ -6327,7 +6327,7 @@ export class SessionManager {
   rearmGovernance(
     sessionId: string,
     config: { costBudgetUsd?: number | null; maxToolCalls?: number | null },
-    holdFor?: "cost_budget" | "max_tool_calls",
+    holdFor?: "cost_budget" | "max_tool_calls" | "control_plane",
   ): void {
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
@@ -6362,6 +6362,20 @@ export class SessionManager {
           .filter((event) => event.payload.kind === "tool_call")
           .map((event) => (event.payload as Extract<SessionEventPayload, { kind: "tool_call" }>).toolCallId),
       );
+    }
+    // A control-plane card holds the queue and nothing else: the live turn keeps running, no
+    // governance trip is recorded (a trip would make a later provider failure look like a
+    // governance settle), and any earlier hard trip is cleared because the thresholds it
+    // enforced have just been re-armed.
+    if (holdFor === "control_plane") {
+      this.setInterruptQueueHold(sessionId, entry, true);
+      if (entry.running) {
+        if (entry.governanceTripped) entry.governanceRearmPending = "resume";
+        return;
+      }
+      entry.governanceTripped = undefined;
+      this.emitStatus(sessionId, "idle");
+      return;
     }
     if (entry.running) {
       if (entry.governanceTripped) entry.governanceRearmPending = holdFor ?? "resume";

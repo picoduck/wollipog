@@ -11095,3 +11095,26 @@ test("the daily budget gates prompt admission and a mid-turn checkpoint Continue
   assert.ok(svc.approve(id, parked.pendingApproval!.requestId, "continue").ok);
   assert.equal(db.getSession(id)!.status, "running", "no settle frame was swallowed, so the turn is still live");
 });
+
+test("a soft-card Continue that cannot reach the runner leaves the card and the approved level untouched", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "spend" });
+  db.raw().prepare("UPDATE sessions SET model='claude-fable-5-1', driver='claude-code' WHERE id=?").run(id);
+  assert.ok(svc.setConfig(id, { costCheckpointsUsd: [1, 2.5] }).ok);
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 1.2 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(id, "idle");
+  const parked = db.getSession(id)!;
+  assert.equal(parked.pendingApproval?.kind, "cost_checkpoint");
+  hub.deliver = false;
+  const failed = svc.approve(id, parked.pendingApproval!.requestId, "continue");
+  assert.equal(failed.ok, false);
+  assert.equal(failed.status, 409);
+  const after = db.getSession(id)!;
+  assert.equal(after.pendingApproval?.requestId, parked.pendingApproval!.requestId, "the card survives");
+  assert.equal(after.costCheckpointApprovedUsd, null, "nothing was approved");
+  hub.deliver = true;
+  assert.ok(svc.approve(id, parked.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.costCheckpointApprovedUsd, 1);
+  const rearm = hub.sentOfType("rearm_governance").at(-1)!;
+  assert.deepEqual(rearm.config, { costBudgetUsd: null, maxToolCalls: null }, "the re-arm carries the current thresholds");
+});

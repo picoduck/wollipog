@@ -580,6 +580,9 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
     routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
     routePath === "/api/search" || routePath === "/api/usage" || routePath === "/api/usage/retention" ||
+    routePath === "/api/usage/daily-budget" || routePath === "/api/usage/users" ||
+    routePath === "/api/usage/pricing/refresh" || routePath === "/api/usage/subscriptions" ||
+    routePath === "/api/usage/subscriptions/refresh" ||
     routePath === "/api/push/vapid-public-key" || routePath === "/api/push/subscriptions" ||
     routePath === "/api/push/unsubscribe" ||
     routePath === "/api/artifacts/:artifactId/export" ||
