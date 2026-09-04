@@ -20,7 +20,12 @@ for (const viewport of [
       await page.goto("/command-inbox-projects-e2e.html?scenario=worktree-identity");
       await setTheme(page, theme);
       const row = page.getByRole("row", { name: /Alpha Session/ });
-      await expect(row).toContainText("fix/session-worktree-identity ← origin/main · Open PR");
+      // The row's own line for this (#664). `origin/main` is the conventional default base, so the
+      // row omits it and spends the width on the branch; the header below still spells it out.
+      const rowWorktree = row.locator(".inbox-row-worktree");
+      await expect(rowWorktree.locator(".inbox-row-branch")).toHaveText("fix/session-worktree-identity");
+      await expect(rowWorktree.locator(".inbox-row-base")).toHaveCount(0);
+      await expect(rowWorktree.locator(".inbox-row-pr-pill")).toHaveText("Open PR");
       if (capture) {
         await mkdir(evidenceDir, { recursive: true });
         await page.screenshot({ path: `${evidenceDir}/after-inbox-${viewport.name}-${theme}.png`, fullPage: true });

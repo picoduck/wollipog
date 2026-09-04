@@ -568,23 +568,23 @@ test("Inbox titles keep one reading axis across row signals, widths, and densiti
       const geometry = await page.locator(".inbox-row").evaluateAll((rows) => rows.map((row) => {
         const title = row.querySelector<HTMLElement>(".inbox-row-title")!;
         const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!;
-        const senderText = sender.querySelector<HTMLElement>("span")!;
         const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!;
         return {
           titleX: title.getBoundingClientRect().left,
-          senderWidth: sender.getBoundingClientRect().width,
-          senderOverflows: senderText.scrollWidth > senderText.clientWidth,
+          senderRight: sender.getBoundingClientRect().right,
+          signalsLeft: signals.getBoundingClientRect().left,
           signalsWidth: signals.getBoundingClientRect().width,
         };
       }));
 
+      // The axis is now the row's own left edge: #664 moved the title onto its own line, so no
+      // amount of status badges or sender text can shift where a title starts.
       expect(Math.max(...geometry.map(({ titleX }) => titleX)) - Math.min(...geometry.map(({ titleX }) => titleX)))
-        .toBeLessThanOrEqual(1);
-      expect(Math.max(...geometry.map(({ senderWidth }) => senderWidth)) - Math.min(...geometry.map(({ senderWidth }) => senderWidth)))
         .toBeLessThanOrEqual(1);
       expect(Math.max(...geometry.map(({ signalsWidth }) => signalsWidth)) - Math.min(...geometry.map(({ signalsWidth }) => signalsWidth)))
         .toBeGreaterThan(8);
-      expect(geometry.some(({ senderOverflows }) => senderOverflows)).toBe(true);
+      // A long agent-and-Project label yields to the signals column instead of colliding with it.
+      for (const { senderRight, signalsLeft } of geometry) expect(senderRight).toBeLessThanOrEqual(signalsLeft + 1);
     }
   }
 });

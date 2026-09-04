@@ -19,6 +19,7 @@ import { absoluteViewUrl } from "../navigation.js";
 import { reminderMenuActionLabel } from "../session-reminders.js";
 import { safeExternalHref } from "../external-href.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
+import { pullRequestStateLabel } from "../worktree-identity.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN, hasSameOriginMarker } from "../config.js";
 import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcript-share-client.js";
@@ -105,7 +106,7 @@ export function SessionHeader({
 }) {
   const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
   const activeWorktreeLabel = activeWorktree
-    ? `${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${activeWorktree.pullRequest.state === "open" ? "Open" : activeWorktree.pullRequest.state === "merged" ? "Merged" : "Closed"} PR` : ""}`
+    ? `${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${pullRequestStateLabel(activeWorktree.pullRequest.state)} PR` : ""}`
     : "";
   const activeWorktreePullRequestHref = safeExternalHref(activeWorktree?.pullRequest?.url);
   const api = useApi();

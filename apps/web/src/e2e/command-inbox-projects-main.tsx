@@ -177,6 +177,52 @@ function initialModel(): FixtureModel {
     initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
     initial.projects[0]!.totalSessionCount = initial.sessions.length;
   }
+  if (SCENARIO === "inbox-row-layout") {
+    // The shapes #664 has to survive at once: a title long enough to fill any viewport, a branch
+    // name long enough to fill the third line on its own, a default base ref that must stay hidden,
+    // a non-default one that must show, and rows with no worktree at all that stay two lines.
+    const rows: Array<[string, string, Partial<SessionView>]> = [
+      ["session-long-branch", "Restructure Inbox Rows so the Title Fades and the Activity Strip Is Always Visible", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/long",
+        worktrees: [{
+          id: "wt-long",
+          path: "/repos/alpha/.agent-worktrees/long",
+          branch: "fix/issue-664-restructure-inbox-rows-so-the-activity-strip-is-always-visible",
+          baseRef: "origin/main",
+          source: "created",
+          pullRequest: { url: "https://github.com/picoduck/wollipog/pull/664", state: "open" },
+        }],
+      }],
+      ["session-stacked-base", "Short Title", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/stacked",
+        worktrees: [{
+          id: "wt-stacked",
+          path: "/repos/alpha/.agent-worktrees/stacked",
+          branch: "fix/issue-664-follow-up",
+          baseRef: "fix/issue-664-restructure-inbox-rows-so-the-activity-strip-is-always-visible",
+          source: "created",
+          pullRequest: { url: "https://github.com/picoduck/wollipog/pull/665", state: "merged" },
+        }],
+      }],
+      ["session-no-worktree", "A Session With No Worktree and a Title That Also Runs Well Past Any Viewport Width", {}],
+      ["session-plain", "Plain", {}],
+    ];
+    initial.sessions = rows.map(([id, title, extra], index) => {
+      const value = session(id, title, "alpha", "alpha-workspace");
+      Object.assign(value, {
+        status: "running",
+        activeTurnId: `turn-${id}`,
+        updatedAt: 100 - index,
+        lastEventAt: 100 - index,
+        ...extra,
+      });
+      return value;
+    });
+    initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
+    initial.projects[0]!.totalSessionCount = initial.sessions.length;
+  }
   if (SCENARIO === "imported-location") {
     Object.assign(initial.projects.find((candidate) => candidate.id === "gamma")!, { canManage: true });
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-no-project")!, {
