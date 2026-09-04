@@ -172,8 +172,11 @@ export function parseBundleReviewFindings(input: unknown): Parsed<BundleReviewFi
 export function formatReviewFindingsPrompt(findings: ReviewFinding[]): string {
   const entries = findings.map((finding, index) => {
     const requirement = finding.required ? "REQUIRED" : "OPTIONAL";
+    const location = finding.remote?.subjectType === "remote"
+      ? `Remote ${finding.remote.provider === "gitlab" ? "GitLab discussion" : "forge discussion"} (${finding.remote.url})`
+      : `${finding.filePath}:${finding.line} (${finding.side}, ${finding.scope})`;
     return [
-      `${index + 1}. [${requirement}] [${finding.severity.toUpperCase()}] ${finding.filePath}:${finding.line} (${finding.side}, ${finding.scope})`,
+      `${index + 1}. [${requirement}] [${finding.severity.toUpperCase()}] ${location}`,
       `   Finding: ${finding.body.replace(/\r?\n/g, "\n   ")}`,
       `   Review finding id: ${finding.findingId}`,
     ].join("\n");

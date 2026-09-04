@@ -3345,7 +3345,7 @@ export class ControlPlaneDb {
         CREATE INDEX idx_review_findings_session ON review_findings(session_id, status, created_at, finding_id);
         COMMIT`);
       } catch (error) {
-        db.exec("ROLLBACK");
+        try { db.exec("ROLLBACK"); } catch { /* no active transaction */ }
         throw error;
       }
     }
@@ -14645,9 +14645,12 @@ export class ControlPlaneDb {
         seen.add(thread.threadId);
         const existing = existingByThread.get(thread.threadId);
         const anchorCurrent = thread.subjectType === "line" && !thread.outdated && sync.localHeadOid === sync.changeRequestHeadOid;
+        const remoteSnapshotIdentity = sync.provider === "github" && sync.host === "github.com"
+          ? `github:${sync.project}:${sync.changeRequestNumber}:${thread.threadId}:${thread.commitId}`
+          : `${sync.provider}:${sync.host}:${sync.project}:${sync.changeRequestNumber}:${thread.threadId}:${thread.commitId}`;
         const diffHash = anchorCurrent
           ? sync.diffHash
-          : createHash("sha256").update(`${sync.provider}:${sync.host}:${sync.project}:${sync.changeRequestNumber}:${thread.threadId}:${thread.commitId}`).digest("hex");
+          : createHash("sha256").update(remoteSnapshotIdentity).digest("hex");
         const desiredStatus: ReviewFindingStatus = thread.resolved
           ? "resolved"
           : existing?.status === "sent" ? "sent" : "open";

@@ -1,12 +1,13 @@
 # Forge review reconciliation
 
 The Review panel can import the current branch's GitHub pull-request or GitLab merge-request
-discussions with **Sync GitHub Reviews** or **Sync GitLab Reviews**. Both operations are read-only
+discussions with **Sync GitHub** or **Sync GitLab**. Both operations are read-only
 toward the forge: Wollipog never posts, edits, resolves, or dismisses a remote comment.
 
 GitLab.com repositories are detected from exact SSH or HTTP(S) remote hosts. A self-managed GitLab
-host becomes active only after `glab auth status --hostname <host>` succeeds, which prevents a
-generic Git server from being misclassified. Install and authenticate `glab` in the same Machine
+host becomes active only when local `glab` configuration contains that exact host; Wollipog checks
+that non-secret configuration before running `glab auth status --hostname <host>`, so it does not
+probe a generic Git server over the network. Install and authenticate `glab` in the same Machine
 context as the session (`glab auth login --hostname <host>`). Native and WSL sessions deliberately
 do not share CLI or authentication assumptions.
 

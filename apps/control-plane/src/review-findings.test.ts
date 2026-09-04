@@ -56,6 +56,36 @@ test("review bundle prompt retains requirement, provenance id, and exact locatio
   assert.match(prompt, /reviewer will verify and resolve/);
 });
 
+test("review bundle prompt describes remote-only GitLab discussions without a fabricated file", () => {
+  const prompt = formatReviewFindingsPrompt([{
+    findingId: "rf_gitlab01",
+    sessionId: "s1",
+    ...create,
+    filePath: "__remote__/gitlab-discussion-101",
+    line: 1,
+    body: "General merge-request feedback.",
+    status: "open",
+    source: "gitlab",
+    author: { kind: "human", id: "reviewer" },
+    createdAt: 1,
+    updatedAt: 1,
+    remote: {
+      provider: "gitlab",
+      repository: "team/repo",
+      pullRequestNumber: 7,
+      threadId: "discussion-1",
+      commentId: 101,
+      url: "https://gitlab.com/team/repo/-/merge_requests/7#note_101",
+      commitId: "a".repeat(40),
+      outdated: true,
+      subjectType: "remote",
+      synchronizedAt: 2,
+    },
+  }]);
+  assert.match(prompt, /Remote GitLab discussion \(https:\/\/gitlab\.com\/team\/repo\/-\/merge_requests\/7#note_101\)/);
+  assert.doesNotMatch(prompt, /__remote__/);
+});
+
 test("GitHub review snapshots are revalidated at the control-plane trust boundary", () => {
   const sync = {
     repository: "acme/repo", pullRequestNumber: 7,

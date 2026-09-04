@@ -884,7 +884,8 @@ export function parseForgeRemote(remote: string): ForgeRemote | null {
     ? "github"
     : hostname === "gitlab.com" ? "gitlab" : null;
   const webProtocol = protocol === "http:" ? "http:" : "https:";
-  return { provider, host, project, webUrl: `${webProtocol}//${host}/${project}` };
+  const encodedProject = project.split("/").map((part) => encodeURIComponent(part)).join("/");
+  return { provider, host, project, webUrl: `${webProtocol}//${host}/${encodedProject}` };
 }
 
 /** Extract owner/repo from an exact github.com remote (ssh or https), or null. */
@@ -1570,17 +1571,32 @@ async function gitlabReadiness(cwd: string, parsed: ForgeRemote): Promise<{
   remote: ForgeRemote;
   forge: GitForgeInfo;
 } | null> {
+  const context = executionContext.getStore() ?? { kind: "native" as const };
+  if (parsed.provider !== "gitlab") {
+    // A local, non-secret per-host setting proves this arbitrary remote is configured for glab
+    // before any authenticated/network command targets it. `glab auth login` records api_protocol
+    // for self-managed hosts; generic Git servers therefore retain local-only summary behavior.
+    try {
+      const configured = await runContextCommand(
+        context,
+        "glab",
+        ["config", "get", "api_protocol", "--host", parsed.host],
+        { cwd, timeoutMs: GLAB_TIMEOUT_MS, maxBuffer: FORGE_MAX_BUFFER },
+      );
+      if (!new Set(["http", "https"]).has(configured.stdout.trim().toLowerCase())) return null;
+    } catch {
+      return null;
+    }
+  }
   try {
     await runGlab(cwd, parsed.host, ["auth", "status"]);
-    const remote = gitlabProject(`${parsed.webUrl}.git`, parsed.host)!;
+    const remote = gitlabProject(`${parsed.webUrl}.git`, parsed.host);
+    if (!remote) throw new Error("the configured GitLab project identity is invalid");
     return {
       remote,
       forge: { provider: "gitlab", host: remote.host, project: remote.project, authenticated: true },
     };
   } catch (error) {
-    // A failed exact-host probe is enough to classify GitLab.com, but not an arbitrary generic Git
-    // server. Successful auth above is the configuration proof for self-managed GitLab.
-    if (parsed.provider !== "gitlab") return null;
     const remediation = isMissingCommand(error)
       ? "Install the GitLab CLI (glab) in this Machine context."
       : `Run glab auth login --hostname ${parsed.host} in this Machine context.`;
@@ -1622,7 +1638,11 @@ async function gitlabMergeRequestForBranch(cwd: string, remote: ForgeRemote, bra
 
 /** Strictly parse one complete GitLab discussions page. An invalid note or position aborts the
  * authoritative page; callers never apply a partial reconciliation. */
-export function parseGitLabReviewPage(raw: string, remote: ForgeRemote, mr: GitLabMergeRequest): ForgeReviewThread[] {
+function parseGitLabReviewPageResult(
+  raw: string,
+  remote: ForgeRemote,
+  mr: GitLabMergeRequest,
+): { threads: ForgeReviewThread[]; discussionCount: number } {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { throw new Error("GitLab returned malformed review data"); }
   if (!Array.isArray(parsed) || parsed.length > GITLAB_REVIEW_PAGE_SIZE) {
@@ -1637,6 +1657,10 @@ export function parseGitLabReviewPage(raw: string, remote: ForgeRemote, mr: GitL
       throw new Error("GitLab returned an invalid review discussion");
     }
     const root = notes.map(jsonObject).find((note) => note && note.system !== true) ?? null;
+    // GitLab represents activity such as pushes, assignments, and label changes as standalone
+    // system-note discussions. They contain no reviewer-authored finding, so exclude them from the
+    // authoritative snapshot without weakening validation for any content-bearing discussion.
+    if (!root) continue;
     const commentId = jsonInt(root?.id);
     const bodyRaw = jsonString(root?.body);
     const author = jsonString(jsonObject(root?.author)?.username) ?? "ghost";
@@ -1682,7 +1706,11 @@ export function parseGitLabReviewPage(raw: string, remote: ForgeRemote, mr: GitL
   if (new Set(threads.map((thread) => thread.threadId)).size !== threads.length) {
     throw new Error("GitLab returned duplicate review discussions");
   }
-  return threads;
+  return { threads, discussionCount: parsed.length };
+}
+
+export function parseGitLabReviewPage(raw: string, remote: ForgeRemote, mr: GitLabMergeRequest): ForgeReviewThread[] {
+  return parseGitLabReviewPageResult(raw, remote, mr).threads;
 }
 
 /** Load a bounded, complete sequence of GitLab discussion pages. The caller applies the returned
@@ -1696,9 +1724,9 @@ export async function loadGitLabReviewThreads(
   const threads: ForgeReviewThread[] = [];
   let complete = false;
   for (let page = 1; page <= GITLAB_REVIEW_MAX_PAGES; page += 1) {
-    const pageThreads = parseGitLabReviewPage(await loadPage(page), remote, mr);
-    threads.push(...pageThreads);
-    if (pageThreads.length < GITLAB_REVIEW_PAGE_SIZE) { complete = true; break; }
+    const pageResult = parseGitLabReviewPageResult(await loadPage(page), remote, mr);
+    threads.push(...pageResult.threads);
+    if (pageResult.discussionCount < GITLAB_REVIEW_PAGE_SIZE) { complete = true; break; }
   }
   if (!complete) throw new Error("the merge request has more than 500 discussions; no partial reconciliation was applied");
   if (new Set(threads.map((thread) => thread.threadId)).size !== threads.length) {
@@ -1829,20 +1857,28 @@ const forgeSummaryCache = new Map<string, {
   value: { pr: GitPrSummary | null; checks: GitChecksSummary | null; forge: GitForgeInfo | null };
 }>();
 
-async function forgeSummary(
+export async function forgeSummary(
   cwd: string,
   remoteUrl: string | null,
   branch: string,
+  loadGitHubSummary: typeof ghPrSummary = ghPrSummary,
 ): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null; forge: GitForgeInfo | null }> {
   const parsed = remoteUrl ? parseForgeRemote(remoteUrl) : null;
-  if (!parsed) return { pr: null, checks: null, forge: null };
-  if (parsed.provider === "github") {
-    const result = await ghPrSummary(cwd);
+  if (parsed?.provider === "github") {
+    const result = await loadGitHubSummary(cwd);
     return {
       ...result,
       forge: { provider: "github", host: parsed.host, project: parsed.project, authenticated: true },
     };
   }
+  // Before provider-neutral summaries, `gh pr view` was attempted regardless of the remote's name
+  // or host. Preserve that behavior for GitHub Enterprise and repositories whose GitHub remote is
+  // not named `origin`; a successful `gh` lookup is authoritative for the current worktree.
+  if (parsed?.provider !== "gitlab") {
+    const github = await loadGitHubSummary(cwd);
+    if (github.pr) return { ...github, forge: null };
+  }
+  if (!parsed) return { pr: null, checks: null, forge: null };
   const context = executionContext.getStore() ?? { kind: "native" as const };
   const key = `${context.kind === "wsl" ? `wsl:${context.distro}` : "native"}:${cwd}:${parsed.host}:${branch}`;
   const hit = forgeSummaryCache.get(key);
@@ -2853,13 +2889,7 @@ async function tryGitLabMr(
   const targetRef = ((await defaultBaseRef(cwd)) ?? "origin/main").replace(/^origin\//, "");
   const endpoint = `projects/${encodeURIComponent(remote.project)}/merge_requests`;
   try {
-    const raw = await runGlab(cwd, remote.host, [
-      "api", "--method", "POST", endpoint,
-      "--field", `source_branch=${branch}`,
-      "--field", `target_branch=${targetRef}`,
-      "--field", `title=${title}`,
-      "--field", `description=${body}`,
-    ]);
+    const raw = await runGlab(cwd, remote.host, gitLabMergeRequestCreateArgs(endpoint, branch, targetRef, title, body));
     return { url: parseGitLabMergeRequest(JSON.parse(raw), remote).webUrl };
   } catch (error) {
     // A retry after a timeout may encounter the MR created by the first request. Read the exact
@@ -2875,6 +2905,24 @@ async function tryGitLabMr(
       error: `Only the branch was pushed. GitLab could not create the merge request (${sanitizedForgeError(error)}). Open the prefilled GitLab page to continue.`,
     };
   }
+}
+
+/** Build string-typed `glab api` fields. `--field` performs JSON/file inference, so user text such
+ * as `1234` or `@reviewers` must use `--raw-field` to reach GitLab verbatim. */
+export function gitLabMergeRequestCreateArgs(
+  endpoint: string,
+  branch: string,
+  targetRef: string,
+  title: string,
+  body: string,
+): string[] {
+  return [
+    "api", "--method", "POST", endpoint,
+    "--raw-field", `source_branch=${branch}`,
+    "--raw-field", `target_branch=${targetRef}`,
+    "--raw-field", `title=${title}`,
+    "--raw-field", `description=${body}`,
+  ];
 }
 
 /** The default base ref (e.g. origin/main) for ahead-counts and compare URLs. */

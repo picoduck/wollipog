@@ -8,7 +8,9 @@ import {
   commitAll,
   computeDiffHash,
   extractHunkPatch,
+  forgeSummary,
   githubSlug,
+  gitLabMergeRequestCreateArgs,
   gitlabProject,
   gitDiff,
   gitStatus,
@@ -554,6 +556,11 @@ test("parseForgeRemote strictly classifies hosted forges and preserves GitLab su
     provider: null, host: "gitlab.example.test", project: "group/repo", webUrl: "https://gitlab.example.test/group/repo",
   });
   assert.equal(gitlabProject("ssh://git@gitlab.example.test/group/repo.git", "gitlab.example.test")?.provider, "gitlab");
+  assert.equal(
+    parseForgeRemote("https://gitlab.com/group/%23repo.git")?.webUrl,
+    "https://gitlab.com/group/%23repo",
+    "decoded reserved characters are re-encoded in derived web URLs",
+  );
   assert.equal(parseForgeRemote("https://notgithub.com/owner/repo.git")?.provider, null);
   assert.equal(parseForgeRemote("git@github.com.evil.example:owner/repo.git")?.provider, null);
   for (const unsafe of [
@@ -571,6 +578,30 @@ test("GitLab merge-request URLs are accepted only for the exact remote identity"
   );
   assert.equal(pickMergeRequestUrl("https://gitlab.com/group/other/-/merge_requests/17", remote), null);
   assert.equal(pickMergeRequestUrl("https://gitlab.com.evil.test/group/repo/-/merge_requests/17", remote), null);
+});
+
+test("forgeSummary preserves legacy gh discovery for enterprise and non-origin remotes", async () => {
+  const calls: string[] = [];
+  const loadGitHub = async (cwd: string) => {
+    calls.push(cwd);
+    return {
+      pr: {
+        number: 17, title: "Enterprise PR", url: "https://github.example.test/team/repo/pull/17",
+        state: "OPEN", provider: "github" as const, kind: "pull_request" as const,
+      },
+      checks: null,
+    };
+  };
+  const enterprise = await forgeSummary(
+    "/repo",
+    "ssh://git@github.example.test/team/repo.git",
+    "feature",
+    loadGitHub,
+  );
+  const withoutOrigin = await forgeSummary("/repo-no-origin", null, "feature", loadGitHub);
+  assert.equal(enterprise.pr?.url, "https://github.example.test/team/repo/pull/17");
+  assert.equal(withoutOrigin.pr?.number, 17);
+  assert.deepEqual(calls, ["/repo", "/repo-no-origin"]);
 });
 
 test("GitLab MR and pipeline parsers validate revision and URL provenance", () => {
@@ -604,6 +635,12 @@ test("parseGitLabReviewPage retains exact anchors and marks unpositioned discuss
   }, remote);
   const page = parseGitLabReviewPage(JSON.stringify([
     {
+      id: "system-discussion", notes: [{
+        id: 100, body: "added 1 commit", author: { username: "reviewer" },
+        created_at: "2026-09-04T09:59:00Z", updated_at: "2026-09-04T09:59:00Z", system: true,
+      }],
+    },
+    {
       id: "discussion-1", resolved: false, notes: [{
         id: 101, body: "Keep this check", author: { username: "reviewer" },
         created_at: "2026-09-04T10:00:00Z", updated_at: "2026-09-04T10:01:00Z", system: false,
@@ -626,6 +663,25 @@ test("parseGitLabReviewPage retains exact anchors and marks unpositioned discuss
   }]), remote, mr), /invalid review-discussion anchor/);
 });
 
+test("GitLab merge-request creation sends all fields as literal strings", () => {
+  assert.deepEqual(
+    gitLabMergeRequestCreateArgs(
+      "projects/team%2Frepo/merge_requests",
+      "feature/@mentions",
+      "main",
+      "1234",
+      "@frontend-team please review",
+    ),
+    [
+      "api", "--method", "POST", "projects/team%2Frepo/merge_requests",
+      "--raw-field", "source_branch=feature/@mentions",
+      "--raw-field", "target_branch=main",
+      "--raw-field", "title=1234",
+      "--raw-field", "description=@frontend-team please review",
+    ],
+  );
+});
+
 test("GitLab review pagination returns only a complete bounded snapshot", async () => {
   const remote = parseForgeRemote("ssh://git@gitlab.example.test/team/sub/repo.git")!;
   const configured = gitlabProject("ssh://git@gitlab.example.test/team/sub/repo.git", "gitlab.example.test")!;
@@ -646,16 +702,33 @@ test("GitLab review pagination returns only a complete bounded snapshot", async 
   const calls: number[] = [];
   const threads = await loadGitLabReviewThreads(configured, mr, async (page) => {
     calls.push(page);
-    return JSON.stringify(page === 1 ? Array.from({ length: 100 }, (_, index) => discussion(index)) : [discussion(100)]);
+    return JSON.stringify(page === 1
+      ? [
+          ...Array.from({ length: 99 }, (_, index) => discussion(index)),
+          { id: "system-only", notes: [{ id: 99_999, body: "added 1 commit", system: true }] },
+        ]
+      : [discussion(100)]);
   });
   assert.equal(remote.provider, null, "the raw self-managed remote stays generic until configured");
   assert.deepEqual(calls, [1, 2]);
-  assert.equal(threads.length, 101);
+  assert.equal(threads.length, 100);
   await assert.rejects(
     loadGitLabReviewThreads(configured, mr, async (page) => page === 1
       ? JSON.stringify(Array.from({ length: 100 }, (_, index) => discussion(index)))
       : "not-json"),
     /malformed review data/,
+  );
+  await assert.rejects(
+    loadGitLabReviewThreads(configured, mr, async (page) => JSON.stringify(
+      Array.from({ length: 100 }, (_, index) => discussion((page - 1) * 100 + index)),
+    )),
+    /more than 500 discussions/,
+  );
+  await assert.rejects(
+    loadGitLabReviewThreads(configured, mr, async (page) => JSON.stringify(
+      page === 1 ? Array.from({ length: 100 }, (_, index) => discussion(index)) : [discussion(0)],
+    )),
+    /duplicate review discussions across pages/,
   );
 });
 
