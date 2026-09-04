@@ -352,6 +352,10 @@ interface ActiveSession {
   /** A successful turn-only interruption preserves the remaining FIFO but does not run it until
    * a later explicit prompt unambiguously asks the session to continue. */
   holdQueuedPromptsAfterInterrupt?: boolean;
+  /** A control-plane card (checkpoint, unpriced, daily budget) is holding the queue. Its own flag,
+   * because the interrupt hold above is cleared when a provider completes before the interrupt
+   * takes effect, and that settle must not release work a card is still parking. */
+  controlPlaneHold?: boolean;
   /** Distinct invocation ids are rebuilt once from the durable event log when a tool guardrail is
    * armed, then maintained in memory on normalized tool events. */
   toolCallIds?: Set<string>;
@@ -3979,7 +3983,7 @@ export class SessionManager {
     if (entry) {
       this.emitQueue(request.sessionId);
       if (entry.queue.length && !entry.running && !entry.governanceTripped &&
-          !entry.holdQueuedPromptsAfterInterrupt && !this.reservedPromotionPrecedesQueue(request.sessionId, entry)) {
+          !this.queueHeld(entry) && !this.reservedPromotionPrecedesQueue(request.sessionId, entry)) {
         this.scheduleDrain(request.sessionId);
       }
     }
@@ -4520,7 +4524,7 @@ export class SessionManager {
       }
       this.emitQueue(sessionId);
       if (!this.steerFences(entry).size && entry.queue.length &&
-          !entry.governanceTripped && !entry.holdQueuedPromptsAfterInterrupt) {
+          !entry.governanceTripped && !this.queueHeld(entry)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
@@ -4779,12 +4783,23 @@ export class SessionManager {
           editRevision: this.queuedPromptEditRevision(q),
         };
       }),
-      ...(entry?.holdQueuedPromptsAfterInterrupt ? { held: true } : {}),
+      ...(entry && this.queueHeld(entry) ? { held: true } : {}),
       ...(entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
     });
   }
 
   /** Publish both edges of the interruption hold so clients never infer it from queue contents. */
+  /** Either hold keeps queued prompts waiting; they are cleared independently. */
+  private queueHeld(entry: ActiveSession): boolean {
+    return Boolean(entry.holdQueuedPromptsAfterInterrupt || entry.controlPlaneHold);
+  }
+
+  private setControlPlaneHold(sessionId: string, entry: ActiveSession, held: boolean): void {
+    if (Boolean(entry.controlPlaneHold) === held) return;
+    entry.controlPlaneHold = held;
+    this.emitQueue(sessionId);
+  }
+
   private setInterruptQueueHold(sessionId: string, entry: ActiveSession, held: boolean): void {
     if (entry.holdQueuedPromptsAfterInterrupt === held) return;
     entry.holdQueuedPromptsAfterInterrupt = held;
@@ -4828,7 +4843,7 @@ export class SessionManager {
       reserved.cancelRequested = true;
       this.emitQueue(sessionId);
       if (!this.reservedPromotionPrecedesQueue(sessionId, entry) && entry.queue.length &&
-          !entry.running && !entry.governanceTripped && !entry.holdQueuedPromptsAfterInterrupt) {
+          !entry.running && !entry.governanceTripped && !this.queueHeld(entry)) {
         this.scheduleDrain(sessionId);
       }
       return;
@@ -5142,7 +5157,7 @@ export class SessionManager {
   /** Run queued prompts one at a time, holding the box lock only while turns are draining. */
   private async drain(sessionId: string): Promise<void> {
     const entry = this.active.get(sessionId);
-    if (!entry || entry.running || entry.governanceTripped || entry.holdQueuedPromptsAfterInterrupt ||
+    if (!entry || entry.running || entry.governanceTripped || this.queueHeld(entry) ||
         this.hasPendingApproval(sessionId) || this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
@@ -5236,7 +5251,7 @@ export class SessionManager {
           await this.waitForSteeringFences(entry);
           if (this.active.get(sessionId) !== entry) break;
         }
-        if (entry.governanceTripped || entry.holdQueuedPromptsAfterInterrupt) break;
+        if (entry.governanceTripped || this.queueHeld(entry)) break;
       }
     } finally {
       entry.running = false;
@@ -6339,15 +6354,14 @@ export class SessionManager {
       const entry = this.active.get(sessionId);
       if (!entry) return;
       if (holdFor === "control_plane") {
-        this.setInterruptQueueHold(sessionId, entry, true);
+        this.setControlPlaneHold(sessionId, entry, true);
         if (entry.running && entry.governanceTripped) entry.governanceRearmPending = "resume";
         else if (!entry.running) entry.governanceTripped = undefined;
         return;
       }
-      if (holdFor === undefined && entry.holdQueuedPromptsAfterInterrupt) {
-        entry.interruptRequested = false;
-        this.setInterruptQueueHold(sessionId, entry, false);
-        if (!entry.running && !entry.governanceTripped && entry.queue.length) this.scheduleDrain(sessionId);
+      if (holdFor === undefined && entry.controlPlaneHold) {
+        this.setControlPlaneHold(sessionId, entry, false);
+        if (!entry.running && !entry.governanceTripped && !this.queueHeld(entry) && entry.queue.length) this.scheduleDrain(sessionId);
       }
       return;
     }
@@ -6385,7 +6399,7 @@ export class SessionManager {
     // governance settle), and any earlier hard trip is cleared because the thresholds it
     // enforced have just been re-armed.
     if (holdFor === "control_plane") {
-      this.setInterruptQueueHold(sessionId, entry, true);
+      this.setControlPlaneHold(sessionId, entry, true);
       if (entry.running) {
         if (entry.governanceTripped) entry.governanceRearmPending = "resume";
         return;
@@ -6394,6 +6408,9 @@ export class SessionManager {
       this.emitStatus(sessionId, "idle");
       return;
     }
+    // A threshold re-arm without a hold releases a control-plane hold too: the card it carried
+    // was answered by the same Continue that sent the new thresholds.
+    if (!holdFor) this.setControlPlaneHold(sessionId, entry, false);
     if (entry.running) {
       if (entry.governanceTripped) entry.governanceRearmPending = holdFor ?? "resume";
       else if (holdFor) entry.governanceTripped = holdFor;

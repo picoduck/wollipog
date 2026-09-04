@@ -11135,3 +11135,28 @@ test("a run for an owner past the daily budget launches no member sessions", () 
   assert.match(run.error ?? "", /daily budget reached/);
   assert.equal(hub.sentOfType("start_session").length, 0, "no member session was launched");
 });
+
+test("a user-owned Project on an organization workspace still meets its owner's daily budget at creation", () => {
+  const { db, hub, svc } = makeHarness();
+  const local = db.localIdentityContext();
+  const project = db.listProjects(true)[0]!;
+  assert.equal(db.setResourceScope({
+    resource: "project", resourceId: project.id, now: 2,
+    scope: { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } },
+  }), true);
+  const location = db.getProject(project.id)!.locations[0]!;
+  // Spend through a user-owned session first.
+  const seeded = seedSession(svc, hub, { prompt: "spend" });
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id=? WHERE session_id=?").run(local.userId, seeded);
+  db.setUsageDailyBudget(local.organizationId, 1, Date.now());
+  db.appendEvent(seeded, { kind: "token_usage", inputTokens: 1, costUsd: 1.5 }, Date.now(), { accrueUsage: true });
+  hub.sentToRunner.length = 0;
+  // No explicit scope: the organization workspace confers one, but the Project narrows it to the user.
+  const created = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, projectId: project.id, projectLocationId: location.id, agentId: AGENT_ID,
+  });
+  assert.equal(created.ok, false);
+  assert.equal(created.status, 409);
+  assert.match(created.error ?? "", /daily budget reached/);
+  assert.equal(hub.sentOfType("start_session").length, 0);
+});

@@ -3156,6 +3156,14 @@ export class SessionsService {
     if (session.pendingApproval?.kind === "cost_budget") {
       return fail("cost budget reached — choose Continue or Stop before invoking a provider command", 409);
     }
+    // A provider command is a billable turn like any prompt, so the owner's daily allowance is
+    // checked here too, parking the session with the card rather than silently refusing.
+    const dailyForCommand = this.dailyBudgetFor(sessionId);
+    if (dailyForCommand && dailyForCommand.spentUsd >= dailyForCommand.budgetUsd) {
+      this.gateOnPolicy(sessionId, Date.now());
+      this.hub.sessionChangedById(sessionId);
+      return fail("daily budget reached — new turns pause until the day rolls over or an owner or admin raises it", 409);
+    }
     if (session.pendingApproval?.kind === "policy_hook") {
       return fail("a tool approval is pending — choose Allow or Deny before invoking a provider command", 409);
     }
