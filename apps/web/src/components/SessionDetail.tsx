@@ -800,7 +800,7 @@ function SessionDetailLoaded({
       });
     return () => { current = false; };
   }, [api, backgroundInventoryAttempt, loadSession, mode, recoveryGeneration,
-    rightPanel.mode, rightPanel.open, session]);
+    rightPanel.mode, rightPanel.open, session.backgroundJobs, session.backgroundJobsAvailable, session.id]);
   const composerComposingRef = useRef(false);
   const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
   const composerExplicitFocusTransferRef = useRef(false);

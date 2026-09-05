@@ -166,6 +166,67 @@ test("bounded history uses authoritative barrier totals and discloses omitted jo
   }
 });
 
+test("delivery-only history remains inspectable without inventing job lifecycle rows", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const opened: number[] = [];
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [],
+          backgroundJobsTruncated: true,
+          backgroundDeliveries: [{
+            continuationId: "private-continuation",
+            parentTurnId: "retained-parent",
+            jobCount: 3,
+            terminalCount: 3,
+            queuedAt: 3_000,
+            acceptedAt: 3_100,
+            runnerResultPersistedAt: 3_200,
+            notificationQueuedAt: 3_300,
+            notifications: [{
+              deliveryId: "private-delivery",
+              endpointKey: "private-endpoint",
+              state: "clicked",
+              attemptCount: 1,
+              clickedAt: 3_400,
+            }],
+          }],
+        } as unknown as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map([["retained-parent", 77]])}
+        onOpenParentTurn={(eventId) => opened.push(eventId)}
+      />,
+    ));
+    assert.equal(container.querySelectorAll(".background-work-group").length, 1);
+    assert.equal(container.querySelectorAll(".background-work-job").length, 0);
+    assert.equal(container.querySelectorAll(".background-work-delivery").length, 1);
+    assert.match(container.textContent ?? "", /Delivery receipt retained for 3 jobs/);
+    assert.match(container.textContent ?? "", /Per-job lifecycle history is outside the bounded inventory/);
+    assert.match(container.textContent ?? "", /Delivery ReceiptResult Delivered · Notification Opened/);
+    assert.match(container.textContent ?? "", /Delivery Receipt 1Result Delivered/);
+    assert.match(container.textContent ?? "", /Recorded Job Count3Recorded Terminal Count3/);
+    assert.doesNotMatch(container.textContent ?? "", /Running|Completed|Failed|Killed|Orphaned/);
+    assert.doesNotMatch(container.textContent ?? "", /private-continuation|private-delivery|private-endpoint|retained-parent/);
+    const receipt = container.querySelector('[role="group"][aria-label="Delivery Receipt Status"]');
+    assert.ok(receipt, "screen readers receive a delivery-specific status group");
+    const parentButton = container.querySelector<HTMLButtonElement>("button");
+    assert.equal(parentButton?.textContent, "View Parent Turn");
+    await act(async () => parentButton!.click());
+    assert.deepEqual(opened, [77]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("multiple delivery rounds under one parent use their combined authoritative totals", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

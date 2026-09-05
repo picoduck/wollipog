@@ -190,7 +190,7 @@ type ComposerDraftLoader = (sessionId: string, instanceScope: string) => Promise
 interface FixtureOptions {
   client?: Partial<ApiClient>;
   mainEventPayloads?: SessionEvent["payload"][];
-  rightPanelMode?: "launcher" | "sidechat";
+  rightPanelMode?: "launcher" | "sidechat" | "background";
   composerDraftCleanup?: typeof deleteComposerDraftIfMatches;
   sessionCapabilities?: SessionView["agentCapabilities"];
   sessionPatch?: Partial<SessionView>;
@@ -462,6 +462,114 @@ async function waitForComposerSendToSettle(fixture: Fixture, timeoutMs = 5_000):
     await flushAsyncWork(10);
   }
 }
+
+function detailedBackgroundSession(id: string): SessionView {
+  return {
+    ...session(id),
+    backgroundWorkTracking: "managed",
+    backgroundJobsAvailable: true,
+    backgroundJobs: [{
+      id: "managed-job",
+      parentTurnId: "parent-turn",
+      launchType: "agent",
+      registeredAt: 1_000,
+      lastObservedAt: 2_000,
+      sourcePresent: true,
+      terminalStatus: "completed",
+      terminalObservedAt: 2_000,
+      continuationRequired: false,
+    }],
+  };
+}
+
+test("same-session replacement preserves one in-flight background inventory load", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const requests: Array<Deferred<{ session: SessionView }>> = [];
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "background",
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      backgroundWorkTracking: "managed",
+      backgroundJobsAvailable: true,
+    },
+    client: {
+      session: async () => {
+        const request = deferred<{ session: SessionView }>();
+        requests.push(request);
+        return request.promise;
+      },
+    },
+  });
+  try {
+    await flushAsyncWork();
+    assert.match(fixture.container.textContent ?? "", /Loading Background Work/);
+    const requestsBeforeReplacement = requests.length;
+    assert.ok(requestsBeforeReplacement >= 1, "the lazy inventory request is in flight");
+
+    await fixture.pushSession({ updatedAt: 2 });
+    await flushAsyncWork();
+    assert.equal(requests.length, requestsBeforeReplacement,
+      "an unrelated same-session replacement does not start a concurrent request");
+
+    await act(async () => {
+      for (const request of requests) request.resolve({ session: detailedBackgroundSession(fixture.sessionId) });
+      await Promise.all(requests.map((request) => request.promise));
+    });
+    await flushAsyncWork();
+    assert.match(fixture.container.textContent ?? "", /Agent Job 1/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Loading Background Work/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("failed background inventory loads expose a working retry", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const requests: Array<Deferred<{ session: SessionView }>> = [];
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "background",
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      backgroundWorkTracking: "managed",
+      backgroundJobsAvailable: true,
+    },
+    client: {
+      session: async () => {
+        const request = deferred<{ session: SessionView }>();
+        requests.push(request);
+        return request.promise;
+      },
+    },
+  });
+  try {
+    await flushAsyncWork();
+    const initialRequests = [...requests];
+    assert.ok(initialRequests.length >= 1);
+    await act(async () => {
+      for (const request of initialRequests) request.reject(new Error("inventory unavailable"));
+      await Promise.allSettled(initialRequests.map((request) => request.promise));
+    });
+    await flushAsyncWork();
+    assert.match(fixture.container.textContent ?? "", /Background Work Unavailable/);
+    const retry = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Retry Loading") as HTMLButtonElement | undefined;
+    assert.ok(retry, "the failed inventory load exposes an accessible button");
+
+    await act(async () => retry.click());
+    await flushAsyncWork();
+    assert.equal(requests.length, initialRequests.length + 1);
+    const retried = requests.at(-1)!;
+    await act(async () => {
+      retried.resolve({ session: detailedBackgroundSession(fixture.sessionId) });
+      await retried.promise;
+    });
+    await flushAsyncWork();
+    assert.match(fixture.container.textContent ?? "", /Agent Job 1/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Background Work Unavailable/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
 
 const submittedImage = { mimeType: "image/png", data: "aW1hZ2U=" } as const;
 const displacedDraftImage = { mimeType: "image/jpeg", data: `/9j/${"A".repeat(1_100_000)}` } as const;

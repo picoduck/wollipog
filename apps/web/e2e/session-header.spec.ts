@@ -563,6 +563,37 @@ test("managed background indicators open a responsive inspectable inventory and 
   await expect(panel.getByText("Result Delivered", { exact: true })).toBeVisible();
   await expect(panel).not.toContainText("private-continuation-id");
   await capture(page, "background-mobile-settled");
+
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundJobs: [],
+      backgroundJobsTruncated: true,
+      backgroundDeliveries: [{
+        continuationId: "private-retained-continuation",
+        parentTurnId: "turn-loaded",
+        jobCount: 2,
+        terminalCount: 2,
+        runnerResultPersistedAt: Date.now() - 1_000,
+        notificationQueuedAt: Date.now() - 900,
+        notifications: [{
+          deliveryId: "private-retained-delivery",
+          endpointKey: "private-retained-endpoint",
+          state: "clicked",
+          attemptCount: 1,
+          clickedAt: Date.now() - 500,
+        }],
+      }],
+    });
+  });
+  await expect(panel.getByRole("group", { name: "Delivery Receipt Status" })).toContainText("Result Delivered");
+  await expect(panel.getByRole("list", { name: "Retained Delivery Receipts" })).toContainText("Notification Opened");
+  await expect(panel.locator(".background-work-job")).toHaveCount(0);
+  await expect(panel.locator(".background-work-delivery")).toHaveCount(1);
+  await expect(panel).not.toContainText(/private-retained-(continuation|delivery|endpoint)/);
+  const retainedParent = panel.getByRole("button", { name: "View Parent Turn" });
+  await retainedParent.focus();
+  await expect(retainedParent).toBeFocused();
+  await capture(page, "background-mobile-delivery-only");
 });
 
 test("mobile Session pane and action controls share trailing columns", async ({ page }) => {

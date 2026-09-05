@@ -2043,10 +2043,12 @@ textarea {
   padding: 0;
   list-style: none;
 }
-.background-work-job {
+.background-work-job,
+.background-work-delivery {
   padding: 11px 12px;
 }
-.background-work-job + .background-work-job { border-top: 1px solid var(--border); }
+.background-work-job + .background-work-job,
+.background-work-delivery + .background-work-delivery { border-top: 1px solid var(--border); }
 .background-work-job-title {
   display: flex;
   align-items: center;
