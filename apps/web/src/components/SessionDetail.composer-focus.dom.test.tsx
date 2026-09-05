@@ -3591,6 +3591,67 @@ test("external question resolution does not steal focus moved outside Answer Mod
   }
 });
 
+test("a delayed answer completion cannot arm focus theft after external resolution", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const answerResult = deferred<SessionView>();
+  const fixture = await mountFixture(draft, {
+    client: {
+      answerQuestion: async () => answerResult.promise,
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-delayed-completion",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    await act(async () => {
+      answer.value = "1";
+      fireDomEvent.change(answer);
+      answer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+    });
+
+    await fixture.pushSession({ pendingApproval: null });
+    await act(async () => { flushFrames(); });
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(reader);
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      reader.focus();
+      answerResult.resolve(session(fixture.sessionId));
+      await answerResult.promise;
+      await Promise.resolve();
+      flushFrames();
+    });
+
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-after-delayed-completion",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Production" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.ok(reader.ownerDocument.activeElement === reader,
+      "a stale answer completion must not leave a focus request for the next question");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
 test("explicit Answer Mode entry wins over delayed ordinary-draft hydration", { timeout: 5_000 }, async () => {
   setQuestionResponseStyle("composer", domWindow as never);
   const draft = deferred<ComposerDraft | null>();

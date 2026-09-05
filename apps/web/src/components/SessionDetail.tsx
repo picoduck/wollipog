@@ -2122,6 +2122,8 @@ function SessionDetailLoaded({
   const answerModeFocusRequestRef = useRef<"answer" | "message" | null>(null);
   const answerFocusRequestIdRef = useRef<string | null>(pendingQuestion?.requestId ?? null);
   const composerAnswerActive = canAnswerPendingQuestion && answerModeRequestId === pendingQuestion.requestId;
+  const activeAnswerModeRequestRef = useRef<string | null>(composerAnswerActive ? answerModeRequestId : null);
+  activeAnswerModeRequestRef.current = composerAnswerActive ? answerModeRequestId : null;
   const answerModeRegion = answerInputRef.current?.closest<HTMLElement>(".composer-answer") ?? null;
   const answerFocusOwnedBeforeRender = answerModeRegion !== null &&
     answerModeRegion.contains(answerInputRef.current!.ownerDocument.activeElement);
@@ -2139,8 +2141,9 @@ function SessionDetailLoaded({
   revealOrdinaryComposerRef.current = revealOrdinaryComposer;
 
   const exitAnswerMode = useCallback(() => {
+    if (!answerModeRequestId || activeAnswerModeRequestRef.current !== answerModeRequestId) return;
     revealOrdinaryComposer("always");
-  }, [revealOrdinaryComposer]);
+  }, [answerModeRequestId, revealOrdinaryComposer]);
   const enterAnswerMode = useCallback(() => {
     if (!canAnswerPendingQuestion) {
       focusComposerAtDraftEnd();
