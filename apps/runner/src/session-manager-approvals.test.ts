@@ -420,6 +420,32 @@ test("startup never resurrects a question that already has a durable resolution"
   }
 });
 
+test("startup clears stale question metadata when its durable resolution won the crash race", () => {
+  const { sm, sent, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "resolved-before-meta-clear",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+    store.appendEvent("s_perm", {
+      kind: "question_resolved",
+      requestId: "resolved-before-meta-clear",
+      answered: true,
+      resolutionReason: "submitted",
+    });
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(eventsOf(sent, "question_resolved").length, 0,
+      "startup must not append a second resolution for an already-resolved question");
+  } finally {
+    cleanup();
+  }
+});
+
 test("authentication requests persist as sign-in input without exposing a distinct routing path", () => {
   const { sm, store, cleanup } = makeHarness(true);
   try {

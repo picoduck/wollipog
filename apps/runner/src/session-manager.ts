@@ -1406,15 +1406,16 @@ export class SessionManager {
   private unresolvedQuestionFromHistory(sessionId: string): {
     scanned: boolean;
     question: SessionMeta["pendingApproval"];
+    resolvedQuestionIds: ReadonlySet<string>;
   } {
+    const resolved = new Set<string>();
     const tail = this.store.logTailSeqResult(sessionId);
-    if (!tail.ok) return { scanned: false, question: null };
+    if (!tail.ok) return { scanned: false, question: null, resolvedQuestionIds: resolved };
     const durableTail = tail.seq;
-    if (durableTail === 0) return { scanned: true, question: null };
+    if (durableTail === 0) return { scanned: true, question: null, resolvedQuestionIds: resolved };
     let cursor = durableTail;
     let logEpoch: number | undefined;
     let throughSeq: number | undefined;
-    const resolved = new Set<string>();
     while (cursor > 0) {
       let span = Math.min(200, cursor);
       let events: StoredEvent[] | null = null;
@@ -1424,7 +1425,7 @@ export class SessionManager {
           limit: span,
           ...(logEpoch === undefined ? {} : { logEpoch, throughSeq: throughSeq! }),
         });
-        if (!page.ok) return { scanned: false, question: null };
+        if (!page.ok) return { scanned: false, question: null, resolvedQuestionIds: resolved };
         if (logEpoch === undefined) {
           logEpoch = page.page.logEpoch;
           throughSeq = page.page.throughSeq;
@@ -1437,7 +1438,7 @@ export class SessionManager {
           events = page.events;
           break;
         }
-        if (span === 1) return { scanned: false, question: null };
+        if (span === 1) return { scanned: false, question: null, resolvedQuestionIds: resolved };
         span = Math.max(1, Math.floor(span / 2));
       }
       if (!events) continue;
@@ -1450,7 +1451,9 @@ export class SessionManager {
         if (payload.kind === "question_request") {
           // A resolved newer question replaced every older pending question, so once its request
           // is reached there is nothing earlier that can still be actionable.
-          if (resolved.has(payload.requestId)) return { scanned: true, question: null };
+          if (resolved.has(payload.requestId)) {
+            return { scanned: true, question: null, resolvedQuestionIds: resolved };
+          }
           return {
             scanned: true,
             question: {
@@ -1460,6 +1463,7 @@ export class SessionManager {
               kind: "question",
               questions: payload.questions,
             },
+            resolvedQuestionIds: resolved,
           };
         }
         if (
@@ -1467,11 +1471,11 @@ export class SessionManager {
           payload.kind === "agent_thought" || payload.kind === "tool_call" ||
           payload.kind === "permission_request" || payload.kind === "conversation_checkpoint" ||
           payload.kind === "turn_interrupted"
-        ) return { scanned: true, question: null };
+        ) return { scanned: true, question: null, resolvedQuestionIds: resolved };
       }
       cursor = events[0]!.seq - 1;
     }
-    return { scanned: true, question: null };
+    return { scanned: true, question: null, resolvedQuestionIds: resolved };
   }
 
   /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
@@ -1542,6 +1546,7 @@ export class SessionManager {
       const terminal = reconciled.status === "completed" || reconciled.status === "failed" ||
         reconciled.status === "stopped";
       let historicalQuestion: SessionMeta["pendingApproval"] = null;
+      let pendingQuestionResolved = false;
       if (!terminal && !reconciled.providerAuthBlock && !reconciled.pendingApproval &&
           reconciled.questionRecoveryReconciled !== true) {
         const recovery = this.unresolvedQuestionFromHistory(m.sessionId);
@@ -1549,10 +1554,16 @@ export class SessionManager {
         if (recovery.scanned) {
           reconciled = this.store.patchMeta(m.sessionId, { questionRecoveryReconciled: true }) ?? reconciled;
         }
+      } else if (!terminal && !reconciled.providerAuthBlock &&
+          reconciled.pendingApproval?.kind === "question") {
+        // A crash can land after the resolution event is durable but before its metadata clear.
+        // Prefer that exact durable resolution over the stale pending-card projection.
+        const recovery = this.unresolvedQuestionFromHistory(m.sessionId);
+        pendingQuestionResolved = recovery.resolvedQuestionIds.has(reconciled.pendingApproval.requestId);
       }
       const recoverableQuestion = terminal
         ? null
-        : reconciled.pendingApproval?.kind === "question"
+        : reconciled.pendingApproval?.kind === "question" && !pendingQuestionResolved
           ? reconciled.pendingApproval
           : historicalQuestion;
       if (reconciled.providerAuthBlock && reconciled.status === "stopped") {
