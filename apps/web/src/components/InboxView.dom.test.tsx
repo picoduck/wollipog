@@ -1,6 +1,6 @@
 import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
+import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -18,7 +18,7 @@ const domWindow = new Window({ url: "http://localhost/" });
 // One mechanism, not two. Disposers registered through `cleanup` run BEFORE the window aborts its
 // pending tasks, which is the order React unmounting needs; a second `afterEach` racing this one
 // tore down the window first and made `act` reject during unmount (#690).
-const { cleanup } = installDomTestCleanup(domWindow);
+const { cleanup } = installDomTestCleanup(domWindow, { reset: () => { mobileViewport = true; } });
 let mobileViewport = true;
 Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
@@ -92,11 +92,6 @@ function mountTestRoot(): { container: HTMLDivElement; root: ReturnType<typeof c
   return { container, root };
 }
 
-afterEach(() => {
-  // An order-independent scalar reset. It used to trail each test's unmount, so a failing test
-  // leaked its viewport into the next one and made this file order-dependent after any failure.
-  mobileViewport = true;
-});
 
 const VIEWPORT_HEIGHT = 2_000;
 const ROW_HEIGHT = 68;

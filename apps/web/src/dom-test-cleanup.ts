@@ -27,8 +27,16 @@ interface DomTestWindow {
  * Register a disposer with the returned `cleanup` when a fixture owns something `abort()` cannot
  * reach, such as a spy that must be restored. Disposers run before the abort, newest first, and one
  * that throws does not stop the rest — the whole point is that cleanup completes unconditionally.
+ *
+ * Pass `reset` for per-test state that must be restored no matter what, such as a module-level
+ * viewport flag. It belongs here rather than in the file's own `afterEach`, because Node SKIPS every
+ * later `afterEach` once one throws: a reset registered separately would be silently dropped in
+ * exactly the failure this helper exists to survive.
  */
-export function installDomTestCleanup(domWindow: DomTestWindow): { cleanup: (dispose: () => void | Promise<void>) => void } {
+export function installDomTestCleanup(
+  domWindow: DomTestWindow,
+  options: { reset?: () => void } = {},
+): { cleanup: (dispose: () => void | Promise<void>) => void } {
   const disposers: Array<() => void | Promise<void>> = [];
 
   afterEach(async () => {
@@ -47,6 +55,7 @@ export function installDomTestCleanup(domWindow: DomTestWindow): { cleanup: (dis
       // Runs whatever the disposers did, because this is the part that actually stops the clock.
       await domWindow.happyDOM.abort();
       domWindow.document.body.innerHTML = "";
+      options.reset?.();
     }
     // A disposer that genuinely broke is still a failure — reported after cleanup, not instead of
     // it. Node reports the test body's own assertion error in preference to this one.

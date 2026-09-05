@@ -1,18 +1,51 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
+const SELF = "dom-test-cleanup.test.ts";
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const path = join(dir, entry);
     if (statSync(path).isDirectory()) sourceFiles(path, out);
-    else if (path.endsWith(".test.ts") || path.endsWith(".test.tsx")) out.push(path);
+    else if (path.endsWith(".ts") || path.endsWith(".tsx")) out.push(path);
   }
   return out;
+}
+
+const isTest = (path: string) => path.endsWith(".test.ts") || path.endsWith(".test.tsx");
+
+/**
+ * Components that put a `StoreProvider` on the page without the caller naming it.
+ *
+ * Derived rather than hardcoded, because the first version of this guard matched the literal string
+ * `StoreProvider` and therefore missed `InstanceRuntimeHost.dom.test.tsx`, which mounts one through
+ * a wrapper. That file still had the original bug while the guard reported everything clean — a
+ * false negative is worse than no guard, because it looks like coverage.
+ *
+ * The e2e fixtures under `src/e2e` are excluded: they are browser entry points, not `node:test`
+ * files, so they never register a Node hook.
+ */
+function storeProviderWrappers(files: string[]): string[] {
+  return files
+    .filter((path) => !isTest(path) && !path.includes(`${SRC}e2e/`))
+    .filter((path) => readFileSync(path, "utf8").includes("<StoreProvider"))
+    .map((path) => basename(path).replace(/\.tsx?$/u, ""));
+}
+
+/** A happy-dom test that reaches a `StoreProvider`, directly or through one of those wrappers. */
+function storeProviderDomTests(files: string[]): string[] {
+  const wrappers = storeProviderWrappers(files);
+  return files
+    .filter((path) => isTest(path) && basename(path) !== SELF)
+    .filter((path) => {
+      const source = readFileSync(path, "utf8");
+      if (!source.includes("new Window(")) return false;
+      return source.includes("StoreProvider") || wrappers.some((name) => source.includes(name));
+    });
 }
 
 /**
@@ -23,34 +56,36 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
  * then stalls for minutes past `--test-timeout` and a plain test failure reads as a hung suite.
  * That is invisible in review unless something checks for it, so this checks for it.
  */
-test("every DOM test that mounts StoreProvider installs the shared cleanup", () => {
-  const offenders = sourceFiles(SRC)
-    .filter((path) => {
-      const source = readFileSync(path, "utf8");
-      return source.includes("StoreProvider") && source.includes("new Window(")
-        && !source.includes("installDomTestCleanup(");
-    })
+test("every DOM test that reaches a StoreProvider installs the shared cleanup", () => {
+  const offenders = storeProviderDomTests(sourceFiles(SRC))
+    .filter((path) => !readFileSync(path, "utf8").includes("installDomTestCleanup("))
     .map((path) => path.slice(SRC.length));
 
   assert.deepEqual(
     offenders,
     [],
-    `${offenders.join(", ")}: mounts StoreProvider in a happy-dom window without installDomTestCleanup(domWindow). ` +
-    "Add it beside the window so a failing assertion cannot leave the store's stall clock running (#690).",
+    `${offenders.join(", ")}: mounts a StoreProvider in a happy-dom window without ` +
+    "installDomTestCleanup(domWindow). Add it beside the window so a failing assertion cannot leave " +
+    "the store's stall clock running (#690).",
   );
 });
 
-test("the guardrail reads the marker it claims to, so it cannot pass vacuously", () => {
-  // Both halves of the predicate matter: a file that mounts StoreProvider is only exempt because it
-  // installs the cleanup, never because the scan failed to find any files at all.
-  const scanned = sourceFiles(SRC);
-  assert.ok(scanned.length > 0, "the source scan found no test files, so the guardrail proves nothing");
-  const storeProviderTests = scanned.filter((path) => {
-    const source = readFileSync(path, "utf8");
-    return source.includes("StoreProvider") && source.includes("new Window(");
-  });
+test("the guardrail measures a real, non-empty set of files", () => {
+  const files = sourceFiles(SRC);
+  // This file names both markers in its own predicate and prose, so counting it would let the
+  // check below pass on a set containing nothing but itself.
+  const candidates = storeProviderDomTests(files).map((path) => path.slice(SRC.length));
   assert.ok(
-    storeProviderTests.length > 0,
-    "no DOM test mounts StoreProvider any more; delete this guardrail rather than letting it pass on an empty set",
+    !candidates.some((path) => path.endsWith(SELF)),
+    "the guardrail is inspecting itself, so its own markers could stand in for real coverage",
+  );
+  assert.ok(
+    storeProviderWrappers(files).length > 0,
+    "no module renders <StoreProvider any more; the wrapper derivation is measuring nothing",
+  );
+  assert.ok(
+    candidates.length > 1,
+    `only ${candidates.length} DOM test reaches a StoreProvider — too few for this guard to be ` +
+    "meaningful. If that is genuinely correct, delete the guard rather than letting it pass vacuously.",
   );
 });
