@@ -319,6 +319,143 @@ test("runtime authentication recovery stays silent until the shared probe settle
   }
 });
 
+test("silent authentication recovery waits for initialization to retain the unsubmitted prompt", async () => {
+  const initialization = deferred<void>();
+  const h = harness({ driver: "claude-code", command: "claude" },
+    (index) => index === 0 ? initialization.promise.then(() => { throw new Error("authentication initialization failed"); }) : Promise.resolve(),
+    Promise.resolve(), () => {}, undefined, undefined, 4, undefined, {
+      describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+      revalidate: async () => ({ status: "authenticated", identityId: "account-a" }),
+      startLogin: async () => "failed",
+      cancel: () => false,
+    });
+  try {
+    h.manager.prompt("resume-session", "retain this initial prompt");
+    for (let i = 0; i < 20 && h.launches.length === 0; i += 1) await shortDelay();
+    h.callbacks().onAuthenticationFailure?.();
+    for (let i = 0; i < 5; i += 1) await shortDelay();
+    assert.ok(h.store.readMeta("resume-session")?.providerAuthBlock,
+      "a successful probe cannot clear the block before launch bookkeeping settles");
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    initialization.resolve();
+    for (let i = 0; i < 40 && h.prompts.length === 0; i += 1) await shortDelay();
+    assert.deepEqual(h.prompts, ["retain this initial prompt"]);
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.ok(h.store.readMeta("resume-session")?.providerAuthRetryAttemptedRecoveryId);
+    assert.equal(h.store.readEvents("resume-session").some((event) => event.payload.kind === "permission_request"), false);
+  } finally {
+    initialization.resolve();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("silent authentication recovery stops after a repeated initialization failure", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({ driver: "claude-code", command: "claude" },
+    () => Promise.resolve().then(() => {
+      h.callbacks().onAuthenticationFailure?.();
+      throw new Error("provider initialization remains unauthenticated");
+    }), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, {
+      describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+      revalidate: async () => ({ status: "authenticated", identityId: "account-a" }),
+      startLogin: async () => "failed",
+      cancel: () => false,
+    });
+  try {
+    h.manager.prompt("resume-session", "bounded automatic retry");
+    for (let i = 0; i < 40 && !h.store.readMeta("resume-session")?.pendingApproval; i += 1) await shortDelay();
+    assert.equal(h.launches.length, 2, "only one automatic relaunch is allowed before provider acceptance");
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.kind, "authentication");
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock?.retry?.text, "bounded automatic retry");
+    for (let i = 0; i < 5; i += 1) await shortDelay();
+    assert.equal(h.launches.length, 2);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("silent authentication preparation timeout surfaces recovery and fences the late probe", async (context) => {
+  const preparation = deferred<void>();
+  let probes = 0;
+  const scope = { id: "scope-a", provider: "claude" as const, canStartLogin: false, configuredCredential: false };
+  const h = harness({ providerCredentialIdentityId: "account-a" }, Promise.resolve(), Promise.resolve(),
+    () => {}, () => preparation.promise, undefined, 4, undefined, {
+      describe: () => scope,
+      revalidate: async () => { probes += 1; return { status: "authenticated", identityId: "account-a" }; },
+      startLogin: async () => "failed",
+      cancel: () => false,
+    });
+  try {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const manager = h.manager as any;
+    manager.parkProviderAuthentication(h.store.readMeta("resume-session"), scope, "turn", "uncertain", false, true);
+    manager.revalidateProviderAuthenticationSilently(scope.id);
+    await tick();
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    context.mock.timers.tick(20_000);
+    await tick();
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.kind, "authentication");
+    preparation.resolve();
+    await tick();
+    assert.equal(probes, 0, "timed-out preparation cannot start a late probe or clear the surfaced block");
+    assert.ok(h.store.readMeta("resume-session")?.providerAuthBlock);
+  } finally {
+    preparation.resolve();
+    context.mock.timers.reset();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a healthy turn re-arms silent authentication recovery without an acceptance callback", async () => {
+  let probes = 0;
+  const h = harness({ providerCredentialScopeId: "scope-a" }, Promise.resolve(), Promise.resolve(),
+    () => {}, undefined, undefined, 4, undefined, {
+      describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: false, configuredCredential: false }),
+      revalidate: async () => { probes += 1; return { status: "authenticated", identityId: "account-a" }; },
+      startLogin: async () => "failed",
+      cancel: () => false,
+    }, false);
+  try {
+    (h.manager as any).providerAuthAutomaticAttempted.add("scope-a");
+    h.manager.prompt("resume-session", "healthy turn without acceptance callback");
+    for (let i = 0; i < 10; i += 1) await shortDelay();
+    h.callbacks().onAuthenticationFailure?.();
+    for (let i = 0; i < 5; i += 1) await shortDelay();
+    assert.equal(probes, 2, "successful turn completion permits a later silent probe");
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const removal of ["delete", "history-failure"] as const) {
+  test(`authentication card ownership transfers after ${removal}`, async () => {
+    const scope = { id: "scope-a", provider: "claude" as const, canStartLogin: false, configuredCredential: false };
+    const h = harness();
+    try {
+      h.store.create(stored(h.root, { sessionId: "shared" }));
+      const manager = h.manager as any;
+      for (const id of ["resume-session", "shared"]) {
+        manager.parkProviderAuthentication(h.store.readMeta(id), scope, "turn", "uncertain");
+      }
+      const owner = h.store.listSessions().find((meta) => meta.pendingApproval?.kind === "authentication")!;
+      if (removal === "delete") await h.manager.delete(owner.sessionId);
+      else manager.failHistoryIntegrity(owner.sessionId, new Error("history unavailable"));
+      const remaining = h.store.listSessions().filter((meta) => meta.pendingApproval?.kind === "authentication");
+      assert.equal(remaining.length, 1);
+      assert.notEqual(remaining[0]!.sessionId, owner.sessionId);
+    } finally {
+      h.manager.shutdownAll();
+      h.cleanup();
+    }
+  });
+}
+
 for (const outcome of ["authenticated", "unauthenticated", "unknown", "wrong-account"] as const) {
   test(`shared authentication burst coalesces sessions when probe is ${outcome}`, async () => {
     const probe = deferred<{ status: "authenticated" | "unauthenticated" | "unknown"; identityId?: string }>();
