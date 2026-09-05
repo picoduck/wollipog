@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerToControlPlane } from "@wollipog/protocol";
-import { SessionManager } from "./session-manager.js";
+import { SessionManager, type DurableCommandLifecycle } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
@@ -331,6 +331,100 @@ test("startup preserves a still-pending question through the primary metadata pa
     assert.equal(store.readMeta("s_perm")?.status, "input_required");
     assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "pending-before-restart");
     assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryReason, "provider_restart");
+  } finally {
+    cleanup();
+  }
+});
+
+test("startup marks only non-secret resumable questions for durable answer continuation", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    store.patchMeta("s_perm", { agentSessionId: "claude-session-1" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "resumable-before-restart",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryAction, "resume_answer");
+
+    store.patchMeta("s_perm", {
+      pendingApproval: {
+        requestId: "secret-before-restart",
+        title: "Token",
+        options: [],
+        kind: "question",
+        questions: [{ id: "token", question: "Token", options: [], allowOther: true, secret: true }],
+      },
+      status: "input_required",
+    });
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryAction, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a durable recovered answer records one resolution before one provider continuation", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(false);
+  try {
+    const prompts: string[] = [];
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "claude-session-1";
+    entry.client.prompt = async (text: string) => {
+      prompts.push(text);
+      return "end_turn" as const;
+    };
+    store.patchMeta("s_perm", {
+      agentSessionId: "claude-session-1",
+      status: "input_required",
+      pendingApproval: {
+        requestId: "recovered-answer",
+        title: "Which target?",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+        recoveryReason: "provider_restart",
+        recoveryAction: "resume_answer",
+      },
+    });
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "answer_command_1",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+
+    sm.answerRecoveredQuestion("s_perm", "recovered-answer", { target: "Production" }, lifecycle);
+    for (let attempt = 0; attempt < 20 && !transitions.includes("completed"); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    assert.deepEqual(transitions, ["queued", "started", "completed"]);
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0]!, /Do not repeat tool calls or other side effects/u);
+    assert.match(prompts[0]!, /"answer":"Production"/u);
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+    assert.deepEqual((eventsOf(sent, "question_resolved")[0] as { payload: unknown }).payload, {
+      kind: "question_resolved",
+      requestId: "recovered-answer",
+      answered: true,
+      resolutionReason: "submitted",
+      commandId: "answer_command_1",
+    });
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
   } finally {
     cleanup();
   }

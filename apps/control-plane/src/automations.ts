@@ -998,6 +998,9 @@ export class AutomationsService {
   ): PreStagedDeliveryOptions {
     const stage = (plan: PreStagedDeliveryPlan): void => {
       const commands = plan.commands.map((command, ordinal) => {
+        if (command.type === "answer_recovered_question") {
+          throw new Error("automation delivery plans cannot contain recovered question answers");
+        }
         const sessionId = command.type === "start_session" ? command.spec.sessionId : command.sessionId;
         return {
           commandId: `ac_${execution.executionId}_${String(ordinal).padStart(3, "0")}`,

@@ -6713,6 +6713,79 @@ test("recovered questions reject unsafe submission but dismiss into an idle exac
   });
 });
 
+test("resumable recovered answers persist one deterministic command before clearing the card", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.setPendingApproval(id, {
+    kind: "question",
+    requestId: "resumable-recovered-question",
+    title: "Which target?",
+    options: [],
+    questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    recoveryReason: "provider_restart",
+    recoveryAction: "resume_answer",
+  });
+  db.updateSessionStatus(id, "input_required", Date.now());
+
+  const result = svc.answerQuestion(
+    id,
+    "resumable-recovered-question",
+    { target: "Production" },
+    { kind: "human", id: "device-recovery" },
+    "submit",
+  );
+
+  assert.ok(result.ok);
+  assert.equal(result.data?.status, "running");
+  assert.equal(result.data?.pendingApproval, null);
+  const first = hub.sentToRunner.map(({ msg }) => msg).find((msg) =>
+    msg.type === "durable_session_command" && msg.command.type === "answer_recovered_question");
+  assert.ok(first?.type === "durable_session_command");
+  assert.match(first.commandId, /^answer_[a-f0-9]{64}$/u);
+  assert.deepEqual(first.command, {
+    type: "answer_recovered_question",
+    sessionId: id,
+    requestId: "resumable-recovered-question",
+    answers: { target: "Production" },
+  });
+
+  hub.sentToRunner.length = 0;
+  svc.retryDuePrompts(Date.now() + 60_000, RUNNER_ID);
+  const retry = hub.sentToRunner.map(({ msg }) => msg).find((msg) => msg.type === "durable_session_command");
+  assert.ok(retry?.type === "durable_session_command");
+  assert.equal(retry.commandId, first.commandId);
+  assert.deepEqual(retry.command, first.command);
+});
+
+test("recovered secret questions remain dismiss-only even if a stale client claims resume support", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.setPendingApproval(id, {
+    kind: "question",
+    requestId: "secret-recovered-question",
+    title: "Enter token",
+    options: [],
+    questions: [{ id: "token", question: "Enter token", options: [], allowOther: true, secret: true }],
+    recoveryReason: "provider_restart",
+    recoveryAction: "resume_answer",
+  });
+  db.updateSessionStatus(id, "input_required", Date.now());
+
+  const result = svc.answerQuestion(
+    id,
+    "secret-recovered-question",
+    { token: "do-not-persist" },
+    { kind: "human", id: "device-recovery" },
+    "submit",
+  );
+
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /secret answers cannot be stored/u);
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "secret-recovered-question");
+  assert.equal(hub.sentToRunner.some(({ msg }) => msg.type === "durable_session_command" &&
+    msg.command.type === "answer_recovered_question"), false);
+});
+
 test("recovered question dismissal does not phantom-idle a newer active status", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });

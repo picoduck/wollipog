@@ -1308,7 +1308,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           break;
         }
         startTrackedSession(msg.command, lifecycle);
-      } else {
+      } else if (msg.command.type === "prompt_session") {
         try {
           sessions.prompt(
             msg.command.sessionId,
@@ -1320,6 +1320,17 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           );
         } catch (error) {
           lifecycle.failed(`prompt acceptance failed: ${errText(error)}`);
+        }
+      } else {
+        try {
+          sessions.answerRecoveredQuestion(
+            msg.command.sessionId,
+            msg.command.requestId,
+            msg.command.answers,
+            lifecycle,
+          );
+        } catch (error) {
+          lifecycle.failed(`recovered answer acceptance failed: ${errText(error)}`);
         }
       }
       break;

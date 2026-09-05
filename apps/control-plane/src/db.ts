@@ -504,9 +504,9 @@ CREATE TABLE IF NOT EXISTS session_reminders (
 CREATE INDEX IF NOT EXISTS idx_session_reminders_due
   ON session_reminders(state, scheduled_for, session_id, user_id);
 
--- User-submitted prompts use the runner's durable v53 receipt lane too. Unlike scheduler-owned
--- automation commands these rows belong directly to a session and remain recoverable across a
--- control-plane restart without manufacturing an automation execution.
+-- User-submitted prompts and recovered question answers use the runner's durable receipt lane.
+-- Unlike scheduler-owned automation commands these rows belong directly to a session and remain
+-- recoverable across a control-plane restart without manufacturing an automation execution.
 CREATE TABLE IF NOT EXISTS session_prompt_commands (
   command_id       TEXT PRIMARY KEY,
   session_id       TEXT NOT NULL,
@@ -12589,6 +12589,14 @@ export class ControlPlaneDb {
     now: number;
   }): SessionPromptCommandRecord {
     JSON.parse(input.payloadJson);
+    const existing = this.getSessionPromptCommand(input.commandId);
+    if (existing) {
+      if (existing.sessionId !== input.sessionId || existing.runnerId !== input.runnerId ||
+          existing.payloadJson !== input.payloadJson || existing.payloadSha256 !== input.payloadSha256) {
+        throw new Error("durable command identity is already bound to different content");
+      }
+      return existing;
+    }
     this.stmt(
       `INSERT INTO session_prompt_commands
        (command_id,session_id,runner_id,payload_json,payload_sha256,state,revision,attempt_count,

@@ -63,6 +63,31 @@ function prompt(text = "deliver this prompt"): DurableSessionCommand {
   return { type: "prompt_session", sessionId: SESSION_ID, text };
 }
 
+test("a stable recovered-answer identity is idempotent only for identical content", () => {
+  const { db, outbox } = fixture();
+  try {
+    const command = {
+      type: "answer_recovered_question",
+      sessionId: SESSION_ID,
+      requestId: "question-1",
+      answers: { target: "Production" },
+    } as const satisfies DurableSessionCommand;
+    const first = outbox.stage(SESSION_ID, RUNNER_ID, command, NOW, "answer_stable");
+    const duplicate = outbox.stage(SESSION_ID, RUNNER_ID, command, NOW + 1, "answer_stable");
+    assert.equal(duplicate.commandId, first.commandId);
+    assert.equal(duplicate.createdAt, first.createdAt);
+    assert.throws(() => outbox.stage(
+      SESSION_ID,
+      RUNNER_ID,
+      { ...command, answers: { target: "Staging" } },
+      NOW + 2,
+      "answer_stable",
+    ), /different content/u);
+  } finally {
+    db.close();
+  }
+});
+
 test("durable prompt receipts reject every malformed runner frame without mutating stored state", () => {
   const { db, outbox, warnings } = fixture();
   try {

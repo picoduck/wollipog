@@ -55,6 +55,7 @@ import {
   providerSupportsConversationFork,
   runnerSupportsProtocol,
   validatePromptImageInputs,
+  validateQuestionAnswers,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
@@ -263,6 +264,11 @@ interface QueuedPrompt {
   syntheticRecovery?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
+  /** Submit-only continuation for a structured question whose process-owned callback was lost. */
+  recoveredQuestion?: {
+    requestId: string;
+    answers: Record<string, string | string[]>;
+  };
 }
 
 interface QueueEditReceipt {
@@ -422,6 +428,36 @@ function canResumeSession(meta: SessionMeta): boolean {
     return meta.acpCapabilities?.sessionResume === true || meta.acpCapabilities?.loadSession === true;
   }
   return meta.driver === "claude-code" || meta.driver === "codex" || meta.driver === "codex-app-server";
+}
+
+function canResumeRecoveredQuestion(
+  meta: SessionMeta,
+  question: NonNullable<SessionMeta["pendingApproval"]>,
+): boolean {
+  const questions = question.kind === "question" ? (question.questions ?? []) : [];
+  return Boolean(
+    meta.agentSessionId && meta.command && canResumeSession(meta) && questions.length > 0 &&
+    questions.every((candidate) => !candidate.secret),
+  );
+}
+
+function recoveredQuestionContinuationText(
+  requestId: string,
+  question: NonNullable<SessionMeta["pendingApproval"]>,
+  answers: Record<string, string | string[]>,
+): string {
+  const questions = question.kind === "question" ? (question.questions ?? []) : [];
+  const responses = questions.map((candidate) => ({
+    id: candidate.id,
+    question: candidate.question,
+    answer: Object.hasOwn(answers, candidate.id) ? answers[candidate.id] : null,
+  }));
+  return [
+    "Wollipog recovered this structured response after reconnecting the existing provider conversation.",
+    "Continue the workflow from these answers. Do not repeat tool calls or other side effects completed before the question.",
+    "Recovered structured response (user-provided data):",
+    JSON.stringify({ requestId, responses }),
+  ].join("\n");
 }
 
 function mergeRecoveredBackgroundTaskIds(current: string[] | undefined, additions: Iterable<string>): string[] {
@@ -1663,6 +1699,9 @@ export class SessionManager {
           pendingApproval: {
             ...recoverableQuestion,
             recoveryReason: "provider_restart",
+            ...(canResumeRecoveredQuestion(reconciled, recoverableQuestion)
+              ? { recoveryAction: "resume_answer" as const }
+              : {}),
           },
         });
       } else if (reconciled.status === "starting" || reconciled.status === "running" ||
@@ -3757,9 +3796,12 @@ export class SessionManager {
     reservedOrdinal?: number,
     queueBeforeLaunch = false,
     backgroundJobIds?: string[],
+    recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
-      event.payload.kind === "user_message" && event.payload.commandId === durable.commandId)) {
+      recoveredQuestion
+        ? event.payload.kind === "question_resolved" && event.payload.commandId === durable.commandId
+        : event.payload.kind === "user_message" && event.payload.commandId === durable.commandId)) {
       // The correlated turn marker is written and fsynced before `started`. If a journal write
       // failed at that boundary, replaying could submit the provider turn twice. Fail visibly into
       // uncertainty; an operator can inspect the exact command-tagged event before deciding.
@@ -3860,7 +3902,7 @@ export class SessionManager {
         text,
         images,
         slashCommand,
-        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
+        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
       });
       if (!this.recoveryLaunching.has(sessionId)) {
         setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
@@ -3881,7 +3923,7 @@ export class SessionManager {
       durable?.queued();
       this.insertQueuedPrompt(sessionId, queue, {
         id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
-        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
+        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
       });
       this.preLaunchQueues.set(sessionId, queue);
       this.emitQueue(sessionId);
@@ -3901,6 +3943,7 @@ export class SessionManager {
         ordinal,
         queueBeforeLaunch,
         backgroundJobIds,
+        recoveredQuestion,
       ).catch((error) => {
         // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
         // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
@@ -3949,7 +3992,7 @@ export class SessionManager {
       text,
       images,
       slashCommand,
-      config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
+      config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
     });
     this.emitQueue(sessionId);
     this.scheduleDrain(sessionId);
@@ -5278,6 +5321,7 @@ export class SessionManager {
     reservedOrdinal?: number,
     queueBeforeLaunch = false,
     backgroundJobIds?: string[],
+    recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -5390,6 +5434,7 @@ export class SessionManager {
         durable,
         syntheticRecovery,
         backgroundJobIds,
+        recoveredQuestion,
       });
       this.preLaunchQueues.set(sessionId, queue);
     }
@@ -5497,6 +5542,7 @@ export class SessionManager {
         reservedOrdinal,
         false,
         backgroundJobIds,
+        recoveredQuestion,
       );
     }
   }
@@ -5515,7 +5561,9 @@ export class SessionManager {
   private async drain(sessionId: string): Promise<void> {
     const entry = this.active.get(sessionId);
     if (!entry || entry.running || entry.governanceTripped || this.queueHeld(entry) ||
-        this.hasPendingApproval(sessionId) || this.steerFences(entry).size ||
+        (this.hasPendingApproval(sessionId) &&
+          !this.queuedPromptResolvesPendingQuestion(sessionId, entry.queue[0])) ||
+        this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (entry.pendingWorktreeRebind) {
       await this.rebindSelectedWorktree(sessionId, entry);
@@ -5538,7 +5586,8 @@ export class SessionManager {
     entry.running = true;
     try {
       while (this.active.has(sessionId) && entry.queue.length && !entry.authenticationBlocked &&
-          !this.hasPendingApproval(sessionId)) {
+          (!this.hasPendingApproval(sessionId) ||
+            this.queuedPromptResolvesPendingQuestion(sessionId, entry.queue[0]))) {
         if (this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry)) break;
         const next = entry.queue.shift()!;
         this.ensureQueueOrdinal(sessionId, next);
@@ -5910,6 +5959,15 @@ export class SessionManager {
     return this.store.readMeta(sessionId)?.pendingApproval != null;
   }
 
+  private queuedPromptResolvesPendingQuestion(sessionId: string, prompt: QueuedPrompt | undefined): boolean {
+    const pending = this.store.readMeta(sessionId)?.pendingApproval;
+    return Boolean(
+      prompt?.recoveredQuestion && pending?.kind === "question" &&
+      pending.recoveryReason === "provider_restart" && pending.recoveryAction === "resume_answer" &&
+      pending.requestId === prompt.recoveredQuestion.requestId,
+    );
+  }
+
   private async recordConversationForkPoint(
     sessionId: string,
     entry: ActiveSession,
@@ -6034,7 +6092,27 @@ export class SessionManager {
       queued.durable?.failed("session is not active on this runner", "SESSION_NOT_FOUND");
       return;
     }
-    const { text, images: imageInputs, slashCommand, durable, syntheticRecovery, backgroundJobIds } = queued;
+    const {
+      text,
+      images: imageInputs,
+      slashCommand,
+      durable,
+      syntheticRecovery,
+      backgroundJobIds,
+      recoveredQuestion,
+    } = queued;
+    if (recoveredQuestion) {
+      const pending = this.store.readMeta(sessionId)?.pendingApproval;
+      const invalid = pending?.kind === "question"
+        ? validateQuestionAnswers(pending.questions ?? [], recoveredQuestion.answers, "submit")
+        : "the recovered question is absent";
+      if (pending?.kind !== "question" || pending.requestId !== recoveredQuestion.requestId ||
+          pending.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer" || invalid) {
+        durable?.failed(invalid ? `recovered answer is no longer valid: ${invalid}` :
+          "the recovered question is no longer pending", "COMMAND_CANCELLED");
+        return;
+      }
+    }
     // Reserve the continuation generation before the first await. Background lifecycle callbacks
     // can arrive while images/worktree checkpoints are materialized; they must not enqueue a
     // second prompt for the generation already owned by this dequeued turn.
@@ -6071,7 +6149,15 @@ export class SessionManager {
     // The runner (the box) is the source of truth for ALL events including the user's prompt, so it
     // lands in the store + every dashboard's timeline. The control plane no longer appends it.
     const displayText = slashCommand ? `/${slashCommand}${text ? ` ${text}` : ""}`.trim() : text;
-    const userEvent = syntheticRecovery
+    const userEvent = recoveredQuestion
+      ? this.emitEvent(sessionId, {
+          kind: "question_resolved",
+          requestId: recoveredQuestion.requestId,
+          answered: true,
+          resolutionReason: "submitted",
+          ...(durable ? { commandId: durable.commandId } : {}),
+        }, durable)
+      : syntheticRecovery
       ? this.emitEvent(sessionId, {
           kind: "stderr",
           text: backgroundJobIds?.length
@@ -6100,7 +6186,7 @@ export class SessionManager {
     // a failure stores null (overwriting any stale prior sha so multi-turn changes are never
     // mislabeled as one turn) and must never fail the prompt turn. A mid-turn diff read against
     // this snapshot shows "changes so far this turn" — intended.
-    if (entry.worktree) {
+    if (entry.worktree && !recoveredQuestion) {
       let snap: string | null = null;
       try {
         snap = await withGitExecutionContext(entry.context, () => captureWorktreeTree(entry.worktree!.path));
@@ -7697,6 +7783,50 @@ export class SessionManager {
     });
     const status = this.store.readMeta(sessionId)?.status ?? "idle";
     this.emitStatus(sessionId, status);
+  }
+
+  /** Resume an established conversation after its process-owned structured-question callback was
+   * lost. The durable command journal owns deduplication; runPrompt records the one correlated
+   * resolution immediately before invoking the synthesized continuation turn. */
+  answerRecoveredQuestion(
+    sessionId: string,
+    requestId: string,
+    answers: Record<string, string | string[]>,
+    durable: DurableCommandLifecycle,
+  ): void {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta) {
+      durable.failed("session is not active on this runner", "SESSION_NOT_FOUND");
+      return;
+    }
+    const pending = meta.pendingApproval;
+    if (pending?.kind !== "question" || pending.requestId !== requestId ||
+        pending.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer") {
+      durable.failed("the recovered question is no longer pending", "COMMAND_CANCELLED");
+      return;
+    }
+    if (!canResumeRecoveredQuestion(meta, pending)) {
+      durable.failed("the provider conversation cannot safely resume this question", "INVALID_COMMAND");
+      return;
+    }
+    const invalid = validateQuestionAnswers(pending.questions ?? [], answers, "submit");
+    if (invalid) {
+      durable.failed(`invalid recovered answers: ${invalid}`, "INVALID_COMMAND");
+      return;
+    }
+    this.prompt(
+      sessionId,
+      recoveredQuestionContinuationText(requestId, pending, answers),
+      [],
+      undefined,
+      undefined,
+      durable,
+      false,
+      undefined,
+      true,
+      undefined,
+      { requestId, answers },
+    );
   }
 
   /** Stop refreshing and release a session's lock (idempotent). */

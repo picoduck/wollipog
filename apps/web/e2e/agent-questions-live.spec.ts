@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { SessionView } from "@wollipog/protocol";
+import type { SessionEventsResponse, SessionView } from "@wollipog/protocol";
 import {
   defaultLocalDeviceTokenPath,
   loadOrCreateLocalDeviceToken,
@@ -31,6 +31,7 @@ interface LiveStack {
   receiptPath: string;
   sessionId: string;
   logs(): string;
+  restart(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -94,11 +95,14 @@ async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "
   return ((await response.json()) as { session: SessionView }).session;
 }
 
-async function fetchEvents(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "sessionId">): Promise<unknown> {
+async function fetchEvents(
+  stack: Pick<LiveStack, "httpBase" | "ownerToken" | "sessionId">,
+): Promise<SessionEventsResponse> {
   const response = await fetch(`${stack.httpBase}/api/sessions/${stack.sessionId}/events`, {
     headers: { authorization: `Bearer ${stack.ownerToken}` },
   });
-  return response.ok ? response.json() : `${response.status} ${await response.text()}`;
+  if (!response.ok) throw new Error(`event lookup failed: ${response.status} ${await response.text()}`);
+  return response.json() as Promise<SessionEventsResponse>;
 }
 
 async function queuePrompt(
@@ -162,6 +166,7 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
 async function startLiveStack(
   provider: "claude" | "codex" = "claude",
   codexScenario: "question" | "dogfood-question" = "question",
+  restartRecovery = false,
 ): Promise<LiveStack> {
   const port = await reservePort();
   const httpBase = `http://127.0.0.1:${port}`;
@@ -174,6 +179,7 @@ async function startLiveStack(
   const runnerBin = join(temp, "bin");
   const configPath = join(temp, "runner.config.json");
   const receiptPath = join(temp, "provider-receipt.json");
+  const recoveryStatePath = join(temp, "provider-recovery-state.json");
   mkdirSync(workspaceDir, { recursive: true });
   mkdirSync(runnerHome, { recursive: true });
   mkdirSync(runnerBin, { recursive: true });
@@ -189,24 +195,54 @@ async function startLiveStack(
 
   let controlPlaneOutput = "";
   let runnerOutput = "";
+  let controlPlane: ChildProcess | null = null;
   let runner: ChildProcess | null = null;
-  const controlPlane = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
-    cwd: REPO_ROOT,
-    env: {
-      ...hermeticEnv(),
-      CONTROL_PLANE_HOST: "127.0.0.1",
-      CONTROL_PLANE_PORT: String(port),
-      CONTROL_PLANE_DB: databasePath,
-      CONTROL_PLANE_TOKEN,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
   const captureControlPlane = (chunk: unknown) => {
     controlPlaneOutput = (controlPlaneOutput + String(chunk)).slice(-65_536);
   };
-  controlPlane.stdout?.on("data", captureControlPlane);
-  controlPlane.stderr?.on("data", captureControlPlane);
+  const captureRunner = (chunk: unknown) => {
+    runnerOutput = (runnerOutput + String(chunk)).slice(-65_536);
+  };
+  const spawnControlPlane = () => {
+    const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
+      cwd: REPO_ROOT,
+      env: {
+        ...hermeticEnv(),
+        CONTROL_PLANE_HOST: "127.0.0.1",
+        CONTROL_PLANE_PORT: String(port),
+        CONTROL_PLANE_DB: databasePath,
+        CONTROL_PLANE_TOKEN,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stdout?.on("data", captureControlPlane);
+    child.stderr?.on("data", captureControlPlane);
+    controlPlane = child;
+    return child;
+  };
+  const runnerEnv = () => ({
+    ...hermeticEnv(),
+    HOME: runnerHome,
+    USERPROFILE: runnerHome,
+    XDG_CONFIG_HOME: join(runnerHome, ".config"),
+    XDG_DATA_HOME: join(runnerHome, ".local", "share"),
+    XDG_STATE_HOME: join(runnerHome, ".local", "state"),
+    PATH: `${runnerBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+    XDG_CACHE_HOME: join(runnerHome, ".cache"),
+  });
+  const spawnRunner = () => {
+    const child = spawn(process.execPath, ["--import", "tsx", "apps/runner/src/cli.ts", "--config", configPath], {
+      cwd: REPO_ROOT,
+      env: runnerEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stdout?.on("data", captureRunner);
+    child.stderr?.on("data", captureRunner);
+    runner = child;
+    return child;
+  };
   const logs = () => `=== CONTROL PLANE ===\n${controlPlaneOutput}\n=== RUNNER ===\n${runnerOutput}`;
   const stop = async () => {
     await stopChild(runner);
@@ -215,7 +251,8 @@ async function startLiveStack(
   };
 
   try {
-    await waitForHealth(httpBase, controlPlane, logs);
+    const initialControlPlane = spawnControlPlane();
+    await waitForHealth(httpBase, initialControlPlane, logs);
     const credentialResponse = await fetch(`${httpBase}/api/runner-credentials`, {
       method: "POST",
       headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
@@ -234,7 +271,10 @@ async function startLiveStack(
           args: [FAKE_CODEX, codexScenario],
           driver: "codex-app-server",
           context: { kind: "native" },
-          env: { WOLLIPOG_FAKE_CODEX_RECEIPT: receiptPath },
+          env: {
+            WOLLIPOG_FAKE_CODEX_RECEIPT: receiptPath,
+            ...(restartRecovery ? { WOLLIPOG_FAKE_QUESTION_STATE: recoveryStatePath } : {}),
+          },
         }
       : {
           id: "claude-question",
@@ -245,6 +285,7 @@ async function startLiveStack(
           env: {
             WOLLIPOG_CLAUDE_PERSISTENT: "1",
             WOLLIPOG_FAKE_CLAUDE_RECEIPT: receiptPath,
+            ...(restartRecovery ? { WOLLIPOG_FAKE_QUESTION_STATE: recoveryStatePath } : {}),
           },
         };
     writeFileSync(configPath, JSON.stringify({
@@ -256,31 +297,12 @@ async function startLiveStack(
       agents: [agent],
     }));
 
-    runner = spawn(process.execPath, ["--import", "tsx", "apps/runner/src/cli.ts", "--config", configPath], {
-      cwd: REPO_ROOT,
-      env: {
-        ...hermeticEnv(),
-        HOME: runnerHome,
-        USERPROFILE: runnerHome,
-        XDG_CONFIG_HOME: join(runnerHome, ".config"),
-        XDG_DATA_HOME: join(runnerHome, ".local", "share"),
-        XDG_STATE_HOME: join(runnerHome, ".local", "state"),
-        PATH: `${runnerBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
-        XDG_CACHE_HOME: join(runnerHome, ".cache"),
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    const captureRunner = (chunk: unknown) => {
-      runnerOutput = (runnerOutput + String(chunk)).slice(-65_536);
-    };
-    runner.stdout?.on("data", captureRunner);
-    runner.stderr?.on("data", captureRunner);
+    const initialRunner = spawnRunner();
 
     let sessionId = "";
     let lastCreateFailure = "";
     for (let attempt = 0; attempt < 300; attempt += 1) {
-      if (runner.exitCode !== null) throw new Error(`runner exited before registering\n${logs()}`);
+      if (initialRunner.exitCode !== null) throw new Error(`runner exited before registering\n${logs()}`);
       const created = await fetch(`${httpBase}/api/sessions`, {
         method: "POST",
         headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
@@ -302,7 +324,27 @@ async function startLiveStack(
     }
     if (!sessionId) throw new Error(`session was never created (${lastCreateFailure})\n${logs()}`);
 
-    const stack = { httpBase, ownerToken, receiptPath, sessionId, logs, stop };
+    const restart = async () => {
+      await stopChild(runner);
+      runner = null;
+      await stopChild(controlPlane);
+      controlPlane = null;
+      const restartedControlPlane = spawnControlPlane();
+      await waitForHealth(httpBase, restartedControlPlane, logs);
+      const restartedRunner = spawnRunner();
+      let lastSession: SessionView | null = null;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const session = await fetchSession({ httpBase, ownerToken, sessionId });
+        lastSession = session;
+        if (session.pendingApproval?.kind === "question" &&
+            session.pendingApproval.recoveryReason === "provider_restart" &&
+            session.pendingApproval.recoveryAction === "resume_answer") return;
+        if (restartedRunner.exitCode !== null) throw new Error(`runner exited during restart recovery\n${logs()}`);
+        await delay(100);
+      }
+      throw new Error(`recovered question never became resumable: ${JSON.stringify(lastSession)}\n${logs()}`);
+    };
+    const stack = { httpBase, ownerToken, receiptPath, sessionId, logs, restart, stop };
     for (let attempt = 0; attempt < 300; attempt += 1) {
       const session = await fetchSession(stack);
       if (session.pendingApproval?.kind === "question") return stack;
@@ -457,6 +499,114 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
     await stack.stop();
   }
 });
+
+for (const provider of ["claude", "codex"] as const) {
+  for (const style of ["interactive", "composer"] as const) {
+    for (const viewport of [
+      { name: "desktop", width: 1280, height: 800 },
+      { name: "mobile", width: 390, height: 844 },
+    ]) {
+      test(`${provider} recovered questions resume exactly once in ${style} style on ${viewport.name}`, async ({ page }) => {
+        test.setTimeout(180_000);
+        await page.setViewportSize({ width: viewport.width, height: viewport.height });
+        const stack = await startLiveStack(provider, "question", true);
+        try {
+          await stack.restart();
+          const recovered = await fetchSession(stack);
+          expect(recovered.pendingApproval).toMatchObject({
+            kind: "question",
+            requestId: provider === "claude" ? "live-question-1" : "live-codex-question-1",
+            recoveryReason: "provider_restart",
+            recoveryAction: "resume_answer",
+          });
+
+          const fragment = new URLSearchParams({
+            origin: stack.httpBase,
+            token: stack.ownerToken,
+            sessionId: stack.sessionId,
+          });
+          await page.addInitScript((responseStyle) => {
+            localStorage.setItem("wollipog.question-response-style", responseStyle);
+          }, style);
+          await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+
+          const card = page.getByRole("region", { name: "Agent Questions" });
+          await expect(card).toBeVisible();
+          await expect(card).toHaveCount(1);
+          await expect(page.getByText("Agent Question Recovery Required")).toBeVisible();
+          await expect(page.getByText(/resume the existing agent conversation and deliver these answers once/)).toBeVisible();
+          if (style === "interactive") {
+            const submit = page.getByRole("button", { name: "Submit" });
+            if (provider === "claude") {
+              await page.getByRole("radio", { name: /Canary/ }).click();
+              await page.getByRole("checkbox", { name: /Unit Tests/ }).click();
+              await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
+            } else {
+              await page.getByRole("radio", { name: /Staging/ }).click();
+              await page.getByLabel("Response").fill("Ship after checks pass");
+            }
+            await expect(submit).toBeEnabled();
+            await submit.scrollIntoViewIfNeeded();
+            await expect(submit).toBeInViewport();
+            await submit.click();
+          } else {
+            const response = page.locator(".composer-answer-input");
+            await expect(response).toBeVisible();
+            await response.fill("1");
+            await response.press("Enter");
+            await response.fill(provider === "claude" ? "1, 2" : "Ship after checks pass");
+            await response.press("Enter");
+          }
+          await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
+
+          const requestId = provider === "claude" ? "live-question-1" : "live-codex-question-1";
+          const expectedAnswers = provider === "claude"
+            ? {
+                "Which rollout strategy should we use?": "Canary",
+                "Which checks should run before promotion?": ["Unit Tests", "Browser Tests"],
+              }
+            : { environment: "Staging", note: "Ship after checks pass" };
+          await expect.poll(async () => {
+            try {
+              return JSON.parse(await readFile(stack.receiptPath, "utf8"));
+            } catch {
+              return null;
+            }
+          }, { timeout: 30_000 }).toEqual({
+            requestId,
+            recovered: true,
+            answers: expectedAnswers,
+            initialQuestions: 1,
+            recoveryTurns: 1,
+          });
+          await expect.poll(async () => (await fetchSession(stack)).status, {
+            timeout: 30_000,
+          }).toBe("idle");
+          await expect.poll(async () => (await fetchSession(stack)).preview, {
+            timeout: 30_000,
+          }).toContain(`Recovered question answers received by ${provider === "claude" ? "Claude Code" : "Codex"}.`);
+
+          const events = await fetchEvents(stack);
+          const requests = events.events.filter((event) =>
+            event.payload.kind === "question_request" && event.payload.requestId === requestId);
+          const resolutions = events.events.filter((event) =>
+            event.payload.kind === "question_resolved" && event.payload.requestId === requestId);
+          expect(requests).toHaveLength(1);
+          expect(resolutions).toHaveLength(1);
+          expect(resolutions[0]?.payload).toMatchObject({
+            kind: "question_resolved",
+            requestId,
+          });
+          expect((resolutions[0]?.payload as { commandId?: string }).commandId).toBeTruthy();
+        } catch (error) {
+          throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stack.logs()}`);
+        } finally {
+          await stack.stop();
+        }
+      });
+    }
+  }
+}
 
 for (const viewport of [
   { name: "mobile portrait", width: 390, height: 844, touch: true },

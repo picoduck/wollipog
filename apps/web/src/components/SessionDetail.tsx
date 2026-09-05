@@ -2086,7 +2086,8 @@ function SessionDetailLoaded({
     }
     return approvalQuestions;
   })();
-  const canAnswerPendingQuestion = pendingQuestion !== null && composerQuestions.length > 0;
+  const canAnswerPendingQuestion = pendingQuestion !== null && composerQuestions.length > 0 &&
+    (pendingQuestion.recoveryReason !== "provider_restart" || pendingQuestion.recoveryAction === "resume_answer");
   const questionResponseStyle = useQuestionResponseStyle();
   const steeringAvailabilityInput = {
     runnerProtocolVersion: runner?.protocolVersion,
@@ -2725,7 +2726,8 @@ function SessionDetailLoaded({
     requestId: pendingQuestion.requestId,
     questions: pendingQuestion.questions ?? [],
     recoveryReason: pendingQuestion.recoveryReason,
-  } : null, [session.id, pendingQuestion?.requestId, pendingQuestion?.recoveryReason]);
+    recoveryAction: pendingQuestion.recoveryAction,
+  } : null, [session.id, pendingQuestion?.requestId, pendingQuestion?.recoveryReason, pendingQuestion?.recoveryAction]);
   const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
   const handlePendingQuestionAvailabilityChange = useCallback((requestId: string, available: boolean) => {
     setInlineQuestionRequestId((current) => available

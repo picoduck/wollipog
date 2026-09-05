@@ -46,6 +46,7 @@ async function renderBanner(
   runnerOnline: boolean,
   client: ApiClient = api,
   requestId = "question-1",
+  recovery?: { reason: "provider_restart"; action?: "resume_answer" },
 ) {
   await act(async () => {
     root.render(
@@ -54,12 +55,59 @@ async function renderBanner(
           sessionId="session-1"
           requestId={requestId}
           questions={questions}
+          recoveryReason={recovery?.reason}
+          recoveryAction={recovery?.action}
           runnerOnline={runnerOnline}
         />
       </ApiProvider>,
     );
   });
 }
+
+test("a resumable recovered question keeps its preserved form answerable", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  const client = {
+    ...api,
+    answerQuestion: async (_sessionId: string, action: Parameters<ApiClient["answerQuestion"]>[1]) => {
+      calls.push(structuredClone(action));
+      return {} as SessionView;
+    },
+  } as ApiClient;
+  const questions: AgentQuestion[] = [{
+    id: "language",
+    question: "Choose a language",
+    options: [{ label: "TypeScript" }, { label: "Python" }],
+  }];
+
+  try {
+    await renderBanner(root, questions, true, client, "question-1", {
+      reason: "provider_restart",
+      action: "resume_answer",
+    });
+    assert.match(container.textContent ?? "", /resume the existing agent conversation and deliver these answers once/);
+    assert.match(container.textContent ?? "", /Prior tool calls will not be replayed/);
+    const choice = container.querySelector<HTMLButtonElement>('[role="radio"]');
+    assert.ok(choice);
+    assert.equal(choice.disabled, false);
+    await act(async () => { choice.click(); });
+    assert.equal(submitButton(container).disabled, false);
+    await act(async () => {
+      submitButton(container).click();
+      await tick();
+    });
+    assert.deepEqual(calls, [{
+      requestId: "question-1",
+      answers: { language: "TypeScript" },
+      action: "submit",
+    }]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
 
 function submitButton(container: HTMLDivElement): HTMLButtonElement {
   const button = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]

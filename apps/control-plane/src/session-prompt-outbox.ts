@@ -22,8 +22,9 @@ function retryDelay(attempt: number): number {
   return Math.min(MAX_RETRY_MS, 250 * (2 ** Math.min(7, Math.max(0, attempt - 1))));
 }
 
-/** Durable at-least-once transport for user-submitted prompts. The runner's command journal
- * deduplicates retries; the control plane retains the exact payload until a terminal receipt. */
+/** Durable at-least-once transport for user-submitted prompts and recovered question answers.
+ * The runner's command journal deduplicates retries; the control plane retains the exact payload
+ * until a terminal receipt. */
 export class SessionPromptOutbox {
   constructor(
     private readonly db: ControlPlaneDb,
@@ -31,8 +32,14 @@ export class SessionPromptOutbox {
     private readonly log: Logger,
   ) {}
 
-  stage(sessionId: string, runnerId: string, command: DurableSessionCommand, now = Date.now()): SessionPromptCommandRecord {
-    const commandId = `prompt_${randomUUID()}`;
+  stage(
+    sessionId: string,
+    runnerId: string,
+    command: DurableSessionCommand,
+    now = Date.now(),
+    stableCommandId?: string,
+  ): SessionPromptCommandRecord {
+    const commandId = stableCommandId ?? `prompt_${randomUUID()}`;
     const payloadJson = canonicalAutomationCommandJson(command);
     return this.db.stageSessionPromptCommand({
       commandId,
@@ -49,19 +56,6 @@ export class SessionPromptOutbox {
     let sent = 0;
     for (const row of this.db.dueSessionPromptCommands(now, runnerId, 100)) {
       if (!this.hub.isRunnerOnline(row.runnerId)) continue;
-      if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, "durablePromptQueueIdentity")) {
-        this.db.recordSessionPromptCommandReceipt({
-          commandId: row.commandId,
-          runnerId: row.runnerId,
-          sessionId: row.sessionId,
-          state: row.state === "pending" ? "failed" : "uncertain",
-          revision: row.revision + 1,
-          error: "runner no longer supports durable queued prompt identity",
-          now,
-        });
-        this.hub.sessionChangedById(row.sessionId);
-        continue;
-      }
       let command: DurableSessionCommand;
       try {
         command = JSON.parse(row.payloadJson) as DurableSessionCommand;
@@ -71,6 +65,24 @@ export class SessionPromptOutbox {
       }
       if (automationCommandDigest(command) !== row.payloadSha256) {
         this.failMalformed(row, "stored durable prompt digest does not match", now);
+        continue;
+      }
+      const capability = command.type === "answer_recovered_question"
+        ? "resumableQuestionAnswers"
+        : "durablePromptQueueIdentity";
+      if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, capability)) {
+        this.db.recordSessionPromptCommandReceipt({
+          commandId: row.commandId,
+          runnerId: row.runnerId,
+          sessionId: row.sessionId,
+          state: row.state === "pending" ? "failed" : "uncertain",
+          revision: row.revision + 1,
+          error: command.type === "answer_recovered_question"
+            ? "runner no longer supports resumable structured-question answers"
+            : "runner no longer supports durable queued prompt identity",
+          now,
+        });
+        this.hub.sessionChangedById(row.sessionId);
         continue;
       }
       const requestId = randomUUID();

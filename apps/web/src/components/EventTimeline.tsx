@@ -52,6 +52,7 @@ export interface TimelineQuestionContext {
     requestId: string;
     questions: AgentQuestion[];
     recoveryReason?: "provider_restart";
+    recoveryAction?: "resume_answer";
   } | null;
   /** True only after the matching pinned row is mounted and measurement-ready. */
   questionInTimeline: boolean;
