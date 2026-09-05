@@ -10,7 +10,7 @@ const WIDTHS = [390, 1000, 1400] as const;
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-row-layout");
-  await expect(page.locator(".inbox-row")).toHaveCount(5);
+  await expect(page.locator(".inbox-row")).toHaveCount(7);
 });
 
 for (const width of WIDTHS) {
@@ -29,7 +29,7 @@ for (const width of WIDTHS) {
       };
     }));
 
-    expect(strips).toHaveLength(5);
+    expect(strips).toHaveLength(7);
     for (const strip of strips) {
       expect(strip.renderedBars).toBe(30);
       expect(strip.stripWidth).toBeGreaterThan(50);
@@ -87,7 +87,7 @@ test("only sessions with a worktree take a third line, and the list measures bot
     bottom: node.closest(".inbox-row-shell")!.getBoundingClientRect().bottom,
   })));
 
-  expect(rows.map((row) => row.hasWorktreeLine)).toEqual([true, true, true, false, false]);
+  expect(rows.map((row) => row.hasWorktreeLine)).toEqual([true, true, true, true, true, false, false]);
   const threeLine = rows.filter((row) => row.hasWorktreeLine);
   const twoLine = rows.filter((row) => !row.hasWorktreeLine);
   expect(Math.min(...threeLine.map((row) => row.height)))
@@ -154,4 +154,17 @@ test("the message preview no longer renders in Inbox rows", async ({ page }) => 
     await expect(page.locator(".inbox-row-snippet")).toHaveCount(0);
     await expect(page.locator(".inbox-row").first()).not.toContainText("preview");
   }
+});
+
+// #679: the row compares against the repository's reported default branch instead of guessing from
+// the branch's name, so a `develop`-default repository keeps an explicit `origin/main` base.
+test("a reported default branch decides whether the base ref is worth showing", async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const nonDefault = page.locator(".inbox-row-worktree").nth(3);
+  await expect(nonDefault.locator(".inbox-row-branch")).toHaveText("fix/issue-679-default-branch");
+  await expect(nonDefault.locator(".inbox-row-base")).toContainText("← origin/main");
+
+  const onDefault = page.locator(".inbox-row-worktree").nth(4);
+  await expect(onDefault.locator(".inbox-row-branch")).toHaveText("fix/issue-679-follow-up");
+  await expect(onDefault.locator(".inbox-row-base")).toHaveCount(0);
 });

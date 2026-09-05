@@ -396,7 +396,7 @@ export async function fetchRemoteDefaultBase(
   repoPath: string,
   options: WorktreeOptions = {},
   remote = "origin",
-): Promise<string> {
+): Promise<{ ref: string; branch: string }> {
   const context = options.context ?? nativeContext;
   safeGitArgument(remote, "Git remote");
   const advertised = await command(context, repoPath, ["ls-remote", "--symref", remote, "HEAD"], 120_000);
@@ -408,7 +408,55 @@ export async function fetchRemoteDefaultBase(
   safeGitArgument(branch, "remote default branch");
   const trackingRef = `refs/remotes/${remote}/${branch}`;
   await command(context, repoPath, ["fetch", "--no-tags", remote, `+${headRef}:${trackingRef}`], 120_000);
-  return `${remote}/${branch}`;
+  // The branch is returned alongside the ref because this call just asked the remote itself, which
+  // makes it the only authoritative answer available without a second round trip.
+  return { ref: `${remote}/${branch}`, branch };
+}
+
+/**
+ * The repository's default branch, read from the remote HEAD Git already tracks locally.
+ *
+ * Deliberately network-free, unlike `fetchRemoteDefaultBase` above: this rides along with every
+ * worktree record purely so the UI can tell a routine base from a deliberate one, and that is not
+ * worth a round trip on the worktree-creation path. `refs/remotes/<remote>/HEAD` is written by
+ * `git clone` and by `git remote set-head`; where it is absent the repository has no locally known
+ * default and callers get `undefined`, which they must treat as unknown rather than as a guess.
+ *
+ * KNOWN STALE WINDOW, measured: `git fetch` — including `--all` — never refreshes this ref. A
+ * remote that changes its default after clone leaves it pointing at the old branch until someone
+ * runs `git remote set-head`. Callers that have just spoken to the remote must therefore prefer
+ * what it advertised; this is the fallback for callers that have not. The dangling case is handled
+ * here: if the recorded default no longer has a tracking ref, the answer is `undefined` rather than
+ * a branch name nothing backs.
+ */
+export async function readRepositoryDefaultBranch(
+  repoPath: string,
+  options: WorktreeOptions = {},
+  remote = "origin",
+): Promise<string | undefined> {
+  const context = options.context ?? nativeContext;
+  safeGitArgument(remote, "Git remote");
+  let head: string;
+  try {
+    head = (await command(context, repoPath, ["symbolic-ref", "--short", `refs/remotes/${remote}/HEAD`])).trim();
+  } catch {
+    // `symbolic-ref` exits non-zero when the remote HEAD has never been recorded. That is an
+    // ordinary state for a repository added by path rather than cloned, not a failure worth
+    // propagating into worktree creation.
+    return undefined;
+  }
+  if (!head) return undefined;
+  const prefix = `${remote}/`;
+  const branch = head.startsWith(prefix) ? head.slice(prefix.length) : head;
+  if (!branch) return undefined;
+  try {
+    await command(context, repoPath, ["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/remotes/${remote}/${branch}`]);
+  } catch {
+    // The symbolic ref outlived the branch it names — a pruned or renamed default. Reporting it
+    // would have the Inbox hide a base ref on the strength of a branch that no longer exists.
+    return undefined;
+  }
+  return branch;
 }
 
 interface ListedWorktree {

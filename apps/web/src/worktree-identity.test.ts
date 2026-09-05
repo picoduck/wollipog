@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { displayBaseRef, isConventionalDefaultBaseRef, pullRequestStateLabel } from "./worktree-identity.js";
+import {
+  displayBaseRef,
+  isConventionalDefaultBaseRef,
+  matchesDefaultBranch,
+  pullRequestStateLabel,
+} from "./worktree-identity.js";
 
 test("conventional default base refs are recognised through remote and ref prefixes", () => {
   for (const ref of [
@@ -43,4 +48,46 @@ test("pull request states read as Title Case labels", () => {
   assert.equal(pullRequestStateLabel("open"), "Open");
   assert.equal(pullRequestStateLabel("merged"), "Merged");
   assert.equal(pullRequestStateLabel("closed"), "Closed");
+});
+
+test("a reported default branch decides the base ref, whatever it is called", () => {
+  // The case #679 exists for: `develop` is the default, so a deliberate `origin/main` base is
+  // information the row must keep. The name heuristic alone suppressed it.
+  assert.equal(displayBaseRef({ baseRef: "origin/main", defaultBranch: "develop" }), "origin/main");
+  assert.equal(displayBaseRef({ baseRef: "origin/develop", defaultBranch: "develop" }), null);
+  assert.equal(displayBaseRef({ baseRef: "develop", defaultBranch: "develop" }), null);
+  assert.equal(displayBaseRef({ baseRef: "refs/heads/develop", defaultBranch: "develop" }), null);
+  assert.equal(displayBaseRef({ baseRef: "refs/remotes/origin/develop", defaultBranch: "develop" }), null);
+  assert.equal(displayBaseRef({ baseRef: "  origin/develop  ", defaultBranch: "  develop  " }), null);
+});
+
+test("a trunk-default repository hides trunk and shows main", () => {
+  assert.equal(displayBaseRef({ baseRef: "origin/trunk", defaultBranch: "trunk" }), null);
+  assert.equal(displayBaseRef({ baseRef: "origin/master", defaultBranch: "trunk" }), "origin/master");
+});
+
+test("a default branch containing a slash is compared whole", () => {
+  // Never reduce `release/2027` to `2027` on the way to a comparison.
+  assert.equal(displayBaseRef({ baseRef: "origin/release/2027", defaultBranch: "release/2027" }), null);
+  assert.equal(displayBaseRef({ baseRef: "origin/release/2028", defaultBranch: "release/2027" }), "origin/release/2028");
+  assert.equal(matchesDefaultBranch("2027", "release/2027"), false);
+});
+
+test("an unreported default branch falls back to the conventional guess, not to hiding", () => {
+  // A runner older than this field, or a repository with no recorded remote HEAD. The row must
+  // degrade to the behaviour shipped in #664 rather than start suppressing refs it cannot vouch for.
+  assert.equal(displayBaseRef({ baseRef: "origin/main" }), null);
+  assert.equal(displayBaseRef({ baseRef: "origin/develop" }), "origin/develop");
+  assert.equal(displayBaseRef({ baseRef: "origin/main", defaultBranch: "" }), null);
+  assert.equal(displayBaseRef({ baseRef: "origin/main", defaultBranch: "   " }), null);
+  assert.equal(displayBaseRef({ baseRef: "origin/develop", defaultBranch: undefined }), "origin/develop");
+});
+
+test("matchesDefaultBranch accepts the spellings Git produces and nothing else", () => {
+  for (const ref of ["main", "origin/main", "upstream/main", "refs/heads/main", "refs/remotes/origin/main"]) {
+    assert.equal(matchesDefaultBranch(ref, "main"), true, ref);
+  }
+  for (const ref of ["mainline", "main-line", "fork/main", "origin/origin/main", "feature/main"]) {
+    assert.equal(matchesDefaultBranch(ref, "main"), false, ref);
+  }
 });

@@ -3364,6 +3364,15 @@ export interface SessionWorktreeView {
   branch: string;
   /** Caller-selected creation ref. Attached and legacy worktrees may omit it. */
   baseRef?: string;
+  /**
+   * The repository's default branch, as a plain branch name with no remote prefix.
+   *
+   * Carried so a reader of `baseRef` can tell "branched from the default, as usual" from "branched
+   * from somewhere deliberate" without guessing from the branch's NAME. Runners that predate this
+   * field, and repositories with no locally known remote HEAD, omit it; consumers must treat it as
+   * unknown rather than assuming a default.
+   */
+  defaultBranch?: string;
   /** Commit resolved from baseRef when this worktree was created. */
   baseCommit?: string;
   source: "legacy" | "created" | "attached";

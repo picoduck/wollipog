@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -2326,5 +2326,144 @@ test("WSL worktrees are created, used, and removed inside the selected distro", 
     manager?.shutdownAll();
     rmSync(managerRoot, { recursive: true, force: true });
     await runContextCommand(context, "rm", ["-rf", "--", repo], { cwd: "/" }).catch(() => {});
+  }
+});
+
+test("the repository default branch is read from the tracked remote HEAD, never the network", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-default-branch-"));
+  const origin = join(root, "origin");
+  const clone = join(root, "clone");
+  try {
+    // A repository whose default is deliberately NOT `main` or `master`: the exact case the name
+    // heuristic in the web client gets wrong (#679).
+    execFileSync("git", ["init", "--bare", "--initial-branch=develop", origin]);
+    const seed = join(root, "seed");
+    execFileSync("git", ["init", "--initial-branch=develop", seed]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "Test"]);
+    writeFileSync(join(seed, "state.txt"), "base\n");
+    execFileSync("git", ["-C", seed, "add", "state.txt"]);
+    execFileSync("git", ["-C", seed, "commit", "-m", "base"]);
+    execFileSync("git", ["-C", seed, "remote", "add", "origin", origin]);
+    execFileSync("git", ["-C", seed, "push", "origin", "develop"]);
+    execFileSync("git", ["clone", origin, clone]);
+
+    // `git clone` records the remote HEAD, so the read is a local ref lookup with no round trip.
+    assert.equal(await readRepositoryDefaultBranch(clone), "develop");
+
+    // With the remote HEAD removed the repository has no locally known default, and the caller
+    // must get `undefined` rather than a guess it would then present as fact.
+    execFileSync("git", ["-C", clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+    assert.equal(await readRepositoryDefaultBranch(clone), undefined);
+
+    // A repository that was never cloned has no remote HEAD either, and must not throw.
+    assert.equal(await readRepositoryDefaultBranch(seed), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a default branch whose tracking ref is gone reads as unknown, not as a name", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-dangling-head-"));
+  const origin = join(root, "origin.git");
+  const clone = join(root, "clone");
+  try {
+    execFileSync("git", ["init", "--bare", "--initial-branch=develop", origin]);
+    const seed = join(root, "seed");
+    execFileSync("git", ["init", "--initial-branch=develop", seed]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "Test"]);
+    writeFileSync(join(seed, "state.txt"), "base\n");
+    execFileSync("git", ["-C", seed, "add", "state.txt"]);
+    execFileSync("git", ["-C", seed, "commit", "-m", "base"]);
+    execFileSync("git", ["-C", seed, "remote", "add", "origin", origin]);
+    execFileSync("git", ["-C", seed, "push", "origin", "develop"]);
+    execFileSync("git", ["clone", origin, clone]);
+    assert.equal(await readRepositoryDefaultBranch(clone), "develop");
+
+    // The symbolic ref outlives the branch it names. Reporting `develop` here would have the Inbox
+    // hide a base ref on the strength of a tracking ref that no longer exists.
+    execFileSync("git", ["-C", clone, "update-ref", "-d", "refs/remotes/origin/develop"]);
+    assert.equal(await readRepositoryDefaultBranch(clone), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a remote that moves its default is not tracked by fetch, so the advertised branch wins", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-stale-head-"));
+  const origin = join(root, "origin.git");
+  const clone = join(root, "clone");
+  try {
+    execFileSync("git", ["init", "--bare", "--initial-branch=release-2027", origin]);
+    const seed = join(root, "seed");
+    execFileSync("git", ["init", "--initial-branch=release-2027", seed]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "Test"]);
+    writeFileSync(join(seed, "state.txt"), "base\n");
+    execFileSync("git", ["-C", seed, "add", "state.txt"]);
+    execFileSync("git", ["-C", seed, "commit", "-m", "base"]);
+    execFileSync("git", ["-C", seed, "remote", "add", "origin", origin]);
+    execFileSync("git", ["-C", seed, "push", "origin", "release-2027"]);
+    execFileSync("git", ["-C", seed, "branch", "develop"]);
+    execFileSync("git", ["-C", seed, "push", "origin", "develop"]);
+    execFileSync("git", ["clone", origin, clone]);
+    execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/develop"]);
+    execFileSync("git", ["-C", clone, "fetch", "--all"]);
+
+    // This is the whole reason the create path prefers what the remote advertises: a plain fetch
+    // leaves the tracked HEAD on the old default indefinitely.
+    assert.equal(await readRepositoryDefaultBranch(clone), "release-2027");
+    const advertised = await fetchRemoteDefaultBase(clone);
+    assert.equal(advertised.branch, "develop");
+    assert.equal(advertised.ref, "origin/develop");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an idempotent retry applies the default branch the remote just advertised", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retry-default-"));
+  const origin = join(root, "origin.git");
+  const repo = join(root, "clone");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", "--bare", "--initial-branch=release-2027", origin]);
+    const seed = join(root, "seed");
+    execFileSync("git", ["init", "--initial-branch=release-2027", seed]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", seed, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["-C", seed, "remote", "add", "origin", origin]);
+    execFileSync("git", ["-C", seed, "push", "origin", "release-2027"]);
+    execFileSync("git", ["-C", seed, "branch", "develop"]);
+    execFileSync("git", ["-C", seed, "push", "origin", "develop"]);
+    execFileSync("git", ["clone", origin, repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_retry", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "retry",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+
+    const first = await manager.requestWorktree("s_retry", { branch: "fix/issue-679-retry" });
+    assert.equal(first.worktree.defaultBranch, "release-2027");
+
+    // The remote moves its default. A plain fetch never updates the tracked HEAD, so only the
+    // retry's own `ls-remote` can notice — and it must write what it learned to the record.
+    execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/develop"]);
+    const retried = await manager.requestWorktree("s_retry", { branch: "fix/issue-679-retry" });
+    assert.equal(retried.worktree.id, first.worktree.id, "the retry is still the same worktree");
+    assert.equal(retried.worktree.defaultBranch, "develop", "a retry must not preserve a stale default");
+  } finally {
+    await manager?.shutdown?.().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
   }
 });

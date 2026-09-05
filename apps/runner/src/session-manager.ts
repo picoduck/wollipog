@@ -114,6 +114,7 @@ import {
   createRequestedWorktree,
   attachRequestedWorktree,
   fetchRemoteDefaultBase,
+  readRepositoryDefaultBranch,
   createWorktreeFromTree,
   captureTurnDiff,
   discardWorktreeIfSafe,
@@ -910,7 +911,11 @@ export class SessionManager {
         ownerHash: this.runnerOwnerHash,
         allowedProjectPaths: this.configuredProjectPaths,
       };
-      const baseRef = request.baseRef ?? await fetchRemoteDefaultBase(meta.repoPath, options);
+      // When no base is chosen we ask the remote, and that answer is authoritative for BOTH the
+      // base ref and the repository's default branch. `git fetch` never refreshes the locally
+      // tracked remote HEAD, so preferring this avoids stamping a default that moved after clone.
+      const advertised = request.baseRef ? null : await fetchRemoteDefaultBase(meta.repoPath, options);
+      const baseRef = request.baseRef ?? advertised!.ref;
       const created = await createRequestedWorktree(meta.repoPath, sessionId, {
         baseRef,
         branch: request.branch,
@@ -922,9 +927,19 @@ export class SessionManager {
         if (!existing) {
           throw new Error("requested worktree already exists without ownership by this session");
         }
-        const canonical = { ...existing, path: created.path };
+        const canonical: SessionWorktreeView = { ...existing, path: created.path };
+        // An idempotent retry still asked the remote, so it still learned the current default and
+        // must apply it — the same refresh rule as attach. Where the caller chose the base we
+        // contacted nobody and learned nothing, so the stored value is left exactly as it was
+        // rather than replaced by a local read that `git fetch` never updates.
+        if (advertised) canonical.defaultBranch = advertised.branch;
         return { worktree: canonical, snapshot: await this.activateWorktree(meta, canonical) };
       }
+      // Stamped once, here, and persisted with the record: `attributedWorktrees` rebuilds views
+      // synchronously and must never reach for Git to do it. The advertised branch wins when we
+      // have one; the local read is the fallback for a caller-chosen base, which never contacts
+      // the remote and so can only offer the possibly stale tracked HEAD.
+      const defaultBranch = advertised?.branch ?? await readRepositoryDefaultBranch(meta.repoPath, options);
       const worktree: SessionWorktreeView = {
         id: created.path.split(/[\\/]/u).at(-1)!,
         path: created.path,
@@ -932,6 +947,7 @@ export class SessionManager {
         baseRef: created.baseRef,
         baseCommit: created.baseCommit,
         source: "created",
+        ...(defaultBranch ? { defaultBranch } : {}),
       };
       try {
         return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
@@ -976,13 +992,24 @@ export class SessionManager {
       if (existing && existing.branch !== attached.branch) {
         throw new Error("worktree branch changed since it was linked to this session");
       }
-      const worktree: SessionWorktreeView = existing ? { ...existing, path: attached.path } : {
-        id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
-        path: attached.path,
-        branch: attached.branch,
-        baseCommit: attached.baseCommit,
-        source: "attached",
-      };
+      // Only the execution context matters here; the read touches no worktree root or project path.
+      const attachedDefaultBranch = await readRepositoryDefaultBranch(meta.repoPath, { context: meta.context });
+      const worktree: SessionWorktreeView = existing
+        // Re-attaching refreshes the default branch without disturbing the rest of the record: the
+        // repository's default can move (`git remote set-head`) long after the worktree was linked.
+        ? { ...existing, path: attached.path }
+        : {
+          id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
+          path: attached.path,
+          branch: attached.branch,
+          baseCommit: attached.baseCommit,
+          source: "attached",
+        };
+      // A refresh REPLACES rather than fills in. When the repository stops advertising a default,
+      // the record has to stop claiming one too, or the row keeps hiding a base ref on evidence
+      // that no longer exists — and the contract on the field is that absent means unknown.
+      if (attachedDefaultBranch) worktree.defaultBranch = attachedDefaultBranch;
+      else delete worktree.defaultBranch;
       return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
     });
   }
