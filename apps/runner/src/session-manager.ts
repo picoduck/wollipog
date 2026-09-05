@@ -267,6 +267,7 @@ interface QueuedPrompt {
   /** Submit-only continuation for a structured question whose process-owned callback was lost. */
   recoveredQuestion?: {
     requestId: string;
+    recoveryId: string;
     answers: Record<string, string | string[]>;
   };
 }
@@ -436,7 +437,7 @@ function canResumeRecoveredQuestion(
 ): boolean {
   const questions = question.kind === "question" ? (question.questions ?? []) : [];
   return Boolean(
-    meta.agentSessionId && meta.command && canResumeSession(meta) && questions.length > 0 &&
+    meta.agentSessionId && meta.command && canResumeSession(meta) && question.recoveryId && questions.length > 0 &&
     questions.every((candidate) => !candidate.secret),
   );
 }
@@ -1561,6 +1562,7 @@ export class SessionManager {
             scanned: true,
             question: {
               requestId: payload.requestId,
+              recoveryId: `question:${logEpoch}:${events[index]!.seq}`,
               title: payload.questions[0]?.question ?? "The agent has a question",
               options: [],
               kind: "question",
@@ -1663,11 +1665,14 @@ export class SessionManager {
         // Prefer that exact durable resolution over the stale pending-card projection.
         const recovery = this.unresolvedQuestionFromHistory(m.sessionId);
         pendingQuestionResolved = recovery.resolvedQuestionIds.has(reconciled.pendingApproval.requestId);
+        if (recovery.question?.requestId === reconciled.pendingApproval.requestId) {
+          historicalQuestion = recovery.question;
+        }
       }
       const recoverableQuestion = terminal
         ? null
         : reconciled.pendingApproval?.kind === "question" && !pendingQuestionResolved
-          ? reconciled.pendingApproval
+          ? historicalQuestion ?? reconciled.pendingApproval
           : historicalQuestion;
       if (reconciled.providerAuthBlock && reconciled.status === "stopped") {
         // Terminal operator intent dominates a stale/incomplete recovery generation.
@@ -5561,10 +5566,9 @@ export class SessionManager {
   private async drain(sessionId: string): Promise<void> {
     const entry = this.active.get(sessionId);
     if (!entry || entry.running || entry.governanceTripped || this.queueHeld(entry) ||
-        (this.hasPendingApproval(sessionId) &&
-          !this.queuedPromptResolvesPendingQuestion(sessionId, entry.queue[0])) ||
         this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
+    if (!this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) return;
     if (entry.pendingWorktreeRebind) {
       await this.rebindSelectedWorktree(sessionId, entry);
       return;
@@ -5586,8 +5590,7 @@ export class SessionManager {
     entry.running = true;
     try {
       while (this.active.has(sessionId) && entry.queue.length && !entry.authenticationBlocked &&
-          (!this.hasPendingApproval(sessionId) ||
-            this.queuedPromptResolvesPendingQuestion(sessionId, entry.queue[0]))) {
+          this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) {
         if (this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry)) break;
         const next = entry.queue.shift()!;
         this.ensureQueueOrdinal(sessionId, next);
@@ -5964,8 +5967,19 @@ export class SessionManager {
     return Boolean(
       prompt?.recoveredQuestion && pending?.kind === "question" &&
       pending.recoveryReason === "provider_restart" && pending.recoveryAction === "resume_answer" &&
-      pending.requestId === prompt.recoveredQuestion.requestId,
+      pending.requestId === prompt.recoveredQuestion.requestId &&
+      pending.recoveryId === prompt.recoveredQuestion.recoveryId,
     );
+  }
+
+  /** A recovered answer resolves the approval barrier itself, so it must run before ordinary work
+   * admitted while the card was visible. The relative FIFO of every other prompt stays intact. */
+  private promoteQueuedRecoveredAnswer(sessionId: string, queue: QueuedPrompt[]): boolean {
+    if (!this.hasPendingApproval(sessionId)) return true;
+    const index = queue.findIndex((prompt) => this.queuedPromptResolvesPendingQuestion(sessionId, prompt));
+    if (index < 0) return false;
+    if (index > 0) queue.unshift(queue.splice(index, 1)[0]!);
+    return true;
   }
 
   private async recordConversationForkPoint(
@@ -6107,6 +6121,7 @@ export class SessionManager {
         ? validateQuestionAnswers(pending.questions ?? [], recoveredQuestion.answers, "submit")
         : "the recovered question is absent";
       if (pending?.kind !== "question" || pending.requestId !== recoveredQuestion.requestId ||
+          pending.recoveryId !== recoveredQuestion.recoveryId ||
           pending.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer" || invalid) {
         durable?.failed(invalid ? `recovered answer is no longer valid: ${invalid}` :
           "the recovered question is no longer pending", "COMMAND_CANCELLED");
@@ -7791,6 +7806,7 @@ export class SessionManager {
   answerRecoveredQuestion(
     sessionId: string,
     requestId: string,
+    recoveryId: string,
     answers: Record<string, string | string[]>,
     durable: DurableCommandLifecycle,
   ): void {
@@ -7800,7 +7816,7 @@ export class SessionManager {
       return;
     }
     const pending = meta.pendingApproval;
-    if (pending?.kind !== "question" || pending.requestId !== requestId ||
+    if (pending?.kind !== "question" || pending.requestId !== requestId || pending.recoveryId !== recoveryId ||
         pending.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer") {
       durable.failed("the recovered question is no longer pending", "COMMAND_CANCELLED");
       return;
@@ -7825,7 +7841,7 @@ export class SessionManager {
       undefined,
       true,
       undefined,
-      { requestId, answers },
+      { requestId, recoveryId, answers },
     );
   }
 

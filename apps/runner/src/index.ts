@@ -1326,6 +1326,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           sessions.answerRecoveredQuestion(
             msg.command.sessionId,
             msg.command.requestId,
+            msg.command.recoveryId,
             msg.command.answers,
             lifecycle,
           );

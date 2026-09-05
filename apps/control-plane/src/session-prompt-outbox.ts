@@ -52,6 +52,25 @@ export class SessionPromptOutbox {
     });
   }
 
+  stageRecoveredAnswer(
+    sessionId: string,
+    runnerId: string,
+    command: Extract<DurableSessionCommand, { type: "answer_recovered_question" }>,
+    now: number,
+    baseCommandId: string,
+  ) {
+    const payloadJson = canonicalAutomationCommandJson(command);
+    return this.db.stageRetriableSessionPromptCommand({
+      baseCommandId,
+      sessionId,
+      runnerId,
+      payloadJson,
+      payloadSha256: automationCommandDigest(command),
+      expiresAt: now + RECEIPT_HORIZON_MS,
+      now,
+    });
+  }
+
   flush(now = Date.now(), runnerId?: string): number {
     let sent = 0;
     for (const row of this.db.dueSessionPromptCommands(now, runnerId, 100)) {

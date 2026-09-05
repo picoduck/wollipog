@@ -49,6 +49,7 @@ test("recovered question answers use the same content-free durable dedupe journa
       type: "answer_recovered_question",
       sessionId: "s_test",
       requestId: "question-1",
+      recoveryId: "question:1:4",
       answers: { target: "Production" },
     };
     const claimed = store.claim(message(command));

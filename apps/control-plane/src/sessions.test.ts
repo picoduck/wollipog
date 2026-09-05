@@ -6724,6 +6724,7 @@ test("resumable recovered answers persist one deterministic command before clear
     questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
     recoveryReason: "provider_restart",
     recoveryAction: "resume_answer",
+    recoveryId: "question:1:12",
   });
   db.updateSessionStatus(id, "input_required", Date.now());
 
@@ -6746,6 +6747,7 @@ test("resumable recovered answers persist one deterministic command before clear
     type: "answer_recovered_question",
     sessionId: id,
     requestId: "resumable-recovered-question",
+    recoveryId: "question:1:12",
     answers: { target: "Production" },
   });
 
@@ -6755,6 +6757,92 @@ test("resumable recovered answers persist one deterministic command before clear
   assert.ok(retry?.type === "durable_session_command");
   assert.equal(retry.commandId, first.commandId);
   assert.deepEqual(retry.command, first.command);
+});
+
+test("reused provider request ids receive distinct durable identities per recovered occurrence", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  const pending = {
+    kind: "question" as const,
+    requestId: "provider-counter-5",
+    title: "Which target?",
+    options: [],
+    questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }, { label: "Staging" }] }],
+    recoveryReason: "provider_restart" as const,
+    recoveryAction: "resume_answer" as const,
+  };
+  db.setPendingApproval(id, { ...pending, recoveryId: "question:1:12" });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(id, pending.requestId, { target: "Production" }).ok);
+  const first = hub.sentToRunner.map(({ msg }) => msg).find((msg) =>
+    msg.type === "durable_session_command" && msg.command.type === "answer_recovered_question");
+  assert.ok(first?.type === "durable_session_command");
+  db.recordSessionPromptCommandReceipt({
+    commandId: first.commandId,
+    runnerId: RUNNER_ID,
+    sessionId: id,
+    state: "completed",
+    revision: 1,
+    now: Date.now(),
+  });
+
+  hub.sentToRunner.length = 0;
+  db.setPendingApproval(id, { ...pending, recoveryId: "question:2:27" });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(id, pending.requestId, { target: "Staging" }).ok);
+  const second = hub.sentToRunner.map(({ msg }) => msg).find((msg) =>
+    msg.type === "durable_session_command" && msg.command.type === "answer_recovered_question");
+  assert.ok(second?.type === "durable_session_command");
+  assert.notEqual(second.commandId, first.commandId);
+  assert.equal(second.command.recoveryId, "question:2:27");
+  assert.deepEqual(second.command.answers, { target: "Staging" });
+});
+
+test("a terminal recovered-answer attempt retains the card instead of reporting a no-op success", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  const pending = {
+    kind: "question" as const,
+    requestId: "terminal-recovered-question",
+    recoveryId: "question:1:31",
+    title: "Which target?",
+    options: [],
+    questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    recoveryReason: "provider_restart" as const,
+    recoveryAction: "resume_answer" as const,
+  };
+  db.setPendingApproval(id, pending);
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(id, pending.requestId, { target: "Production" }).ok);
+  const first = hub.sentToRunner.map(({ msg }) => msg).find((msg) =>
+    msg.type === "durable_session_command" && msg.command.type === "answer_recovered_question");
+  assert.ok(first?.type === "durable_session_command");
+  db.recordSessionPromptCommandReceipt({
+    commandId: first.commandId,
+    runnerId: RUNNER_ID,
+    sessionId: id,
+    state: "started",
+    revision: 1,
+    userEventSeq: 88,
+    now: Date.now(),
+  });
+  db.recordSessionPromptCommandReceipt({
+    commandId: first.commandId,
+    runnerId: RUNNER_ID,
+    sessionId: id,
+    state: "failed",
+    revision: 2,
+    error: "provider connection ended",
+    now: Date.now(),
+  });
+  db.setPendingApproval(id, pending);
+  db.updateSessionStatus(id, "input_required", Date.now());
+
+  const retry = svc.answerQuestion(id, pending.requestId, { target: "Production" });
+  assert.equal(retry.status, 409);
+  assert.match(retry.error ?? "", /may already have reached the provider/u);
+  assert.equal(db.getSession(id)?.pendingApproval?.recoveryId, pending.recoveryId);
+  assert.equal(db.getSession(id)?.status, "input_required");
 });
 
 test("recovered secret questions remain dismiss-only even if a stale client claims resume support", () => {

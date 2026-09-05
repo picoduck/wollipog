@@ -33,9 +33,9 @@ const runner: RunnerMetadata = {
   workspaces: [],
 };
 
-function fixture() {
+function fixture(protocolVersion = 107) {
   const db = ControlPlaneDb.open(":memory:");
-  db.registerRunner(runner, NOW, 96);
+  db.registerRunner(runner, NOW, protocolVersion);
   db.createSession({
     id: SESSION_ID,
     runnerId: RUNNER_ID,
@@ -70,6 +70,7 @@ test("a stable recovered-answer identity is idempotent only for identical conten
       type: "answer_recovered_question",
       sessionId: SESSION_ID,
       requestId: "question-1",
+      recoveryId: "question:1:4",
       answers: { target: "Production" },
     } as const satisfies DurableSessionCommand;
     const first = outbox.stage(SESSION_ID, RUNNER_ID, command, NOW, "answer_stable");
@@ -83,6 +84,104 @@ test("a stable recovered-answer identity is idempotent only for identical conten
       NOW + 2,
       "answer_stable",
     ), /different content/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a recovered answer creates a fresh attempt only after a definitive pre-provider failure", () => {
+  const { db, outbox } = fixture();
+  try {
+    const command = {
+      type: "answer_recovered_question",
+      sessionId: SESSION_ID,
+      requestId: "question-retry",
+      recoveryId: "question:1:9",
+      answers: { target: "Production" },
+    } as const;
+    const first = outbox.stageRecoveredAnswer(SESSION_ID, RUNNER_ID, command, NOW, "answer_retryable");
+    assert.equal(first.disposition, "deliverable");
+    db.recordSessionPromptCommandReceipt({
+      commandId: first.command.commandId,
+      runnerId: RUNNER_ID,
+      sessionId: SESSION_ID,
+      state: "failed",
+      revision: 1,
+      error: "queue was unavailable",
+      now: NOW + 1,
+    });
+
+    const retry = outbox.stageRecoveredAnswer(
+      SESSION_ID,
+      RUNNER_ID,
+      { ...command, answers: { target: "Staging" } },
+      NOW + 2,
+      "answer_retryable",
+    );
+    assert.equal(retry.disposition, "deliverable");
+    assert.equal(retry.command.commandId, "answer_retryable.retry-1");
+    assert.equal(retry.command.state, "pending");
+  } finally {
+    db.close();
+  }
+});
+
+test("a terminal recovered answer that crossed the user-event boundary cannot be restaged", () => {
+  const { db, outbox } = fixture();
+  try {
+    const command = {
+      type: "answer_recovered_question",
+      sessionId: SESSION_ID,
+      requestId: "question-fenced",
+      recoveryId: "question:1:11",
+      answers: { target: "Production" },
+    } as const;
+    const first = outbox.stageRecoveredAnswer(SESSION_ID, RUNNER_ID, command, NOW, "answer_fenced");
+    db.recordSessionPromptCommandReceipt({
+      commandId: first.command.commandId,
+      runnerId: RUNNER_ID,
+      sessionId: SESSION_ID,
+      state: "started",
+      revision: 1,
+      userEventSeq: 42,
+      now: NOW + 1,
+    });
+    db.recordSessionPromptCommandReceipt({
+      commandId: first.command.commandId,
+      runnerId: RUNNER_ID,
+      sessionId: SESSION_ID,
+      state: "failed",
+      revision: 2,
+      error: "provider connection ended",
+      now: NOW + 2,
+    });
+
+    const retry = outbox.stageRecoveredAnswer(SESSION_ID, RUNNER_ID, command, NOW + 3, "answer_fenced");
+    assert.equal(retry.disposition, "terminal");
+    assert.equal(retry.command.commandId, first.command.commandId);
+    assert.equal(db.raw().prepare(
+      "SELECT COUNT(*) AS count FROM session_prompt_commands WHERE command_id GLOB 'answer_fenced*'",
+    ).get().count, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a v106 runner fails recovered answers at the v107 capability boundary", () => {
+  const { db, outbox, sent } = fixture(106);
+  try {
+    outbox.stageRecoveredAnswer(SESSION_ID, RUNNER_ID, {
+      type: "answer_recovered_question",
+      sessionId: SESSION_ID,
+      requestId: "question-downgrade",
+      recoveryId: "question:1:15",
+      answers: { target: "Production" },
+    }, NOW, "answer_downgrade");
+
+    assert.equal(outbox.flush(NOW + 1), 0);
+    assert.deepEqual(sent, []);
+    assert.equal(db.getSessionPromptCommand("answer_downgrade")?.state, "failed");
+    assert.match(db.getSessionPromptCommand("answer_downgrade")?.error ?? "", /no longer supports/u);
   } finally {
     db.close();
   }

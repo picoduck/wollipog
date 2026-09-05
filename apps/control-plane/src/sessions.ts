@@ -706,8 +706,10 @@ function questionAuditContent(
   return Object.fromEntries(Object.entries(answers).filter(([id]) => !secretIds.has(id)));
 }
 
-function recoveredQuestionCommandId(sessionId: string, requestId: string): string {
-  const digest = createHash("sha256").update(JSON.stringify([sessionId, requestId]), "utf8").digest("hex");
+function recoveredQuestionCommandId(sessionId: string, requestId: string, recoveryId: string): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([sessionId, requestId, recoveryId]), "utf8")
+    .digest("hex");
   return `answer_${digest}`;
 }
 
@@ -4127,6 +4129,9 @@ export class SessionsService {
       if ((pending.questions ?? []).some((question) => question.secret)) {
         return fail("recovered secret answers cannot be stored for durable delivery; dismiss this question and continue with a new prompt", 409);
       }
+      if (!pending.recoveryId) {
+        return fail("the recovered question has no stable occurrence identity; dismiss it and continue with a new prompt", 409);
+      }
       const capabilityFailure = this.capabilityFailure(
         session.runnerId,
         "resumableQuestionAnswers",
@@ -4137,17 +4142,24 @@ export class SessionsService {
         type: "answer_recovered_question",
         sessionId,
         requestId,
+        recoveryId: pending.recoveryId,
         answers,
       };
       const now = Date.now();
       try {
-        this.promptOutbox.stage(
+        const staged = this.promptOutbox.stageRecoveredAnswer(
           sessionId,
           session.runnerId,
           command,
           now,
-          recoveredQuestionCommandId(sessionId, requestId),
+          recoveredQuestionCommandId(sessionId, requestId, pending.recoveryId),
         );
+        if (staged.disposition === "terminal") {
+          return fail(
+            "the previous delivery attempt may already have reached the provider; dismiss this question or inspect the durable receipt before continuing",
+            409,
+          );
+        }
       } catch (error) {
         return fail(`recovered answer could not be persisted: ${(error as Error).message}`, 409);
       }

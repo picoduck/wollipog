@@ -315,6 +315,8 @@
 //      pre-v106 runners reject the structured attachment instead of silently dropping it.
 // 107: answer_recovered_question extends the durable command receipt lane so a structured answer
 //      can resume an established provider conversation after runner/process loss without replay.
+//      A runner-owned recovery occurrence id prevents provider request-id reuse from aliasing two
+//      different interrupted questions.
 export const PROTOCOL_VERSION = 107;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
@@ -1869,6 +1871,9 @@ export interface PendingApproval {
   /** The runner proved that this recovered, non-secret question can continue the same provider
    * conversation through the durable answer command lane. Absence retains dismiss-only recovery. */
   recoveryAction?: "resume_answer";
+  /** Stable identity of this exact recovered question occurrence. Provider request ids can repeat
+   * after process restart, so durable delivery must bind to this runner-owned discriminator too. */
+  recoveryId?: string;
   /** What is being approved, when the driver can say (kind "permission"). */
   context?: ApprovalContext;
   /** Content-safe provenance for a CP-owned Claude hook ask. */
@@ -4667,6 +4672,9 @@ export interface AnswerRecoveredQuestionCommand {
   type: "answer_recovered_question";
   sessionId: string;
   requestId: string;
+  /** Runner-owned identity for this exact question occurrence, independent of provider request-id
+   * reuse across process generations. */
+  recoveryId: string;
   answers: Record<string, string | string[]>;
 }
 
