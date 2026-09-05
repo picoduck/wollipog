@@ -6,10 +6,12 @@ import { join } from "node:path";
 import {
   READ_FILE_CAP,
   createWorkspaceReference,
+  inspectWorkspaceReferenceDiff,
   listSessionFiles,
   normalizeRelPath,
   parseWslWorkspaceReferenceSearch,
   readSessionFile,
+  resolveWorkspaceReference,
   searchWorkspaceReferences,
   workspaceReferenceDiffContent,
   wslListArgs,
@@ -159,6 +161,25 @@ test("workspace reference search is bounded to the session root and skips symlin
   }
 });
 
+test("native workspace search distinguishes exactly 50 flat-root matches from a 51st match", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-search-boundary-"));
+  try {
+    for (let index = 0; index < 50; index += 1) {
+      writeFileSync(join(root, `match-${String(index).padStart(2, "0")}.txt`), "");
+    }
+    const exact = await searchWorkspaceReferences(NATIVE, root, "match-");
+    assert.equal(exact.results.length, 50);
+    assert.equal(exact.truncated, false);
+
+    writeFileSync(join(root, "match-50.txt"), "");
+    const overflow = await searchWorkspaceReferences(NATIVE, root, "match-");
+    assert.equal(overflow.results.length, 50);
+    assert.equal(overflow.truncated, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace references bind root, target content, ranges, and diff identity", async () => {
   const root = makeFixture();
   try {
@@ -181,6 +202,55 @@ test("workspace references bind root, target content, ranges, and diff identity"
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("directory reference resolution traverses once for native and WSL contexts", async () => {
+  for (const context of [NATIVE, { kind: "wsl", distro: "Ubuntu" } as const]) {
+    let rootFingerprintCalls = 0;
+    let directoryTreeCalls = 0;
+    const resolved = await resolveWorkspaceReference(context, "/session/root", {
+      path: "docs",
+      kind: "directory",
+    }, {
+      rootFingerprint: async (receivedContext, receivedRoot) => {
+        rootFingerprintCalls += 1;
+        assert.deepEqual(receivedContext, context);
+        assert.equal(receivedRoot, "/session/root");
+        return "root-fingerprint";
+      },
+      directoryTree: async (receivedContext, receivedRoot, receivedPath) => {
+        directoryTreeCalls += 1;
+        assert.deepEqual(receivedContext, context);
+        assert.equal(receivedRoot, "/session/root");
+        assert.equal(receivedPath, "docs");
+        return { content: "docs/guide.md (5 bytes)", truncated: false };
+      },
+    });
+    assert.equal(rootFingerprintCalls, 1);
+    assert.equal(directoryTreeCalls, 1);
+    assert.equal(resolved.directoryTree?.content, "docs/guide.md (5 bytes)");
+    assert.equal(resolved.reference.rootFingerprint, "root-fingerprint");
+  }
+});
+
+test("invalid structured diff scopes are rejected before Git inspection", async () => {
+  let gitInspections = 0;
+  await assert.rejects(
+    () => inspectWorkspaceReferenceDiff({
+      path: "source.ts",
+      kind: "diff",
+      startLine: 1,
+      endLine: 1,
+      side: "right",
+      diffHash: "d".repeat(64),
+      diffScope: "unsupported" as "uncommitted",
+    }, async () => {
+      gitInspections += 1;
+      throw new Error("Git must not run");
+    }),
+    /diff reference identity is invalid/,
+  );
+  assert.equal(gitInspections, 0);
 });
 
 test("diff references resolve the exact selected side and reject gaps", async () => {
@@ -249,6 +319,11 @@ test("wslSearchArgs: preserves find grouping and emits type metadata in one boun
 });
 
 test("WSL search parsing bounds matches and reports both result and traversal truncation", () => {
+  const exactMatches = Array.from({ length: 50 }, (_, index) => `f\tsrc/item-${index}\n`).join("");
+  const exact = parseWslWorkspaceReferenceSearch(exactMatches, "src");
+  assert.equal(exact.results.length, 50);
+  assert.equal(exact.truncated, false);
+
   const matches = Array.from({ length: 51 }, (_, index) => `${index % 2 ? "d" : "f"}\tsrc/item-${index}\n`).join("");
   const resultBound = parseWslWorkspaceReferenceSearch(matches, "src");
   assert.equal(resultBound.results.length, 50);

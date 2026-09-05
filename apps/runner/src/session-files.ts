@@ -47,6 +47,16 @@ export interface WorkspaceDirectoryTree {
   truncated: boolean;
 }
 
+export interface ResolvedWorkspaceReference {
+  reference: WorkspaceReference;
+  directoryTree?: WorkspaceDirectoryTree;
+}
+
+export interface WorkspaceReferenceResolutionDependencies {
+  directoryTree: typeof workspaceDirectoryTree;
+  rootFingerprint: (context: AgentContext, root: string) => Promise<string>;
+}
+
 /** Normalize a root-relative wire path: `\` → `/`, collapse empty/`.` segments. Returns null for
  * anything that could escape the root — absolute paths (posix or drive-letter), `..` segments,
  * NUL. "" is valid and means the root itself. Pure; exported for tests. */
@@ -162,12 +172,21 @@ export async function createWorkspaceReference(
   root: string,
   target: CreateWorkspaceReferenceRequest,
 ): Promise<WorkspaceReference> {
+  return (await resolveWorkspaceReference(context, root, target)).reference;
+}
+
+/** Resolve a content-free attachment and retain only the bounded directory tree needed by the
+ * immediate provider boundary. Callers must not persist `directoryTree`. */
+export async function resolveWorkspaceReference(
+  context: AgentContext,
+  root: string,
+  target: CreateWorkspaceReferenceRequest,
+  dependencies: Partial<WorkspaceReferenceResolutionDependencies> = {},
+): Promise<ResolvedWorkspaceReference> {
   const rel = normalizeRelPath(target.path);
   if (!rel) throw new Error("invalid workspace reference path");
-  validateReferenceRange(target);
-  const rootFingerprint = context.kind === "wsl"
-    ? await wslRootFingerprint(context.distro, root)
-    : nativeRootFingerprint(root);
+  validateWorkspaceReferenceTarget(target);
+  const rootFingerprint = await (dependencies.rootFingerprint ?? workspaceRootFingerprint)(context, root);
   if (target.kind === "file" || target.kind === "lines") {
     const file = await readSessionFile(context, root, rel);
     if (file.binary) throw new Error("binary files cannot be attached as prompt text");
@@ -179,7 +198,7 @@ export async function createWorkspaceReference(
     }
   }
   const directoryTree = target.kind === "directory"
-    ? await workspaceDirectoryTree(context, root, rel)
+    ? await (dependencies.directoryTree ?? workspaceDirectoryTree)(context, root, rel)
     : null;
   const targetFingerprint = target.kind === "diff"
     ? hashText([rootFingerprint, rel, target.diffScope, target.diffHash, target.side, target.startLine, target.endLine].join("\0"))
@@ -188,7 +207,7 @@ export async function createWorkspaceReference(
     : context.kind === "wsl"
       ? await wslTargetFingerprint(context.distro, root, rel, false)
       : await nativeTargetFingerprint(root, rel, false);
-  return {
+  const reference: WorkspaceReference = {
     artifactId: `workspace:${randomUUID()}`,
     mimeType: "application/vnd.wollipog.workspace-reference+json",
     sizeBytes: 0,
@@ -204,9 +223,13 @@ export async function createWorkspaceReference(
     ...(target.diffHash === undefined ? {} : { diffHash: target.diffHash }),
     ...(target.diffScope === undefined ? {} : { diffScope: target.diffScope }),
   };
+  return {
+    reference,
+    ...(directoryTree === null ? {} : { directoryTree }),
+  };
 }
 
-function validateReferenceRange(target: CreateWorkspaceReferenceRequest): void {
+export function validateWorkspaceReferenceTarget(target: CreateWorkspaceReferenceRequest): void {
   const ranged = target.kind === "lines" || target.kind === "diff";
   if (ranged && (!Number.isSafeInteger(target.startLine) || !Number.isSafeInteger(target.endLine) ||
       target.startLine! < 1 || target.endLine! < target.startLine! || target.endLine! > 1_000_000)) {
@@ -221,6 +244,51 @@ function validateReferenceRange(target: CreateWorkspaceReferenceRequest): void {
        (target.diffScope !== "uncommitted" && target.diffScope !== "all_branch" && target.diffScope !== "last_turn"))) {
     throw new Error("the diff reference identity is invalid");
   }
+}
+
+function diffContainsTarget(diff: GitDiffInfo, target: CreateWorkspaceReferenceRequest): boolean {
+  const file = diff.files.find((candidate) => candidate.path === target.path ||
+    (target.side === "left" && candidate.oldPath === target.path));
+  if (!file || target.startLine === undefined || target.endLine === undefined || !target.side) return false;
+  const seen = new Set<number>();
+  for (const hunk of file.hunks) {
+    let left = hunk.oldStart;
+    let right = hunk.newStart;
+    for (const line of hunk.lines) {
+      if (line.status !== "+") {
+        if (target.side === "left") seen.add(left);
+        left += 1;
+      }
+      if (line.status !== "-") {
+        if (target.side === "right") seen.add(right);
+        right += 1;
+      }
+    }
+  }
+  for (let line = target.startLine; line <= target.endLine; line += 1) {
+    if (!seen.has(line)) return false;
+  }
+  return true;
+}
+
+/** Validate structured diff identity before allowing the caller's Git inspection to run. */
+export async function inspectWorkspaceReferenceDiff(
+  target: CreateWorkspaceReferenceRequest,
+  inspect: (scope: NonNullable<CreateWorkspaceReferenceRequest["diffScope"]>) => Promise<GitDiffInfo>,
+): Promise<GitDiffInfo | null> {
+  validateWorkspaceReferenceTarget(target);
+  if (target.kind !== "diff") return null;
+  const current = await inspect(target.diffScope!);
+  if (current.diffHash !== target.diffHash || !diffContainsTarget(current, target)) {
+    throw new Error("the diff changed or the selected lines are no longer present — refresh Review and attach them again");
+  }
+  return current;
+}
+
+async function workspaceRootFingerprint(context: AgentContext, root: string): Promise<string> {
+  return context.kind === "wsl"
+    ? wslRootFingerprint(context.distro, root)
+    : nativeRootFingerprint(root);
 }
 
 function hashText(value: string): string {
@@ -353,7 +421,9 @@ function nativeSearch(root: string, query: string): WorkspaceReferenceSearch {
   const pending = [""];
   const results: WorkspaceReferenceCandidate[] = [];
   let visited = 0;
-  while (pending.length && visited < WORKSPACE_SEARCH_VISIT_CAP && results.length < MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS) {
+  let resultOverflow = false;
+  let visitOverflow = false;
+  while (pending.length && !resultOverflow && !visitOverflow) {
     const rel = pending.shift()!;
     const abs = rel ? join(canonicalRoot, ...rel.split("/")) : canonicalRoot;
     let entries;
@@ -363,18 +433,25 @@ function nativeSearch(root: string, query: string): WorkspaceReferenceSearch {
       continue;
     }
     for (const entry of entries) {
-      if (++visited > WORKSPACE_SEARCH_VISIT_CAP) break;
+      if (visited >= WORKSPACE_SEARCH_VISIT_CAP) {
+        visitOverflow = true;
+        break;
+      }
+      visited += 1;
       if (entry.name === ".git" || entry.isSymbolicLink()) continue;
       const path = rel ? `${rel}/${entry.name}` : entry.name;
       const isDirectory = entry.isDirectory();
       if (entry.name.toLocaleLowerCase().includes(query) || path.toLocaleLowerCase().includes(query)) {
+        if (results.length >= MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS) {
+          resultOverflow = true;
+          break;
+        }
         results.push({ path, isDirectory });
-        if (results.length >= MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS) break;
       }
       if (isDirectory) pending.push(path);
     }
   }
-  return { results, truncated: pending.length > 0 || visited >= WORKSPACE_SEARCH_VISIT_CAP };
+  return { results, truncated: resultOverflow || visitOverflow || pending.length > 0 };
 }
 
 /* ---------------------------------- WSL ----------------------------------- */
