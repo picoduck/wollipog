@@ -848,9 +848,9 @@ test("turn settlement closes the active id but retains the provider turn used by
     onRequest: () => {},
     onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
   });
-  notifications.get("turn/started")!({ turn: { id: "turn-provider-7" } });
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
+  notifications.get("turn/started")!({ turn: { id: "turn-provider-7" } });
   notifications.get("turn/completed")!({ turn: { status: "completed" } });
   assert.equal((h.driver as any).turnId, null);
   assert.equal((h.driver as any).promptBusy, false);
@@ -860,9 +860,9 @@ test("turn settlement closes the active id but retains the provider turn used by
 test("a second prompt missing turn/started cannot reuse the first completed turn id", async () => {
   const h = makeHarness();
   const notifications = notificationHandlers(h.driver);
-  notifications.get("turn/started")!({ turn: { id: "first-completed-turn" } });
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
+  notifications.get("turn/started")!({ turn: { id: "first-completed-turn" } });
   notifications.get("turn/completed")!({ turn: { status: "completed" } });
   assert.equal(h.driver.agentTurnId(), "first-completed-turn", "the completed checkpoint remains available between turns");
 
@@ -874,6 +874,70 @@ test("a second prompt missing turn/started cannot reuse the first completed turn
   notifications.get("turn/completed")!({ turn: { status: "completed" } });
   assert.equal(await second, "end_turn");
   assert.equal(h.driver.agentTurnId(), null);
+});
+
+test("turn/start response recovers steering without a notification and publishes both availability edges", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  const changes: (string | null)[] = [];
+  (h.driver as any).cb.onSteeringTurnChanged = () => changes.push(h.driver.activeSteeringTurnId());
+  let turn = 0;
+  (h.driver as any).peer = { request: async () => ({ turn: { id: `turn-${++turn}`, status: "inProgress" } }) };
+  for (const id of ["turn-1", "turn-2"]) {
+    const pending = h.driver.prompt("next");
+    assert.equal(h.driver.activeSteeringTurnId(), null);
+    await nextTask();
+    assert.equal(h.driver.activeSteeringTurnId(), id);
+    if (id === "turn-2") {
+      notifications.get("turn/started")!({ turn: { id: "turn-1" } });
+      notifications.get("turn/completed")!({ turn: { id: "turn-1", status: "completed" } });
+      assert.equal(h.driver.activeSteeringTurnId(), id);
+    }
+    notifications.get("turn/completed")!({ turn: { id, status: "completed" } });
+    assert.equal(await pending, "end_turn");
+    assert.equal(h.driver.activeSteeringTurnId(), null);
+    notifications.get("turn/started")!({ turn: { id } });
+    assert.equal(h.driver.activeSteeringTurnId(), null);
+  }
+  assert.deepEqual(changes, ["turn-1", null, "turn-2", null]);
+});
+
+test("late turn/start responses cannot resurrect a completed turn or overwrite a newer notification", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  let respond!: (value: unknown) => void;
+  (h.driver as any).peer = { request: () => new Promise((resolve) => { respond = resolve; }) };
+  const first = h.driver.prompt("first");
+  await nextTask();
+  const firstRespond = respond;
+  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  await first;
+  const second = h.driver.prompt("second");
+  await nextTask();
+  firstRespond({ turn: { id: "old", status: "inProgress" } });
+  await nextTask();
+  assert.equal(h.driver.activeSteeringTurnId(), null);
+  notifications.get("turn/started")!({ turn: { id: "newest" } });
+  respond({ turn: { id: "initial", status: "inProgress" } });
+  await nextTask();
+  assert.equal(h.driver.activeSteeringTurnId(), "newest");
+  notifications.get("turn/completed")!({ turn: { id: "newest", status: "completed" } });
+  await second;
+});
+
+test("missing coordinates explain the running server identity rather than assuming the installed CLI version", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  (h.driver as any).serverIdentity = "codex/0.149.1";
+  (h.driver as any).peer = { request: async () => ({}) };
+  const pending = h.driver.prompt("work");
+  await nextTask();
+  assert.equal(h.driver.activeSteeringTurnId(), null);
+  assert.match(h.stderr.at(-1)!, /running server: codex\/0.149.1; installed CLI version may differ/);
+  notifications.get("turn/started")!({ turn: { id: "recovered" } });
+  assert.equal(h.driver.activeSteeringTurnId(), "recovered");
+  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  await pending;
 });
 
 test("forkSession calls thread/fork with source thread and last turn", async () => {

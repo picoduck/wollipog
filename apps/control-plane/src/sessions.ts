@@ -3561,6 +3561,12 @@ export class SessionsService {
     if (!activeTurnId || activeTurnId !== request.turnId) {
       return fail("the active turn changed before it could be steered", 409);
     }
+    if (promotion) {
+      const queued = this.hub.queuedPromptForSession(sessionId, request.promotePromptId!);
+      if (queued?.steerable === false) {
+        return fail(queued.steerDisabledReason ?? "This queued message cannot currently be steered.", 409);
+      }
+    }
     const configSnapshot: SessionConfig = {
       ...(session.model ? { model: session.model } : {}),
       ...(session.effort ? { effort: session.effort } : {}),

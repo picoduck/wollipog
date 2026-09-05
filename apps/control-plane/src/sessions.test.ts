@@ -194,6 +194,11 @@ class FakeHub {
   deliveryHandler?: (runnerId: string, msg: ControlPlaneToRunner) => boolean;
   requestHandler?: (msg: ControlPlaneToRunner) => RunnerRequestResult | Promise<RunnerRequestResult>;
   activeTurnIds = new Map<string, string>();
+  queuedPrompts = new Map<string, QueuedPromptView[]>();
+
+  queuedPromptForSession(sessionId: string, promptId: string): QueuedPromptView | undefined {
+    return this.queuedPrompts.get(sessionId)?.find((prompt) => prompt.id === promptId);
+  }
 
   isRunnerOnline(runnerId: string): boolean {
     this.calls.push({ method: "isRunnerOnline", args: [runnerId] });
@@ -239,6 +244,7 @@ class FakeHub {
   }
 
   setSessionQueue(sessionId: string, queue: QueuedPromptView[], held = false, activeTurnId?: string): void {
+    this.queuedPrompts.set(sessionId, queue);
     this.calls.push({ method: "setSessionQueue", args: [sessionId, queue, held, activeTurnId] });
     if (activeTurnId) this.activeTurnIds.set(sessionId, activeTurnId);
     else this.activeTurnIds.delete(sessionId);
@@ -2023,6 +2029,24 @@ test("offline provider commands remain durable and capability loss settles them 
   db.registerRunner(runnerMeta(), Date.now(), 74);
   assert.equal(svc.recoverPendingSessionCommands(RUNNER_ID), 1);
   assert.equal(db.getSession(id)?.commandInvocations?.[0]?.state, "uncertain");
+});
+
+test("known unavailable queued steering returns its live reason without creating a durable receipt", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-live");
+  const queued = { id: "queued-kept", text: "keep me", hasImages: true, steerable: false,
+    steerDisabledReason: "Wollipog has not confirmed an active provider turn." };
+  hub.setSessionQueue(id, [queued], false, "turn-live");
+  const result = await svc.steer(id, {
+    submissionId: "blocked-promotion", turnId: "turn-live", promotePromptId: queued.id,
+  });
+  assert.equal(result.status, 409);
+  assert.equal(result.error, queued.steerDisabledReason);
+  assert.equal(db.findSteeringAttemptBySubmission(id, "blocked-promotion"), null);
+  assert.equal(hub.sentOfType("steer_session").length, 0);
+  assert.deepEqual(hub.queuedPromptForSession(id, queued.id), queued);
 });
 
 test("steer persists before dispatch, relays an accepted receipt, and is idempotent", async () => {

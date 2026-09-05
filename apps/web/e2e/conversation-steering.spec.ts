@@ -42,6 +42,36 @@ test.beforeEach(async ({ page }) => {
   await openSteeringSession(page);
 });
 
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+  test(`disabled steering explains the live reason accessibly at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const reason = "Wollipog has not confirmed an active provider turn.";
+    await page.evaluate((reason) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      queued: [{ id: "coordinate-queue", text: "Keep this message and attachment", hasImages: true,
+        steerable: false, steerDisabledReason: reason }],
+    }), reason);
+    const row = page.getByTestId("queued-prompt-coordinate-queue");
+    await expect(row.getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
+    const info = row.getByLabel("Why Steering Is Unavailable");
+    await info.focus();
+    await page.keyboard.press("Enter");
+    await expect(row.getByRole("status")).toHaveText(reason);
+    await info.click();
+    await expect(row.getByRole("status")).toBeHidden();
+    await info.click();
+    await expect(row.getByRole("status")).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("steering-explanation.png") });
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(0);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      queued: [{ id: "coordinate-queue", text: "Keep this message and attachment", hasImages: true,
+        steerable: true }],
+    }));
+    await expect(info).toHaveCount(0);
+    await expect(row.getByRole("button", { name: "Steer Queued Message" })).toBeEnabled();
+    await expect(row).toContainText("Keep this message and attachment");
+  });
+}
+
 test("Ctrl+Enter steers without an optimistic echo while Enter, Shift+Enter, IME, and slash selection keep their contracts", async ({ page }) => {
   const composer = page.locator(".composer-input");
 

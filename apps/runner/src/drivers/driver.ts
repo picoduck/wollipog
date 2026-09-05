@@ -126,6 +126,8 @@ export interface DriverCallbacks {
   /** Session-scoped steering availability changed after launch (for example, a persistent
    * transport circuit fell back to a one-shot provider process). */
   onSteeringAvailability?: (available: boolean) => void;
+  /** The live provider turn coordinate changed; refresh queue admission immediately. */
+  onSteeringTurnChanged?: () => void;
 }
 
 export interface DriverOptions {
@@ -163,6 +165,8 @@ export interface Driver {
 
   /** Provider-native id of the most recently started turn, when the driver exposes one. */
   agentTurnId?(): string | null;
+  /** Active steering coordinate, never a retained completed-turn checkpoint. */
+  activeSteeringTurnId?(): string | null;
 
   /** Mint a provider-native conversation fork through the completed turn. */
   forkSession?(lastTurnId: string, cwd: string): Promise<string>;

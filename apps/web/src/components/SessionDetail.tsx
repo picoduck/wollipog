@@ -4244,6 +4244,8 @@ function SessionDetailLoaded({
                     ? "Steering is being submitted for this queued message."
                     : !availability.available
                       ? availability.reason
+                      : composerRequestBusy
+                        ? "Wait for the current message request to finish."
                       : "Promote this queued message into the active turn.";
                   const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting;
                   return (
@@ -4279,6 +4281,12 @@ function SessionDetailLoaded({
                         >
                           {locallyPromoting || q.steeringState === "promoting" ? "Steering…" : "Steer"}
                         </button>
+                        {(!availability.available || locallyPromoting || composerRequestBusy) && (
+                          <details className="queued-steer-info">
+                            <summary aria-label="Why Steering Is Unavailable">ⓘ</summary>
+                            <span role="status">{queueTitle}</span>
+                          </details>
+                        )}
                         <button
                           type="button"
                           className="btn ghost sm queued-edit"

@@ -3207,11 +3207,17 @@ export class SessionManager {
             this.onSubscriptionUsageUpdate?.(meta.agentId, meta.driver, meta.context, update);
           }
         },
+        onSteeringTurnChanged: () => {
+          const live = this.active.get(sessionId);
+          if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
+          this.emitQueue(sessionId);
+        },
         onSteeringAvailability: (available) => {
           const live = this.active.get(sessionId);
           if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
           if (live.steeringAvailable === available) return;
           live.steeringAvailable = available;
+          this.emitQueue(sessionId);
           const current = this.store.readMeta(sessionId);
           if (current) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(current) });
         },
@@ -4412,7 +4418,7 @@ export class SessionManager {
           : "Provider command turns cannot be steered.",
       };
     }
-    if (!entry.client.steer) {
+    if (!entry.client.steer || entry.steeringAvailable === false) {
       return {
         eligible: false,
         reason: "unsupported_driver",
@@ -4445,6 +4451,13 @@ export class SessionManager {
         eligible: false,
         reason: "policy_blocked",
         message: "Send a normal prompt to resume the held queue before steering.",
+      };
+    }
+    if (entry.client.activeSteeringTurnId && !entry.client.activeSteeringTurnId()) {
+      return {
+        eligible: false,
+        reason: "no_active_provider_turn",
+        message: "Wollipog has not confirmed an active provider turn.",
       };
     }
     if (!entry.running || !entry.activeTurnId) {

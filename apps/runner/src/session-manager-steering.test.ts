@@ -194,6 +194,34 @@ test("accepted steering is serialized, deduplicated, and authored once by the ru
   }
 });
 
+test("queue steering requires a live provider coordinate and preserves unavailable message attachments", async () => {
+  let coordinate: string | null = null;
+  let calls = 0;
+  const h = harness({
+    activeSteeringTurnId: () => coordinate,
+    steer: async () => { calls++; return { outcome: "accepted", providerTurnId: coordinate! }; },
+  });
+  try {
+    const images = [{ mimeType: "image/png", data: "aGVsbG8=" }];
+    h.manager.prompt("s_steer", "keep queued", images);
+    const queued = h.queues().at(-1)!.queue[0]!;
+    assert.equal(queued.steerable, false);
+    assert.match(queued.steerDisabledReason!, /has not confirmed an active provider turn/);
+    const result = await h.manager.steerSession({
+      submissionId: "missing-coordinate", sessionId: "s_steer", turnId: "turn-a", promotePromptId: queued.id,
+    });
+    assert.equal(result.reason, "no_active_provider_turn");
+    assert.equal(calls, 0);
+    assert.deepEqual((h.manager as any).active.get("s_steer").queue[0].images, images);
+    coordinate = "confirmed";
+    (h.manager as any).emitQueue("s_steer");
+    assert.equal(h.queues().at(-1)!.queue[0]!.steerable, true);
+    coordinate = null;
+    (h.manager as any).emitQueue("s_steer");
+    assert.equal(h.queues().at(-1)!.queue[0]!.steerable, false);
+  } finally { h.cleanup(); }
+});
+
 test("pending agent input blocks direct steering and queued promotion authoritatively", async () => {
   let providerCalls = 0;
   const h = harness({
