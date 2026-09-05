@@ -40,6 +40,16 @@ const structuredItems: TimelineItem[] = [
     completedAt: Date.now() - 11_250,
   },
   {
+    kind: "review_decision",
+    id: 212,
+    reviewId: "overflow-review-low",
+    reviewer: { kind: "policy", id: "fixture-policy" },
+    outcome: "allowed",
+    riskLevel: "low",
+    rationale: "Read-only inspection is permitted.",
+    createdAt: Date.now() - 11_100,
+  },
+  {
     kind: "tool_call",
     id: 202,
     toolCallId: "overflow-tool",
@@ -49,6 +59,16 @@ const structuredItems: TimelineItem[] = [
     text: `tool-output:${longToken}`,
     startedAt: Date.now() - 11_000,
     completedAt: Date.now() - 10_000,
+  },
+  {
+    kind: "review_decision",
+    id: 213,
+    reviewId: "overflow-review-high",
+    reviewer: { kind: "agent", id: "fixture-reviewer" },
+    outcome: "allowed",
+    riskLevel: "high",
+    rationale: "The bounded fixture operation is permitted.",
+    createdAt: Date.now() - 9_900,
   },
   {
     kind: "file_edit",

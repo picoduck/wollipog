@@ -1,8 +1,9 @@
-import type { AgentDriverKind } from "@wollipog/protocol";
+import type { AgentDriverKind, ReviewRiskLevel } from "@wollipog/protocol";
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
   groupTimeline,
+  isCollapsibleWorkItem,
   SubagentTreeProjector,
   timelineBoundaryKey,
   timelineItemIsStreaming,
@@ -80,7 +81,16 @@ export function assistantForkTurns(items: readonly TimelineItem[]): ReadonlyMap<
   return turns;
 }
 export type TimelineRenderRow =
-  | { kind: "work_summary"; key: string; tools: number; edits: number; thoughts: number; open: boolean }
+  | {
+      kind: "work_summary";
+      key: string;
+      tools: number;
+      edits: number;
+      thoughts: number;
+      autoApproved: number;
+      highestReviewRisk?: ReviewRiskLevel;
+      open: boolean;
+    }
   | { kind: "subagent_summary"; key: string; tool: ToolItem; depth: number; open: boolean }
   | { kind: "item"; key: string; item: TimelineItem; inWork: boolean; depth: number };
 
@@ -327,6 +337,8 @@ function EventTimelineBody({
           tools={row.tools}
           edits={row.edits}
           thoughts={row.thoughts}
+          autoApproved={row.autoApproved}
+          highestReviewRisk={row.highestReviewRisk}
           open={row.open}
           onToggle={() => toggle(row.key, row.open)}
         />
@@ -447,9 +459,15 @@ export interface TimelineRowsProjection {
   keyDirtyFrom: number;
 }
 
-const isWorkItem = (item: TimelineItem): boolean =>
-  item.kind === "agent_thought" || item.kind === "tool_call" || item.kind === "command_output" ||
-  item.kind === "stderr" || item.kind === "file_edit" || item.kind === "plan";
+const reviewRiskRank: Record<ReviewRiskLevel, number> = { low: 1, medium: 2, high: 3 };
+
+function higherReviewRisk(
+  current: ReviewRiskLevel | undefined,
+  candidate: ReviewRiskLevel | undefined,
+): ReviewRiskLevel | undefined {
+  if (!candidate || (current && reviewRiskRank[current] >= reviewRiskRank[candidate])) return current;
+  return candidate;
+}
 
 const rendersSubagentSummary = (item: TimelineItem): boolean =>
   item.kind === "tool_call" && (item.toolKind === "agent" || Boolean(item.children?.length));
@@ -568,7 +586,7 @@ export class IncrementalTimelineRows {
       const appended = tailDelta.dirtyFrom >= previousLength;
       const previousLastGroup = this.groups.at(-1)!;
       const firstNew = items[previousLength];
-      const joinsLastWork = appended && previousLastGroup.kind === "work" && firstNew != null && isWorkItem(firstNew);
+      const joinsLastWork = appended && previousLastGroup.kind === "work" && firstNew != null && isCollapsibleWorkItem(firstNew);
       const appendedItems = appended ? items.slice(previousLength) : [];
       const appendedToolIds = this.collectToolIds(appendedItems);
       const localToolIds = new Set<string>();
@@ -580,7 +598,7 @@ export class IncrementalTimelineRows {
       // A newly materialized root tool may claim an older orphan child. That changes earlier
       // topology, so only the full projector may handle it.
       const canAppendWithoutTopologyChange = !appendedToolIds.some((id) => this.unresolvedParentIds.has(id));
-      if (joinsLastWork && appendedItems.every(isWorkItem) && !hasToolCollision && canAppendWithoutTopologyChange) {
+      if (joinsLastWork && appendedItems.every(isCollapsibleWorkItem) && !hasToolCollision && canAppendWithoutTopologyChange) {
         const oldRowLength = this.rows.length;
         previousLastGroup.items.push(...appendedItems);
         const summaryIndex = this.rowIndexes.get(`work:${previousLastGroup.id}`);
@@ -589,16 +607,24 @@ export class IncrementalTimelineRows {
           let tools = 0;
           let edits = 0;
           let thoughts = 0;
+          let autoApproved = 0;
+          let highestReviewRisk = summary.highestReviewRisk;
           for (const item of appendedItems) {
             if (item.kind === "tool_call") tools += 1;
             else if (item.kind === "file_edit") edits += 1;
             else if (item.kind === "agent_thought") thoughts += 1;
+            else if (item.kind === "review_decision" && item.outcome === "allowed") {
+              autoApproved += 1;
+              highestReviewRisk = higherReviewRisk(highestReviewRisk, item.riskLevel);
+            }
           }
           this.rows[summaryIndex!] = {
             ...summary,
             tools: summary.tools + tools,
             edits: summary.edits + edits,
             thoughts: summary.thoughts + thoughts,
+            autoApproved: summary.autoApproved + autoApproved,
+            highestReviewRisk,
           };
           if (summary.open) {
             for (const id of appendedToolIds) this.toolIdCounts.set(id, 1);
@@ -1348,12 +1374,18 @@ export function flattenTimelineRows(
     let tools = 0;
     let edits = 0;
     let thoughts = 0;
+    let autoApproved = 0;
+    let highestReviewRisk: ReviewRiskLevel | undefined;
     for (const item of group.items) {
       if (item.kind === "tool_call") tools += 1;
       else if (item.kind === "file_edit") edits += 1;
       else if (item.kind === "agent_thought") thoughts += 1;
+      else if (item.kind === "review_decision" && item.outcome === "allowed") {
+        autoApproved += 1;
+        highestReviewRisk = higherReviewRisk(highestReviewRisk, item.riskLevel);
+      }
     }
-    rows.push({ kind: "work_summary", key, tools, edits, thoughts, open });
+    rows.push({ kind: "work_summary", key, tools, edits, thoughts, autoApproved, highestReviewRisk, open });
     if (open) rows.push(...flattenTimelineItemRows(group.items, disclosure, true, 0, toolIds));
   }
   return rows;
@@ -1391,19 +1423,27 @@ function WorkSummary({
   tools,
   edits,
   thoughts,
+  autoApproved,
+  highestReviewRisk,
   open,
   onToggle,
 }: {
   tools: number;
   edits: number;
   thoughts: number;
+  autoApproved: number;
+  highestReviewRisk?: ReviewRiskLevel;
   open: boolean;
   onToggle: () => void;
 }) {
   const parts: string[] = [];
-  if (tools) parts.push(`${tools} command${tools === 1 ? "" : "s"}`);
-  if (edits) parts.push(`${edits} edit${edits === 1 ? "" : "s"}`);
-  if (!tools && !edits && thoughts) parts.push(`${thoughts} reasoning step${thoughts === 1 ? "" : "s"}`);
+  if (tools) parts.push(`${tools} Command${tools === 1 ? "" : "s"}`);
+  if (edits) parts.push(`${edits} Edit${edits === 1 ? "" : "s"}`);
+  if (!tools && !edits && thoughts) parts.push(`${thoughts} Reasoning Step${thoughts === 1 ? "" : "s"}`);
+  if (autoApproved) {
+    const risk = highestReviewRisk ? ` · ${titleCaseLabel(highestReviewRisk)} Risk` : "";
+    parts.push(`${autoApproved} Tool Call${autoApproved === 1 ? "" : "s"} Auto-Approved${risk}`);
+  }
   const summary = parts.length ? `Worked · ${parts.join(", ")}` : "Worked";
   return (
     <div className={`tl-work${open ? " open" : ""}`}>
@@ -1775,6 +1815,8 @@ const TimelineRow = memo(function TimelineRow({
             <span className="perm-resolved">
               {titleCaseLabel(item.outcome.replace("_", " "))}{item.riskLevel ? ` (${titleCaseLabel(item.riskLevel)} Risk)` : ""}
             </span>
+            <span>{titleCaseLabel(item.reviewer.kind)}{item.reviewer.id ? ` · ${item.reviewer.id}` : ""}</span>
+            <ActivityTimestampMeta startedAt={item.createdAt} pointWhenEqual />
           </div>
           {item.rationale && <div className="bubble-text">{item.rationale}</div>}
         </div>
