@@ -6798,6 +6798,33 @@ test("reused provider request ids receive distinct durable identities per recove
   assert.deepEqual(second.command.answers, { target: "Staging" });
 });
 
+test("recovered answers reapply the same post-resolution policy gate as live answers", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 1 }).ok);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 2 });
+  db.setPendingApproval(id, {
+    kind: "question",
+    requestId: "policy-gated-recovery",
+    recoveryId: "question:1:29",
+    title: "Which target?",
+    options: [],
+    questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    recoveryReason: "provider_restart",
+    recoveryAction: "resume_answer",
+  });
+  db.updateSessionStatus(id, "input_required", Date.now());
+
+  const result = svc.answerQuestion(id, "policy-gated-recovery", { target: "Production" });
+
+  assert.ok(result.ok);
+  assert.equal(result.data?.status, "input_required");
+  assert.equal(result.data?.pendingApproval?.kind, "cost_budget");
+  assert.equal(hub.sentToRunner.some(({ msg }) => msg.type === "durable_session_command" &&
+    msg.command.type === "answer_recovered_question"), true);
+});
+
 test("a terminal recovered-answer attempt retains the card instead of reporting a no-op success", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });

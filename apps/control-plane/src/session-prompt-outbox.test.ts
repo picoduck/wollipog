@@ -73,11 +73,11 @@ test("a stable recovered-answer identity is idempotent only for identical conten
       recoveryId: "question:1:4",
       answers: { target: "Production" },
     } as const satisfies DurableSessionCommand;
-    const first = outbox.stage(SESSION_ID, RUNNER_ID, command, NOW, "answer_stable");
-    const duplicate = outbox.stage(SESSION_ID, RUNNER_ID, command, NOW + 1, "answer_stable");
-    assert.equal(duplicate.commandId, first.commandId);
-    assert.equal(duplicate.createdAt, first.createdAt);
-    assert.throws(() => outbox.stage(
+    const first = outbox.stageRecoveredAnswer(SESSION_ID, RUNNER_ID, command, NOW, "answer_stable");
+    const duplicate = outbox.stageRecoveredAnswer(SESSION_ID, RUNNER_ID, command, NOW + 1, "answer_stable");
+    assert.equal(duplicate.command.commandId, first.command.commandId);
+    assert.equal(duplicate.command.createdAt, first.command.createdAt);
+    assert.throws(() => outbox.stageRecoveredAnswer(
       SESSION_ID,
       RUNNER_ID,
       { ...command, answers: { target: "Staging" } },

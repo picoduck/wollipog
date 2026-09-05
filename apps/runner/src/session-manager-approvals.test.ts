@@ -359,6 +359,7 @@ test("startup marks only non-secret resumable questions for durable answer conti
         options: [],
         kind: "question",
         questions: [{ id: "token", question: "Token", options: [], allowOther: true, secret: true }],
+        recoveryId: "question:1:secret",
       },
       status: "input_required",
     });
@@ -387,6 +388,8 @@ test("a durable recovered answer records one resolution before one provider cont
     };
     store.patchMeta("s_perm", {
       agentSessionId: "claude-session-1",
+      title: "Untitled session",
+      titleSource: "generated",
       status: "input_required",
       pendingApproval: {
         requestId: "recovered-answer",
@@ -446,6 +449,7 @@ test("a durable recovered answer records one resolution before one provider cont
     });
     assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
     assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.title, "Untitled session");
   } finally {
     cleanup();
   }
@@ -561,6 +565,52 @@ test("a correlated recovered resolution is a durable no-replay fence", () => {
       "uncertain:the durable user event already exists but provider submission state is unknown",
     ]);
     assert.equal(entry.queue.length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a durable recovered answer rejects a mismatched question occurrence", () => {
+  const { sm, store, cleanup } = makeHarness(false);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    entry.client.agentSessionId = () => "claude-session-1";
+    store.patchMeta("s_perm", {
+      agentSessionId: "claude-session-1",
+      status: "input_required",
+      pendingApproval: {
+        requestId: "provider-counter-5",
+        recoveryId: "question:2:40",
+        title: "Which target?",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+        recoveryReason: "provider_restart",
+        recoveryAction: "resume_answer",
+      },
+    });
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "answer_wrong_occurrence",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+
+    sm.answerRecoveredQuestion(
+      "s_perm",
+      "provider-counter-5",
+      "question:1:40",
+      { target: "Production" },
+      lifecycle,
+    );
+
+    assert.deepEqual(transitions, ["failed:the recovered question is no longer pending"]);
+    assert.equal(entry.queue.length, 0);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryId, "question:2:40");
   } finally {
     cleanup();
   }

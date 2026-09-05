@@ -37,9 +37,8 @@ export class SessionPromptOutbox {
     runnerId: string,
     command: DurableSessionCommand,
     now = Date.now(),
-    stableCommandId?: string,
   ): SessionPromptCommandRecord {
-    const commandId = stableCommandId ?? `prompt_${randomUUID()}`;
+    const commandId = `prompt_${randomUUID()}`;
     const payloadJson = canonicalAutomationCommandJson(command);
     return this.db.stageSessionPromptCommand({
       commandId,

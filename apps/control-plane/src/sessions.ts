@@ -4177,6 +4177,8 @@ export class SessionsService {
         now,
         { content: auditContent },
       );
+      this.gateOnPolicy(sessionId, now);
+      this.reconcilePolicyHookTimeouts(now, sessionId);
       try {
         this.promptOutbox.flush(now, session.runnerId);
       } catch (error) {

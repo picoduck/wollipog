@@ -3860,7 +3860,7 @@ export class SessionManager {
     // The first real message names an untitled session (Codex-style). meta.title is the source of
     // truth (snapshots carry it to the control plane), so set it here; the CP also derives the same
     // title live from the user_message event for immediacy.
-    if (!syntheticRecovery && !slashCommand && text.trim()) {
+    if (!syntheticRecovery && !recoveredQuestion && !slashCommand && text.trim()) {
       const meta = this.store.readMeta(sessionId);
       if (
         meta &&
