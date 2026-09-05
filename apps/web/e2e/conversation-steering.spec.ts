@@ -470,6 +470,50 @@ test("recovered queued-edit attachments become self-contained ordinary draft ima
   }]);
 });
 
+test("an oversized recovered attachment set stays recoverable and reports the limit", async ({ page }) => {
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(99);
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      queued: [{
+        id: "queue-recovered-oversized",
+        text: "Changed elsewhere",
+        hasImages: true,
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "newer-revision",
+      }],
+    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.seedQueuedEditRecovery("session-alpha", {
+      edit: {
+        promptId: "queue-recovered-oversized",
+        text: "Original queued content",
+        images: [],
+        editRevision: "original-revision",
+        displacedDraft: { text: "Ordinary draft", images: [] },
+      },
+      draft: {
+        text: "Keep this oversized recovered message",
+        images: Array.from({ length: 7 }, (_, index) => ({
+          artifactId: `artifact-recovered-image-${index}`,
+          mimeType: "image/png",
+          sizeBytes: 68,
+          sha256: "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        })),
+      },
+      error: "The queued message changed before this edit was confirmed.",
+    });
+  });
+
+  await reopenSteeringSession(page);
+  await expect(page.getByText("Recovered Queued Message", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Use as New Message" }).click();
+
+  await expect(page.getByText("Recovered Queued Message", { exact: true })).toBeVisible();
+  await expect(page.locator(".composer-input")).toHaveValue("Keep this oversized recovered message");
+  await expect(page.locator(".composer-error")).toContainText("at most 6 images may be attached");
+});
+
 test("a definite direct rejection preserves the draft and never creates a transcript bubble", async ({ page }) => {
   const composer = page.locator(".composer-input");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextSteeringResult());

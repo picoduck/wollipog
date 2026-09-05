@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { QueuedPromptView } from "@wollipog/protocol";
-import type { KeyValueStorage } from "./instance-storage.js";
+import { instanceStorageKey, type KeyValueStorage } from "./instance-storage.js";
 import {
   QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
   QUEUED_EDIT_RECOVERY_MAX_BYTES,
@@ -15,6 +15,7 @@ import {
   parseQueuedPromptEditRecovery,
   queuedEditRecoveryAccountKey,
   reconcileQueuedEditRecovery,
+  refreshDurableQueuedEditRecovery,
   saveDurableQueuedEditRecovery,
   storeRuntimeQueuedEditRecovery,
   type QueuedEditRecoveryScope,
@@ -398,6 +399,121 @@ test("failed definitive cleanup is suppressed immediately and retried when stora
   assert.equal(loadDurableQueuedEditRecovery(target, flaky, 2_002), undefined);
   assert.equal(loadDurableQueuedEditRecovery(target, backing, 2_003), undefined,
     "the next access retries and completes the durable cleanup");
+});
+
+test("a delayed recovery refresh cannot outrank a clear that lands during its write", () => {
+  const storage = new MemoryStorage();
+  const target = scope("refresh-versus-clear");
+  assert.equal(saveDurableQueuedEditRecovery(target, recovery, storage, 1_000), true);
+  const refreshed = {
+    ...recovery,
+    edit: {
+      ...recovery.edit,
+      displacedDraft: { text: "Hydrated ordinary draft", images: [] },
+    },
+  };
+  let clearing = false;
+  storage.beforeSet = (_key, value) => {
+    if (clearing) return;
+    const parsed = JSON.parse(value) as { kind?: string; recovery?: QueuedPromptEditRecovery };
+    if (parsed.kind !== "recovery" || parsed.recovery?.edit.displacedDraft.text !== "Hydrated ordinary draft") return;
+    clearing = true;
+    assert.equal(clearDurableQueuedEditRecovery(target, storage, 2_000), true);
+  };
+
+  assert.equal(refreshDurableQueuedEditRecovery(target, recovery, refreshed, storage, 1_500), "stale");
+  assert.equal(loadDurableQueuedEditRecovery(target, storage, 2_001), undefined);
+});
+
+test("a recovery refresh retains logical ordering while updating derived content", () => {
+  const storage = new MemoryStorage();
+  const target = scope("refresh");
+  assert.equal(saveDurableQueuedEditRecovery(target, recovery, storage, 1_000), true);
+  const refreshed = {
+    ...recovery,
+    edit: {
+      ...recovery.edit,
+      displacedDraft: { text: "Hydrated ordinary draft", images: [] },
+    },
+  };
+  assert.equal(refreshDurableQueuedEditRecovery(target, recovery, refreshed, storage, 1_500), "updated");
+  assert.deepEqual(loadDurableQueuedEditRecovery(target, storage, 1_501), refreshed);
+  assert.equal(loadDurableQueuedEditRecovery(
+    target,
+    storage,
+    1_000 + QUEUED_EDIT_RECOVERY_MAX_AGE_MS + 1,
+  ), undefined, "derived hydration must not renew the original recovery lease");
+});
+
+test("refreshing a legacy recovery migrates it without renewing its lease", () => {
+  const storage = new MemoryStorage();
+  const target = scope("legacy-refresh");
+  const legacyRecovery = {
+    ...recovery,
+    edit: {
+      ...recovery.edit,
+      displacedDraft: { text: "Compact ordinary draft", images: [] },
+      displacedDraftStoredSeparately: true as const,
+    },
+  };
+  const expiresAt = 1_000 + QUEUED_EDIT_RECOVERY_MAX_AGE_MS;
+  storage.setItem(instanceStorageKey("wollipog.queued-edit-recoveries.v1", target.instanceScope), JSON.stringify({
+    version: 1,
+    entries: [{
+      accountKey: target.accountKey,
+      sessionId: target.sessionId,
+      recovery: legacyRecovery,
+      updatedAt: 1_000,
+      expiresAt,
+    }],
+  }));
+  const { displacedDraftStoredSeparately: _storedSeparately, ...legacyEdit } = legacyRecovery.edit;
+  const refreshed = {
+    ...legacyRecovery,
+    edit: {
+      ...legacyEdit,
+      displacedDraft: { text: "Hydrated ordinary draft", images: recovery.edit.displacedDraft.images },
+    },
+  };
+
+  assert.equal(refreshDurableQueuedEditRecovery(
+    target,
+    legacyRecovery,
+    refreshed,
+    storage,
+    1_500,
+  ), "updated");
+  assert.deepEqual(loadDurableQueuedEditRecovery(target, storage, 1_501), refreshed);
+  assert.equal(loadDurableQueuedEditRecovery(target, storage, expiresAt), undefined,
+    "legacy migration must retain the original expiry");
+});
+
+test("a delayed recovery refresh cannot replace a newer save", () => {
+  const storage = new MemoryStorage();
+  const target = scope("refresh-versus-save");
+  assert.equal(saveDurableQueuedEditRecovery(target, recovery, storage, 1_000), true);
+  const refreshed = {
+    ...recovery,
+    edit: {
+      ...recovery.edit,
+      displacedDraft: { text: "Hydrated ordinary draft", images: [] },
+    },
+  };
+  const newer = {
+    ...recovery,
+    draft: { text: "Newer recovery from another tab", images: [] },
+  };
+  let saving = false;
+  storage.beforeSet = (_key, value) => {
+    if (saving) return;
+    const parsed = JSON.parse(value) as { kind?: string; recovery?: QueuedPromptEditRecovery };
+    if (parsed.kind !== "recovery" || parsed.recovery?.edit.displacedDraft.text !== "Hydrated ordinary draft") return;
+    saving = true;
+    assert.equal(saveDurableQueuedEditRecovery(target, newer, storage, 2_000), true);
+  };
+
+  assert.equal(refreshDurableQueuedEditRecovery(target, recovery, refreshed, storage, 1_500), "stale");
+  assert.deepEqual(loadDurableQueuedEditRecovery(target, storage, 2_001), newer);
 });
 
 test("malformed persisted recovery is rejected before it reaches the composer", () => {

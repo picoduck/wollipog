@@ -2378,6 +2378,7 @@ export function validatePromptImageInputs(
   const inline: PromptImage[] = [];
   let imageCount = 0;
   let referenceCount = 0;
+  let referencedBase64Bytes = 0;
   const allowedMimeSet = new Set<string>(allowedMimeTypes);
   for (let i = 0; i < images.length; i++) {
     const image = images[i]!;
@@ -2414,6 +2415,7 @@ export function validatePromptImageInputs(
     if (!/^[a-f0-9]{64}$/.test(image.sha256)) {
       return { ok: false, error: `image ${i + 1} has an invalid SHA-256 digest` };
     }
+    referencedBase64Bytes += Math.ceil(image.sizeBytes / 3) * 4;
   }
   if (imageCount > MAX_PROMPT_IMAGES) {
     return { ok: false, error: `at most ${MAX_PROMPT_IMAGES} images may be attached` };
@@ -2421,7 +2423,17 @@ export function validatePromptImageInputs(
   if (referenceCount > MAX_WORKSPACE_REFERENCES) {
     return { ok: false, error: `at most ${MAX_WORKSPACE_REFERENCES} workspace references may be attached` };
   }
-  return validatePromptImages(inline, allowedMimeTypes);
+  const inlineValidation = validatePromptImages(inline, allowedMimeTypes);
+  if (!inlineValidation.ok) return inlineValidation;
+  const totalBase64Bytes = referencedBase64Bytes +
+    inline.reduce((total, image) => total + image.data.length, 0);
+  if (totalBase64Bytes > MAX_PROMPT_IMAGE_TOTAL_BASE64_BYTES) {
+    return {
+      ok: false,
+      error: `combined image payload exceeds the ${MAX_PROMPT_IMAGE_TOTAL_BASE64_BYTES / 1024 / 1024} MiB base64 limit`,
+    };
+  }
+  return { ok: true };
 }
 
 /* ---------------------------- Session events ------------------------------ */

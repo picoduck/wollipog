@@ -72,10 +72,12 @@ or instance removal. A temporary pairing interruption preserves it.
 Recovered edits are retried only when an authoritative live queue still exposes the same prompt ID
 at the same editable revision. Offline or incomplete projections leave recovery intact, while a
 changed or missing target disables in-place retry and offers the recovered content as a deliberate
-new-message draft. Durable recovery retains at most 20 entries and 3 MiB of serialized data per
+new-message draft. Durable recovery retains at most 20 entries and 2 MiB of serialized data per
 instance. Entries expire seven days after their latest save; expiry is applied on every recovery
 read or write. If the browser cannot safely store the recovery, Wollipog keeps the current editor
-and does not submit the queued edit.
+and does not submit the queued edit. Rehydrating a separately stored displaced draft refreshes the
+existing logical recovery operation without renewing its expiry or advancing it past a concurrent
+success, dismissal, account cleanup, or instance-removal tombstone.
 
 ## Stop Redelivery Policy
 

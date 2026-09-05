@@ -28,6 +28,12 @@ export interface QueuedEditRecoveryScope {
   sessionId: string;
 }
 
+export type DurableQueuedEditRecoveryRefreshResult =
+  | "updated"
+  | "stale"
+  | "conflict"
+  | "failed";
+
 export type QueuedEditRecoveryReconciliation =
   | { status: "retryable" }
   | { status: "checking"; reason: string }
@@ -453,6 +459,37 @@ function activeRecords(instanceScope: string, storage: KeyValueStorage | undefin
   return active;
 }
 
+function currentRecoveryRecord(
+  scope: QueuedEditRecoveryScope,
+  storage: KeyValueStorage | undefined,
+  now: number,
+): StoredItem<StoredQueuedEditRecoveryRecord> | undefined {
+  return activeRecords(scope.instanceScope, storage, now)
+    .filter((item) => item.value.accountKey === scope.accountKey && item.value.sessionId === scope.sessionId)
+    .sort((left, right) => left.value.startedAt - right.value.startedAt ||
+      left.value.operationId.localeCompare(right.value.operationId))
+    .at(-1);
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value)
+      .filter(([, child]) => child !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function recoveriesMatch(
+  left: QueuedPromptEditRecovery,
+  right: QueuedPromptEditRecovery,
+): boolean {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
 function markerMatchesScope(
   scope: QueuedEditRecoveryScope,
   marker: StoredQueuedEditRecoveryTombstone,
@@ -535,14 +572,19 @@ function removeSupersededSessionRecords(
   return true;
 }
 
-function legacyRecovery(scope: QueuedEditRecoveryScope, storage: KeyValueStorage | undefined,
-  now: number): QueuedPromptEditRecovery | undefined {
+function legacyRecoveryEntry(scope: QueuedEditRecoveryScope, storage: KeyValueStorage | undefined,
+  now: number): StoredQueuedEditRecovery | undefined {
   const { registry } = parseLegacyRegistry(
     loadInstanceStorageValue(LEGACY_STORAGE_KEY, scope.instanceScope, storage),
     now,
   );
-  const entry = registry.entries.find((candidate) =>
+  return registry.entries.find((candidate) =>
     candidate.accountKey === scope.accountKey && candidate.sessionId === scope.sessionId);
+}
+
+function legacyRecovery(scope: QueuedEditRecoveryScope, storage: KeyValueStorage | undefined,
+  now: number): QueuedPromptEditRecovery | undefined {
+  const entry = legacyRecoveryEntry(scope, storage, now);
   return entry ? cloneQueuedPromptEditRecovery(entry.recovery) : undefined;
 }
 
@@ -551,11 +593,7 @@ export function loadDurableQueuedEditRecovery(
   storage?: KeyValueStorage,
   now = Date.now(),
 ): QueuedPromptEditRecovery | undefined {
-  const candidates = activeRecords(scope.instanceScope, storage, now)
-    .filter((item) => item.value.accountKey === scope.accountKey && item.value.sessionId === scope.sessionId)
-    .sort((left, right) => left.value.startedAt - right.value.startedAt ||
-      left.value.operationId.localeCompare(right.value.operationId));
-  const current = candidates.at(-1)?.value;
+  const current = currentRecoveryRecord(scope, storage, now)?.value;
   if (current) return cloneQueuedPromptEditRecovery(current.recovery);
   const recovered = legacyRecovery(scope, storage, now);
   if (!recovered) return undefined;
@@ -565,6 +603,72 @@ export function loadDurableQueuedEditRecovery(
     expiresAt: now + 1, recovery: recovered,
   };
   return recordIsSuppressed(synthetic, effectiveTombstones(scope.instanceScope, storage, now)) ? undefined : recovered;
+}
+
+/**
+ * Refresh derived recovery content without creating a new logical save. Retaining the original
+ * operation ordering means a concurrent definitive tombstone always suppresses this late result.
+ */
+export function refreshDurableQueuedEditRecovery(
+  scope: QueuedEditRecoveryScope,
+  expected: QueuedPromptEditRecovery,
+  recovery: QueuedPromptEditRecovery,
+  storage?: KeyValueStorage,
+  now = Date.now(),
+): DurableQueuedEditRecoveryRefreshResult {
+  const current = currentRecoveryRecord(scope, storage, now);
+  const legacy = current ? undefined : legacyRecoveryEntry(scope, storage, now);
+  if (!current && !legacy) return "stale";
+  if (!recoveriesMatch(current?.value.recovery ?? legacy!.recovery, expected)) return "conflict";
+
+  let refreshed: StoredQueuedEditRecoveryRecord = current
+    ? {
+        ...current.value,
+        recovery: cloneQueuedPromptEditRecovery(recovery),
+        updatedAt: now,
+      }
+    : {
+        version: 2,
+        kind: "recovery",
+        instanceScope: scope.instanceScope,
+        accountKey: scope.accountKey,
+        sessionId: scope.sessionId,
+        recovery: cloneQueuedPromptEditRecovery(recovery),
+        operationId: browserRandomUUID(),
+        startedAt: 0,
+        updatedAt: now,
+        expiresAt: legacy!.expiresAt,
+      };
+  const logicalKey = entryLogicalKey(refreshed);
+  let serialized = JSON.stringify(refreshed);
+  if (currentStorageBytes(logicalKey, serialized, scope.instanceScope) > QUEUED_EDIT_RECOVERY_MAX_BYTES &&
+      refreshed.recovery.edit.displacedDraft.images.length > 0) {
+    refreshed = {
+      ...refreshed,
+      recovery: {
+        ...refreshed.recovery,
+        edit: {
+          ...refreshed.recovery.edit,
+          displacedDraft: { ...refreshed.recovery.edit.displacedDraft, images: [] },
+          displacedDraftStoredSeparately: true,
+        },
+      },
+    };
+    serialized = JSON.stringify(refreshed);
+  }
+  if (currentStorageBytes(logicalKey, serialized, scope.instanceScope) > QUEUED_EDIT_RECOVERY_MAX_BYTES) {
+    return "failed";
+  }
+  if (recordIsSuppressed(refreshed, effectiveTombstones(scope.instanceScope, storage, now))) return "stale";
+  if (!writeStoredValue(logicalKey, serialized, scope.instanceScope, storage)) return "failed";
+  if (!enforceStoredBounds(scope.instanceScope, refreshed.operationId, storage, now)) {
+    if (current) writeStoredValue(logicalKey, current.raw, scope.instanceScope, storage);
+    else removeInstanceStorageValue(logicalKey, scope.instanceScope, storage);
+    return "failed";
+  }
+  const after = currentRecoveryRecord(scope, storage, now);
+  if (!after || after.value.operationId !== refreshed.operationId) return "stale";
+  return after.raw === serialized ? "updated" : "conflict";
 }
 
 export function saveDurableQueuedEditRecovery(

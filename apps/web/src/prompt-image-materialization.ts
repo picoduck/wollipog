@@ -1,6 +1,6 @@
 import {
   isPromptImageReference,
-  type PromptImage,
+  validatePromptImageInputs,
   type PromptImageInput,
 } from "@wollipog/protocol";
 import { sha256Hex } from "./artifact-preview.js";
@@ -23,7 +23,11 @@ function bytesToBase64(bytes: Uint8Array): string {
 export async function materializePromptImages(
   images: readonly PromptImageInput[],
   exportArtifact: (artifactId: string) => Promise<Blob>,
-): Promise<PromptImage[]> {
+): Promise<PromptImageInput[]> {
+  const validation = validatePromptImageInputs([...images]);
+  if (!validation.ok) {
+    throw new Error(`Recovered attachments are invalid: ${validation.error}.`);
+  }
   return Promise.all(images.map(async (image, index) => {
     if (!isPromptImageReference(image)) return { ...image };
 

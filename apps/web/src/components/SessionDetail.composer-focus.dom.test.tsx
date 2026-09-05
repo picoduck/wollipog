@@ -4,7 +4,14 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView, SideChatView } from "@wollipog/protocol";
+import {
+  MAX_PROMPT_IMAGES,
+  type ControlPlaneToUi,
+  type RunnerView,
+  type SessionEvent,
+  type SessionView,
+  type SideChatView,
+} from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { COMPOSER_FOCUS_DIAGNOSTIC_EVENT } from "../composer-focus.js";
@@ -21,6 +28,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import {
   QUEUED_EDIT_RECOVERY_MAX_BYTES,
+  clearDurableQueuedEditRecovery,
   loadDurableQueuedEditRecovery,
   loadRuntimeQueuedEditRecovery,
   queuedEditRecoveryAccountKey,
@@ -918,6 +926,109 @@ test("a live queue revision change disables recovered retry while preserving con
   }
 });
 
+test("malformed recovered image collections stay recoverable without starting exports", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  let exports = 0;
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Changed on another client",
+        hasImages: true,
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_newer",
+      }],
+    },
+    client: {
+      artifactExport: async () => {
+        exports += 1;
+        return new Blob([Buffer.from("image")], { type: "image/png" });
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Ordinary draft");
+    assert.equal(saveDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.sessionId,
+    }, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "Ordinary draft", images: [] },
+      },
+      draft: {
+        text: "Recovered queued edit",
+        images: Array.from({ length: MAX_PROMPT_IMAGES + 1 }, (_, index) => ({
+          ...materializedImageReference,
+          artifactId: `oversized-recovery-${index}`,
+        })),
+      },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+
+    await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    const reuse = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Use as New Message") as HTMLButtonElement | undefined;
+    assert.ok(reuse);
+    const previewExports = exports;
+    await act(async () => { reuse.click(); });
+    await flushAsyncWork();
+
+    assert.equal(exports, previewExports,
+      "materialization validation must fail before starting any additional artifact exports");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"),
+      "invalid retained attachments must leave recovery available");
+    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "",
+      new RegExp(`at most ${MAX_PROMPT_IMAGES} images`, "i"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("mount hydration cannot restore a recovery cleared while its displaced draft loads", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const delayedDraft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, { runnerProtocolVersion: 99 });
+  const recoveryScope = {
+    instanceScope: fixture.instanceScope,
+    accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+    sessionId: fixture.sessionId,
+  };
+  try {
+    await resolveDraft(draft, "Ordinary draft");
+    assert.equal(saveDurableQueuedEditRecovery(recoveryScope, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "Compact ordinary draft", images: [] },
+        displacedDraftStoredSeparately: true,
+      },
+      draft: { text: "Recovered queued edit", images: [] },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+
+    await fixture.fullReloadWithDraftLoader(() => delayedDraft.promise);
+    assert.equal(clearDurableQueuedEditRecovery(recoveryScope), true);
+    delayedDraft.resolve({ text: "Hydrated ordinary draft", images: [submittedImage], updatedAt: 2 });
+    await flushAsyncWork();
+
+    assert.equal(loadDurableQueuedEditRecovery(recoveryScope), undefined);
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+      "a delayed mount result must not restore recovery cleared elsewhere");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a failed queued edit survives a simulated full runtime reload with its exact retry identity", async () => {
   const draft = deferred<ComposerDraft | null>();
   const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
@@ -1575,6 +1686,101 @@ test("post-mutation recovery preserves ordinary typing that arrives during displ
     await flushAsyncWork();
     assert.equal(reloaded.value, "Ordinary typing while recovery storage is pending");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a clear that wins during delayed displaced-draft hydration is not resurrected", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const steering = deferred<Awaited<ReturnType<ApiClient["steer"]>>>();
+  const delayedRecoveryDraft = deferred<ComposerDraft | null>();
+  let delayedRecoveryReads = 0;
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionCapabilities: {
+      models: [],
+      effortLevels: [],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      supportsSteering: true,
+    },
+    sessionPatch: {
+      status: "running",
+      activeTurnId: "turn-active",
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        steerable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: { steer: () => steering.promise },
+  });
+  const recoveryScope = {
+    instanceScope: fixture.instanceScope,
+    accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+    sessionId: fixture.sessionId,
+  };
+  try {
+    await resolveComposerDraft(draft, {
+      text: "Ordinary draft before recovery",
+      images: [submittedImage],
+      updatedAt: 1,
+    });
+    await fixture.rerenderWithDraftLoader(async () => {
+      delayedRecoveryReads += 1;
+      return delayedRecoveryDraft.promise;
+    });
+
+    const promote = fixture.container.querySelector(
+      'button[aria-label="Steer Queued Message"]',
+    ) as HTMLButtonElement;
+    await act(async () => { promote.click(); });
+    assert.equal(saveDurableQueuedEditRecovery(recoveryScope, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "Compact displaced draft", images: [] },
+        displacedDraftStoredSeparately: true,
+      },
+      draft: { text: "Recovered queued edit", images: [] },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+
+    await act(async () => {
+      steering.resolve({
+        submissionId: "steer-1",
+        turnId: "turn-active",
+        source: "queued",
+        sourceQueueId: "queue-1",
+        text: "Queued projection",
+        state: "accepted",
+        reason: "accepted",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await steering.promise;
+    });
+    await flushAsyncWork();
+    assert.equal(delayedRecoveryReads, 1);
+
+    assert.equal(clearDurableQueuedEditRecovery(recoveryScope), true);
+    delayedRecoveryDraft.resolve({
+      text: "Older ordinary draft from storage",
+      images: [submittedImage],
+      updatedAt: 2,
+    });
+    await flushAsyncWork();
+
+    assert.equal(loadDurableQueuedEditRecovery(recoveryScope), undefined);
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+      "a delayed hydration result must not restore a recovery cleared elsewhere");
   } finally {
     await unmountFixture(fixture);
   }
