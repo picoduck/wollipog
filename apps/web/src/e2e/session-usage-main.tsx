@@ -7,7 +7,14 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { SessionDetail } from "../components/SessionDetail.js";
+import { setQuestionResponseStyle } from "../question-response-style.js";
 import "../styles.css";
+
+declare global {
+  interface Window {
+    resolveSessionUsageQuestion(): void;
+  }
+}
 
 /** Real-browser SessionDetail harness for recovery geometry and earlier-history pagination:
  * `?mode=preview|expanded`, `?height=<px>`, and `?pinned=1` configure the recovery fixture.
@@ -101,6 +108,20 @@ if (params.get("approval") === "checkpoint") {
       { optionId: "cancel", name: "Stop", kind: "reject_once" },
     ],
   };
+} else if (params.get("approval") === "question") {
+  setQuestionResponseStyle("composer");
+  session.status = "input_required";
+  session.pendingApproval = {
+    requestId: "question:session-usage-e2e:1",
+    kind: "question",
+    title: "Choose a release target",
+    options: [],
+    questions: [{
+      id: "target",
+      question: "Which environment should receive the release?",
+      options: [{ label: "Staging" }, { label: "Production" }],
+    }],
+  };
 }
 
 const snapshotMessage: ControlPlaneToUi = {
@@ -144,6 +165,15 @@ class FixtureSocket implements UiSocket {
   send() {}
   close() {}
 }
+
+window.resolveSessionUsageQuestion = () => {
+  session.status = "idle";
+  session.pendingApproval = null;
+  fixtureSocket?.onmessage?.({ data: JSON.stringify({
+    type: "session_upsert",
+    session: { ...session },
+  } satisfies ControlPlaneToUi) });
+};
 
 const connection: UiConnectionRuntime = {
   instanceId: "recovery-e2e",

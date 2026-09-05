@@ -181,6 +181,7 @@ interface Fixture {
   alternateSessionId: string;
   instanceScope: string;
   pushSession: (patch: Partial<SessionView>) => Promise<void>;
+  pushSessionSync: (patch: Partial<SessionView>) => void;
   pushEvent: (payload: SessionEvent["payload"]) => Promise<void>;
   closeSocket: (code: number) => Promise<void>;
 }
@@ -373,6 +374,10 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   });
   const composer = container.querySelector(".composer-input") as HTMLTextAreaElement | null;
   assert.ok(composer, "the real SessionDetail composer is mounted");
+  const pushSessionSync = (patch: Partial<SessionView>) => {
+    Object.assign(currentSession, patch);
+    socket.push({ type: "session_upsert", session: { ...currentSession } });
+  };
   return {
     composer,
     container,
@@ -385,9 +390,9 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     alternateSessionId: alternateSession.id,
     instanceScope: LOCAL_INSTANCE_SCOPE,
     pushSession: async (patch) => {
-      Object.assign(currentSession, patch);
-      await act(async () => { socket.push({ type: "session_upsert", session: { ...currentSession } }); });
+      await act(async () => { pushSessionSync(patch); });
     },
+    pushSessionSync,
     pushEvent: async (payload) => {
       currentSession.messageCount += 1;
       const seq = currentSession.messageCount;
@@ -1325,6 +1330,77 @@ test("identity hydration preserves an ordinary draft typed before durable recove
     assert.equal(reloaded.value, "New ordinary draft typed during sign-in");
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+test("late queued-edit recovery exits Answer Mode and reveals the recovered editor", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const delayedIdentity = deferred<Awaited<ReturnType<ApiClient["getIdentity"]>>>();
+  const fixture = await mountFixture(draft, {
+    sessionPatch: {
+      pendingApproval: {
+        requestId: "ask-late-recovery",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    },
+    client: { getIdentity: async () => delayedIdentity.promise },
+  });
+  try {
+    assert.equal(saveDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.sessionId,
+    }, {
+      edit: {
+        promptId: "queue-recovered-answer-mode",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_answer_mode",
+        displacedDraft: { text: "", images: [] },
+      },
+      draft: { text: "Recovered queued edit", images: [] },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+    await act(async () => { fixture.composer.focus(); });
+    await resolveDraft(draft, "");
+    await act(async () => { flushFrames(); });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    await act(async () => { answer.focus(); });
+
+    await act(async () => {
+      delayedIdentity.resolve({
+        context: {
+          userId: "user-1",
+          userName: "Test User",
+          organizationId: "org-1",
+          organizationName: "Test Organization",
+          role: "owner",
+          deviceId: "device-1",
+          localBootstrap: false,
+        },
+        organizations: [],
+        memberships: [],
+        teams: [],
+      });
+      await delayedIdentity.promise;
+    });
+    await flushAsyncWork();
+    await act(async () => { flushFrames(); });
+
+    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.equal(ordinary?.value, "Recovered queued edit");
+    assert.equal(ordinary?.ownerDocument.activeElement, ordinary);
+    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Recovered Queued Message/);
+    assert.ok(fixture.container.querySelector('button[aria-label="Save Queued Message"]'));
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
   }
 });
 
@@ -2973,6 +3049,117 @@ test("SessionDetail inserts a side-chat response with the shared end-safe focus 
   }
 });
 
+test("inserting a side-chat response exits Answer Mode and reveals the ordinary draft", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const child = session("side-chat-answer-mode-child");
+  const relation: SideChatView = {
+    parentSessionId: "unused-by-panel",
+    session: child,
+    createdAt: 1,
+  };
+  const response: SessionEvent = {
+    id: 1,
+    sessionId: child.id,
+    seq: 1,
+    ts: 2,
+    payload: { kind: "agent_message", text: "side-chat answer", final: true },
+  };
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "sidechat",
+    client: {
+      sideChat: async () => ({ sideChat: relation }),
+      session: async (id: string) => ({ session: id === child.id ? child : session(id) }),
+      getSessionEventPage: async () => ({ events: [response], eventEpoch: 0, nextAfter: 1, cacheComplete: true }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-side-chat-insert",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    assert.ok(fixture.container.querySelector(".composer-answer-input"));
+
+    const insert = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Insert Latest Response into Primary Draft") as HTMLButtonElement;
+    assert.ok(insert);
+    await act(async () => {
+      insert.focus();
+      insert.click();
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.equal(ordinary?.value, "side-chat answer");
+    assert.equal(ordinary?.ownerDocument.activeElement, ordinary);
+    assert.match(fixture.container.querySelector(".composer-question-waiting")?.textContent ?? "", /Question Waiting/);
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("an ordinary-composer handoff does not arm focus theft for a later question", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: [{ kind: "user_message", text: "original prompt", images: [] }],
+  });
+  try {
+    await resolveDraft(draft, "existing draft");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    const edit = fixture.container.querySelector(
+      'button[aria-label="Edit User Message as a New Turn"]',
+    ) as HTMLButtonElement | null;
+    assert.ok(edit);
+    await act(async () => { edit.click(); });
+    const load = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Load into Composer") as HTMLButtonElement | undefined;
+    assert.ok(load);
+    await act(async () => {
+      load.focus();
+      load.click();
+    });
+    await act(async () => {
+      flushFrames();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
+    });
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(reader);
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      reader.focus();
+    });
+
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-after-side-chat-insert",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.ok(reader.ownerDocument.activeElement === reader,
+      "a completed ordinary handoff must not remain armed and steal deliberately transferred reader focus");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
 test("SessionDetail prepares Edit & Resend text with accessible focus and an end selection", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft, {
@@ -3040,6 +3227,59 @@ test("SessionDetail prepares Edit & Resend text with accessible focus and an end
   } finally {
     domWindow.document.removeEventListener("focusin", onFocusIn);
     await unmountFixture(fixture);
+  }
+});
+
+test("Load into Composer exits Answer Mode and reveals the prepared message", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: [{ kind: "user_message", text: "original prompt", images: [] }],
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-resend",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    assert.ok(fixture.container.querySelector(".composer-answer-input"));
+
+    const edit = fixture.container.querySelector(
+      'button[aria-label="Edit User Message as a New Turn"]',
+    ) as HTMLButtonElement | null;
+    assert.ok(edit);
+    await act(async () => {
+      edit.focus();
+      edit.click();
+    });
+    const dialogInput = fixture.container.querySelector(".message-action-input") as HTMLTextAreaElement;
+    await act(async () => {
+      dialogInput.value = "prepared new turn";
+      fireDomEvent.change(dialogInput);
+    });
+    const load = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Load into Composer") as HTMLButtonElement;
+    await act(async () => {
+      load.focus();
+      load.click();
+    });
+    await flushAsyncWork();
+    await act(async () => { flushFrames(); });
+
+    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.equal(ordinary?.value, "prepared new turn");
+    assert.equal(ordinary?.ownerDocument.activeElement, ordinary);
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
   }
 });
 
@@ -3286,6 +3526,225 @@ test("external question resolution returns Answer Mode focus to ordinary composi
     assert.ok(ordinary);
     assert.equal(ordinary.ownerDocument.activeElement, ordinary,
       "external resolution must not leave Session Reading shortcuts armed on document.body");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("external question resolution returns focus from every Answer Mode control", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    const focusSelectors = [".composer-answer-choice", ".composer-answer-heading button"];
+    for (const [index, selector] of focusSelectors.entries()) {
+      await fixture.pushSession({
+        pendingApproval: {
+          requestId: `ask-external-control-${index}`,
+          title: "Choose a target",
+          options: [],
+          kind: "question",
+          questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+        },
+      });
+      await act(async () => { flushFrames(); });
+      const control = fixture.container.querySelector<HTMLElement>(selector);
+      assert.ok(control);
+      await act(async () => { control.focus(); });
+
+      await fixture.pushSession({ pendingApproval: null });
+      await act(async () => { flushFrames(); });
+      const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+      assert.ok(ordinary);
+      assert.equal(ordinary.ownerDocument.activeElement, ordinary,
+        `${selector} focus must return to ordinary composition when the request resolves`);
+    }
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("external question resolution does not steal focus moved outside Answer Mode", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-external-unowned",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(reader);
+    await act(async () => { reader.focus(); });
+
+    await fixture.pushSession({ pendingApproval: null });
+    await act(async () => { flushFrames(); });
+    assert.equal(reader.ownerDocument.activeElement, reader);
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("a delayed answer completion cannot arm focus theft after external resolution", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const answerResult = deferred<SessionView>();
+  const fixture = await mountFixture(draft, {
+    client: {
+      answerQuestion: async () => answerResult.promise,
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-delayed-completion",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    await act(async () => {
+      answer.value = "1";
+      fireDomEvent.change(answer);
+      answer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+    });
+
+    await fixture.pushSession({ pendingApproval: null });
+    await act(async () => { flushFrames(); });
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(reader);
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      reader.focus();
+      answerResult.resolve(session(fixture.sessionId));
+      await answerResult.promise;
+      await Promise.resolve();
+      flushFrames();
+    });
+
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-after-delayed-completion",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Production" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.ok(reader.ownerDocument.activeElement === reader,
+      "a stale answer completion must not leave a focus request for the next question");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("a superseded explicit entry cannot focus a later question", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-superseded-entry",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    await act(async () => {
+      answer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+      flushFrames();
+    });
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(reader);
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      reader.focus();
+      reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "r", bubbles: true }) as never);
+      fixture.pushSessionSync({ pendingApproval: null });
+    });
+
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-after-superseded-entry",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Production" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    const laterAnswer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(laterAnswer, "the later empty-draft question still enters Answer Mode");
+    assert.ok(reader.ownerDocument.activeElement === reader,
+      "a focus request for a superseded question must not target a later question");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("explicit Answer Mode entry wins over delayed ordinary-draft hydration", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-explicit-before-hydration",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(reader);
+    await act(async () => {
+      reader.focus();
+      reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "r", bubbles: true }) as never);
+    });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    assert.equal(answer.ownerDocument.activeElement, answer);
+
+    await resolveDraft(draft, "persisted ordinary draft");
+    await act(async () => { flushFrames(); });
+
+    const retainedAnswer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(retainedAnswer, "hydration cannot override explicit Answer Mode entry");
+    assert.equal(retainedAnswer.ownerDocument.activeElement, retainedAnswer);
+    await act(async () => {
+      retainedAnswer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+      flushFrames();
+    });
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.equal(ordinary?.value, "persisted ordinary draft");
   } finally {
     await unmountFixture(fixture);
     setQuestionResponseStyle("interactive", domWindow as never);

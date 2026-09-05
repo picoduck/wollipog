@@ -55,6 +55,31 @@ test("a cost checkpoint parks the session with a Continue/Stop card", async ({ p
   await page.screenshot({ path: `${SHOT}/desktop-checkpoint-card.png` });
 });
 
+test.describe("Answer Mode ownership", () => {
+  test("Load into Composer reveals the prepared draft and external resolution restores region focus", async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=1180&height=780&approval=question");
+
+    await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
+    await page.screenshot({ path: `${SHOT}/answer-mode-before.png` });
+    await page.getByRole("button", { name: "Edit User Message as a New Turn" }).last().click();
+    await page.getByLabel("Message", { exact: true }).fill("Prepared follow-up from an earlier turn");
+    await page.getByRole("button", { name: "Load into Composer" }).click();
+
+    const composer = page.locator(".composer-input");
+    await expect(composer).toHaveValue("Prepared follow-up from an earlier turn");
+    await expect(composer).toBeFocused();
+    await expect(page.getByText("Question Waiting", { exact: true })).toBeVisible();
+    await page.screenshot({ path: `${SHOT}/answer-mode-after-load.png` });
+
+    await page.getByRole("button", { name: "Respond", exact: true }).click();
+    const choice = page.getByRole("radio", { name: /Staging/ });
+    await choice.focus();
+    await page.evaluate(() => window.resolveSessionUsageQuestion());
+    await expect(composer).toBeFocused();
+  });
+});
+
 test("mobile: the ring and per-turn usage stay reachable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/session-usage-e2e.html?width=390&height=800");

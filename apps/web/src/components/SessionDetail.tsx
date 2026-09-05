@@ -719,6 +719,7 @@ function SessionDetailLoaded({
   const [error, setError] = useState<string | null>(null);
   const [messageAction, setMessageAction] = useState<MessageActionState | null>(null);
   const messageActionReturnFocusRef = useRef<HTMLElement | null>(null);
+  const revealOrdinaryComposerRef = useRef<(focus: "always" | "answer-owned") => void>(() => {});
   const forkInFlightRef = useRef(false);
   const readForkInProgress = useCallback(() => sessionForkInProgress(sessionId), [sessionId]);
   const forkInProgress = useSyncExternalStore(
@@ -1099,6 +1100,7 @@ function SessionDetailLoaded({
     pending: boolean,
     preserveDraft = false,
   ) => {
+    revealOrdinaryComposerRef.current("answer-owned");
     const restored = cloneQueuedPromptEditRecovery(recovery);
     queuedEditRef.current = restored.edit;
     setQueuedEdit(restored.edit);
@@ -1119,16 +1121,17 @@ function SessionDetailLoaded({
   }, [replace, sessionId, setProgrammaticComposerText]);
   // Hold-to-talk dictation (browser SpeechRecognition; hidden when unsupported).
   const dictation = useVoiceDictation((phrase) => {
+    revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     const next = appendTranscript(draftState.current.text, phrase);
     setProgrammaticComposerText(next);
   });
   const insertSideChatDraft = useCallback((response: string) => {
+    revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     const next = appendTranscript(draftState.current.text, response);
     setProgrammaticComposerText(next);
-    window.requestAnimationFrame(focusComposerAtDraftEnd);
-  }, [focusComposerAtDraftEnd, markDraftDirty, setProgrammaticComposerText]);
+  }, [markDraftDirty, setProgrammaticComposerText]);
   // Shared git status: the composer branch chip + the right panel's Review mode read one
   // fetch. Called before the !session guard — hooks must run unconditionally.
   // Inbox previews render neither the composer Git chip, pinned summary, nor Review panel. Do not
@@ -1475,6 +1478,7 @@ function SessionDetailLoaded({
         if (completedQueuedEdit) draftHydratedSessionRef.current = sessionId;
         return;
       }
+      revealOrdinaryComposerRef.current("answer-owned");
       setProgrammaticComposerText(restored.text);
       replace(restored.images);
       commandSubmissionRetryRef.current = restored.commandSubmission ?? null;
@@ -2110,6 +2114,7 @@ function SessionDetailLoaded({
   });
   const [activePane, setActivePane] = useState<"reader" | "composer">("reader");
   const [answerModeRequestId, setAnswerModeRequestId] = useState<string | null>(null);
+  const answerModeExplicitRequestRef = useRef<string | null>(null);
   const answerModeArrivalRef = useRef({
     requestId: null as string | null,
     style: questionResponseStyle,
@@ -2118,18 +2123,34 @@ function SessionDetailLoaded({
   const answerModeFocusRequestRef = useRef<"answer" | "message" | null>(null);
   const answerFocusRequestIdRef = useRef<string | null>(pendingQuestion?.requestId ?? null);
   const composerAnswerActive = canAnswerPendingQuestion && answerModeRequestId === pendingQuestion.requestId;
-  const answerFocusedBeforeRender = typeof document !== "undefined" && answerInputRef.current !== null &&
-    answerInputRef.current.ownerDocument.activeElement === answerInputRef.current;
+  const activeAnswerModeRequestRef = useRef<string | null>(composerAnswerActive ? answerModeRequestId : null);
+  activeAnswerModeRequestRef.current = composerAnswerActive ? answerModeRequestId : null;
+  const answerModeRegion = answerInputRef.current?.closest<HTMLElement>(".composer-answer") ?? null;
+  const answerFocusOwnedBeforeRender = answerModeRegion !== null &&
+    answerModeRegion.contains(answerInputRef.current!.ownerDocument.activeElement);
+
+  const revealOrdinaryComposer = useCallback((focus: "always" | "answer-owned") => {
+    const input = answerInputRef.current;
+    const activeElement = input?.ownerDocument.activeElement ?? null;
+    const region = input?.closest<HTMLElement>(".composer-answer") ?? null;
+    const shouldFocus = focus === "always" || (region !== null && region.contains(activeElement));
+    answerModeExplicitRequestRef.current = null;
+    answerModeFocusRequestRef.current = shouldFocus && composerAnswerActive ? "message" : null;
+    setAnswerModeRequestId(null);
+    if (!composerAnswerActive && shouldFocus) window.requestAnimationFrame(focusComposerAtDraftEnd);
+  }, [composerAnswerActive, focusComposerAtDraftEnd]);
+  revealOrdinaryComposerRef.current = revealOrdinaryComposer;
 
   const exitAnswerMode = useCallback(() => {
-    answerModeFocusRequestRef.current = "message";
-    setAnswerModeRequestId(null);
-  }, []);
+    if (!answerModeRequestId || activeAnswerModeRequestRef.current !== answerModeRequestId) return;
+    revealOrdinaryComposer("always");
+  }, [answerModeRequestId, revealOrdinaryComposer]);
   const enterAnswerMode = useCallback(() => {
     if (!canAnswerPendingQuestion) {
       focusComposerAtDraftEnd();
       return;
     }
+    answerModeExplicitRequestRef.current = pendingQuestion.requestId;
     setActivePane("composer");
     if (composerAnswerActive) {
       answerModeFocusRequestRef.current = null;
@@ -2144,7 +2165,13 @@ function SessionDetailLoaded({
     const liveRequestId = pendingQuestion?.requestId ?? null;
     const requestChanged = answerFocusRequestIdRef.current !== liveRequestId;
     answerFocusRequestIdRef.current = liveRequestId;
-    if (requestChanged && answerFocusedBeforeRender) {
+    if (requestChanged && answerModeExplicitRequestRef.current !== liveRequestId) {
+      answerModeExplicitRequestRef.current = null;
+    }
+    if (requestChanged && answerModeFocusRequestRef.current === "answer") {
+      answerModeFocusRequestRef.current = null;
+    }
+    if (!composerAnswerActive && answerFocusOwnedBeforeRender) {
       answerModeFocusRequestRef.current = null;
       focusComposerAtDraftEnd();
       return;
@@ -2157,7 +2184,7 @@ function SessionDetailLoaded({
       answerModeFocusRequestRef.current = null;
       focusComposerAtDraftEnd();
     }
-  }, [answerFocusedBeforeRender, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+  }, [answerFocusOwnedBeforeRender, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
 
   useEffect(() => {
     const previous = answerModeArrivalRef.current;
@@ -2168,10 +2195,12 @@ function SessionDetailLoaded({
     const answerabilityChanged = previous.answerable !== answerable;
     const nextArrival = { requestId, style: questionResponseStyle, answerable };
     if (!requestId || questionResponseStyle !== "composer" || !answerable) {
+      answerModeExplicitRequestRef.current = null;
       answerModeArrivalRef.current = nextArrival;
       if (!requestId || styleChanged || answerabilityChanged) setAnswerModeRequestId(null);
       return;
     }
+    if (answerModeExplicitRequestRef.current !== requestId) answerModeExplicitRequestRef.current = null;
     if (requestChanged || styleChanged || answerabilityChanged) {
       answerModeArrivalRef.current = nextArrival;
       let cancelled = false;
@@ -2179,6 +2208,10 @@ function SessionDetailLoaded({
       let remainingHydrationFrames = 120;
       const chooseInitialMode = () => {
         if (cancelled) return;
+        if (answerModeExplicitRequestRef.current === requestId) {
+          setAnswerModeRequestId(requestId);
+          return;
+        }
         if (queuedEditRef.current) {
           setAnswerModeRequestId(null);
           return;
@@ -2672,6 +2705,7 @@ function SessionDetailLoaded({
 
   const prepareResend = useCallback((draft: { text: string; images: PromptImageInput[] }) => {
     if (!canPrompt) throw new Error("This session cannot accept a new turn right now.");
+    revealOrdinaryComposerRef.current("always");
     draftDirty.current = true;
     composerDraftVersionRef.current += 1;
     draftState.current = draft;
@@ -3323,6 +3357,7 @@ function SessionDetailLoaded({
 
   const cancelQueuedPromptEdit = () => {
     if (!queuedEdit || queuedEditBusy) return;
+    revealOrdinaryComposerRef.current("always");
     const displaced = queuedEdit.displacedDraft;
     markDraftDirty();
     clearQueuedPromptEditRecovery(mutationKey);
@@ -3335,11 +3370,11 @@ function SessionDetailLoaded({
     setHistIdx(-1);
     setError(null);
     void saveComposerDraft(sessionId, displaced.text, displaced.images, instanceScope);
-    window.requestAnimationFrame(focusComposerAtDraftEnd);
   };
 
   const useRecoveredQueuedEditAsNewMessage = async () => {
     if (!queuedEdit || !queuedEditRecovered || queuedEditBusy) return;
+    revealOrdinaryComposerRef.current("always");
     const generation = viewGenerationRef.current;
     const recoveredEdit = queuedEdit;
     const draftVersion = composerDraftVersionRef.current;
