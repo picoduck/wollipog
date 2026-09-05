@@ -1357,6 +1357,7 @@ declare global {
       settleDeferredGit(id: string, action: GitFixtureAction): void;
       failNextGit(id: string, action: GitFixtureAction, message?: string): void;
       setGitUnavailable(id: string, unavailable: boolean): void;
+      setGitSummary(id: string, patch: Partial<GitSummaryInfo>): void;
       gitRequestCounts(id: string): { status: number; summary: number };
       setSlashCommands(
         commands: AgentSlashCommand[],
@@ -1571,6 +1572,11 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   setGitUnavailable(id, unavailable) {
     if (unavailable) unavailableGitSessions.add(id);
     else unavailableGitSessions.delete(id);
+  },
+  setGitSummary(id, patch) {
+    const fixture = gitFixtures.get(id);
+    if (!fixture) throw new Error(`unknown Git fixture: ${id}`);
+    Object.assign(fixture.summary, structuredClone(patch));
   },
   gitRequestCounts(id) {
     return structuredClone(gitRequestCounts.get(id) ?? { status: 0, summary: 0 });

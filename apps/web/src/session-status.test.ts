@@ -8,7 +8,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { statusMeta } from "./format.js";
-import { sessionChangeStatus, sessionMayShowChangeStatus } from "./session-status.js";
+import { isOpenReviewRequestState, sessionChangeStatus, sessionMayShowChangeStatus } from "./session-status.js";
 
 const lifecycleCases: Array<[SessionStatus, string]> = [
   ["queued", "Queued"],
@@ -116,6 +116,13 @@ test("active turns suppress retained change evidence", () => {
   }
 });
 
+test("open review-request states are normalized without provider-specific assumptions", () => {
+  assert.equal(isOpenReviewRequestState("OPEN"), true);
+  assert.equal(isOpenReviewRequestState("opened"), true);
+  assert.equal(isOpenReviewRequestState("CLOSED"), false);
+  assert.equal(isOpenReviewRequestState(undefined), false);
+});
+
 test("change labels require settled Git evidence and never use workflow or lifecycle guesses", () => {
   assert.equal(sessionChangeStatus({ available: true, settled: false, status: gitStatus({ hasChanges: true }) }), null);
   assert.equal(sessionChangeStatus({ available: true, settled: true, status: null }), null);
@@ -160,13 +167,15 @@ test("change labels require settled Git evidence and never use workflow or lifec
         number: 142,
         title: "GitLab taxonomy",
         url: "https://gitlab.example.test/group/project/-/merge_requests/142",
-        state: "OPEN",
+        state: "OPENED",
         provider: "gitlab",
         kind: "merge_request",
       },
     }),
   });
   assert.match(mergeRequestReady?.description ?? "", /open merge request/u);
+  assert.equal(mergeRequestReady?.label, "Ready for Review",
+    "GitLab's real OPENED state is normalized as an open merge request");
   const reviewReadyFromProductionEvidence = sessionChangeStatus({
     available: true,
     settled: true,

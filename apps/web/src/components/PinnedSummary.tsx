@@ -13,6 +13,7 @@ import {
   legacyLocalGitFacts,
   remoteHttpUrl,
   sourceKind,
+  visibleForgeFacts,
   type GitPresentation,
 } from "../pinned-summary.js";
 import type { GitStatus, GitSummary } from "./useGitStatus.js";
@@ -86,13 +87,15 @@ export function PinnedSummary({
   const commitAction = deriveCommitAction(reviewFacts);
   const subagents = deriveSubagents(session, runs, sessions);
   const forgeFactsVisible = !richGitSupported || gitPresentation.state !== "not_repository";
-  const remoteUrl = forgeFactsVisible ? summary?.remoteUrl ?? displayedFacts?.remoteUrl : null;
-  const source = summary?.forge?.provider ?? sourceKind(remoteUrl);
+  const { forge, remoteUrl, pr, checks } = visibleForgeFacts(
+    summary,
+    displayedFacts?.remoteUrl,
+    forgeFactsVisible,
+  );
+  const source = forge?.provider ?? sourceKind(remoteUrl);
   const sourceUrl = remoteHttpUrl(remoteUrl);
   const pane = useMemo(() => deriveSidePaneContent(items), [items]);
   const branch = legacyFacts?.branch ?? (session.worktreePath ? `agent/${session.id}` : null);
-  const pr = forgeFactsVisible ? summary?.pr ?? null : null;
-  const checks = forgeFactsVisible ? summary?.checks ?? null : null;
   const prHref = safeExternalHref(pr?.url);
   const canPrompt = runnerOnline && !isTerminal(session.status) && !isPolicyApproval(session.pendingApproval);
   const refreshGit = async () => {
@@ -204,14 +207,14 @@ export function PinnedSummary({
         )}
 
         {checks && <ChecksRow checks={checks} session={session} canPrompt={canPrompt} kind={pr?.kind} />}
-        {summary?.forge?.authenticationError && (
-          <div className="ps-row is-static" title={summary.forge.authenticationError}>
+        {forge?.authenticationError && (
+          <div className="ps-row is-static" title={forge.authenticationError}>
             <span className="ps-check-dot is-fail" aria-hidden="true" />
             <span>Forge Authentication Needed</span>
           </div>
         )}
-        {summary?.forge?.statusError && (
-          <div className="ps-row is-static" title={summary.forge.statusError}>
+        {forge?.statusError && (
+          <div className="ps-row is-static" title={forge.statusError}>
             <span className="ps-check-dot is-fail" aria-hidden="true" />
             <span>Forge Status Unavailable</span>
           </div>

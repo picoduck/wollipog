@@ -15,6 +15,28 @@ import type {
   SessionView,
 } from "@wollipog/protocol";
 
+export interface VisibleForgeFacts {
+  forge: GitSummaryInfo["forge"] | undefined;
+  remoteUrl: string | null;
+  pr: GitSummaryInfo["pr"] | null;
+  checks: GitSummaryInfo["checks"] | null;
+}
+
+/** Apply one current-repository decision to every retained forge-derived summary field. */
+export function visibleForgeFacts(
+  summary: GitSummaryInfo | null | undefined,
+  fallbackRemoteUrl: string | null | undefined,
+  visible: boolean,
+): VisibleForgeFacts {
+  if (!visible) return { forge: undefined, remoteUrl: null, pr: null, checks: null };
+  return {
+    forge: summary?.forge ?? undefined,
+    remoteUrl: summary?.remoteUrl ?? fallbackRemoteUrl ?? null,
+    pr: summary?.pr ?? null,
+    checks: summary?.checks ?? null,
+  };
+}
+
 /** Where this session's working directory actually lives. */
 export interface HostRow {
   kind: "local" | "remote";
