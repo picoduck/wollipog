@@ -5,6 +5,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { SessionQuestionBanner } from "../components/SessionApproval.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
+import { EventTimeline } from "../components/EventTimeline.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
 import { inTypingContext } from "../shortcuts.js";
 import { isFollowTailResumeKey } from "../useFollowTail.js";
@@ -46,6 +47,25 @@ const shortQuestions: AgentQuestion[] = [{
     { label: "Python", description: "Use a standalone script." },
   ],
 }];
+
+const signedEvidenceUrl = "https://evidence.example/private/mobile-capture.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=temporary-access-key&X-Amz-Signature=very-long-private-signature#full-resolution";
+const richQuestions: AgentQuestion[] = [
+  {
+    id: "target",
+    header: "Target",
+    question: `Choose **one** deployment target.\n\n- \`staging\` for verification\n- production after approval`,
+    context: `Review the [release guide](https://docs.example/release) and evidence at ${signedEvidenceUrl}`,
+    options: [{ label: "Staging" }, { label: "Production" }],
+  },
+  {
+    id: "checks",
+    header: "Checks",
+    question: "Select the required checks:\n\n1. **Unit tests**\n2. Browser tests",
+    context: `Keep ${signedEvidenceUrl} available for comparison.`,
+    multiSelect: true,
+    options: [{ label: "Unit Tests" }, { label: "Browser Tests" }],
+  },
+];
 
 const longDescription = "A deliberately long description that wraps across several lines on a narrow phone while remaining understandable and tappable.";
 const longQuestions: AgentQuestion[] = [
@@ -151,7 +171,13 @@ function Fixture() {
   const responseStyle = useQuestionResponseStyle();
   const [requestId, setRequestId] = useState("ask-1");
   const [questions, setQuestions] = useState(
-    params.get("set") === "long" ? longQuestions : params.get("set") === "forms" ? formQuestions : shortQuestions,
+    params.get("set") === "long"
+      ? longQuestions
+      : params.get("set") === "forms"
+        ? formQuestions
+        : params.get("set") === "rich"
+          ? richQuestions
+          : params.get("set") === "rich-single" ? richQuestions.slice(0, 1) : shortQuestions,
   );
   const [runnerOnline, setRunnerOnline] = useState(initialOnline);
   const [resolved, setResolved] = useState(false);
@@ -192,7 +218,16 @@ function Fixture() {
   }), []) as ApiClient;
 
   const questionContent = resolved ? (
-    <p role="status">Question Answered</p>
+    <>
+      <p role="status">Question Answered</p>
+      <EventTimeline items={[{
+        kind: "question",
+        id: 1,
+        requestId,
+        questions,
+        answered: true,
+      }]} />
+    </>
   ) : (
     <SessionQuestionBanner
       sessionId="agent-question-session"
