@@ -79,17 +79,30 @@ function mountTestRoot(): { container: HTMLDivElement; root: ReturnType<typeof c
 }
 
 afterEach(async () => {
-  // `splice` empties the registry before unmounting, so one throwing teardown cannot strand the
-  // roots behind it and leak the clock again. Reverse order unwinds the newest mount first.
-  for (const { root, container } of mountedRoots.splice(0).reverse()) {
-    await act(async () => { root.unmount(); });
-    container.remove();
+  // Drain EVERY root even when one teardown throws. React makes `act` reject if an effect cleanup
+  // throws during unmount, and an early exit would strand the roots behind it — untracked, because
+  // `splice` has already emptied the registry — leaking exactly the clock this hook exists to stop.
+  // Reverse order unwinds the newest mount first.
+  const failures: unknown[] = [];
+  try {
+    for (const { root, container } of mountedRoots.splice(0).reverse()) {
+      try {
+        await act(async () => { root.unmount(); });
+      } catch (error) {
+        failures.push(error);
+      }
+      container.remove();
+    }
+  } finally {
+    // Menus and dialogs portal into the body, outside any container, which is why some tests used
+    // to clear it by hand. Both resets trailed the unmount before, so a failing test leaked its
+    // viewport into the next one; they must not depend on every unmount succeeding either.
+    domWindow.document.body.innerHTML = "";
+    mobileViewport = true;
   }
-  // Menus and dialogs portal into the body, outside any container, which is why some tests used to
-  // clear it by hand. Both resets trailed the unmount before, so a failing test leaked its viewport
-  // into the next one and made this file order-dependent after any failure.
-  domWindow.document.body.innerHTML = "";
-  mobileViewport = true;
+  // A teardown that genuinely broke is still a failure — reported after cleanup, not instead of it.
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "roots failed to unmount");
 });
 
 const VIEWPORT_HEIGHT = 2_000;
