@@ -31,6 +31,12 @@ export interface SessionChangeEvidence {
   available: boolean;
 }
 
+export function isOpenReviewRequestState(state: unknown): boolean {
+  if (typeof state !== "string") return false;
+  const normalized = state.toUpperCase();
+  return normalized === "OPEN" || normalized === "OPENED";
+}
+
 /**
  * Derive change state only from a completed Git observation. Workflow-column placement and idle
  * lifecycle are deliberately absent: neither proves a diff. An open PR plus confirmed commits ahead of
@@ -49,7 +55,7 @@ export function sessionChangeStatus(evidence: SessionChangeEvidence): SessionCha
   );
   const prState = evidence.summary?.pr?.state;
   const requestName = evidence.summary?.pr?.kind === "merge_request" ? "merge request" : "pull request";
-  const openPullRequest = summaryMatchesStatus && typeof prState === "string" && prState.toUpperCase() === "OPEN";
+  const openPullRequest = summaryMatchesStatus && isOpenReviewRequestState(prState);
   if (baseComparisonKnown && facts.ahead > 0 && openPullRequest) {
     return {
       kind: "ready_for_review",
