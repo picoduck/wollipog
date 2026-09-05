@@ -16,13 +16,20 @@ import {
 import { instanceStorageKey } from "./instance-storage.js";
 
 const backing = new Map<string, string>();
+let denyWrites = false;
 (globalThis as { localStorage?: unknown }).localStorage = {
   getItem: (key: string) => backing.get(key) ?? null,
-  setItem: (key: string, value: string) => void backing.set(key, value),
+  setItem: (key: string, value: string) => {
+    if (denyWrites) throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+    backing.set(key, value);
+  },
   removeItem: (key: string) => void backing.delete(key),
 };
 
-beforeEach(() => backing.clear());
+beforeEach(() => {
+  backing.clear();
+  denyWrites = false;
+});
 
 test("parseComposerDraft accepts text and image attachments", () => {
   const draft = parseComposerDraft({ text: "finish this", images: [{ mimeType: "image/png", data: "abc" }], updatedAt: 42 });
@@ -47,6 +54,12 @@ test("localStorage fallback saves, loads, and deletes text with image attachment
 
   await deleteComposerDraft("s1");
   assert.equal(await loadComposerDraft("s1"), null);
+});
+
+test("localStorage fallback reports a draft that could not be persisted", async () => {
+  denyWrites = true;
+  assert.equal(await saveComposerDraft("quota", "retain this", [{ mimeType: "image/png", data: "large" }]), false);
+  assert.equal(await loadComposerDraft("quota"), null);
 });
 
 test("a reserved command draft retains its stable retry submission coordinates", async () => {

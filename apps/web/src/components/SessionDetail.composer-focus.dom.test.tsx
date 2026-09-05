@@ -579,6 +579,12 @@ const preparedImageReference = {
   sizeBytes: 5,
   sha256: "a".repeat(64),
 } as const;
+const materializedImageReference = {
+  artifactId: "art-materialized-image",
+  mimeType: "image/png",
+  sizeBytes: 5,
+  sha256: "6105d6cc76af400325e94d588ce511be5bfdbb73b437dc51eca43917d7a43e3d",
+} as const;
 
 test("queued message editing loads exact content and Cancel Edit restores the displaced draft", async () => {
   const draft = deferred<ComposerDraft | null>();
@@ -787,7 +793,9 @@ test("a queued edit that fails after navigation restores its exact retry and kee
 test("a live queue revision change disables recovered retry while preserving content for a new message", async () => {
   const draft = deferred<ComposerDraft | null>();
   const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
-  const prompts: string[] = [];
+  const prompts: Array<{ text: string; images: Parameters<ApiClient["prompt"]>[2] }> = [];
+  const exportedArtifacts: string[] = [];
+  let exportFailure: Error | null = null;
   const fixture = await mountFixture(draft, {
     runnerProtocolVersion: 99,
     sessionPatch: {
@@ -801,6 +809,12 @@ test("a live queue revision change disables recovered retry while preserving con
       }],
     },
     client: {
+      preparePromptImages: async (_sessionId, images) => images.map(() => materializedImageReference),
+      artifactExport: async (artifactId) => {
+        exportedArtifacts.push(artifactId);
+        if (exportFailure) throw exportFailure;
+        return new Blob([Buffer.from("image")], { type: "image/png" });
+      },
       readQueuedPrompt: async (_sessionId, promptId) => ({
         prompt: {
           promptId,
@@ -813,8 +827,8 @@ test("a live queue revision change disables recovered retry while preserving con
         edits.push(request);
         throw new Error("The request timed out before confirmation.");
       },
-      prompt: async (_sessionId, text) => {
-        prompts.push(text);
+      prompt: async (_sessionId, text, images) => {
+        prompts.push({ text, images });
         return undefined as never;
       },
     },
@@ -866,15 +880,32 @@ test("a live queue revision change disables recovered retry while preserving con
     const reuse = [...fixture.container.querySelectorAll("button")]
       .find((button) => button.textContent === "Use as New Message") as HTMLButtonElement | undefined;
     assert.ok(reuse);
+    exportFailure = new Error("The retained attachment is unavailable.");
+    await act(async () => { reuse.click(); });
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"),
+      "a failed materialization must keep the recovery available");
+    assert.equal(fixture.composer.value, "Recovered revision for reuse");
+    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /attachment could not be retained/i);
+
+    exportFailure = null;
     await act(async () => { reuse.click(); });
     await flushAsyncWork(450);
     assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
     assert.equal(fixture.composer.value, "Recovered revision for reuse");
+    assert.ok(exportedArtifacts.includes(materializedImageReference.artifactId));
 
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "Recovered revision for reuse");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    assert.deepEqual((await loadComposerDraft(fixture.sessionId, fixture.instanceScope))?.images, [submittedImage],
+      "ordinary draft storage retains raw bytes instead of an expiring preparation reference");
+
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+    assert.deepEqual(prompts, [{ text: "Recovered revision for reuse", images: [submittedImage] }],
+      "the later ordinary send re-prepares its retained raw image bytes");
   } finally {
     await unmountFixture(fixture);
   }
@@ -1357,6 +1388,230 @@ test("recovery appearing after mutation release preserves the dirty ordinary dra
     const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(reloaded.value, "New ordinary draft from this tab");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("post-mutation recovery preserves ordinary typing that arrives during displaced-draft hydration", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const steering = deferred<Awaited<ReturnType<ApiClient["steer"]>>>();
+  const delayedRecoveryDraft = deferred<ComposerDraft | null>();
+  let delayedRecoveryReads = 0;
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionCapabilities: {
+      models: [],
+      effortLevels: [],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      supportsSteering: true,
+    },
+    sessionPatch: {
+      status: "running",
+      activeTurnId: "turn-active",
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        steerable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: { steer: () => steering.promise },
+  });
+  try {
+    await resolveComposerDraft(draft, {
+      text: "Ordinary draft before recovery",
+      images: [submittedImage],
+      updatedAt: 1,
+    });
+    await fixture.rerenderWithDraftLoader(async () => {
+      delayedRecoveryReads += 1;
+      return delayedRecoveryDraft.promise;
+    });
+
+    const promote = fixture.container.querySelector(
+      'button[aria-label="Steer Queued Message"]',
+    ) as HTMLButtonElement;
+    await act(async () => { promote.click(); });
+    assert.equal(saveDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.sessionId,
+    }, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "Compact displaced draft", images: [] },
+        displacedDraftStoredSeparately: true,
+      },
+      draft: { text: "Recovered queued edit", images: [] },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+
+    await act(async () => {
+      steering.resolve({
+        submissionId: "steer-1",
+        turnId: "turn-active",
+        source: "queued",
+        sourceQueueId: "queue-1",
+        text: "Queued projection",
+        state: "accepted",
+        reason: "accepted",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await steering.promise;
+    });
+    await flushAsyncWork();
+    assert.equal(delayedRecoveryReads, 1);
+
+    await act(async () => {
+      fixture.composer.value = "Ordinary typing while recovery storage is pending";
+      fireDomEvent.change(fixture.composer);
+    });
+    delayedRecoveryDraft.resolve({
+      text: "Older ordinary draft from storage",
+      images: [submittedImage],
+      updatedAt: 2,
+    });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Recovered queued edit");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+
+    const dismiss = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Dismiss Recovery") as HTMLButtonElement | undefined;
+    assert.ok(dismiss);
+    await act(async () => { dismiss.click(); });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Ordinary typing while recovery storage is pending");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+
+    const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(reloaded.value, "Ordinary typing while recovery storage is pending");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a recovered edit completed after delayed hydration restores the latest ordinary draft", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const steering = deferred<Awaited<ReturnType<ApiClient["steer"]>>>();
+  const delayedRecoveryDraft = deferred<ComposerDraft | null>();
+  let delayedRecoveryReads = 0;
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionCapabilities: {
+      models: [],
+      effortLevels: [],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      supportsSteering: true,
+    },
+    sessionPatch: {
+      status: "running",
+      activeTurnId: "turn-active",
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        steerable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      steer: () => steering.promise,
+      editQueuedPrompt: async (_sessionId, promptId, request) => ({
+        prompt: {
+          promptId,
+          text: request.text,
+          images: request.images,
+          editRevision: "qer_applied",
+        },
+      }),
+    },
+  });
+  try {
+    await resolveComposerDraft(draft, {
+      text: "Ordinary draft before recovery",
+      images: [submittedImage],
+      updatedAt: 1,
+    });
+    await fixture.rerenderWithDraftLoader(async () => {
+      delayedRecoveryReads += 1;
+      return delayedRecoveryDraft.promise;
+    });
+
+    const promote = fixture.container.querySelector(
+      'button[aria-label="Steer Queued Message"]',
+    ) as HTMLButtonElement;
+    await act(async () => { promote.click(); });
+    assert.equal(saveDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.sessionId,
+    }, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "Compact displaced draft", images: [] },
+        displacedDraftStoredSeparately: true,
+      },
+      draft: { text: "Recovered queued edit", images: [] },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+
+    await act(async () => {
+      steering.resolve({
+        submissionId: "steer-1",
+        turnId: "turn-active",
+        source: "queued",
+        sourceQueueId: "queue-1",
+        text: "Queued projection",
+        state: "accepted",
+        reason: "accepted",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await steering.promise;
+    });
+    await flushAsyncWork();
+    assert.equal(delayedRecoveryReads, 1);
+
+    await act(async () => {
+      fixture.composer.value = "Latest ordinary draft before recovery completion";
+      fireDomEvent.change(fixture.composer);
+    });
+    delayedRecoveryDraft.resolve({
+      text: "Older ordinary draft from storage",
+      images: [submittedImage],
+      updatedAt: 2,
+    });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Recovered queued edit");
+
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Latest ordinary draft before recovery completion");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+
+    const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(reloaded.value, "Latest ordinary draft before recovery completion");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
   } finally {
     await unmountFixture(fixture);
