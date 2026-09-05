@@ -32,7 +32,8 @@ export function notifyDecision(prev: SessionView | undefined, next: SessionView)
       const what = next.pendingApproval?.title ? `: ${next.pendingApproval.title}` : "";
       const attention = sessionAttentionStatus(next);
       const label = attention?.kind === "answer_required" ? "Answer required"
-        : attention?.kind === "authentication_required" ? "Authentication required"
+        : attention?.kind === "recovery_required" ? "Recovery required"
+          : attention?.kind === "authentication_required" ? "Authentication required"
           : attention?.kind === "approval_required" ? "Approval required" : "Input required";
       return { title: `${name} needs your input`, body: `${label}${what}`, sessionId: next.id };
     }

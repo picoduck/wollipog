@@ -48,7 +48,11 @@ export interface TimelineRevealTarget {
 
 export interface TimelineQuestionContext {
   sessionId: string;
-  pendingQuestion: { requestId: string; questions: AgentQuestion[] } | null;
+  pendingQuestion: {
+    requestId: string;
+    questions: AgentQuestion[];
+    recoveryReason?: "provider_restart";
+  } | null;
   /** True only after the matching pinned row is mounted and measurement-ready. */
   questionInTimeline: boolean;
   onPendingQuestionAvailabilityChange?: (requestId: string, available: boolean) => void;

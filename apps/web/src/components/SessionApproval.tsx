@@ -126,6 +126,7 @@ export function SessionApprovalRegion({
             sessionId={session.id}
             requestId={approval.requestId}
             questions={approval.questions ?? []}
+            recoveryReason={approval.recoveryReason}
             runnerOnline={runnerOnline}
             onSessionUpdate={onSessionUpdate}
             showKeyHints={showKeyHints}
@@ -149,7 +150,11 @@ export function SessionTimelineQuestionRegion({
   children,
 }: {
   sessionId: string;
-  pendingQuestion: { requestId: string; questions: AgentQuestion[] } | null;
+  pendingQuestion: {
+    requestId: string;
+    questions: AgentQuestion[];
+    recoveryReason?: "provider_restart";
+  } | null;
   eventRequestId: string;
   eventQuestions: AgentQuestion[];
   eventResolved: boolean;
@@ -168,6 +173,7 @@ export function SessionTimelineQuestionRegion({
           sessionId={sessionId}
           requestId={approval.requestId}
           questions={approval.questions.length > 0 ? approval.questions : eventQuestions}
+          recoveryReason={approval.recoveryReason}
           runnerOnline={runnerOnline}
           onSessionUpdate={onSessionUpdate}
           showKeyHints={showKeyHints}
@@ -391,6 +397,7 @@ export function SessionQuestionBanner({
   sessionId,
   requestId,
   questions,
+  recoveryReason,
   runnerOnline,
   onSessionUpdate,
   showKeyHints = true,
@@ -398,6 +405,7 @@ export function SessionQuestionBanner({
   sessionId: string;
   requestId: string;
   questions: AgentQuestion[];
+  recoveryReason?: "provider_restart";
   runnerOnline: boolean;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
@@ -421,6 +429,8 @@ export function SessionQuestionBanner({
   // HTMLInputElement.list lookup used by some DOM implementations, so keep this idref family plain.
   const labelPrefix = useId().replace(/:/g, "");
   const availabilityId = `${labelPrefix}-availability`;
+  const recoveryId = `${labelPrefix}-recovery`;
+  const recoveryRequired = recoveryReason === "provider_restart";
 
   useEffect(() => {
     const previous = previousDraftRequestRef.current;
@@ -446,8 +456,8 @@ export function SessionQuestionBanner({
   const draftValue = (questionId: string) => Object.hasOwn(draftValues, questionId) ? draftValues[questionId] : undefined;
   const resolved = questionDraftAnswers(questions, draftValues);
   const unsupportedQuestionFormat = questions.some((question) => !isAnswerableAgentQuestion(question));
-  const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat;
-  const fixedChoicesNativelyDisabled = busy !== null || unsupportedQuestionFormat;
+  const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat || recoveryRequired;
+  const fixedChoicesNativelyDisabled = busy !== null || unsupportedQuestionFormat || recoveryRequired;
 
   const updateDraft = (question: AgentQuestion, value: QuestionResponseDraft) => {
     setDrafts((current) => {
@@ -478,7 +488,7 @@ export function SessionQuestionBanner({
   const complete = !unsupportedQuestionFormat && Object.keys(resolved.errors).length === 0;
 
   const submit = async () => {
-    if (operationPendingRef.current || busy !== null || !runnerOnline || unsupportedQuestionFormat) return;
+    if (operationPendingRef.current || busy !== null || !runnerOnline || unsupportedQuestionFormat || recoveryRequired) return;
     if (Object.keys(resolved.errors).length > 0) {
       setValidationAttempted(true);
       const firstInvalid = questions.find((question) => Object.hasOwn(resolved.errors, question.id));
@@ -547,7 +557,9 @@ export function SessionQuestionBanner({
       <div className="approval-main">
         <span className="approval-icon" aria-hidden="true">❓</span>
         <span className="approval-text">
-          The agent has {questions.length === 1 ? "a question" : `${questions.length} questions`}
+          {recoveryRequired
+            ? "Agent Question Recovery Required"
+            : `The agent has ${questions.length === 1 ? "a question" : `${questions.length} questions`}`}
           {!runnerOnline && <span className="muted"> · Runner Offline</span>}
         </span>
         <div className="approval-actions">
@@ -559,9 +571,9 @@ export function SessionQuestionBanner({
             disabled={busy !== null || !runnerOnline}
             onClick={() => void dismiss()}
           >
-            {busy === "dismiss" ? "Dismissing…" : "Dismiss"} {showKeyHints && busy === null && <kbd className="inbox-key-hint">D</kbd>}
+            {busy === "dismiss" ? "Dismissing…" : recoveryRequired ? "Dismiss and Continue" : "Dismiss"} {showKeyHints && busy === null && <kbd className="inbox-key-hint">D</kbd>}
           </button>
-          {responseStyle === "interactive" && questions.length > 0 && (
+          {responseStyle === "interactive" && questions.length > 0 && !recoveryRequired && (
             <button
               className="btn sm primary"
               type="button"
@@ -578,12 +590,17 @@ export function SessionQuestionBanner({
       <div id={availabilityId} className="question-availability" role="status" aria-atomic="true">
         {runnerOnline ? "" : "Responses are unavailable until the runner reconnects."}
       </div>
-      {responseStyle === "composer" && questions.length > 0 && (
+      {recoveryRequired && (
+        <div className="question-recovery" id={recoveryId} role="status">
+          The runner restarted after this question was asked, so its original answer channel is no longer available. Review the preserved question, then dismiss it and send a new prompt to continue safely. No prior tool calls will be replayed.
+        </div>
+      )}
+      {responseStyle === "composer" && questions.length > 0 && !recoveryRequired && (
         <div className="question-submit-hint">
           Respond through Answer Mode in the Session composer. Press R or use <code>/respond</code>.
         </div>
       )}
-      {responseStyle === "interactive" && runnerOnline && busy === null && questions.length > 0 && !complete && (
+      {responseStyle === "interactive" && runnerOnline && busy === null && questions.length > 0 && !complete && !recoveryRequired && (
         <div className="question-submit-hint">
           {unsupportedQuestionFormat
             ? "This question format is unsupported. Dismiss the question to continue."
@@ -608,6 +625,7 @@ export function SessionQuestionBanner({
           const controlDescriptionIds = [
             question.context ? contextId : null,
             requirementId,
+            recoveryRequired ? recoveryId : null,
             !runnerOnline ? availabilityId : null,
           ]
             .filter((value): value is string => value !== null);

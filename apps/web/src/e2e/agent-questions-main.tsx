@@ -14,6 +14,7 @@ interface AnswerCall {
   sessionId: string;
   requestId: string;
   answers: Record<string, string | string[]>;
+  action?: "submit" | "dismiss";
 }
 
 declare global {
@@ -30,6 +31,7 @@ setQuestionResponseStyle(["composer", "text"].includes(params.get("style") ?? ""
 const initialOnline = params.get("offline") !== "1";
 const shouldFail = params.get("failure") === "1";
 const renderInFallbackSlot = params.get("slot") === "1";
+const recoveryRequired = params.get("recovery") === "1";
 let shouldHold = params.get("hold") === "1";
 let releasePending: (() => void) | null = null;
 
@@ -173,7 +175,12 @@ function Fixture() {
       sessionId: string,
       body: { requestId: string; answers: Record<string, string | string[]> },
     ) => {
-      window.agentQuestionCalls.push({ sessionId, requestId: body.requestId, answers: body.answers });
+      window.agentQuestionCalls.push({
+        sessionId,
+        requestId: body.requestId,
+        answers: body.answers,
+        action: (body as { action?: "submit" | "dismiss" }).action,
+      });
       if (shouldHold) {
         shouldHold = false;
         await new Promise<void>((resolve) => { releasePending = resolve; });
@@ -190,6 +197,7 @@ function Fixture() {
       sessionId="agent-question-session"
       requestId={requestId}
       questions={questions}
+      recoveryReason={recoveryRequired ? "provider_restart" : undefined}
       runnerOnline={runnerOnline}
       onSessionUpdate={() => setResolved(true)}
       showKeyHints={false}

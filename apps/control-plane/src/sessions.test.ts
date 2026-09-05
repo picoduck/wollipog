@@ -6617,6 +6617,84 @@ test("mixed-version multi-select Other requests reject submission but remain saf
   });
 });
 
+test("recovered questions reject unsafe submission but dismiss into an idle exactly-once recovery", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.setPendingApproval(id, {
+    kind: "question",
+    requestId: "recovered-question",
+    title: "Which target?",
+    options: [],
+    questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    recoveryReason: "provider_restart",
+  });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  const deliveryCount = hub.sentOfType("answer_question").length;
+
+  const submission = svc.answerQuestion(
+    id,
+    "recovered-question",
+    { target: "Production" },
+    { kind: "human", id: "device-recovery" },
+    "submit",
+  );
+  assert.equal(submission.status, 409);
+  assert.match(submission.error ?? "", /original answer channel ended/);
+  assert.equal(hub.sentOfType("answer_question").length, deliveryCount);
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "recovered-question");
+
+  const dismissal = svc.answerQuestion(
+    id,
+    "recovered-question",
+    {},
+    { kind: "human", id: "device-recovery" },
+    "dismiss",
+  );
+  assert.ok(dismissal.ok);
+  assert.equal(dismissal.data?.status, "idle");
+  assert.equal(dismissal.data?.pendingApproval, null);
+  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+    type: "answer_question",
+    sessionId: id,
+    requestId: "recovered-question",
+    answers: {},
+    action: "dismiss",
+  });
+});
+
+test("recovered question dismissal does not phantom-idle a newer active status", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  db.setPendingApproval(id, {
+    kind: "question",
+    requestId: "recovery-during-new-turn",
+    title: "Which target?",
+    options: [],
+    questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    recoveryReason: "provider_restart",
+  });
+
+  const dismissal = svc.answerQuestion(
+    id,
+    "recovery-during-new-turn",
+    {},
+    { kind: "human", id: "device-recovery" },
+    "dismiss",
+  );
+
+  assert.ok(dismissal.ok);
+  assert.notEqual(dismissal.data?.status, "idle");
+  assert.equal(dismissal.data?.pendingApproval, null);
+  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+    type: "answer_question",
+    sessionId: id,
+    requestId: "recovery-during-new-turn",
+    answers: {},
+    action: "dismiss",
+  });
+});
+
 test("question governance audit distinguishes explicit dismissal from submission", () => {
   const { hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });

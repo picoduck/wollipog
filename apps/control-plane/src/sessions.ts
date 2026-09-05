@@ -4083,6 +4083,9 @@ export class SessionsService {
     if (!pending) return fail("no pending question for this session", 409);
     if (pending.requestId !== requestId) return fail("question request id does not match the pending one", 409);
     if (pending.kind !== "question") return fail("the pending approval is not a question", 409);
+    if (pending.recoveryReason === "provider_restart" && action !== "dismiss") {
+      return fail("the original answer channel ended when the runner restarted; dismiss this question and continue with a new prompt", 409);
+    }
     // Answers ride verbatim into the agent's updatedInput — reject anything the pending card
     // never offered (unknown keys, wrong select shape, un-offered labels) WITHOUT clearing the
     // pending state, so a bad client can't strand or spoof the ask.
@@ -4102,7 +4105,13 @@ export class SessionsService {
     // The runner records question_resolved into the box log and streams it back (same
     // no-duplicate rule as permission_resolved); update local state for immediate feedback.
     this.db.setPendingApproval(sessionId, null);
-    this.db.updateSessionStatus(sessionId, "running", now);
+    this.db.updateSessionStatus(
+      sessionId,
+      pending.recoveryReason === "provider_restart" && action === "dismiss"
+        ? session.status === "input_required" ? "idle" : session.status
+        : "running",
+      now,
+    );
     this.recordGovernanceAudit(
       session,
       pending,

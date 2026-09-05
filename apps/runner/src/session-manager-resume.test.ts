@@ -659,6 +659,8 @@ test("startup reconciliation restores a durable authentication card and suppress
     const restored = h.store.readMeta("resume-session")!;
     assert.equal(restored.status, "input_required");
     assert.equal(restored.providerAuthBlock?.loginOperationId, undefined);
+    assert.equal(restored.questionRecoveryReconciled, undefined,
+      "a higher-priority authentication block must not consume the question recovery scan");
     assert.equal(restored.pendingApproval?.requestId, "provider-auth:recovery-a");
     assert.equal(restored.pendingApproval?.title, "Authentication Required — Claude Code");
     assert.deepEqual(

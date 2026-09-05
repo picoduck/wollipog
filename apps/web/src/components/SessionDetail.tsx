@@ -2631,7 +2631,8 @@ function SessionDetailLoaded({
   const timelinePendingQuestion = useMemo(() => pendingQuestion ? {
     requestId: pendingQuestion.requestId,
     questions: pendingQuestion.questions ?? [],
-  } : null, [session.id, pendingQuestion?.requestId]);
+    recoveryReason: pendingQuestion.recoveryReason,
+  } : null, [session.id, pendingQuestion?.requestId, pendingQuestion?.recoveryReason]);
   const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
   const handlePendingQuestionAvailabilityChange = useCallback((requestId: string, available: boolean) => {
     setInlineQuestionRequestId((current) => available

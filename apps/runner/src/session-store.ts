@@ -120,6 +120,8 @@ export interface SessionMeta {
   costUsd: number;
   preview: string | null;
   pendingApproval: PendingApproval | null;
+  /** One-time upgrade scan repaired any question that an older startup path stranded in history. */
+  questionRecoveryReconciled?: true;
   /** Runner-only structural identity for the provider installation + credential home/source. */
   providerCredentialScopeId?: string;
   /** Runner-only account/credential digest observed while provider-native status was authenticated. */
@@ -1602,11 +1604,17 @@ export class SessionStore {
   /** Highest seq in the ndjson log — public so callers can consult the DURABLE tail (a
    * concurrent writer's appends are visible here before its debounced meta flush lands). */
   logTailSeq(id: string): number {
+    const result = this.logTailSeqResult(id);
+    return result.ok ? result.seq : 0;
+  }
+
+  /** Structured variant for callers that must distinguish an empty log from a failed read. */
+  logTailSeqResult(id: string): { ok: true; seq: number } | { ok: false } {
     try {
       this.recoverHistoryReset(id);
-      return this.historyTail(id).seq;
+      return { ok: true, seq: this.historyTail(id).seq };
     } catch {
-      return 0;
+      return { ok: false };
     }
   }
 

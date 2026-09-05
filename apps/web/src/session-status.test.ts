@@ -50,6 +50,16 @@ test("attention labels distinguish questions, authentication, approvals, and leg
   );
   assert.equal(
     sessionAttentionStatus(session("input_required", {
+      requestId: "recovered-question",
+      title: "Which database?",
+      options: [],
+      kind: "question",
+      recoveryReason: "provider_restart",
+    }))?.label,
+    "Recovery Required",
+  );
+  assert.equal(
+    sessionAttentionStatus(session("input_required", {
       requestId: "auth",
       title: "Sign in",
       options: [],

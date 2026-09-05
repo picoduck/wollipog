@@ -43,8 +43,33 @@ test("desktop questions select and submit the exact current answers", async ({ p
     sessionId: "agent-question-session",
     requestId: "ask-1",
     answers: { language: "TypeScript" },
+    action: "submit",
   }]);
 });
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test(`restart recovery stays explicit and dismissible on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/agent-questions-e2e.html?recovery=1");
+
+    await expect(page.getByText("Agent Question Recovery Required")).toBeVisible();
+    await expect(page.getByText(/original answer channel is no longer available/)).toBeVisible();
+    await expect(page.getByRole("radio", { name: /TypeScript/ })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Submit" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Dismiss and Continue" }).click();
+
+    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([{
+      sessionId: "agent-question-session",
+      requestId: "ask-1",
+      answers: {},
+      action: "dismiss",
+    }]);
+  });
+}
 
 test("desktop Composer Response submits a multi-question flow using only the keyboard", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -153,6 +178,7 @@ test("Composer Response keeps its draft and focus after a submission error", asy
     sessionId: "agent-question-session",
     requestId: "ask-1",
     answers: { language: "Python" },
+    action: "submit",
   });
 });
 
@@ -254,6 +280,7 @@ test("a replacement request cannot submit retained selections", async ({ page })
     sessionId: "agent-question-session",
     requestId: "ask-2",
     answers: { replacement: "Fresh Answer" },
+    action: "submit",
   }]);
 });
 

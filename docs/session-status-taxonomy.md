@@ -15,7 +15,8 @@ Session status is multidimensional. A workflow column is organization only; it n
 | Activity | `status=completed` | **Completed** | The session ended normally. |
 | Activity | `status=failed` | **Failed** | The provider or session ended in failure. |
 | Activity | `status=stopped` | **Stopped** | A person stopped the session. |
-| Attention | `pendingApproval.kind=question` | **Answer Required** | The agent asked a structured question. |
+| Attention | `pendingApproval.kind=question` and `recoveryReason=provider_restart` | **Recovery Required** | A structured question survived a provider restart but its original answer callback did not; dismiss the preserved question before continuing. |
+| Attention | `pendingApproval.kind=question` without a recovery reason | **Answer Required** | The agent asked a structured question. |
 | Attention | `pendingApproval.kind=authentication` | **Authentication Required** | Provider authentication is required. |
 | Attention | Any other `pendingApproval` | **Approval Required** | A permission, policy, budget, or tool-limit decision is required. |
 | Attention | `status=input_required` without a pending-action kind | **Input Required** | Neutral mixed-version fallback; the concrete action is unavailable. |

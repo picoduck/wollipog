@@ -63,6 +63,31 @@ test("the standalone approval slot keeps a pending question reachable until its 
   assert.equal((html.match(/Agent Questions/g) ?? []).length, 1);
 });
 
+test("a question stranded by restart preserves context but offers only the explicit safe recovery", () => {
+  const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
+    sessionId: "s-recovered",
+    requestId: "ask-recovered",
+    runnerOnline: true,
+    recoveryReason: "provider_restart",
+    questions: [{
+      id: "target",
+      header: "Target",
+      question: "Which target should receive the deployment?",
+      options: [{ label: "Production" }, { label: "Staging" }],
+    }],
+  }));
+
+  assert.match(html, /Agent Question Recovery Required/);
+  assert.match(html, /original answer channel is no longer available/);
+  assert.match(html, /No prior tool calls will be replayed/);
+  assert.match(html, /Which target should receive the deployment\?/);
+  assert.match(html, /Production/);
+  assert.match(html, /Staging/);
+  assert.match(html, /Dismiss and Continue/);
+  assert.doesNotMatch(html, />Submit</);
+  assert.equal((html.match(/role="radio"[^>]*aria-disabled="true"/g) ?? []).length, 2);
+});
+
 test("question choices expose labelled radio and checkbox semantics with one radio tab stop", () => {
   const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
     sessionId: "s1",

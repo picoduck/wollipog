@@ -168,6 +168,17 @@ test("questions and approvals receive distinct notification labels", () => {
     status: "input_required",
     pendingApproval: { requestId: "approval", title: "Run deploy?", options: [], kind: "permission" },
   });
+  const recovery = session({
+    status: "input_required",
+    pendingApproval: {
+      requestId: "recovery",
+      title: "Which database?",
+      options: [],
+      kind: "question",
+      recoveryReason: "provider_restart",
+    },
+  });
   assert.match(notifyDecision(session({ status: "running" }), question)!.body, /^Answer required/);
   assert.match(notifyDecision(session({ status: "running" }), approval)!.body, /^Approval required/);
+  assert.match(notifyDecision(session({ status: "running" }), recovery)!.body, /^Recovery required/);
 });
