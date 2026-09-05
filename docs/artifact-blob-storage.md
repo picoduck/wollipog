@@ -45,9 +45,11 @@ its prepared images; prompt, steering, event, and workflow associations independ
 images they reference. Maintenance expires an uncommitted, otherwise-unreferenced preparation
 after eight days—one day beyond browser queued-edit recovery—and then uses the same retryable blob
 garbage collection path. When a recovered queued edit is instead kept with **Use as New Message**,
-the browser authenticated-exports and verifies every prepared image before storing self-contained
-raw bytes in the ordinary local draft. The recovery remains available if any export fails, while a
-successful conversion no longer depends on the bounded preparation lease.
+the browser first validates the complete retained collection against the ordinary image-count and
+aggregate payload limits, then authenticated-exports and verifies every prepared image before
+storing self-contained raw bytes in the ordinary local draft. Invalid collections start no exports,
+and the recovery remains available if validation or any export fails. A successful conversion no
+longer depends on the bounded preparation lease.
 
 ## Backup and operations
 
