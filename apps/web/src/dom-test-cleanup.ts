@@ -10,6 +10,49 @@ interface DomTestWindow {
 }
 
 /**
+ * The drain itself, exported so its failure handling can be tested without a `node:test` hook.
+ *
+ * Round three of this PR's review found the guarded-finalizer fix MISSING from a commit whose
+ * message claimed it — an unrelated `git checkout` had taken it back and nothing caught that. A
+ * commit message is not evidence. This is what makes the behaviour checkable.
+ */
+export async function runDomTestCleanup(
+  domWindow: DomTestWindow,
+  disposers: Array<() => void | Promise<void>>,
+  options: { reset?: () => void } = {},
+): Promise<unknown[]> {
+  const failures: unknown[] = [];
+  try {
+    // `splice` first so a disposer that throws cannot be retried, and reverse so the newest fixture
+    // unwinds before whatever it was layered on.
+    for (const dispose of disposers.splice(0).reverse()) {
+      try {
+        await dispose();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  } finally {
+    // Every finalizer is guarded, and none may skip the ones after it. Same shape as the disposer
+    // loop, for the same reason: an unguarded `abort()` rejection would skip the body clear and the
+    // reset, and a throw inside a `finally` REPLACES the failures collected above rather than adding
+    // to them — losing the very error the run was reporting.
+    for (const finalize of [
+      () => domWindow.happyDOM.abort(),
+      () => { domWindow.document.body.innerHTML = ""; },
+      () => options.reset?.(),
+    ]) {
+      try {
+        await finalize();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  }
+  return failures;
+}
+
+/**
  * Guarantees that a DOM test file cannot outlive its own tests.
  *
  * A test that mounts `StoreProvider` starts the store's shared stall clock: a `setTimeout` that
@@ -40,27 +83,11 @@ export function installDomTestCleanup(
   const disposers: Array<() => void | Promise<void>> = [];
 
   afterEach(async () => {
-    const failures: unknown[] = [];
-    try {
-      // `splice` first so a disposer that throws cannot be retried, and reverse so the newest
-      // fixture unwinds before whatever it was layered on.
-      for (const dispose of disposers.splice(0).reverse()) {
-        try {
-          await dispose();
-        } catch (error) {
-          failures.push(error);
-        }
-      }
-    } finally {
-      // Runs whatever the disposers did, because this is the part that actually stops the clock.
-      await domWindow.happyDOM.abort();
-      domWindow.document.body.innerHTML = "";
-      options.reset?.();
-    }
-    // A disposer that genuinely broke is still a failure — reported after cleanup, not instead of
-    // it. Node reports the test body's own assertion error in preference to this one.
+    const failures = await runDomTestCleanup(domWindow, disposers, options);
+    // Cleanup that genuinely broke is still a failure — reported after cleanup, not instead of it.
+    // Node reports the test body's own assertion error in preference to this one.
     if (failures.length === 1) throw failures[0];
-    if (failures.length > 1) throw new AggregateError(failures, "DOM test disposers failed");
+    if (failures.length > 1) throw new AggregateError(failures, "DOM test cleanup failed");
   });
 
   return { cleanup: (dispose) => { disposers.push(dispose); } };
