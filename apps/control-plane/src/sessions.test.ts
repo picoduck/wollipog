@@ -4824,6 +4824,40 @@ test("token_usage crossing the budget parks the session with a cost_budget appro
     s.pendingApproval!.options.map((o) => o.optionId),
     ["continue", "cancel"],
   );
+  const priced = hub.sentOfType("priced_session_cost").at(-1)!;
+  assert.equal(priced.sessionId, id);
+  assert.equal(priced.costUsd, s.costUsd);
+});
+
+test("Codex usage sends its control-plane-priced cumulative cost to a current runner", () => {
+  const { db, hub, svc } = makeHarness();
+  db.setUsageRateTable(parseRateTable({
+    "gpt-5.5-codex": { input_cost_per_token: 0.000002, output_cost_per_token: 0.00001 },
+  }));
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  svc.onSessionEvent(id, {
+    kind: "token_usage",
+    inputTokens: 1_000,
+    outputTokens: 100,
+    cachedInputTokens: 0,
+    model: "gpt-5.5-codex",
+  });
+
+  const priced = hub.sentOfType("priced_session_cost").at(-1)!;
+  assert.equal(priced.sessionId, id);
+  assert.equal(priced.costUsd, db.getSession(id)!.costUsd);
+  assert.ok(priced.costUsd > 0, "the acknowledgement carries the rate-table price, not Codex's absent cost");
+  assert.deepEqual(Object.keys(priced).sort(), ["costUsd", "sessionId", "type"]);
+});
+
+test("priced cost acknowledgements are not sent to pre-v106 runners", () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 105);
+  const id = seedSession(svc, hub);
+
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 1 });
+
+  assert.equal(hub.sentOfType("priced_session_cost").length, 0);
 });
 
 test("parented token_usage remains in the timeline but does not inflate authoritative session totals or gates", () => {

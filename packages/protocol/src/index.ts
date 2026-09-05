@@ -304,7 +304,10 @@
 //      priced fails closed with a cost_unpriced card; an organization-wide per-user daily budget
 //      parks a user's sessions with a daily_budget card until the day rolls over or an owner or
 //      admin raises it. All control-plane owned; runners see the new config field as opaque.
-export const PROTOCOL_VERSION = 105;
+// 106: priced_session_cost acknowledges the control-plane-priced cumulative USD total after each
+//      parentless usage event. Current runners persist that total and apply the existing mid-turn
+//      cost guardrail to it; older runners keep provider-reported local cost enforcement.
+export const PROTOCOL_VERSION = 106;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -444,6 +447,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   usageEventModel: 104,
   /** v105 runners honour `rearm_governance.holdFor: "control_plane"` as a queue-only hold. */
   controlPlaneQueueHold: 105,
+  /** v106 runners enforce the control-plane-priced cumulative cost during the active turn. */
+  pricedSessionCost: 106,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
 } as const;
@@ -4711,6 +4716,14 @@ export interface RearmGovernanceMessage {
   holdFor?: RunnerGuardrailKind | "control_plane";
 }
 
+/** Acknowledge the authoritative, control-plane-priced cumulative session cost after one
+ * parentless usage event. Content-free and additive; sent only to v106+ runners. */
+export interface PricedSessionCostMessage {
+  type: "priced_session_cost";
+  sessionId: string;
+  costUsd: number;
+}
+
 export interface ResolvePermissionMessage {
   type: "resolve_permission";
   sessionId: string;
@@ -5628,6 +5641,7 @@ export type ControlPlaneToRunner =
   | EditQueuedPromptMessage
   | StopSessionMessage
   | RearmGovernanceMessage
+  | PricedSessionCostMessage
   | ResolvePermissionMessage
   | AnswerQuestionMessage
   | RewindSessionMessage
