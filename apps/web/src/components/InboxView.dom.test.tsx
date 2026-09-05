@@ -12,8 +12,13 @@ import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
 import type { RightPanelState } from "./RightPanel.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+// One mechanism, not two. Disposers registered through `cleanup` run BEFORE the window aborts its
+// pending tasks, which is the order React unmounting needs; a second `afterEach` racing this one
+// tore down the window first and made `act` reject during unmount (#690).
+const { cleanup } = installDomTestCleanup(domWindow);
 let mobileViewport = true;
 Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
@@ -74,39 +79,23 @@ function mountTestRoot(): { container: HTMLDivElement; root: ReturnType<typeof c
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  mountedRoots.push({ root, container });
+  const entry = { root, container };
+  mountedRoots.push(entry);
+  // The shared cleanup drains disposers newest-first and guards each one, so a teardown that throws
+  // cannot strand the roots behind it — the property rounds 1 and 2 of #684 were about.
+  cleanup(async () => {
+    const at = mountedRoots.indexOf(entry);
+    if (at >= 0) mountedRoots.splice(at, 1);
+    await act(async () => { root.unmount(); });
+    container.remove();
+  });
   return { container, root };
 }
 
-afterEach(async () => {
-  // Drain EVERY root even when one teardown throws. React makes `act` reject if an effect cleanup
-  // throws during unmount, and an early exit would strand the roots behind it — untracked, because
-  // `splice` has already emptied the registry — leaking exactly the clock this hook exists to stop.
-  // Reverse order unwinds the newest mount first.
-  const failures: unknown[] = [];
-  try {
-    for (const { root, container } of mountedRoots.splice(0).reverse()) {
-      // The WHOLE body is guarded, not just the unmount. Round 1 caught `act` rejecting and round 2
-      // caught `container.remove()` throwing; both stranded the roots behind them for the same
-      // reason. Guarding the statements one at a time invites a third variant, so nothing in here
-      // is allowed to escape and end the drain early.
-      try {
-        await act(async () => { root.unmount(); });
-        container.remove();
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-  } finally {
-    // Menus and dialogs portal into the body, outside any container, which is why some tests used
-    // to clear it by hand. Both resets trailed the unmount before, so a failing test leaked its
-    // viewport into the next one; they must not depend on every unmount succeeding either.
-    domWindow.document.body.innerHTML = "";
-    mobileViewport = true;
-  }
-  // A teardown that genuinely broke is still a failure — reported after cleanup, not instead of it.
-  if (failures.length === 1) throw failures[0];
-  if (failures.length > 1) throw new AggregateError(failures, "roots failed to unmount");
+afterEach(() => {
+  // An order-independent scalar reset. It used to trail each test's unmount, so a failing test
+  // leaked its viewport into the next one and made this file order-dependent after any failure.
+  mobileViewport = true;
 });
 
 const VIEWPORT_HEIGHT = 2_000;

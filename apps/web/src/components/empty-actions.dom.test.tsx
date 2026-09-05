@@ -17,6 +17,7 @@ import { AutomationsView } from "./AutomationsView.js";
 import { Board } from "./Board.js";
 import { RunnersView } from "./RunnersView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 /**
  * What the empty-state actions actually DO.
@@ -29,6 +30,7 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
  */
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
