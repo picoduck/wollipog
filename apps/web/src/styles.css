@@ -160,11 +160,11 @@
 }
 
 :root[data-theme="light"] {
-  /* Usage chart series slots, stepped for the light surface. Slot 3 keeps the darker aqua: the
-     lighter step measured 2.6-2.8:1 against the page ground in every light palette. */
-  --usage-series-1: #eb6834;
+  /* Usage chart series slots, stepped for every light chart surface. Orange and aqua are darker
+     than the original slots so they also clear 3:1 on One Dark's elevated ground. */
+  --usage-series-1: #d75f30;
   --usage-series-2: #2a78d6;
-  --usage-series-3: #199e70;
+  --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
   /* The dim tiers, for text that sits on a TINTED row rather than a plain surface.
      A diff gutter, a slash-menu source, a syntax comment: each declares only a colour and inherits
@@ -12217,9 +12217,9 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #823d0f;
   --red-on-strong-tint: #73232b;
   --yellow: #7d4e00;
-  --usage-series-1: #eb6834;
+  --usage-series-1: #d75f30;
   --usage-series-2: #2a78d6;
-  --usage-series-3: #199e70;
+  --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
   --diff-add-bg: #dae9df;
   --diff-delete-bg: #f7dfe0;
@@ -12361,9 +12361,9 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #614a20;
   --red-on-strong-tint: #6a233a;
   --yellow: #7b5b01;
-  --usage-series-1: #eb6834;
+  --usage-series-1: #d75f30;
   --usage-series-2: #2a78d6;
-  --usage-series-3: #199e70;
+  --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
   --diff-add-bg: #dde3de;
   --diff-delete-bg: #f0d6dd;
@@ -12505,9 +12505,9 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #773d18;
   --red-on-strong-tint: #682b24;
   --yellow: #736017;
-  --usage-series-1: #eb6834;
+  --usage-series-1: #d75f30;
   --usage-series-2: #2a78d6;
-  --usage-series-3: #199e70;
+  --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
   --diff-add-bg: #d9e5c7;
   --diff-delete-bg: #f3dbcc;
@@ -12649,9 +12649,9 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #7a4214;
   --red-on-strong-tint: #74213f;
   --yellow: #726312;
-  --usage-series-1: #eb6834;
+  --usage-series-1: #d75f30;
   --usage-series-2: #2a78d6;
-  --usage-series-3: #199e70;
+  --usage-series-3: #18966a;
   --usage-series-4: #4a3aa7;
   --diff-add-bg: #e0e6d2;
   --diff-delete-bg: #f3d9dd;
