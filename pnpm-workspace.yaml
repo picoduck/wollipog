@@ -2,6 +2,9 @@ packages:
   - "apps/*"
   - "packages/*"
 
+# pnpm 11 reads engine enforcement here instead of .npmrc.
+engineStrict: true
+
 # esbuild's postinstall links the platform-native binary used by tsx and vite.
 # pnpm blocks dependency build scripts by default; this environment gates them
 # through the allowBuilds field.
