@@ -19,32 +19,41 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
 const isTest = (path: string) => path.endsWith(".test.ts") || path.endsWith(".test.tsx");
 
 /**
- * Components that put a `StoreProvider` on the page without the caller naming it.
+ * Modules that hand a caller a `StoreProvider` without the caller naming it.
  *
- * Derived rather than hardcoded, because the first version of this guard matched the literal string
- * `StoreProvider` and therefore missed `InstanceRuntimeHost.dom.test.tsx`, which mounts one through
- * a wrapper. That file still had the original bug while the guard reported everything clean — a
- * false negative is worse than no guard, because it looks like coverage.
+ * Derived, but only ONE level, and deliberately so. Three richer versions were tried and all three
+ * were wrong. Matching the literal `StoreProvider` missed `InstanceRuntimeHost.dom.test.tsx`, which
+ * mounts one through a wrapper. Closing the set transitively then contaminated it — `<App` matches
+ * `<ApprovalBar`, so the closure swept in `ComposerControls` and `SessionApproval` and the guard
+ * flagged thirty-two innocent files. Source text cannot tell a JSX tag from a longer identifier
+ * that starts the same way, and a guard that cries wolf is worse than one with a stated limit.
  *
- * The e2e fixtures under `src/e2e` are excluded: they are browser entry points, not `node:test`
- * files, so they never register a Node hook.
+ * KNOWN LIMIT: a test mounting a SECOND-level wrapper — `App`, which renders `InstanceRuntimeHost`
+ * — is not flagged. No such test exists today (no windowed test imports `App.js`), and the honest
+ * fix if one appears is to add it here rather than to widen the matching until it lies again.
  */
-function storeProviderWrappers(files: string[]): string[] {
+function storeProviderModules(files: string[]): string[] {
   return files
     .filter((path) => !isTest(path) && !path.includes(`${SRC}e2e/`))
     .filter((path) => readFileSync(path, "utf8").includes("<StoreProvider"))
-    .map((path) => basename(path).replace(/\.tsx?$/u, ""));
+    .map((path) => basename(path));
 }
 
-/** A happy-dom test that reaches a `StoreProvider`, directly or through one of those wrappers. */
+/**
+ * A happy-dom test that puts a `StoreProvider` on the page, directly or through such a module.
+ *
+ * Matched on IMPORT SPECIFIERS, never on bare component names: an import is the precise statement
+ * that this file can mount that module, where a name is just a string that might be a prefix of
+ * something else entirely.
+ */
 function storeProviderDomTests(files: string[]): string[] {
-  const wrappers = storeProviderWrappers(files);
+  const specifiers = ["store.js", ...storeProviderModules(files).map((name) => name.replace(/\.tsx?$/u, ".js"))];
   return files
     .filter((path) => isTest(path) && basename(path) !== SELF)
     .filter((path) => {
       const source = readFileSync(path, "utf8");
-      if (!source.includes("new Window(")) return false;
-      return source.includes("StoreProvider") || wrappers.some((name) => source.includes(name));
+      if (!/^(?:const|let) \w+ = new Window\(/mu.test(source)) return false;
+      return specifiers.some((specifier) => source.includes(`/${specifier}"`) || source.includes(`"./${specifier}"`));
     });
 }
 
@@ -80,8 +89,8 @@ test("the guardrail measures a real, non-empty set of files", () => {
     "the guardrail is inspecting itself, so its own markers could stand in for real coverage",
   );
   assert.ok(
-    storeProviderWrappers(files).length > 0,
-    "no module renders <StoreProvider any more; the wrapper derivation is measuring nothing",
+    storeProviderModules(files).length > 0,
+    "no module renders <StoreProvider any more; the derivation is measuring nothing",
   );
   assert.ok(
     candidates.length > 1,
