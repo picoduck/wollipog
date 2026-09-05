@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatReviewFindingsPrompt, parseBundleReviewFindings, parseCreateReviewFinding, parseUpdateReviewFinding, validateGitHubReviewSync } from "./review-findings.js";
+import { formatReviewFindingsPrompt, parseBundleReviewFindings, parseCreateReviewFinding, parseUpdateReviewFinding, validateForgeReviewSync, validateGitHubReviewSync } from "./review-findings.js";
 
 const create = {
   scope: "uncommitted",
@@ -56,6 +56,36 @@ test("review bundle prompt retains requirement, provenance id, and exact locatio
   assert.match(prompt, /reviewer will verify and resolve/);
 });
 
+test("review bundle prompt describes remote-only GitLab discussions without a fabricated file", () => {
+  const prompt = formatReviewFindingsPrompt([{
+    findingId: "rf_gitlab01",
+    sessionId: "s1",
+    ...create,
+    filePath: "__remote__/gitlab-discussion-101",
+    line: 1,
+    body: "General merge-request feedback.",
+    status: "open",
+    source: "gitlab",
+    author: { kind: "human", id: "reviewer" },
+    createdAt: 1,
+    updatedAt: 1,
+    remote: {
+      provider: "gitlab",
+      repository: "team/repo",
+      pullRequestNumber: 7,
+      threadId: "discussion-1",
+      commentId: 101,
+      url: "https://gitlab.com/team/repo/-/merge_requests/7#note_101",
+      commitId: "a".repeat(40),
+      outdated: true,
+      subjectType: "remote",
+      synchronizedAt: 2,
+    },
+  }]);
+  assert.match(prompt, /Remote GitLab discussion \(https:\/\/gitlab\.com\/team\/repo\/-\/merge_requests\/7#note_101\)/);
+  assert.doesNotMatch(prompt, /__remote__/);
+});
+
 test("GitHub review snapshots are revalidated at the control-plane trust boundary", () => {
   const sync = {
     repository: "acme/repo", pullRequestNumber: 7,
@@ -74,4 +104,44 @@ test("GitHub review snapshots are revalidated at the control-plane trust boundar
   assert.equal(validateGitHubReviewSync({ ...sync, threads: [{ ...sync.threads[0], path: "../secret" }] }), false);
   assert.equal(validateGitHubReviewSync({ ...sync, threads: [sync.threads[0], sync.threads[0]] }), false);
   assert.equal(validateGitHubReviewSync({ ...sync, diffHash: "not-a-hash" }), false);
+});
+
+test("GitLab review snapshots enforce exact self-managed host/project provenance", () => {
+  const sync = {
+    provider: "gitlab", host: "gitlab.example.test", project: "team/sub/repo", changeRequestNumber: 19,
+    changeRequestUrl: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19",
+    changeRequestHeadOid: "a".repeat(40), changeRequestBaseOid: "b".repeat(40),
+    localHeadOid: "a".repeat(40), diffHash: "d".repeat(64), synchronizedAt: 2_000,
+    threads: [{
+      threadId: "discussion-1", commentId: 101,
+      url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19#note_101",
+      path: "src/a.ts", side: "right", line: 4, body: "Remote issue", author: "reviewer",
+      createdAt: 1_000, updatedAt: 1_100, commitId: "c".repeat(40), subjectType: "line", resolved: false, outdated: false,
+    }],
+  } as const;
+  assert.equal(validateForgeReviewSync(sync), true);
+  assert.equal(validateForgeReviewSync({ ...sync, host: "evil.test" }), false);
+  assert.equal(validateForgeReviewSync({ ...sync, changeRequestUrl: `${sync.changeRequestUrl}.evil.test` }), false);
+  assert.equal(validateForgeReviewSync({ ...sync, changeRequestUrl: "https://token@gitlab.example.test/team/sub/repo/-/merge_requests/19" }), false);
+  assert.equal(validateForgeReviewSync({ ...sync, threads: [{ ...sync.threads[0], url: "https://evil.test/#note_101" }] }), false);
+  assert.equal(validateForgeReviewSync({ ...sync, threads: [{ ...sync.threads[0], subjectType: "remote", path: "__remote__/discussion-101" }] }), true);
+  assert.equal(validateForgeReviewSync({ ...sync, provider: "github", host: "github.com", threads: [{ ...sync.threads[0], subjectType: "remote" }] }), false);
+});
+
+test("forge GitHub validation accepts canonical mixed-case URL paths", () => {
+  const sync = {
+    provider: "github", host: "github.com", project: "microsoft/typescript", changeRequestNumber: 7,
+    changeRequestUrl: "https://github.com/microsoft/TypeScript/pull/7",
+    changeRequestHeadOid: "a".repeat(40), changeRequestBaseOid: "b".repeat(40),
+    localHeadOid: "a".repeat(40), diffHash: "d".repeat(64), synchronizedAt: 2_000,
+    threads: [{
+      threadId: "PRRT_1", commentId: 101,
+      url: "https://github.com/microsoft/TypeScript/pull/7#discussion_r101",
+      path: "src/a.ts", side: "right", line: 4, body: "Remote issue", author: "reviewer",
+      createdAt: 1_000, updatedAt: 1_100, commitId: "c".repeat(40), subjectType: "line",
+      resolved: false, outdated: false,
+    }],
+  } as const;
+  assert.equal(validateForgeReviewSync(sync), true);
+  assert.equal(validateForgeReviewSync({ ...sync, changeRequestUrl: "https://github.com/microsoft/Other/pull/7" }), false);
 });

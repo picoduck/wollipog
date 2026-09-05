@@ -18,7 +18,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import type { AgentContext } from "@wollipog/protocol";
+import type { AgentContext, ForgeProvider } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import {
   captureWorktreeTree,
@@ -668,20 +668,44 @@ export async function worktreeHead(worktreePath: string, options: WorktreeOption
 }
 
 export type PullRequestLifecycleState = "open" | "merged" | "closed";
-const isGitHubPullRequestUrl = (value: string): boolean =>
-  /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/u.test(value);
+type LinkedChangeRequest = {
+  provider: ForgeProvider;
+  host: string;
+  project: string;
+  number: number;
+};
+
+function linkedChangeRequest(value: string): LinkedChangeRequest | null {
+  try {
+    const url = new URL(value);
+    if (!new Set(["http:", "https:"]).has(url.protocol) || url.username || url.password || url.search || url.hash) return null;
+    const github = url.pathname.match(/^\/([^/\s]+\/[^/\s]+)\/pull\/([1-9]\d*)$/u);
+    if (url.protocol === "https:" && url.hostname.toLowerCase() === "github.com" && !url.port && github) {
+      return { provider: "github", host: "github.com", project: github[1]!, number: Number(github[2]) };
+    }
+    const gitlab = url.pathname.match(/^\/(.+)\/-\/merge_requests\/([1-9]\d*)$/u);
+    const project = gitlab?.[1] ?? "";
+    if (!gitlab || /[\0\r\n\\]/u.test(project) || project.length > 512 ||
+        project.split("/").some((part) => !part || part === "." || part === "..")) return null;
+    return { provider: "gitlab", host: url.host.toLowerCase(), project, number: Number(gitlab[2]) };
+  } catch {
+    return null;
+  }
+}
 
 export function parseWorktreePullRequestState(
   raw: string,
   expectedUrl: string,
 ): PullRequestLifecycleState | null {
-  if (!isGitHubPullRequestUrl(expectedUrl)) return null;
+  const expected = linkedChangeRequest(expectedUrl);
+  if (!expected) return null;
   try {
-    const parsed = JSON.parse(raw) as { url?: unknown; state?: unknown };
-    if (parsed.url !== expectedUrl || typeof parsed.state !== "string") return null;
-    if (parsed.state === "OPEN") return "open";
-    if (parsed.state === "MERGED") return "merged";
-    if (parsed.state === "CLOSED") return "closed";
+    const parsed = JSON.parse(raw) as { url?: unknown; web_url?: unknown; state?: unknown };
+    if ((expected.provider === "github" ? parsed.url : parsed.web_url) !== expectedUrl || typeof parsed.state !== "string") return null;
+    const state = parsed.state.toUpperCase();
+    if (state === "OPEN" || state === "OPENED") return "open";
+    if (state === "MERGED") return "merged";
+    if (state === "CLOSED") return "closed";
     return null;
   } catch {
     return null;
@@ -693,14 +717,20 @@ export function parseWorktreePullRequestState(
 export async function worktreePullRequestState(
   worktreePath: string,
   pullRequestUrl: string,
-  options: WorktreeOptions = {},
+  options: WorktreeOptions & { provider?: ForgeProvider } = {},
 ): Promise<PullRequestLifecycleState | null> {
-  if (!isGitHubPullRequestUrl(pullRequestUrl)) return null;
+  const request = linkedChangeRequest(pullRequestUrl);
+  if (!request || (request.provider === "gitlab" && options.provider !== "gitlab")) return null;
   try {
     const result = await runContextCommand(
       options.context ?? nativeContext,
-      "gh",
-      ["pr", "view", pullRequestUrl, "--json", "url,state"],
+      request.provider === "github" ? "gh" : "glab",
+      request.provider === "github"
+        ? ["pr", "view", pullRequestUrl, "--json", "url,state"]
+        : [
+          "api", `projects/${encodeURIComponent(request.project)}/merge_requests/${request.number}`,
+          "--hostname", request.host,
+        ],
       { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
     );
     return parseWorktreePullRequestState(result.stdout, pullRequestUrl);

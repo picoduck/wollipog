@@ -648,6 +648,8 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(50, "fineGrainedDiff"), true);
   assert.equal(runnerSupportsProtocol(50, "githubReviewReconciliation"), false);
   assert.equal(runnerSupportsProtocol(51, "githubReviewReconciliation"), true);
+  assert.equal(runnerSupportsProtocol(105, "forgeIntegration"), false);
+  assert.equal(runnerSupportsProtocol(106, "forgeIntegration"), true);
   assert.equal(runnerSupportsProtocol(51, "podReconciliation"), false);
   assert.equal(runnerSupportsProtocol(52, "podReconciliation"), true);
   assert.equal(runnerSupportsProtocol(52, "automationCommandReceipts"), false);

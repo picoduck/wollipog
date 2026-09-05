@@ -493,6 +493,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     { action: "commit", message: "must stay isolated" },
     { action: "diff", scope: "uncommitted" },
     { action: "github_review_sync" },
+    { action: "forge_review_sync" },
   ]) {
     const response = await ownerFetch("/api/sessions/session-target/git", {
       method: "POST",

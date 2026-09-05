@@ -3,6 +3,7 @@ import { ChevronLeftIcon, CommandLineIcon, FolderIcon, GlobeIcon, HelpIcon, Team
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
+  type GitForgeInfo,
   type SessionView,
   type SourceLocation,
   type CreateWorkspaceReferenceRequest,
@@ -174,6 +175,7 @@ export function RightPanel({
   runnerOnline,
   runnerProtocolVersion,
   git,
+  forge,
   onOpenTerminal,
   onInsertSideChatDraft,
   onAttachWorkspaceReference,
@@ -192,6 +194,7 @@ export function RightPanel({
   runnerOnline: boolean;
   runnerProtocolVersion: number | null | undefined;
   git: GitStatus;
+  forge?: GitForgeInfo | null;
   /** The Terminal launcher row opens the bottom dock — the app's single terminal surface. */
   onOpenTerminal: () => void;
   /** Explicitly prepares the primary composer; never sends it. */
@@ -381,6 +384,7 @@ export function RightPanel({
                 runnerOnline={runnerOnline}
                 runnerProtocolVersion={runnerProtocolVersion}
                 git={git}
+                forge={forge}
                 onOpenSourceLocation={onOpenSourceLocation}
                 onAttachWorkspaceReference={onAttachWorkspaceReference}
               />

@@ -313,6 +313,9 @@
 //      Provider-neutral workspace references are runner-minted, root-scoped, revision-bound
 //      prompt attachments. Search and minting remain bounded inside the session execution root;
 //      pre-v106 runners reject the structured attachment instead of silently dropping it.
+//      Forge-neutral source-control metadata and review reconciliation add GitLab.com plus exact-
+//      host self-managed GitLab support. Legacy GitHub action/result fields remain accepted so a
+//      rolling control-plane/runner/web deployment falls back to the established GitHub workflow.
 // 107: answer_recovered_question extends the durable command receipt lane so a structured answer
 //      can resume an established provider conversation after runner/process loss without replay.
 //      A runner-owned recovery occurrence id prevents provider request-id reuse from aliasing two
@@ -401,6 +404,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   hunkStaging: 13,
   fineGrainedDiff: 50,
   githubReviewReconciliation: 51,
+  forgeIntegration: 106,
   podReconciliation: 52,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -2037,7 +2041,7 @@ export interface ApprovalQueueRejectResult {
 export type ReviewFindingSeverity = "blocker" | "major" | "minor" | "nit";
 export type ReviewFindingStatus = "open" | "sent" | "resolved" | "dismissed";
 export type ReviewFindingSide = "left" | "right";
-export type ReviewFindingSource = "local" | "github";
+export type ReviewFindingSource = "local" | "github" | "gitlab";
 
 /** Durable line-anchored review feedback. `diffHash` makes a comment's source snapshot explicit;
  * comments whose hash no longer matches the visible diff remain in the findings list as stale
@@ -2068,7 +2072,7 @@ export interface ReviewFinding {
 }
 
 export interface ReviewFindingRemote {
-  provider: "github";
+  provider: ForgeProvider;
   repository: string;
   pullRequestNumber: number;
   threadId: string;
@@ -2076,7 +2080,7 @@ export interface ReviewFindingRemote {
   url: string;
   commitId: string;
   outdated: boolean;
-  subjectType: "line" | "file";
+  subjectType: "line" | "file" | "remote";
   synchronizedAt: number;
 }
 
@@ -3492,8 +3496,14 @@ export interface SessionWorktreeView {
   /** Commit resolved from baseRef when this worktree was created. */
   baseCommit?: string;
   source: "legacy" | "created" | "attached";
-  /** Pull request linkage is additive and may be absent until GitHub state is available. */
-  pullRequest?: { url: string; state: "open" | "merged" | "closed" };
+  /** Forge change-request linkage. The historic field name is retained on the wire for rolling
+   * compatibility; `kind` and `provider` distinguish pull requests from merge requests. */
+  pullRequest?: {
+    url: string;
+    state: "open" | "merged" | "closed";
+    provider?: ForgeProvider;
+    kind?: ForgeChangeRequestKind;
+  };
 }
 
 /* ========================================================================== */
@@ -5182,7 +5192,9 @@ export type GitAction =
    * metadata; callers never supply an arbitrary filesystem path. */
   | { kind: "pod_reconcile"; sourceSessionId: string; message: string }
   /** Read-only import/reconciliation of review threads for the PR associated with HEAD. */
-  | { kind: "github_review_sync" };
+  | { kind: "github_review_sync" }
+  /** Provider-selected read-only import for the change request associated with HEAD. */
+  | { kind: "forge_review_sync" };
 
 export interface GitActionRequestMessage {
   type: "git_action";
@@ -5649,6 +5661,22 @@ export interface GitCommitInfo {
 
 /* --- Git summary (pinned summary card: PR + checks at a glance) --- */
 
+export type ForgeProvider = "github" | "gitlab";
+export type ForgeChangeRequestKind = "pull_request" | "merge_request";
+
+/** Content-free forge capability/authentication state, resolved in the session's execution
+ * context. Credentials never cross the runner boundary. */
+export interface GitForgeInfo {
+  provider: ForgeProvider;
+  host: string;
+  project: string;
+  authenticated: boolean;
+  /** Bounded, sanitized remediation when the provider CLI is missing or not authenticated. */
+  authenticationError?: string;
+  /** Bounded provider read failure such as rate limiting, unsupported API behavior, or access. */
+  statusError?: string;
+}
+
 /** The open PR for the session branch, from `gh pr view`. */
 export interface GitPrSummary {
   number: number;
@@ -5656,6 +5684,9 @@ export interface GitPrSummary {
   url: string;
   /** gh's PR state vocabulary: OPEN | MERGED | CLOSED. */
   state: string;
+  /** Additive forge identity. Missing means a pre-v106 GitHub summary. */
+  provider?: ForgeProvider;
+  kind?: ForgeChangeRequestKind;
 }
 
 /** Check rollup for that PR (CheckRuns + commit StatusContexts combined). */
@@ -5684,6 +5715,8 @@ export interface GitSummaryInfo extends GitRepositoryFacts {
   remoteUrl: string | null;
   pr: GitPrSummary | null;
   checks: GitChecksSummary | null;
+  /** Additive forge readiness. Missing means the runner predates provider-neutral integration. */
+  forge?: GitForgeInfo | null;
 }
 
 /* --- Rich diff / review pane (PR-A, read-only) --- */
@@ -5763,12 +5796,53 @@ export interface GitDiffInfo {
 }
 
 export interface GitPrInfo {
-  /** PR URL (from gh) or a prefilled compare URL fallback. */
+  /** Authoritative change-request URL or a validated prefilled creation URL fallback. */
   url: string;
   branch: string;
   pushed: boolean;
   /** True when `gh` created a real PR; false when we returned a compare URL. */
   createdWithGh: boolean;
+  /** Additive provider-neutral creation result. Missing means a legacy GitHub runner. */
+  provider?: ForgeProvider;
+  kind?: ForgeChangeRequestKind;
+  created?: boolean;
+  /** Human-readable, sanitized explanation when only a prefilled creation URL was returned. */
+  notice?: string;
+}
+
+/** One top-level forge review discussion. Replies remain remote context and do not become
+ * duplicate local findings. Timestamps are epoch milliseconds. */
+export interface ForgeReviewThread {
+  threadId: string;
+  commentId: number;
+  url: string;
+  path: string;
+  side: ReviewFindingSide;
+  line: number;
+  body: string;
+  author: string;
+  createdAt: number;
+  updatedAt: number;
+  commitId: string;
+  /** `remote` means GitLab supplied a discussion without a trustworthy diff position. */
+  subjectType: "line" | "file" | "remote";
+  resolved: boolean;
+  outdated: boolean;
+}
+
+/** Complete authoritative review snapshot for one pull request or merge request. */
+export interface ForgeReviewSyncInfo {
+  provider: ForgeProvider;
+  host: string;
+  project: string;
+  changeRequestNumber: number;
+  changeRequestUrl: string;
+  changeRequestHeadOid: string;
+  changeRequestBaseOid: string;
+  localHeadOid: string;
+  diffHash: string;
+  threads: ForgeReviewThread[];
+  synchronizedAt: number;
 }
 
 /** One top-level GitHub PR review thread. Replies remain remote context and do not become
@@ -5812,6 +5886,8 @@ export interface GitHubReviewReconciliation {
   dismissedMissing: number;
 }
 
+export type ForgeReviewReconciliation = GitHubReviewReconciliation;
+
 /** Result of a git action, keyed by which action ran. */
 export interface GitActionData {
   status?: GitStatusInfo;
@@ -5820,6 +5896,7 @@ export interface GitActionData {
   commit?: GitCommitInfo;
   pr?: GitPrInfo;
   githubReview?: GitHubReviewSyncInfo;
+  forgeReview?: ForgeReviewSyncInfo;
   podReconciliation?: {
     status: "applied" | "already_applied" | "conflicted";
     sourceHead: string;

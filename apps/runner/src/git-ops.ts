@@ -35,6 +35,10 @@ import type {
   GitRepositoryFacts,
   GitStatusInfo,
   GitSummaryInfo,
+  ForgeProvider,
+  ForgeReviewSyncInfo,
+  ForgeReviewThread,
+  GitForgeInfo,
   AgentContext,
 } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
@@ -68,6 +72,10 @@ const GH_REVIEW_MAX_BUFFER = 8 * 1024 * 1024;
 const GH_REVIEW_PAGE_SIZE = 100;
 const GH_REVIEW_MAX_PAGES = 5;
 const GH_REVIEW_BODY_MAX = 4_000;
+const GLAB_TIMEOUT_MS = 45_000;
+const FORGE_MAX_BUFFER = 8 * 1024 * 1024;
+const GITLAB_REVIEW_PAGE_SIZE = 100;
+const GITLAB_REVIEW_MAX_PAGES = 5;
 
 const GH_REVIEW_QUERY = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){
   repository(owner:$owner,name:$name){
@@ -835,13 +843,94 @@ export function parseRevListPair(out: string): RevListPair | null {
   return { left: Number(match[1]), right: Number(match[2]) };
 }
 
-/** Extract owner/repo from a github remote (ssh or https), or null. */
+export interface ForgeRemote {
+  provider: ForgeProvider | null;
+  host: string;
+  project: string;
+  webUrl: string;
+}
+
+/** Parse only network Git remotes. The host is normalized and the project remains slash-delimited
+ * so subgroups work. Credentials, query strings, fragments, local paths, traversal, and control
+ * characters are rejected before any forge CLI sees the identity. */
+export function parseForgeRemote(remote: string): ForgeRemote | null {
+  const raw = remote.trim();
+  if (!raw || /[\0\r\n]/.test(raw)) return null;
+  let host = "";
+  let project = "";
+  let protocol = "https:";
+  try {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+      const url = new URL(raw);
+      if (!new Set(["http:", "https:", "ssh:"]).has(url.protocol) || url.password ||
+          ((url.protocol === "http:" || url.protocol === "https:") && url.username) || url.search || url.hash) return null;
+      // An SSH transport port is not the forge's web/API port. glab resolves any custom API host
+      // from its exact-host configuration; carrying `:2222` into browser/API URLs is incorrect.
+      host = (url.protocol === "ssh:" ? url.hostname : url.host).toLowerCase();
+      protocol = url.protocol;
+      project = decodeURIComponent(url.pathname.replace(/^\/+/, "").replace(/\.git$/i, ""));
+    } else {
+      const scp = raw.match(/^(?:[^@/:\s]+@)?([^/:\s]+):(.+)$/);
+      if (!scp) return null;
+      host = scp[1]!.toLowerCase();
+      project = scp[2]!.replace(/^\/+/, "").replace(/\.git$/i, "");
+    }
+  } catch {
+    return null;
+  }
+  if (!host || !/^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host) ||
+      !project || project.length > 512 || /[\0\r\n]/.test(project) || project.includes("\\") ||
+      project.split("/").length < 2 || project.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  const hostname = host.replace(/:\d+$/, "");
+  const provider: ForgeProvider | null = hostname === "github.com"
+    ? "github"
+    : hostname === "gitlab.com" ? "gitlab" : null;
+  const webProtocol = protocol === "http:" ? "http:" : "https:";
+  const encodedProject = project.split("/").map((part) => encodeURIComponent(part)).join("/");
+  return { provider, host, project, webUrl: `${webProtocol}//${host}/${encodedProject}` };
+}
+
+/** Recover only a GitHub identity from a credential-bearing HTTPS remote. Credentials are erased
+ * before parsing and this identity is used solely to validate gh output and build safe web URLs. */
+function credentialFreeGitHubRemote(remote: string): ForgeRemote | null {
+  try {
+    const url = new URL(remote.trim());
+    if (!new Set(["http:", "https:"]).has(url.protocol) || (!url.username && !url.password)) return null;
+    url.username = "";
+    url.password = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    const parsed = parseForgeRemote(url.href);
+    return parsed?.provider === "github" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeRemoteFallback(remote: string, parsed: ForgeRemote | null): string {
+  if (parsed) return parsed.webUrl;
+  try {
+    const url = new URL(remote);
+    if (url.username || url.password || url.search || url.hash) return "(no forge remote configured)";
+  } catch {
+    // Local paths and scp-style generic remotes retain their legacy display value.
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remote)) return "(no forge remote configured)";
+  }
+  return remote || "(no forge remote configured)";
+}
+
+/** Extract owner/repo from an exact github.com remote (ssh or https), or null. */
 export function githubSlug(remote: string): string | null {
-  const s = remote.trim();
-  // git@github.com:owner/repo.git  |  ssh://git@github.com/owner/repo.git
-  // https://github.com/owner/repo(.git)
-  const m = s.match(/github\.com[/:]([^/]+)\/(.+?)(?:\.git)?$/i);
-  return m ? `${m[1]}/${m[2]}` : null;
+  const parsed = parseForgeRemote(remote);
+  return parsed?.provider === "github" ? parsed.project : null;
+}
+
+/** Extract a GitLab project from GitLab.com, or from a self-managed host already proven by an
+ * exact-host authenticated `glab` probe. */
+export function gitlabProject(remote: string, authenticatedHost?: string): ForgeRemote | null {
+  const parsed = parseForgeRemote(remote);
+  if (!parsed) return null;
+  if (parsed.provider === "gitlab") return parsed;
+  return authenticatedHost?.toLowerCase() === parsed.host ? { ...parsed, provider: "gitlab" } : null;
 }
 
 /**
@@ -849,9 +938,24 @@ export function githubSlug(remote: string): string | null {
  * the `/pull/<n>` shape: a docs/login/status URL in a gh error must NOT be mistaken
  * for a created PR (otherwise a failed `gh pr create` looks like success).
  */
-export function pickPrUrl(text: string): string | null {
-  const m = text.match(/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/);
-  return m ? m[0] : null;
+export function pickPrUrl(text: string, remote?: ForgeRemote | null): string | null {
+  if (!remote) {
+    const match = text.match(/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/);
+    return match ? match[0] : null;
+  }
+  const base = new URL(remote.webUrl);
+  const expectedPrefix = `${base.pathname.replace(/\/$/, "")}/pull/`.toLowerCase();
+  for (const candidate of text.match(/https?:\/\/[^\s<>"']+/g) ?? []) {
+    const safe = safeHttpUrl(candidate.replace(/[),.;]+$/, ""));
+    if (!safe) continue;
+    const url = new URL(safe);
+    if (!url.username && !url.password && !url.search && !url.hash &&
+        url.host.toLowerCase() === remote.host && url.pathname.toLowerCase().startsWith(expectedPrefix) &&
+        /^[1-9]\d*\/?$/.test(url.pathname.slice(expectedPrefix.length))) {
+      return url.href.replace(/\/$/, "");
+    }
+  }
+  return null;
 }
 
 /* ------------------------------ diff parsing ----------------------------- */
@@ -1196,9 +1300,10 @@ export function summarizeCheckRollup(nodes: unknown): Omit<GitChecksSummary, "ur
 const GH_PR_CACHE_TTL_MS = 15_000;
 const ghPrCache = new Map<string, { at: number; pr: GitPrSummary | null; checks: GitChecksSummary | null }>();
 
-/** Test-only: drop the gh PR cache. */
+/** Test-only: drop forge summary caches. */
 export function clearGhPrCacheForTests(): void {
   ghPrCache.clear();
+  forgeSummaryCache.clear();
 }
 
 type JsonObject = Record<string, unknown>;
@@ -1313,7 +1418,8 @@ export function parseGitHubReviewPage(raw: string): {
 async function githubReviewSync(cwd: string): Promise<GitHubReviewSyncInfo> {
   const context = executionContext.getStore() ?? { kind: "native" as const };
   const remote = (await git(cwd, ["remote", "get-url", "origin"])).trim();
-  const repository = githubSlug(remote)?.toLowerCase() ?? null;
+  const forge = parseForgeRemote(remote) ?? credentialFreeGitHubRemote(remote);
+  const repository = forge?.provider === "github" ? forge.project.toLowerCase() : null;
   if (!repository) throw new Error("the origin remote is not a GitHub repository");
   const [owner, name] = repository.split("/");
   let prView: JsonObject;
@@ -1413,6 +1519,352 @@ async function githubReviewSync(cwd: string): Promise<GitHubReviewSyncInfo> {
   };
 }
 
+interface GitLabMergeRequest {
+  iid: number;
+  title: string;
+  webUrl: string;
+  state: string;
+  headOid: string;
+  baseOid: string;
+  pipeline: JsonObject | null;
+}
+
+function sanitizedForgeError(error: unknown): string {
+  return firstErrLine(error)
+    .replace(/(?:oauth|private|access)[-_ ]?token\s*[:=]\s*\S+/gi, "token=[redacted]")
+    .replace(/https?:\/\/[^/@\s]+@/g, "https://[redacted]@")
+    .slice(0, 320);
+}
+
+function isMissingCommand(error: unknown): boolean {
+  const value = error as { code?: unknown; message?: unknown } | null;
+  return value?.code === "ENOENT" || /(?:not found|is not recognized)/i.test(String(value?.message ?? ""));
+}
+
+function gitlabUrl(value: unknown, remote: Pick<ForgeRemote, "host" | "project" | "webUrl">): string | null {
+  const url = safeHttpUrl(value);
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const base = new URL(remote.webUrl);
+    const expectedPrefix = `${base.pathname.replace(/\/$/, "")}/-/`;
+    return !parsed.username && !parsed.password && parsed.host.toLowerCase() === remote.host &&
+      parsed.pathname.startsWith(expectedPrefix) ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function gitlabOid(value: unknown): string | null {
+  const oid = jsonString(value)?.toLowerCase() ?? null;
+  return oid && /^[a-f0-9]{40}$/.test(oid) ? oid : null;
+}
+
+/** Parse one GitLab MR API object without trusting host, project, revision, or pipeline URLs. */
+export function parseGitLabMergeRequest(value: unknown, remote: ForgeRemote): GitLabMergeRequest {
+  const object = jsonObject(value);
+  const iid = jsonInt(object?.iid);
+  const title = jsonString(object?.title);
+  const webUrl = gitlabUrl(object?.web_url, remote);
+  const state = jsonString(object?.state);
+  const refs = jsonObject(object?.diff_refs);
+  const headOid = gitlabOid(refs?.head_sha) ?? gitlabOid(object?.sha);
+  const baseOid = gitlabOid(refs?.base_sha);
+  const pipeline = object?.head_pipeline == null ? null : jsonObject(object.head_pipeline);
+  if (iid == null || iid < 1 || !title || title.length > 1_000 || !webUrl || !state || !headOid || !baseOid ||
+      (object?.head_pipeline != null && !pipeline)) {
+    throw new Error("GitLab returned invalid merge-request metadata");
+  }
+  return { iid, title, webUrl, state, headOid, baseOid, pipeline };
+}
+
+/** Collapse GitLab's bounded head-pipeline object into the existing provider-neutral check rollup. */
+export function summarizeGitLabPipeline(pipeline: unknown, remote: ForgeRemote): GitChecksSummary | null {
+  if (pipeline == null) return null;
+  const object = jsonObject(pipeline);
+  const status = jsonString(object?.status)?.toLowerCase();
+  const id = jsonInt(object?.id);
+  const url = gitlabUrl(object?.web_url, remote);
+  if (!status || !url) throw new Error("GitLab returned invalid pipeline metadata");
+  const name = id == null ? "Pipeline" : `Pipeline #${id}`;
+  if (new Set(["success", "skipped"]).has(status)) {
+    return { failing: 0, pending: 0, passing: 1, failingNames: [], url };
+  }
+  if (new Set(["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled", "manual"]).has(status)) {
+    return { failing: 0, pending: 1, passing: 0, failingNames: [], url };
+  }
+  return { failing: 1, pending: 0, passing: 0, failingNames: [name], url };
+}
+
+async function runGlab(cwd: string, host: string, args: string[]): Promise<string> {
+  const context = executionContext.getStore() ?? { kind: "native" as const };
+  const result = await runContextCommand(context, "glab", [...args, "--hostname", host], {
+    cwd,
+    timeoutMs: GLAB_TIMEOUT_MS,
+    maxBuffer: FORGE_MAX_BUFFER,
+  });
+  return result.stdout;
+}
+
+export async function gitlabReadiness(
+  cwd: string,
+  parsed: ForgeRemote,
+  runCommand: typeof runContextCommand = runContextCommand,
+): Promise<{
+  remote: ForgeRemote;
+  forge: GitForgeInfo;
+} | null> {
+  const context = executionContext.getStore() ?? { kind: "native" as const };
+  if (parsed.provider !== "gitlab") {
+    // A local, non-secret per-host setting proves this arbitrary remote is configured for glab
+    // before any authenticated/network command targets it. `glab auth login` records api_protocol
+    // for self-managed hosts; generic Git servers therefore retain local-only summary behavior.
+    try {
+      const configured = await runCommand(
+        context,
+        "glab",
+        ["config", "get", "api_protocol", "--host", parsed.host, "--global"],
+        { cwd, timeoutMs: GLAB_TIMEOUT_MS, maxBuffer: FORGE_MAX_BUFFER },
+      );
+      if (!new Set(["http", "https"]).has(configured.stdout.trim().toLowerCase())) return null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    await runCommand(
+      context,
+      "glab",
+      ["auth", "status", "--hostname", parsed.host],
+      { cwd, timeoutMs: GLAB_TIMEOUT_MS, maxBuffer: FORGE_MAX_BUFFER },
+    );
+    const remote = gitlabProject(`${parsed.webUrl}.git`, parsed.host);
+    if (!remote) throw new Error("the configured GitLab project identity is invalid");
+    return {
+      remote,
+      forge: { provider: "gitlab", host: remote.host, project: remote.project, authenticated: true },
+    };
+  } catch (error) {
+    const remediation = isMissingCommand(error)
+      ? "Install the GitLab CLI (glab) in this Machine context."
+      : `Run glab auth login --hostname ${parsed.host} in this Machine context.`;
+    return {
+      remote: parsed,
+      forge: {
+        provider: "gitlab",
+        host: parsed.host,
+        project: parsed.project,
+        authenticated: false,
+        authenticationError: `${remediation} (${sanitizedForgeError(error)})`,
+      },
+    };
+  }
+}
+
+async function gitlabMergeRequestForBranch(cwd: string, remote: ForgeRemote, branch: string): Promise<GitLabMergeRequest | null> {
+  const project = encodeURIComponent(remote.project);
+  const query = `projects/${project}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}&per_page=20`;
+  const raw = await runGlab(cwd, remote.host, ["api", query]);
+  const list = JSON.parse(raw) as unknown;
+  if (!Array.isArray(list) || list.length > 20) throw new Error("GitLab returned an invalid merge-request listing");
+  const candidates = list.map((value) => {
+    const object = jsonObject(value);
+    const iid = jsonInt(object?.iid);
+    const webUrl = gitlabUrl(object?.web_url, remote);
+    if (iid == null || iid < 1 || !webUrl) throw new Error("GitLab returned an invalid merge-request listing");
+    return { iid, webUrl };
+  });
+  if (candidates.length === 0) return null;
+  if (candidates.length > 1) throw new Error("GitLab returned more than one open merge request for this branch");
+  // The detail response carries diff_refs and head_pipeline consistently across supported GitLab
+  // versions; list endpoints on older self-managed releases may omit one or both.
+  const detail = await runGlab(cwd, remote.host, ["api", `projects/${project}/merge_requests/${candidates[0]!.iid}`]);
+  const parsed = parseGitLabMergeRequest(JSON.parse(detail), remote);
+  if (parsed.iid !== candidates[0]!.iid) throw new Error("GitLab changed the merge request while it was loading");
+  return parsed;
+}
+
+/** Strictly parse one complete GitLab discussions page. An invalid note or position aborts the
+ * authoritative page; callers never apply a partial reconciliation. */
+function parseGitLabReviewPageResult(
+  raw: string,
+  remote: ForgeRemote,
+  mr: GitLabMergeRequest,
+): { threads: ForgeReviewThread[]; discussionCount: number } {
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { throw new Error("GitLab returned malformed review data"); }
+  if (!Array.isArray(parsed) || parsed.length > GITLAB_REVIEW_PAGE_SIZE) {
+    throw new Error("GitLab returned an invalid review-discussion page");
+  }
+  const threads: ForgeReviewThread[] = [];
+  for (const value of parsed) {
+    const discussion = jsonObject(value);
+    const threadId = jsonString(discussion?.id);
+    const notes = discussion?.notes;
+    if (!threadId || threadId.length > 512 || !Array.isArray(notes) || notes.length < 1 || notes.length > 100) {
+      throw new Error("GitLab returned an invalid review discussion");
+    }
+    const root = notes.map(jsonObject).find((note) => note && note.system !== true) ?? null;
+    // GitLab represents activity such as pushes, assignments, and label changes as standalone
+    // system-note discussions. They contain no reviewer-authored finding, so exclude them from the
+    // authoritative snapshot without weakening validation for any content-bearing discussion.
+    if (!root) continue;
+    const commentId = jsonInt(root?.id);
+    const bodyRaw = jsonString(root?.body);
+    const author = jsonString(jsonObject(root?.author)?.username) ?? "ghost";
+    const createdAt = Date.parse(jsonString(root?.created_at) ?? "");
+    const updatedAt = Date.parse(jsonString(root?.updated_at) ?? "");
+    const position = jsonObject(root?.position);
+    const positioned = position != null && jsonString(position.position_type) === "text";
+    const newPath = positioned ? githubReviewPath(position.new_path) : null;
+    const oldPath = positioned ? githubReviewPath(position.old_path) : null;
+    const newLine = positioned ? jsonInt(position.new_line) : null;
+    const oldLine = positioned ? jsonInt(position.old_line) : null;
+    const side = newLine != null ? "right" as const : "left" as const;
+    const line = newLine ?? oldLine ?? 1;
+    const subjectType = positioned ? (newLine != null || oldLine != null ? "line" as const : "file" as const) : "remote" as const;
+    const path = side === "right" ? newPath ?? oldPath : oldPath ?? newPath;
+    const positionHead = positioned ? gitlabOid(position.head_sha) : null;
+    const commitId = positionHead ?? mr.headOid;
+    const url = `${mr.webUrl}#note_${commentId ?? ""}`;
+    if (commentId == null || commentId < 1 || bodyRaw == null || !author || author.length > 160 ||
+        !Number.isFinite(createdAt) || !Number.isFinite(updatedAt) || updatedAt < createdAt ||
+        line < 1 || line > 10_000_000 || (positioned && !path) || !gitlabUrl(url, remote) ||
+        (positioned && !positionHead)) {
+      throw new Error("GitLab returned an invalid review-discussion anchor");
+    }
+    const trimmed = bodyRaw.trim() || "(empty GitLab review comment)";
+    threads.push({
+      threadId,
+      commentId,
+      url,
+      path: path ?? `__remote__/gitlab-discussion-${commentId}`,
+      side,
+      line,
+      body: trimmed.length > GH_REVIEW_BODY_MAX ? `${trimmed.slice(0, GH_REVIEW_BODY_MAX - 1)}…` : trimmed,
+      author,
+      createdAt,
+      updatedAt,
+      commitId,
+      subjectType,
+      resolved: discussion?.resolved === true || root?.resolved === true,
+      outdated: !positioned || positionHead !== mr.headOid,
+    });
+  }
+  if (new Set(threads.map((thread) => thread.threadId)).size !== threads.length) {
+    throw new Error("GitLab returned duplicate review discussions");
+  }
+  return { threads, discussionCount: parsed.length };
+}
+
+export function parseGitLabReviewPage(raw: string, remote: ForgeRemote, mr: GitLabMergeRequest): ForgeReviewThread[] {
+  return parseGitLabReviewPageResult(raw, remote, mr).threads;
+}
+
+/** Load a bounded, complete sequence of GitLab discussion pages. The caller applies the returned
+ * snapshot only after every page validates, so a late malformed/failed page cannot partially
+ * reconcile durable findings. */
+export async function loadGitLabReviewThreads(
+  remote: ForgeRemote,
+  mr: GitLabMergeRequest,
+  loadPage: (page: number) => Promise<string>,
+): Promise<ForgeReviewThread[]> {
+  const threads: ForgeReviewThread[] = [];
+  let complete = false;
+  for (let page = 1; page <= GITLAB_REVIEW_MAX_PAGES; page += 1) {
+    const pageResult = parseGitLabReviewPageResult(await loadPage(page), remote, mr);
+    threads.push(...pageResult.threads);
+    if (pageResult.discussionCount < GITLAB_REVIEW_PAGE_SIZE) { complete = true; break; }
+  }
+  if (!complete) {
+    // A sixth, bounded sentinel page distinguishes exactly 500 discussions from overflow without
+    // ever admitting discussion 501 into the authoritative snapshot.
+    const overflow = parseGitLabReviewPageResult(await loadPage(GITLAB_REVIEW_MAX_PAGES + 1), remote, mr);
+    if (overflow.discussionCount > 0) {
+      throw new Error("the merge request has more than 500 discussions; no partial reconciliation was applied");
+    }
+  }
+  if (new Set(threads.map((thread) => thread.threadId)).size !== threads.length) {
+    throw new Error("GitLab returned duplicate review discussions across pages");
+  }
+  return threads;
+}
+
+async function gitlabReviewSync(cwd: string, remote: ForgeRemote): Promise<ForgeReviewSyncInfo> {
+  const branch = (await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
+  let mr: GitLabMergeRequest | null;
+  try { mr = await gitlabMergeRequestForBranch(cwd, remote, branch); } catch (error) {
+    throw new Error(`could not read the GitLab merge request (${sanitizedForgeError(error)})`);
+  }
+  if (!mr) throw new Error("GitLab has no open merge request for this branch");
+  const project = encodeURIComponent(remote.project);
+  const threads = await loadGitLabReviewThreads(remote, mr, async (page) => {
+    try {
+      return await runGlab(cwd, remote.host, [
+        "api", `projects/${project}/merge_requests/${mr.iid}/discussions?per_page=${GITLAB_REVIEW_PAGE_SIZE}&page=${page}`,
+      ]);
+    } catch (error) {
+      throw new Error(`could not read GitLab review discussions (${sanitizedForgeError(error)})`);
+    }
+  });
+  const confirmed = await gitlabMergeRequestForBranch(cwd, remote, branch);
+  if (!confirmed || confirmed.iid !== mr.iid || confirmed.headOid !== mr.headOid || confirmed.baseOid !== mr.baseOid) {
+    throw new Error("the merge request changed while its review discussions were loading — retry the sync");
+  }
+  const localHeadOid = (await git(cwd, ["rev-parse", "HEAD"])).trim().toLowerCase();
+  if (!(await treeExists(cwd, mr.baseOid))) {
+    throw new Error("the merge-request base commit is not available in this worktree — fetch the target branch and retry the sync");
+  }
+  const mergeBase = (await git(cwd, ["merge-base", mr.baseOid, "HEAD"])).trim();
+  const raw = await git(cwd, [...DIFF_CFG, "diff", "--no-ext-diff", "--unified=3", `${mergeBase}..HEAD`, "--"]);
+  if ((await git(cwd, ["rev-parse", "HEAD"])).trim().toLowerCase() !== localHeadOid) {
+    throw new Error("the local branch changed while its review diff was loading — retry the sync");
+  }
+  return {
+    provider: "gitlab",
+    host: remote.host,
+    project: remote.project,
+    changeRequestNumber: mr.iid,
+    changeRequestUrl: mr.webUrl,
+    changeRequestHeadOid: mr.headOid,
+    changeRequestBaseOid: mr.baseOid,
+    localHeadOid,
+    diffHash: computeDiffHash(raw),
+    threads,
+    synchronizedAt: Date.now(),
+  };
+}
+
+function githubReviewAsForge(sync: GitHubReviewSyncInfo): ForgeReviewSyncInfo {
+  return {
+    provider: "github",
+    host: "github.com",
+    project: sync.repository,
+    changeRequestNumber: sync.pullRequestNumber,
+    changeRequestUrl: sync.pullRequestUrl,
+    changeRequestHeadOid: sync.pullRequestHeadOid,
+    changeRequestBaseOid: sync.pullRequestBaseOid,
+    localHeadOid: sync.localHeadOid,
+    diffHash: sync.diffHash,
+    threads: sync.threads,
+    synchronizedAt: sync.synchronizedAt,
+  };
+}
+
+async function forgeReviewSync(cwd: string): Promise<ForgeReviewSyncInfo> {
+  const remoteUrl = (await git(cwd, ["remote", "get-url", "origin"])).trim();
+  const parsed = parseForgeRemote(remoteUrl);
+  const github = parsed?.provider === "github" ? parsed : credentialFreeGitHubRemote(remoteUrl);
+  if (github) return githubReviewAsForge(await githubReviewSync(cwd));
+  if (!parsed) throw new Error("the origin remote is not a supported forge repository");
+  const readiness = await gitlabReadiness(cwd, parsed);
+  if (!readiness) throw new Error("the origin remote is not a supported GitHub or configured GitLab repository");
+  if (!readiness.forge.authenticated) {
+    throw new Error(readiness.forge.authenticationError ?? "GitLab authentication is unavailable");
+  }
+  return gitlabReviewSync(cwd, readiness.remote);
+}
+
 /** The PR + checks for the branch checked out in `cwd`, via gh. Null when gh is missing,
  * unauthenticated, the repo isn't on GitHub, or the branch has no PR — never a throw. */
 async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null }> {
@@ -1437,7 +1889,14 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
     };
     const url = safeHttpUrl(d.url);
     if (typeof d.number === "number" && url) {
-      pr = { number: d.number, title: d.title ?? "", url, state: d.state ?? "OPEN" };
+      pr = {
+        number: d.number,
+        title: d.title ?? "",
+        url,
+        state: d.state ?? "OPEN",
+        provider: "github",
+        kind: "pull_request",
+      };
       const rollup = summarizeCheckRollup(d.statusCheckRollup);
       // No checks configured at all → omit the section rather than showing 0/0/0.
       checks = rollup.failing + rollup.pending + rollup.passing > 0 ? { ...rollup, url: `${url.replace(/\/$/, "")}/checks` } : null;
@@ -1447,6 +1906,75 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
   }
   ghPrCache.set(cacheKey, { at: Date.now(), pr, checks });
   return { pr, checks };
+}
+
+const forgeSummaryCache = new Map<string, {
+  at: number;
+  value: { pr: GitPrSummary | null; checks: GitChecksSummary | null; forge: GitForgeInfo | null };
+}>();
+
+export async function forgeSummary(
+  cwd: string,
+  remoteUrl: string | null,
+  branch: string,
+  loadGitHubSummary: typeof ghPrSummary = ghPrSummary,
+): Promise<{ pr: GitPrSummary | null; checks: GitChecksSummary | null; forge: GitForgeInfo | null }> {
+  const parsed = remoteUrl ? parseForgeRemote(remoteUrl) : null;
+  if (parsed?.provider === "github") {
+    const result = await loadGitHubSummary(cwd);
+    return {
+      ...result,
+      forge: { provider: "github", host: parsed.host, project: parsed.project, authenticated: true },
+    };
+  }
+  // Before provider-neutral summaries, `gh pr view` was attempted regardless of the remote's name
+  // or host. Preserve that behavior for GitHub Enterprise and repositories whose GitHub remote is
+  // not named `origin`; a successful `gh` lookup is authoritative for the current worktree.
+  if (parsed?.provider !== "gitlab") {
+    const github = await loadGitHubSummary(cwd);
+    if (github.pr) return { ...github, forge: null };
+  }
+  if (!parsed) return { pr: null, checks: null, forge: null };
+  const context = executionContext.getStore() ?? { kind: "native" as const };
+  const key = `${context.kind === "wsl" ? `wsl:${context.distro}` : "native"}:${cwd}:${parsed.host}:${branch}`;
+  const hit = forgeSummaryCache.get(key);
+  if (hit && Date.now() - hit.at < GH_PR_CACHE_TTL_MS) return hit.value;
+  const readiness = await gitlabReadiness(cwd, parsed);
+  if (!readiness) {
+    const value = { pr: null, checks: null, forge: null };
+    forgeSummaryCache.set(key, { at: Date.now(), value });
+    return value;
+  }
+  if (!readiness.forge.authenticated) {
+    const value = { pr: null, checks: null, forge: readiness.forge };
+    forgeSummaryCache.set(key, { at: Date.now(), value });
+    return value;
+  }
+  try {
+    const mr = await gitlabMergeRequestForBranch(cwd, readiness.remote, branch);
+    const value = {
+      pr: mr ? {
+        number: mr.iid,
+        title: mr.title,
+        url: mr.webUrl,
+        state: mr.state.toUpperCase(),
+        provider: "gitlab" as const,
+        kind: "merge_request" as const,
+      } : null,
+      checks: mr ? summarizeGitLabPipeline(mr.pipeline, readiness.remote) : null,
+      forge: readiness.forge,
+    };
+    forgeSummaryCache.set(key, { at: Date.now(), value });
+    return value;
+  } catch (error) {
+    const value = {
+      pr: null,
+      checks: null,
+      forge: { ...readiness.forge, statusError: `GitLab status unavailable: ${sanitizedForgeError(error)}` },
+    };
+    forgeSummaryCache.set(key, { at: Date.now(), value });
+    return value;
+  }
 }
 
 /** Forge metadata is untrusted input. Only publish absolute web URLs to dashboard clients. */
@@ -1460,13 +1988,13 @@ export function safeHttpUrl(value: unknown): string | null {
   }
 }
 
-/** One read powering the pinned summary card: status bits + behind-count + the gh PR/checks. */
+/** One read powering the pinned summary card: status bits plus provider-neutral forge metadata. */
 export async function gitSummary(cwd: string): Promise<GitSummaryInfo> {
   const { status, behindBase } = await collectGitStatus(cwd);
   // Commits the base has that this branch lacks (0 if unknown) — same resolved base as the
   // ahead count in gitStatus, so the two can never disagree about what "the base" is.
   const { files: _files, ...facts } = status;
-  const { pr, checks } = await ghPrSummary(cwd);
+  const { pr, checks, forge } = await forgeSummary(cwd, status.remoteUrl, status.branch);
   return {
     ...facts,
     behind: behindBase,
@@ -1474,6 +2002,7 @@ export async function gitSummary(cwd: string): Promise<GitSummaryInfo> {
     deletedLines: status.deletedLines ?? 0,
     pr,
     checks,
+    forge,
   };
 }
 
@@ -2036,19 +2565,72 @@ export async function commitAll(cwd: string, message: string, all = false): Prom
   return { sha, message, filesChanged: staged.length, stagedOnly };
 }
 
-export async function openPr(cwd: string, opts: { title: string; body: string; branch?: string }): Promise<GitPrInfo> {
+export async function openPr(
+  cwd: string,
+  opts: { title: string; body: string; branch?: string },
+  runCommand: typeof runContextCommand = runContextCommand,
+): Promise<GitPrInfo> {
   let branch = (await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (opts.branch && opts.branch.trim() && opts.branch !== branch) {
     await git(cwd, ["branch", "-m", opts.branch.trim()]);
     branch = opts.branch.trim();
   }
+  const remoteUrl = (await git(cwd, ["remote", "get-url", "origin"])).trim();
+  const parsed = parseForgeRemote(remoteUrl);
+  const github = parsed?.provider === "github" ? parsed : credentialFreeGitHubRemote(remoteUrl);
+  const gitlab = !github && parsed && parsed.provider !== "github"
+    ? await gitlabReadiness(cwd, parsed, runCommand)
+    : null;
   await git(cwd, ["push", "-u", "origin", branch]);
 
-  // Prefer a real PR via gh; fall back to a prefilled compare URL if gh is absent,
-  // unauthenticated, or the repo isn't on GitHub.
-  const gh = await tryGhPr(cwd, opts.title, opts.body, branch);
-  if (gh) return { url: gh, branch, pushed: true, createdWithGh: true };
-  return { url: await compareUrl(cwd, branch), branch, pushed: true, createdWithGh: false };
+  if (github) {
+    // Prefer a real PR via gh; fall back to a prefilled compare URL if gh is absent or unauthenticated.
+    const gh = await tryGhPr(cwd, opts.title, opts.body, branch, github, runCommand);
+    if (gh) return {
+      url: gh, branch, pushed: true, createdWithGh: true,
+      provider: "github", kind: "pull_request", created: true,
+    };
+    return {
+      url: await compareUrl(cwd, branch, github), branch, pushed: true, createdWithGh: false,
+      provider: "github", kind: "pull_request", created: false,
+      notice: "Only the branch was pushed. Authenticate the GitHub CLI to create the pull request here.",
+    };
+  }
+  if (gitlab) {
+    const creation = gitlab.forge.authenticated
+      ? await tryGitLabMr(cwd, gitlab.remote, opts.title, opts.body, branch)
+      : { url: null };
+    if (creation.url) return {
+      url: creation.url, branch, pushed: true, createdWithGh: false,
+      provider: "gitlab", kind: "merge_request", created: true,
+    };
+    return {
+      url: await gitlabCompareUrl(cwd, gitlab.remote, branch, opts.title, opts.body),
+      branch,
+      pushed: true,
+      createdWithGh: false,
+      provider: "gitlab",
+      kind: "merge_request",
+      created: false,
+      notice: gitlab.forge.authenticationError ??
+        creation.error ?? "Only the branch was pushed. Open the prefilled GitLab page to create the merge request.",
+    };
+  }
+  // Legacy behavior let gh resolve unknown hosts itself. Retain it for GitHub Enterprise while
+  // validating any returned PR URL against the credential-free origin identity when available.
+  const gh = await tryGhPr(cwd, opts.title, opts.body, branch, parsed, runCommand);
+  if (gh) return {
+    url: gh, branch, pushed: true, createdWithGh: true,
+    provider: "github", kind: "pull_request", created: true,
+  };
+  return {
+    url: safeRemoteFallback(remoteUrl, parsed),
+    branch,
+    pushed: true,
+    createdWithGh: false,
+    created: false,
+    notice: "Only the branch was pushed. This remote has no configured forge integration.",
+  };
 }
 
 const cleanGitPath = (value: string): string => {
@@ -2250,6 +2832,8 @@ export async function runGitAction(cwd: string, action: GitAction, ctx: GitActio
       return { summary: await gitSummary(cwd) };
     case "github_review_sync":
       return { githubReview: await githubReviewSync(cwd) };
+    case "forge_review_sync":
+      return { forgeReview: await forgeReviewSync(cwd) };
     case "diff":
       return { diff: await gitDiff(cwd, action.scope, ctx) };
     case "commit": {
@@ -2347,22 +2931,75 @@ async function assertGitRepository(cwd: string): Promise<void> {
   }
 }
 
-async function tryGhPr(cwd: string, title: string, body: string, branch: string): Promise<string | null> {
+async function tryGhPr(
+  cwd: string,
+  title: string,
+  body: string,
+  branch: string,
+  remote: ForgeRemote | null = null,
+  runCommand: typeof runContextCommand = runContextCommand,
+): Promise<string | null> {
   try {
     const context = executionContext.getStore() ?? { kind: "native" as const };
-    const { stdout } = await runContextCommand(context, "gh", ["pr", "create", "--title", title, "--body", body, "--head", branch], {
+    const { stdout } = await runCommand(context, "gh", ["pr", "create", "--title", title, "--body", body, "--head", branch], {
       cwd,
       timeoutMs: GH_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     });
-    return pickPrUrl(stdout);
+    return pickPrUrl(stdout, remote);
   } catch (err) {
     // gh missing/unauth, or a PR already exists (gh prints the existing PR URL to
     // stderr). pickPrUrl only matches a real /pull/<n> URL, so a docs/login/error
     // URL won't be misread as a created PR.
     const e = err as { stderr?: string; stdout?: string; message?: string };
-    return pickPrUrl(`${e.stderr ?? ""}\n${e.stdout ?? ""}\n${e.message ?? ""}`);
+    return pickPrUrl(`${e.stderr ?? ""}\n${e.stdout ?? ""}\n${e.message ?? ""}`, remote);
   }
+}
+
+async function tryGitLabMr(
+  cwd: string,
+  remote: ForgeRemote,
+  title: string,
+  body: string,
+  branch: string,
+): Promise<{ url: string | null; error?: string }> {
+  const targetRef = ((await defaultBaseRef(cwd)) ?? "origin/main").replace(/^origin\//, "");
+  const endpoint = `projects/${encodeURIComponent(remote.project)}/merge_requests`;
+  try {
+    const raw = await runGlab(cwd, remote.host, gitLabMergeRequestCreateArgs(endpoint, branch, targetRef, title, body));
+    return { url: parseGitLabMergeRequest(JSON.parse(raw), remote).webUrl };
+  } catch (error) {
+    // A retry after a timeout may encounter the MR created by the first request. Read the exact
+    // branch before falling back, but never claim creation from an unrelated URL in stderr.
+    try {
+      const existing = (await gitlabMergeRequestForBranch(cwd, remote, branch))?.webUrl ?? null;
+      if (existing) return { url: existing };
+    } catch {
+      // The creation error is the actionable primary failure and is sanitized below.
+    }
+    return {
+      url: null,
+      error: `Only the branch was pushed. GitLab could not create the merge request (${sanitizedForgeError(error)}). Open the prefilled GitLab page to continue.`,
+    };
+  }
+}
+
+/** Build string-typed `glab api` fields. `--field` performs JSON/file inference, so user text such
+ * as `1234` or `@reviewers` must use `--raw-field` to reach GitLab verbatim. */
+export function gitLabMergeRequestCreateArgs(
+  endpoint: string,
+  branch: string,
+  targetRef: string,
+  title: string,
+  body: string,
+): string[] {
+  return [
+    "api", "--method", "POST", endpoint,
+    "--raw-field", `source_branch=${branch}`,
+    "--raw-field", `target_branch=${targetRef}`,
+    "--raw-field", `title=${title}`,
+    "--raw-field", `description=${body}`,
+  ];
 }
 
 /** The default base ref (e.g. origin/main) for ahead-counts and compare URLs. */
@@ -2372,11 +3009,30 @@ async function defaultBaseRef(cwd: string): Promise<string | null> {
   return null;
 }
 
-async function compareUrl(cwd: string, branch: string): Promise<string> {
+async function compareUrl(cwd: string, branch: string, knownRemote?: ForgeRemote): Promise<string> {
   const remote = (await gitSoft(cwd, ["remote", "get-url", "origin"])).trim();
-  const slug = githubSlug(remote);
+  const slug = knownRemote?.provider === "github" ? knownRemote.project : githubSlug(remote);
   if (!slug) return remote || "(no GitHub remote configured)";
   const baseRef = (await defaultBaseRef(cwd)) ?? "origin/main";
   const base = baseRef.replace(/^origin\//, "");
-  return `https://github.com/${slug}/compare/${base}...${encodeURIComponent(branch)}?expand=1`;
+  const webUrl = knownRemote?.provider === "github" ? knownRemote.webUrl : `https://github.com/${slug}`;
+  return `${webUrl}/compare/${base}...${encodeURIComponent(branch)}?expand=1`;
+}
+
+async function gitlabCompareUrl(
+  cwd: string,
+  remote: ForgeRemote,
+  branch: string,
+  title: string,
+  body: string,
+): Promise<string> {
+  const baseRef = (await defaultBaseRef(cwd)) ?? "origin/main";
+  const url = new URL(`${remote.webUrl}/-/merge_requests/new`);
+  url.searchParams.set("merge_request[source_branch]", branch);
+  url.searchParams.set("merge_request[target_branch]", baseRef.replace(/^origin\//, ""));
+  url.searchParams.set("merge_request[title]", title);
+  if (body) url.searchParams.set("merge_request[description]", body);
+  const safe = gitlabUrl(url.href, remote);
+  if (!safe) throw new Error("could not construct a safe GitLab merge-request URL");
+  return safe;
 }

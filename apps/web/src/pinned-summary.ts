@@ -421,11 +421,15 @@ export function deriveCommitAction(status: { hasChanges: boolean; ahead: number 
  * The prompt the "Fix" button sends when checks are failing — the Codex affordance: hand the
  * failing-check names to the agent and let it investigate.
  */
-export function fixChecksPrompt(checks: GitChecksSummary): string {
+export function fixChecksPrompt(
+  checks: GitChecksSummary,
+  kind: "pull_request" | "merge_request" = "pull_request",
+): string {
   const n = checks.failing;
   const names = checks.failingNames.length ? ` (${checks.failingNames.join(", ")})` : "";
+  const requestName = kind === "merge_request" ? "merge request" : "pull request";
   return (
-    `The PR has ${n} failing check${n === 1 ? "" : "s"}${names}. ` +
+    `The ${requestName} has ${n} failing check${n === 1 ? "" : "s"}${names}. ` +
     `Investigate the failure${n === 1 ? "" : "s"}, fix the underlying issue, and push the fix.`
   );
 }
@@ -453,13 +457,14 @@ export function deriveSubagents(
 
 /** Which forge icon the Sources section shows. Null hides the section. GitHub means the
  * remote HOST is exactly github.com — `notgithub.com` / `mygithub.com` must not match. */
-export function sourceKind(remoteUrl: string | null | undefined): "github" | "git" | null {
+export function sourceKind(remoteUrl: string | null | undefined): "github" | "gitlab" | "git" | null {
   if (!remoteUrl) return null;
   const http = remoteHttpUrl(remoteUrl);
   if (http) {
     try {
       const host = new URL(http).hostname.toLowerCase();
       if (host === "github.com" || host === "www.github.com") return "github";
+      if (host === "gitlab.com" || host === "www.gitlab.com") return "gitlab";
     } catch {
       /* unparseable — treat as a generic remote */
     }

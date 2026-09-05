@@ -2141,8 +2141,14 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
       const resolved = validatePodReconciliationMetadata(execution.cwd, meta, source);
       return { podReconciliation: await runPodReconcile(execution.cwd, resolved.sourceWorktreePath, msg.action) };
     });
-    if (msg.action.kind === "open_pr" && data.pr?.createdWithGh) {
-      await sessions.linkWorktreePullRequest(msg.sessionId, execution.cwd, data.pr.url);
+    if (msg.action.kind === "open_pr" && (data.pr?.created ?? data.pr?.createdWithGh)) {
+      await sessions.linkWorktreePullRequest(
+        msg.sessionId,
+        execution.cwd,
+        data.pr.url,
+        data.pr.provider,
+        data.pr.kind,
+      );
     }
     sendUp({ type: "git_result", requestId: msg.requestId, ok: true, data });
   } catch (err) {

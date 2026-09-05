@@ -48,17 +48,18 @@ export function sessionChangeStatus(evidence: SessionChangeEvidence): SessionCha
     evidence.summary?.baseRef === evidence.status.baseRef
   );
   const prState = evidence.summary?.pr?.state;
+  const requestName = evidence.summary?.pr?.kind === "merge_request" ? "merge request" : "pull request";
   const openPullRequest = summaryMatchesStatus && typeof prState === "string" && prState.toUpperCase() === "OPEN";
   if (baseComparisonKnown && facts.ahead > 0 && openPullRequest) {
     return {
       kind: "ready_for_review",
       label: "Ready for Review",
-      description: "Git confirms commits ahead of base with an open pull request.",
+      description: `Git confirms commits ahead of base with an open ${requestName}.`,
       ...(facts.hasChanges ? {
         supplement: {
           kind: "uncommitted_changes" as const,
           label: "Uncommitted Changes" as const,
-          description: "Git confirms additional uncommitted changes that are not included in the pull request.",
+          description: `Git confirms additional uncommitted changes that are not included in the ${requestName}.`,
         },
       } : {}),
     };

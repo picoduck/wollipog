@@ -9,6 +9,7 @@ import {
   type GitCommitInfo,
   type GitDiffInfo,
   type GitDiffScope,
+  type GitForgeInfo,
   type GitPrInfo,
   type ReviewFinding,
   type ReviewFindingSummary,
@@ -29,6 +30,7 @@ import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
+import { sourceKind } from "../pinned-summary.js";
 
 /**
  * Git / PR workflow for a worktree session: review the worktree status, commit the
@@ -41,6 +43,7 @@ export function ReviewPanel({
   runnerOnline,
   runnerProtocolVersion,
   git,
+  forge,
   onOpenSourceLocation,
   onAttachWorkspaceReference,
 }: {
@@ -48,6 +51,7 @@ export function ReviewPanel({
   runnerOnline: boolean;
   runnerProtocolVersion: number | null | undefined;
   git: GitStatus;
+  forge?: GitForgeInfo | null;
   onOpenSourceLocation: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
 }) {
@@ -102,6 +106,16 @@ export function ReviewPanel({
   const stagingSupported = runnerSupportsProtocol(runnerProtocolVersion, "hunkStaging");
   const fineDiffSupported = runnerSupportsProtocol(runnerProtocolVersion, "fineGrainedDiff");
   const githubReviewSupported = runnerSupportsProtocol(runnerProtocolVersion, "githubReviewReconciliation");
+  const forgeReviewSupported = runnerSupportsProtocol(runnerProtocolVersion, "forgeIntegration");
+  const hostedGitLab = sourceKind(status?.remoteUrl) === "gitlab";
+  const forgeProvider = forge?.provider ?? (hostedGitLab ? "gitlab" : "github");
+  // A pre-v106 runner treats GitLab as generic Git. Preserve that established action surface until
+  // the runner advertises the forge contract; otherwise the web client would promise MR creation
+  // while dispatching to a runner that can only push a branch.
+  const mergeRequest = forgeProvider === "gitlab" && forgeReviewSupported;
+  const requestName = mergeRequest ? "Merge Request" : "Pull Request";
+  const requestShortName = mergeRequest ? "MR" : "PR";
+  const reviewSyncSupported = forgeReviewSupported || (!mergeRequest && githubReviewSupported);
   const diffHint = runnerCapabilityRequirement(runnerProtocolVersion, "richDiff", "Rich diff loading");
   const stagingHint = runnerCapabilityRequirement(runnerProtocolVersion, "hunkStaging", "Hunk staging");
   const fineDiffHint = runnerCapabilityRequirement(runnerProtocolVersion, "fineGrainedDiff", "Staged panes, line staging, and discard");
@@ -224,21 +238,24 @@ export function ReviewPanel({
     }
   };
 
-  const syncGitHubFindings = async () => {
+  const syncForgeFindings = async () => {
     setSyncingGitHub(true);
     setFindingError(null);
     setFindingNotice(null);
     try {
-      const data = await api.git(session.id, { action: "github_review_sync" });
-      if (!data.reviewFindings || !data.reviewReconciliation || !data.githubReview) {
-        throw new Error("the runner returned an incomplete GitHub review sync");
+      const data = await api.git(session.id, { action: forgeReviewSupported ? "forge_review_sync" : "github_review_sync" });
+      const remote = data.forgeReview;
+      if (!data.reviewFindings || !data.reviewReconciliation || (!remote && !data.githubReview)) {
+        throw new Error("the runner returned an incomplete forge review sync");
       }
       findingReqRef.current += 1;
       installFindings(data.reviewFindings);
       const counts = data.reviewReconciliation;
       const changed = counts.imported + counts.updated + counts.dismissedMissing;
       setFindingNotice(
-        `GitHub PR #${data.githubReview.pullRequestNumber} synchronized: ${data.githubReview.threads.length} thread${data.githubReview.threads.length === 1 ? "" : "s"}, ${changed} local change${changed === 1 ? "" : "s"}.`,
+        remote
+          ? `${remote.provider === "gitlab" ? "GitLab MR" : "GitHub PR"} #${remote.changeRequestNumber} synchronized: ${remote.threads.length} thread${remote.threads.length === 1 ? "" : "s"}, ${changed} local change${changed === 1 ? "" : "s"}.`
+          : `GitHub PR #${data.githubReview!.pullRequestNumber} synchronized: ${data.githubReview!.threads.length} thread${data.githubReview!.threads.length === 1 ? "" : "s"}, ${changed} local change${changed === 1 ? "" : "s"}.`,
       );
     } catch (cause) {
       setFindingError((cause as Error).message);
@@ -627,13 +644,13 @@ export function ReviewPanel({
             <button className="btn ghost sm" disabled={bundlingFindings} onClick={() => void loadFindings()}>↻ Refresh</button>
             <button
               className="btn ghost sm"
-              disabled={bundlingFindings || syncingGitHub || !runnerOnline || !session.worktreePath || !githubReviewSupported}
-              title={githubReviewSupported
-                ? "Import the current PR's GitHub review threads (read-only)"
-                : runnerCapabilityRequirement(runnerProtocolVersion, "githubReviewReconciliation", "GitHub review reconciliation")}
-              onClick={() => void syncGitHubFindings()}
+              disabled={bundlingFindings || syncingGitHub || !runnerOnline || !session.worktreePath || !reviewSyncSupported}
+              title={reviewSyncSupported
+                ? `Import the current ${requestName}'s ${mergeRequest ? "GitLab" : "GitHub"} review threads (read-only)`
+                : runnerCapabilityRequirement(runnerProtocolVersion, mergeRequest ? "forgeIntegration" : "githubReviewReconciliation", `${mergeRequest ? "GitLab" : "GitHub"} review reconciliation`)}
+              onClick={() => void syncForgeFindings()}
             >
-              {syncingGitHub ? "Syncing GitHub…" : "Sync GitHub"}
+              {syncingGitHub ? `Syncing ${mergeRequest ? "GitLab" : "GitHub"}…` : `Sync ${mergeRequest ? "GitLab" : "GitHub"}`}
             </button>
             <button
               className="btn sm"
@@ -652,16 +669,22 @@ export function ReviewPanel({
           <div className="review-findings-list">
             {findings.filter((finding) => finding.status === "open" || finding.status === "sent").map((finding) => {
               const stale = shownDiff?.diffHash !== finding.diffHash;
-              const sourcePath = normalizeSourcePath(finding.filePath);
+              const remoteOnly = finding.remote?.subjectType === "remote";
+              const sourcePath = remoteOnly ? null : normalizeSourcePath(finding.filePath);
               const sourceLocation = sourcePath ? {
                 path: sourcePath,
                 ...(finding.remote?.subjectType === "file" || finding.side !== "right" ? {} : { line: finding.line }),
               } : null;
+              const findingLocation = remoteOnly
+                ? "Remote Discussion"
+                : `${finding.filePath}${finding.remote?.subjectType === "file" ? " (file comment)" : `:${finding.line}`}`;
               return (
                 <article className="review-finding-row" key={finding.findingId}>
                   <input
                     type="checkbox"
-                    aria-label={finding.remote?.subjectType === "file"
+                    aria-label={remoteOnly
+                      ? "Select Remote Discussion"
+                      : finding.remote?.subjectType === "file"
                       ? `Select file-level finding on ${finding.filePath}`
                       : `Select finding on ${finding.filePath} line ${finding.line}`}
                     checked={selectedFindings.has(finding.findingId)}
@@ -676,10 +699,10 @@ export function ReviewPanel({
                     <div className="review-finding-meta">
                       {sourceLocation ? (
                         <button type="button" className="source-path-link" onClick={() => onOpenSourceLocation(sourceLocation)}>
-                          <code>{finding.filePath}{finding.remote?.subjectType === "file" ? " (file comment)" : `:${finding.line}`}</code>
+                          <code>{findingLocation}</code>
                         </button>
                       ) : (
-                        <code>{finding.filePath}{finding.remote?.subjectType === "file" ? " (file comment)" : `:${finding.line}`}</code>
+                        <code>{findingLocation}</code>
                       )}
                       <span className={`review-severity review-severity-${finding.severity}`}>{titleCaseLabel(finding.severity)}</span>
                       {finding.required && <span className="review-required">Required</span>}
@@ -687,16 +710,16 @@ export function ReviewPanel({
                       {stale && <span className="review-stale">Stale Diff Anchor</span>}
                     </div>
                     <div>{finding.body}</div>
-                    <div className="review-finding-provenance">{titleCaseLabel(finding.source)} · {finding.author.id ?? titleCaseLabel(finding.author.kind)} · {titleCaseLabel(finding.scope)} · {titleCaseLabel(finding.side)}</div>
+                    <div className="review-finding-provenance">{finding.source === "gitlab" ? "GitLab" : titleCaseLabel(finding.source)} · {finding.author.id ?? titleCaseLabel(finding.author.kind)} · {titleCaseLabel(finding.scope.replaceAll("_", " "))} · {titleCaseLabel(finding.side)}</div>
                     {finding.remote && (
                       <div className="review-finding-provenance">
-                        PR #{finding.remote.pullRequestNumber}{finding.remote.outdated ? " · Outdated" : ""}{" · "}
-                        <a href={finding.remote.url} target="_blank" rel="noreferrer">Open on GitHub</a>
+                        {finding.remote.provider === "gitlab" ? "MR" : "PR"} #{finding.remote.pullRequestNumber}{finding.remote.outdated ? " · Outdated" : ""}{" · "}
+                        <a href={finding.remote.url} target="_blank" rel="noreferrer">Open on {finding.remote.provider === "gitlab" ? "GitLab" : "GitHub"}</a>
                       </div>
                     )}
                   </div>
                   <div className="review-finding-row-actions">
-                    {finding.source === "github" ? (
+                    {finding.remote ? (
                       <span className="muted">Remote-Owned</span>
                     ) : (
                       <>
@@ -749,14 +772,14 @@ export function ReviewPanel({
         )}
       </div>
 
-      <div className="git-action" role="group" aria-label="Open a Pull Request">
-        <label>Open a Pull Request</label>
-        <input value={prTitle} onChange={(e) => setPrTitle(e.target.value)} placeholder="PR title" aria-label="PR Title" />
+      <div className="git-action" role="group" aria-label={`Open a ${requestName}`}>
+        <label>Open a {requestName}</label>
+        <input value={prTitle} onChange={(e) => setPrTitle(e.target.value)} placeholder={mergeRequest ? "MR title" : "PR title"} aria-label={`${requestShortName} Title`} />
         <textarea
           value={prBody}
           onChange={(e) => setPrBody(e.target.value)}
-          placeholder="PR description (optional)"
-          aria-label="PR Description"
+          placeholder={mergeRequest ? "MR description (optional)" : "PR description (optional)"}
+          aria-label={`${requestShortName} Description`}
           rows={2}
         />
         <div className="git-inline">
@@ -767,13 +790,13 @@ export function ReviewPanel({
             aria-label="Branch Name"
           />
           <button className="btn primary sm" onClick={doPr} disabled={disabled}>
-            {busy === "pr" ? "Opening…" : "Push & Open PR"}
+            {busy === "pr" ? "Opening…" : `Push & Open ${requestName}`}
           </button>
         </div>
-        <div className="hint">Commits any pending changes, pushes the branch, and opens a PR (falls back to a prefilled compare link if the runner has no authenticated <code>gh</code>). If you've staged hunks selectively, use Commit first — Push &amp; Open PR won't guess at a partial stage.</div>
+        <div className="hint">Commits any pending changes, pushes the branch, and opens a {requestName.toLowerCase()} (falls back to a validated prefilled link when authenticated forge tooling is unavailable). If you've staged hunks selectively, use Commit first — Push &amp; Open {requestName} won't guess at a partial stage.</div>
         {pr && (
           <div className="git-ok">
-            ✓ {pr.createdWithGh ? "PR opened" : "Branch pushed — click to open the PR"}:{" "}
+            ✓ {(pr.created ?? pr.createdWithGh) ? `${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"} opened` : `Branch pushed — click to open the ${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"}`}:{" "}
             {prHref ? (
               <a href={prHref} target="_blank" rel="noreferrer">{pr.url}</a>
             ) : (
@@ -781,6 +804,7 @@ export function ReviewPanel({
             )}
           </div>
         )}
+        {pr?.notice && <div className="hint warn">{pr.notice}</div>}
       </div>
     </div>
   );

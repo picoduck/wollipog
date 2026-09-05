@@ -1109,12 +1109,18 @@ export class SessionManager {
     });
   }
 
-  async linkWorktreePullRequest(sessionId: string, worktreePath: string, url: string): Promise<void> {
+  async linkWorktreePullRequest(
+    sessionId: string,
+    worktreePath: string,
+    url: string,
+    provider?: "github" | "gitlab",
+    kind?: "pull_request" | "merge_request",
+  ): Promise<void> {
     await this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta?.worktrees) return;
       const worktrees = meta.worktrees.map((worktree) => sameWorktreePath(meta.context, worktree.path, worktreePath)
-        ? { ...worktree, pullRequest: { url, state: "open" as const } }
+        ? { ...worktree, pullRequest: { url, state: "open" as const, ...(provider ? { provider } : {}), ...(kind ? { kind } : {}) } }
         : worktree);
       const updated = this.store.patchMeta(sessionId, { worktrees });
       if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
@@ -1271,7 +1277,7 @@ export class SessionManager {
                 const verified = await this.resolveWorktreePullRequestState(
                   worktree.path,
                   worktree.pullRequest.url,
-                  { context: meta.context },
+                  { context: meta.context, provider: worktree.pullRequest.provider },
                 );
                 if (!verified || verified === "open") continue;
                 state = verified;

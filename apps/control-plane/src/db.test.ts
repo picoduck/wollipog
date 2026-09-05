@@ -13,6 +13,7 @@ import type {
   PendingApproval,
   RunnerMetadata,
   ReviewFinding,
+  ForgeReviewSyncInfo,
   GitHubReviewSyncInfo,
   SessionConfig,
   SessionSnapshot,
@@ -3932,12 +3933,162 @@ test("GitHub review reconciliation is idempotent, remote-owned, and dismisses on
   assert.equal(findings[0]?.status, "resolved");
   assert.equal(findings[0]?.body, "Updated remotely.");
   assert.equal(findings[0]?.remote?.outdated, true);
-  assert.notEqual(findings[0]?.diffHash, sync.diffHash, "outdated or mismatched heads cannot attach to the current diff");
+  assert.equal(
+    findings[0]?.diffHash,
+    createHash("sha256").update(`github:${sync.repository}:${sync.pullRequestNumber}:${thread.threadId}:${thread.commitId}`).digest("hex"),
+    "outdated GitHub findings retain their pre-v106 snapshot identity",
+  );
 
   assert.deepEqual(db.reconcileGitHubReviewFindings("sess-1", { ...resolved, threads: [], synchronizedAt: 1_600 }), {
     imported: 0, updated: 0, resolved: 0, reopened: 0, dismissedMissing: 1,
   });
   assert.equal(db.listReviewFindings("sess-1")[0]?.status, "dismissed");
+});
+
+test("GitLab review reconciliation isolates projects, preserves provenance, and reopens remotely", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  const sync = {
+    provider: "gitlab",
+    host: "gitlab.example.test",
+    project: "team/sub/repo",
+    changeRequestNumber: 19,
+    changeRequestUrl: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19",
+    changeRequestHeadOid: "a".repeat(40),
+    changeRequestBaseOid: "b".repeat(40),
+    localHeadOid: "a".repeat(40),
+    diffHash: "d".repeat(64),
+    synchronizedAt: 2_000,
+    threads: [{
+      threadId: "discussion-1", commentId: 101,
+      url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19#note_101",
+      path: "src/a.ts", side: "right", line: 4, body: "Remote issue", author: "reviewer",
+      createdAt: 1_000, updatedAt: 1_100, commitId: "a".repeat(40), subjectType: "line", resolved: false, outdated: false,
+    }],
+  } satisfies ForgeReviewSyncInfo;
+  assert.deepEqual(db.reconcileForgeReviewFindings("sess-1", sync), {
+    imported: 1, updated: 0, resolved: 0, reopened: 0, dismissedMissing: 0,
+  });
+  let finding = db.listReviewFindings("sess-1")[0]!;
+  assert.equal(finding.source, "gitlab");
+  assert.equal(finding.diffHash, sync.diffHash);
+  assert.deepEqual(finding.remote, {
+    provider: "gitlab", repository: sync.project, pullRequestNumber: 19, threadId: "discussion-1",
+    commentId: 101, url: sync.threads[0].url, commitId: "a".repeat(40), outdated: false,
+    subjectType: "line", synchronizedAt: 2_000,
+  });
+  assert.deepEqual(db.reconcileForgeReviewFindings("sess-1", {
+    ...sync, synchronizedAt: 2_200, threads: [{ ...sync.threads[0], resolved: true, updatedAt: 2_100 }],
+  }), { imported: 0, updated: 1, resolved: 1, reopened: 0, dismissedMissing: 0 });
+  assert.deepEqual(db.reconcileForgeReviewFindings("sess-1", {
+    ...sync, synchronizedAt: 2_400, threads: [{ ...sync.threads[0], resolved: false, outdated: true, updatedAt: 2_300 }],
+  }), { imported: 0, updated: 1, resolved: 0, reopened: 1, dismissedMissing: 0 });
+  finding = db.listReviewFindings("sess-1")[0]!;
+  assert.equal(finding.status, "open");
+  assert.notEqual(finding.diffHash, sync.diffHash, "outdated positions remain remote-only");
+});
+
+test("GitLab review findings survive a control-plane reconnect", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-gitlab-review-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession());
+    initial.reconcileForgeReviewFindings("sess-1", {
+      provider: "gitlab", host: "gitlab.com", project: "team/repo", changeRequestNumber: 7,
+      changeRequestUrl: "https://gitlab.com/team/repo/-/merge_requests/7",
+      changeRequestHeadOid: "a".repeat(40), changeRequestBaseOid: "b".repeat(40),
+      localHeadOid: "a".repeat(40), diffHash: "d".repeat(64), synchronizedAt: 2_000,
+      threads: [{
+        threadId: "discussion-7", commentId: 107,
+        url: "https://gitlab.com/team/repo/-/merge_requests/7#note_107",
+        path: "__remote__/gitlab-discussion-107", side: "left", line: 1,
+        body: "General review", author: "reviewer", createdAt: 1_000, updatedAt: 1_100,
+        commitId: "a".repeat(40), subjectType: "remote", resolved: false, outdated: true,
+      }],
+    });
+    initial.close();
+
+    const reconnected = ControlPlaneDb.open(path);
+    const [finding] = reconnected.listReviewFindings("sess-1");
+    assert.equal(finding?.source, "gitlab");
+    assert.equal(finding?.remote?.provider, "gitlab");
+    assert.equal(finding?.remote?.subjectType, "remote");
+    assert.equal(reconnected.reviewFindingSummary("sess-1").completion, "blocked");
+    reconnected.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("review finding v106 migration preserves legacy GitHub provenance and indexes", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-v106-migration-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession());
+    const sync = {
+      repository: "acme/repo", pullRequestNumber: 7,
+      pullRequestUrl: "https://github.com/acme/repo/pull/7",
+      pullRequestHeadOid: "a".repeat(40), pullRequestBaseOid: "b".repeat(40),
+      localHeadOid: "c".repeat(40), diffHash: "d".repeat(64), synchronizedAt: 2_000,
+      threads: [{
+        threadId: "PRRT_legacy", commentId: 101,
+        url: "https://github.com/acme/repo/pull/7#discussion_r101",
+        path: "src/legacy.ts", side: "left", line: 9, body: "Legacy review", author: "octocat",
+        createdAt: 1_000, updatedAt: 1_100, commitId: "e".repeat(40),
+        subjectType: "line", resolved: false, outdated: true,
+      }],
+    } satisfies GitHubReviewSyncInfo;
+    initial.reconcileGitHubReviewFindings("sess-1", sync);
+    const before = initial.listReviewFindings("sess-1")[0]!;
+    initial.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE review_findings_v105 (
+        finding_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, scope TEXT NOT NULL,
+        diff_hash TEXT NOT NULL, file_path TEXT NOT NULL, side TEXT NOT NULL, line INTEGER NOT NULL,
+        body TEXT NOT NULL, severity TEXT NOT NULL, required INTEGER NOT NULL, status TEXT NOT NULL,
+        source TEXT NOT NULL, author_kind TEXT NOT NULL, author_id TEXT, created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL, sent_at INTEGER, resolved_at INTEGER, resolved_by_kind TEXT,
+        resolved_by_id TEXT, remote_provider TEXT, remote_repository TEXT, remote_pr_number INTEGER,
+        remote_thread_id TEXT, remote_comment_id INTEGER, remote_url TEXT, remote_commit_id TEXT,
+        remote_outdated INTEGER, remote_subject_type TEXT, remote_synchronized_at INTEGER,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        CHECK (scope IN ('uncommitted','all_branch','last_turn')),
+        CHECK (side IN ('left','right')), CHECK (line > 0),
+        CHECK (severity IN ('blocker','major','minor','nit')), CHECK (required IN (0,1)),
+        CHECK (status IN ('open','sent','resolved','dismissed')),
+        CHECK (source IN ('local','github'))
+      );
+      INSERT INTO review_findings_v105 SELECT * FROM review_findings;
+      DROP TABLE review_findings;
+      ALTER TABLE review_findings_v105 RENAME TO review_findings;
+      CREATE INDEX idx_review_findings_session ON review_findings(session_id, status, created_at, finding_id);
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+    legacy.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    assert.deepEqual(upgraded.listReviewFindings("sess-1")[0], before);
+    upgraded.close();
+    const verified = new DatabaseSync(path);
+    const tableSql = verified.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='review_findings'",
+    ).get() as { sql: string };
+    assert.match(tableSql.sql, /'gitlab'/);
+    const indexes = verified.prepare("PRAGMA index_list(review_findings)").all() as Array<{ name: string }>;
+    assert.equal(indexes.some((index) => index.name === "idx_review_findings_session"), true);
+    verified.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("createRun + run members reflected in runView via getRun/listRuns", () => {

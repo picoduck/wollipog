@@ -610,7 +610,6 @@
     "driver-codex",
     "driver-codex-app-server",
     "following",
-    "is-fail",
     "is-pass",
     "is-pending",
     "loc-local",
