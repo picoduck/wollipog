@@ -37,6 +37,13 @@ test("prompt image materialization verifies and embeds prepared artifact bytes",
 test("prompt image materialization rejects retained artifact integrity mismatches", async () => {
   await assert.rejects(
     () => materializePromptImages(
+      [{ ...reference, sizeBytes: bytes.byteLength + 1 }],
+      async () => new Blob([bytes], { type: "image/png" }),
+    ),
+    /length does not match/,
+  );
+  await assert.rejects(
+    () => materializePromptImages(
       [{ ...reference, sha256: "0".repeat(64) }],
       async () => new Blob([bytes], { type: "image/png" }),
     ),
@@ -49,4 +56,21 @@ test("prompt image materialization rejects retained artifact integrity mismatche
     ),
     /MIME type does not match/,
   );
+});
+
+test("prompt image materialization explains secure-context requirements", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", { configurable: true, value: undefined });
+  try {
+    await assert.rejects(
+      () => materializePromptImages(
+        [reference],
+        async () => new Blob([bytes], { type: "image/png" }),
+      ),
+      /require HTTPS or localhost/,
+    );
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "crypto", descriptor);
+    else Reflect.deleteProperty(globalThis, "crypto");
+  }
 });

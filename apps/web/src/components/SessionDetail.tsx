@@ -3220,8 +3220,20 @@ function SessionDetailLoaded({
         return;
       }
       const recoveredDraft = { text: retainedDraft.text, images: materializedImages };
+      const saved = await saveComposerDraft(sessionId, recoveredDraft.text, recoveredDraft.images, instanceScope);
+      if (viewGenerationRef.current !== generation || queuedEditRef.current !== recoveredEdit) return;
+      if (composerDraftVersionRef.current !== draftVersion) {
+        const displaced = recoveredEdit.displacedDraft;
+        await saveComposerDraft(sessionId, displaced.text, displaced.images, instanceScope);
+        if (viewGenerationRef.current !== generation || queuedEditRef.current !== recoveredEdit) return;
+        setError("Recovered message was not converted because the composer changed. Try again.");
+        return;
+      }
+      if (!saved) {
+        setError("Recovered message was not converted because the ordinary draft could not be saved safely.");
+        return;
+      }
       markDraftDirty();
-      void saveComposerDraft(sessionId, recoveredDraft.text, recoveredDraft.images, instanceScope);
       clearQueuedPromptEditRecovery(mutationKey);
       setQueuedEditBusy(false);
       queuedEditRef.current = null;

@@ -35,6 +35,9 @@ export async function materializePromptImages(
       throw new Error(`Attachment ${index + 1} MIME type does not match its retained metadata.`);
     }
     const bytes = await blob.arrayBuffer();
+    if (!globalThis.crypto?.subtle) {
+      throw new Error("Attachment integrity checks require HTTPS or localhost. Open Wollipog in a secure browser context and try again.");
+    }
     if ((await sha256Hex(bytes)) !== image.sha256.toLowerCase()) {
       throw new Error(`Attachment ${index + 1} digest does not match its retained metadata.`);
     }

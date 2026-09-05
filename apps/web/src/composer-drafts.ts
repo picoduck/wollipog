@@ -587,10 +587,13 @@ export async function saveComposerDraft(
   text: string,
   images: PromptImageInput[],
   instanceScope = LOCAL_INSTANCE_SCOPE,
-): Promise<void> {
+): Promise<boolean> {
   const key = draftKey(sessionId, instanceScope);
-  if (discardedSessionIds.has(key)) return;
-  if (!text && images.length === 0) return deleteComposerDraft(sessionId, instanceScope);
+  if (discardedSessionIds.has(key)) return false;
+  if (!text && images.length === 0) {
+    await deleteComposerDraft(sessionId, instanceScope);
+    return true;
+  }
   const startedAtRevision = revision(key);
   const draft: ComposerDraft = { text, images, updatedAt: Date.now(), revision: browserRandomUUID() };
   if (typeof indexedDB !== "undefined") {
@@ -603,21 +606,21 @@ export async function saveComposerDraft(
         // transaction that deletes it; an unconditional delete could otherwise erase the newer
         // draft after IndexedDB serializes that write ahead of this continuation.
         await idbDeleteCurrentIfMatches(db, key, draft.text, draft.images, draft.revision);
-        return;
+        return false;
       }
       clearFallbackTombstone(sessionId, instanceScope);
       removeInstanceStorageValue(fallbackLogicalKey(sessionId), instanceScope);
-      return;
+      return true;
     } catch {
       /* use the smaller/quota-limited fallback when IndexedDB is unavailable */
     }
   }
-  if (discardedSessionIds.has(key) || revision(key) !== startedAtRevision) return;
+  if (discardedSessionIds.has(key) || revision(key) !== startedAtRevision) return false;
   // A fallback write does not prove the current IndexedDB record was replaced. Keep any external
   // deletion intent so reads can suppress an older still-readable IDB record before choosing this
   // newer fallback. A later successful IDB save clears the marker.
   const fallbackDraft = advanceDraftPastFallbackTombstone(sessionId, instanceScope, draft);
-  saveInstanceStorageValue(
+  return saveInstanceStorageValue(
     fallbackLogicalKey(sessionId),
     JSON.stringify(fallbackDraft),
     instanceScope,
