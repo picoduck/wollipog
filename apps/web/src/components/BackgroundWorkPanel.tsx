@@ -66,27 +66,80 @@ interface BackgroundJobGroup {
   parentTurnId: string;
   parentTurnKnown: boolean;
   jobs: ManagedBackgroundJobView[];
+  deliveries: BackgroundDeliveryView[];
 }
 
-function groupJobs(jobs: readonly ManagedBackgroundJobView[]): BackgroundJobGroup[] {
-  const groups = new Map<string, ManagedBackgroundJobView[]>();
+function deliveryTimestamp(delivery: BackgroundDeliveryView): number {
+  return Math.max(
+    delivery.queuedAt ?? 0,
+    delivery.submittedAt ?? 0,
+    delivery.acceptedAt ?? 0,
+    delivery.runnerResultPersistedAt ?? 0,
+    delivery.transcriptProjectedAt ?? 0,
+    delivery.notificationQueuedAt ?? 0,
+    delivery.dashboardObservedAt ?? 0,
+    delivery.statusSettledAt ?? 0,
+    ...(delivery.notifications ?? []).flatMap((receipt) => [
+      receipt.serviceAcceptedAt ?? 0,
+      receipt.shownAt ?? 0,
+      receipt.clickedAt ?? 0,
+    ]),
+  );
+}
+
+function deliveryStage(deliveries: readonly BackgroundDeliveryView[]): string {
+  if (deliveries.some((delivery) => delivery.runnerResultPersistedAt != null)) return "Result Delivered";
+  if (deliveries.some((delivery) => delivery.acceptedAt != null)) return "Continuation Accepted";
+  if (deliveries.some((delivery) => delivery.submittedAt != null)) return "Continuation Submitted";
+  if (deliveries.some((delivery) => delivery.queuedAt != null)) return "Continuation Pending";
+  return "Status Unverified";
+}
+
+function groupBackgroundHistory(
+  jobs: readonly ManagedBackgroundJobView[],
+  deliveries: readonly BackgroundDeliveryView[],
+): BackgroundJobGroup[] {
+  const groups = new Map<string, BackgroundJobGroup>();
   for (const job of jobs) {
     // `unknown` is a runner sentinel, not a shared barrier identity. Keep those jobs separate so
     // unrelated discoveries can never be presented as one fabricated parent-turn barrier.
     const key = job.parentTurnId === "unknown" ? `unknown:${job.id}` : job.parentTurnId;
-    const group = groups.get(key) ?? [];
-    group.push(job);
+    const group = groups.get(key) ?? {
+      key,
+      parentTurnId: job.parentTurnId,
+      parentTurnKnown: job.parentTurnId !== "unknown",
+      jobs: [],
+      deliveries: [],
+    };
+    group.jobs.push(job);
     groups.set(key, group);
   }
-  return [...groups.entries()]
-    .map(([key, group]) => ({
+  deliveries.forEach((delivery, index) => {
+    const parentTurnKnown = delivery.parentTurnId !== "unknown";
+    const key = parentTurnKnown ? delivery.parentTurnId : `delivery:unknown:${index}`;
+    const group = groups.get(key) ?? {
       key,
-      parentTurnId: group[0]!.parentTurnId,
-      parentTurnKnown: group[0]!.parentTurnId !== "unknown",
-      jobs: group.sort((left, right) => left.registeredAt - right.registeredAt || left.id.localeCompare(right.id)),
+      parentTurnId: delivery.parentTurnId,
+      parentTurnKnown,
+      jobs: [],
+      deliveries: [],
+    };
+    group.deliveries.push(delivery);
+    groups.set(key, group);
+  });
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      jobs: group.jobs.sort((left, right) => left.registeredAt - right.registeredAt || left.id.localeCompare(right.id)),
     }))
-    .sort((left, right) => Math.max(...right.jobs.map((job) => job.registeredAt)) -
-      Math.max(...left.jobs.map((job) => job.registeredAt)));
+    .sort((left, right) => {
+      const latest = (group: BackgroundJobGroup) => Math.max(
+        0,
+        ...group.jobs.map((job) => job.registeredAt),
+        ...group.deliveries.map(deliveryTimestamp),
+      );
+      return latest(right) - latest(left);
+    });
 }
 
 export function BackgroundWorkPanel({
@@ -108,9 +161,10 @@ export function BackgroundWorkPanel({
 }) {
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
   const jobs = session.backgroundJobs ?? [];
-  const groups = useMemo(() => groupJobs(jobs), [jobs]);
+  const deliveries = session.backgroundDeliveries ?? [];
+  const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
   // Every visible relative timestamp ages, including settled history left open for inspection.
-  const now = useTimelineClock(jobs.length > 0);
+  const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0);
   const aggregateState = session.backgroundWorkState === "resumed"
     ? undefined
     : session.backgroundWorkState;
@@ -166,15 +220,13 @@ export function BackgroundWorkPanel({
           )}
         </div>
       ) : (
-        <div className="background-work-groups" role="list" aria-label="Background Work Jobs">
+        <div className="background-work-groups" role="list" aria-label="Background Work History">
           {groups.map((group, groupIndex) => {
+            const deliveryOnly = group.jobs.length === 0;
             const shownTerminalCount = group.jobs.filter((job) => job.terminalStatus).length;
             const shownDeliveredCount = group.jobs.filter((job) => job.assistantResultPersistedAt != null ||
               (job.terminalObservedAt != null && job.continuationRequired === false)).length;
-            const groupDeliveries = group.parentTurnKnown
-              ? (session.backgroundDeliveries ?? []).filter((delivery) =>
-                  delivery.parentTurnId === group.parentTurnId)
-              : [];
+            const groupDeliveries = group.deliveries;
             const recordedJobCount = groupDeliveries.reduce((total, delivery) => total + delivery.jobCount, 0);
             const recordedTerminalCount = groupDeliveries.reduce(
               (total, delivery) => total + delivery.terminalCount,
@@ -196,9 +248,11 @@ export function BackgroundWorkPanel({
                     <h3 id={`background-work-group-${groupIndex}`}>{group.parentTurnKnown
                       ? `Parent Turn ${groupIndex + 1}`
                       : "Unknown Parent Turn"}</h3>
-                    <p>{terminalCount} of {jobCount} jobs terminal · {groupTruncated
-                      ? `${group.jobs.length} shown`
-                      : `${shownDeliveredCount} delivered`}</p>
+                    <p>{deliveryOnly
+                      ? `Delivery receipt retained for ${jobCount} ${jobCount === 1 ? "job" : "jobs"}. Per-job lifecycle history is outside the bounded inventory.`
+                      : <>{terminalCount} of {jobCount} jobs terminal · {groupTruncated
+                        ? `${group.jobs.length} shown`
+                        : `${shownDeliveredCount} delivered`}</>}</p>
                   </div>
                   {group.parentTurnKnown && parentEventId != null ? (
                     <button type="button" className="btn ghost sm" onClick={() => onOpenParentTurn(parentEventId)}>
@@ -214,18 +268,40 @@ export function BackgroundWorkPanel({
                     </span>
                   )}
                 </div>
-                <div className="background-work-barrier" role="group" aria-label="Barrier Status">
-                  <span>Barrier</span>
-                  <strong>{!group.parentTurnKnown
-                    ? "Status Unverified"
-                    : terminalCount < jobCount
-                      ? "Waiting for Jobs"
-                      : groupTruncated && !deliveryComplete
+                <div className="background-work-barrier" role="group"
+                  aria-label={deliveryOnly ? "Delivery Receipt Status" : "Barrier Status"}>
+                  <span>{deliveryOnly ? "Delivery Receipt" : "Barrier"}</span>
+                  <strong>{deliveryOnly
+                    ? deliveryStage(groupDeliveries)
+                    : !group.parentTurnKnown
                       ? "Status Unverified"
-                      : deliveryComplete ? "Delivered" : "Delivery Pending"}</strong>
+                      : terminalCount < jobCount
+                        ? "Waiting for Jobs"
+                        : groupTruncated && !deliveryComplete
+                          ? "Status Unverified"
+                          : deliveryComplete ? "Delivered" : "Delivery Pending"}</strong>
                   {notificationStage(groupDeliveries) && <span> · {notificationStage(groupDeliveries)}</span>}
                 </div>
-                <ol className="background-work-jobs">
+                {deliveryOnly ? (
+                  <ol className="background-work-jobs" aria-label="Retained Delivery Receipts">
+                    {groupDeliveries.map((delivery, deliveryIndex) => (
+                      <li className="background-work-delivery" key={delivery.continuationId ?? `${group.key}:${deliveryIndex}`}>
+                        <div className="background-work-job-title">
+                          <strong>Delivery Receipt {deliveryIndex + 1}</strong>
+                          <span className="background-work-state">
+                            {deliveryStage([delivery])}
+                          </span>
+                        </div>
+                        <dl className="background-work-job-meta">
+                          <div><dt>Recorded Job Count</dt><dd>{delivery.jobCount}</dd></div>
+                          <div><dt>Recorded Terminal Count</dt><dd>{delivery.terminalCount}</dd></div>
+                          <div><dt>Notification</dt><dd>{notificationStage([delivery]) ?? "Not Requested"}</dd></div>
+                          <div><dt>Latest Receipt</dt><dd>{recordedTime(deliveryTimestamp(delivery) || undefined, now)}</dd></div>
+                        </dl>
+                      </li>
+                    ))}
+                  </ol>
+                ) : <ol className="background-work-jobs">
                   {group.jobs.map((job, jobIndex) => {
                     const state = backgroundJobCurrentState(
                       job,
@@ -255,7 +331,7 @@ export function BackgroundWorkPanel({
                       </li>
                     );
                   })}
-                </ol>
+                </ol>}
               </section>
             );
           })}
