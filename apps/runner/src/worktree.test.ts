@@ -2421,3 +2421,49 @@ test("a remote that moves its default is not tracked by fetch, so the advertised
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("an idempotent retry applies the default branch the remote just advertised", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retry-default-"));
+  const origin = join(root, "origin.git");
+  const repo = join(root, "clone");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", "--bare", "--initial-branch=release-2027", origin]);
+    const seed = join(root, "seed");
+    execFileSync("git", ["init", "--initial-branch=release-2027", seed]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", seed, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["-C", seed, "remote", "add", "origin", origin]);
+    execFileSync("git", ["-C", seed, "push", "origin", "release-2027"]);
+    execFileSync("git", ["-C", seed, "branch", "develop"]);
+    execFileSync("git", ["-C", seed, "push", "origin", "develop"]);
+    execFileSync("git", ["clone", origin, repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_retry", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "retry",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+
+    const first = await manager.requestWorktree("s_retry", { branch: "fix/issue-679-retry" });
+    assert.equal(first.worktree.defaultBranch, "release-2027");
+
+    // The remote moves its default. A plain fetch never updates the tracked HEAD, so only the
+    // retry's own `ls-remote` can notice — and it must write what it learned to the record.
+    execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/develop"]);
+    const retried = await manager.requestWorktree("s_retry", { branch: "fix/issue-679-retry" });
+    assert.equal(retried.worktree.id, first.worktree.id, "the retry is still the same worktree");
+    assert.equal(retried.worktree.defaultBranch, "develop", "a retry must not preserve a stale default");
+  } finally {
+    await manager?.shutdown?.().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});

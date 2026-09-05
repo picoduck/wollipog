@@ -917,7 +917,12 @@ export class SessionManager {
         if (!existing) {
           throw new Error("requested worktree already exists without ownership by this session");
         }
-        const canonical = { ...existing, path: created.path };
+        const canonical: SessionWorktreeView = { ...existing, path: created.path };
+        // An idempotent retry still asked the remote, so it still learned the current default and
+        // must apply it — the same refresh rule as attach. Where the caller chose the base we
+        // contacted nobody and learned nothing, so the stored value is left exactly as it was
+        // rather than replaced by a local read that `git fetch` never updates.
+        if (advertised) canonical.defaultBranch = advertised.branch;
         return { worktree: canonical, snapshot: await this.activateWorktree(meta, canonical) };
       }
       // Stamped once, here, and persisted with the record: `attributedWorktrees` rebuilds views
