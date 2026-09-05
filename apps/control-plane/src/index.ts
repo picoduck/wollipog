@@ -37,6 +37,8 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   scopeAudienceContained,
+  isPromptImageReference,
+  isWorkspaceReference,
   validatePromptImageInputs,
   type AddBoxRequest,
   type AccessScopeChangePreview,
@@ -2460,6 +2462,16 @@ app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
   const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "Queued prompt editing");
   if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (typedImages.some(isWorkspaceReference)) {
+    const unsupportedWorkspaceReferences = runnerCapabilityError(
+      session.runnerId,
+      "workspaceReferences",
+      "Workspace references",
+    );
+    if (unsupportedWorkspaceReferences) {
+      return reply.code(409).send({ error: unsupportedWorkspaceReferences });
+    }
+  }
   const preparedImages = svc.prepareQueuedPromptEditImages(id, typedImages);
   if (!preparedImages.ok || !preparedImages.data) {
     return reply.code(preparedImages.status).send({ error: preparedImages.error ?? "queued message images are invalid" });
@@ -2484,7 +2496,8 @@ app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
       return reply.code(409).send({ error: result.error ?? "queued message could not be saved", reason: result.reason });
     }
     try {
-      db.commitPreparedPromptImages(preparedImages.data.map((image) => image.artifactId));
+      db.commitPreparedPromptImages(preparedImages.data.flatMap((image) =>
+        isWorkspaceReference(image) || !isPromptImageReference(image) ? [] : [image.artifactId]));
     } catch (error) {
       // Runner acceptance is authoritative. Lease cleanup is outcome-neutral; never turn an
       // applied edit into an ambiguous client failure.
