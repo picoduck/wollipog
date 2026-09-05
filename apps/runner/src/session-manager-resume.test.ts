@@ -280,12 +280,111 @@ test("provider auth failure stops the turn, parks exact recovery context, and ho
   }
 });
 
+test("runtime authentication recovery stays silent until the shared probe settles", async () => {
+  const probe = deferred<{ status: "authenticated"; identityId: string }>();
+  let h!: ReturnType<typeof harness>;
+  let probes = 0;
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ++probes === 1
+      ? { status: "authenticated", identityId: "account-a" }
+      : probe.promise,
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  h = harness({ driver: "claude-code", command: "claude" }, Promise.resolve(), Promise.resolve(),
+    () => {}, undefined, undefined, 4, async () => {
+      h.callbacks().onAuthenticationFailure?.();
+    }, controller);
+  try {
+    h.manager.prompt("resume-session", "possibly delivered");
+    for (let i = 0; i < 5; i += 1) await tick();
+    assert.equal(probes, 2);
+    assert.ok(h.store.readMeta("resume-session")?.providerAuthBlock);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    assert.equal(h.sent.some((message) => message.type === "session_status" && message.status === "input_required"), false);
+    h.manager.prompt("resume-session", "must not cross the probe");
+    await tick();
+    assert.deepEqual(h.prompts, ["possibly delivered"]);
+    probe.resolve({ status: "authenticated", identityId: "account-a" });
+    for (let i = 0; i < 10; i += 1) await shortDelay();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.deepEqual(h.prompts, ["possibly delivered"], "uncertain delivery is not replayed");
+    assert.equal(h.store.readEvents("resume-session").some((event) =>
+      event.payload.kind === "permission_request" || event.payload.kind === "permission_resolved"), false);
+    assert.equal(h.sent.some((message) => message.type === "session_status" && message.status === "input_required"), false);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const outcome of ["authenticated", "unauthenticated", "unknown", "wrong-account"] as const) {
+  test(`shared authentication burst coalesces sessions when probe is ${outcome}`, async () => {
+    const probe = deferred<{ status: "authenticated" | "unauthenticated" | "unknown"; identityId?: string }>();
+    let probes = 0;
+    let recovered = false;
+    const scope = { id: "scope-a", provider: "claude" as const, canStartLogin: false, configuredCredential: false };
+    const h = harness({ providerCredentialIdentityId: "account-a" }, Promise.resolve(), Promise.resolve(),
+      () => {}, undefined, undefined, 4, undefined, {
+        describe: () => scope,
+        revalidate: async () => {
+          probes += 1;
+          return recovered ? { status: "authenticated", identityId: "account-a" } : probe.promise;
+        },
+        startLogin: async () => "failed",
+        cancel: () => false,
+      });
+    try {
+      h.store.create(stored(h.root, { sessionId: "shared", providerCredentialIdentityId: "account-a" }));
+      const manager = h.manager as any;
+      for (const id of ["resume-session", "shared"]) {
+        manager.parkProviderAuthentication(h.store.readMeta(id), scope, "turn", "uncertain", false, true);
+        manager.revalidateProviderAuthenticationSilently(scope.id);
+      }
+      await tick();
+      assert.equal(probes, 1);
+      assert.equal(h.store.listSessions().filter((meta) => meta.pendingApproval).length, 0);
+      probe.resolve(outcome === "wrong-account"
+        ? { status: "authenticated", identityId: "account-b" }
+        : { status: outcome, identityId: "account-a" });
+      await tick();
+      await tick();
+      const cards = h.store.listSessions().filter((meta) => meta.pendingApproval?.kind === "authentication");
+      assert.equal(cards.length, outcome === "authenticated" ? 0 : 1);
+      assert.equal(h.store.listSessions().filter((meta) => meta.providerAuthBlock).length,
+        outcome === "authenticated" ? 0 : 2);
+      assert.equal(h.sent.filter((message) => message.type === "session_status" && message.status === "input_required").length,
+        outcome === "authenticated" ? 0 : 1, "only the owner can trigger an authentication push");
+      if (outcome === "unauthenticated") {
+        recovered = true;
+        h.manager.resolvePermission(cards[0]!.sessionId, cards[0]!.pendingApproval!.requestId, "auth:revalidate");
+        for (let i = 0; i < 5; i += 1) await tick();
+        assert.equal(h.store.listSessions().filter((meta) => meta.providerAuthBlock || meta.pendingApproval).length, 0);
+        assert.equal(["resume-session", "shared"].flatMap((id) => h.store.readEvents(id)).filter((event) =>
+          event.payload.kind === "permission_resolved").length, 1, "only the surfaced card gets a resolution");
+      }
+      if (outcome === "unknown") {
+        // Stopping the card owner must expose recovery for the surviving blocked session.
+        h.manager.stop(cards[0]!.sessionId);
+        assert.equal(h.store.listSessions().filter((meta) => meta.pendingApproval?.kind === "authentication").length, 1);
+      }
+    } finally {
+      h.manager.shutdownAll();
+      h.cleanup();
+    }
+  });
+}
+
 test("app-server authentication recheck resumes the held FIFO without another prompt", async () => {
   let h!: ReturnType<typeof harness>;
   let attempts = 0;
+  let rechecks = 0;
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: false, configuredCredential: false }),
-    revalidate: async () => ({ status: "authenticated", identityId: "account-a" }),
+    revalidate: async () => ++rechecks === 2
+      ? { status: "unauthenticated" }
+      : { status: "authenticated", identityId: "account-a" },
     startLogin: async () => "failed",
     cancel: () => false,
   };
@@ -931,9 +1030,12 @@ test("wrong-account revalidation fails closed and uncertain delivery is never re
 
 test("authentication recovery fans out only to matching credential scopes", async () => {
   let h!: ReturnType<typeof harness>;
+  let rechecks = 0;
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: true, configuredCredential: false }),
-    revalidate: async () => ({ status: "authenticated", identityId: "account-a" }),
+    revalidate: async () => ++rechecks === 2
+      ? { status: "unauthenticated" }
+      : { status: "authenticated", identityId: "account-a" },
     startLogin: async () => "completed",
     cancel: () => false,
   };
