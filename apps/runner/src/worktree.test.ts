@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -2358,6 +2358,65 @@ test("the repository default branch is read from the tracked remote HEAD, never 
 
     // A repository that was never cloned has no remote HEAD either, and must not throw.
     assert.equal(await readRepositoryDefaultBranch(seed), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a default branch whose tracking ref is gone reads as unknown, not as a name", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-dangling-head-"));
+  const origin = join(root, "origin.git");
+  const clone = join(root, "clone");
+  try {
+    execFileSync("git", ["init", "--bare", "--initial-branch=develop", origin]);
+    const seed = join(root, "seed");
+    execFileSync("git", ["init", "--initial-branch=develop", seed]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "Test"]);
+    writeFileSync(join(seed, "state.txt"), "base\n");
+    execFileSync("git", ["-C", seed, "add", "state.txt"]);
+    execFileSync("git", ["-C", seed, "commit", "-m", "base"]);
+    execFileSync("git", ["-C", seed, "remote", "add", "origin", origin]);
+    execFileSync("git", ["-C", seed, "push", "origin", "develop"]);
+    execFileSync("git", ["clone", origin, clone]);
+    assert.equal(await readRepositoryDefaultBranch(clone), "develop");
+
+    // The symbolic ref outlives the branch it names. Reporting `develop` here would have the Inbox
+    // hide a base ref on the strength of a tracking ref that no longer exists.
+    execFileSync("git", ["-C", clone, "update-ref", "-d", "refs/remotes/origin/develop"]);
+    assert.equal(await readRepositoryDefaultBranch(clone), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a remote that moves its default is not tracked by fetch, so the advertised branch wins", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-stale-head-"));
+  const origin = join(root, "origin.git");
+  const clone = join(root, "clone");
+  try {
+    execFileSync("git", ["init", "--bare", "--initial-branch=release-2027", origin]);
+    const seed = join(root, "seed");
+    execFileSync("git", ["init", "--initial-branch=release-2027", seed]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "Test"]);
+    writeFileSync(join(seed, "state.txt"), "base\n");
+    execFileSync("git", ["-C", seed, "add", "state.txt"]);
+    execFileSync("git", ["-C", seed, "commit", "-m", "base"]);
+    execFileSync("git", ["-C", seed, "remote", "add", "origin", origin]);
+    execFileSync("git", ["-C", seed, "push", "origin", "release-2027"]);
+    execFileSync("git", ["-C", seed, "branch", "develop"]);
+    execFileSync("git", ["-C", seed, "push", "origin", "develop"]);
+    execFileSync("git", ["clone", origin, clone]);
+    execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/develop"]);
+    execFileSync("git", ["-C", clone, "fetch", "--all"]);
+
+    // This is the whole reason the create path prefers what the remote advertises: a plain fetch
+    // leaves the tracked HEAD on the old default indefinitely.
+    assert.equal(await readRepositoryDefaultBranch(clone), "release-2027");
+    const advertised = await fetchRemoteDefaultBase(clone);
+    assert.equal(advertised.branch, "develop");
+    assert.equal(advertised.ref, "origin/develop");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
