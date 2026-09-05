@@ -11,8 +11,10 @@ import {
 } from "./store.js";
 import type { SessionView } from "@wollipog/protocol";
 import type { UiConnectionRuntime, UiSocket } from "./ui-transport.js";
+import { installDomTestCleanup } from "./dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,

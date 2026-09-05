@@ -28,8 +28,10 @@ import {
 } from "../queued-edit-recovery.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { clearSessionDetailComposerRuntimeForInstance, SessionDetail } from "./SessionDetail.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 const VIEWPORT_HEIGHT = 1_200;
 const ROW_HEIGHT = 72;
 Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {

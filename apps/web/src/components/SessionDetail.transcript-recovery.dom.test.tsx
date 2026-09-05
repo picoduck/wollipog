@@ -18,8 +18,10 @@ import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { SessionDetail } from "./SessionDetail.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
   configurable: true,
   value() {
