@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { DurableSessionCommandMessage, StartSessionMessage } from "@wollipog/protocol";
+import type { DurableSessionCommand, DurableSessionCommandMessage, StartSessionMessage } from "@wollipog/protocol";
 import { DurableCommandStore, durableCommandPayloadDigest } from "./durable-command-store.js";
 
 function startCommand(sessionId = "s_test"): StartSessionMessage {
@@ -26,7 +26,7 @@ function startCommand(sessionId = "s_test"): StartSessionMessage {
 }
 
 function message(
-  command: StartSessionMessage = startCommand(),
+  command: DurableSessionCommand = startCommand(),
   overrides: Partial<DurableSessionCommandMessage> = {},
 ): DurableSessionCommandMessage {
   return {
@@ -40,6 +40,29 @@ function message(
     ...overrides,
   };
 }
+
+test("recovered question answers use the same content-free durable dedupe journal", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-recovered-answer-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    const command: DurableSessionCommand = {
+      type: "answer_recovered_question",
+      sessionId: "s_test",
+      requestId: "question-1",
+      recoveryId: "question:1:4",
+      answers: { target: "Production" },
+    };
+    const claimed = store.claim(message(command));
+    assert.equal(claimed.kind, "new");
+    const persisted = files(root).map((file) => readFileSync(file, "utf8")).join("\n");
+    assert.doesNotMatch(persisted, /question-1|Production|target/u);
+    assert.match(persisted, /answer_recovered_question/u);
+    const duplicate = store.claim(message(command));
+    assert.equal(duplicate.kind, "duplicate");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function files(root: string): string[] {
   const result: string[] = [];
@@ -332,7 +355,7 @@ test("durable command kinds outside the supported set are rejected", () => {
       assert.fail("unsupported command kind was not rejected");
     }
     assert.equal(rejected.receipt.code, "INVALID_COMMAND");
-    assert.match(rejected.receipt.error ?? "", /kind is unsupported/);
+    assert.match(rejected.receipt.error ?? "", /envelope is malformed|kind is unsupported/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -69,6 +69,28 @@ for (const viewport of [
       action: "dismiss",
     }]);
   });
+
+  test(`resumable restart recovery submits its preserved form on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/agent-questions-e2e.html?recovery=1&resume=1");
+
+    await expect(page.getByText("Agent Question Recovery Required")).toBeVisible();
+    await expect(page.getByText(/resume the existing agent conversation and deliver these answers once/)).toBeVisible();
+    await expect(page.getByText(/Prior tool calls will not be replayed/)).toBeVisible();
+    const choice = page.getByRole("radio", { name: /TypeScript/ });
+    await expect(choice).toBeEnabled();
+    await expectInsideViewport(choice, page);
+    await choice.click();
+    await page.getByRole("button", { name: "Submit" }).click();
+
+    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([{
+      sessionId: "agent-question-session",
+      requestId: "ask-1",
+      answers: { language: "TypeScript" },
+      action: "submit",
+    }]);
+  });
 }
 
 test("desktop Composer Response submits a multi-question flow using only the keyboard", async ({ page }) => {

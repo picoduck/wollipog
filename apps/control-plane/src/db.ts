@@ -504,9 +504,9 @@ CREATE TABLE IF NOT EXISTS session_reminders (
 CREATE INDEX IF NOT EXISTS idx_session_reminders_due
   ON session_reminders(state, scheduled_for, session_id, user_id);
 
--- User-submitted prompts use the runner's durable v53 receipt lane too. Unlike scheduler-owned
--- automation commands these rows belong directly to a session and remain recoverable across a
--- control-plane restart without manufacturing an automation execution.
+-- User-submitted prompts and recovered question answers use the runner's durable receipt lane.
+-- Unlike scheduler-owned automation commands these rows belong directly to a session and remain
+-- recoverable across a control-plane restart without manufacturing an automation execution.
 CREATE TABLE IF NOT EXISTS session_prompt_commands (
   command_id       TEXT PRIMARY KEY,
   session_id       TEXT NOT NULL,
@@ -2924,6 +2924,13 @@ export interface SessionPromptCommandRecord {
   dismissedAt?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface RetriableSessionPromptCommandStage {
+  command: SessionPromptCommandRecord;
+  /** A failed attempt with no correlated user event is safe to replace. Any terminal attempt that
+   * crossed that boundary remains a no-replay fence and must stay visible to the caller. */
+  disposition: "deliverable" | "terminal";
 }
 
 export interface AutomationTriggerRecord extends AutomationTriggerView {
@@ -12589,6 +12596,14 @@ export class ControlPlaneDb {
     now: number;
   }): SessionPromptCommandRecord {
     JSON.parse(input.payloadJson);
+    const existing = this.getSessionPromptCommand(input.commandId);
+    if (existing) {
+      if (existing.sessionId !== input.sessionId || existing.runnerId !== input.runnerId ||
+          existing.payloadJson !== input.payloadJson || existing.payloadSha256 !== input.payloadSha256) {
+        throw new Error("durable command identity is already bound to different content");
+      }
+      return existing;
+    }
     this.stmt(
       `INSERT INTO session_prompt_commands
        (command_id,session_id,runner_id,payload_json,payload_sha256,state,revision,attempt_count,
@@ -12599,6 +12614,67 @@ export class ControlPlaneDb {
       input.now, input.expiresAt, input.now, input.now,
     );
     return this.getSessionPromptCommand(input.commandId)!;
+  }
+
+  /** Stage one stable incident identity, creating a fresh durable-command attempt only after a
+   * definitive pre-provider failure. Active retries reuse their exact id; any terminal attempt
+   * with a correlated user event is fenced because the provider may already have seen it. */
+  stageRetriableSessionPromptCommand(input: {
+    baseCommandId: string;
+    sessionId: string;
+    runnerId: string;
+    payloadJson: string;
+    payloadSha256: string;
+    expiresAt: number;
+    now: number;
+  }): RetriableSessionPromptCommandStage {
+    JSON.parse(input.payloadJson);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const latestRow = this.stmt(
+        `SELECT * FROM session_prompt_commands
+         WHERE command_id=? OR command_id GLOB ?
+         ORDER BY rowid DESC LIMIT 1`,
+      ).get(input.baseCommandId, `${input.baseCommandId}.retry-*`) as unknown as SessionPromptCommandRow | undefined;
+      if (latestRow) {
+        const latest = this.sessionPromptCommand(latestRow);
+        if (latest.sessionId !== input.sessionId || latest.runnerId !== input.runnerId) {
+          throw new Error("durable command identity is already bound to a different session");
+        }
+        const active = ["pending", "sent", "accepted", "queued", "started"].includes(latest.state);
+        if (active) {
+          if (latest.payloadJson !== input.payloadJson || latest.payloadSha256 !== input.payloadSha256) {
+            throw new Error("durable command identity is already bound to different content");
+          }
+          this.db.exec("COMMIT");
+          return { command: latest, disposition: "deliverable" };
+        }
+        if (latest.state !== "failed" || latest.userEventSeq !== undefined) {
+          this.db.exec("COMMIT");
+          return { command: latest, disposition: "terminal" };
+        }
+      }
+
+      const retry = latestRow
+        ? Number(/\.retry-(\d+)$/u.exec(latestRow.command_id)?.[1] ?? 0) + 1
+        : 0;
+      const commandId = retry === 0 ? input.baseCommandId : `${input.baseCommandId}.retry-${retry}`;
+      this.stmt(
+        `INSERT INTO session_prompt_commands
+         (command_id,session_id,runner_id,payload_json,payload_sha256,state,revision,attempt_count,
+          next_attempt_at,expires_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,'pending',0,0,?,?,?,?)`,
+      ).run(
+        commandId, input.sessionId, input.runnerId, input.payloadJson, input.payloadSha256,
+        input.now, input.expiresAt, input.now, input.now,
+      );
+      const command = this.getSessionPromptCommand(commandId)!;
+      this.db.exec("COMMIT");
+      return { command, disposition: "deliverable" };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   getSessionPromptCommand(commandId: string): SessionPromptCommandRecord | null {

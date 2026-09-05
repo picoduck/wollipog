@@ -127,6 +127,7 @@ export function SessionApprovalRegion({
             requestId={approval.requestId}
             questions={approval.questions ?? []}
             recoveryReason={approval.recoveryReason}
+            recoveryAction={approval.recoveryAction}
             runnerOnline={runnerOnline}
             onSessionUpdate={onSessionUpdate}
             showKeyHints={showKeyHints}
@@ -154,6 +155,7 @@ export function SessionTimelineQuestionRegion({
     requestId: string;
     questions: AgentQuestion[];
     recoveryReason?: "provider_restart";
+    recoveryAction?: "resume_answer";
   } | null;
   eventRequestId: string;
   eventQuestions: AgentQuestion[];
@@ -174,6 +176,7 @@ export function SessionTimelineQuestionRegion({
           requestId={approval.requestId}
           questions={approval.questions.length > 0 ? approval.questions : eventQuestions}
           recoveryReason={approval.recoveryReason}
+          recoveryAction={approval.recoveryAction}
           runnerOnline={runnerOnline}
           onSessionUpdate={onSessionUpdate}
           showKeyHints={showKeyHints}
@@ -328,6 +331,8 @@ export function SessionApprovalBanner({
         sessionId={session.id}
         requestId={approval.requestId}
         questions={approval.questions ?? []}
+        recoveryReason={approval.recoveryReason}
+        recoveryAction={approval.recoveryAction}
         runnerOnline={runnerOnline}
         onSessionUpdate={onSessionUpdate}
         showKeyHints={showKeyHints}
@@ -398,6 +403,7 @@ export function SessionQuestionBanner({
   requestId,
   questions,
   recoveryReason,
+  recoveryAction,
   runnerOnline,
   onSessionUpdate,
   showKeyHints = true,
@@ -406,6 +412,7 @@ export function SessionQuestionBanner({
   requestId: string;
   questions: AgentQuestion[];
   recoveryReason?: "provider_restart";
+  recoveryAction?: "resume_answer";
   runnerOnline: boolean;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
@@ -431,6 +438,8 @@ export function SessionQuestionBanner({
   const availabilityId = `${labelPrefix}-availability`;
   const recoveryId = `${labelPrefix}-recovery`;
   const recoveryRequired = recoveryReason === "provider_restart";
+  const recoveryCanResume = recoveryRequired && recoveryAction === "resume_answer";
+  const recoveryRequiresDismiss = recoveryRequired && !recoveryCanResume;
 
   useEffect(() => {
     const previous = previousDraftRequestRef.current;
@@ -456,8 +465,8 @@ export function SessionQuestionBanner({
   const draftValue = (questionId: string) => Object.hasOwn(draftValues, questionId) ? draftValues[questionId] : undefined;
   const resolved = questionDraftAnswers(questions, draftValues);
   const unsupportedQuestionFormat = questions.some((question) => !isAnswerableAgentQuestion(question));
-  const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat || recoveryRequired;
-  const fixedChoicesNativelyDisabled = busy !== null || unsupportedQuestionFormat || recoveryRequired;
+  const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat || recoveryRequiresDismiss;
+  const fixedChoicesNativelyDisabled = busy !== null || unsupportedQuestionFormat || recoveryRequiresDismiss;
 
   const updateDraft = (question: AgentQuestion, value: QuestionResponseDraft) => {
     setDrafts((current) => {
@@ -488,7 +497,7 @@ export function SessionQuestionBanner({
   const complete = !unsupportedQuestionFormat && Object.keys(resolved.errors).length === 0;
 
   const submit = async () => {
-    if (operationPendingRef.current || busy !== null || !runnerOnline || unsupportedQuestionFormat || recoveryRequired) return;
+    if (operationPendingRef.current || busy !== null || !runnerOnline || unsupportedQuestionFormat || recoveryRequiresDismiss) return;
     if (Object.keys(resolved.errors).length > 0) {
       setValidationAttempted(true);
       const firstInvalid = questions.find((question) => Object.hasOwn(resolved.errors, question.id));
@@ -573,7 +582,7 @@ export function SessionQuestionBanner({
           >
             {busy === "dismiss" ? "Dismissing…" : recoveryRequired ? "Dismiss and Continue" : "Dismiss"} {showKeyHints && busy === null && <kbd className="inbox-key-hint">D</kbd>}
           </button>
-          {responseStyle === "interactive" && questions.length > 0 && !recoveryRequired && (
+          {responseStyle === "interactive" && questions.length > 0 && !recoveryRequiresDismiss && (
             <button
               className="btn sm primary"
               type="button"
@@ -592,15 +601,17 @@ export function SessionQuestionBanner({
       </div>
       {recoveryRequired && (
         <div className="question-recovery" id={recoveryId} role="status">
-          The runner restarted after this question was asked, so its original answer channel is no longer available. Review the preserved question, then dismiss it and send a new prompt to continue safely. No prior tool calls will be replayed.
+          {recoveryCanResume
+            ? "The runner restarted after this question was asked. Submit the preserved form to resume the existing agent conversation and deliver these answers once. Prior tool calls will not be replayed."
+            : "The runner restarted after this question was asked, so its original answer channel is no longer available. Review the preserved question, then dismiss it and send a new prompt to continue safely. No prior tool calls will be replayed."}
         </div>
       )}
-      {responseStyle === "composer" && questions.length > 0 && !recoveryRequired && (
+      {responseStyle === "composer" && questions.length > 0 && !recoveryRequiresDismiss && (
         <div className="question-submit-hint">
           Respond through Answer Mode in the Session composer. Press R or use <code>/respond</code>.
         </div>
       )}
-      {responseStyle === "interactive" && runnerOnline && busy === null && questions.length > 0 && !complete && !recoveryRequired && (
+      {responseStyle === "interactive" && runnerOnline && busy === null && questions.length > 0 && !complete && !recoveryRequiresDismiss && (
         <div className="question-submit-hint">
           {unsupportedQuestionFormat
             ? "This question format is unsupported. Dismiss the question to continue."

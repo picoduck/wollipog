@@ -313,7 +313,11 @@
 //      Provider-neutral workspace references are runner-minted, root-scoped, revision-bound
 //      prompt attachments. Search and minting remain bounded inside the session execution root;
 //      pre-v106 runners reject the structured attachment instead of silently dropping it.
-export const PROTOCOL_VERSION = 106;
+// 107: answer_recovered_question extends the durable command receipt lane so a structured answer
+//      can resume an established provider conversation after runner/process loss without replay.
+//      A runner-owned recovery occurrence id prevents provider request-id reuse from aliasing two
+//      different interrupted questions.
+export const PROTOCOL_VERSION = 107;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -459,6 +463,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   controlPlaneQueueHold: 105,
   /** v106 runners enforce the control-plane-priced cumulative cost during the active turn. */
   pricedSessionCost: 106,
+  /** v107 runners durably resume non-secret structured-question answers after process loss. */
+  resumableQuestionAnswers: 107,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
 } as const;
@@ -1648,7 +1654,9 @@ export function sessionAttentionStatus(
     return {
       kind: "recovery_required",
       label: "Recovery Required",
-      description: "The runner restarted while the agent was waiting for an answer. Resolve the preserved question before continuing.",
+      description: pending.recoveryAction === "resume_answer"
+        ? "The runner restarted while the agent was waiting. Submit the preserved answer to resume the conversation."
+        : "The runner restarted while the agent was waiting for an answer. Resolve the preserved question before continuing.",
     };
   }
   if (pending?.kind === "question") {
@@ -1860,6 +1868,12 @@ export interface PendingApproval {
   /** The provider-owned response callback ended with its process. The question remains visible and
    * dismissible, but must not accept an answer that can no longer reach the exact request. */
   recoveryReason?: "provider_restart";
+  /** The runner proved that this recovered, non-secret question can continue the same provider
+   * conversation through the durable answer command lane. Absence retains dismiss-only recovery. */
+  recoveryAction?: "resume_answer";
+  /** Stable identity of this exact recovered question occurrence. Provider request ids can repeat
+   * after process restart, so durable delivery must bind to this runner-owned discriminator too. */
+  recoveryId?: string;
   /** What is being approved, when the driver can say (kind "permission"). */
   context?: ApprovalContext;
   /** Content-safe provenance for a CP-owned Claude hook ask. */
@@ -2524,6 +2538,8 @@ export type SessionEventPayload =
       requestId: string;
       answered: boolean;
       resolutionReason?: StructuredRequestResolutionReason;
+      /** Durable recovery-command identity when provider continuation replaced a lost callback. */
+      commandId?: string;
     }
   | { kind: "checkpoint"; turn: number; tree: string }
   | { kind: "checkpoint_restored"; turn: number }
@@ -4649,6 +4665,19 @@ export interface PromptSessionMessage {
   slashCommand?: string;
 }
 
+/** Continue an established provider conversation with the preserved answer to a structured
+ * question whose original process-owned callback was lost. This command is submit-only: dismiss
+ * remains an immediate resolution and secret answers are never staged in its durable payload. */
+export interface AnswerRecoveredQuestionCommand {
+  type: "answer_recovered_question";
+  sessionId: string;
+  requestId: string;
+  /** Runner-owned identity for this exact question occurrence, independent of provider request-id
+   * reuse across process generations. */
+  recoveryId: string;
+  answers: Record<string, string | string[]>;
+}
+
 /** Attempt to incorporate direct input or one existing queue item into the exact active turn.
  * Runtime validation enforces exactly one input form: direct content or promotePromptId. */
 export interface SteerSessionMessage {
@@ -4728,7 +4757,10 @@ export interface SessionCommandInvocationUpdateMessage {
 
 /* --- Durable automation command delivery (protocol v53) --- */
 
-export type DurableSessionCommand = StartSessionMessage | PromptSessionMessage;
+export type DurableSessionCommand =
+  | StartSessionMessage
+  | PromptSessionMessage
+  | AnswerRecoveredQuestionCommand;
 
 /** A distinct outer message is load-bearing: a pre-v53 runner cannot execute the inner command
  * while silently ignoring its receipt contract. `requestId` changes on every transport attempt;

@@ -32,6 +32,7 @@ const initialOnline = params.get("offline") !== "1";
 const shouldFail = params.get("failure") === "1";
 const renderInFallbackSlot = params.get("slot") === "1";
 const recoveryRequired = params.get("recovery") === "1";
+const recoveryCanResume = recoveryRequired && params.get("resume") === "1";
 let shouldHold = params.get("hold") === "1";
 let releasePending: (() => void) | null = null;
 
@@ -198,12 +199,13 @@ function Fixture() {
       requestId={requestId}
       questions={questions}
       recoveryReason={recoveryRequired ? "provider_restart" : undefined}
+      recoveryAction={recoveryCanResume ? "resume_answer" : undefined}
       runnerOnline={runnerOnline}
       onSessionUpdate={() => setResolved(true)}
       showKeyHints={false}
     />
   );
-  const composerContent = !resolved && responseStyle === "composer" ? (
+  const composerContent = !resolved && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume) ? (
     <div className="composer">
       <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
         <ComposerQuestionResponse

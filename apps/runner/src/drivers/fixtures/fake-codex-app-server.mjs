@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const scenario = process.argv[2] ?? "resume";
@@ -12,6 +12,8 @@ const threadId = scenario === "fresh"
 const questionRequestId = scenario === "dogfood-question"
   ? 5
   : "live-codex-question-1";
+const recoveryStatePath = process.env.WOLLIPOG_FAKE_QUESTION_STATE;
+const recovering = Boolean(recoveryStatePath && existsSync(recoveryStatePath));
 let dogfoodTurnCount = 0;
 const expectedQueuedDogfoodPrompts = [
   "Keep this long message queued until both structured questions are answered.",
@@ -29,7 +31,7 @@ function send(message) {
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
-  if ((scenario === "question" || scenario === "dogfood-question") && message.method == null && message.id === questionRequestId) {
+  if (!recovering && (scenario === "question" || scenario === "dogfood-question") && message.method == null && message.id === questionRequestId) {
     const expected = scenario === "dogfood-question"
       ? {
           answers: {
@@ -63,11 +65,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { userAgent: "fake" } });
     return;
   }
-  if (message.method === "thread/read" && scenario === "resume") {
+  if (message.method === "thread/read" && (scenario === "resume" || recovering)) {
     send({ id: message.id, result: { thread: { id: threadId, status: { type: "idle" }, turns: [{ id: "historical" }] } } });
     return;
   }
-  if (message.method === "thread/resume" && scenario === "resume") {
+  if (message.method === "thread/resume" && (scenario === "resume" || recovering)) {
     send({ id: message.id, result: { thread: { id: threadId, turns: [{ id: "historical" }] } } });
     return;
   }
@@ -83,6 +85,50 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { turn: { id: turnId } } });
     send({ method: "turn/started", params: { threadId, turn: { id: turnId } } });
     if (scenario === "question") {
+      if (recovering) {
+        const text = message.params?.input?.find((input) => input?.type === "text")?.text;
+        const line = typeof text === "string" ? text.trim().split("\n").at(-1) : null;
+        const payload = line ? JSON.parse(line) : null;
+        const expected = {
+          requestId: questionRequestId,
+          responses: [
+            { id: "environment", question: "Where should this be deployed?", answer: "Staging" },
+            { id: "note", question: "Add a release note", answer: "Ship after checks pass" },
+          ],
+        };
+        if (JSON.stringify(payload) !== JSON.stringify(expected)) {
+          process.stderr.write("unexpected recovered structured response: " + JSON.stringify(payload) + "\n");
+          process.exitCode = 2;
+          return;
+        }
+        const state = JSON.parse(readFileSync(recoveryStatePath, "utf8"));
+        const recoveredState = {
+          initialQuestions: state.initialQuestions,
+          recoveryTurns: state.recoveryTurns + 1,
+        };
+        writeFileSync(recoveryStatePath, JSON.stringify(recoveredState));
+        const receipt = process.env.WOLLIPOG_FAKE_CODEX_RECEIPT;
+        if (receipt) writeFileSync(receipt, JSON.stringify({
+          requestId: questionRequestId,
+          recovered: true,
+          answers: Object.fromEntries(payload.responses.map((response) => [response.id, response.answer])),
+          ...recoveredState,
+        }));
+        send({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId,
+            turnId,
+            itemId: "recovered-answer",
+            delta: "Recovered question answers received by Codex.",
+          },
+        });
+        send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+        return;
+      }
+      if (recoveryStatePath) {
+        writeFileSync(recoveryStatePath, JSON.stringify({ initialQuestions: 1, recoveryTurns: 0 }));
+      }
       send({
         id: questionRequestId,
         method: "item/tool/requestUserInput",

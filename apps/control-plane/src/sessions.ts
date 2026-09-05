@@ -706,6 +706,13 @@ function questionAuditContent(
   return Object.fromEntries(Object.entries(answers).filter(([id]) => !secretIds.has(id)));
 }
 
+function recoveredQuestionCommandId(sessionId: string, requestId: string, recoveryId: string): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([sessionId, requestId, recoveryId]), "utf8")
+    .digest("hex");
+  return `answer_${digest}`;
+}
+
 function sessionCommandPayloadDigest(input: {
   argumentText: string;
   catalogRevision: string;
@@ -3018,6 +3025,7 @@ export class SessionsService {
         this.log.warn(`durable prompt flush deferred for ${sessionId}: ${(error as Error).message}`);
       }
     } else {
+      if (command.type !== "prompt_session") return fail("session prompt command is malformed", 409);
       const delivered = this.hub.sendToRunner(session.runnerId, command);
       if (!delivered) {
         this.db.updateSessionStatus(sessionId, session.status, Date.now());
@@ -4107,15 +4115,78 @@ export class SessionsService {
     if (!pending) return fail("no pending question for this session", 409);
     if (pending.requestId !== requestId) return fail("question request id does not match the pending one", 409);
     if (pending.kind !== "question") return fail("the pending approval is not a question", 409);
-    if (pending.recoveryReason === "provider_restart" && action !== "dismiss") {
-      return fail("the original answer channel ended when the runner restarted; dismiss this question and continue with a new prompt", 409);
-    }
     // Answers ride verbatim into the agent's updatedInput — reject anything the pending card
     // never offered (unknown keys, wrong select shape, un-offered labels) WITHOUT clearing the
     // pending state, so a bad client can't strand or spoof the ask.
     const invalid = validateQuestionAnswers(pending.questions ?? [], answers, action);
     if (invalid) return fail(`invalid answers: ${invalid}`, 400);
     const auditContent = questionAuditContent(pending, answers);
+
+    if (pending.recoveryReason === "provider_restart" && action === "submit") {
+      if (pending.recoveryAction !== "resume_answer") {
+        return fail("the original answer channel ended when the runner restarted; dismiss this question and continue with a new prompt", 409);
+      }
+      if ((pending.questions ?? []).some((question) => question.secret)) {
+        return fail("recovered secret answers cannot be stored for durable delivery; dismiss this question and continue with a new prompt", 409);
+      }
+      if (!pending.recoveryId) {
+        return fail("the recovered question has no stable occurrence identity; dismiss it and continue with a new prompt", 409);
+      }
+      const capabilityFailure = this.capabilityFailure(
+        session.runnerId,
+        "resumableQuestionAnswers",
+        "Recovered structured-question answers",
+      );
+      if (capabilityFailure) return capabilityFailure;
+      const command: DurableSessionCommand = {
+        type: "answer_recovered_question",
+        sessionId,
+        requestId,
+        recoveryId: pending.recoveryId,
+        answers,
+      };
+      const now = Date.now();
+      try {
+        const staged = this.promptOutbox.stageRecoveredAnswer(
+          sessionId,
+          session.runnerId,
+          command,
+          now,
+          recoveredQuestionCommandId(sessionId, requestId, pending.recoveryId),
+        );
+        if (staged.disposition === "terminal") {
+          return fail(
+            "the previous delivery attempt may already have reached the provider; dismiss this question or inspect the durable receipt before continuing",
+            409,
+          );
+        }
+      } catch (error) {
+        return fail(`recovered answer could not be persisted: ${(error as Error).message}`, 409);
+      }
+      // Persistence is the acceptance boundary. Clear the card only after the durable command is
+      // staged; reconnect/timer delivery can now safely retry the same identity without a second
+      // provider turn.
+      this.db.setPendingApproval(sessionId, null);
+      this.db.updateSessionStatus(sessionId, "running", now);
+      this.recordGovernanceAudit(
+        session,
+        pending,
+        "resolution",
+        "answered",
+        actor,
+        now,
+        { content: auditContent },
+      );
+      this.gateOnPolicy(sessionId, now);
+      this.reconcilePolicyHookTimeouts(now, sessionId);
+      try {
+        this.promptOutbox.flush(now, session.runnerId);
+      } catch (error) {
+        this.log.warn(`recovered question answer flush deferred for ${sessionId}: ${(error as Error).message}`);
+      }
+      this.hub.sessionChangedById(sessionId);
+      return ok(this.db.getSession(sessionId)!);
+    }
 
     const sent = this.hub.sendToRunner(session.runnerId, { type: "answer_question", sessionId, requestId, answers, action });
     if (!sent) {

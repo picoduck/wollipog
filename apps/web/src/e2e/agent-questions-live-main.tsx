@@ -108,6 +108,8 @@ function LiveQuestionFixture() {
                           pendingQuestion: pendingQuestion ? {
                             requestId: pendingQuestion.requestId,
                             questions: pendingQuestion.questions ?? [],
+                            recoveryReason: pendingQuestion.recoveryReason,
+                            recoveryAction: pendingQuestion.recoveryAction,
                           } : null,
                           questionInTimeline,
                           onPendingQuestionAvailabilityChange: handleQuestionAvailabilityChange,
@@ -133,7 +135,9 @@ function LiveQuestionFixture() {
                   </div>
                 )}
                 <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
-                  {pendingQuestion && (
+                  {pendingQuestion &&
+                    (pendingQuestion.recoveryReason !== "provider_restart" ||
+                      pendingQuestion.recoveryAction === "resume_answer") && (
                     <ComposerQuestionResponse
                       sessionId={session.id}
                       requestId={pendingQuestion.requestId}
