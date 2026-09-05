@@ -2167,6 +2167,9 @@ function SessionDetailLoaded({
     if (requestChanged && answerModeExplicitRequestRef.current !== liveRequestId) {
       answerModeExplicitRequestRef.current = null;
     }
+    if (requestChanged && answerModeFocusRequestRef.current === "answer") {
+      answerModeFocusRequestRef.current = null;
+    }
     if (!composerAnswerActive && answerFocusOwnedBeforeRender) {
       answerModeFocusRequestRef.current = null;
       focusComposerAtDraftEnd();

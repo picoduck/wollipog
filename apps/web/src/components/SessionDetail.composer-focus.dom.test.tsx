@@ -181,6 +181,7 @@ interface Fixture {
   alternateSessionId: string;
   instanceScope: string;
   pushSession: (patch: Partial<SessionView>) => Promise<void>;
+  pushSessionSync: (patch: Partial<SessionView>) => void;
   pushEvent: (payload: SessionEvent["payload"]) => Promise<void>;
   closeSocket: (code: number) => Promise<void>;
 }
@@ -373,6 +374,10 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   });
   const composer = container.querySelector(".composer-input") as HTMLTextAreaElement | null;
   assert.ok(composer, "the real SessionDetail composer is mounted");
+  const pushSessionSync = (patch: Partial<SessionView>) => {
+    Object.assign(currentSession, patch);
+    socket.push({ type: "session_upsert", session: { ...currentSession } });
+  };
   return {
     composer,
     container,
@@ -385,9 +390,9 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     alternateSessionId: alternateSession.id,
     instanceScope: LOCAL_INSTANCE_SCOPE,
     pushSession: async (patch) => {
-      Object.assign(currentSession, patch);
-      await act(async () => { socket.push({ type: "session_upsert", session: { ...currentSession } }); });
+      await act(async () => { pushSessionSync(patch); });
     },
+    pushSessionSync,
     pushEvent: async (payload) => {
       currentSession.messageCount += 1;
       const seq = currentSession.messageCount;
@@ -3646,6 +3651,58 @@ test("a delayed answer completion cannot arm focus theft after external resoluti
 
     assert.ok(reader.ownerDocument.activeElement === reader,
       "a stale answer completion must not leave a focus request for the next question");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("a superseded explicit entry cannot focus a later question", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-superseded-entry",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer);
+    await act(async () => {
+      answer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+      flushFrames();
+    });
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(reader);
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      reader.focus();
+      reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "r", bubbles: true }) as never);
+      fixture.pushSessionSync({ pendingApproval: null });
+    });
+
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-after-superseded-entry",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Production" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    const laterAnswer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(laterAnswer, "the later empty-draft question still enters Answer Mode");
+    assert.ok(reader.ownerDocument.activeElement === reader,
+      "a focus request for a superseded question must not target a later question");
   } finally {
     await unmountFixture(fixture);
     setQuestionResponseStyle("interactive", domWindow as never);
