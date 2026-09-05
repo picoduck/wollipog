@@ -2132,7 +2132,7 @@ function SessionDetailLoaded({
     const region = input?.closest<HTMLElement>(".composer-answer") ?? null;
     const shouldFocus = focus === "always" || (region !== null && region.contains(activeElement));
     answerModeExplicitRequestRef.current = null;
-    answerModeFocusRequestRef.current = shouldFocus ? "message" : null;
+    answerModeFocusRequestRef.current = shouldFocus && composerAnswerActive ? "message" : null;
     setAnswerModeRequestId(null);
     if (!composerAnswerActive && shouldFocus) window.requestAnimationFrame(focusComposerAtDraftEnd);
   }, [composerAnswerActive, focusComposerAtDraftEnd]);

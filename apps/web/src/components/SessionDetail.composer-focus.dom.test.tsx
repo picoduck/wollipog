@@ -3103,6 +3103,58 @@ test("inserting a side-chat response exits Answer Mode and reveals the ordinary 
   }
 });
 
+test("an ordinary-composer handoff does not arm focus theft for a later question", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: [{ kind: "user_message", text: "original prompt", images: [] }],
+  });
+  try {
+    await resolveDraft(draft, "existing draft");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    const edit = fixture.container.querySelector(
+      'button[aria-label="Edit User Message as a New Turn"]',
+    ) as HTMLButtonElement | null;
+    assert.ok(edit);
+    await act(async () => { edit.click(); });
+    const load = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Load into Composer") as HTMLButtonElement | undefined;
+    assert.ok(load);
+    await act(async () => {
+      load.focus();
+      load.click();
+    });
+    await act(async () => {
+      flushFrames();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
+    });
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(reader);
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      reader.focus();
+    });
+
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-after-side-chat-insert",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.ok(reader.ownerDocument.activeElement === reader,
+      "a completed ordinary handoff must not remain armed and steal deliberately transferred reader focus");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
 test("SessionDetail prepares Edit & Resend text with accessible focus and an end selection", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft, {
