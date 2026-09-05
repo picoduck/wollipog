@@ -1234,79 +1234,26 @@ function SessionDetailLoaded({
       ? { ...storedQueuedEdit, error: "The prior queued message edit outcome was not recorded. Check the current queue before retrying." }
       : storedQueuedEdit;
     let queuedEditRecovery = pendingQueuedEdit ?? runtimeQueuedEdit ?? durableQueuedEdit;
-    if (queuedEditRecovery && !pendingQueuedEdit && draftDirty.current && queuedEditRef.current === null) {
-      const displacedDraft = {
-        text: draftState.current.text,
-        images: draftState.current.images.map((image) => ({ ...image })),
-      };
-      queuedEditRecovery = {
-        ...recoveryWithDisplacedDraft(queuedEditRecovery, displacedDraft),
-      };
-      // Identity can settle after the user has already begun a new ordinary draft. Keep that work
-      // in both draft storage and the recovery's displaced-draft slot before showing the recovery.
-      void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
-      if (queuedEditRecoveryScope) {
-        saveDurableQueuedEditRecovery(queuedEditRecoveryScope, queuedEditRecovery);
-        storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
-      }
-    }
-    if (queuedEditRecovery) {
-      const finishRecoveryRestore = (
-        candidate: QueuedPromptEditRecovery,
-        expectedDurableRecovery?: QueuedPromptEditRecovery,
-      ) => {
-        if (cancelled) return;
-        if (queuedEditRef.current && !pendingQueuedEdit &&
-            (!hydrationKeyChanged || queuedEditRef.current !== queuedEditAtHydrationStart)) return;
-        let restored = candidate;
-        let displacedDraftChanged = false;
-        if (draftDirty.current && queuedEditRef.current === null) {
-          const displacedDraft = {
-            text: draftState.current.text,
-            images: draftState.current.images.map((image) => ({ ...image })),
-          };
-          restored = recoveryWithDisplacedDraft(restored, displacedDraft);
-          displacedDraftChanged = true;
-          void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
-        }
-        if (queuedEditRecoveryScope && expectedDurableRecovery) {
-          const refresh = refreshDurableQueuedEditRecovery(
-            queuedEditRecoveryScope,
-            expectedDurableRecovery,
-            restored,
-          );
-          if (refresh === "stale" || refresh === "conflict") {
-            clearRuntimeQueuedEditRecovery(mutationKey);
-            return;
-          }
-        } else if (queuedEditRecoveryScope && displacedDraftChanged) {
-          saveDurableQueuedEditRecovery(queuedEditRecoveryScope, restored);
-        }
-        if (!runtimeQueuedEdit && queuedEditRecoveryScope) {
-          storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
-        }
-        restoreQueuedPromptEditRecovery(restored, pendingQueuedEdit !== undefined);
-      };
-      if (queuedEditRecovery.edit.displacedDraftStoredSeparately) {
-        void (async () => {
-          let displaced: ComposerDraft | null | undefined;
-          try { displaced = await loadDraftForSession(sessionId, instanceScope); } catch { /* retain compact text */ }
-          if (displaced === undefined) return;
-          finishRecoveryRestore(
-            recoveryWithDisplacedDraft(queuedEditRecovery, displaced),
-            storedQueuedEdit,
-          );
-        })();
-      } else {
-        finishRecoveryRestore(queuedEditRecovery);
-      }
-      return () => {
-        cancelled = true;
-      };
-    }
-    void (async () => {
-      let draft = await loadDraftForSession(sessionId, instanceScope);
+    const commitOrdinaryDraftHydration = (draft: ComposerDraft | null) => {
       if (cancelled) return;
+      if (draft && !draftDirty.current) {
+        // Defer completion until a layout effect observes the controlled textarea's committed
+        // value. Promise settlement and animation-frame ordering cannot prove that React has
+        // written the hydrated text to the DOM yet.
+        pendingHydrationCommitRef.current = { sessionId, expectedText: draft.text };
+        setProgrammaticComposerText(draft.text, draft.text.length, true);
+        replace(draft.images);
+        commandSubmissionRetryRef.current = draft.commandSubmission ?? null;
+        consumeComposerDraftHandoff(sessionId, draft, instanceScope);
+        setHydrationCommitRevision((revision) => revision + 1);
+      } else {
+        draftHydratedSessionRef.current = sessionId;
+        pendingHydrationCaretRef.current = null;
+        pendingComposerFocusRestoreRef.current = null;
+      }
+    };
+    const reconcileOrdinaryDraftHydration = async (initialDraft: ComposerDraft | null) => {
+      let draft = initialDraft;
       const currentMutation = composerMutationRegistry.get(mutationKey);
       // The request can settle while IndexedDB hydration is in flight. Re-read after release so a
       // stale pre-delete result cannot resurrect a successfully submitted reservation.
@@ -1337,21 +1284,110 @@ function SessionDetailLoaded({
         draftHydratedSessionRef.current = sessionId;
         pendingHydrationCaretRef.current = null;
         pendingComposerFocusRestoreRef.current = null;
-      } else if (draft && !draftDirty.current) {
-        // Defer completion until a layout effect observes the controlled textarea's committed
-        // value. Promise settlement and animation-frame ordering cannot prove that React has
-        // written the hydrated text to the DOM yet.
-        pendingHydrationCommitRef.current = { sessionId, expectedText: draft.text };
-        setProgrammaticComposerText(draft.text, draft.text.length, true);
-        replace(draft.images);
-        commandSubmissionRetryRef.current = draft.commandSubmission ?? null;
-        consumeComposerDraftHandoff(sessionId, draft, instanceScope);
-        setHydrationCommitRevision((revision) => revision + 1);
       } else {
-        draftHydratedSessionRef.current = sessionId;
-        pendingHydrationCaretRef.current = null;
-        pendingComposerFocusRestoreRef.current = null;
+        commitOrdinaryDraftHydration(draft);
       }
+    };
+    if (queuedEditRecovery && !pendingQueuedEdit && draftDirty.current && queuedEditRef.current === null) {
+      const displacedDraft = {
+        text: draftState.current.text,
+        images: draftState.current.images.map((image) => ({ ...image })),
+      };
+      queuedEditRecovery = {
+        ...recoveryWithDisplacedDraft(queuedEditRecovery, displacedDraft),
+      };
+      // Identity can settle after the user has already begun a new ordinary draft. Keep that work
+      // in both draft storage and the recovery's displaced-draft slot before showing the recovery.
+      void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+      if (queuedEditRecoveryScope) {
+        saveDurableQueuedEditRecovery(queuedEditRecoveryScope, queuedEditRecovery);
+        storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
+      }
+    }
+    if (queuedEditRecovery) {
+      const finishRecoveryRestore = (
+        candidate: QueuedPromptEditRecovery,
+        expectedDurableRecovery?: QueuedPromptEditRecovery,
+        ordinaryDraft?: ComposerDraft | null,
+      ) => {
+        if (cancelled) return;
+        if (queuedEditRef.current && !pendingQueuedEdit &&
+            (!hydrationKeyChanged || queuedEditRef.current !== queuedEditAtHydrationStart)) return;
+        let restored = candidate;
+        let displacedDraftChanged = false;
+        if (draftDirty.current && queuedEditRef.current === null) {
+          const displacedDraft = {
+            text: draftState.current.text,
+            images: draftState.current.images.map((image) => ({ ...image })),
+          };
+          restored = recoveryWithDisplacedDraft(restored, displacedDraft);
+          displacedDraftChanged = true;
+          void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+        }
+        if (queuedEditRecoveryScope && expectedDurableRecovery) {
+          const refresh = refreshDurableQueuedEditRecovery(
+            queuedEditRecoveryScope,
+            expectedDurableRecovery,
+            restored,
+          );
+          if (refresh === "stale") {
+            clearRuntimeQueuedEditRecovery(mutationKey);
+            void reconcileOrdinaryDraftHydration(ordinaryDraft ?? null);
+            return;
+          }
+          if (refresh === "conflict") {
+            clearRuntimeQueuedEditRecovery(mutationKey);
+            const current = loadDurableQueuedEditRecovery(queuedEditRecoveryScope);
+            if (!current) {
+              void reconcileOrdinaryDraftHydration(ordinaryDraft ?? null);
+              return;
+            }
+            let latest = !current.error
+              ? { ...current, error: "The prior queued message edit outcome was not recorded. Check the current queue before retrying." }
+              : current;
+            if (latest.edit.displacedDraftStoredSeparately && ordinaryDraft !== undefined) {
+              latest = recoveryWithDisplacedDraft(latest, ordinaryDraft);
+            }
+            if (draftDirty.current && queuedEditRef.current === null) {
+              latest = recoveryWithDisplacedDraft(latest, {
+                text: draftState.current.text,
+                images: draftState.current.images.map((image) => ({ ...image })),
+              });
+            }
+            storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, latest);
+            restoreQueuedPromptEditRecovery(latest, false);
+            return;
+          }
+        } else if (queuedEditRecoveryScope && displacedDraftChanged) {
+          saveDurableQueuedEditRecovery(queuedEditRecoveryScope, restored);
+        }
+        if (!runtimeQueuedEdit && queuedEditRecoveryScope) {
+          storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
+        }
+        restoreQueuedPromptEditRecovery(restored, pendingQueuedEdit !== undefined);
+      };
+      if (queuedEditRecovery.edit.displacedDraftStoredSeparately) {
+        void (async () => {
+          let displaced: ComposerDraft | null | undefined;
+          try { displaced = await loadDraftForSession(sessionId, instanceScope); } catch { /* retain compact text */ }
+          if (displaced === undefined) return;
+          finishRecoveryRestore(
+            recoveryWithDisplacedDraft(queuedEditRecovery, displaced),
+            storedQueuedEdit,
+            displaced,
+          );
+        })();
+      } else {
+        finishRecoveryRestore(queuedEditRecovery);
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+    void (async () => {
+      const draft = await loadDraftForSession(sessionId, instanceScope);
+      if (cancelled) return;
+      await reconcileOrdinaryDraftHydration(draft);
     })();
     return () => {
       cancelled = true;

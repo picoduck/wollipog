@@ -71,6 +71,8 @@ for (const [name, value] of Object.entries({
   HTMLTextAreaElement: domWindow.HTMLTextAreaElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
+  File: domWindow.File,
+  FileReader: domWindow.FileReader,
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
   MutationObserver: domWindow.MutationObserver,
@@ -1024,6 +1026,149 @@ test("mount hydration cannot restore a recovery cleared while its displaced draf
     assert.equal(loadDurableQueuedEditRecovery(recoveryScope), undefined);
     assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
       "a delayed mount result must not restore recovery cleared elsewhere");
+    const currentComposer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
+    assert.equal(currentComposer.value, "Hydrated ordinary draft",
+      "the same mount must reveal the ordinary draft after definitive cleanup wins");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("mount hydration reconciles a newer recovery saved while its displaced draft loads", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const delayedDraft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionCapabilities: {
+      models: [],
+      effortLevels: [],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      supportsSteering: true,
+    },
+  });
+  const recoveryScope = {
+    instanceScope: fixture.instanceScope,
+    accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+    sessionId: fixture.sessionId,
+  };
+  try {
+    await resolveDraft(draft, "Ordinary draft");
+    assert.equal(saveDurableQueuedEditRecovery(recoveryScope, {
+      edit: {
+        promptId: "queue-1",
+        text: "Older queued content",
+        images: [],
+        editRevision: "qer_older",
+        displacedDraft: { text: "Compact ordinary draft", images: [] },
+        displacedDraftStoredSeparately: true,
+      },
+      draft: { text: "Older recovered edit", images: [] },
+      error: "Older recovery",
+    }), true);
+
+    await fixture.fullReloadWithDraftLoader(() => delayedDraft.promise);
+    const localComposer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
+    await act(async () => {
+      localComposer.value = "Local work entered while hydration waits";
+      fireDomEvent.change(localComposer);
+    });
+    const attachmentInput = fixture.container.querySelector(".composer-attach-input") as HTMLInputElement;
+    Object.defineProperty(attachmentInput, "files", {
+      configurable: true,
+      value: [new domWindow.File([Buffer.from("local image")], "local.png", { type: "image/png" })],
+    });
+    await act(async () => {
+      attachmentInput.dispatchEvent(
+        new domWindow.Event("change", { bubbles: true }) as unknown as Event,
+      );
+    });
+    await flushAsyncWork(25);
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    const newerRecovery = {
+      edit: {
+        promptId: "queue-1",
+        text: "Newer queued content",
+        images: [],
+        editRevision: "qer_newer",
+        displacedDraft: { text: "Compact ordinary draft", images: [] },
+        displacedDraftStoredSeparately: true as const,
+      },
+      draft: { text: "Newer recovered edit", images: [] },
+      error: "Newer recovery",
+    };
+    assert.equal(saveDurableQueuedEditRecovery(recoveryScope, newerRecovery), true);
+    delayedDraft.resolve({ text: "Hydrated ordinary draft", images: [submittedImage], updatedAt: 2 });
+    await flushAsyncWork();
+
+    const currentComposer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
+    assert.equal(currentComposer.value, "Newer recovered edit");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /Newer recovery/);
+    await flushAsyncWork(450);
+    const reconciled = loadDurableQueuedEditRecovery(recoveryScope);
+    assert.equal(reconciled?.edit.editRevision, "qer_newer");
+    assert.equal(reconciled?.draft.text, "Newer recovered edit");
+    assert.equal(reconciled?.error, "Newer recovery");
+    assert.equal(reconciled?.edit.displacedDraft.text, "Local work entered while hydration waits");
+    assert.equal(reconciled?.edit.displacedDraft.images.length, 1,
+      "settled reconciliation must preserve the winner and its displaced local attachment");
+
+    const dismiss = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Dismiss Recovery") as HTMLButtonElement | undefined;
+    assert.ok(dismiss);
+    await act(async () => { dismiss.click(); });
+    await flushAsyncWork();
+    assert.equal(currentComposer.value, "Local work entered while hydration waits",
+      "the competing recovery must retain locally entered text as the displaced ordinary draft");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1,
+      "the competing recovery must retain locally attached images as the displaced ordinary draft");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("recovery cleanup cannot resurrect an ordinary draft reserved by an in-flight send", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const delayedDraft = deferred<ComposerDraft | null>();
+  const prompt = deferred<never>();
+  const fixture = await mountFixture(draft, {
+    client: { prompt: () => prompt.promise },
+    runnerProtocolVersion: 99,
+  });
+  const recoveryScope = {
+    instanceScope: fixture.instanceScope,
+    accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+    sessionId: fixture.sessionId,
+  };
+  try {
+    await resolveDraft(draft, "Submitted ordinary draft");
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+    assert.ok(sendButton(fixture).querySelector(".spinner"));
+    assert.equal(saveDurableQueuedEditRecovery(recoveryScope, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "Submitted ordinary draft", images: [] },
+        displacedDraftStoredSeparately: true,
+      },
+      draft: { text: "Recovered queued edit", images: [] },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+
+    const remounted = await fixture.remountWithDraftLoader(() => delayedDraft.promise);
+    assert.equal(clearDurableQueuedEditRecovery(recoveryScope), true);
+    delayedDraft.resolve({ text: "Submitted ordinary draft", images: [], updatedAt: 2 });
+    await flushAsyncWork();
+
+    assert.equal(remounted.value, "",
+      "cleanup must not reveal an ordinary draft still owned by an in-flight send");
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
   } finally {
     await unmountFixture(fixture);
   }
