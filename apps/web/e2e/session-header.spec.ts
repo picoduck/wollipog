@@ -489,6 +489,82 @@ test("desktop Session actions stay contained with five concurrent status indicat
   await expect(projectActions).toBeVisible();
 });
 
+test("managed background indicators open a responsive inspectable inventory and settled work leaves history only", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  await openSession(page, "preview-follow", { sessionShell: "1" });
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage(
+      "session-alpha",
+      "Start the managed background task.",
+      "turn-loaded",
+    );
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundWorkState: "resumed",
+      backgroundWorkTracking: "untracked",
+    });
+  });
+  const header = page.locator(".session-detail > .detail-head");
+  await expect(header.getByRole("button", { name: "Detached Work: Untracked" })).toBeVisible();
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundWorkState: "running",
+      backgroundWorkTracking: "managed",
+      backgroundJobs: [{
+        id: "private-task-id",
+        parentTurnId: "turn-loaded",
+        launchType: "shell",
+        registeredAt: Date.now() - 65_000,
+        lastObservedAt: Date.now() - 1_000,
+        sourcePresent: true,
+      }],
+    });
+  });
+
+  await header.getByRole("button", { name: "Background Work: Waiting on External Job" }).click();
+  const panel = page.locator("#right-panel");
+  await expect(panel).toHaveAccessibleName("Background Work");
+  await expect(panel.getByText("Shell Job 1", { exact: true })).toBeVisible();
+  await expect(panel.getByText("Running", { exact: true })).toBeVisible();
+  await expect(panel.getByText("Not Started", { exact: true })).toBeVisible();
+  await expect(panel.getByRole("button", { name: "View Parent Turn" })).toBeVisible();
+  await expect(panel).not.toContainText("private-task-id");
+  await panel.getByRole("button", { name: "View Parent Turn" }).click();
+  await expect(panel).toBeVisible();
+  await capture(page, "background-desktop-running");
+
+  await page.setViewportSize({ width: 390, height: 800 });
+  const mobileBox = await panel.boundingBox();
+  expect(mobileBox?.x).toBe(0);
+  expect(mobileBox?.width).toBe(390);
+  await capture(page, "background-mobile-running");
+
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundWorkState: undefined,
+      backgroundWorkTracking: "managed",
+      backgroundJobs: [{
+        id: "private-task-id",
+        parentTurnId: "turn-loaded",
+        launchType: "shell",
+        registeredAt: Date.now() - 65_000,
+        lastObservedAt: Date.now(),
+        sourcePresent: true,
+        terminalStatus: "completed",
+        terminalObservedAt: Date.now() - 3_000,
+        continuationRequired: true,
+        continuationId: "private-continuation-id",
+        continuationQueuedAt: Date.now() - 2_500,
+        assistantResultPersistedAt: Date.now() - 2_000,
+      }],
+    });
+  });
+  await expect(header.getByLabel("Background Work: Waiting on External Job")).toHaveCount(0);
+  await expect(panel.getByText("Completed", { exact: true })).toBeVisible();
+  await expect(panel.getByText("Result Delivered", { exact: true })).toBeVisible();
+  await expect(panel).not.toContainText("private-continuation-id");
+  await capture(page, "background-mobile-settled");
+});
+
 test("mobile Session pane and action controls share trailing columns", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 800 });
   await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
@@ -744,9 +820,16 @@ for (const viewport of [
     expect(popoverGeometry.right).toBeLessThanOrEqual(viewport.width - 8);
     expect(popoverGeometry.contentWrap).toBe("wrap");
     await capture(page, `narrow-${viewport.width}-status-popover`);
-    await page.keyboard.press("Escape");
+    if (viewport.width === 390) {
+      await statusPopover.getByRole("button", { name: "Background Work: Waiting on External Job" }).click();
+      await expect(page.locator("#right-panel")).toHaveAccessibleName("Background Work");
+      await expect(overflowTrigger).toBeFocused();
+      await page.getByRole("button", { name: "Close Panel" }).click();
+    } else {
+      await page.keyboard.press("Escape");
+    }
     await expect(statusPopover).toHaveCount(0);
-    await expect(overflowTrigger).toBeFocused();
+    if (viewport.width !== 390) await expect(overflowTrigger).toBeFocused();
 
     await overflowTrigger.click();
     await page.locator(".menu-backdrop").click({ position: { x: 300, y: 700 } });

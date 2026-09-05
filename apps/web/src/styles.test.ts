@@ -185,10 +185,10 @@ test("mobile Session statuses stay on one measured line before fixed actions", (
     "overflowed badges must not remain partially painted",
   );
   const interactiveStatus = phoneRule.declarationsForSelector(
-    ".session-detail > .detail-head > .session-header-statuses > button",
+    ".session-detail > .detail-head > .session-header-statuses > .active-subagents-badge",
   );
   assert.deepEqual(interactiveStatus.get("order"), ["-1"],
-    "focusable status actions must lead the row instead of disappearing into the clipped tail");
+    "active subagents must lead the row without reordering every actionable status badge");
   assert.deepEqual(interactiveStatus.get("flex"), ["none"]);
   const lifecycle = phoneRule
     .declarationsForSelector(

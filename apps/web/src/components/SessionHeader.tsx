@@ -69,6 +69,7 @@ export function SessionHeader({
   topbarControls,
   changeStatus,
   activeSubagents,
+  onOpenBackgroundWork,
   titleId,
 }: {
   session: SessionView;
@@ -101,6 +102,8 @@ export function SessionHeader({
   changeStatus?: SessionChangeStatus | null;
   /** Live structured subagents remain visible even while the parent awaits its next prompt. */
   activeSubagents?: { count: number; onOpen: () => void };
+  /** Opens the inspectable managed-job inventory. */
+  onOpenBackgroundWork?: () => void;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
@@ -149,6 +152,9 @@ export function SessionHeader({
     activeSubagents?.count,
   ]);
   const terminal = isTerminal(session.status);
+  const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
+    ? undefined
+    : session.backgroundWorkState;
   const reprocessSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionReprocess");
   const logoutSupported = runnerSupportsProtocol(runnerProtocolVersion, "acpLogout");
   const dashboardOrigin = instancePublicOrigin(instances);
@@ -159,11 +165,18 @@ export function SessionHeader({
     <>
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
       <ChangeStatusBadge change={changeStatus ?? null} />
-      {session.backgroundWorkState && (
-        <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={false} />
+      {visibleBackgroundWorkState && (
+        <BackgroundWorkBadge state={visibleBackgroundWorkState} compact announce={false}
+          onOpen={onOpenBackgroundWork ? () => {
+            closeStatusPopover(true);
+            onOpenBackgroundWork();
+          } : undefined} />
       )}
-      {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-        <UntrackedBackgroundWorkBadge />
+      {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+        <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
+          closeStatusPopover(true);
+          onOpenBackgroundWork();
+        } : undefined} />
       )}
     </>
   );
@@ -363,9 +376,9 @@ export function SessionHeader({
       ) : (
         null
       )}
-      {session.backgroundWorkState && (
+      {visibleBackgroundWorkState && (
         <span className="sr-only">
-          <BackgroundWorkBadge state={session.backgroundWorkState} compact />
+          <BackgroundWorkBadge state={visibleBackgroundWorkState} compact />
         </span>
       )}
       {note && <span className="detail-note session-header-note" role="status" aria-live="polite">{note}</span>}

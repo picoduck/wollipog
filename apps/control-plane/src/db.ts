@@ -56,6 +56,8 @@ import {
   type BackgroundWorkState,
   type BackgroundWorkTracking,
   type ManagedBackgroundJobSnapshot,
+  type ManagedBackgroundJobView,
+  MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
   type SessionCapabilities,
   type StopOperationView,
   type AcpSessionContextConfig,
@@ -9501,7 +9503,7 @@ export class ControlPlaneDb {
         snap.title,
         snap.titleSource ?? "generated",
         snap.providerUpdatedAt ?? null,
-        snap.backgroundWorkState ?? null,
+        backgroundWorkStateForStorage(snap.backgroundWorkState),
         snap.backgroundWorkTracking ?? null,
         snap.status,
         snap.useWorktree ? 1 : 0,
@@ -9684,7 +9686,7 @@ export class ControlPlaneDb {
         titleSource,
         semanticTitle,
         snap.providerUpdatedAt ?? null,
-        snap.backgroundWorkState ?? null,
+        backgroundWorkStateForStorage(snap.backgroundWorkState),
         snap.backgroundWorkTracking ?? null,
         snap.preview,
         pendingJson,
@@ -9753,7 +9755,7 @@ export class ControlPlaneDb {
     this.maybeMaintainUsageAggregation();
   }
 
-  /** Monotonic mirror of projection-safe runner facts. Absence means a pre-v78 runner and leaves
+  /** Monotonic mirror of projection-safe runner facts. Absence means a pre-v82 runner and leaves
    * prior evidence intact; a present array is authoritative, so missing jobs become inactive
    * tombstones while their audit and delivery evidence remains durable. */
   private upsertManagedBackgroundJobsInTransaction(
@@ -10115,6 +10117,72 @@ export class ControlPlaneDb {
       terminalCount: row.terminal_count,
       watchdogState: "terminal_without_continuation" as const,
     })));
+  }
+
+  /** Active and recent terminal jobs, bounded for session-list broadcasts. Provider-local fields
+   * never enter this table and therefore cannot cross the dashboard privacy boundary here. */
+  listManagedBackgroundJobs(sessionId: string): ManagedBackgroundJobView[] {
+    const rows = this.stmt(
+      `SELECT job_id, parent_turn_id, launch_type, registered_at, last_observed_at,
+              source_present, terminal_status, terminal_observed_at, continuation_required,
+              continuation_id, continuation_queued_at, continuation_submitted_at,
+              continuation_accepted_at, assistant_result_persisted_at
+         FROM managed_background_jobs
+        WHERE session_id=?
+        ORDER BY CASE
+                   WHEN source_present=1 AND assistant_result_persisted_at IS NULL THEN 0
+                   ELSE 1
+                 END,
+                 COALESCE(terminal_observed_at, registered_at) DESC,
+                 job_id
+        LIMIT ${MANAGED_BACKGROUND_JOB_VIEW_LIMIT}`,
+    ).all(sessionId) as unknown as Array<{
+      job_id: string;
+      parent_turn_id: string;
+      launch_type: ManagedBackgroundJobView["launchType"];
+      registered_at: number;
+      last_observed_at: number;
+      source_present: number;
+      terminal_status: ManagedBackgroundJobView["terminalStatus"] | null;
+      terminal_observed_at: number | null;
+      continuation_required: number | null;
+      continuation_id: string | null;
+      continuation_queued_at: number | null;
+      continuation_submitted_at: number | null;
+      continuation_accepted_at: number | null;
+      assistant_result_persisted_at: number | null;
+    }>;
+    return rows.map((row) => ({
+      id: row.job_id,
+      parentTurnId: row.parent_turn_id,
+      launchType: row.launch_type,
+      registeredAt: row.registered_at,
+      lastObservedAt: row.last_observed_at,
+      sourcePresent: row.source_present === 1,
+      ...(row.terminal_status ? { terminalStatus: row.terminal_status } : {}),
+      ...(row.terminal_observed_at != null ? { terminalObservedAt: row.terminal_observed_at } : {}),
+      ...(row.continuation_required != null ? { continuationRequired: row.continuation_required === 1 } : {}),
+      ...(row.continuation_id ? { continuationId: row.continuation_id } : {}),
+      ...(row.continuation_queued_at != null ? { continuationQueuedAt: row.continuation_queued_at } : {}),
+      ...(row.continuation_submitted_at != null ? { continuationSubmittedAt: row.continuation_submitted_at } : {}),
+      ...(row.continuation_accepted_at != null ? { continuationAcceptedAt: row.continuation_accepted_at } : {}),
+      ...(row.assistant_result_persisted_at != null
+        ? { assistantResultPersistedAt: row.assistant_result_persisted_at }
+        : {}),
+    }));
+  }
+
+  private managedBackgroundJobsTruncated(sessionId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 AS present FROM managed_background_jobs WHERE session_id=?
+        LIMIT 1 OFFSET ${MANAGED_BACKGROUND_JOB_VIEW_LIMIT}`,
+    ).get(sessionId));
+  }
+
+  private managedBackgroundJobsPresent(sessionId: string): boolean {
+    return Boolean(this.stmt(
+      "SELECT 1 AS present FROM managed_background_jobs WHERE session_id=? LIMIT 1",
+    ).get(sessionId));
   }
 
   /** Highest runner-owned event seq this cache has ingested for a session. */
@@ -13243,7 +13311,7 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(id) as unknown as
       | SessionRow
       | undefined;
-    return row ? this.sessionView(row, undefined, this.sessionStopIntent(id)) : null;
+    return row ? this.sessionView(row, undefined, this.sessionStopIntent(id), true) : null;
   }
 
   recordSideChat(parentSessionId: string, childSessionId: string, now: number): void {
@@ -13312,7 +13380,7 @@ export class ControlPlaneDb {
       .all() as unknown as SessionRow[];
     const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
     const stopIntents = this.sessionStopIntents();
-    return rows.map((r) => this.sessionView(r, legacyTargets, stopIntents.get(r.id)));
+    return rows.map((r) => this.sessionView(r, legacyTargets, stopIntents.get(r.id), false));
   }
 
   private legacyExecutionTargets(runnerId: string): ExecutionTargetDefinition[] | undefined {
@@ -13336,6 +13404,7 @@ export class ControlPlaneDb {
     row: SessionRow,
     legacyTargetCache?: Map<string, ExecutionTargetDefinition[] | undefined>,
     stopIntent?: SessionStopIntentRecord,
+    includeBackgroundJobs = true,
   ): SessionView {
     const agentName = row.agent_id
       ? ((this.stmt("SELECT name FROM agent_definitions WHERE id=?").get(row.agent_id) as
@@ -13405,6 +13474,14 @@ export class ControlPlaneDb {
         const backgroundDeliveries = this.listBackgroundDeliveries(row.id, status);
         return backgroundDeliveries.length ? { backgroundDeliveries } : {};
       })(),
+      ...(includeBackgroundJobs ? (() => {
+        const backgroundJobs = this.listManagedBackgroundJobs(row.id);
+        return backgroundJobs.length ? {
+          backgroundJobsAvailable: true,
+          backgroundJobs,
+          ...(this.managedBackgroundJobsTruncated(row.id) ? { backgroundJobsTruncated: true } : {}),
+        } : { backgroundJobsAvailable: false };
+      })() : { backgroundJobsAvailable: this.managedBackgroundJobsPresent(row.id) }),
       status,
       column,
       runId: row.run_id,
@@ -17661,9 +17738,15 @@ function parseJson<T>(raw: string | null): T | null {
 }
 
 function parseBackgroundWorkState(raw: string | null): BackgroundWorkState | undefined {
-  return raw === "running" || raw === "continuation_pending" || raw === "orphaned" || raw === "resumed"
+  return raw === "running" || raw === "continuation_pending" || raw === "orphaned"
     ? raw
     : undefined;
+}
+
+/** A pre-v106 runner may still report the historical `resumed` sentinel. The delivery rows retain
+ * that event durably; the current-state column deliberately clears it. */
+function backgroundWorkStateForStorage(raw: BackgroundWorkState | undefined): string | null {
+  return raw === "running" || raw === "continuation_pending" || raw === "orphaned" ? raw : null;
 }
 
 function parseBackgroundWorkTracking(raw: string | null): BackgroundWorkTracking | undefined {

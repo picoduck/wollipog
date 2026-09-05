@@ -768,6 +768,39 @@ function SessionDetailLoaded({
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
+  const backgroundInventoryRequestRef = useRef<string | null>(null);
+  const [backgroundInventoryError, setBackgroundInventoryError] = useState<string | null>(null);
+  const [backgroundInventoryAttempt, setBackgroundInventoryAttempt] = useState(0);
+  const retryBackgroundInventory = useCallback(() => {
+    backgroundInventoryRequestRef.current = null;
+    setBackgroundInventoryError(null);
+    setBackgroundInventoryAttempt((attempt) => attempt + 1);
+  }, []);
+  useEffect(() => {
+    if (mode !== "expanded" || !rightPanel.open || rightPanel.mode !== "background" ||
+        session.backgroundJobsAvailable !== true || session.backgroundJobs !== undefined) {
+      if (session.backgroundJobs !== undefined || mode !== "expanded" ||
+          !rightPanel.open || rightPanel.mode !== "background") {
+        backgroundInventoryRequestRef.current = null;
+        setBackgroundInventoryError(null);
+      }
+      return;
+    }
+    const requestKey = `${session.id}:${recoveryGeneration}`;
+    if (backgroundInventoryRequestRef.current === requestKey) return;
+    backgroundInventoryRequestRef.current = requestKey;
+    setBackgroundInventoryError(null);
+    let current = true;
+    void api.session(session.id)
+      .then(({ session: loaded }) => {
+        if (current) loadSession(loaded);
+      })
+      .catch((cause: unknown) => {
+        if (current) setBackgroundInventoryError((cause as Error).message);
+      });
+    return () => { current = false; };
+  }, [api, backgroundInventoryAttempt, loadSession, mode, recoveryGeneration,
+    rightPanel.mode, rightPanel.open, session]);
   const composerComposingRef = useRef(false);
   const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
   const composerExplicitFocusTransferRef = useRef(false);
@@ -1886,6 +1919,13 @@ function SessionDetailLoaded({
     ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
   [items, runnerOnline, session.status]);
   const preferredActiveSubagentId = selectedSubagentId(activeSubagents);
+  const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
+    ? undefined
+    : session.backgroundWorkState;
+  const backgroundParentTurnEventIds = useMemo(() => new Map(items
+    .filter((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
+      item.kind === "user_message" && Boolean(item.turnId))
+    .map((item) => [item.turnId!, item.id] as const)), [items]);
 
   // Prior user prompts for ↑ history recall (chronological; recall walks from newest backward).
   const timelineUserPrompts = useMemo(
@@ -2356,6 +2396,10 @@ function SessionDetailLoaded({
     else if (restore.state === "paused") followTail.pause();
     else followTail.preview();
   }, [followTail.follow, followTail.pause, followTail.preview]);
+  const revealBackgroundParentTurn = useCallback((eventId: number) => {
+    if (isMobile) rightPanelRef.current.close();
+    revealCurrentOperation(eventId);
+  }, [isMobile, revealCurrentOperation]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({
     beginProgrammaticScroll: followTail.beginProgrammaticScroll,
     follow: followTail.follow,
@@ -3480,6 +3524,7 @@ function SessionDetailLoaded({
             count: activeSubagents.length,
             onOpen: () => openSubagent(preferredActiveSubagentId),
           } : undefined}
+          onOpenBackgroundWork={() => rightPanel.show("background")}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
@@ -3490,17 +3535,30 @@ function SessionDetailLoaded({
             <h2 className="session-preview-title">{session.title}</h2>
             <div className="session-preview-meta">
               <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-              {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
-              {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-                <UntrackedBackgroundWorkBadge />
+              {visibleBackgroundWorkState && <BackgroundWorkBadge state={visibleBackgroundWorkState} onOpen={() => {
+                rightPanel.show("background");
+                onExpand?.();
+              }} />}
+              {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+                <UntrackedBackgroundWorkBadge onOpen={() => {
+                  rightPanel.show("background");
+                  onExpand?.();
+                }} />
               )}
               {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
                 <BackgroundDeliveryBadge
                   state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
+                  onOpen={() => {
+                    rightPanel.show("background");
+                    onExpand?.();
+                  }}
                 />
               )}
               {session.backgroundDeliveries?.flatMap((delivery) => delivery.notifications ?? []).slice(-2).map((receipt) => (
-                <BackgroundNotificationBadge key={receipt.deliveryId} state={receipt.state} />
+                <BackgroundNotificationBadge key={receipt.deliveryId} state={receipt.state} onOpen={() => {
+                  rightPanel.show("background");
+                  onExpand?.();
+                }} />
               ))}
               <span className="tag tag-machine" title={session.runnerId}>{runnerDisp.name}</span>
               {session.agentName && (
@@ -4263,6 +4321,10 @@ function SessionDetailLoaded({
           onOpenTerminal={onOpenTerminal}
           onInsertSideChatDraft={insertSideChatDraft}
           items={items}
+          parentTurnEventIds={backgroundParentTurnEventIds}
+          onOpenParentTurn={revealBackgroundParentTurn}
+          backgroundInventoryError={backgroundInventoryError}
+          onRetryBackgroundInventory={retryBackgroundInventory}
         />}
       </div>
       {mode === "expanded" && messageAction && (

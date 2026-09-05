@@ -25,6 +25,7 @@ import type { GitStatus } from "./useGitStatus.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import type { TimelineItem } from "../timeline.js";
 import { SubagentsPanel } from "./SubagentsPanel.js";
+import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 
 /** Viewport-aware width ceiling: the panel may take at most ~40% of the window, so the
@@ -32,6 +33,8 @@ import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-st
 function viewportPanelMax(): number {
   return Math.floor(window.innerWidth * 0.4);
 }
+
+const EMPTY_PARENT_TURN_EVENTS: ReadonlyMap<string, number> = new Map();
 
 /**
  * The right side panel's app-level state. Lives in App.tsx (NOT inside the per-session-keyed
@@ -152,6 +155,7 @@ const MODE_TITLES: Record<RightPanelMode, string> = {
   browser: "Browser",
   sidechat: "Side Chat",
   subagents: "Subagents",
+  background: "Background Work",
 };
 
 /**
@@ -173,6 +177,10 @@ export function RightPanel({
   onInsertSideChatDraft,
   items,
   earlierActivityUnloaded = false,
+  parentTurnEventIds = EMPTY_PARENT_TURN_EVENTS,
+  onOpenParentTurn = () => undefined,
+  backgroundInventoryError = null,
+  onRetryBackgroundInventory,
 }: {
   state: RightPanelState;
   session: SessionView;
@@ -189,6 +197,11 @@ export function RightPanel({
   items: TimelineItem[];
   /** The transcript is showing a bounded window with older turns still unloaded. */
   earlierActivityUnloaded?: boolean;
+  /** Loaded parent turns that can be revealed directly in the virtual transcript. */
+  parentTurnEventIds?: ReadonlyMap<string, number>;
+  onOpenParentTurn?: (eventId: number) => void;
+  backgroundInventoryError?: string | null;
+  onRetryBackgroundInventory?: () => void;
 }) {
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const filesSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionFiles");
@@ -339,6 +352,9 @@ export function RightPanel({
             filesHint={filesHint}
             terminalSupported={terminalSupported}
             terminalHint={terminalHint}
+            backgroundAvailable={(session.backgroundJobs?.length ?? 0) > 0 ||
+              session.backgroundJobsAvailable === true ||
+              session.backgroundWorkTracking != null || session.backgroundWorkState != null}
           />
         ) : (
           <div className="rp-body">
@@ -388,8 +404,20 @@ export function RightPanel({
                 onSelect={(subagentId) => state.selectSubagent(session.id, sessionEventEpoch, subagentId)}
               />
             )}
+            {state.mode === "background" && (
+              <BackgroundWorkPanel
+                session={session}
+                runnerOnline={runnerOnline}
+                runnerProtocolVersion={runnerProtocolVersion}
+                parentTurnEventIds={parentTurnEventIds}
+                onOpenParentTurn={onOpenParentTurn}
+                inventoryError={backgroundInventoryError}
+                onRetryInventory={onRetryBackgroundInventory}
+              />
+            )}
             {state.mode !== "files" && state.mode !== "review" && state.mode !== "browser" &&
-              state.mode !== "sidechat" && state.mode !== "subagents" && <div className="hint">Coming soon.</div>}
+              state.mode !== "sidechat" && state.mode !== "subagents" && state.mode !== "background" &&
+              <div className="hint">Coming soon.</div>}
           </div>
         )}
       </aside>
@@ -429,6 +457,7 @@ function Launcher({
   filesHint,
   terminalSupported,
   terminalHint,
+  backgroundAvailable,
 }: {
   onPick: (mode: RightPanelMode) => void;
   onOpenTerminal: () => void;
@@ -436,6 +465,7 @@ function Launcher({
   filesHint: string;
   terminalSupported: boolean;
   terminalHint: string;
+  backgroundAvailable: boolean;
 }) {
   return (
     <div className="rp-launcher">
@@ -445,6 +475,13 @@ function Launcher({
           {!terminalSupported && <div>{terminalHint}</div>}
         </div>
       )}
+      <LauncherRow
+        label="Background Work"
+        disabled={!backgroundAvailable}
+        hint="No background-work capability or history is available for this session."
+        onClick={() => onPick("background")}
+        icon={<CommandLineIcon size={14} />}
+      />
       <LauncherRow
         label="Review"
         kbd={shortcutDisplay("open-review")}

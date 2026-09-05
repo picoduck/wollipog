@@ -2417,7 +2417,7 @@ test("the adopted marker round-trips through create/update snapshot into Session
   assert.equal(db.getSession("no")?.adopted, true);
 });
 
-test("background work state round-trips through runner snapshot create and update", () => {
+test("background work state round-trips while legacy settled sentinels clear current status", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(
     snapshot({ id: "background-work", driver: "claude_code", backgroundWorkState: "running", backgroundWorkTracking: "managed" }),
@@ -2448,7 +2448,7 @@ test("background work state round-trips through runner snapshot create and updat
     snapshot({ id: "background-work", driver: "claude_code", backgroundWorkState: "resumed" }),
     4_000,
   );
-  assert.equal(db.getSession("background-work")?.backgroundWorkState, "resumed");
+  assert.equal(db.getSession("background-work")?.backgroundWorkState, undefined);
 });
 
 test("managed background delivery stages survive reconnect, hydration, acknowledgement, and restart", () => {
@@ -2488,6 +2488,17 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
       jobCount: 1,
       terminalCount: 1,
       watchdogState: "terminal_without_continuation",
+    }]);
+    assert.deepEqual(db.getSession("background-delivery")?.backgroundJobs, [{
+      id: "job-1",
+      parentTurnId: "turn-1",
+      launchType: "agent",
+      registeredAt: 1_000,
+      lastObservedAt: 2_000,
+      sourcePresent: true,
+      terminalStatus: "completed",
+      terminalObservedAt: 1_100,
+      continuationRequired: true,
     }]);
 
     db.updateSessionFromSnapshot("background-delivery", snapshot({
@@ -2538,7 +2549,7 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
     assert.equal(db.acknowledgeBackgroundDelivery("background-delivery", "bgcont-1", 1_700), false);
     assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState, undefined);
 
-    // A pre-v78 reconnect omits the inventory; it must not erase already-acknowledged evidence.
+    // A pre-v82 reconnect omits the inventory; it must not erase already-acknowledged evidence.
     db.updateSessionFromSnapshot("background-delivery", snapshot({
       id: "background-delivery",
       driver: "claude_code",
@@ -2660,6 +2671,8 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
 
     db = ControlPlaneDb.open(dbPath);
     assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.dashboardObservedAt, 1_600);
+    assert.equal(db.getSession("background-delivery")?.backgroundJobs?.[0]?.assistantResultPersistedAt, 1_500,
+      "job inventory survives a control-plane restart with its delivery timestamp");
 
     db.createSessionFromSnapshot(snapshot({
       id: "background-indexed",
@@ -2697,6 +2710,55 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("managed background job views are bounded, prioritize active work, and omit runner-local fields", () => {
+  const db = withRunner();
+  const jobs = Array.from({ length: 140 }, (_, index) => ({
+    id: `job-${String(index).padStart(3, "0")}`,
+    parentTurnId: `turn-${index}`,
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: index === 0 ? "monitor" as const : "shell" as const,
+    registeredAt: index + 1,
+    ...(index === 0 ? {} : {
+      terminalStatus: "completed" as const,
+      terminalObservedAt: index + 101,
+      continuationRequired: false,
+      assistantResultPersistedAt: index + 201,
+    }),
+  }));
+  db.createSessionFromSnapshot(snapshot({
+    id: "background-bounded",
+    driver: "claude_code",
+    backgroundWorkState: "running",
+    backgroundJobs: jobs,
+  }), "runner-1", 1_000);
+
+  const session = db.getSession("background-bounded");
+  const view = session?.backgroundJobs ?? [];
+  assert.equal(view.length, 128);
+  assert.equal(session?.backgroundJobsTruncated, true);
+  assert.equal(session?.backgroundJobsAvailable, true);
+  const listed = db.listSessions({ includeArchived: true })
+    .find((candidate) => candidate.id === "background-bounded");
+  assert.equal(listed?.backgroundJobs, undefined,
+    "bulk session projections do not query or broadcast the per-job inspection payload");
+  assert.equal(listed?.backgroundJobsTruncated, undefined);
+  assert.equal(listed?.backgroundJobsAvailable, true,
+    "bulk projections retain the compact signal needed to load the inspection payload on demand");
+  db.createSession(newSession({ id: "background-empty" }));
+  assert.equal(db.getSession("background-empty")?.backgroundJobsAvailable, false,
+    "current control planes explicitly distinguish an empty inventory from an unsupported projection");
+  assert.ok(view.some((job) => job.id === "job-000"), "unresolved active work survives history truncation");
+  const safeKeys = new Set([
+    "id", "parentTurnId", "launchType", "registeredAt", "lastObservedAt", "sourcePresent",
+    "terminalStatus", "terminalObservedAt", "continuationRequired", "continuationId",
+    "continuationQueuedAt", "continuationSubmittedAt", "continuationAcceptedAt",
+    "assistantResultPersistedAt",
+  ]);
+  assert.ok(view.every((job) => Object.keys(job).every((key) => safeKeys.has(key))),
+    "the dashboard projection contains only its explicit privacy-safe allowlist");
 });
 
 test("background push receipts are per-endpoint, retryable, capability-authenticated, and restart durable", () => {
