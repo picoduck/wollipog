@@ -161,17 +161,18 @@ export function SessionHeader({
   const internalSessionUrl = dashboardOrigin
     ? absoluteViewUrl(dashboardOrigin, { name: "session", id: session.id })
     : null;
-  const renderNoninteractiveStatuses = () => (
+  const renderBackgroundWork = () => visibleBackgroundWorkState && (
+    <BackgroundWorkBadge state={visibleBackgroundWorkState} compact announce={false}
+      onOpen={onOpenBackgroundWork ? () => {
+        closeStatusPopover(true);
+        onOpenBackgroundWork();
+      } : undefined} />
+  );
+  const renderNoninteractiveStatuses = (includeBackground = true) => (
     <>
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
+      {includeBackground && renderBackgroundWork()}
       <ChangeStatusBadge change={changeStatus ?? null} />
-      {visibleBackgroundWorkState && (
-        <BackgroundWorkBadge state={visibleBackgroundWorkState} compact announce={false}
-          onOpen={onOpenBackgroundWork ? () => {
-            closeStatusPopover(true);
-            onOpenBackgroundWork();
-          } : undefined} />
-      )}
       {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
           closeStatusPopover(true);
@@ -350,8 +351,11 @@ export function SessionHeader({
           </div>
         </>
       )}
+      {isMobile && visibleBackgroundWorkState && (
+        <div className="session-header-background-work">{renderBackgroundWork()}</div>
+      )}
       <div className="session-header-statuses" ref={statusesRef}>
-        {renderNoninteractiveStatuses()}
+        {renderNoninteractiveStatuses(!isMobile)}
         {activeSubagents && (
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
         )}

@@ -110,6 +110,33 @@ const worktreeSession = (worktree: Record<string, unknown> | null): SessionView 
   worktrees: worktree ? [worktree] : undefined,
 } as unknown as SessionView);
 
+test("idle Inbox rows retain authoritative background work alongside attention", async () => {
+  for (const [state, visible, accessible] of [
+    ["running", "Waiting on External Job", "Waiting on External Job"],
+    ["continuation_pending", "Continuation Pending", "Continuation Pending"],
+    ["orphaned", "Background Work Orphaned", "Orphaned"],
+    ["resumed", null, null],
+    [undefined, null, null],
+  ] as const) {
+    await withRow({
+      ...worktreeSession(null), status: "idle", backgroundWorkState: state,
+      pendingApproval: { kind: "permission", requestId: "background-approval", title: "Review external work", options: [] },
+    }, (container) => {
+      assert.ok(container.querySelector('[aria-label="Activity: Awaiting Prompt"]'));
+      assert.ok(container.querySelector('[aria-label="Attention: Approval Required"]'));
+      const badge = container.querySelector(".inbox-row-background-work .background-work-badge");
+      if (visible) {
+        assert.equal(badge?.getAttribute("aria-label"), `Background Work: ${accessible}`);
+        assert.equal(badge?.querySelector('span[aria-hidden="true"]:last-child')?.textContent, visible);
+        assert.equal(badge?.getAttribute("role"), null, "rows must not create hundreds of live regions");
+      } else {
+        assert.equal(badge, null);
+        assert.equal(container.querySelector(".inbox-row-background-work"), null);
+      }
+    });
+  }
+});
+
 test("a session with a worktree gets a third line, and a default base ref is left off it", async () => {
   await withRow(
     worktreeSession({

@@ -11,6 +11,7 @@ import {
 import { displayBaseRef, pullRequestStateLabel } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
+import { BackgroundWorkBadge } from "./common.js";
 import { sessionAgentLabel } from "./agent-options.js";
 
 export interface InboxRowProps {
@@ -134,6 +135,11 @@ function InboxRowInner({
                   {pullRequestStateLabel(activeWorktree.pullRequest.state)} PR
                 </span>
               )}
+            </span>
+          )}
+          {session.backgroundWorkState && session.backgroundWorkState !== "resumed" && (
+            <span className="inbox-row-background-work">
+              <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={false} />
             </span>
           )}
           <span className="inbox-row-signals">
