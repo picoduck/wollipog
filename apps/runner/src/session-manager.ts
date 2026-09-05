@@ -114,6 +114,7 @@ import {
   createRequestedWorktree,
   attachRequestedWorktree,
   fetchRemoteDefaultBase,
+  readRepositoryDefaultBranch,
   createWorktreeFromTree,
   captureTurnDiff,
   discardWorktreeIfSafe,
@@ -915,6 +916,9 @@ export class SessionManager {
         const canonical = { ...existing, path: created.path };
         return { worktree: canonical, snapshot: await this.activateWorktree(meta, canonical) };
       }
+      // Stamped once, here, and persisted with the record: `attributedWorktrees` rebuilds views
+      // synchronously and must never reach for Git to do it.
+      const defaultBranch = await readRepositoryDefaultBranch(meta.repoPath, options);
       const worktree: SessionWorktreeView = {
         id: created.path.split(/[\\/]/u).at(-1)!,
         path: created.path,
@@ -922,6 +926,7 @@ export class SessionManager {
         baseRef: created.baseRef,
         baseCommit: created.baseCommit,
         source: "created",
+        ...(defaultBranch ? { defaultBranch } : {}),
       };
       try {
         return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
@@ -966,13 +971,20 @@ export class SessionManager {
       if (existing && existing.branch !== attached.branch) {
         throw new Error("worktree branch changed since it was linked to this session");
       }
-      const worktree: SessionWorktreeView = existing ? { ...existing, path: attached.path } : {
-        id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
-        path: attached.path,
-        branch: attached.branch,
-        baseCommit: attached.baseCommit,
-        source: "attached",
-      };
+      // Only the execution context matters here; the read touches no worktree root or project path.
+      const attachedDefaultBranch = await readRepositoryDefaultBranch(meta.repoPath, { context: meta.context });
+      const worktree: SessionWorktreeView = existing
+        // Re-attaching refreshes the default branch without disturbing the rest of the record: the
+        // repository's default can move (`git remote set-head`) long after the worktree was linked.
+        ? { ...existing, path: attached.path, ...(attachedDefaultBranch ? { defaultBranch: attachedDefaultBranch } : {}) }
+        : {
+          id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
+          path: attached.path,
+          branch: attached.branch,
+          baseCommit: attached.baseCommit,
+          source: "attached",
+          ...(attachedDefaultBranch ? { defaultBranch: attachedDefaultBranch } : {}),
+        };
       return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
     });
   }

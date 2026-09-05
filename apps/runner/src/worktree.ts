@@ -411,6 +411,37 @@ export async function fetchRemoteDefaultBase(
   return `${remote}/${branch}`;
 }
 
+/**
+ * The repository's default branch, read from the remote HEAD Git already tracks locally.
+ *
+ * Deliberately network-free, unlike `fetchRemoteDefaultBase` above: this rides along with every
+ * worktree record purely so the UI can tell a routine base from a deliberate one, and that is not
+ * worth a round trip on the worktree-creation path. `refs/remotes/<remote>/HEAD` is written by
+ * `git clone` and by `git remote set-head`; where it is absent the repository has no locally known
+ * default and callers get `undefined`, which they must treat as unknown rather than as a guess.
+ */
+export async function readRepositoryDefaultBranch(
+  repoPath: string,
+  options: WorktreeOptions = {},
+  remote = "origin",
+): Promise<string | undefined> {
+  const context = options.context ?? nativeContext;
+  safeGitArgument(remote, "Git remote");
+  let head: string;
+  try {
+    head = (await command(context, repoPath, ["symbolic-ref", "--short", `refs/remotes/${remote}/HEAD`])).trim();
+  } catch {
+    // `symbolic-ref` exits non-zero when the remote HEAD has never been recorded. That is an
+    // ordinary state for a repository added by path rather than cloned, not a failure worth
+    // propagating into worktree creation.
+    return undefined;
+  }
+  if (!head) return undefined;
+  const prefix = `${remote}/`;
+  const branch = head.startsWith(prefix) ? head.slice(prefix.length) : head;
+  return branch || undefined;
+}
+
 interface ListedWorktree {
   path: string;
   head: string | null;

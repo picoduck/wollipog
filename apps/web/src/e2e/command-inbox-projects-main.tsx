@@ -222,6 +222,33 @@ function initialModel(): FixtureModel {
           pullRequest: { url: "https://github.com/picoduck/wollipog/pull/666", state: "closed" },
         }],
       }],
+      // #679: this repository's default is `develop`, so an explicit `origin/main` base is a
+      // deliberate choice the row has to keep. Before the default branch was carried, the name
+      // heuristic suppressed it.
+      ["session-nondefault-repo", "Branched From Main in a Develop-Default Repository", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/develop-default",
+        worktrees: [{
+          id: "wt-develop-default",
+          path: "/repos/alpha/.agent-worktrees/develop-default",
+          branch: "fix/issue-679-default-branch",
+          baseRef: "origin/main",
+          defaultBranch: "develop",
+          source: "created",
+        }],
+      }],
+      ["session-default-repo", "Branched From the Default of a Develop-Default Repository", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/develop-base",
+        worktrees: [{
+          id: "wt-develop-base",
+          path: "/repos/alpha/.agent-worktrees/develop-base",
+          branch: "fix/issue-679-follow-up",
+          baseRef: "origin/develop",
+          defaultBranch: "develop",
+          source: "created",
+        }],
+      }],
       ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {}],
       ["session-plain", "Plain", {}],
     ];
