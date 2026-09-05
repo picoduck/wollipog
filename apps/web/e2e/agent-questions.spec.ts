@@ -11,6 +11,27 @@ const geometry = (locator: Locator) => locator.evaluate((element) => {
   };
 });
 
+test("late composer answers cannot erase a question received after external clearing", async ({ page }) => {
+  await page.goto("/agent-questions-e2e.html?style=composer&hold=1");
+  const response = page.locator(".composer-answer-input");
+  await response.fill("1");
+  await response.press("Enter");
+  await expect(response).toBeDisabled();
+  await page.evaluate(() => window.clearAgentQuestion());
+  await expect(response).toHaveCount(0);
+  await page.evaluate(() => window.replaceAgentQuestion());
+  await expect(response).toBeEnabled();
+  await response.fill("2");
+  await page.evaluate(() => window.releaseAgentQuestion());
+  await expect(response).toHaveValue("2");
+  await response.press("Enter");
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  expect(await page.evaluate(() => window.agentQuestionCalls.map(({ requestId, answers }) => ({ requestId, answers })))).toEqual([
+    { requestId: "ask-1", answers: { language: "TypeScript" } },
+    { requestId: "ask-2", answers: { replacement: "Another Fresh Answer" } },
+  ]);
+});
+
 async function expectInsideViewport(locator: Locator, page: Page) {
   const box = await geometry(locator);
   const viewport = page.viewportSize()!;
