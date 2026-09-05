@@ -196,6 +196,7 @@ import {
   type QueuedPromptEditRecovery,
   type QueuedPromptEditState,
 } from "../queued-edit-recovery.js";
+import { materializePromptImages } from "../prompt-image-materialization.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
@@ -1348,11 +1349,37 @@ function SessionDetailLoaded({
           let displaced: ComposerDraft | null | undefined;
           try { displaced = await loadDraftForSession(sessionId, instanceScope); } catch { /* retain compact text */ }
           if (displaced === undefined || cancelled || (queuedEditRef.current && !queuedEditRecovered)) return;
-          const restored = recoveryWithDisplacedDraft(queuedEditRecovery, displaced);
+          const openQueuedEditAfterLoad = queuedEditRef.current;
+          if (openQueuedEditAfterLoad && openQueuedEditAfterLoad.promptId !== queuedEditRecovery.edit.promptId) return;
+          let preserveDraftAfterLoad = draftDirty.current && openQueuedEditAfterLoad?.promptId === queuedEditRecovery.edit.promptId;
+          let restored = recoveryWithDisplacedDraft(queuedEditRecovery, displaced);
+          if (preserveDraftAfterLoad) {
+            restored = {
+              ...restored,
+              draft: {
+                text: draftState.current.text,
+                images: draftState.current.images.map((image) => ({ ...image })),
+              },
+            };
+          } else if (draftDirty.current && openQueuedEditAfterLoad === null) {
+            const currentDisplacedDraft = {
+              text: draftState.current.text,
+              images: draftState.current.images.map((image) => ({ ...image })),
+            };
+            restored = recoveryWithDisplacedDraft(queuedEditRecovery, currentDisplacedDraft);
+            void saveComposerDraft(
+              sessionId,
+              currentDisplacedDraft.text,
+              currentDisplacedDraft.images,
+              instanceScope,
+            );
+            preserveDraftAfterLoad = false;
+          }
           if (queuedEditRecoveryScope) {
+            saveDurableQueuedEditRecovery(queuedEditRecoveryScope, restored);
             storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
           }
-          restoreQueuedPromptEditRecovery(restored, false, preserveQueuedEditDraft);
+          restoreQueuedPromptEditRecovery(restored, false, preserveDraftAfterLoad);
         })();
         return () => { cancelled = true; };
       }
@@ -3174,21 +3201,46 @@ function SessionDetailLoaded({
     window.requestAnimationFrame(focusComposerAtDraftEnd);
   };
 
-  const useRecoveredQueuedEditAsNewMessage = () => {
+  const useRecoveredQueuedEditAsNewMessage = async () => {
     if (!queuedEdit || !queuedEditRecovered || queuedEditBusy) return;
-    const recoveredDraft = {
+    const generation = viewGenerationRef.current;
+    const recoveredEdit = queuedEdit;
+    const draftVersion = composerDraftVersionRef.current;
+    const retainedDraft = {
       text: draftState.current.text,
       images: draftState.current.images.map((image) => ({ ...image })),
     };
-    markDraftDirty();
-    clearQueuedPromptEditRecovery(mutationKey);
-    queuedEditRef.current = null;
-    setQueuedEdit(null);
-    setQueuedEditRecovered(false);
-    setHistIdx(-1);
     setError(null);
-    void saveComposerDraft(sessionId, recoveredDraft.text, recoveredDraft.images, instanceScope);
-    window.requestAnimationFrame(focusComposerAtDraftEnd);
+    setQueuedEditBusy(true);
+    try {
+      const materializedImages = await materializePromptImages(retainedDraft.images, api.artifactExport);
+      if (viewGenerationRef.current !== generation || queuedEditRef.current !== recoveredEdit) return;
+      if (composerDraftVersionRef.current !== draftVersion) {
+        setError("Recovered message was not converted because the composer changed. Try again.");
+        return;
+      }
+      const recoveredDraft = { text: retainedDraft.text, images: materializedImages };
+      markDraftDirty();
+      void saveComposerDraft(sessionId, recoveredDraft.text, recoveredDraft.images, instanceScope);
+      clearQueuedPromptEditRecovery(mutationKey);
+      setQueuedEditBusy(false);
+      queuedEditRef.current = null;
+      setQueuedEdit(null);
+      setQueuedEditRecovered(false);
+      draftState.current = recoveredDraft;
+      replace(recoveredDraft.images);
+      setHistIdx(-1);
+      setError(null);
+      window.requestAnimationFrame(focusComposerAtDraftEnd);
+    } catch (cause) {
+      if (viewGenerationRef.current === generation && queuedEditRef.current === recoveredEdit) {
+        setError(`Recovered message was not converted because an attachment could not be retained. ${(cause as Error).message}`);
+      }
+    } finally {
+      if (viewGenerationRef.current === generation && queuedEditRef.current === recoveredEdit) {
+        setQueuedEditBusy(false);
+      }
+    }
   };
 
   const saveQueuedPromptEdit = async () => {
@@ -3997,7 +4049,7 @@ function SessionDetailLoaded({
                       type="button"
                       className="btn ghost sm"
                       disabled={queuedEditBusy}
-                      onClick={useRecoveredQueuedEditAsNewMessage}
+                      onClick={() => void useRecoveredQueuedEditAsNewMessage()}
                     >
                       Use as New Message
                     </button>

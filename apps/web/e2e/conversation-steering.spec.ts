@@ -421,6 +421,55 @@ test("queued promotion uses stable queue identity and reconciles one canonical a
   await expect(page.getByText("Promote this exact prompt", { exact: true })).toHaveCount(1);
 });
 
+test("recovered queued-edit attachments become self-contained ordinary draft images", async ({ page }) => {
+  await page.evaluate(() => {
+    const image = {
+      artifactId: "artifact-recovered-image",
+      mimeType: "image/png",
+      sizeBytes: 68,
+      sha256: "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+    };
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(99);
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      queued: [{
+        id: "queue-recovered",
+        text: "Changed elsewhere",
+        hasImages: true,
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "newer-revision",
+      }],
+    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.seedQueuedEditRecovery("session-alpha", {
+      edit: {
+        promptId: "queue-recovered",
+        text: "Original queued content",
+        images: [],
+        editRevision: "original-revision",
+        displacedDraft: { text: "Ordinary draft", images: [] },
+      },
+      draft: { text: "Keep this recovered message", images: [image] },
+      error: "The queued message changed before this edit was confirmed.",
+    });
+  });
+
+  await reopenSteeringSession(page);
+  await expect(page.getByText("Recovered Queued Message", { exact: true })).toBeVisible();
+  await expect(page.locator(".composer-input")).toHaveValue("Keep this recovered message");
+  await expect(page.locator(".image-thumb img")).toBeVisible();
+
+  await page.getByRole("button", { name: "Use as New Message" }).click();
+  await expect(page.getByText("Recovered Queued Message", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".composer-input")).toHaveValue("Keep this recovered message");
+  await expect(page.locator(".image-thumb img")).toHaveAttribute("src", /^data:image\/png;base64,/);
+  await expect.poll(() => page.evaluate(async () =>
+    (await window.__WOLLIPOG_PROJECT_INBOX_E2E__.composerDraft("session-alpha"))?.images,
+  )).toEqual([{
+    mimeType: "image/png",
+    data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  }]);
+});
+
 test("a definite direct rejection preserves the draft and never creates a transcript bubble", async ({ page }) => {
   const composer = page.locator(".composer-input");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextSteeringResult());

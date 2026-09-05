@@ -26,6 +26,11 @@ import {
 } from "@wollipog/protocol";
 import type { ProviderComposerCommand } from "../composer-commands.js";
 import { loadComposerDraft, type ComposerDraft } from "../composer-drafts.js";
+import {
+  queuedEditRecoveryAccountKey,
+  saveDurableQueuedEditRecovery,
+  type QueuedPromptEditRecovery,
+} from "../queued-edit-recovery.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -707,6 +712,26 @@ function settleSteeringAttempt(
 
 const client = {
   ...api,
+  getIdentity: async () => ({
+    context: {
+      userId: "fixture-user",
+      userName: "Fixture User",
+      organizationId: "fixture-organization",
+      organizationName: "Fixture Organization",
+      role: "owner" as const,
+      deviceId: "fixture-device",
+      localBootstrap: false,
+    },
+    organizations: [],
+    memberships: [],
+    teams: [],
+  }),
+  artifactExport: async () => {
+    const encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    return new Blob([bytes], { type: "image/png" });
+  },
   git: async (id: string) => {
     await waitForGitFixture(id, "status");
     if (unavailableGitSessions.has(id)) return {};
@@ -1343,6 +1368,7 @@ declare global {
       terminalOpenCount(): number;
       cancelTurnCount(): number;
       failNextCancelTurn(): void;
+      seedQueuedEditRecovery(sessionId: string, recovery: QueuedPromptEditRecovery): void;
     };
   }
 }
@@ -1617,6 +1643,14 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   cancelTurnCount: () => cancelTurnCount,
   failNextCancelTurn: () => {
     failNextCancelTurn = true;
+  },
+  seedQueuedEditRecovery(sessionId, recovery) {
+    const saved = saveDurableQueuedEditRecovery({
+      instanceScope: "project-inbox-e2e",
+      accountKey: queuedEditRecoveryAccountKey("fixture-organization", "fixture-user"),
+      sessionId,
+    }, recovery);
+    if (!saved) throw new Error("queued edit recovery was not saved");
   },
 };
 
