@@ -5,7 +5,9 @@ import {
   MAX_PROMPT_IMAGES,
   MAX_PROMPT_IMAGE_BYTES,
   MAX_PROMPT_IMAGE_TOTAL_BASE64_BYTES,
+  WORKSPACE_REFERENCE_MIME_TYPE,
   type PromptImageReference,
+  type WorkspaceReference,
 } from "@wollipog/protocol";
 import { materializePromptImages } from "./prompt-image-materialization.js";
 
@@ -17,6 +19,19 @@ const reference: PromptImageReference = {
   mimeType: "image/png",
   sizeBytes: bytes.byteLength,
   sha256: createHash("sha256").update(bytes).digest("hex"),
+};
+const workspaceReference: WorkspaceReference = {
+  artifactId: "workspace:source-lines",
+  mimeType: WORKSPACE_REFERENCE_MIME_TYPE,
+  sizeBytes: 0,
+  sha256: "a".repeat(64),
+  referenceVersion: 1,
+  kind: "lines",
+  path: "src/index.ts",
+  rootFingerprint: "b".repeat(64),
+  targetFingerprint: "a".repeat(64),
+  startLine: 4,
+  endLine: 8,
 };
 
 test("prompt image materialization leaves inline images self-contained", async () => {
@@ -37,6 +52,45 @@ test("prompt image materialization verifies and embeds prepared artifact bytes",
     async () => new Blob([bytes], { type: "image/png; charset=binary" }),
   );
   assert.deepEqual(result, [{ mimeType: "image/png", data: "aW1hZ2U=" }]);
+});
+
+test("prompt image materialization preserves workspace references without exporting them", async () => {
+  const exported: string[] = [];
+  const result = await materializePromptImages([workspaceReference], async (artifactId) => {
+    exported.push(artifactId);
+    throw new Error("workspace references must not be exported");
+  });
+  assert.deepEqual(result, [workspaceReference]);
+  assert.notEqual(result[0], workspaceReference);
+  assert.deepEqual(exported, []);
+});
+
+test("prompt image materialization exports only images in mixed recoveries", async () => {
+  const exported: string[] = [];
+  const result = await materializePromptImages(
+    [workspaceReference, reference],
+    async (artifactId) => {
+      exported.push(artifactId);
+      return new Blob([bytes], { type: "image/png" });
+    },
+  );
+  assert.deepEqual(result, [workspaceReference, { mimeType: "image/png", data: "aW1hZ2U=" }]);
+  assert.deepEqual(exported, [reference.artifactId]);
+});
+
+test("failed image exports never attempt to export workspace references", async () => {
+  const exported: string[] = [];
+  await assert.rejects(
+    () => materializePromptImages(
+      [workspaceReference, reference],
+      async (artifactId) => {
+        exported.push(artifactId);
+        throw new Error("image unavailable");
+      },
+    ),
+    /image unavailable/,
+  );
+  assert.deepEqual(exported, [reference.artifactId]);
 });
 
 test("prompt image materialization rejects retained artifact integrity mismatches", async () => {

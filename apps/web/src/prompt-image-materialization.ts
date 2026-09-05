@@ -1,5 +1,6 @@
 import {
   isPromptImageReference,
+  isWorkspaceReference,
   validatePromptImageInputs,
   type PromptImageInput,
 } from "@wollipog/protocol";
@@ -29,7 +30,7 @@ export async function materializePromptImages(
     throw new Error(`Recovered attachments are invalid: ${validation.error}.`);
   }
   return Promise.all(images.map(async (image, index) => {
-    if (!isPromptImageReference(image)) return { ...image };
+    if (isWorkspaceReference(image) || !isPromptImageReference(image)) return { ...image };
 
     const blob = await exportArtifact(image.artifactId);
     if (!Number.isSafeInteger(image.sizeBytes) || image.sizeBytes < 0 || blob.size !== image.sizeBytes) {

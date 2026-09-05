@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import {
   MAX_PROMPT_IMAGES,
+  WORKSPACE_REFERENCE_MIME_TYPE,
   type ControlPlaneToUi,
   type RunnerView,
   type SessionEvent,
@@ -602,6 +603,19 @@ const materializedImageReference = {
   sizeBytes: 5,
   sha256: "6105d6cc76af400325e94d588ce511be5bfdbb73b437dc51eca43917d7a43e3d",
 } as const;
+const workspaceReference = {
+  artifactId: "workspace:source-lines",
+  mimeType: WORKSPACE_REFERENCE_MIME_TYPE,
+  sizeBytes: 0,
+  sha256: "a".repeat(64),
+  referenceVersion: 1,
+  kind: "lines",
+  path: "src/index.ts",
+  rootFingerprint: "b".repeat(64),
+  targetFingerprint: "a".repeat(64),
+  startLine: 4,
+  endLine: 8,
+} as const;
 
 test("queued message editing loads exact content and Cancel Edit restores the displaced draft", async () => {
   const draft = deferred<ComposerDraft | null>();
@@ -923,6 +937,81 @@ test("a live queue revision change disables recovered retry while preserving con
     await flushAsyncWork();
     assert.deepEqual(prompts, [{ text: "Recovered revision for reuse", images: [submittedImage] }],
       "the later ordinary send re-prepares its retained raw image bytes");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Use as New Message preserves workspace references while materializing recovered images", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const exportedArtifacts: string[] = [];
+  let exportFailure: Error | null = new Error("The retained image is unavailable.");
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 106,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Changed on another client",
+        hasImages: true,
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_newer",
+      }],
+    },
+    client: {
+      artifactExport: async (artifactId) => {
+        exportedArtifacts.push(artifactId);
+        if (exportFailure) throw exportFailure;
+        return new Blob([Buffer.from("image")], { type: "image/png" });
+      },
+    },
+  });
+  const recoveryScope = {
+    instanceScope: fixture.instanceScope,
+    accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+    sessionId: fixture.sessionId,
+  };
+  try {
+    await resolveDraft(draft, "Ordinary draft");
+    assert.equal(saveDurableQueuedEditRecovery(recoveryScope, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "Ordinary draft", images: [] },
+      },
+      draft: {
+        text: "Recovered mixed attachments",
+        images: [workspaceReference, materializedImageReference],
+      },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+
+    await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    const reuse = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Use as New Message") as HTMLButtonElement | undefined;
+    assert.ok(reuse);
+
+    await act(async () => { reuse.click(); });
+    await flushAsyncWork();
+    assert.ok(exportedArtifacts.length > 0);
+    assert.ok(exportedArtifacts.every((artifactId) => artifactId === materializedImageReference.artifactId),
+      "workspace references must never be sent to artifact export, including preview exports");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.deepEqual(loadDurableQueuedEditRecovery(recoveryScope)?.draft.images,
+      [workspaceReference, materializedImageReference],
+      "a failed image export must retain the full mixed recovery");
+
+    exportFailure = null;
+    await act(async () => { reuse.click(); });
+    await flushAsyncWork(450);
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assert.ok(exportedArtifacts.every((artifactId) => artifactId === materializedImageReference.artifactId));
+    assert.deepEqual((await loadComposerDraft(fixture.sessionId, fixture.instanceScope))?.images,
+      [workspaceReference, submittedImage],
+      "conversion must structurally preserve the workspace reference and embed only the image");
   } finally {
     await unmountFixture(fixture);
   }
