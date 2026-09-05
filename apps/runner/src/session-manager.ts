@@ -97,7 +97,12 @@ import {
   type CheckpointRefOwnershipRecord,
 } from "./checkpoint-ref-ownership.js";
 import { anchorForkRef, anchorTurnRef, captureWorktreeTree, deleteTurnRef, deleteTurnRefs, gitDiff, isMissingGitRepositoryError, readTurnRef, resetWorktreeIndex, restoreWorktreeToTree, synchronizeCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
-import { createWorkspaceReference, readSessionFile, workspaceDirectoryTree, workspaceReferenceDiffContent } from "./session-files.js";
+import {
+  readSessionFile,
+  inspectWorkspaceReferenceDiff,
+  resolveWorkspaceReference,
+  workspaceReferenceDiffContent,
+} from "./session-files.js";
 import {
   SessionStore,
   isAdoptedSession,
@@ -4597,17 +4602,7 @@ export class SessionManager {
     const sections: string[] = [];
     let remaining = MAX_WORKSPACE_REFERENCE_CONTEXT_BYTES - Buffer.byteLength(prefix, "utf8");
     for (const reference of references) {
-      let diff: Awaited<ReturnType<typeof gitDiff>> | null = null;
-      if (reference.kind === "diff") {
-        diff = await withGitExecutionContext(entry.context, () => gitDiff(entry.cwd, reference.diffScope!, {
-          useWorktree: Boolean(entry.worktree),
-          lastTurnBaseTree: meta.lastTurnBaseTree,
-        }));
-        if (diff.diffHash !== reference.diffHash) {
-          throw new Error(`${reference.path} changed since it was attached; refresh Review and attach the selected lines again`);
-        }
-      }
-      const current = await createWorkspaceReference(entry.context, entry.cwd, {
+      const target = {
         path: reference.path,
         kind: reference.kind,
         startLine: reference.startLine,
@@ -4615,14 +4610,22 @@ export class SessionManager {
         side: reference.side,
         diffHash: reference.diffHash,
         diffScope: reference.diffScope,
-      });
+      };
+      const diff = await inspectWorkspaceReferenceDiff(target, (scope) =>
+        withGitExecutionContext(entry.context, () => gitDiff(entry.cwd, scope, {
+          useWorktree: Boolean(entry.worktree),
+          lastTurnBaseTree: meta.lastTurnBaseTree,
+        })),
+      );
+      const resolved = await resolveWorkspaceReference(entry.context, entry.cwd, target);
+      const current = resolved.reference;
       if (current.rootFingerprint !== reference.rootFingerprint || current.targetFingerprint !== reference.targetFingerprint) {
         throw new Error(`${reference.path} is missing, changed, or belongs to a different workspace; remove it and attach it again`);
       }
       let content: string;
       let contentTruncated = false;
       if (reference.kind === "directory") {
-        const tree = await workspaceDirectoryTree(entry.context, entry.cwd, reference.path);
+        const tree = resolved.directoryTree!;
         content = tree.content;
         contentTruncated = tree.truncated;
       } else if (reference.kind === "diff") {
