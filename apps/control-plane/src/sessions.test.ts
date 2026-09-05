@@ -21,6 +21,7 @@ import type {
   SessionView,
   SteerRequest,
   SteerSessionResultMessage,
+  WorkspaceReference,
   WorkflowDefinitionSpec,
 } from "@wollipog/protocol";
 import {
@@ -29,6 +30,7 @@ import {
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  WORKSPACE_REFERENCE_MIME_TYPE,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { parseRateTable } from "./usage-pricing.js";
@@ -1190,6 +1192,29 @@ test("prompt images fail closed against a pre-v56 runner", () => {
   });
   assert.equal(result.status, 409);
   assert.match(result.error ?? "", /requires protocol v56/);
+  assert.equal(db.listSessions().length, 0);
+  assert.equal(hub.sentToRunner.length, 0);
+});
+
+test("workspace references fail closed against a pre-v106 runner", () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 105);
+  const reference: WorkspaceReference = {
+    artifactId: "workspace:pre-v106",
+    mimeType: WORKSPACE_REFERENCE_MIME_TYPE,
+    sizeBytes: 0,
+    sha256: "a".repeat(64),
+    referenceVersion: 1,
+    kind: "file",
+    path: "src/app.ts",
+    rootFingerprint: "b".repeat(64),
+    targetFingerprint: "a".repeat(64),
+  };
+  const result = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt: "look", images: [reference],
+  });
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /requires protocol v106/);
   assert.equal(db.listSessions().length, 0);
   assert.equal(hub.sentToRunner.length, 0);
 });
@@ -2606,6 +2631,32 @@ test("malformed steering images are rejected before hashing or persistence", asy
     assert.equal(result.status, 400);
     assert.equal(db.findSteeringAttemptBySubmission(id, `submission-malformed-image-${index}`), null);
   }
+  assert.equal(hub.sentOfType("steer_session").length, 0);
+});
+
+test("workspace-reference steering fails closed against a pre-v106 runner", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.registerRunner(runnerMeta(), Date.now(), 105);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.activeTurnIds.set(id, "turn-workspace-reference");
+  const reference: WorkspaceReference = {
+    artifactId: "workspace:pre-v106-steer",
+    mimeType: WORKSPACE_REFERENCE_MIME_TYPE,
+    sizeBytes: 0,
+    sha256: "a".repeat(64),
+    referenceVersion: 1,
+    kind: "file",
+    path: "src/app.ts",
+    rootFingerprint: "b".repeat(64),
+    targetFingerprint: "a".repeat(64),
+  };
+  const result = await svc.steer(id, {
+    submissionId: "submission-workspace-reference", turnId: "turn-workspace-reference", text: "inspect", images: [reference],
+  });
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /requires protocol v106/);
+  assert.equal(db.findSteeringAttemptBySubmission(id, "submission-workspace-reference"), null);
   assert.equal(hub.sentOfType("steer_session").length, 0);
 });
 

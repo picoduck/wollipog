@@ -14,6 +14,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   isGuardrailApproval,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   isPromptImageReference,
+  isWorkspaceReference,
   isPolicyApproval,
   isTerminal,
   mergeSessionCapabilities,
@@ -36,6 +37,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type CreateWorkflowRunResult,
   type CreateWorkflowInstanceRequest,
   type CreateSessionRequest,
+  type CreateWorkspaceReferenceRequest,
   type DirectoryEntry,
   type DurableSessionCommand,
   type DurableSessionCommandResultMessage,
@@ -66,6 +68,8 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type PodView,
   type OS,
   type SessionFileEntry,
+  type WorkspaceReference,
+  type WorkspaceReferenceCandidate,
   type PromptImageInput,
   type PromptImageReference,
   type QueuedPromptView,
@@ -416,7 +420,8 @@ function validateModelImageSupport(
   capabilities: AgentCapabilities | undefined,
   modelId: string | null | undefined,
 ): ReturnType<typeof validatePromptImages> {
-  if (!images.length || !capabilities) return { ok: true };
+  const actualImages = images.filter((image) => !isWorkspaceReference(image));
+  if (!actualImages.length || !capabilities) return { ok: true };
   if (!capabilities.supportsImages) return { ok: false, error: "this agent installation does not support image input" };
   const model = capabilities.models.find((candidate) => candidate.id === modelId)
     ?? capabilities.models.find((candidate) => candidate.default && !candidate.hidden)
@@ -2200,7 +2205,7 @@ export class SessionsService {
     inputs: PromptImageInput[],
     actor: GovernanceActor = { kind: "system", id: "prompt-image" },
     allowRunArtifacts = false,
-  ): ServiceResult<PromptImageReference[]> {
+  ): ServiceResult<PromptImageInput[]> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const validation = validateImagesForDriver(inputs, session.driver);
@@ -2209,9 +2214,13 @@ export class SessionsService {
     const cleanup = () => {
       for (const artifactId of created) this.db.deleteWorkflowArtifact(artifactId);
     };
-    const references: PromptImageReference[] = [];
+    const references: PromptImageInput[] = [];
     try {
       for (const input of inputs) {
+        if (isWorkspaceReference(input)) {
+          references.push(input);
+          continue;
+        }
         if (isPromptImageReference(input)) {
           const preflight = this.db.workflowArtifactExportPreflight(input.artifactId);
           const artifact = preflight?.artifact;
@@ -2263,7 +2272,7 @@ export class SessionsService {
   prepareQueuedPromptEditImages(
     sessionId: string,
     inputs: PromptImageInput[],
-  ): ServiceResult<PromptImageReference[]> {
+  ): ServiceResult<PromptImageInput[]> {
     return this.externalizePromptImages(sessionId, inputs, { kind: "human", id: "local" });
   }
 
@@ -2512,12 +2521,16 @@ export class SessionsService {
     const images = snapshotCommand?.type === "start_session" ? (snapshotCommand.initialImages ?? []) : (req.images ?? []);
     const imageValidation = validateImagesForDriver(images, launch.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
-    if (images.length) {
+    if (images.some(isWorkspaceReference)) {
+      const unsupported = this.capabilityFailure(req.runnerId, "workspaceReferences", "Workspace references");
+      if (unsupported) return unsupported;
+    }
+    if (images.some((image) => !isWorkspaceReference(image))) {
       const unsupported = this.capabilityFailure(req.runnerId, "promptImageReferences", "Prompt image attachments");
       if (unsupported) return unsupported;
-      if (delivery && !snapshotCommand) {
-        return fail("pre-staged session creation cannot carry unexternalized prompt images", 409);
-      }
+    }
+    if (images.length && delivery && !snapshotCommand) {
+      return fail("pre-staged session creation cannot carry unexternalized prompt attachments", 409);
     }
     const agentCapabilities = snapshotSpec?.capabilities ??
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
@@ -2851,7 +2864,11 @@ export class SessionsService {
     const effectiveConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
     const imageValidation = validateImagesForDriver(effectiveImages, session.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
-    if (effectiveImages.length) {
+    if (effectiveImages.some(isWorkspaceReference)) {
+      const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+      if (unsupported) return unsupported;
+    }
+    if (effectiveImages.some((image) => !isWorkspaceReference(image))) {
       const unsupported = this.capabilityFailure(session.runnerId, "promptImageReferences", "Prompt image attachments");
       if (unsupported) return unsupported;
     }
@@ -3409,6 +3426,7 @@ export class SessionsService {
 
   private steeringRequestSha256(request: SteerRequest, text: string): string {
     const images = (request.images ?? []).map((image) => {
+      if (isWorkspaceReference(image)) return image;
       if (isPromptImageReference(image)) {
         return { mimeType: image.mimeType, sizeBytes: image.sizeBytes, sha256: image.sha256 };
       }
@@ -3530,7 +3548,11 @@ export class SessionsService {
       const modelImageValidation = validateModelImageSupport(images, agentCapabilities, session.model ?? undefined);
       if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
     }
-    let commandImages: PromptImageReference[] = [];
+    if (!promotion && images.some(isWorkspaceReference)) {
+      const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+      if (unsupported) return unsupported;
+    }
+    let commandImages: PromptImageInput[] = [];
     if (!promotion && images.length) {
       const externalized = this.externalizePromptImages(sessionId, images);
       if (!externalized.ok || !externalized.data) {
@@ -3539,7 +3561,9 @@ export class SessionsService {
       commandImages = externalized.data;
     }
     const ownedArtifactIds = commandImages.flatMap((image, index) =>
-      isPromptImageReference(images[index]) ? [] : [image.artifactId]
+      isWorkspaceReference(image) || isPromptImageReference(images[index]) || !isPromptImageReference(image)
+        ? []
+        : [image.artifactId]
     );
     const requestId = `steer_${randomUUID().slice(0, 12)}`;
     let created;
@@ -7333,6 +7357,50 @@ export class SessionsService {
       if (res.type !== "read_session_file_result") return fail("unexpected runner reply", 502);
       if (!res.ok) return fail(res.error ?? "could not read that file", 502);
       return ok({ path: res.path ?? path, content: res.content, size: res.size, truncated: res.truncated, binary: res.binary });
+    } catch (err) {
+      return fail((err as Error).message, 504);
+    }
+  }
+
+  async searchWorkspaceReferences(
+    sessionId: string,
+    query: string,
+  ): Promise<ServiceResult<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+    if (unsupported) return unsupported;
+    const requestId = `wsr_search_${randomUUID().slice(0, 8)}`;
+    try {
+      const res = await this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "search_workspace_references", requestId, sessionId, query,
+      }, 20_000);
+      if (res.type !== "search_workspace_references_result") return fail("unexpected runner reply", 502);
+      if (!res.ok) return fail(res.error ?? "could not search workspace paths", 502);
+      return ok({ results: res.results ?? [], truncated: res.truncated === true });
+    } catch (err) {
+      return fail((err as Error).message, 504);
+    }
+  }
+
+  async createWorkspaceReference(
+    sessionId: string,
+    target: CreateWorkspaceReferenceRequest,
+  ): Promise<ServiceResult<WorkspaceReference>> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+    if (unsupported) return unsupported;
+    const requestId = `wsr_create_${randomUUID().slice(0, 8)}`;
+    try {
+      const res = await this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "create_workspace_reference", requestId, sessionId, target,
+      }, 30_000);
+      if (res.type !== "create_workspace_reference_result") return fail("unexpected runner reply", 502);
+      if (!res.ok || !res.reference) return fail(res.error ?? "could not attach that workspace target", 409);
+      return ok(res.reference);
     } catch (err) {
       return fail((err as Error).message, 504);
     }

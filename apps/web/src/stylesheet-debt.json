@@ -703,7 +703,6 @@
     "instance-recovery-app",
     "instance-recovery-body",
     "instance-recovery-state",
-    "is-readonly",
     "link-button",
     "pod-detail",
     "pod-member-col",

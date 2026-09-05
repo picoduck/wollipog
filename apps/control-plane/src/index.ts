@@ -37,6 +37,8 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   scopeAudienceContained,
+  isPromptImageReference,
+  isWorkspaceReference,
   validatePromptImageInputs,
   type AddBoxRequest,
   type AccessScopeChangePreview,
@@ -58,6 +60,7 @@ import {
   type DispatchWorkflowNodeRequest,
   type CreateWorkflowArtifactRequest,
   type CreateSessionRequest,
+  type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
   type UpdateProjectRequest,
   type AddProjectLocationRequest,
@@ -1293,6 +1296,8 @@ app.register(async (instance) => {
       case "list_directory_result":
       case "list_session_files_result":
       case "read_session_file_result":
+      case "search_workspace_references_result":
+      case "create_workspace_reference_result":
       case "shell_open_result":
       case "rewind_result":
       case "fork_result":
@@ -2362,6 +2367,29 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
   return r.data;
 });
 
+app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const q = req.query as { q?: unknown };
+  if (typeof q.q !== "string" || !q.q.trim() || q.q.length > 256) {
+    return reply.code(400).send({ error: "q must contain 1-256 characters" });
+  }
+  const r = await svc.searchWorkspaceReferences(id, q.q);
+  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  return r.data;
+});
+
+app.post("/api/sessions/:id/workspace-references", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const body = (req.body ?? {}) as Partial<CreateWorkspaceReferenceRequest>;
+  if (typeof body.path !== "string" || !body.path ||
+      (body.kind !== "file" && body.kind !== "directory" && body.kind !== "lines" && body.kind !== "diff")) {
+    return reply.code(400).send({ error: "path and a valid reference kind are required" });
+  }
+  const r = await svc.createWorkspaceReference(id, body as CreateWorkspaceReferenceRequest);
+  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  return { reference: r.data };
+});
+
 // Drop one not-yet-started queued prompt (the running turn is unaffected). The runner echoes the
 // updated queue back via session_queue, which refreshes the session — so this is fire-and-forget.
 app.post("/api/sessions/:id/cancel-queued", async (req, reply) => {
@@ -2434,6 +2462,16 @@ app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
   const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "Queued prompt editing");
   if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (typedImages.some(isWorkspaceReference)) {
+    const unsupportedWorkspaceReferences = runnerCapabilityError(
+      session.runnerId,
+      "workspaceReferences",
+      "Workspace references",
+    );
+    if (unsupportedWorkspaceReferences) {
+      return reply.code(409).send({ error: unsupportedWorkspaceReferences });
+    }
+  }
   const preparedImages = svc.prepareQueuedPromptEditImages(id, typedImages);
   if (!preparedImages.ok || !preparedImages.data) {
     return reply.code(preparedImages.status).send({ error: preparedImages.error ?? "queued message images are invalid" });
@@ -2458,7 +2496,8 @@ app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
       return reply.code(409).send({ error: result.error ?? "queued message could not be saved", reason: result.reason });
     }
     try {
-      db.commitPreparedPromptImages(preparedImages.data.map((image) => image.artifactId));
+      db.commitPreparedPromptImages(preparedImages.data.flatMap((image) =>
+        isWorkspaceReference(image) || !isPromptImageReference(image) ? [] : [image.artifactId]));
     } catch (error) {
       // Runner acceptance is authoritative. Lease cleanup is outcome-neutral; never turn an
       // applied edit into an ambiguous client failure.

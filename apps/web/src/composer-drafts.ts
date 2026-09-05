@@ -1,5 +1,5 @@
 import { browserRandomUUID } from "./browser-crypto.js";
-import type { PromptImageInput } from "@wollipog/protocol";
+import { isWorkspaceReference, validateWorkspaceReference, type PromptImageInput } from "@wollipog/protocol";
 import {
   LOCAL_INSTANCE_SCOPE,
   instanceResourceKey,
@@ -199,6 +199,7 @@ function revision(key: string): number {
 
 function validImage(value: unknown): value is PromptImageInput {
   if (!value || typeof value !== "object") return false;
+  if (isWorkspaceReference(value)) return validateWorkspaceReference(value).ok;
   const image = value as Record<string, unknown>;
   if (typeof image.mimeType !== "string" || !image.mimeType.startsWith("image/")) return false;
   if (typeof image.data === "string") return true;

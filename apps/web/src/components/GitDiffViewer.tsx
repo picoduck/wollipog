@@ -2,6 +2,7 @@ import { Fragment, useState } from "react";
 import { normalizeSourcePath } from "@wollipog/protocol";
 import type {
   CreateReviewFindingRequest,
+  CreateWorkspaceReferenceRequest,
   GitDiffFile,
   GitDiffInfo,
   GitHunk,
@@ -20,6 +21,7 @@ import {
 } from "../diff-view.js";
 import { titleCaseLabel } from "../format.js";
 import { Spinner } from "./common.js";
+import { Checkbox } from "./ui/ChoiceControls.js";
 
 export type DiffLayout = "unified" | "split";
 export type DiffPane = "combined" | "unstaged" | "staged";
@@ -77,12 +79,14 @@ export function GitDiffViewer({
   staging,
   review,
   onOpenSourceLocation,
+  onAttachWorkspaceReference,
   layout = "unified",
 }: {
   diff: GitDiffInfo;
   staging?: StagingControls;
   review?: DiffReviewControls;
   onOpenSourceLocation?: (location: SourceLocation) => void;
+  onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   layout?: DiffLayout;
 }) {
   const files = groupHunksForDisplay(diff.files, COLLAPSE_THRESHOLD);
@@ -113,6 +117,7 @@ export function GitDiffViewer({
           staging={staging}
           review={review}
           onOpenSourceLocation={onOpenSourceLocation}
+          onAttachWorkspaceReference={onAttachWorkspaceReference}
           diffHash={diff.diffHash}
           scope={diff.scope}
           layout={layout}
@@ -127,6 +132,7 @@ function DiffFileCard({
   staging,
   review,
   onOpenSourceLocation,
+  onAttachWorkspaceReference,
   diffHash,
   scope,
   layout,
@@ -135,6 +141,7 @@ function DiffFileCard({
   staging?: StagingControls;
   review?: DiffReviewControls;
   onOpenSourceLocation?: (location: SourceLocation) => void;
+  onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   diffHash: string;
   scope: GitDiffInfo["scope"];
   layout: DiffLayout;
@@ -224,6 +231,7 @@ function DiffFileCard({
                     staging={stageEligible(file) ? staging : undefined}
                     review={review}
                     onOpenSourceLocation={onOpenSourceLocation}
+                    onAttachWorkspaceReference={onAttachWorkspaceReference}
                     diffHash={diffHash}
                     scope={scope}
                     layout={layout}
@@ -250,6 +258,7 @@ function HunkView({
   staging,
   review,
   onOpenSourceLocation,
+  onAttachWorkspaceReference,
   diffHash,
   scope,
   layout,
@@ -261,6 +270,7 @@ function HunkView({
   staging?: StagingControls;
   review?: DiffReviewControls;
   onOpenSourceLocation?: (location: SourceLocation) => void;
+  onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   diffHash: string;
   scope: GitDiffInfo["scope"];
   layout: DiffLayout;
@@ -275,6 +285,8 @@ function HunkView({
   const [severity, setSeverity] = useState<CreateReviewFindingRequest["severity"]>("major");
   const [required, setRequired] = useState(true);
   const [selectedLines, setSelectedLines] = useState<Set<number>>(new Set());
+  const [selectedReferenceLines, setSelectedReferenceLines] = useState<{ side: "left" | "right"; lines: Set<number> } | null>(null);
+  const [attachBusy, setAttachBusy] = useState(false);
   const lineDirection = staging?.fineGrained && staging.pane !== "combined" && fileStatus === "modified"
     ? (staging.pane === "unstaged" ? "stage" : "unstage")
     : null;
@@ -292,6 +304,40 @@ function HunkView({
     if (next.has(sourceIndex)) next.delete(sourceIndex); else next.add(sourceIndex);
     return next;
   });
+  const toggleReferenceLine = (row: DiffHunkRow) => setSelectedReferenceLines((prior) => {
+    const lines = prior?.side === row.anchor.side ? new Set(prior.lines) : new Set<number>();
+    if (lines.has(row.anchor.line)) lines.delete(row.anchor.line); else lines.add(row.anchor.line);
+    return lines.size ? { side: row.anchor.side, lines } : null;
+  });
+  const referenceLineList = selectedReferenceLines ? [...selectedReferenceLines.lines].sort((a, b) => a - b) : [];
+  const referenceSelectionContiguous = referenceLineList.every((line, position) =>
+    position === 0 || line === referenceLineList[position - 1]! + 1);
+  const attachSelectedLines = async () => {
+    if (!onAttachWorkspaceReference || !selectedReferenceLines || !referenceLineList.length || !referenceSelectionContiguous) return;
+    setAttachBusy(true);
+    try {
+      await onAttachWorkspaceReference({
+        path: filePath,
+        kind: "diff",
+        startLine: referenceLineList[0],
+        endLine: referenceLineList[referenceLineList.length - 1],
+        side: selectedReferenceLines.side,
+        diffHash,
+        diffScope: scope,
+      });
+      setSelectedReferenceLines(null);
+    } finally {
+      setAttachBusy(false);
+    }
+  };
+  const referenceCheckbox = (row: DiffHunkRow) => onAttachWorkspaceReference ? (
+    <Checkbox
+      checked={selectedReferenceLines?.side === row.anchor.side && selectedReferenceLines.lines.has(row.anchor.line)}
+      disabled={attachBusy}
+      label={`Select ${row.anchor.side === "left" ? "base" : "worktree"} line ${row.anchor.line} for prompt`}
+      onChange={() => toggleReferenceLine(row)}
+    />
+  ) : null;
   const submitFinding = async () => {
     if (!review || !draftTarget || !body.trim()) return;
     const created = await review.onCreate({
@@ -408,6 +454,17 @@ function HunkView({
     <div className="diff-hunk">
       <div className="diff-hunk-header">
         <span className="diff-hunk-header-text">{hunk.header}</span>
+        {onAttachWorkspaceReference && (
+          <button
+            className="hunk-act"
+            type="button"
+            disabled={attachBusy || referenceLineList.length === 0 || !referenceSelectionContiguous}
+            title={!referenceSelectionContiguous ? "Select a contiguous range on one diff side" : "Attach Selected Lines to Prompt"}
+            onClick={() => void attachSelectedLines()}
+          >
+            {attachBusy ? <Spinner /> : `Attach Selected (${referenceLineList.length})`}
+          </button>
+        )}
         {staging && (
           <span className="hunk-actions">
             {staging.pane === "combined" ? (
@@ -441,6 +498,7 @@ function HunkView({
           <Fragment key={i}>
             <div className={`diff-line diff-line-${row.status === "+" ? "add" : row.status === "-" ? "del" : "ctx"}`}>
               <span className="diff-line-select">
+                {referenceCheckbox(row)}
                 {lineDirection && row.status !== " " && (
                   <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
                 )}
@@ -459,6 +517,7 @@ function HunkView({
               {[pair.left, pair.right].map((row, sideIndex) => row ? (
                 <div className={`diff-split-cell diff-line-${row.status === "+" ? "add" : row.status === "-" ? "del" : "ctx"}`} key={sideIndex}>
                   <span className="diff-line-select">
+                    {referenceCheckbox(row)}
                     {lineDirection && row.status !== " " && (
                       <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
                     )}

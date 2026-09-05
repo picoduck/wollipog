@@ -1,6 +1,6 @@
 import type { AgentDriverKind, ReviewRiskLevel } from "@wollipog/protocol";
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
+import { isWorkspaceReference, normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
   groupTimeline,
   isCollapsibleWorkItem,
@@ -1618,8 +1618,11 @@ const TimelineRow = memo(function TimelineRow({
               )}
               {item.images && item.images.length > 0 && (
                 <div className="bubble-images">
-                  {item.images.map((img, i) => (
+                  {item.images.filter((attachment) => !isWorkspaceReference(attachment)).map((img, i) => (
                     <PromptImageView key={"artifactId" in img ? img.artifactId : i} image={img} alt={`attachment ${i + 1}`} />
+                  ))}
+                  {item.images.filter(isWorkspaceReference).map((reference) => (
+                    <span className="workspace-reference-chip is-readonly" key={reference.artifactId}>@{reference.path}</span>
                   ))}
                 </div>
               )}

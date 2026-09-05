@@ -16,16 +16,20 @@ import {
   MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
   isPolicyApproval,
+  isWorkspaceReference,
   isTerminal,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   providerSupportsConversationFork,
   type PromptImageInput,
+  type CreateWorkspaceReferenceRequest,
   type QueuedPromptView,
   type SessionConfig,
   type SessionReminderView,
   type SessionView,
   type SourceLocation,
+  type WorkspaceReference,
+  type WorkspaceReferenceCandidate,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -155,6 +159,7 @@ import {
   type ProviderComposerCommand,
 } from "../composer-commands.js";
 import { SlashCommandMenu, slashCommandOptionId } from "./SlashCommandMenu.js";
+import { WorkspaceReferencePicker } from "./WorkspaceReferencePicker.js";
 import {
   captureComposerFocus,
   focusComposerAtEnd,
@@ -428,6 +433,14 @@ type MessageActionState = {
 };
 
 class AmbiguousForkError extends Error {}
+
+function findWorkspaceReferenceTrigger(text: string, caret: number): { start: number; query: string } | null {
+  const before = text.slice(0, caret);
+  const match = /(^|\s)@([^\s@]*)$/u.exec(before);
+  if (!match) return null;
+  const query = match[2] ?? "";
+  return { start: caret - query.length - 1, query };
+}
 
 function ambiguousForkError(cause: unknown): AmbiguousForkError | null {
   if (!forkFailureIsAmbiguous(cause instanceof ApiError ? cause.status : undefined)) return null;
@@ -754,6 +767,14 @@ function SessionDetailLoaded({
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
   const slashListboxId = `session-slash-${useId().replace(/:/g, "")}`;
+  const workspaceListboxId = `session-workspace-${useId().replace(/:/g, "")}`;
+  const [workspaceResults, setWorkspaceResults] = useState<WorkspaceReferenceCandidate[]>([]);
+  const [workspaceSearchBusy, setWorkspaceSearchBusy] = useState(false);
+  const [workspaceSearchError, setWorkspaceSearchError] = useState<string | null>(null);
+  const [workspaceSearchTruncated, setWorkspaceSearchTruncated] = useState(false);
+  const [activeWorkspaceResult, setActiveWorkspaceResult] = useState(0);
+  const [workspaceDismissedFor, setWorkspaceDismissedFor] = useState<string | null>(null);
+  const [inspectedWorkspaceReference, setInspectedWorkspaceReference] = useState<WorkspaceReference | null>(null);
   const [dragActive, setDragActive] = useState(false);
   // Up-arrow history recall (-1 = editing/not browsing). Prior prompts come from the timeline.
   const [histIdx, setHistIdx] = useState(-1);
@@ -1032,11 +1053,12 @@ function SessionDetailLoaded({
     composerDraftVersionRef.current += 1;
     invalidateComposerMutationRecovery(mutationKey);
   }, [mutationKey]);
-  const { images, onPaste, addFiles, remove, clear, replace } = usePastedImages(
+  const { images, onPaste, addFiles, addWorkspaceReference, remove, clear, replace } = usePastedImages(
     markDraftDirty,
     setError,
     allowedImageMimeTypes,
   );
+  const actualImages = images.filter((attachment) => !isWorkspaceReference(attachment));
   const draftState = useRef<{ text: string; images: PromptImageInput[] }>({ text: "", images: [] });
   draftState.current = { text, images };
   const updateComposerSelection = useCallback((start: number, end = start) => {
@@ -2734,13 +2756,82 @@ function SessionDetailLoaded({
       : null,
     [composerSelection.end, composerSelection.start, text],
   );
+  const workspaceReferencesSupported = runnerSupportsProtocol(runner?.protocolVersion, "workspaceReferences");
+  const workspaceTrigger = useMemo(
+    () => workspaceReferencesSupported && composerSelection.start === composerSelection.end
+      ? findWorkspaceReferenceTrigger(text, composerSelection.start)
+      : null,
+    [composerSelection.end, composerSelection.start, text, workspaceReferencesSupported],
+  );
+  const workspaceDismissKey = workspaceTrigger ? `${text}\u0000${composerSelection.start}` : null;
+  const workspacePickerOpen = canPrompt && workspaceTrigger !== null && workspaceDismissedFor !== workspaceDismissKey;
+  useEffect(() => {
+    if (!workspacePickerOpen || !workspaceTrigger?.query) {
+      setWorkspaceResults([]);
+      setWorkspaceSearchBusy(false);
+      setWorkspaceSearchError(null);
+      setWorkspaceSearchTruncated(false);
+      setActiveWorkspaceResult(0);
+      return;
+    }
+    let current = true;
+    const timer = window.setTimeout(() => {
+      setWorkspaceSearchBusy(true);
+      setWorkspaceSearchError(null);
+      void api.searchWorkspaceReferences(sessionId, workspaceTrigger.query).then((result) => {
+        if (!current) return;
+        setWorkspaceResults(result.results);
+        setWorkspaceSearchTruncated(result.truncated);
+        setActiveWorkspaceResult(0);
+      }).catch((cause: unknown) => {
+        if (!current) return;
+        setWorkspaceResults([]);
+        setWorkspaceSearchError((cause as Error).message);
+      }).finally(() => {
+        if (current) setWorkspaceSearchBusy(false);
+      });
+    }, 150);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [api, sessionId, workspacePickerOpen, workspaceTrigger?.query]);
+
+  const attachWorkspaceTarget = useCallback(async (target: CreateWorkspaceReferenceRequest) => {
+    if (!workspaceReferencesSupported) {
+      setError(runnerCapabilityRequirement(runner?.protocolVersion, "workspaceReferences", "Workspace references"));
+      return;
+    }
+    try {
+      const { reference } = await api.createWorkspaceReference(sessionId, target);
+      const outcome = addWorkspaceReference(reference);
+      if (outcome !== "limit") setError(null);
+      if (outcome === "added") showToast(`Attached ${reference.path}.`);
+      if (outcome === "duplicate") showToast(`${reference.path} is already attached.`);
+      window.requestAnimationFrame(() => inputRef.current?.focus());
+    } catch (cause) {
+      setError((cause as Error).message);
+    }
+  }, [addWorkspaceReference, api, runner?.protocolVersion, sessionId, showToast, workspaceReferencesSupported]);
+
+  const selectWorkspaceCandidate = (candidate: WorkspaceReferenceCandidate) => {
+    if (!workspaceTrigger) return;
+    const nextText = text.slice(0, workspaceTrigger.start) + text.slice(composerSelection.start);
+    markDraftDirty();
+    setProgrammaticComposerText(nextText, workspaceTrigger.start);
+    setWorkspaceDismissedFor(null);
+    void attachWorkspaceTarget({
+      path: candidate.path,
+      kind: candidate.isDirectory ? "directory" : "file",
+    });
+  };
   const slashMatches = useMemo(() => {
     if (!slashTrigger) return [];
     const ranked = rankComposerCommands(composerCommands, slashTrigger.query).map((match) => match.command);
     return slashTrigger.query ? ranked : ranked.filter((command) => command.available);
   }, [composerCommands, slashTrigger]);
   const slashDismissKey = slashTrigger ? `${text}\u0000${composerSelection.start}` : null;
-  const paletteOpen = canPrompt && slashMatches.length > 0 && slashDismissedFor !== slashDismissKey;
+  const paletteOpen = !workspacePickerOpen && canPrompt && slashMatches.length > 0 && slashDismissedFor !== slashDismissKey;
   const selectedSlashCommandId = retainActiveComposerCommandId(activeSlashCommandId, slashMatches);
   const selectedSlashCommand = slashMatches.find((command) => command.id === selectedSlashCommandId);
   const selectedSlashCommandIndex = selectedSlashCommand
@@ -2886,7 +2977,7 @@ function SessionDetailLoaded({
       Boolean(invocation.command.providerCommandId && invocation.command.catalogRevision);
     const preservesAttachments = invocation.kind === "command" &&
       invocation.command.attachmentPolicy === "preserve";
-    if (images.length && !preservesAttachments && !modelSupportsImages(sessionCaps, effectiveModel)) {
+    if (actualImages.length && !preservesAttachments && !modelSupportsImages(sessionCaps, effectiveModel)) {
       setError("The selected model does not support image input. Remove the attachment or choose an image-capable model.");
       return;
     }
@@ -3039,7 +3130,7 @@ function SessionDetailLoaded({
       return;
     }
     const outgoing = text.trim();
-    if (images.length && !modelSupportsImages(sessionCaps, effectiveModel)) {
+    if (actualImages.length && !modelSupportsImages(sessionCaps, effectiveModel)) {
       setError("The selected model does not support image input. Remove the attachment or choose an image-capable model.");
       return;
     }
@@ -3422,6 +3513,26 @@ function SessionDetailLoaded({
       void steerDraft();
       return;
     }
+    if (workspacePickerOpen) {
+      const plainKey = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
+      if (e.key === "Escape" && plainKey) {
+        e.preventDefault();
+        setWorkspaceDismissedFor(workspaceDismissKey);
+        return;
+      }
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && plainKey && workspaceResults.length) {
+        e.preventDefault();
+        setActiveWorkspaceResult((current) => e.key === "ArrowDown"
+          ? (current + 1) % workspaceResults.length
+          : (current - 1 + workspaceResults.length) % workspaceResults.length);
+        return;
+      }
+      if ((e.key === "Tab" || e.key === "Enter") && plainKey && workspaceResults[activeWorkspaceResult]) {
+        e.preventDefault();
+        selectWorkspaceCandidate(workspaceResults[activeWorkspaceResult]!);
+        return;
+      }
+    }
     if (paletteOpen) {
       const plainKey = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
       if (e.key === "Escape" && plainKey) {
@@ -3765,8 +3876,11 @@ function SessionDetailLoaded({
                       <div className="bubble user-bubble">
                         {pending.images.length > 0 && (
                           <div className="bubble-images">
-                            {pending.images.map((img, i) => (
+                            {pending.images.filter((attachment) => !isWorkspaceReference(attachment)).map((img, i) => (
                               <PromptImageView key={"artifactId" in img ? img.artifactId : i} image={img} alt={`attachment ${i + 1}`} />
+                            ))}
+                            {pending.images.filter(isWorkspaceReference).map((reference) => (
+                              <span className="workspace-reference-chip is-readonly" key={reference.artifactId}>@{reference.path}</span>
                             ))}
                           </div>
                         )}
@@ -3982,8 +4096,8 @@ function SessionDetailLoaded({
                         {queueLabel}
                       </span>
                       <span className="queued-text">
-                        {q.hasImages && <span className="queued-img" aria-hidden="true">🖼 </span>}
-                        {q.text || (q.hasImages ? "(image)" : "")}
+                        {q.hasImages && <span className="queued-img" aria-hidden="true">📎 </span>}
+                        {q.text || (q.hasImages ? "(attachment)" : "")}
                         {q.durableDeliveryError && (
                           <span className="queued-error"> — {q.durableDeliveryError}</span>
                         )}
@@ -4125,7 +4239,19 @@ function SessionDetailLoaded({
                   onSelectCommand={commitSlashCommand}
                 />
               )}
-              <ImageStrip images={images} onRemove={remove} />
+              {workspacePickerOpen && (
+                <WorkspaceReferencePicker
+                  listboxId={workspaceListboxId}
+                  results={workspaceResults}
+                  activeIndex={activeWorkspaceResult}
+                  busy={workspaceSearchBusy}
+                  error={workspaceSearchError}
+                  truncated={workspaceSearchTruncated}
+                  query={workspaceTrigger?.query ?? ""}
+                  onSelect={selectWorkspaceCandidate}
+                />
+              )}
+              <ImageStrip images={images} onRemove={remove} onInspectReference={setInspectedWorkspaceReference} />
               {commandPreservesAttachedImages && (
                 <div className="composer-attachment-notice" role="status">
                   {DURABLE_COMMAND_ATTACHMENT_NOTICE}
@@ -4136,12 +4262,14 @@ function SessionDetailLoaded({
                 className="composer-input"
                 role="combobox"
                 aria-autocomplete="list"
-                aria-expanded={paletteOpen}
+                aria-expanded={paletteOpen || workspacePickerOpen}
                 aria-busy={steeringRequestBusy || retitlePending || undefined}
-                aria-controls={paletteOpen ? slashListboxId : undefined}
-                aria-activedescendant={paletteOpen && selectedSlashCommandId
-                  ? slashCommandOptionId(slashListboxId, selectedSlashCommandId)
-                  : undefined}
+                aria-controls={workspacePickerOpen ? workspaceListboxId : paletteOpen ? slashListboxId : undefined}
+                aria-activedescendant={workspacePickerOpen && workspaceResults[activeWorkspaceResult]
+                  ? `${workspaceListboxId}-${activeWorkspaceResult}`
+                  : paletteOpen && selectedSlashCommandId
+                    ? slashCommandOptionId(slashListboxId, selectedSlashCommandId)
+                    : undefined}
                 value={text}
                 onFocus={(event) => {
                   composerExplicitFocusTransferRef.current = false;
@@ -4182,6 +4310,7 @@ function SessionDetailLoaded({
                     e.currentTarget.selectionEnd,
                   );
                   setSlashDismissedFor(null);
+                  setWorkspaceDismissedFor(null);
                   if (histIdx !== -1) setHistIdx(-1); // typing exits history browsing
                 }}
                 onKeyDown={onKeyDown}
@@ -4320,6 +4449,7 @@ function SessionDetailLoaded({
           git={git}
           onOpenTerminal={onOpenTerminal}
           onInsertSideChatDraft={insertSideChatDraft}
+          onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTarget : undefined}
           items={items}
           parentTurnEventIds={backgroundParentTurnEventIds}
           onOpenParentTurn={revealBackgroundParentTurn}
@@ -4327,6 +4457,42 @@ function SessionDetailLoaded({
           onRetryBackgroundInventory={retryBackgroundInventory}
         />}
       </div>
+      {mode === "expanded" && inspectedWorkspaceReference && (
+        <Modal
+          title="Workspace Reference"
+          onClose={() => setInspectedWorkspaceReference(null)}
+          footer={<button className="btn primary" type="button" onClick={() => setInspectedWorkspaceReference(null)}>Done</button>}
+        >
+          <dl className="workspace-reference-details">
+            <dt>Path</dt><dd><code>{inspectedWorkspaceReference.path}</code></dd>
+            <dt>Reference Type</dt><dd>{inspectedWorkspaceReference.kind === "diff" ? "Diff Lines" : inspectedWorkspaceReference.kind === "lines" ? "File Lines" : inspectedWorkspaceReference.kind === "directory" ? "Folder" : "File"}</dd>
+            {inspectedWorkspaceReference.startLine !== undefined && (
+              <><dt>Line Range</dt><dd>{inspectedWorkspaceReference.startLine}–{inspectedWorkspaceReference.endLine}</dd></>
+            )}
+            {inspectedWorkspaceReference.side && (
+              <><dt>Diff Side</dt><dd>{inspectedWorkspaceReference.side === "left" ? "Base" : "Worktree"}</dd></>
+            )}
+            {inspectedWorkspaceReference.diffScope && (
+              <><dt>Diff Scope</dt><dd>{inspectedWorkspaceReference.diffScope.replace("_", " ")}</dd></>
+            )}
+            <dt>Revision</dt><dd><code>{inspectedWorkspaceReference.targetFingerprint.slice(0, 12)}</code></dd>
+          </dl>
+          <p className="muted">The runner will verify this path, workspace, and revision again before delivery.</p>
+          {inspectedWorkspaceReference.kind !== "directory" && inspectedWorkspaceReference.kind !== "diff" && (
+            <button
+              className="btn ghost"
+              type="button"
+              onClick={() => {
+                openSourceLocation({ path: inspectedWorkspaceReference.path, line: inspectedWorkspaceReference.startLine });
+                rightPanel.show("files");
+                setInspectedWorkspaceReference(null);
+              }}
+            >
+              Open in Files
+            </button>
+          )}
+        </Modal>
+      )}
       {mode === "expanded" && messageAction && (
         <MessageActionDialog
           key={`${messageAction.mode}-${messageAction.item.id}`}
