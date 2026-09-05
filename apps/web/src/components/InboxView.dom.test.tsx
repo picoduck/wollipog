@@ -86,12 +86,16 @@ afterEach(async () => {
   const failures: unknown[] = [];
   try {
     for (const { root, container } of mountedRoots.splice(0).reverse()) {
+      // The WHOLE body is guarded, not just the unmount. Round 1 caught `act` rejecting and round 2
+      // caught `container.remove()` throwing; both stranded the roots behind them for the same
+      // reason. Guarding the statements one at a time invites a third variant, so nothing in here
+      // is allowed to escape and end the drain early.
       try {
         await act(async () => { root.unmount(); });
+        container.remove();
       } catch (error) {
         failures.push(error);
       }
-      container.remove();
     }
   } finally {
     // Menus and dialogs portal into the body, outside any container, which is why some tests used
