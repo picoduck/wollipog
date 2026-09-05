@@ -1,6 +1,6 @@
 import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -56,6 +56,58 @@ function setVisibility(value: "visible" | "hidden"): void {
 function setWindowFocused(focused: boolean): void {
   Object.defineProperty(domWindow.document, "hasFocus", { configurable: true, value: () => focused });
 }
+
+/**
+ * Mounts a React root whose teardown is guaranteed to run.
+ *
+ * Every test here renders `InboxView` under a `StoreProvider`, and the store drives one shared
+ * stall clock: a `setTimeout` that reschedules itself every `ACTIVITY_BUCKET_MS`, torn down only
+ * by that effect's cleanup. Teardown used to be the closing statements of each test, so an
+ * assertion that threw skipped it, the clock kept rescheduling a minute at a time, and the process
+ * could not exit — a plain assertion failure surfaced as a multi-minute stall rather than a
+ * failure in seconds, past `--test-timeout` (#680). Registering the root here and draining in
+ * `afterEach` makes cleanup independent of whether the assertions hold.
+ */
+const mountedRoots: Array<{ root: ReturnType<typeof createRoot>; container: HTMLDivElement }> = [];
+
+function mountTestRoot(): { container: HTMLDivElement; root: ReturnType<typeof createRoot> } {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  mountedRoots.push({ root, container });
+  return { container, root };
+}
+
+afterEach(async () => {
+  // Drain EVERY root even when one teardown throws. React makes `act` reject if an effect cleanup
+  // throws during unmount, and an early exit would strand the roots behind it — untracked, because
+  // `splice` has already emptied the registry — leaking exactly the clock this hook exists to stop.
+  // Reverse order unwinds the newest mount first.
+  const failures: unknown[] = [];
+  try {
+    for (const { root, container } of mountedRoots.splice(0).reverse()) {
+      // The WHOLE body is guarded, not just the unmount. Round 1 caught `act` rejecting and round 2
+      // caught `container.remove()` throwing; both stranded the roots behind them for the same
+      // reason. Guarding the statements one at a time invites a third variant, so nothing in here
+      // is allowed to escape and end the drain early.
+      try {
+        await act(async () => { root.unmount(); });
+        container.remove();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  } finally {
+    // Menus and dialogs portal into the body, outside any container, which is why some tests used
+    // to clear it by hand. Both resets trailed the unmount before, so a failing test leaked its
+    // viewport into the next one; they must not depend on every unmount succeeding either.
+    domWindow.document.body.innerHTML = "";
+    mobileViewport = true;
+  }
+  // A teardown that genuinely broke is still a failure — reported after cleanup, not instead of it.
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "roots failed to unmount");
+});
 
 const VIEWPORT_HEIGHT = 2_000;
 const ROW_HEIGHT = 68;
@@ -210,9 +262,7 @@ for (const viewport of ["mobile", "desktop"] as const) {
   ]) {
     test(`InboxView repairs a deleted ${scenario.selected} row to its slot on ${viewport}`, async () => {
       mobileViewport = viewport === "mobile";
-      const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-      domWindow.document.body.append(container as never);
-      const root = createRoot(container);
+      const { container, root } = mountTestRoot();
       const socket = new FakeSocket();
       const connection: UiConnectionRuntime = {
         instanceId: `inbox-delete-${viewport}-${scenario.selected}`,
@@ -243,9 +293,6 @@ for (const viewport of ["mobile", "desktop"] as const) {
       assert.deepEqual(rowTitles(container), scenario.remaining.map((id) => `Session ${id}`));
       assert.equal(selectedRowTitle(container), `Session ${scenario.expected}`);
 
-      await act(async () => { root.unmount(); });
-      container.remove();
-      mobileViewport = true;
     });
   }
 }
@@ -253,9 +300,7 @@ for (const viewport of ["mobile", "desktop"] as const) {
 for (const viewport of ["mobile", "desktop"] as const) {
   test(`InboxView clears selection when its only row is deleted on ${viewport}`, async () => {
     mobileViewport = viewport === "mobile";
-    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-    domWindow.document.body.append(container as never);
-    const root = createRoot(container);
+    const { container, root } = mountTestRoot();
     const socket = new FakeSocket();
     const connection: UiConnectionRuntime = {
       instanceId: `inbox-delete-only-${viewport}`,
@@ -278,16 +323,11 @@ for (const viewport of ["mobile", "desktop"] as const) {
     assert.equal(selectedRowTitle(container), null);
     assert.ok(container.querySelector(".inbox-zero"));
 
-    await act(async () => { root.unmount(); });
-    container.remove();
-    mobileViewport = true;
   });
 }
 
 test("InboxView preserves the server-authoritative Project count when reminders hide no rows", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "inbox-project-count-test",
@@ -340,14 +380,10 @@ test("InboxView preserves the server-authoritative Project count when reminders 
   assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 7 Sessions");
   assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 0 Sessions");
 
-  await act(async () => { root.unmount(); });
-  container.remove();
 });
 
 test("Active and Snoozed badges follow the selected Project split and live reminders", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "inbox-reminder-scope-test",
@@ -426,15 +462,11 @@ test("Active and Snoozed badges follow the selected Project split and live remin
   assert.equal(countLabel("Active"), "Active, 2 Sessions");
   assert.equal(countLabel("Snoozed"), "Snoozed, 1 Session");
 
-  await act(async () => { root.unmount(); });
-  container.remove();
 });
 
 test("reminder membership, scoped badges, and visible retention reasons reconcile live in list and board", async () => {
   mobileViewport = true;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "inbox-reminder-membership-test",
@@ -523,14 +555,10 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
   assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 5 Sessions");
   assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 5 Sessions");
 
-  await act(async () => { root.unmount(); });
-  container.remove();
 });
 
 test("InboxView keeps mobile browsing order stable before and through a touch", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "inbox-order-test",
@@ -620,18 +648,13 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   });
   assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
 
-  await act(async () => { root.unmount(); });
-  container.remove();
-  mobileViewport = true;
 });
 
 test("InboxView holds desktop browsing order until the user leaves the window", async () => {
   mobileViewport = false;
   setVisibility("visible");
   setWindowFocused(true);
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "inbox-desktop-order-test",
@@ -770,18 +793,13 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
     /Session A/,
   );
 
-  await act(async () => { root.unmount(); });
-  container.remove();
-  mobileViewport = true;
 });
 
 test("InboxView does not offer a reorder when only a removed selected id remains held", async () => {
   mobileViewport = false;
   setVisibility("visible");
   setWindowFocused(true);
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "inbox-removed-selection-order-test",
@@ -809,18 +827,13 @@ test("InboxView does not offer a reorder when only a removed selected id remains
     "a stale selected-id placeholder is not a visible order difference");
   assert.doesNotMatch(container.textContent ?? "", /A newer Inbox order is available/);
 
-  await act(async () => { root.unmount(); });
-  container.remove();
-  mobileViewport = true;
 });
 
 test("InboxView does not arm the order hold when it mounts in an unfocused window", async () => {
   mobileViewport = false;
   setVisibility("visible");
   setWindowFocused(false);
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "inbox-unfocused-mount-test",
@@ -847,16 +860,11 @@ test("InboxView does not arm the order hold when it mounts in an unfocused windo
   await act(async () => { socket.push({ type: "session_upsert", session: session("A", 60) }); });
   assert.deepEqual(rowTitles(container), ["Session C", "Session B", "Session A"]);
 
-  await act(async () => { root.unmount(); });
-  container.remove();
-  mobileViewport = true;
 });
 
 test("a two-client reminder upsert preserves the open Inbox Snooze draft and focus", async () => {
   mobileViewport = false;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "inbox-reminder-conflict-test",
@@ -954,18 +962,13 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
   assert.equal(container.querySelector<HTMLInputElement>("#snooze-exact")?.value, "2099-05-06T07:45");
   assert.equal(container.querySelector('[role="alert"]'), null, "closing still discards the local draft normally");
 
-  await act(async () => { root.unmount(); });
-  container.remove();
-  mobileViewport = true;
 });
 
 test("board mode shares the Sessions toolbar scope and toggles back to the list", async () => {
   mobileViewport = false;
   setWindowFocused(true);
   setVisibility("visible");
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "sessions-board-mode",
@@ -1022,18 +1025,13 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   assert.deepEqual(pushed.at(-1), { name: "inbox" },
     "switching modes navigates: the route is the mode");
 
-  await act(async () => { root.unmount(); });
-  container.remove();
-  mobileViewport = true;
 });
 
 test("row and card context menus share one surface, act on their target, and never navigate", async () => {
   mobileViewport = false;
   setWindowFocused(true);
   setVisibility("visible");
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "session-context-menu",
@@ -1123,18 +1121,13 @@ test("row and card context menus share one surface, act on their target, and nev
   assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
   assert.deepEqual(pushed, [], "board-card menus never navigate either");
 
-  await act(async () => { root.unmount(); });
-  container.remove();
-  mobileViewport = true;
 });
 
 test("a touch long-press opens the row menu and suppresses the tap it rode in on", async () => {
   mobileViewport = false;
   setWindowFocused(true);
   setVisibility("visible");
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "session-long-press",
@@ -1173,9 +1166,6 @@ test("a touch long-press opens the row menu and suppresses the tap it rode in on
     assert.equal(selectedRowTitle(container), before, "the long-press gesture is not also a tap");
     assert.notEqual(selectedRowTitle(container), "Session B");
   } finally {
-    await act(async () => { root.unmount(); });
-    container.remove();
-    domWindow.document.body.innerHTML = "";
     mobileViewport = true;
   }
 });
@@ -1186,9 +1176,7 @@ test("a long-press over a card's approval button opens the menu without approvin
   mobileViewport = false;
   setWindowFocused(true);
   setVisibility("visible");
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "long-press-approval",
@@ -1240,9 +1228,6 @@ test("a long-press over a card's approval button opens the menu without approvin
     assert.deepEqual(approvals, [], "the gesture asked for a menu, not an approval");
     assert.ok(domWindow.document.querySelector('[role="menu"]'), "and the menu is still the surface in charge");
   } finally {
-    await act(async () => { root.unmount(); });
-    container.remove();
-    domWindow.document.body.innerHTML = "";
     mobileViewport = true;
   }
 });
@@ -1253,9 +1238,7 @@ test("a quick tap after a dismissed long-press still selects, and an archived ta
   mobileViewport = false;
   setWindowFocused(true);
   setVisibility("visible");
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "long-press-followup",
@@ -1313,9 +1296,6 @@ test("a quick tap after a dismissed long-press still selects, and an archived ta
     assert.notEqual(domWindow.document.activeElement, domWindow.document.body,
       "and dismissal hands focus to a durable surface, not <body>");
   } finally {
-    await act(async () => { root.unmount(); });
-    container.remove();
-    domWindow.document.body.innerHTML = "";
     mobileViewport = true;
   }
 });
@@ -1327,9 +1307,7 @@ test("a cancelled press and a source-landed release click both leave the next ba
   mobileViewport = false;
   setWindowFocused(true);
   setVisibility("visible");
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "long-press-consume",
@@ -1379,9 +1357,23 @@ test("a cancelled press and a source-landed release click both leave the next ba
     assert.equal(domWindow.document.querySelector('[role="menu"]'), null,
       "the singleton was spent on the source click, so the backdrop tap closes");
   } finally {
-    await act(async () => { root.unmount(); });
-    container.remove();
-    domWindow.document.body.innerHTML = "";
     mobileViewport = true;
   }
+});
+
+/**
+ * Guards the teardown contract itself (#680).
+ *
+ * `mountedRoots` is drained by `afterEach`, so by the time any later test starts it must be empty
+ * and the body must hold no leftover roots. Reintroducing per-test teardown — or dropping the hook
+ * — leaves entries behind here, and the store's one-minute stall clock leaks with them, which is
+ * what turned an assertion failure into a multi-minute stall.
+ */
+test("every mounted root is torn down before the next test starts", () => {
+  assert.deepEqual(mountedRoots, [], "a previous test left a React root mounted");
+  assert.equal(
+    domWindow.document.body.innerHTML,
+    "",
+    "a previous test left nodes in the body, so portalled menus and dialogs outlive their test",
+  );
 });
