@@ -389,7 +389,7 @@ test("steering gates fail closed across protocol, provider, active-turn, held-qu
   }));
   await composer.fill("held queue");
   await page.keyboard.press("Control+Enter");
-  await expect(page.getByText("Send a normal prompt to resume the held queue before steering.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveText("Send a normal prompt to resume the held queue before steering.");
   await expect.poll(requests).toBe(0);
   await expect(page.getByTestId("queued-prompt-queue-ineligible").getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
   await expect(page.getByTestId("queued-prompt-queue-legacy").getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
