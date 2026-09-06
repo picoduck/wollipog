@@ -4541,13 +4541,14 @@ export class SessionsService {
       this.db.listSessionTitleContextEvents(sessionId),
       (text) => redactOperationalTranscriptText(text, sensitivePaths),
       [...(session.worktrees ?? [])].sort((left, right) =>
-        Number(left.path === session.worktreePath) - Number(right.path === session.worktreePath)),
+        Number(left?.path === session.worktreePath) - Number(right?.path === session.worktreePath)),
     );
     if (!messages.length) return fail("the session has no completed conversation context to name", 409);
 
     const epoch = this.bumpTitleGenerationEpoch(sessionId);
     const expectedTitle = session.title;
     const expectedSource = session.titleSource ?? "generated";
+    const preserveSpecificity = expectedSource !== "generated" || this.db.hasSemanticSessionTitle(sessionId);
     const expectedGenerationRevision = this.titleGenerationRevision?.(sessionId);
     const controller = new AbortController();
     this.titleGenerationControllers.set(sessionId, controller);
@@ -4574,7 +4575,7 @@ export class SessionsService {
       }
       const title = normalizeGeneratedSessionTitle(rawTitle);
       if (!title) throw new SessionTitleGenerationError("invalid_result", "output_validation");
-      if (isLessSpecificSessionTitle(current.title, title)) {
+      if (preserveSpecificity && isLessSpecificSessionTitle(current.title, title)) {
         // Explicit requests still take ownership when retaining the better existing title.
         if (ownership === "user") this.db.setSemanticSessionTitle(sessionId, current.title, Date.now(), ownership);
         this.hub.sessionChangedById(sessionId);

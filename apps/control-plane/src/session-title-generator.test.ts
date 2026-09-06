@@ -67,6 +67,13 @@ test("title regression guard preserves numbered targets and concrete work over g
   assert.equal(isLessSpecificSessionTitle("Choose Priority Issues", "Fix Parser Crash"), false);
 });
 
+test("malformed worktree metadata cannot break isolated naming", () => {
+  const metadata = JSON.parse('[{},null,{"branch":27,"pullRequest":{"url":13}}]');
+  assert.deepEqual(boundedSessionTitleContext([
+    event(1, { kind: "user_message", text: "Original objective", final: true }),
+  ], (text) => text, metadata), [{ role: "user", text: "Original objective" }]);
+});
+
 test("title context transforms sensitive text before applying its character bound", () => {
   const secret = `token=${"s".repeat(2_000)}`;
   let transformedInput = "";

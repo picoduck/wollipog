@@ -4067,7 +4067,7 @@ test("native streamed response completion refines once without a final aggregate
   const id = seedSession(svc, hub);
   svc.onSessionEvent(id, { kind: "user_message", text: "Choose and fix priority issues", final: true });
   await new Promise((resolve) => setImmediate(resolve));
-  for (const text of ["Selected ", "#123", " and ", "#124", ". Fixes pass."]) {
+  for (const text of ["Selected ", "#123", " and ", "#124", ". Fixes pass.", ...Array<string>(300).fill(" More")]) {
     svc.onSessionEvent(id, { kind: "agent_message", messageId: "native-stream", text });
   }
   svc.onSessionEvent(id, { kind: "agent_response_completed" });
@@ -4080,6 +4080,15 @@ test("native streamed response completion refines once without a final aggregate
   svc.onSessionEvent(id, { kind: "agent_message", text: "Final fallback", final: true });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(contexts.length, 2);
+});
+
+test("initial semantic naming can replace an uninformative raw fallback with a triage title", async () => {
+  const { db, hub, svc } = makeHarness(async () => "Triage Inbox Bugs");
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Help me make sense of our backlog", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Triage Inbox Bugs");
+  assert.equal(db.hasSemanticSessionTitle(id), true);
 });
 
 test("a prompt-created fallback also schedules semantic naming on its first durable message", async () => {

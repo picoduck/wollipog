@@ -3116,6 +3116,17 @@ test("title context reassembles bounded identified deltas before redaction and d
   assert.deepEqual(completed.map((entry) => (entry.payload as { text: string }).text), ["Pick priority work", "Earlier relevant answer", "Fixed #123 and #124"]);
 });
 
+test("oversized title streams fail closed without preventing later bounded streams", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "title-bounds" }));
+  db.appendEvent("title-bounds", { kind: "user_message", text: "Original", final: true }, 1);
+  db.appendEvent("title-bounds", { kind: "agent_message", messageId: "oversized", text: "x".repeat(65_537) }, 2);
+  assert.equal(db.listSessionTitleContextEvents("title-bounds").length, 1);
+  db.appendEvent("title-bounds", { kind: "agent_message", messageId: "bounded", text: "Selected #123" }, 3);
+  const context = db.listSessionTitleContextEvents("title-bounds");
+  assert.deepEqual(context.map((event) => (event.payload as { text: string }).text), ["Original", "Selected #123"]);
+});
+
 test("createSessionFromSnapshot auto-files an adopted session by its workspacePath", () => {
   const db = withRunner();
   // Adopted from ANOTHER dashboard (or delete-then-rehydrate): the snapshot carries no workspaceId

@@ -10463,6 +10463,10 @@ export class ControlPlaneDb {
       .run(title, source, now, id);
   }
 
+  hasSemanticSessionTitle(id: string): boolean {
+    return Boolean(this.stmt("SELECT 1 FROM sessions WHERE id=? AND semantic_title=1").get(id));
+  }
+
   private sessionReminderView(row: SessionReminderRow): SessionReminderView {
     return {
       reminderId: row.reminder_id,
@@ -14129,16 +14133,23 @@ export class ControlPlaneDb {
       // Stream events are deltas, not semantic messages. Reassemble from the beginning before
       // redaction so credentials split across chunks never escape. Fail closed on oversized
       // streams; completed messages remain eligible through the normal path.
-      const chunks = this.stmt(
+      const rows = this.stmt(
         `SELECT substr(json_extract(payload, '$.text'), 1, 65537) AS text FROM session_events
          WHERE session_id=? AND kind='agent_message'
            AND json_extract(payload, '$.messageId')=?
            AND json_type(payload, '$.parentToolUseId') IS NULL
            AND COALESCE(json_extract(payload, '$.final'), 0) != 1 AND seq<=?
-         ORDER BY seq LIMIT 257`,
-      ).all(sessionId, payload.messageId, event.seq) as unknown as { text: string }[];
-      if (chunks.length > 256 || chunks.reduce((sum, chunk) => sum + chunk.text.length, 0) > 64 * 1024) return [];
-      return [{ ...event, payload: { ...payload, text: chunks.map((chunk) => chunk.text).join("") } }];
+         ORDER BY seq LIMIT 4097`,
+      ).iterate(sessionId, payload.messageId, event.seq);
+      const chunks: string[] = [];
+      let chars = 0;
+      for (const row of rows) {
+        const text = row.text as string;
+        chars += text.length;
+        if (chunks.length >= 4096 || chars > 64 * 1024) return [];
+        chunks.push(text);
+      }
+      return [{ ...event, payload: { ...payload, text: chunks.join("") } }];
     }).reverse();
   }
 
