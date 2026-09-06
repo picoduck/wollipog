@@ -43,6 +43,64 @@ function setInputValue(input: HTMLInputElement, value: string) {
   fireDomEvent.change(input, { target: { value } } as never);
 }
 
+for (const transition of ["clear", "replace", "remount", "unchanged"] as const) {
+ for (const result of ["resolve", "reject"] as const) {
+  test(`delayed answer ${result} respects live question ownership after ${transition}`, async () => {
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    let resolveAnswer!: (session: SessionView) => void;
+    let rejectAnswer!: (error: Error) => void;
+    const answer = new Promise<SessionView>((resolve, reject) => { resolveAnswer = resolve; rejectAnswer = reject; });
+    const updates: SessionView[] = [];
+    let exits = 0;
+    let calls = 0;
+    const client = { ...api, answerQuestion: () => { calls++; return answer; } } as ApiClient;
+    const returnedSession = { id: "session-1" } as SessionView;
+    const renderQuestion = (requestId: string | null) => root.render(
+      <ApiProvider client={client}>
+        {requestId && <ComposerQuestionResponse
+          sessionId="session-1"
+          requestId={requestId}
+          questions={[{ id: "target", question: `Question ${requestId}`, options: [{ label: "Staging" }] }]}
+          runnerOnline active showWaiting inputRef={{ current: null }}
+          onEnter={() => {}} onExit={() => { exits++; }}
+          onSessionUpdate={(session) => { updates.push(session); }}
+        />}
+      </ApiProvider>,
+    );
+    try {
+      await act(async () => renderQuestion("ask-single"));
+      const input = container.querySelector<HTMLInputElement>(".composer-answer-input")!;
+      await act(async () => {
+        setInputValue(input, "1");
+        input.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+      });
+      assert.equal(calls, 1);
+      if (transition === "clear" || transition === "remount") await act(async () => renderQuestion(null));
+      if (transition === "replace" || transition === "remount") await act(async () => renderQuestion("ask-replacement"));
+      await act(async () => {
+        if (result === "resolve") resolveAnswer(returnedSession);
+        else rejectAnswer(new Error("Answer rejected"));
+        await tick();
+      });
+      const ownedSuccess = transition === "unchanged" && result === "resolve";
+      assert.deepEqual(updates, ownedSuccess ? [returnedSession] : []);
+      assert.equal(exits, ownedSuccess ? 1 : 0);
+      assert.equal(container.querySelector('[role="alert"]')?.textContent ?? "",
+        transition === "unchanged" && result === "reject" ? "Could not answer the question: Answer rejected" : "");
+      if (transition === "replace" || transition === "remount") {
+        assert.match(container.textContent ?? "", /Question ask-replacement/);
+        assert.equal(container.querySelector<HTMLInputElement>(".composer-answer-input")!.disabled, false);
+      }
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+ }
+}
+
 function Harness({
   client,
   questions,

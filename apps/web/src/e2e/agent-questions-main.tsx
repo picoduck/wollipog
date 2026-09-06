@@ -21,6 +21,7 @@ declare global {
   interface Window {
     agentQuestionCalls: AnswerCall[];
     replaceAgentQuestion(): void;
+    clearAgentQuestion(): void;
     releaseAgentQuestion(): void;
     setAgentQuestionOnline(online: boolean): void;
   }
@@ -168,6 +169,7 @@ function Fixture() {
     setResolved(false);
   };
   window.releaseAgentQuestion = () => releasePending?.();
+  window.clearAgentQuestion = () => setResolved(true);
   window.setAgentQuestionOnline = (online) => setRunnerOnline(online);
 
   const client = useMemo(() => ({

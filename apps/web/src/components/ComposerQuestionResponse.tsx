@@ -3,7 +3,7 @@ import {
   type AgentQuestion,
   type SessionView,
 } from "@wollipog/protocol";
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { useApi } from "../api-context.js";
 import {
   clearQuestionDrafts,
@@ -96,8 +96,13 @@ export function ComposerQuestionResponse({
   const [busy, setBusy] = useState(false);
   const operationPendingRef = useRef<string | null>(null);
   const previousActiveRef = useRef(active);
-  const liveRequestRef = useRef(requestId);
-  liveRequestRef.current = requestId;
+  const liveRequestRef = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    // A committed question owns its response only until replacement or unmount. A fresh
+    // token also prevents an earlier incarnation of the same request from regaining ownership.
+    liveRequestRef.current = {};
+    return () => { liveRequestRef.current = null; };
+  }, [requestId, sessionId]);
 
   useEffect(() => {
     setDraftState({ requestId, values: storedQuestionDrafts(sessionId, requestId) });
@@ -187,6 +192,7 @@ export function ComposerQuestionResponse({
     }
     if (operationPendingRef.current === requestId || !runnerOnline) return;
     const submittedRequestId = requestId;
+    const submittedRequest = liveRequestRef.current;
     const releaseOperation = claimQuestionResponseOperation(sessionId, submittedRequestId);
     if (!releaseOperation) {
       setSubmissionError("Another response is already being submitted for this question.");
@@ -202,19 +208,19 @@ export function ComposerQuestionResponse({
         answers: resolved.answers,
         action: "submit",
       });
-      if (liveRequestRef.current !== submittedRequestId) return;
+      if (liveRequestRef.current !== submittedRequest) return;
       clearQuestionDrafts(sessionId, submittedRequestId);
       onExit();
       onSessionUpdate?.(updated);
     } catch (cause) {
-      if (liveRequestRef.current === submittedRequestId) {
+      if (liveRequestRef.current === submittedRequest) {
         setSubmissionError((cause as Error).message);
         focusSoon(inputRef);
       }
     } finally {
       releaseOperation();
       if (operationPendingRef.current === submittedRequestId) operationPendingRef.current = null;
-      if (liveRequestRef.current === submittedRequestId) setBusy(false);
+      if (liveRequestRef.current === submittedRequest) setBusy(false);
     }
   };
 
