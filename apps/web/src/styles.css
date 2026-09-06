@@ -2001,7 +2001,6 @@ textarea {
   flex-wrap: wrap;
   gap: 6px;
 }
-.agents-filters button[aria-pressed="true"],
 .agents-list button[aria-current="true"] {
   background: var(--bg-elev-2);
   outline: 1px solid var(--border);

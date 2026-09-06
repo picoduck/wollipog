@@ -4,6 +4,14 @@ import type { SubagentDescriptor } from "./subagents.js";
 
 export type WorkerState = "working" | "waiting" | "input_required" | "completed" | "failed" | "stopped" | "unverified";
 export type WorkerTarget = { kind: "subagent"; id: string } | { kind: "background"; id: string } | { kind: "session"; id: string };
+export interface WorkerMemberMetadata {
+  type?: "Workflow Member" | "Pod Member";
+  role?: string;
+  phase?: string;
+  activations?: number;
+  terminalState?: "completed" | "failed" | "stopped";
+  completedAt?: number;
+}
 export interface WorkerRow {
   id: string;
   name: string;
@@ -35,7 +43,7 @@ export function workerRoster(
   subagents: readonly SubagentDescriptor[],
   members: readonly SessionView[],
   online: (runnerId: string) => boolean,
-  metadata: ReadonlyMap<string, { role?: string; phase?: string; activations?: number }> = new Map(),
+  metadata: ReadonlyMap<string, WorkerMemberMetadata> = new Map(),
 ): WorkerRow[] {
   const waitingOwners = new Set(pendingRequests(session.pendingApproval)
     .filter((request) => !request.recoveryReason).map((request) => request.ownerToolUseId));
@@ -74,17 +82,20 @@ export function workerRoster(
   for (const member of members) {
     if (member.id === session.id || seen.has(member.id)) continue;
     seen.add(member.id);
-    const settled = ["completed", "failed", "stopped"].includes(member.status);
+    const workflow = metadata.get(member.id);
+    const terminalState = member.status === "completed" || member.status === "failed" || member.status === "stopped"
+      ? member.status : member.status === "idle" ? workflow?.terminalState : undefined;
+    const settled = terminalState != null;
     rows.push({
-      id: `session:${member.id}`, name: member.title, type: metadata.has(member.id) ? "Workflow Member" : "Run Member",
+      id: `session:${member.id}`, name: member.title, type: workflow?.type ?? "Run Member",
       ...metadata.get(member.id),
-      state: !settled && !online(member.runnerId) ? "unverified"
+      state: terminalState ?? (!online(member.runnerId) ? "unverified"
         : member.pendingApproval || member.status === "input_required" ? "input_required"
         : member.status === "running" || member.status === "starting" ? "working"
-        : member.status === "idle" || member.status === "queued" ? "waiting" : member.status,
+        : member.status === "idle" || member.status === "queued" ? "waiting" : member.status),
       target: { kind: "session", id: member.id }, depth: 0,
       startedAt: member.createdAt, lastActivityAt: member.lastEventAt ?? undefined,
-      ...(settled ? { completedAt: member.updatedAt } : {}),
+      ...(settled ? { completedAt: workflow?.completedAt ?? member.updatedAt } : {}),
       ...(member.resolvedModel || member.model ? { model: member.resolvedModel || member.model! } : {}),
       ...(member.effort ? { effort: member.effort } : {}),
       tokens: member.tokensIn + member.tokensOut,

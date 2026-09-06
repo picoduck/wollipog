@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { PROTOCOL_VERSION, removePendingRequest, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
@@ -7,6 +7,7 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { AgentsPanel } from "../components/AgentsPanel.js";
+import { SessionApprovalRegion, focusSessionRequest } from "../components/SessionApproval.js";
 import type { TimelineItem } from "../timeline.js";
 import "../styles.css";
 
@@ -32,6 +33,11 @@ const initial: SessionView = {
   backgroundJobs: [{ id: "job-monitor", parentTurnId: "turn-1", launchType: "monitor", registeredAt: now - 60_000,
     lastObservedAt: now, sourcePresent: true }],
 };
+if (params.has("primary-question")) {
+  initial.pendingApproval = { ...initial.pendingApproval!, kind: "question", options: [],
+    title: "Choose Audit Scope", questions: [{ id: "scope", question: "Choose Audit Scope",
+      options: [{ label: "Parser", description: "Inspect the parser." }] }] };
+}
 const items: TimelineItem[] = [
   { kind: "tool_call", id: 1, toolCallId: "audit", title: "Audit Storage", text: "",
     toolKind: "agent", status: "in_progress", startedAt: now - 120_000,
@@ -51,6 +57,7 @@ function Fixture() {
   const [session, setSession] = useState(initial);
   const [selected, setSelected] = useState<string | null>(null);
   const [online, setOnline] = useState(true);
+  const primaryRef = useRef<HTMLHeadingElement>(null);
   const client: ApiClient = { ...api, approve: async (_sessionId, { requestId }) => {
     const next = { ...session, pendingApproval: removePendingRequest(session.pendingApproval, requestId) };
     setSession(next);
@@ -58,9 +65,12 @@ function Fixture() {
   } };
   return <ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
     <main style={{ maxWidth: 780, padding: 16, margin: "0 auto" }}>
-      <h1>Agents</h1>
+      <h1 ref={primaryRef} tabIndex={-1}>Agents</h1>
+      {params.has("primary-question") && <SessionApprovalRegion session={session} runnerOnline={online}
+        fallbackFocusRef={primaryRef} showKeyHints={false} />}
       <button type="button" className="btn" style={{ marginBottom: 12 }} onClick={() => setOnline((value) => !value)}>{online ? "Disconnect Runner" : "Reconnect Runner"}</button>
       <AgentsPanel session={session} items={items} runnerOnline={online}
+        onOpenPrimaryRequest={params.has("primary-question") ? (requestId) => focusSessionRequest(session.id, requestId) : undefined}
         runnerProtocolVersion={PROTOCOL_VERSION} requestedId={selected} onSelect={setSelected}
         parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
     </main>

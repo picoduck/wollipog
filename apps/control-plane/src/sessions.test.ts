@@ -5105,6 +5105,18 @@ test("child attention resolves by exact identity and preserves unrelated request
     title: "Allow Tool", options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }],
   });
   assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
+  assert.deepEqual(svc.approvalQueue().filter((item) => item.sessionId === id)
+    .map((item) => item.requestId).sort(), ["child-a", "child-b"]);
+  const settlements: string[] = [];
+  const reconcile = (svc as any).reconcileWorkflowSessionStatus.bind(svc);
+  (svc as any).reconcileWorkflowSessionStatus = (sessionId: string, status: string, now: number) => {
+    settlements.push(status);
+    return reconcile(sessionId, status, now);
+  };
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.status, "input_required");
+  assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
+  assert.deepEqual(settlements, ["idle"], "foreground settlement still reaches workflow consumers");
   assert.equal(svc.approve(id, "child-b", "not-offered").ok, false);
   assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
   assert.equal(svc.approve(id, "child-b", "yes").ok, true);
@@ -5114,6 +5126,18 @@ test("child attention resolves by exact identity and preserves unrelated request
   assert.equal(db.getSession(id)!.pendingApproval?.requestId, "child-a");
   assert.equal(svc.approve(id, "child-b", "yes").ok, false);
   assert.equal(svc.approve(id, "child-a", "yes").ok, true);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+});
+
+test("child requests displace, rather than share, a control-plane-only policy card", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.setPendingApproval(id, { requestId: "guardrail", kind: "cost_budget", title: "Budget", options: [] });
+  svc.onSessionEvent(id, { kind: "permission_request", requestId: "child",
+    ownerToolUseId: "spawn", title: "Read", options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }] });
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, "child");
+  assert.equal(db.getSession(id)!.pendingApproval?.additionalRequests, undefined);
+  assert.equal(svc.approve(id, "child", "yes").ok, true);
   assert.equal(db.getSession(id)!.pendingApproval, null);
 });
 

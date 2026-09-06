@@ -1868,10 +1868,12 @@ export class ClaudeCodeDriver implements Driver {
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
           if (!this.pendingApprovals.has(msg.request_id) && this.pendingApprovals.size >= 128) {
-            this.child.stdin.write(JSON.stringify({
-              type: "control_response", response: { subtype: "success", request_id: msg.request_id,
-                response: { behavior: "deny", message: "Too many concurrent pending requests." } },
-            }) + "\n");
+            try {
+              this.child.stdin.write(JSON.stringify({
+                type: "control_response", response: { subtype: "success", request_id: msg.request_id,
+                  response: { behavior: "deny", message: "Too many concurrent pending requests." } },
+              }) + "\n");
+            } catch { /* the provider process ended before the denial could be written */ }
             return null;
           }
           if (this.pendingApprovals.size === 0) this.pendingAttentionOwners.clear();

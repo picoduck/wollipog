@@ -519,7 +519,7 @@ export class CodexAppServerDriver implements Driver {
       this.seenItems.clear();
       this.emittedErrors.clear();
       this.streamedAgentResponse = false;
-      this.declinePendingRequests();
+      this.declinePendingRequests("provider_resolved", true);
       this.pendingTurnUsage = null;
       this.turnUsageClosed = false;
       this.turnResolve = resolve;
@@ -691,22 +691,26 @@ export class CodexAppServerDriver implements Driver {
     terminateDescendantBoundaries(this.descendantOwner);
   }
 
-  private declinePendingRequests(resolutionReason?: "replaced"): void {
-    this.attentionOwners.clear();
+  private declinePendingRequests(resolutionReason?: "replaced" | "provider_resolved", preserveChildren = false): void {
     for (const [requestId, p] of this.pendingApprovals) {
+      if (preserveChildren && this.attentionOwners.has(requestId)) continue;
       p.resolve(p.method === MCP_ELICITATION_METHOD ? mcpElicitationResponse("cancel") : approvalResponse(p.method, p.params, null));
+      this.pendingApprovals.delete(requestId);
+      this.attentionOwners.delete(requestId);
       if (resolutionReason) {
         this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason });
       }
     }
-    this.pendingApprovals.clear();
     for (const [requestId, p] of this.pendingQuestions) {
+      if (preserveChildren && this.attentionOwners.has(requestId)) continue;
       p.resolve(p.response({}, "dismiss"));
+      this.pendingQuestions.delete(requestId);
+      this.attentionOwners.delete(requestId);
       if (resolutionReason) {
         this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason });
       }
     }
-    this.pendingQuestions.clear();
+    if (!preserveChildren) this.attentionOwners.clear();
   }
 
   private settleTurn(r: StopReason): void {
@@ -767,8 +771,6 @@ export class CodexAppServerDriver implements Driver {
   private updateSubagentLifecycle(threadId: string, lifecycle: AuthoritativeSubagentLifecycle): void {
     const toolCallId = this.subagentToolByThread.get(threadId);
     if (!toolCallId) return;
-    if (this.subagentLifecycleByThread.get(threadId) === lifecycle) return;
-    this.subagentLifecycleByThread.set(threadId, lifecycle);
     if (["completed", "failed", "interrupted"].includes(lifecycle)) {
       for (const [requestId, owner] of this.attentionOwners) {
         if (owner !== toolCallId) continue;
@@ -784,6 +786,8 @@ export class CodexAppServerDriver implements Driver {
         }
       }
     }
+    if (this.subagentLifecycleByThread.get(threadId) === lifecycle) return;
+    this.subagentLifecycleByThread.set(threadId, lifecycle);
     this.cb.onEvent({
       kind: "tool_call_update",
       toolCallId,
@@ -882,9 +886,9 @@ export class CodexAppServerDriver implements Driver {
       ? candidate : undefined;
     // Preserve provider-declared concurrent children. Unknown ownership remains on the parent;
     // older peers retain their existing replacement semantics.
-    if (!this.cb.supportsWorkerAttention?.() || (!owner && this.attentionOwners.size === 0)) {
-      this.declinePendingRequests("replaced");
-    }
+    if (!this.cb.supportsWorkerAttention?.()) this.declinePendingRequests("replaced");
+    else if (!owner) this.declinePendingRequests("replaced", true);
+    if (owner && ["completed", "failed", "interrupted"].includes(this.subagentLifecycleByThread.get(params.threadId) ?? "")) return null;
     if (this.pendingApprovals.size + this.pendingQuestions.size >= 128) {
       this.cb.onStderr("Too many concurrent provider requests; the new request was cancelled.");
       return null;
@@ -1070,7 +1074,7 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("turn/started", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) return;
       if (!this.promptBusy || !this.turnResolve || p?.turn?.id === this.completedTurnId) return;
-      this.declinePendingRequests();
+      this.declinePendingRequests("provider_resolved", true);
       const id = p?.turn?.id;
       if (typeof id === "string" && id) {
         this.lastTurnId = id;
@@ -1115,7 +1119,7 @@ export class CodexAppServerDriver implements Driver {
       if (p?.turn?.id && (p.turn.id === this.completedTurnId ||
           (this.turnId && p.turn.id !== this.turnId))) return;
       if (typeof p?.turn?.id === "string" && p.turn.id) this.completedTurnId = p.turn.id;
-      this.declinePendingRequests();
+      this.declinePendingRequests("provider_resolved", true);
       this.closeTurnUsage();
       const status = p?.turn?.status;
       if (status === "failed") {
@@ -1141,7 +1145,7 @@ export class CodexAppServerDriver implements Driver {
         }
         return;
       }
-      this.declinePendingRequests();
+      this.declinePendingRequests("provider_resolved", true);
       this.streamedAgentResponse = false;
       this.emitDriverError(p?.error);
       this.closeTurnUsage();

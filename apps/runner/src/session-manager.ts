@@ -1599,7 +1599,9 @@ export class SessionManager {
 
   /** Reconcile exact concurrent identities against durable events before recovering callbacks.
    * Pages bound memory even when the owning request is far back in the transcript. */
-  private recoveredWorkerQuestions(sessionId: string, pending: SessionMeta["pendingApproval"]): ReturnType<typeof pendingRequests> {
+  private recoveredWorkerQuestions(sessionId: string, pending: SessionMeta["pendingApproval"]): {
+    requests: ReturnType<typeof pendingRequests>; verified: boolean;
+  } {
     const requests = new Map(pendingRequests(pending).filter((request) => request.kind === "question")
       .map((request) => [request.requestId, request]));
     const expectedIds = new Set(requests.keys());
@@ -1607,7 +1609,7 @@ export class SessionManager {
     let generation: { logEpoch: number; throughSeq: number } | undefined;
     for (;;) {
       const page = this.store.readEventPage(sessionId, { afterSeq, limit: 200, ...generation });
-      if (!page.ok) return []; // Never revive a callback from an unverifiable generation.
+      if (!page.ok) return { requests: [...requests.values()], verified: false };
       generation ??= { logEpoch: page.page.logEpoch, throughSeq: page.page.throughSeq };
       for (const event of page.events) {
         if (event.payload.kind === "question_request" && expectedIds.has(event.payload.requestId)) {
@@ -1622,11 +1624,12 @@ export class SessionManager {
         if (event.payload.kind === "question_resolved") requests.delete(event.payload.requestId);
       }
       const last = page.events.at(-1)?.seq;
-      if (last == null || last >= generation.throughSeq) break;
-      if (last <= afterSeq) return [];
+      if (last == null) return { requests: [...requests.values()], verified: generation.throughSeq === 0 };
+      if (last >= generation.throughSeq) break;
+      if (last <= afterSeq) return { requests: [...requests.values()], verified: false };
       afterSeq = last;
     }
-    return [...requests.values()];
+    return { requests: [...requests.values()], verified: true };
   }
 
   /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
@@ -1746,9 +1749,12 @@ export class SessionManager {
       } else if (pendingRequests(reconciled.pendingApproval).some((request) => request.ownerToolUseId)) {
         // The parent conversation's resume coordinate cannot resume an exact child callback.
         // Preserve child questions for inspection/dismissal, but never offer parent continuation.
-        const recovered = this.recoveredWorkerQuestions(m.sessionId, reconciled.pendingApproval)
+        const recovery = this.recoveredWorkerQuestions(m.sessionId, reconciled.pendingApproval);
+        const recovered = recovery.requests
           .map(({ additionalRequests: _additional, recoveryAction: _action, ...request }) => ({
             ...request, recoveryReason: "provider_restart" as const,
+            ...(recovery.verified && !request.ownerToolUseId && canResumeRecoveredQuestion(reconciled, request)
+              ? { recoveryAction: "resume_answer" as const } : {}),
           }));
         const [first, ...rest] = recovered;
         this.store.patchMeta(m.sessionId, {
@@ -8317,14 +8323,15 @@ export class SessionManager {
       detail = undefined;
     }
     const entry = this.active.get(sessionId);
-    if (entry) entry.status = status;
-    // When a turn settles (idle/stopped/failed/etc.) any pending approval is moot — clear it so the
-    // box snapshot doesn't carry a stale card. The runner stays "running" through an approval, and
-    // "input_required" IS the parked-on-a-card state — wiping the card while keeping that status
-    // would strand a live ask (e.g. the dead-target corrective re-emit racing a parked session in
-    // a shared box store). Mirrors the CP rule: LEAVING input_required clears the card.
-    const settled = status !== "running" && status !== "starting" && status !== "input_required";
-    this.store.patchMeta(sessionId, settled ? { status, pendingApproval: null } : { status });
+    const terminal = status === "completed" || status === "failed" || status === "stopped";
+    const childAttention = !terminal && pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
+      .some((request) => request.ownerToolUseId);
+    const projectedStatus = childAttention ? "input_required" : status;
+    if (entry) entry.status = projectedStatus;
+    // Foreground idle does not end independently owned child callbacks. Keep their snapshot
+    // actionable while the raw foreground status still reaches workflow/pod settlement consumers.
+    const settled = projectedStatus !== "running" && projectedStatus !== "starting" && projectedStatus !== "input_required";
+    this.store.patchMeta(sessionId, settled ? { status: projectedStatus, pendingApproval: null } : { status: projectedStatus });
     this.send({
       type: "session_status",
       sessionId,
@@ -9028,7 +9035,13 @@ export class SessionManager {
   private onDriverEvent(sessionId: string, payload: SessionEventPayload): void {
     const entry = this.active.get(sessionId);
     if (entry?.historyIntegrityFailure) return;
+    const managedAttentionResolution = (payload.kind === "permission_resolved" || payload.kind === "question_resolved") &&
+      pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId);
     if (!this.emitEvent(sessionId, payload)) return;
+    if (managedAttentionResolution && entry) {
+      this.emitStatus(sessionId, this.store.readMeta(sessionId)?.pendingApproval
+        ? "input_required" : entry.running ? "running" : "idle");
+    }
     if (entry?.currentBackgroundJobIds?.length && payload.kind === "agent_message" &&
         !payload.parentToolUseId) {
       entry.backgroundAssistantMessagePersisted = true;

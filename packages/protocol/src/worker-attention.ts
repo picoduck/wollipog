@@ -20,13 +20,15 @@ function packRequests(requests: PendingApproval[]): PendingApproval | null {
 
 /** Only provider-owned child requests may coexist; legacy parent replacement remains unchanged. */
 export function addPendingRequest(current: PendingApproval | null | undefined, next: PendingApproval): PendingApproval {
-  const requests = pendingRequests(current);
+  // CP-only policy cards keep their existing single-slot barrier/displacement semantics.
+  const requests = pendingRequests(current).filter((request) =>
+    request.kind == null || ["permission", "question", "authentication"].includes(request.kind));
   const { additionalRequests: _rest, ...single } = next;
   if (!single.ownerToolUseId && !requests.some((request) => request.ownerToolUseId)) return single;
-  return packRequests([...requests.filter((request) => request.requestId !== next.requestId), single])!;
+  return packRequests([...requests.filter((request) =>
+    request.requestId !== next.requestId && (single.ownerToolUseId || request.ownerToolUseId)), single])!;
 }
 
 export function removePendingRequest(current: PendingApproval | null | undefined, requestId: string): PendingApproval | null {
   return packRequests(pendingRequests(current).filter((request) => request.requestId !== requestId));
 }
-

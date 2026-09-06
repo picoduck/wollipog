@@ -1746,21 +1746,50 @@ test("negotiated child questions coexist and completion cancels only their exact
       status: "completed", senderThreadId: "root", receiverThreadIds: [child],
       agentsStates: { [child]: { status: "running" } } },
   });
-  const ask = (threadId: string) => requests.get("item/tool/requestUserInput")!({
+  const ask = (threadId: string, requestId = "ask-" + threadId) => requests.get("item/tool/requestUserInput")!({
     threadId, questions: [{ id: "choice", header: "Choice", question: "Choose",
       isOther: false, options: [{ label: "A", description: "A" }] }],
-  }, "ask-" + threadId);
+  }, requestId);
   const a = ask("a");
   const b = ask("b");
   assert.deepEqual(h.events.filter((event) => event.kind === "question_request")
     .map((event) => event.ownerToolUseId), ["spawn-a", "spawn-b"]);
   const replacementB = ask("b");
   assert.deepEqual(await b, { answers: {} }, "a repeated child RPC id settles its old promise");
-  (h.driver as any).updateSubagentStates({ a: { status: "completed" } });
+  const root1 = ask("root", "root-1");
+  const root2 = ask("root", "root-2");
+  assert.deepEqual(await root1, { answers: {} }, "root replacement still applies with children pending");
+  notifications.get("turn/started")!({ threadId: "root", turn: { id: "root-turn" } });
+  assert.deepEqual(await root2, { answers: {} });
+  notifications.get("turn/completed")!({ threadId: "root", turn: { id: "root-turn", status: "completed" } });
+  notifications.get("item/completed")!({
+    threadId: "root", item: { type: "collabAgentToolCall", id: "spawn-a", tool: "spawnAgent",
+      status: "completed", senderThreadId: "root", receiverThreadIds: ["a"],
+      agentsStates: { a: { status: "completed" } } },
+  });
   assert.deepEqual(await a, { answers: {} });
   assert.equal(h.driver.answerQuestion("ask-a", { choice: "A" }), false);
   assert.equal(h.driver.answerQuestion("ask-b", { choice: "A" }), true);
   assert.deepEqual(await replacementB, { answers: { choice: { answers: ["A"] } } });
+});
+
+test("Codex child request capacity denies the new callback without dropping existing ones", async () => {
+  const h = makeHarness();
+  (h.driver as any).cb.supportsWorkerAttention = () => true;
+  (h.driver as any).subagentToolByThread.set("child", "spawn");
+  const requests = new Map<string, (params: any, id: string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: any) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const ask = (id: string) => requests.get("item/tool/requestUserInput")!({ threadId: "child",
+    questions: [{ id: "q", header: "Choice", question: "Choose",
+      isOther: false, options: [{ label: "A", description: "A" }] }] }, id);
+  const pending = Array.from({ length: 128 }, (_, index) => ask(String(index)));
+  assert.deepEqual(await ask("overflow"), { answers: {} });
+  assert.equal(h.events.filter((event) => event.kind === "question_request").length, 128);
+  h.driver.dispose();
+  assert.equal((await Promise.all(pending)).length, 128);
 });
 
 test("a newer structured request settles and resolves the displaced request exactly once", async () => {

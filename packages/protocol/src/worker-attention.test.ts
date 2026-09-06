@@ -28,10 +28,21 @@ test("legacy replacement and stale child resolutions do not erase a newer reques
   assert.deepEqual(removePendingRequest(pending, "old"), pending);
 });
 
+test("root replacement preserves children but not obsolete roots or policy cards", () => {
+  const mixed = addPendingRequest(ask("root-old"), ask("child", "owner"));
+  const replaced = addPendingRequest(mixed, ask("root-new"));
+  assert.deepEqual(pendingRequests(replaced).map((request) => request.requestId), ["child", "root-new"]);
+  const guarded = addPendingRequest({ ...ask("policy"), kind: "cost_budget" }, ask("child", "owner"));
+  assert.equal(guarded.requestId, "child");
+  assert.equal(guarded.additionalRequests, undefined);
+  const attention = sessionAttentionStatus({ status: "running", pendingApproval: replaced })!;
+  assert.equal(attention.label, "2 Actions Required");
+  assert.match(attention.description, /2 approvals, 0 questions, 0 authentication requests; 1 belong/);
+});
+
 test("the action list rejects recursive expansion and duplicate identities", () => {
   const first = ask("a", "child");
   first.additionalRequests = [first, { ...ask("b"), additionalRequests: [ask("hidden")] }];
   assert.deepEqual(pendingRequests(first).map((request) => request.requestId), ["a", "b"]);
   assert.ok(pendingRequests(first).every((request) => !request.additionalRequests));
 });
-

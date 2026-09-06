@@ -27,6 +27,7 @@ import type { GitStatus } from "./useGitStatus.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import type { TimelineItem } from "../timeline.js";
 import { AgentsPanel } from "./AgentsPanel.js";
+import { focusSessionRequest } from "./SessionApproval.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 
@@ -395,6 +396,11 @@ export function RightPanel({
             )}
             {state.mode === "subagents" && (
               <AgentsPanel
+                key={`${session.id}:${sessionEventEpoch}`}
+                onOpenPrimaryRequest={(requestId) => {
+                  state.close();
+                  window.requestAnimationFrame(() => focusSessionRequest(session.id, requestId));
+                }}
                 runnerProtocolVersion={runnerProtocolVersion}
                 parentTurnEventIds={parentTurnEventIds}
                 onOpenParentTurn={onOpenParentTurn}

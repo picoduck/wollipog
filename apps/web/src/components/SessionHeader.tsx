@@ -172,7 +172,10 @@ export function SessionHeader({
   );
   const renderNoninteractiveStatuses = (includeBackground = true) => (
     <>
-      <SessionStatusIndicators session={session} disconnected={!runnerOnline} onOpenAttention={onOpenAttention} />
+      <SessionStatusIndicators session={session} disconnected={!runnerOnline} onOpenAttention={onOpenAttention ? () => {
+        closeStatusPopover(false);
+        onOpenAttention();
+      } : undefined} />
       {includeBackground && renderBackgroundWork()}
       <ChangeStatusBadge change={changeStatus ?? null} />
       {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (

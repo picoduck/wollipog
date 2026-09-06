@@ -6274,15 +6274,12 @@ export class SessionsService {
     if (status !== "idle" && !isTerminal(status)) {
       this.db.clearPolicyResumeStatus(sessionId);
     }
-    if (!isTerminal(status) && pendingRequests(session.pendingApproval).some((request) => request.ownerToolUseId)) {
-      this.db.updateSessionStatus(sessionId, "input_required", Date.now());
-      this.hub.sessionChangedById(sessionId);
-      return;
-    }
+    const childAttention = !isTerminal(status) &&
+      pendingRequests(session.pendingApproval).some((request) => request.ownerToolUseId);
     if (isTerminal(status)) {
       this.abortPolicyHookApprovals(session, Date.now(), "provider-session-ended");
     }
-    this.db.updateSessionStatus(sessionId, status, Date.now());
+    this.db.updateSessionStatus(sessionId, childAttention ? "input_required" : status, Date.now());
     // If the session ended while an approval was pending, clear the stale card.
     if (isTerminal(status) && session.pendingApproval) {
       this.db.setPendingApproval(sessionId, null);

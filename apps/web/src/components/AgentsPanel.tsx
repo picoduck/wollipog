@@ -5,7 +5,7 @@ import { formatDuration, formatRecordedRelativeTime } from "../format.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { isCurrentWorker, workerRoster, type WorkerState } from "../worker-roster.js";
+import { isCurrentWorker, workerRoster, type WorkerState, type WorkerMemberMetadata } from "../worker-roster.js";
 import { SubagentsPanel } from "./SubagentsPanel.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { SessionApprovalBanner } from "./SessionApproval.js";
@@ -17,7 +17,9 @@ const STATE_LABELS: Record<WorkerState, string> = {
 };
 const PAGE_SIZE = 50;
 type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof BackgroundWorkPanel>,
-  "runnerProtocolVersion" | "parentTurnEventIds" | "onOpenParentTurn" | "inventoryError" | "onRetryInventory">;
+  "runnerProtocolVersion" | "parentTurnEventIds" | "onOpenParentTurn" | "inventoryError" | "onRetryInventory"> & {
+    onOpenPrimaryRequest?: (requestId: string) => void;
+  };
 
 /** One roster retains each transport's own detail and response boundary. */
 export function AgentsPanel(props: Props) {
@@ -52,26 +54,33 @@ export function AgentsPanel(props: Props) {
   }, [api, session.runId]);
   const { navigate, loadSession } = useStoreActions();
   const projector = useRef(new IncrementalSubagentProjector());
-  const agents = useMemo(() => projector.current.project(items, {
+  const projection = useMemo(() => projector.current.project(items, {
     sessionStatus: session.status, runnerOnline,
     availability: runnerOnline ? "live" : "recorded",
-  }).descriptors, [items, runnerOnline, session.status]);
+  }), [items, runnerOnline, session.status]);
+  const agents = projection.descriptors;
   const rows = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
     const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
-    const metadata = new Map<string, { role?: string; phase?: string; activations?: number }>();
-    for (const member of pod?.members ?? []) metadata.set(member.sessionId, { role: member.role });
+    const metadata = new Map<string, WorkerMemberMetadata>();
+    for (const member of pod?.members ?? []) metadata.set(member.sessionId, { role: member.role, type: "Pod Member" });
     for (const workflow of workflows) for (const node of workflow.nodeStates) {
       if (node.sessionId) metadata.set(node.sessionId, {
-        ...metadata.get(node.sessionId), phase: node.nodeId, activations: node.attemptCount,
+        ...metadata.get(node.sessionId), type: "Workflow Member", phase: node.nodeId, activations: node.attemptCount,
+        ...(node.status === "succeeded" || node.status === "skipped" ? { terminalState: "completed" as const }
+          : node.status === "failed" ? { terminalState: "failed" as const }
+          : node.status === "stopped" ? { terminalState: "stopped" as const } : {}),
+        completedAt: node.completedAt,
       });
     }
     const members = [...new Set([...(run?.sessionIds ?? []), ...metadata.keys()])].flatMap((id) => {
       const member = sessions.get(id);
       return member ? [member] : [];
     });
-    return workerRoster(session, agents, members, (id) => id === session.runnerId ? runnerOnline : runners.get(id)?.status === "online", metadata);
-  }, [session, agents, runs, sessions, runners, pods, workflows, runnerOnline]);
+    const unambiguousAgents = agents.map((agent) => projection.ambiguousIds.has(agent.id)
+      ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
+    return workerRoster(session, unambiguousAgents, members, (id) => id === session.runnerId ? runnerOnline : runners.get(id)?.status === "online", metadata);
+  }, [session, agents, projection.ambiguousIds, runs, sessions, runners, pods, workflows, runnerOnline]);
   const [filter, setFilter] = useState<"active" | "history" | "all">("active");
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -79,10 +88,11 @@ export function AgentsPanel(props: Props) {
   const [requestLimit, setRequestLimit] = useState(PAGE_SIZE);
   const requests = pendingRequests(session.pendingApproval);
   const selectedRequest = requests.find((request) => request.requestId === requestId);
+  const primaryInSession = Boolean(props.onOpenPrimaryRequest && selectedRequest?.requestId === session.pendingApproval?.requestId);
   const requestDetailRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (selectedRequest) requestDetailRef.current?.focus();
-  }, [selectedRequest?.requestId]);
+    if (selectedRequest && !primaryInSession) requestDetailRef.current?.focus();
+  }, [selectedRequest?.requestId, primaryInSession]);
   const selectedKey = requestedId ? `subagent:${requestedId}` : chosen;
   const selected = rows.find((row) => row.id === selectedKey);
   const filtered = rows.filter((row) => filter === "all" || (filter === "active" ? isCurrentWorker(row) : !isCurrentWorker(row)));
@@ -92,7 +102,8 @@ export function AgentsPanel(props: Props) {
     <div className="agents-panel">
       {requests.length > 0 && <section aria-label="Worker Attention" className="agents-attention">
         {requests.slice(0, requestLimit).map((request) => {
-          const owner = agents.find((agent) => agent.id === request.ownerToolUseId);
+          const owner = !projection.ambiguousIds.has(request.ownerToolUseId ?? "")
+            ? agents.find((agent) => agent.id === request.ownerToolUseId) : undefined;
           const attention = sessionAttentionStatus({ status: session.status, pendingApproval: request });
           return <button type="button" className="btn" key={request.requestId} onClick={() => {
             setRequestId(request.requestId);
@@ -104,7 +115,10 @@ export function AgentsPanel(props: Props) {
           </button>;
         })}
         {requests.length > requestLimit && <button type="button" onClick={() => setRequestLimit((value) => value + PAGE_SIZE)}>Show More Requests</button>}
-        {selectedRequest && <div ref={requestDetailRef} tabIndex={-1} role="region" aria-label="Selected Worker Request"><SessionApprovalBanner key={selectedRequest.requestId}
+        {selectedRequest && primaryInSession && <button type="button" className="btn"
+          onClick={() => props.onOpenPrimaryRequest?.(selectedRequest.requestId)}>Open Request in Session</button>}
+        {selectedRequest && !primaryInSession && <div ref={requestDetailRef} tabIndex={-1} role="region" aria-label="Selected Worker Request"
+          data-session-request-id={selectedRequest.requestId} data-session-request-session={session.id}><SessionApprovalBanner key={selectedRequest.requestId}
           session={{ ...session, pendingApproval: selectedRequest }} runnerOnline={runnerOnline}
           onSessionUpdate={loadSession} showKeyHints={false} /></div>}
       </section>}

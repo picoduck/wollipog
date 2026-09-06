@@ -2954,6 +2954,18 @@ test("after dispose, handleEvent is inert (returns null, no events)", () => {
   assert.equal(h.events.length, 0);
 });
 
+test("Claude request capacity preserves existing asks when the denial write fails", () => {
+  const h = makeHarness();
+  (h.driver as any).cb.supportsWorkerAttention = () => true;
+  (h.driver as any).child = { stdin: { write: () => { throw new Error("EPIPE"); } } };
+  const ask = (index: number) => h.feed({ type: "control_request", request_id: String(index),
+    parent_tool_use_id: "owner", request: { subtype: "can_use_tool", tool_name: "Read", input: {} } });
+  for (let index = 0; index < 128; index++) ask(index);
+  assert.doesNotThrow(() => ask(128));
+  assert.equal((h.driver as any).pendingApprovals.size, 128);
+  assert.equal(h.events.filter((event) => event.kind === "permission_request").length, 128);
+});
+
 test("negotiated Claude child completion resolves only its owned requests", () => {
   const h = makeHarness();
   (h.driver as any).cb.supportsWorkerAttention = () => true;

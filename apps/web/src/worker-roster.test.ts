@@ -50,3 +50,13 @@ test("legacy empty evidence has no fabricated workers and unknown ownership is n
   assert.deepEqual(workerRoster(legacy, [], [], () => true), []);
   assert.equal(workerRoster(legacy, [child], [], () => true)[0]!.state, "working");
 });
+
+test("terminal workflow evidence retires idle members without hiding new running work", () => {
+  const member = { ...session, id: "member", status: "idle", pendingApproval: null } as SessionView;
+  const metadata = new Map([["member", { terminalState: "completed" as const, completedAt: 50 }]]);
+  const completed = workerRoster(session, [], [member], () => true, metadata).at(-1)!;
+  assert.equal(completed.state, "completed");
+  assert.equal(completed.completedAt, 50);
+  assert.equal(isCurrentWorker(completed), false);
+  assert.equal(workerRoster(session, [], [{ ...member, status: "running" }], () => true, metadata).at(-1)!.state, "working");
+});
