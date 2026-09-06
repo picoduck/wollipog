@@ -156,6 +156,7 @@ function Fixture() {
   const deferredMeasurementFixture = useMemo(() => new URLSearchParams(window.location.search).get("defer") === "1", []);
   const predecessorRerenderFixture = useMemo(() => new URLSearchParams(window.location.search).get("predecessor-rerender") === "1", []);
   const overflowFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("overflow") === "1", []);
+  const questionHistoryFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("question-history") === "1", []);
   const [panelWidth, setPanelWidth] = useState(0);
   const [composerHeight, setComposerHeight] = useState(0);
   const [noticeMounted, setNoticeMounted] = useState(true);
@@ -216,9 +217,21 @@ function Fixture() {
         text: `Later transcript row ${index + 1}. ${sentence.repeat(4)}`,
       })),
     ] : [];
-    const complete = [...prefix, ...current, ...revealItems];
+    const historicalQuestions: TimelineItem[] = questionHistoryFixtureEnabled ? [0, 1].map((index) => ({
+      kind: "question",
+      id: 301 + index,
+      requestId: `historical-question-${index}`,
+      answered: true,
+      questions: [{
+        id: `destination-${index}`,
+        question: `Choose **destination ${index + 1}** for the release.`,
+        context: "Verify `staging` first.\n\n- Review the [release checklist](https://example.test/checklist).\n- Confirm the selected destination.",
+        options: [],
+      }],
+    })) : [];
+    const complete = [...prefix, ...historicalQuestions, ...current, ...revealItems];
     return currentHistoryLimit == null ? complete : complete.slice(0, currentHistoryLimit);
-  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, overflowFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
+  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
   const followTail = useFollowTail({
     scrollRef: followTailEnabled ? scrollRef : disabledFollowScrollRef,
     contentRevision: `${sessionId}:${currentHistoryPrepend}:${currentHistoryReplacement}:${currentHistoryLimit ?? "all"}:${headStreamTicks}:${tailStreamTicks}`,
@@ -342,7 +355,7 @@ function Fixture() {
           />
         )}
       </section>
-      <nav hidden={overflowFixtureEnabled} style={{ position: "fixed", zIndex: 2, top: 4, right: 4 }}>
+      <nav hidden={overflowFixtureEnabled} style={{ position: "fixed", zIndex: 2, top: questionHistoryFixtureEnabled ? undefined : 4, bottom: questionHistoryFixtureEnabled ? 4 : undefined, right: 4 }}>
         <button type="button" data-testid="close-panel" onClick={() => setPanelWidth(0)}>Close Panel</button>
         <button type="button" data-testid="medium-panel" onClick={() => setPanelWidth(460)}>Medium Panel</button>
         <button type="button" data-testid="wide-panel" onClick={() => setPanelWidth(540)}>Wide Panel</button>
