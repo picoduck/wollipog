@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { pendingRequests, sessionAttentionStatus, type WorkflowInstanceView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatDuration, formatRecordedRelativeTime } from "../format.js";
@@ -90,6 +90,15 @@ export function AgentsPanel(props: Props) {
   const selectedRequest = requests.find((request) => request.requestId === requestId);
   const primaryInSession = Boolean(props.onOpenPrimaryRequest && selectedRequest?.requestId === session.pendingApproval?.requestId);
   const requestDetailRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const attentionRef = useRef<HTMLElement>(null);
+  const requestOwnsFocus = useRef(false);
+  useLayoutEffect(() => {
+    if ((!selectedRequest || primaryInSession) && requestOwnsFocus.current) {
+      requestOwnsFocus.current = false;
+      (attentionRef.current ?? panelRef.current)?.focus();
+    }
+  }, [selectedRequest?.requestId, primaryInSession, requests.length]);
   useEffect(() => {
     if (selectedRequest && !primaryInSession) requestDetailRef.current?.focus();
   }, [selectedRequest?.requestId, primaryInSession]);
@@ -99,8 +108,8 @@ export function AgentsPanel(props: Props) {
   const now = useTimelineClock(rows.length > 0);
   const selectFilter = (value: typeof filter) => { setFilter(value); setLimit(PAGE_SIZE); };
   return (
-    <div className="agents-panel">
-      {requests.length > 0 && <section aria-label="Worker Attention" className="agents-attention">
+    <div className="agents-panel" ref={panelRef} tabIndex={-1} role="region" aria-label="Worker Roster">
+      {requests.length > 0 && <section ref={attentionRef} tabIndex={-1} aria-label="Worker Attention" className="agents-attention">
         {requests.slice(0, requestLimit).map((request) => {
           const owner = !projection.ambiguousIds.has(request.ownerToolUseId ?? "")
             ? agents.find((agent) => agent.id === request.ownerToolUseId) : undefined;
@@ -118,6 +127,10 @@ export function AgentsPanel(props: Props) {
         {selectedRequest && primaryInSession && <button type="button" className="btn"
           onClick={() => props.onOpenPrimaryRequest?.(selectedRequest.requestId)}>Open Request in Session</button>}
         {selectedRequest && !primaryInSession && <div ref={requestDetailRef} tabIndex={-1} role="region" aria-label="Selected Worker Request"
+          onFocusCapture={() => { requestOwnsFocus.current = true; }}
+          onBlurCapture={(event) => {
+            if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) requestOwnsFocus.current = false;
+          }}
           data-session-request-id={selectedRequest.requestId} data-session-request-session={session.id}><SessionApprovalBanner key={selectedRequest.requestId}
           session={{ ...session, pendingApproval: selectedRequest }} runnerOnline={runnerOnline}
           onSessionUpdate={loadSession} showKeyHints={false} /></div>}

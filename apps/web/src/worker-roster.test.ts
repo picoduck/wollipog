@@ -58,5 +58,7 @@ test("terminal workflow evidence retires idle members without hiding new running
   assert.equal(completed.state, "completed");
   assert.equal(completed.completedAt, 50);
   assert.equal(isCurrentWorker(completed), false);
-  assert.equal(workerRoster(session, [], [{ ...member, status: "running" }], () => true, metadata).at(-1)!.state, "working");
+  const restarted = workerRoster(session, [], [{ ...member, status: "running" }], () => true, metadata).at(-1)!;
+  assert.equal(restarted.state, "working");
+  assert.equal(restarted.completedAt, undefined, "stale workflow completion must not freeze a new activation's duration");
 });

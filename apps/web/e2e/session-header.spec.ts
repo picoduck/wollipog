@@ -431,7 +431,7 @@ test("desktop Session actions stay contained with five concurrent status indicat
   await expect(header.locator(
     '.session-header-statuses > [aria-label="Background Work: Waiting on External Job"]',
   )).toBeVisible();
-  await expect(header.getByRole("button", { name: "1 Subagent Active" })).toBeVisible();
+  await expect(header.getByRole("button", { name: "1 Worker Active" })).toBeVisible();
   await expect(header.locator(".session-status-overflow-trigger")).toHaveCount(0);
   await capture(page, "desktop-concurrent");
   const longProjectName = "Alpha Project with a deliberately long name for breadcrumb truncation";
@@ -662,7 +662,7 @@ for (const viewport of [
     await expect(header.locator(
       '.sr-only > [role="status"][aria-label="Background Work: Waiting on External Job"]',
     )).toHaveCount(1);
-    const activeSubagent = header.getByRole("button", { name: "1 Subagent Active" });
+    const activeSubagent = header.getByRole("button", { name: "1 Worker Active" });
     await expect(activeSubagent).toBeVisible();
     const overflowTrigger = header.locator(".session-status-overflow-trigger");
     await expect(overflowTrigger).toBeVisible();
@@ -692,7 +692,7 @@ for (const viewport of [
       const share = element.querySelector('[aria-label="Share"]') as HTMLElement;
       const overflow = element.querySelector('.session-status-overflow-trigger') as HTMLElement;
       const moreActions = element.querySelector('[aria-label="More Actions"]') as HTMLElement;
-      const activeSubagent = element.querySelector('[aria-label="1 Subagent Active"]') as HTMLElement;
+      const activeSubagent = element.querySelector('[aria-label="1 Worker Active"]') as HTMLElement;
       const statusStyle = getComputedStyle(statuses);
       const pageScrollWidth = document.documentElement.scrollWidth;
       statuses.style.display = "none";
@@ -836,7 +836,7 @@ for (const viewport of [
     await expect(statusPopover.getByText("Ready for Review", { exact: true })).toBeVisible();
     await expect(statusPopover.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
     await expect(statusPopover.getByText("Waiting on External Job", { exact: true })).toBeVisible();
-    await expect(statusPopover.getByRole("button", { name: "1 Subagent Active" })).toBeEnabled();
+    await expect(statusPopover.getByRole("button", { name: "1 Worker Active" })).toBeEnabled();
     await expect(statusPopover.getByLabel("All Session Statuses")).toBeFocused();
     const popoverGeometry = await statusPopover.evaluate((element) => {
       const box = element.getBoundingClientRect();

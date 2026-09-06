@@ -1959,7 +1959,8 @@ export class SessionsService {
         });
       }
     }
-    return items.sort((a, b) => a.provenance.requestedAt - b.provenance.requestedAt || a.sessionId.localeCompare(b.sessionId));
+    return items.sort((a, b) => a.provenance.requestedAt - b.provenance.requestedAt ||
+      a.sessionId.localeCompare(b.sessionId) || a.requestId.localeCompare(b.requestId));
   }
 
   reviewFindings(sessionId: string): ServiceResult<ReviewFindingsResponse> {

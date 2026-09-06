@@ -2046,6 +2046,10 @@ export class ClaudeCodeDriver implements Driver {
           if (b?.type !== "tool_result") continue;
           for (const [requestId, owner] of this.pendingAttentionOwners) {
             if (owner.owner !== b.tool_use_id) continue;
+            if (!this.pendingApprovals.has(requestId)) {
+              this.pendingAttentionOwners.delete(requestId);
+              continue;
+            }
             // Completion ends this exact tool's callbacks, not its siblings' requests.
             if (owner.question) {
               this.answerQuestion(requestId, {}, "dismiss");

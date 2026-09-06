@@ -25,6 +25,7 @@ for (const viewport of [
     await expect(page.getByText("The parser tests are ready to run.")).toBeVisible();
     await page.getByRole("button", { name: "Allow", exact: true }).click();
     await expect(page.getByRole("button", { name: "Inspect Parser · Child Approval Required", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Worker Attention", exact: true })).toBeFocused();
     await expect(page.getByRole("button", { name: "Audit Storage · Child Approval Required", exact: true })).toBeVisible();
     await page.getByRole("radio", { name: "History (1)", exact: true }).click();
     await expect(roster.getByText("Review Documentation", { exact: true })).toBeVisible();

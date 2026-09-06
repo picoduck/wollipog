@@ -5097,16 +5097,18 @@ test("approve fails 409 when the runner is offline (online guard)", () => {
   assert.equal(hub.sentToRunner.length, before);
 });
 
-test("child attention resolves by exact identity and preserves unrelated requests", () => {
+test("child attention resolves by exact identity and preserves unrelated requests", (t) => {
+  const requestedAt = Date.now();
+  t.mock.method(Date, "now", () => requestedAt);
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
-  for (const requestId of ["child-a", "child-b"]) svc.onSessionEvent(id, {
+  for (const requestId of ["child-b", "child-a"]) svc.onSessionEvent(id, {
     kind: "permission_request", requestId, ownerToolUseId: requestId + "-tool",
     title: "Allow Tool", options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }],
   });
   assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
   assert.deepEqual(svc.approvalQueue().filter((item) => item.sessionId === id)
-    .map((item) => item.requestId).sort(), ["child-a", "child-b"]);
+    .map((item) => item.requestId), ["child-a", "child-b"]);
   const settlements: string[] = [];
   const reconcile = (svc as any).reconcileWorkflowSessionStatus.bind(svc);
   (svc as any).reconcileWorkflowSessionStatus = (sessionId: string, status: string, now: number) => {

@@ -88,7 +88,9 @@ export function workerRoster(
     const settled = terminalState != null;
     rows.push({
       id: `session:${member.id}`, name: member.title, type: workflow?.type ?? "Run Member",
-      ...metadata.get(member.id),
+      ...(workflow?.role ? { role: workflow.role } : {}),
+      ...(workflow?.phase ? { phase: workflow.phase } : {}),
+      ...(workflow?.activations != null ? { activations: workflow.activations } : {}),
       state: terminalState ?? (!online(member.runnerId) ? "unverified"
         : member.pendingApproval || member.status === "input_required" ? "input_required"
         : member.status === "running" || member.status === "starting" ? "working"

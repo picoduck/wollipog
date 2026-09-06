@@ -2982,6 +2982,19 @@ test("negotiated Claude child completion resolves only its owned requests", () =
   assert.equal(h.events.filter((event) => event.kind === "permission_resolved" && event.requestId === "ask-a").length, 1);
 });
 
+test("buffered Claude child completion after cancellation cannot resolve an already-retired ask", () => {
+  const h = makeHarness();
+  (h.driver as any).cb.supportsWorkerAttention = () => true;
+  (h.driver as any).child = { stdin: { write: () => {} } };
+  (h.driver as any).deps.kill = () => {};
+  h.feed({ type: "control_request", request_id: "ask-a", parent_tool_use_id: "a",
+    request: { subtype: "can_use_tool", tool_name: "Read", input: {} } });
+  h.driver.cancel();
+  h.feed({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "a", content: "Done" }] } });
+  assert.equal(h.events.filter((event) => event.kind === "permission_resolved").length, 0);
+  assert.equal((h.driver as any).pendingAttentionOwners.size, 0);
+});
+
 test("control_request (can_use_tool) -> permission_request with allow/deny options", () => {
   const h = makeHarness();
   // Asks are only meaningful while the process is alive (the child-null guard).
