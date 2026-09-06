@@ -43,7 +43,8 @@ import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
 import { useRightPanelState } from "../components/RightPanel.js";
 import { useIsMobile } from "../components/useIsMobile.js";
-import { Header } from "../App.js";
+import { Header, Shell } from "../App.js";
+import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
@@ -1792,7 +1793,7 @@ createRoot(root).render(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            {SCENARIO === "permission-mode-layout" ? (
+            {FIXTURE_QUERY.get("fullShell") === "1" ? <ThemeProvider><Shell /></ThemeProvider> : SCENARIO === "permission-mode-layout" ? (
               <div className="app">
                 <main className="main">
                   <div className="main-body inbox-main-body">

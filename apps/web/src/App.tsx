@@ -234,7 +234,7 @@ function xtermOwnsKey(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest(".xterm"));
 }
 
-function Shell() {
+export function Shell() {
   const instances = useInstances();
   const reportActiveStatus = instances.reportActiveStatus;
   const activeInstanceKind = instances.activeProfile.kind;
@@ -463,6 +463,9 @@ function Shell() {
         return;
       }
       if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      // Dialogs own Escape before the shell's underlying menus, regardless of
+      // the order their window listeners were mounted.
+      if (document.querySelector('[aria-modal="true"]')) return;
       const backdrops = Array.from(document.querySelectorAll<HTMLElement>(".plus-backdrop, .menu-backdrop"));
       if (backdrops.length) {
         e.preventDefault();
