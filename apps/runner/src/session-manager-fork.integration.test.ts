@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AgentDriverKind, RunnerToControlPlane } from "@wollipog/protocol";
+import type { AgentDefinition, AgentDriverKind, RunnerToControlPlane } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
 import { SessionManager } from "./session-manager.js";
@@ -13,6 +13,99 @@ import { createWorktree } from "./worktree.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
+  test(`${sourceDriver} checkpoint hands exact files to a fresh opposite provider only after Send`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-"));
+    const repo = join(root, "repo");
+    git(root, ["init", "-q", repo]);
+    git(repo, ["config", "user.email", "test@example.com"]);
+    git(repo, ["config", "user.name", "Test"]);
+    writeFileSync(join(repo, "file.txt"), "base");
+    git(repo, ["add", "."]); git(repo, ["commit", "-qm", "base"]);
+    const worktree = await createWorktree(repo, "s_handoff_source", { dataDir: root });
+    writeFileSync(join(worktree.path, "file.txt"), "checkpoint");
+    const tree = await captureWorktreeTree(worktree.path);
+    const baseCommit = git(worktree.path, ["rev-parse", "HEAD"]);
+    writeFileSync(join(worktree.path, "file.txt"), "later source state");
+    const store = new SessionStore(join(root, "sessions"));
+    const source: SessionMeta = {
+      sessionId: "s_handoff_source", agentId: sourceDriver, workspaceId: "workspace", repoPath: repo,
+      worktreePath: worktree.path, driver: sourceDriver, command: "source", args: ["--private-source"],
+      env: { SECRET: "source-private-value" }, context: { kind: "native" }, agentSessionId: "private-provider-id",
+      status: "idle", title: "Source", config: {}, tokensIn: 123, tokensOut: 456, costUsd: 9,
+      preview: null, pendingApproval: null, turnCount: 3, seq: 0, createdAt: 1, updatedAt: 1,
+      forkPoints: { "1": { tree, baseCommit, agentTurnId: "private-turn-id", eventSeq: 3 } },
+    };
+    store.create(source);
+    store.appendEvent(source.sessionId, { kind: "user_message", text: "Keep the checkpoint", final: true });
+    store.appendEvent(source.sessionId, { kind: "agent_message", text: "Kept the checkpoint", final: true });
+    store.appendEvent(source.sessionId, { kind: "conversation_checkpoint", turn: 1 });
+    store.appendEvent(source.sessionId, { kind: "user_message", text: "later excluded", final: true });
+    store.flush(source.sessionId);
+    const before = JSON.stringify(store.readMeta(source.sessionId));
+    const destination: AgentDefinition = {
+      id: "destination", name: "Destination", command: "destination", args: [], env: { OWN_AUTH: "independent" },
+      driver: sourceDriver === "claude-code" ? "codex-app-server" : "claude-code", authStatus: "authenticated", available: true,
+      capabilities: { models: [{ id: "test-model" }], effortLevels: ["high"], permissionModes: ["default"], slashCommands: [], supportsImages: true, supportsApprovals: true },
+    };
+    let launches = 0;
+    let prompts = 0;
+    let launchedOptions: DriverOptions | undefined;
+    let establishedId: string | null = null;
+    const factory = (_driver: AgentDriverKind, options: DriverOptions): Driver => {
+      launches++; launchedOptions = options;
+      return {
+        initialize: async () => {}, newSession: async () => { establishedId = "destination-fresh-id"; return establishedId; },
+        agentSessionId: () => establishedId, prompt: async () => { prompts++; return "end_turn"; },
+        setConfig: () => {}, cancel: () => {}, resolvePermission: () => false, dispose: () => {},
+      };
+    };
+    const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory, root);
+    try {
+      const request = { agent: destination, config: { model: "test-model", effort: "high", permissionMode: "default" } };
+      const creating = manager.forkConversation(source.sessionId, "s_handoff_child", 1, "Handoff", false, request);
+      const duplicate = await manager.forkConversation(source.sessionId, "s_duplicate", 1, "Duplicate", false, request);
+      assert.equal(duplicate.ok, false); assert.match(duplicate.error!, /already in progress/);
+      const result = await creating;
+      assert.equal(result.ok, true, result.error);
+      assert.equal(launches, 0); assert.equal(prompts, 0);
+      const child = store.readMeta("s_handoff_child")!;
+      assert.equal(child.driver, destination.driver); assert.equal(child.agentSessionId, null);
+      assert.equal(child.turnCount, 0); assert.deepEqual(child.env, {}); assert.deepEqual(child.args, []);
+      assert.equal(child.tokensIn, 0); assert.equal(child.costUsd, 0);
+      assert.equal(readFileSync(join(child.worktreePath!, "file.txt"), "utf8"), "checkpoint");
+      assert.equal(git(child.worktreePath!, ["rev-parse", "HEAD"]), baseCommit);
+      assert.equal(readFileSync(join(worktree.path, "file.txt"), "utf8"), "later source state");
+      assert.equal(JSON.stringify(store.readMeta(source.sessionId)), before);
+      assert.match(result.handoffDraft!.text, /Keep the checkpoint/);
+      assert.doesNotMatch(result.handoffDraft!.text, /later excluded|private-provider-id|source-private-value/);
+      assert.equal(result.events?.length, 1);
+      const boundary = result.events![0]!.payload;
+      assert.equal(boundary.kind, "conversation_forked");
+      if (boundary.kind === "conversation_forked") assert.deepEqual([boundary.sourceSessionId, boundary.turn, boundary.handoff?.destinationAgent], [source.sessionId, 1, destination.id]);
+      const unauthenticated = await manager.forkConversation(source.sessionId, "s_no_auth", 1, "No Auth", false,
+        { ...request, agent: { ...destination, authStatus: "unauthenticated" } });
+      assert.equal(unauthenticated.ok, false); assert.match(unauthenticated.error!, /authenticate/); assert.equal(store.has("s_no_auth"), false);
+      store.patchMeta(source.sessionId, { status: "queued" });
+      const queued = await manager.forkConversation(source.sessionId, "s_busy", 1, "Busy", false, request);
+      assert.equal(queued.ok, false); assert.match(queued.error!, /busy|queued/);
+      store.patchMeta(source.sessionId, { status: "idle" });
+      const cancelled = manager.forkConversation(source.sessionId, "s_cancelled_handoff", 1, "Cancelled", false, request);
+      await manager.delete("s_cancelled_handoff");
+      const cancelledResult = await cancelled;
+      assert.equal(cancelledResult.ok, false); assert.match(cancelledResult.error!, /cancelled/);
+      assert.equal(store.has("s_cancelled_handoff"), false);
+      assert.doesNotMatch(git(repo, ["worktree", "list", "--porcelain"]), /s_cancelled_handoff/);
+      assert.equal(launches, 0, "rejected and cancelled handoffs cannot initialize providers");
+      manager.prompt(child.sessionId, result.handoffDraft!.text);
+      for (let attempt = 0; attempt < 200 && !prompts; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(prompts, 1); assert.equal(launches, 1); assert.equal(launchedOptions?.resumeId, undefined);
+      assert.equal(store.readMeta(child.sessionId)?.handoffPending, undefined);
+      await manager.delete(child.sessionId);
+    } finally { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
+  });
 }
 
 test("provider fork preserves exact post-turn files, commit base, and target cwd", async () => {

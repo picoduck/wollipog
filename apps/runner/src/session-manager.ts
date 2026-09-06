@@ -13,6 +13,7 @@
  * the same session at once.
  */
 
+import { buildConversationHandoff, handoffDestinationError, type ConversationHandoffDraft } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
   AgentContext,
@@ -5456,7 +5457,7 @@ export class SessionManager {
       }
     }
     const established = meta.agentSessionId != null;
-    if (!established && meta.driver === "claude-code" && meta.seq > 0) {
+    if (!established && meta.driver === "claude-code" && meta.seq > 0 && !meta.handoffPending) {
       this.emitEvent(sessionId, {
         kind: "error",
         message: "this Claude history has no persisted provider conversation id and cannot be continued without risking a replacement conversation",
@@ -5465,7 +5466,7 @@ export class SessionManager {
       durable?.failed("Claude history has no resumable provider conversation id", "INVALID_COMMAND");
       return;
     }
-    if (!established && meta.driver === "codex-app-server" && meta.seq > 0) {
+    if (!established && meta.driver === "codex-app-server" && meta.seq > 0 && !meta.handoffPending) {
       this.emitEvent(sessionId, {
         kind: "error",
         message: "this app-server history has no persisted Codex thread id and cannot be continued without risking a replacement conversation",
@@ -6820,11 +6821,18 @@ export class SessionManager {
     turn: number,
     title: string,
     deferHistory = false,
-  ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]> }> {
+    handoff?: { agent: AgentDefinition; config: SessionConfig },
+  ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]>; handoffDraft?: ConversationHandoffDraft }> {
     const source = this.store.readMeta(sourceSessionId);
     if (!source) return { ok: false, error: "source session not found on this box" };
     const supportsFork = providerSupportsConversationFork(source.driver, source.capabilities);
-    if (!supportsFork) return { ok: false, error: "this provider session does not support conversation fork" };
+    if (!supportsFork && !handoff) return { ok: false, error: "this provider session does not support conversation fork" };
+    if (handoff) {
+      const error = handoffDestinationError(handoff.agent, source.driver, handoff.config);
+      if (error) return { ok: false, error };
+      if (JSON.stringify(handoff.agent.context ?? { kind: "native" }) !== JSON.stringify(source.context) ||
+          source.executionTarget && source.executionTarget.adapter !== "host") return { ok: false, error: "handoff requires the same host execution context" };
+    }
     if (!source.worktreePath) return { ok: false, error: "conversation fork requires a worktree session" };
     if (this.hasCheckpointRefCleanupForSession(targetSessionId)) {
       try {
@@ -6847,10 +6855,11 @@ export class SessionManager {
     } else if (this.attributedWorktrees(source).length !== 1) {
       return { ok: false, error: `turn ${turn} predates worktree identity and cannot be forked after a worktree switch` };
     }
-    if (source.driver === "claude-code" && turn !== source.turnCount) {
+    if (!handoff && source.driver === "claude-code" && turn !== source.turnCount) {
       return { ok: false, error: "Claude CLI can only fork its current transcript at the matching turn checkpoint" };
     }
     const live = this.active.get(sourceSessionId);
+    if (handoff && (["queued", "starting", "running", "input_required"].includes(source.status) || source.pendingApproval || this.preLaunchQueues.get(sourceSessionId)?.length)) return { ok: false, error: "the source session is busy or has queued input" };
     if (live && (live.running || live.queue.length)) return { ok: false, error: "a turn is running or queued — wait before forking" };
     if (this.loggingOut.has(sourceSessionId)) return { ok: false, error: "agent sign-out is in progress" };
     if (this.deleting.has(sourceSessionId)) return { ok: false, error: "session deletion is in progress" };
@@ -6892,6 +6901,41 @@ export class SessionManager {
     let forkedThreadId: string | null = null;
     let providerStateJournaled = false;
     try {
+      if (handoff) {
+        const sourceEvents = this.store.readEvents(sourceSessionId);
+        const cutoff = point.eventSeq ?? sourceEvents.find((event) => event.payload.kind === "conversation_checkpoint" && event.payload.turn === turn)?.seq;
+        if (!cutoff) throw new Error("checkpoint has no durable history boundary");
+        const handoffDraft = buildConversationHandoff(sourceEvents, cutoff, handoff.agent, handoff.config, {
+          privateValues: [source.agentSessionId, source.repoPath, source.worktreePath, ...Object.values(source.env),
+            ...Object.values(source.forkPoints ?? {}).map((checkpoint) => checkpoint.agentTurnId)].filter((value): value is string => typeof value === "string" && value.length > 0),
+        });
+        const worktreeOptions = { context: source.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
+        if (!point.baseCommit) throw new Error("checkpoint has no historical commit base");
+        worktree = await createWorktreeFromTree(source.repoPath, targetSessionId, point.tree, point.baseCommit, worktreeOptions);
+        if (this.deleting.has(targetSessionId) || this.deleted.has(targetSessionId) || this.store.isDeleted(targetSessionId) || !this.store.has(sourceSessionId)) throw new Error("handoff was cancelled");
+        const ownership = this.checkpointRefOwnership.claim({ sessionId: targetSessionId, repoPath: source.repoPath,
+          context: source.context, ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}) });
+        await this.reclaimStaleCheckpointRefOwnership(ownership);
+        if (this.deleted.has(targetSessionId) || this.store.isDeleted(targetSessionId)) throw new Error("handoff was cancelled");
+        const now = Date.now();
+        const target: SessionMeta = {
+          sessionId: targetSessionId, agentId: handoff.agent.id, agentVersion: handoff.agent.version,
+          capabilities: handoff.agent.capabilities, workspaceId: source.workspaceId, repoPath: source.repoPath,
+          worktreePath: worktree.path, worktreeBranch: worktree.branch,
+          driver: handoff.agent.driver!, command: handoff.agent.command, args: [...handoff.agent.args],
+          env: {}, context: source.context, agentSessionId: null, handoffPending: true,
+          status: "idle", title, titleSource: "generated", config: { ...handoff.config },
+          tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+          turnCount: 0, seq: 0, createdAt: now, updatedAt: now,
+          providerStateVersion: source.context.kind === "wsl" ? 3 : 2,
+          ...(this.runnerOwnerHash ? { checkpointRefVersion: 2 as const } : {}),
+        };
+        this.store.create(target);
+        this.store.appendEvent(targetSessionId, { kind: "conversation_forked", sourceSessionId, turn,
+          handoff: { sourceAgent: source.agentId ?? source.driver, destinationAgent: handoff.agent.id, disclosure: handoffDraft.disclosure } }, now);
+        this.store.flush(targetSessionId);
+        return { ok: true, snapshot: this.snapshot(this.store.readMeta(targetSessionId)!), events: this.store.readEvents(targetSessionId), handoffDraft };
+      }
       if (this.executionIsolation.mode === "bwrap" &&
           source.providerStateVersion !== (source.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(source);
@@ -7949,7 +7993,7 @@ export class SessionManager {
   private captureAgentSessionId(sessionId: string, client: Driver): void {
     const aid = client.agentSessionId();
     if (aid && this.store.readMeta(sessionId)?.agentSessionId !== aid) {
-      this.store.patchMeta(sessionId, { agentSessionId: aid });
+      this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined });
     }
   }
 

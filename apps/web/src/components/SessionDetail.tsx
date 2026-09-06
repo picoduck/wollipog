@@ -50,6 +50,7 @@ import {
   SessionStatusIndicators,
 } from "./common.js";
 import { EventTimeline, type TimelineRevealRequest } from "./EventTimeline.js";
+import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
@@ -634,6 +635,7 @@ function SessionDetailLoaded({
   const [text, setText] = useState("");
   const draftDirty = useRef(false);
   const [busy, setBusy] = useState(false);
+  const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
   const [restartPending, setRestartPending] = useState(false);
   const [steeringBusy, setSteeringBusy] = useState(false);
   const [queuedEditBusy, setQueuedEditBusy] = useState(false);
@@ -4039,6 +4041,10 @@ function SessionDetailLoaded({
                           : undefined
                       }
                       onFork={mode === "expanded" ? onFork : undefined}
+                      handoff={mode === "expanded" ? {
+                        open: setHandoffTurn,
+                        reason: !runnerOnline ? "The runner is offline." : !runnerSupportsProtocol(runner?.protocolVersion, "conversationHandoff") ? "Update the runner to support checkpoint handoffs." : !session.worktreePath ? "A worktree is required." : busy || forkInProgress || session.queued?.length || ["running", "starting", "queued", "input_required"].includes(session.status) ? "The source session is busy." : undefined,
+                      } : undefined}
                       onEditAndResend={mode === "expanded" && canPrompt ? openResendAction : undefined}
                       onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
                       editInForkTargets={mode === "expanded" ? editInForkTargets : undefined}
@@ -4689,6 +4695,23 @@ function SessionDetailLoaded({
           )}
         </Modal>
       )}
+      {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver} turn={handoffTurn}
+        onClose={() => setHandoffTurn(null)} onCreate={async (agentId, config) => {
+          const release = acquireSessionFork(sessionId);
+          if (!release) throw new Error("A conversation fork or handoff is already in progress.");
+          let releaseOnFinish = true;
+          try {
+            const child = await api.handoff(sessionId, handoffTurn, agentId, config);
+            if (!child.handoffDraft) throw new Error("The runner returned no handoff draft.");
+            stageComposerDraftHandoff(child.id, child.handoffDraft.text, child.handoffDraft.images, instanceScope);
+            await saveComposerDraft(child.id, child.handoffDraft.text, child.handoffDraft.images, instanceScope);
+            setHandoffTurn(null); navigate({ name: "session", id: child.id });
+          } catch (cause) {
+            const ambiguous = ambiguousForkError(cause);
+            if (ambiguous) { releaseOnFinish = false; throw ambiguous; }
+            throw cause;
+          } finally { if (releaseOnFinish) release(); }
+        }} />}
       {mode === "expanded" && messageAction && (
         <MessageActionDialog
           key={`${messageAction.mode}-${messageAction.item.id}`}

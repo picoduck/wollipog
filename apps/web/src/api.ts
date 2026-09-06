@@ -724,6 +724,11 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify({ turn }),
     }),
 
+  handoff: (id: string, turn: number, agentId: string, config: SessionConfig) =>
+    req<SessionView & { handoffDraft: import("@wollipog/protocol").ConversationHandoffDraft }>(`/api/sessions/${id}/fork`, {
+      method: "POST", body: JSON.stringify({ turn, handoff: { agentId, config } }),
+    }),
+
   search: (q: string) =>
     req<{ results: Array<{
       sessionId: string;
