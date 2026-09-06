@@ -11,7 +11,7 @@ Thank you for helping improve Wollipog.
 
 ## Development Setup
 
-Wollipog requires Node.js 22.13 or newer (24 recommended), pnpm, and Git. Rust and the platform C toolchain are required for desktop work.
+Wollipog requires Node.js 22.13+ within 22.x, or 23.4+ (24 recommended; 23.0–23.3 are unsupported), pnpm, and Git. Rust and the platform C toolchain are required for desktop work.
 
 ```bash
 pnpm install --frozen-lockfile
