@@ -354,6 +354,7 @@ test("runtime authentication recovery stays silent until the shared probe settle
   const probe = deferred<{ status: "authenticated"; identityId: string }>();
   let h!: ReturnType<typeof harness>;
   let probes = 0;
+  let turns = 0;
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
     revalidate: async () => ++probes === 1
@@ -364,7 +365,7 @@ test("runtime authentication recovery stays silent until the shared probe settle
   };
   h = harness({ driver: "claude-code", command: "claude" }, Promise.resolve(), Promise.resolve(),
     () => {}, undefined, undefined, 4, async () => {
-      h.callbacks().onAuthenticationFailure?.();
+      if (++turns === 1) h.callbacks().onAuthenticationFailure?.();
     }, controller);
   try {
     h.manager.prompt("resume-session", "possibly delivered");
@@ -383,11 +384,84 @@ test("runtime authentication recovery stays silent until the shared probe settle
     assert.equal(h.store.readEvents("resume-session").some((event) =>
       event.payload.kind === "permission_request" || event.payload.kind === "permission_resolved"), false);
     assert.equal(h.sent.some((message) => message.type === "session_status" && message.status === "input_required"), false);
+    assert.equal(h.manager.prompt("resume-session", "retry after recovery"), true);
+    for (let i = 0; i < 5; i += 1) await tick();
+    assert.deepEqual(h.prompts, ["possibly delivered", "retry after recovery"]);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
   }
 });
+
+for (const state of ["automatic", "manual", "local-card", "shared-card"] as const) {
+  test(`blocked prompt guidance is actionable during ${state} recovery`, async () => {
+    const probe = deferred<{ status: "unauthenticated" }>();
+    const scope = { id: "scope-a", provider: "claude" as const, canStartLogin: false, configuredCredential: false };
+    const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, {
+      describe: () => scope,
+      revalidate: async () => probe.promise,
+      startLogin: async () => "failed",
+      cancel: () => false,
+    });
+    const failures: Array<[string, string | undefined]> = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: `blocked-${state}`,
+      queued: () => assert.fail("blocked work must not be queued"),
+      started: () => assert.fail("blocked work must not be started"),
+      completed: () => assert.fail("blocked work must not be completed"),
+      uncertain: () => assert.fail("blocked work has known non-delivery"),
+      failed: (message, code) => failures.push([message, code]),
+    };
+    try {
+      const manager = h.manager as any;
+      if (state === "shared-card") {
+        h.store.create(stored(h.root, { sessionId: "private-peer", title: "Private peer title" }));
+        manager.parkProviderAuthentication(h.store.readMeta("private-peer"), scope, "turn", "uncertain");
+      }
+      manager.parkProviderAuthentication(h.store.readMeta("resume-session"), scope, "turn", "uncertain", false,
+        state === "automatic" || state === "manual");
+      if (state === "automatic") manager.revalidateProviderAuthenticationSilently(scope.id);
+      if (state === "manual") manager.providerAuthOperations.add(scope.id);
+      const approvalsBefore = h.store.listSessions().filter((meta) => meta.pendingApproval).length;
+      const attentionBefore = h.sent.filter((message) => message.type === "session_status" && message.status === "input_required").length;
+      assert.equal(h.manager.prompt("resume-session", "new blocked prompt", [], undefined, undefined, lifecycle), false);
+      assert.deepEqual(h.prompts, []);
+      assert.equal(failures.length, 1);
+      assert.equal(failures[0]![1], "PROVIDER_AUTHENTICATION_REQUIRED");
+      const stderr = h.store.readEvents("resume-session").map((event) => event.payload)
+        .filter((payload) => payload.kind === "stderr").at(-1);
+      assert.ok(stderr?.kind === "stderr");
+      assert.equal(failures[0]![0], stderr.text, "durable receipt carries the same actionable guidance");
+      assert.match(stderr.text, /This prompt was not submitted/);
+      assert.match(stderr.text, /retry this prompt/i);
+      if (state === "automatic") {
+        assert.match(stderr.text, /checked automatically/);
+        assert.doesNotMatch(stderr.text, /Recheck Authentication|Inbox/);
+      } else if (state === "manual") {
+        assert.match(stderr.text, /recovery is in progress/);
+        assert.doesNotMatch(stderr.text, /Recheck Authentication|Inbox/);
+      } else if (state === "local-card") {
+        assert.match(stderr.text, /this session's Authentication Required card/);
+        assert.match(stderr.text, /Recheck Authentication/);
+      } else {
+        assert.match(stderr.text, /In Inbox/);
+        assert.match(stderr.text, /ask the runner owner/);
+        assert.doesNotMatch(stderr.text, /private-peer|Private peer title|scope-a/);
+      }
+      assert.equal(h.store.listSessions().filter((meta) => meta.pendingApproval).length, approvalsBefore);
+      if (state !== "local-card") {
+        assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+        assert.equal(h.sent.filter((message) => message.type === "session_status" && message.status === "input_required").length,
+          attentionBefore, "rejection cannot introduce another attention notification");
+      }
+    } finally {
+      probe.resolve({ status: "unauthenticated" });
+      h.manager.shutdownAll();
+      await tick();
+      h.cleanup();
+    }
+  });
+}
 
 test("silent authentication recovery waits for initialization to retain the unsubmitted prompt", async () => {
   const initialization = deferred<void>();
@@ -564,6 +638,13 @@ for (const outcome of ["authenticated", "unauthenticated", "unknown", "wrong-acc
       assert.equal(h.sent.filter((message) => message.type === "session_status" && message.status === "input_required").length,
         outcome === "authenticated" ? 0 : 1, "only the owner can trigger an authentication push");
       if (outcome === "unauthenticated") {
+        const peer = h.store.listSessions().find((meta) => meta.sessionId !== cards[0]!.sessionId)!;
+        assert.equal(h.manager.prompt(peer.sessionId, "blocked after failed probe"), false);
+        const guidance = h.store.readEvents(peer.sessionId).map((event) => event.payload)
+          .filter((payload) => payload.kind === "stderr").at(-1);
+        assert.ok(guidance?.kind === "stderr");
+        assert.match(guidance.text, /In Inbox/);
+        assert.doesNotMatch(guidance.text, /checked automatically/);
         recovered = true;
         h.manager.resolvePermission(cards[0]!.sessionId, cards[0]!.pendingApproval!.requestId, "auth:revalidate");
         for (let i = 0; i < 5; i += 1) await tick();
