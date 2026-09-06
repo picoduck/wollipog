@@ -23,7 +23,11 @@ choose or overwrite a parent. A nullable parent reference is persisted on the ch
 session views; removing a parent preserves the child's history and clears the reference.
 
 Agent-created children receive finite guardrails before their initial prompt can execute.
-An unbounded parent defaults each child to $5 and 100 tool calls. A bounded parent divides its
+An unbounded parent defaults each child to the parent Project's human-managed child allowances,
+or $5 and 100 tool calls when no Project override exists. Project settings and the human-only
+`PATCH /api/projects/:id` surface accept `childSessionDefaults` with a positive finite
+`costBudgetUsd` and a positive integer `maxToolCalls`; null restores the installation fallback.
+The parent's Project supplies these defaults even when the child is filed elsewhere. A bounded parent divides its
 remaining, unreserved allowance across its remaining spawn slots; explicit child limits can narrow
 that allocation. The default lifetime spawn cap is four, configurable at session creation with
 `config.maxChildSessions` from zero through 64. Reservations survive deletion of child history.

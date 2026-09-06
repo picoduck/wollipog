@@ -136,6 +136,7 @@ import {
   localPairingUrl,
 } from "./local-device-credential.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
+import { childSessionDefaultsError } from "./child-session-guardrails.js";
 import {
   decideScopedBoxLifecycle,
   parseBoxLifecycleForce,
@@ -1677,15 +1678,23 @@ app.patch("/api/projects/:id", async (req, reply) => {
   if (!principal) return reply.code(403).send({ error: "human identity is required" });
   if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
   const body = (req.body ?? {}) as UpdateProjectRequest;
-  if (body.name === undefined && body.hidden === undefined) {
-    return reply.code(400).send({ error: "name or hidden is required" });
+  if (body.name === undefined && body.hidden === undefined && body.childSessionDefaults === undefined) {
+    return reply.code(400).send({ error: "name, hidden, or childSessionDefaults is required" });
   }
   const name = body.name === undefined ? undefined : projectName(body.name);
   if (body.name !== undefined && !name) return reply.code(400).send({ error: "name must be 1-120 characters" });
   if (body.hidden !== undefined && typeof body.hidden !== "boolean") {
     return reply.code(400).send({ error: "hidden must be a boolean" });
   }
-  db.updateProject(id, { ...(name ? { name } : {}), ...(body.hidden !== undefined ? { hidden: body.hidden } : {}) });
+  if (body.childSessionDefaults !== undefined) {
+    const error = childSessionDefaultsError(body.childSessionDefaults);
+    if (error) return reply.code(400).send({ error });
+  }
+  db.updateProject(id, {
+    ...(name ? { name } : {}),
+    ...(body.hidden !== undefined ? { hidden: body.hidden } : {}),
+    ...(body.childSessionDefaults !== undefined ? { childSessionDefaults: body.childSessionDefaults } : {}),
+  });
   const project = db.getProject(id)!;
   hub.projectChanged(project);
   return { project: db.getProjectForPrincipal(principal, id)! };
