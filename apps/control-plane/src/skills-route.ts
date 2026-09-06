@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { registerSkillGitRoutes } from "./skill-git-route.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   SKILL_MAX_TOTAL_BYTES,
@@ -316,6 +317,7 @@ function parseNote(value: unknown): string | null | undefined {
 }
 
 export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps): void {
+  registerSkillGitRoutes(app, deps);
   const { db, hub, pushSkillsSync } = deps;
 
   /** Re-sync every machine whose desired set may have changed. Runner-scoped assignment

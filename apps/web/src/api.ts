@@ -467,6 +467,12 @@ export function createApiClient(transport: ApiTransport) {
    * dashboard. */
   listSkills: () => req<SkillListPayload>("/api/skills"),
 
+  previewGitSkills: (source: import("./skills.js").SkillGitSource) =>
+    req<import("./skills.js").SkillGitPreview>("/api/skill-git/preview", { method: "POST", body: JSON.stringify(source) }),
+  discardGitSkillPreview: (id: string) => req<void>(`/api/skill-git/preview/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  importGitSkill: (body: { previewId: string; path: string; acceptUpdate: boolean }) =>
+    req<SkillDetailPayload>("/api/skill-git/import", { method: "POST", body: JSON.stringify(body) }),
+
   createSkill: (body: { name: string; description?: string; groupId?: string; files: SkillFile[]; note?: string }) =>
     req<SkillDetailPayload>("/api/skills", { method: "POST", body: JSON.stringify(body) }),
 

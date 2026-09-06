@@ -1865,6 +1865,11 @@ CREATE TABLE IF NOT EXISTS skill_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id, created_at DESC, id);
 
+CREATE TABLE IF NOT EXISTS skill_git_provenance (
+  version_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS skill_assignments (
   id             TEXT PRIMARY KEY,
   skill_id       TEXT NOT NULL,
@@ -2680,6 +2685,7 @@ export interface SkillView {
   description: string | null;
   groupId: string | null;
   source: string;
+  gitSource?: SkillVersionView["gitSource"];
   latestVersion: SkillVersionSummary | null;
   assignmentCount: number;
   createdAt: number;
@@ -2692,6 +2698,7 @@ export interface SkillVersionView extends SkillVersionSummary {
   manifest: string;
   files: SkillFile[];
   note: string | null;
+  gitSource?: { url: string; ref: string; subdirectory: string; path: string; commit: string };
 }
 
 export interface SkillGroupView {
@@ -5392,6 +5399,10 @@ export class ControlPlaneDb {
   /* --------------------------- Managed agent skills --------------------------- */
 
   private skillView(row: SkillRow): SkillView {
+    const gitSource = this.stmt(`SELECT p.source FROM skill_git_provenance p
+      JOIN skill_versions v ON v.id=p.version_id WHERE v.skill_id=?
+      ORDER BY (v.id=?) DESC, v.created_at DESC, v.id DESC LIMIT 1`)
+      .get(row.id, row.latest_version_id) as { source: string } | undefined;
     const latest = row.latest_version_id
       ? (this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE id=?")
         .get(row.latest_version_id) as { id: string; digest: string; created_at: number } | undefined)
@@ -5404,6 +5415,7 @@ export class ControlPlaneDb {
       description: row.description,
       groupId: row.group_id,
       source: row.source,
+      ...(gitSource ? { gitSource: JSON.parse(gitSource.source) as NonNullable<SkillVersionView["gitSource"]> } : {}),
       latestVersion: latest
         ? { id: latest.id, digest: latest.digest, createdAt: latest.created_at }
         : null,
@@ -5414,6 +5426,8 @@ export class ControlPlaneDb {
   }
 
   private skillVersionView(row: SkillVersionRow): SkillVersionView {
+    const provenance = this.stmt("SELECT source FROM skill_git_provenance WHERE version_id=?")
+      .get(row.id) as { source: string } | undefined;
     return {
       id: row.id,
       skillId: row.skill_id,
@@ -5421,6 +5435,7 @@ export class ControlPlaneDb {
       manifest: row.manifest,
       files: parseJson<SkillFile[]>(row.files) ?? [],
       note: row.note,
+      ...(provenance ? { gitSource: JSON.parse(provenance.source) as NonNullable<SkillVersionView["gitSource"]> } : {}),
       createdAt: row.created_at,
     };
   }
@@ -5576,8 +5591,37 @@ export class ControlPlaneDb {
     return row ? this.skillVersionView(row) : null;
   }
 
+  /** Snapshot acceptance and provenance commit together; never deploy on preview. */
+  importGitSkill(input: {
+    name: string; description: string | null; files: SkillFile[]; manifest: string; digest: string;
+    source: NonNullable<SkillVersionView["gitSource"]>; scope: ResourceScope;
+    expectedVersionId: string | null;
+  }): SkillView {
+    return this.atomic(() => {
+      const current = this.getSkillByName(input.name);
+      if ((current?.latestVersion?.id ?? null) !== input.expectedVersionId) {
+        throw new Error("The library changed after preview. Preview the import again.");
+      }
+      if (current?.latestVersion?.digest === input.digest) {
+        // An identical local version can acquire provenance without duplicating its content.
+        // Existing provenance is immutable, including when another remote has identical bytes.
+        this.stmt("INSERT OR IGNORE INTO skill_git_provenance (version_id, source) VALUES (?, ?)")
+          .run(current.latestVersion.id, JSON.stringify(input.source));
+        this.stmt("UPDATE skills SET source='git' WHERE id=?").run(current.id);
+        return this.getSkill(current.id)!;
+      }
+      const skill = current ?? this.createSkill(input);
+      const version = current ? this.addSkillVersion(current.id, input)! : this.getSkillVersion(skill.latestVersion!.id)!;
+      this.stmt("INSERT INTO skill_git_provenance (version_id, source) VALUES (?, ?)")
+        .run(version.id, JSON.stringify(input.source));
+      this.stmt("UPDATE skills SET source='git' WHERE id=?").run(skill.id);
+      return this.getSkill(skill.id)!;
+    });
+  }
+
   deleteSkill(skillId: string): boolean {
     return this.atomic(() => {
+      this.stmt("DELETE FROM skill_git_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
       this.stmt("DELETE FROM skill_assignments WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_versions WHERE skill_id=?").run(skillId);

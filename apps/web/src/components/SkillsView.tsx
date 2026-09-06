@@ -9,6 +9,7 @@ import { Empty, Modal, Skeleton } from "./common.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SkillsIcon } from "./Icons.js";
 import { Markdown } from "./Markdown.js";
+import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -271,7 +272,7 @@ export function SkillsView() {
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | null>(null);
+  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | "git-import" | "git-update" | null>(null);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
   const listGeneration = useRef(0);
@@ -417,6 +418,7 @@ export function SkillsView() {
   };
 
   const latest = detail?.latestVersion ?? null;
+  const gitSource = detail?.gitSource ?? latest?.gitSource;
   const skillMd = latest?.files?.find((file) => file.path === "SKILL.md" && file.encoding === "utf8");
 
   return (
@@ -426,7 +428,10 @@ export function SkillsView() {
           <h2>Agent Skills</h2>
           <p>Author a skill once, then assign it to machines and agents. Wollipog deploys the latest version and reports each machine's state.</p>
         </div>
-        <button className="btn primary" type="button" onClick={() => setDialog("new-skill")}>New Skill</button>
+        <div className="skills-section-heading">
+          <button className="btn" type="button" onClick={() => setDialog("git-import")}>Import from Git</button>
+          <button className="btn primary" type="button" onClick={() => setDialog("new-skill")}>New Skill</button>
+        </div>
       </div>
       {error && <div className="form-error" role="alert">{error}</div>}
 
@@ -503,6 +508,13 @@ export function SkillsView() {
                   </div>
                 </section>
               )}
+
+              {gitSource && <section className="skills-section">
+                <h4>Git Source</h4>
+                <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
+                <p className="skills-hint">Commit {gitSource.commit}</p>
+                <button className="btn sm" type="button" onClick={() => setDialog("git-update")}>Check for Updates</button>
+              </section>}
 
               <section className="skills-section" aria-label="Assignments">
                 <div className="skills-section-heading">
@@ -682,6 +694,13 @@ export function SkillsView() {
       {dialog === "new-skill" && (
         <NewSkillDialog busy={busy} onClose={() => setDialog(null)} onCreate={createSkill} />
       )}
+      {(dialog === "git-import" || dialog === "git-update") && <SkillGitImportDialog
+        source={dialog === "git-update" && gitSource ? { ...gitSource, subdirectory: gitSource.path } : undefined}
+        onClose={() => setDialog(null)} onImported={async () => {
+          await refreshList();
+          if (selectedId) await refreshDetail(selectedId);
+          await refreshMachines();
+        }} />}
       {dialog === "add-assignment" && detail && (
         <AddAssignmentDialog
           skill={detail}
