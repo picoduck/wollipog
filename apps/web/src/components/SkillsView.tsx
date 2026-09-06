@@ -509,7 +509,7 @@ export function SkillsView() {
                 </section>
               )}
 
-              {gitSource && <section className="skills-section">
+              {gitSource && <section className="skills-section skills-git-source">
                 <h4>Git Source</h4>
                 <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
                 <p className="skills-hint">Commit {gitSource.commit}</p>

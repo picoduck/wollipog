@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 test.use({ video: "on" });
-test("Check for Updates preserves the source and previews the recorded skill directory", async ({ page }) => {
+test("Check for Updates preserves the source and previews the recorded skill directory", async ({ page }, info) => {
+  await page.setViewportSize({ width: 320, height: 900 });
   await page.route("**/api/skill-git/preview", async (route) => {
     expect(route.request().postDataJSON()).toEqual({ url: "https://github.com/example/skills.git", ref: "stable", subdirectory: "skills/code-review" });
     await route.fulfill({ json: { previewId: "updates", candidates: [] } });
@@ -9,6 +10,8 @@ test("Check for Updates preserves the source and previews the recorded skill dir
   await page.goto("/skills-removals-e2e.html");
   await page.getByRole("button", { name: /code-review/i }).click();
   await expect(page.getByRole("heading", { name: "Git Source" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
+  await page.screenshot({ path: info.outputPath("git-source-mobile-after.png"), fullPage: true });
   await page.getByRole("button", { name: "Check for Updates" }).click();
   await expect(page.getByLabel("Git Repository", { exact: true })).toHaveValue("https://github.com/example/skills.git");
   await expect(page.getByLabel("Ref", { exact: true })).toHaveValue("stable");

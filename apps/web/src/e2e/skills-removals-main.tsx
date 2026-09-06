@@ -123,7 +123,7 @@ const client = {
       id: "skill-1",
       name: "code-review",
       description: "Reviews code",
-      gitSource: { url: "https://github.com/example/skills.git", ref: "stable", subdirectory: "skills", path: "skills/code-review", commit: "a".repeat(40) },
+      gitSource: { url: "https://github.com/example/skills.git", ref: "stable", subdirectory: "skills", path: "skills/code-review", commit: "a".repeat(64) },
       latestVersion: { id: "v1", digest: "d1", createdAt: reportedAt },
     },
     latestVersion: {
