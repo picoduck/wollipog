@@ -3098,6 +3098,24 @@ test("session title context queries keep the original objective and a bounded se
   );
 });
 
+test("title context reassembles bounded identified deltas before redaction and deduplicates final output", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "title-stream" }));
+  db.appendEvent("title-stream", { kind: "user_message", text: "Pick priority work", final: true }, 1);
+  db.appendEvent("title-stream", { kind: "agent_message", text: "Earlier relevant answer", final: true }, 1);
+  for (const text of ["Selected issues ", "#123", " and ", "#124", ". token", "=", "secret-value"]) {
+    db.appendEvent("title-stream", { kind: "agent_message", messageId: "active", text }, 2);
+  }
+  db.appendEvent("title-stream", { kind: "agent_message", text: "legacy partial" }, 3);
+  const active = db.listSessionTitleContextEvents("title-stream", 2);
+  assert.equal(active.length, 3, "one streamed message must not displace all other recent messages");
+  assert.equal((active[2]!.payload as { text: string }).text, "Selected issues #123 and #124. token=secret-value");
+  db.appendEvent("title-stream", { kind: "agent_message", messageId: "active", text: "Fixed #123 and #124", final: true }, 4);
+  assert.equal(db.hasCompletedAgentMessage("title-stream"), true);
+  const completed = db.listSessionTitleContextEvents("title-stream");
+  assert.deepEqual(completed.map((entry) => (entry.payload as { text: string }).text), ["Pick priority work", "Earlier relevant answer", "Fixed #123 and #124"]);
+});
+
 test("createSessionFromSnapshot auto-files an adopted session by its workspacePath", () => {
   const db = withRunner();
   // Adopted from ANOTHER dashboard (or delete-then-rehydrate): the snapshot carries no workspaceId

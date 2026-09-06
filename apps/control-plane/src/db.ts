@@ -14085,26 +14085,61 @@ export class ControlPlaneDb {
     ).get(sessionId));
   }
 
+  /** Durable first-answer milestone: replay or a CP restart cannot spend refinement again. */
+  hasCompletedAgentMessage(sessionId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM session_events WHERE session_id=? AND kind='agent_message'
+       AND json_extract(payload, '$.final') = 1
+       AND trim(json_extract(payload, '$.text')) != ''
+       AND json_type(payload, '$.parentToolUseId') IS NULL LIMIT 1`,
+    ).get(sessionId));
+  }
+
   /** Original objective plus a bounded recent semantic tail, returned chronologically. */
   listSessionTitleContextEvents(sessionId: string, recentLimit = 8): SessionEvent[] {
     const predicate = `session_id=? AND (
       (kind='user_message' AND COALESCE(json_extract(payload, '$.final'), 1) != 0
         AND json_type(payload, '$.commandInvocation') IS NULL)
-      OR (kind='agent_message' AND json_extract(payload, '$.final') = 1
+      OR (kind='agent_message' AND (json_extract(payload, '$.final') = 1
+        OR json_type(payload, '$.messageId') = 'text')
         AND json_type(payload, '$.parentToolUseId') IS NULL))`;
     type TitleEventRow = { id: number; session_id: string; seq: number; ts: number; payload: string };
     const first = this.stmt(
-      `SELECT id, session_id, seq, ts, payload FROM session_events WHERE ${predicate} ORDER BY seq LIMIT 1`,
+      `SELECT id, session_id, seq, ts, payload FROM session_events WHERE ${predicate} AND kind='user_message' ORDER BY seq LIMIT 1`,
     ).get(sessionId) as TitleEventRow | undefined;
     const recent = this.stmt(
-      `SELECT id, session_id, seq, ts, payload FROM session_events WHERE ${predicate} ORDER BY seq DESC LIMIT ?`,
+      `SELECT id, session_id, MAX(seq) AS seq, ts, payload FROM session_events WHERE ${predicate}
+       GROUP BY CASE WHEN kind='agent_message' AND json_type(payload, '$.messageId') = 'text'
+         THEN 'message:' || json_extract(payload, '$.messageId') ELSE 'event:' || id END
+       ORDER BY seq DESC LIMIT ?`,
     ).all(sessionId, recentLimit) as unknown as TitleEventRow[];
     const rows = [...new Map([...(first ? [first] : []), ...recent].map((row) => [row.id, row])).values()]
       .sort((left, right) => left.seq - right.seq);
-    return rows.map((row) => ({
+    const events: SessionEvent[] = rows.map((row) => ({
       id: row.id, sessionId: row.session_id, seq: row.seq, ts: row.ts,
       payload: JSON.parse(row.payload) as SessionEventPayload,
     }));
+    const seen = new Set<string>();
+    return events.reverse().flatMap((event): SessionEvent[] => {
+      const payload = event.payload;
+      if (payload.kind !== "agent_message" || !payload.messageId) return [event];
+      if (seen.has(payload.messageId)) return [];
+      seen.add(payload.messageId);
+      if (payload.final === true) return [event];
+      // Stream events are deltas, not semantic messages. Reassemble from the beginning before
+      // redaction so credentials split across chunks never escape. Fail closed on oversized
+      // streams; completed messages remain eligible through the normal path.
+      const chunks = this.stmt(
+        `SELECT substr(json_extract(payload, '$.text'), 1, 65537) AS text FROM session_events
+         WHERE session_id=? AND kind='agent_message'
+           AND json_extract(payload, '$.messageId')=?
+           AND json_type(payload, '$.parentToolUseId') IS NULL
+           AND COALESCE(json_extract(payload, '$.final'), 0) != 1 AND seq<=?
+         ORDER BY seq LIMIT 257`,
+      ).all(sessionId, payload.messageId, event.seq) as unknown as { text: string }[];
+      if (chunks.length > 256 || chunks.reduce((sum, chunk) => sum + chunk.text.length, 0) > 64 * 1024) return [];
+      return [{ ...event, payload: { ...payload, text: chunks.map((chunk) => chunk.text).join("") } }];
+    }).reverse();
   }
 
   /** Latest runner-assigned turn coordinate visible in the cached transcript, when supported. */
