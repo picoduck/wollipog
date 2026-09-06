@@ -399,6 +399,7 @@ export type SessionDetailProps = {
   sessionId: string;
   mode?: SessionDetailMode;
   sourceLocation?: SourceLocation;
+  attentionTarget?: import("../navigation.js").AttentionTarget;
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
   pinnedOpen: boolean;
@@ -536,6 +537,7 @@ export function SessionDetail(props: SessionDetailProps) {
 function SessionDetailLoaded({
   sessionId,
   sourceLocation,
+  attentionTarget,
   rightPanel,
   onOpenTerminal,
   pinnedOpen,
@@ -4637,6 +4639,7 @@ function SessionDetailLoaded({
           session={session}
           earlierActivityUnloaded={isPartialHistory(eventWindow)}
           sourceLocation={sourceLocation}
+          attentionTarget={attentionTarget}
           onOpenSourceLocation={openSourceLocation}
           onClearSourceLocation={clearSourceLocation}
           runnerOnline={runnerOnline}

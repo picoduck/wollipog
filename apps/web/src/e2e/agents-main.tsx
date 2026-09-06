@@ -3,7 +3,10 @@ import { createRoot } from "react-dom/client";
 import { PROTOCOL_VERSION, removePendingRequest, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { StoreProvider } from "../store.js";
+import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
+import { InboxRow } from "../components/InboxRow.js";
+import { Board } from "../components/Board.js";
+import { viewPath } from "../navigation.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { AgentsPanel } from "../components/AgentsPanel.js";
@@ -12,8 +15,10 @@ import type { TimelineItem } from "../timeline.js";
 import "../styles.css";
 
 const params = new URLSearchParams(location.search);
-document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
+if (params.has("theme")) sessionStorage.setItem("agents-fixture-theme", params.get("theme")!);
+document.documentElement.dataset.theme = (params.get("theme") ?? sessionStorage.getItem("agents-fixture-theme")) === "light" ? "light" : "dark";
 const now = Date.now();
+const navigationMode = params.has("navigation") || location.pathname.includes("/attention");
 const initial: SessionView = {
   id: "agents-fixture", runnerId: "runner", workspaceId: null, workspaceName: null,
   agentId: null, agentName: null, title: "Unified Supervision", status: "input_required",
@@ -64,6 +69,7 @@ function Fixture() {
     return next;
   } };
   return <ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
+    {navigationMode ? <NavigationFixture session={session} onSession={setSession} online={online} /> :
     <main style={{ maxWidth: 780, padding: 16, margin: "0 auto" }}>
       <h1 ref={primaryRef} tabIndex={-1}>Agents</h1>
       {params.has("primary-question") && <SessionApprovalRegion session={session} runnerOnline={online}
@@ -73,7 +79,41 @@ function Fixture() {
         onOpenPrimaryRequest={params.has("primary-question") ? (requestId) => focusSessionRequest(session.id, requestId) : undefined}
         runnerProtocolVersion={PROTOCOL_VERSION} requestedId={selected} onSelect={setSelected}
         parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
-    </main>
+    </main>}
   </StoreProvider></FeedbackProvider></ApiProvider>;
+}
+
+function NavigationFixture({ session, onSession, online }: {
+  session: SessionView; onSession: (value: SessionView) => void; online: boolean;
+}) {
+  const view = useStoreSelector((state) => state.view);
+  const { navigate } = useStoreActions();
+  const [selected, setSelected] = useState<string | null>(null);
+  const primaryRef = useRef<HTMLHeadingElement>(null);
+  return <main style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
+    <h1 ref={primaryRef} tabIndex={-1}>Attention Navigation</h1>
+    <output aria-label="Current Route" style={{ display: "block", overflowWrap: "anywhere" }}>{viewPath(view)}</output>
+    {view.name !== "session" ? <>
+      <h2>Inbox</h2>
+      <div role="grid" aria-label="Fixture Inbox"><InboxRow session={session} projectName="Fixture"
+        optionId="fixture-row" selected={false} unread={false} pinned={false} rowIndex={1}
+        stalled={false} activityNow={now} onSelect={() => {}} onExpand={() => {}}
+        onSessionMenu={() => {}} onNavigate={navigate} /></div>
+      <h2>Board</h2>
+      <Board sessions={[session]} searchActive={false} onShowAll={() => {}}
+        onNewSession={() => {}} onSessionMenu={() => {}} />
+    </> : <>
+      <button className="btn" onClick={() => navigate({ name: "inbox" })}>Back to Inbox</button>
+      <button className="btn" onClick={() => onSession({ ...session,
+        pendingApproval: removePendingRequest(session.pendingApproval, "permission-b") })}>Resolve Linked Request</button>
+      <button className="btn" onClick={() => onSession({ ...session, eventEpoch: (session.eventEpoch ?? 0) + 1 })}>Reprocess Session</button>
+      <SessionApprovalRegion session={session} runnerOnline={online} fallbackFocusRef={primaryRef} showKeyHints={false} />
+      <AgentsPanel key={`${session.id}:${session.eventEpoch ?? 0}`} session={session} items={items}
+        runnerOnline={online} runnerProtocolVersion={PROTOCOL_VERSION} requestedId={selected} onSelect={setSelected}
+        attentionTarget={view.attention}
+        onOpenPrimaryRequest={(requestId) => focusSessionRequest(session.id, requestId)}
+        parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+    </>}
+  </main>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

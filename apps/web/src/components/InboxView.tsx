@@ -26,7 +26,7 @@ import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { encodeResourceId } from "../navigation.js";
+import { encodeResourceId, type AttentionTarget } from "../navigation.js";
 import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
@@ -143,6 +143,7 @@ export interface InboxViewProps {
   viewMode?: SessionsViewMode;
   expandedSessionId?: string | null;
   sourceLocation?: SourceLocation;
+  attentionTarget?: AttentionTarget;
   /** App-shell control cluster forwarded into the expanded session's unified bar on desktop. */
   topbarControls?: ReactNode;
   rightPanel: RightPanelState;
@@ -160,6 +161,7 @@ export function InboxView({
   viewMode = "list",
   expandedSessionId = null,
   sourceLocation,
+  attentionTarget,
   topbarControls,
   rightPanel,
   onOpenTerminal,
@@ -1149,6 +1151,7 @@ export function InboxView({
           />
         ) : (
         <InboxList
+          onNavigate={navigate}
           ref={captureListRef}
           entries={entries}
           selectedSessionId={displayedSelection}
@@ -1281,6 +1284,7 @@ export function InboxView({
                 sessionId={surfaceSessionId}
                 mode={expanded ? "expanded" : "preview"}
                 sourceLocation={expanded ? sourceLocation : undefined}
+                attentionTarget={expanded ? attentionTarget : undefined}
                 topbarControls={expanded ? topbarControls : undefined}
                 rightPanel={rightPanel}
                 onOpenTerminal={onOpenTerminal}

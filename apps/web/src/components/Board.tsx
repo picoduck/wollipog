@@ -1,4 +1,6 @@
 import { BoardIcon } from "./Icons.js";
+import { AttentionRequests } from "./AttentionRequests.js";
+import type { View } from "../navigation.js";
 import { type DragEvent, type MouseEvent, useMemo, useRef, useState } from "react";
 import { BOARD_COLUMNS, type BoardColumn, type BoxView, type SessionReminderView, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
@@ -242,6 +244,7 @@ export function Board({ sessions: scoped, reminders = new Map(), searchActive, o
                   machineName={machineName}
                   runnerOnline={(runnerId) => runners.get(runnerId)?.status === "online"}
                   onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
+                  onNavigate={navigate}
                   onDragEnd={clearDragState}
                   onSessionMenu={onSessionMenu}
                 />
@@ -260,6 +263,7 @@ function BoardColumnBody({
   machineName,
   runnerOnline,
   onOpen,
+  onNavigate,
   onDragEnd,
   onSessionMenu,
 }: {
@@ -268,6 +272,7 @@ function BoardColumnBody({
   machineName: (runnerId: string) => string;
   runnerOnline: (runnerId: string) => boolean;
   onOpen: (sessionId: string) => void;
+  onNavigate: (view: View) => void;
   onDragEnd: () => void;
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
@@ -285,6 +290,7 @@ function BoardColumnBody({
             machineName={machineName(session.runnerId)}
             runnerOnline={runnerOnline(session.runnerId)}
             onOpen={() => onOpen(session.id)}
+            onNavigate={onNavigate}
             onDragEnd={onDragEnd}
             onSessionMenu={onSessionMenu}
           />
@@ -307,6 +313,7 @@ function SessionCard({
   machineName,
   runnerOnline,
   onOpen,
+  onNavigate,
   onDragEnd,
   onSessionMenu,
 }: {
@@ -315,6 +322,7 @@ function SessionCard({
   machineName: string;
   runnerOnline: boolean;
   onOpen: () => void;
+  onNavigate: (view: View) => void;
   onDragEnd: () => void;
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
@@ -386,6 +394,7 @@ function SessionCard({
         {session.title}
       </button>
       {session.preview && <div className="card-preview">{session.preview}</div>}
+      <AttentionRequests session={session} onNavigate={onNavigate} />
 
       {session.pendingApproval && session.pendingApproval.kind === "question" ? (
         // Structured questions have no inline options (options[] is empty by design) — the

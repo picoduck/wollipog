@@ -63,6 +63,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onNewSession: () => void;
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
+  onNavigate?: (view: import("../navigation.js").View) => void;
   onScrollPosition: (scrollTop: number) => void;
   onPointerTargetChange?: (pointerId: number, targeting: boolean, pointerType: string) => void;
   onPointerPressChange?: (pointerId: number, active: boolean, pointerType: string) => void;
@@ -83,6 +84,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onNewSession,
   onSelect,
   onExpand,
+  onNavigate,
   onScrollPosition,
   onPointerTargetChange,
   onPointerPressChange,
@@ -191,6 +193,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
             stalled: stalledSessionIds.has(session.id),
             onSelect,
             onExpand,
+            onNavigate,
             onSessionMenu,
           } satisfies Omit<InboxRowProps, "activity" | "activityNow">;
           return activityBySession && activityNow !== undefined

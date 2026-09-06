@@ -8855,6 +8855,10 @@ body.shell-dock-dragging * {
   pointer-events: none;
 }
 .inbox-row-primary-cell { display: block; min-width: 0; }
+.attention-requests { margin: 4px 8px; font-size: var(--text-sm); }
+.attention-requests > summary { width: fit-content; cursor: pointer; color: var(--text-dim); }
+.attention-requests-picker { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0; }
+.attention-requests-picker > button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .inbox-row {
   display: grid;
   width: 100%;

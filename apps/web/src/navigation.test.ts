@@ -38,6 +38,22 @@ const routes: Array<[View, string]> = [
   [{ name: "pod", id: "pod_abc" }, `/pods/~${encodeResourceId("pod_abc")}`],
 ];
 
+test("attention routes retain exact opaque request identity and epoch through reload", () => {
+  for (const requestId of [undefined, "child / ..? # % ✅", "\u0000request"]) {
+    const view: View = { name: "session", id: "session / ✅",
+      attention: { eventEpoch: 4, ...(requestId === undefined ? {} : { requestId }) } };
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+    assert.equal(sameView(view, { ...view, attention: { eventEpoch: 5, requestId } }), false);
+  }
+  const path = `/sessions/~${encodeResourceId("s")}/attention/~${encodeResourceId("request")}`;
+  for (const query of ["", "?epoch=-1", "?epoch=01", "?epoch=1.5", "?epoch=Infinity",
+    "?epoch=9007199254740992", "?epoch=0&epoch=1", "?epoch=0&request=other"]) {
+    assert.equal(viewFromPath(path, query), null);
+  }
+  assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/attention/~!`, "?epoch=0"), null);
+});
+
 test("every dashboard view has a canonical round-tripping path", () => {
   for (const [view, path] of routes) {
     assert.equal(viewPath(view), path);

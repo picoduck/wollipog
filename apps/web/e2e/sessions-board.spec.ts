@@ -20,6 +20,25 @@ function harnessPath(page: Page): string | null {
   return new URL(page.url()).searchParams.get("path");
 }
 
+test("Inbox attention navigation contains keyboard shortcuts and retains exact request identity", async ({ page }) => {
+  await openHarness(page);
+  const row = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
+  await row.locator(".inbox-row").click();
+  const summary = row.locator(".attention-requests > summary");
+  await summary.focus();
+  await summary.press("a");
+  expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);
+  await expect(summary).toHaveText("1 Request");
+  await summary.press("Enter");
+  await row.getByRole("button", { name: "View All Requests", exact: true }).press("Escape");
+  await expect(summary).toBeFocused();
+  await expect(row.locator(".attention-requests")).not.toHaveAttribute("open");
+  await summary.press("Space");
+  await row.getByRole("button", { name: "Request 1 · Approval Required", exact: true }).press("Enter");
+  expect(harnessPath(page)).toMatch(/\/attention\/~[^/]+\?epoch=0$/);
+  expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);
+});
+
 test("the reminder and mode controls use scoped badges and compact mobile icons", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openHarness(page);
@@ -164,6 +183,7 @@ async function touchSession(page: Page): Promise<CDPSession> {
 }
 
 async function centerOf(target: Locator): Promise<{ x: number; y: number }> {
+  await target.scrollIntoViewIfNeeded();
   const box = (await target.boundingBox())!;
   return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 }

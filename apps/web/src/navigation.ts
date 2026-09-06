@@ -4,6 +4,8 @@ import {
   type SourceLocation,
 } from "@wollipog/protocol";
 
+export type AttentionTarget = { eventEpoch: number; requestId?: string };
+
 export type View =
   | { name: "inbox" }
   | { name: "board" }
@@ -15,7 +17,7 @@ export type View =
   | { name: "usage" }
   | { name: "archived" }
   | { name: "projects"; id?: string }
-  | { name: "session"; id: string; location?: SourceLocation }
+  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
   | { name: "run"; id: string }
   | { name: "settings"; section?: SettingsSection }
   | { name: "pod"; id: string };
@@ -194,6 +196,8 @@ export function viewPath(view: View): string {
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : "/projects";
     case "session": return view.location
       ? `/sessions/~${encodeResourceId(view.id)}/files/~${encodeOpaque(view.location.path)}${sourceLocationSearch(view.location)}`
+      : view.attention
+      ? `/sessions/~${encodeResourceId(view.id)}/attention${view.attention.requestId === undefined ? "" : `/~${encodeOpaque(view.attention.requestId)}`}?epoch=${view.attention.eventEpoch}`
       : `/sessions/~${encodeResourceId(view.id)}`;
     case "run": return `/runs/~${encodeResourceId(view.id)}`;
     case "settings": return `/settings/${view.section ?? "appearance"}`;
@@ -261,6 +265,16 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (projectMatch) {
     const id = decodeResourceId(projectMatch[1]!);
     return id === null ? null : { name: "projects", id };
+  }
+  const attentionMatch = /^\/sessions\/~([^/]+)\/attention(?:\/~([^/]+))?$/.exec(path);
+  if (attentionMatch) {
+    const id = decodeResourceId(attentionMatch[1]!);
+    const requestId = attentionMatch[2] === undefined ? undefined : decodeOpaque(attentionMatch[2], 2048);
+    const params = new URLSearchParams(search);
+    const epoch = params.get("epoch");
+    if (id === null || requestId === null || [...params.keys()].length !== 1 ||
+        epoch === null || !/^(0|[1-9]\d*)$/.test(epoch) || !Number.isSafeInteger(Number(epoch))) return null;
+    return { name: "session", id, attention: { eventEpoch: Number(epoch), ...(requestId === undefined ? {} : { requestId }) } };
   }
   const fileMatch = /^\/sessions\/~([^/]+)\/files\/~([^/]+)$/.exec(path);
   if (fileMatch) {
