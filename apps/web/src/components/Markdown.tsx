@@ -1,4 +1,4 @@
-import { createContext, isValidElement, memo, useContext, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import React, { createContext, isValidElement, memo, useContext, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -202,17 +202,50 @@ function TranscriptMediaEmbed({ href, kind, label, imageAlt }: {
   );
 }
 
-function MarkdownLink({ href, children, inlineMedia, mediaSettled }: ComponentProps<"a"> & {
+/** A stable, query-free label for generated URL links; the anchor still retains the full href. */
+export function compactMarkdownUrlLabel(href: string): string {
+  try {
+    const url = new URL(href);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return href;
+    const basename = url.pathname.split("/").filter(Boolean).at(-1);
+    if (!basename) return url.hostname;
+    let decoded = basename;
+    try {
+      decoded = decodeURIComponent(basename);
+    } catch {
+      // Keep the encoded path segment when it is malformed.
+    }
+    const safe = decoded.replace(UNSAFE_GENERATED_MEDIA_LABEL, "").trim() || "link";
+    const bounded = safe.length > 48 ? `${safe.slice(0, 45)}…` : safe;
+    return `${url.hostname}/${bounded}`;
+  } catch {
+    return href;
+  }
+}
+
+function isGeneratedUrlLabel(label: string, href: string): boolean {
+  try {
+    return new URL(label).href === new URL(href).href;
+  } catch {
+    return false;
+  }
+}
+
+function MarkdownLink({ href, children, inlineMedia, mediaSettled, compactUrls }: ComponentProps<"a"> & {
   inlineMedia: boolean;
   mediaSettled: boolean;
+  compactUrls: boolean;
 }) {
   const kind = inlineMedia ? transcriptMediaKind(href) : null;
   const childText = reactNodeText(children).trim();
   const label = kind && href ? transcriptMediaLabel(href, kind, childText) : childText || href || "media";
+  const visibleChildren = compactUrls && href && isGeneratedUrlLabel(childText, href)
+    ? compactMarkdownUrlLabel(href)
+    : children;
   return (
     <>
       <a href={href} target="_blank" rel="noopener noreferrer">
-        {children}
+        {visibleChildren}
       </a>
       {kind && href && mediaSettled && (
         <TranscriptMediaEmbed key={href} href={href} kind={kind} label={label} />
@@ -221,12 +254,12 @@ function MarkdownLink({ href, children, inlineMedia, mediaSettled }: ComponentPr
   );
 }
 
-const MarkdownMediaContext = createContext({ inlineMedia: false, mediaSettled: true });
+const MarkdownMediaContext = createContext({ inlineMedia: false, mediaSettled: true, compactUrls: false });
 
 function MarkdownAnchor({ href, children }: ComponentProps<"a">) {
-  const { inlineMedia, mediaSettled } = useContext(MarkdownMediaContext);
+  const { inlineMedia, mediaSettled, compactUrls } = useContext(MarkdownMediaContext);
   return (
-    <MarkdownLink href={href} inlineMedia={inlineMedia} mediaSettled={mediaSettled}>
+    <MarkdownLink href={href} inlineMedia={inlineMedia} mediaSettled={mediaSettled} compactUrls={compactUrls}>
       {children}
     </MarkdownLink>
   );
@@ -277,6 +310,7 @@ export const Markdown = memo(function Markdown({
   highlightEligible = true,
   inlineMedia = false,
   mediaSettled = true,
+  compactUrls = false,
 }: {
   children: string;
   /** Timeline virtualization passes whether this settled row currently intersects the viewport. */
@@ -285,6 +319,8 @@ export const Markdown = memo(function Markdown({
   inlineMedia?: boolean;
   /** False while a transcript row is still streaming; remote media mounts only after completion. */
   mediaSettled?: boolean;
+  /** Replace generated absolute-URL text with a bounded, query-free label while retaining href. */
+  compactUrls?: boolean;
 }) {
   const key = useRef<symbol | null>(null);
   key.current ??= Symbol("markdown-highlight");
@@ -346,7 +382,7 @@ export const Markdown = memo(function Markdown({
   // instead of remounting, collapsing its row, and issuing another remote request.
   return (
     <div className="md">
-      <MarkdownMediaContext.Provider value={{ inlineMedia, mediaSettled: activeMedia.enabled }}>
+      <MarkdownMediaContext.Provider value={{ inlineMedia, mediaSettled: activeMedia.enabled, compactUrls }}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkBreaks]}
           rehypePlugins={rehypePlugins}

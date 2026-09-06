@@ -27,6 +27,7 @@ import { PromptImageView } from "./PromptImageView.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
+import { StructuredQuestionText, structuredQuestionSummary } from "./StructuredQuestionText.js";
 import type { ConversationForkAvailability } from "../session-actions.js";
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
@@ -1866,34 +1867,45 @@ const TimelineRow = memo(function TimelineRow({
         </div>
       );
     case "question": {
+      const firstQuestion = item.questions[0];
+      const summary = firstQuestion ? structuredQuestionSummary(firstQuestion.question) : "Question";
       const historicalQuestion = (
         <div className="tl-perm tl-question">
-          <div className="tl-perm-head">
-            <span className="perm-icon">❓</span>
-            <span>
-              {item.questions.length === 1
-                ? item.questions[0]!.question
-                : `The agent asked ${item.questions.length} questions`}
-            </span>
-            {item.answered !== undefined ? (
-              <span className="perm-resolved">
-                {item.resolutionReason === "replaced"
-                  ? "→ Replaced"
-                  : item.resolutionReason === "provider_resolved"
-                    ? "→ Resolved by Provider"
-                    : item.answered ? "→ Answered" : "→ Dismissed"}
+          <details className="question-history">
+            <summary className="tl-perm-head">
+              <span className="perm-icon" aria-hidden="true">❓</span>
+              <span className="question-history-summary">
+                {summary}{item.questions.length > 1 ? ` (+${item.questions.length - 1} more)` : ""}
               </span>
-            ) : (
-              <span className="perm-pending">awaiting answer…</span>
-            )}
-          </div>
-          {item.questions.length > 1 && (
-            <ul className="question-recap">
-              {item.questions.map((q) => (
-                <li key={q.id}>{q.question}</li>
+              {item.answered !== undefined ? (
+                <span className="perm-resolved">
+                  {item.resolutionReason === "replaced"
+                    ? "→ Replaced"
+                    : item.resolutionReason === "provider_resolved"
+                      ? "→ Resolved by Provider"
+                      : item.answered ? "→ Answered" : "→ Dismissed"}
+                </span>
+              ) : (
+                <span className="perm-pending">awaiting answer…</span>
+              )}
+            </summary>
+            <div className="question-history-body">
+              {item.questions.map((question, index) => (
+                <section className="question-history-item" key={question.id}>
+                  <div className="question-history-label">
+                    {item.questions.length > 1 && <strong>Question {index + 1}</strong>}
+                    {question.header && <span className="question-chip">{question.header}</span>}
+                  </div>
+                  <StructuredQuestionText>{question.question}</StructuredQuestionText>
+                  {question.context && (
+                    <div className="question-history-context">
+                      <StructuredQuestionText>{question.context}</StructuredQuestionText>
+                    </div>
+                  )}
+                </section>
               ))}
-            </ul>
-          )}
+            </div>
+          </details>
         </div>
       );
       return questionContext ? (

@@ -17,6 +17,7 @@ import {
   type QuestionResponseDraft,
 } from "../question-response.js";
 import { Spinner } from "./common.js";
+import { StructuredQuestionText } from "./StructuredQuestionText.js";
 
 export interface ComposerQuestionResponseProps {
   sessionId: string;
@@ -291,10 +292,14 @@ export function ComposerQuestionResponse({
       </div>
       <div className="composer-answer-question" id={questionLabelId}>
         {question.header && <span className="question-chip">{question.header}</span>}
-        {question.question}
+        <StructuredQuestionText>{question.question}</StructuredQuestionText>
         {question.multiSelect && <span className="muted sm"> (select all that apply)</span>}
       </div>
-      {question.context && <div className="composer-answer-context">{question.context}</div>}
+      {question.context && (
+        <div className="composer-answer-context">
+          <StructuredQuestionText>{question.context}</StructuredQuestionText>
+        </div>
+      )}
       {question.options.length > 0 && (
         <div
           className="composer-answer-choices"

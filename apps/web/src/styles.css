@@ -3181,6 +3181,23 @@ textarea {
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
+.composer-answer-question > .md,
+.question-text > .md {
+  margin-top: 4px;
+}
+.composer-answer-question .md,
+.composer-answer-context .md,
+.question-text .md,
+.question-context .md {
+  min-width: 0;
+  max-width: 100%;
+}
+.composer-answer-question .md p,
+.composer-answer-context .md p,
+.question-text .md p,
+.question-context .md p {
+  margin-bottom: 6px;
+}
 .composer-answer-context,
 .composer-answer-help {
   color: var(--text-dim);
@@ -4754,8 +4771,7 @@ button.file-head.source-path-link {
   border-radius: var(--radius-sm);
 }
 .tl-perm > .bubble-text,
-.tl-perm > .perm-context,
-.tl-perm > .question-recap {
+.tl-perm > .perm-context {
   flex: 1 1 100%;
   min-width: 0;
   max-width: 100%;
@@ -4955,6 +4971,7 @@ button.file-head.source-path-link {
 .md a {
   color: var(--accent);
   text-decoration: none;
+  overflow-wrap: anywhere;
 }
 .md a:hover {
   text-decoration: underline;
@@ -5032,6 +5049,7 @@ button.file-head.source-path-link {
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 1px 5px;
+  overflow-wrap: anywhere;
 }
 /* fenced code blocks */
 .md pre {
@@ -10325,10 +10343,56 @@ body.shell-dock-dragging * {
   margin-top: 4px;
   font-weight: var(--weight-normal);
 }
-.tl-question .question-recap {
-  margin: 6px 0 0 26px;
+.tl-perm.tl-question { display: block; }
+.question-history {
+  width: 100%;
+  min-width: 0;
+}
+.question-history > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.question-history > summary::-webkit-details-marker { display: none; }
+.question-history > summary::before {
+  content: "▸";
+  flex: none;
+  color: var(--text-faint);
+}
+.question-history[open] > summary::before { content: "▾"; }
+.question-history-summary {
+  flex: 1 1 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.question-history-body {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 8px 0 2px 25px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.question-history-item {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.question-history-item + .question-history-item {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.question-history-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
   color: var(--text-dim);
-  font-size: 12px;
+}
+.question-history-context {
+  margin-top: 6px;
+  color: var(--text-dim);
 }
 .tl-perm-head {
   display: flex;
