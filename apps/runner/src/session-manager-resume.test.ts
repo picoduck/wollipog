@@ -23,6 +23,76 @@ import {
   type SessionMeta,
 } from "./session-store.js";
 
+test("restart recovers exact unresolved child questions as dismiss-only and drops stale callbacks", () => {
+  const a = { requestId: "a", ownerToolUseId: "tool-a", kind: "question" as const,
+    title: "Choose A", options: [], questions: [{ id: "a", question: "Choose A" }] };
+  const b = { ...a, requestId: "b", ownerToolUseId: "tool-b" };
+  const h = harness({ status: "input_required", pendingApproval: { ...a, additionalRequests: [b] } });
+  try {
+    h.store.appendEvent("resume-session", { kind: "question_request",
+      requestId: "a", ownerToolUseId: "tool-a", questions: a.questions });
+    h.store.appendEvent("resume-session", { kind: "question_request",
+      requestId: "b", ownerToolUseId: "tool-b", questions: b.questions });
+    h.store.appendEvent("resume-session", { kind: "question_resolved", requestId: "a", answered: true });
+    h.manager.reconcileStore();
+    const pending = h.store.readMeta("resume-session")!.pendingApproval!;
+    assert.equal(pending.requestId, "b");
+    assert.equal(pending.ownerToolUseId, "tool-b");
+    assert.equal(pending.recoveryReason, "provider_restart");
+    assert.equal(pending.recoveryAction, undefined, "a parent resume cannot answer a child callback");
+    assert.equal(pending.additionalRequests, undefined);
+    h.manager.answerQuestion("resume-session", "b", {}, "dismiss");
+    assert.equal(h.store.readMeta("resume-session")!.pendingApproval, null);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const readable of [true, false]) test(`mixed parent/child recovery is explicit when history is ${readable ? "readable" : "unreadable"}`, () => {
+  const question = { requestId: "parent", kind: "question" as const, title: "Choose",
+    options: [], recoveryId: "prior", questions: [{ id: "q", question: "Choose" }] };
+  const child = { ...question, requestId: "child", ownerToolUseId: "spawn" };
+  const h = harness({ status: "input_required", pendingApproval: { ...question, additionalRequests: [child] } });
+  try {
+    h.store.appendEvent("resume-session", { kind: "question_request", requestId: "parent", questions: question.questions });
+    h.store.appendEvent("resume-session", { kind: "question_request", requestId: "child", ownerToolUseId: "spawn", questions: child.questions });
+    if (!readable) (h.store as any).readEventPage = () => ({ ok: false });
+    h.manager.reconcileStore();
+    const pending = h.store.readMeta("resume-session")!.pendingApproval!;
+    assert.equal(pending.requestId, "parent");
+    assert.equal(pending.recoveryReason, "provider_restart");
+    assert.equal(pending.recoveryAction, readable ? "resume_answer" : undefined);
+    assert.equal(pending.additionalRequests?.[0]?.requestId, "child");
+    assert.equal(pending.additionalRequests?.[0]?.recoveryAction, undefined);
+    assert.equal(h.store.readMeta("resume-session")!.status, "input_required");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("foreground idle preserves child attention and final child resolution publishes settlement", async () => {
+  const h = harness();
+  try {
+    h.manager.prompt("resume-session", "Start");
+    for (let index = 0; index < 8 && !h.callbacks(); index++) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.ok(h.callbacks());
+    h.callbacks().onEvent({ kind: "permission_request", requestId: "child", ownerToolUseId: "spawn",
+      title: "Read", options: [{ optionId: "yes", name: "Allow" }] });
+    (h.manager as any).emitStatus("resume-session", "idle");
+    assert.equal(h.store.readMeta("resume-session")!.pendingApproval?.requestId, "child");
+    assert.equal(h.store.readMeta("resume-session")!.status, "input_required");
+    h.callbacks().onEvent({ kind: "permission_resolved", requestId: "child", optionId: null, resolutionReason: "provider_resolved" });
+    assert.equal(h.store.readMeta("resume-session")!.pendingApproval, null);
+    const status = h.sent.filter((message) => message.type === "session_status").at(-1);
+    assert.ok(status && (status.status === "idle" || status.status === "running"));
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const shortDelay = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
 const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();

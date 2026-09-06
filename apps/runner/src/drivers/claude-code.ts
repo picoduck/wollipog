@@ -343,6 +343,7 @@ export class ClaudeCodeDriver implements Driver {
   private interactive = false;
   /** requestId -> the tool input to echo back on allow (stdio control protocol). */
   private readonly pendingApprovals = new Map<string, Json>();
+  private readonly pendingAttentionOwners = new Map<string, { owner: string; question: boolean }>();
   /** Claude's message_start id scoped by parent Task. Entries close on message_stop/result, so
    * provider block identity never becomes transcript-lifetime state. */
   private readonly streamingMessageIds = new Map<string, string>();
@@ -1734,6 +1735,7 @@ export class ClaudeCodeDriver implements Driver {
     const input = this.pendingApprovals.get(requestId);
     if (input === undefined) return false;
     this.pendingApprovals.delete(requestId);
+    this.pendingAttentionOwners.delete(requestId);
     const allow = optionId === "allow";
     const response = allow
       ? { behavior: "allow", updatedInput: input }
@@ -1755,6 +1757,7 @@ export class ClaudeCodeDriver implements Driver {
     const original = this.pendingApprovals.get(requestId);
     if (original === undefined) return false;
     this.pendingApprovals.delete(requestId);
+    this.pendingAttentionOwners.delete(requestId);
     const response = action === "submit" || (action == null && Object.keys(answers).length > 0)
       ? { behavior: "allow", updatedInput: { ...(original as Json), answers } }
       : { behavior: "deny", message: "The user dismissed the question." };
@@ -1864,7 +1867,21 @@ export class ClaudeCodeDriver implements Driver {
         if (!this.child) return null;
         const req = msg.request;
         if (req?.subtype === "can_use_tool" && typeof msg.request_id === "string") {
+          if (!this.pendingApprovals.has(msg.request_id) && this.pendingApprovals.size >= 128) {
+            try {
+              this.child.stdin.write(JSON.stringify({
+                type: "control_response", response: { subtype: "success", request_id: msg.request_id,
+                  response: { behavior: "deny", message: "Too many concurrent pending requests." } },
+              }) + "\n");
+            } catch { /* the provider process ended before the denial could be written */ }
+            return null;
+          }
+          if (this.pendingApprovals.size === 0) this.pendingAttentionOwners.clear();
           this.pendingApprovals.set(msg.request_id, req.input ?? {});
+          this.pendingAttentionOwners.delete(msg.request_id);
+          if (this.cb.supportsWorkerAttention?.() && parentId) {
+            this.pendingAttentionOwners.set(msg.request_id, { owner: parentId, question: req.tool_name === "AskUserQuestion" });
+          }
           // AskUserQuestion is not a permission ask — it's the agent asking the USER a
           // structured multiple-choice question (docs/askuserquestion-implementation-
           // recommendation.md). Surface it as a question card; answerQuestion() returns the
@@ -1876,6 +1893,7 @@ export class ClaudeCodeDriver implements Driver {
               // card the UI can't answer would strand the session in input_required with no
               // escape — deny immediately so the turn settles, and say why on stderr.
               this.pendingApprovals.delete(msg.request_id);
+              this.pendingAttentionOwners.delete(msg.request_id);
               this.cb.onStderr(
                 "AskUserQuestion arrived with no answerable questions (malformed or duplicate question text) — auto-dismissing so the turn doesn't stall",
               );
@@ -1897,6 +1915,7 @@ export class ClaudeCodeDriver implements Driver {
             }
             this.cb.onEvent({
               kind: "question_request",
+              ...(this.cb.supportsWorkerAttention?.() && parentId ? { ownerToolUseId: parentId } : {}),
               requestId: msg.request_id,
               questions,
             });
@@ -1909,6 +1928,7 @@ export class ClaudeCodeDriver implements Driver {
           const title = req.tool_name ? `${req.tool_name}: ${truncate(detail, 80)}` : "Permission requested";
           this.cb.onEvent({
             kind: "permission_request",
+            ...(this.cb.supportsWorkerAttention?.() && parentId ? { ownerToolUseId: parentId } : {}),
             requestId: msg.request_id,
             title,
             options: [
@@ -2024,6 +2044,22 @@ export class ClaudeCodeDriver implements Driver {
         const blocks: Json[] = msg.message?.content ?? [];
         for (const b of blocks) {
           if (b?.type !== "tool_result") continue;
+          for (const [requestId, owner] of this.pendingAttentionOwners) {
+            if (owner.owner !== b.tool_use_id) continue;
+            if (!this.pendingApprovals.has(requestId)) {
+              this.pendingAttentionOwners.delete(requestId);
+              continue;
+            }
+            // Completion ends this exact tool's callbacks, not its siblings' requests.
+            if (owner.question) {
+              this.answerQuestion(requestId, {}, "dismiss");
+              this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason: "provider_resolved" });
+            } else {
+              this.resolvePermission(requestId, null);
+              this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason: "provider_resolved" });
+            }
+            this.pendingAttentionOwners.delete(requestId);
+          }
           this.cb.onEvent({
             kind: "tool_call_update",
             toolCallId: b.tool_use_id ?? "tool",

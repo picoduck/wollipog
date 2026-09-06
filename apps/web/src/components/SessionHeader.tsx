@@ -70,6 +70,7 @@ export function SessionHeader({
   changeStatus,
   activeSubagents,
   onOpenBackgroundWork,
+  onOpenAttention,
   titleId,
 }: {
   session: SessionView;
@@ -101,9 +102,10 @@ export function SessionHeader({
   topbarControls?: ReactNode;
   changeStatus?: SessionChangeStatus | null;
   /** Live structured subagents remain visible even while the parent awaits its next prompt. */
-  activeSubagents?: { count: number; onOpen: () => void };
+  activeSubagents?: { count: number; onOpen: () => void; workers?: boolean };
   /** Opens the inspectable managed-job inventory. */
   onOpenBackgroundWork?: () => void;
+  onOpenAttention?: () => void;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
@@ -170,7 +172,10 @@ export function SessionHeader({
   );
   const renderNoninteractiveStatuses = (includeBackground = true) => (
     <>
-      <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
+      <SessionStatusIndicators session={session} disconnected={!runnerOnline} onOpenAttention={onOpenAttention ? () => {
+        closeStatusPopover(false);
+        onOpenAttention();
+      } : undefined} />
       {includeBackground && renderBackgroundWork()}
       <ChangeStatusBadge change={changeStatus ?? null} />
       {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
@@ -357,7 +362,7 @@ export function SessionHeader({
       <div className="session-header-statuses" ref={statusesRef}>
         {renderNoninteractiveStatuses(!isMobile)}
         {activeSubagents && (
-          <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
+          <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} workers={activeSubagents.workers} />
         )}
       </div>
       {activeWorktree?.pullRequest && activeWorktreePullRequestHref ? (
@@ -438,6 +443,7 @@ export function SessionHeader({
                     {activeSubagents && (
                       <ActiveSubagentsBadge
                         count={activeSubagents.count}
+                        workers={activeSubagents.workers}
                         onOpen={() => {
                           closeStatusPopover(false);
                           activeSubagents.onOpen();

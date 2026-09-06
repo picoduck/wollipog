@@ -96,6 +96,8 @@ export interface DriverSubscriptionUsageUpdate {
 }
 
 export interface DriverCallbacks {
+  /** Negotiated control-plane capability; absence retains legacy request replacement. */
+  supportsWorkerAttention?: () => boolean;
   onEvent: (payload: SessionEventPayload) => void;
   onStderr: (text: string) => void;
   onExit: (code: number | null) => void;

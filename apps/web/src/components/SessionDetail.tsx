@@ -174,7 +174,8 @@ import { useQuestionResponseStyle } from "../question-response-style.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
-import { IncrementalSubagentProjector, selectedSubagentId } from "../subagents.js";
+import { IncrementalSubagentProjector } from "../subagents.js";
+import { workerRoster, isCurrentWorker } from "../worker-roster.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
 import {
   projectAssignmentAudienceConfirmation,
@@ -792,6 +793,16 @@ function SessionDetailLoaded({
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
+  const attentionEntryScope = useRef<string | null>(null);
+  useEffect(() => {
+    if (mode !== "expanded") return;
+    const scope = `${session.id}:${session.eventEpoch ?? 0}`;
+    if (attentionEntryScope.current === scope) return;
+    attentionEntryScope.current = scope;
+    if (session.pendingApproval?.ownerToolUseId || session.pendingApproval?.additionalRequests?.length) {
+      rightPanelRef.current.show("subagents");
+    }
+  }, [mode, session.id, session.eventEpoch, session.pendingApproval]);
   const backgroundInventoryRequestRef = useRef<string | null>(null);
   const [backgroundInventoryError, setBackgroundInventoryError] = useState<string | null>(null);
   const [backgroundInventoryAttempt, setBackgroundInventoryAttempt] = useState(0);
@@ -801,10 +812,10 @@ function SessionDetailLoaded({
     setBackgroundInventoryAttempt((attempt) => attempt + 1);
   }, []);
   useEffect(() => {
-    if (mode !== "expanded" || !rightPanel.open || rightPanel.mode !== "background" ||
+    if (mode !== "expanded" || !rightPanel.open || !["background", "subagents"].includes(rightPanel.mode) ||
         session.backgroundJobsAvailable !== true || session.backgroundJobs !== undefined) {
       if (session.backgroundJobs !== undefined || mode !== "expanded" ||
-          !rightPanel.open || rightPanel.mode !== "background") {
+          !rightPanel.open || !["background", "subagents"].includes(rightPanel.mode)) {
         backgroundInventoryRequestRef.current = null;
         setBackgroundInventoryError(null);
       }
@@ -2036,7 +2047,15 @@ function SessionDetailLoaded({
     descriptor.availability === "live" &&
     ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
   [items, runnerOnline, session.status]);
-  const preferredActiveSubagentId = selectedSubagentId(activeSubagents);
+  const rosterSessions = useStoreSelector((state) => state.sessions);
+  const rosterRuns = useStoreSelector((state) => state.runs);
+  const rosterRunners = useStoreSelector((state) => state.runners);
+  const activeWorkerCount = useMemo(() => workerRoster(session, activeSubagents,
+    (session.runId ? rosterRuns.get(session.runId)?.sessionIds ?? [] : []).flatMap((id) => {
+      const member = rosterSessions.get(id);
+      return member ? [member] : [];
+    }), (id) => rosterRunners.get(id)?.status === "online").filter(isCurrentWorker).length,
+  [session, activeSubagents, rosterSessions, rosterRuns, rosterRunners]);
   const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
     ? undefined
     : session.backgroundWorkState;
@@ -3797,11 +3816,13 @@ function SessionDetailLoaded({
           )}
           topbarControls={topbarControls}
           changeStatus={changeStatus}
-          activeSubagents={preferredActiveSubagentId ? {
-            count: activeSubagents.length,
-            onOpen: () => openSubagent(preferredActiveSubagentId),
+          activeSubagents={activeWorkerCount ? {
+            count: activeWorkerCount,
+            workers: true,
+            onOpen: () => rightPanel.show("subagents"),
           } : undefined}
           onOpenBackgroundWork={() => rightPanel.show("background")}
+          onOpenAttention={() => rightPanel.show("subagents")}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}

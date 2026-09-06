@@ -259,6 +259,7 @@ export class CodexAppServerDriver implements Driver {
    * thread is admitted to this session only after a structured spawn item binds it to the exact
    * spawning collaboration tool. */
   private readonly subagentToolByThread = new Map<string, string>();
+  private readonly attentionOwners = new Map<string, string>();
   private readonly subagentParentByTool = new Map<string, string | undefined>();
   private readonly subagentLifecycleByThread = new Map<string, AuthoritativeSubagentLifecycle>();
   /** Latest per-child turn usage. Like root usage, it is emitted once when that child turn settles,
@@ -518,7 +519,7 @@ export class CodexAppServerDriver implements Driver {
       this.seenItems.clear();
       this.emittedErrors.clear();
       this.streamedAgentResponse = false;
-      this.declinePendingRequests();
+      this.declinePendingRequests("provider_resolved", true);
       this.pendingTurnUsage = null;
       this.turnUsageClosed = false;
       this.turnResolve = resolve;
@@ -642,6 +643,7 @@ export class CodexAppServerDriver implements Driver {
     const pending = this.pendingApprovals.get(requestId);
     if (!pending) return false;
     this.pendingApprovals.delete(requestId);
+    this.attentionOwners.delete(requestId);
     pending.resolve(pending.method === MCP_ELICITATION_METHOD
       ? mcpElicitationResponse(optionId === "accept" ? "accept" : optionId === "decline" ? "decline" : "cancel")
       : approvalResponse(pending.method, pending.params, optionId));
@@ -652,6 +654,7 @@ export class CodexAppServerDriver implements Driver {
     const pending = this.pendingQuestions.get(requestId);
     if (!pending) return false;
     this.pendingQuestions.delete(requestId);
+    this.attentionOwners.delete(requestId);
     pending.resolve(pending.response(answers, action ?? (Object.keys(answers).length > 0 ? "submit" : "dismiss")));
     return true;
   }
@@ -688,21 +691,26 @@ export class CodexAppServerDriver implements Driver {
     terminateDescendantBoundaries(this.descendantOwner);
   }
 
-  private declinePendingRequests(resolutionReason?: "replaced"): void {
+  private declinePendingRequests(resolutionReason?: "replaced" | "provider_resolved", preserveChildren = false): void {
     for (const [requestId, p] of this.pendingApprovals) {
+      if (preserveChildren && this.attentionOwners.has(requestId)) continue;
       p.resolve(p.method === MCP_ELICITATION_METHOD ? mcpElicitationResponse("cancel") : approvalResponse(p.method, p.params, null));
+      this.pendingApprovals.delete(requestId);
+      this.attentionOwners.delete(requestId);
       if (resolutionReason) {
         this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason });
       }
     }
-    this.pendingApprovals.clear();
     for (const [requestId, p] of this.pendingQuestions) {
+      if (preserveChildren && this.attentionOwners.has(requestId)) continue;
       p.resolve(p.response({}, "dismiss"));
+      this.pendingQuestions.delete(requestId);
+      this.attentionOwners.delete(requestId);
       if (resolutionReason) {
         this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason });
       }
     }
-    this.pendingQuestions.clear();
+    if (!preserveChildren) this.attentionOwners.clear();
   }
 
   private settleTurn(r: StopReason): void {
@@ -763,6 +771,21 @@ export class CodexAppServerDriver implements Driver {
   private updateSubagentLifecycle(threadId: string, lifecycle: AuthoritativeSubagentLifecycle): void {
     const toolCallId = this.subagentToolByThread.get(threadId);
     if (!toolCallId) return;
+    if (["completed", "failed", "interrupted"].includes(lifecycle)) {
+      for (const [requestId, owner] of this.attentionOwners) {
+        if (owner !== toolCallId) continue;
+        const permission = this.pendingApprovals.get(requestId);
+        const question = this.pendingQuestions.get(requestId);
+        if (permission) {
+          this.resolvePermission(requestId, null);
+          this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason: "provider_resolved" });
+        }
+        if (question) {
+          this.answerQuestion(requestId, {}, "dismiss");
+          this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason: "provider_resolved" });
+        }
+      }
+    }
     if (this.subagentLifecycleByThread.get(threadId) === lifecycle) return;
     this.subagentLifecycleByThread.set(threadId, lifecycle);
     this.cb.onEvent({
@@ -847,6 +870,33 @@ export class CodexAppServerDriver implements Driver {
     this.updateSubagentStates(item?.agentsStates);
   }
 
+  private prepareAttention(params: Json, requestId: string): { ownerToolUseId?: string } | null {
+    // Reused RPC identities replace only that callback, never orphan its parked promise.
+    if (this.pendingApprovals.has(requestId)) {
+      this.resolvePermission(requestId, null);
+      this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason: "replaced" });
+    }
+    if (this.pendingQuestions.has(requestId)) {
+      this.answerQuestion(requestId, {}, "dismiss");
+      this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason: "replaced" });
+    }
+    const candidate = this.cb.supportsWorkerAttention?.() && typeof params?.threadId === "string"
+      ? this.subagentToolByThread.get(params.threadId) : undefined;
+    const owner = candidate && [...this.subagentToolByThread.values()].filter((value) => value === candidate).length === 1
+      ? candidate : undefined;
+    // Preserve provider-declared concurrent children. Unknown ownership remains on the parent;
+    // older peers retain their existing replacement semantics.
+    if (!this.cb.supportsWorkerAttention?.()) this.declinePendingRequests("replaced");
+    else if (!owner) this.declinePendingRequests("replaced", true);
+    if (owner && ["completed", "failed", "interrupted"].includes(this.subagentLifecycleByThread.get(params.threadId) ?? "")) return null;
+    if (this.pendingApprovals.size + this.pendingQuestions.size >= 128) {
+      this.cb.onStderr("Too many concurrent provider requests; the new request was cancelled.");
+      return null;
+    }
+    if (owner) this.attentionOwners.set(requestId, owner);
+    return owner ? { ownerToolUseId: owner } : {};
+  }
+
   private registerHandlers(peer: JsonRpcPeer): void {
     // Server -> client approval requests: park a promise until the UI answers. The
     // method is captured so the response is built in the shape that method expects
@@ -855,13 +905,15 @@ export class CodexAppServerDriver implements Driver {
       new Promise<Json>((resolve) => {
         if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, null));
         const id = String(rpcRequestId ?? params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
-        this.declinePendingRequests("replaced");
+        const ownership = this.prepareAttention(params, id);
+        if (!ownership) return resolve(approvalResponse(method, params, null));
         if (this.disposed || this.cancelled) {
           return resolve(approvalResponse(method, params, null));
         }
         this.pendingApprovals.set(id, { method, params, resolve });
         this.cb.onEvent({
           kind: "permission_request",
+          ...ownership,
           requestId: id,
           title: approvalTitle(params),
           options: method === PERMISSIONS_METHOD
@@ -893,12 +945,13 @@ export class CodexAppServerDriver implements Driver {
           return resolve({ answers: {} });
         }
         const id = String(rpcRequestId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
-        this.declinePendingRequests("replaced");
+        const ownership = this.prepareAttention(params, id);
+        if (!ownership) return resolve(normalized.response({}, "dismiss"));
         if (this.disposed || this.cancelled) {
           return resolve(normalized.response({}, "dismiss"));
         }
         this.pendingQuestions.set(id, { resolve, response: normalized.response });
-        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, ...ownership });
       }));
 
     peer.onRequest(MCP_ELICITATION_METHOD, (params: Json, rpcRequestId: number | string) =>
@@ -913,11 +966,13 @@ export class CodexAppServerDriver implements Driver {
             this.cb.onStderr("Codex MCP URL elicitation was malformed — cancelling it");
             return resolve(mcpElicitationResponse("cancel"));
           }
-          this.declinePendingRequests("replaced");
+          const ownership = this.prepareAttention(params, id);
+          if (!ownership) return resolve(mcpElicitationResponse("cancel"));
           if (this.disposed || this.cancelled) return resolve(mcpElicitationResponse("cancel"));
           this.pendingApprovals.set(id, { method: MCP_ELICITATION_METHOD, params, resolve });
           this.cb.onEvent({
             kind: "permission_request",
+            ...ownership,
             requestId: id,
             title: `${serverName} requests a browser flow`,
             options: [
@@ -934,16 +989,18 @@ export class CodexAppServerDriver implements Driver {
           this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${diagnosticValue(params?.mode)} — cancelling it`);
           return resolve(mcpElicitationResponse("cancel"));
         }
-        this.declinePendingRequests("replaced");
+        const ownership = this.prepareAttention(params, id);
+        if (!ownership) return resolve(normalized.response({}, "dismiss"));
         if (this.disposed || this.cancelled) {
           return resolve(normalized.response({}, "dismiss"));
         }
         this.pendingQuestions.set(id, { resolve, response: normalized.response });
-        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, ...ownership });
       }));
 
     peer.onNotification("serverRequest/resolved", (params: Json) => {
       const id = String(params?.requestId ?? "");
+      this.attentionOwners.delete(id);
       const question = this.pendingQuestions.get(id);
       if (question) {
         this.pendingQuestions.delete(id);
@@ -1017,7 +1074,7 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("turn/started", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) return;
       if (!this.promptBusy || !this.turnResolve || p?.turn?.id === this.completedTurnId) return;
-      this.declinePendingRequests();
+      this.declinePendingRequests("provider_resolved", true);
       const id = p?.turn?.id;
       if (typeof id === "string" && id) {
         this.lastTurnId = id;
@@ -1062,7 +1119,7 @@ export class CodexAppServerDriver implements Driver {
       if (p?.turn?.id && (p.turn.id === this.completedTurnId ||
           (this.turnId && p.turn.id !== this.turnId))) return;
       if (typeof p?.turn?.id === "string" && p.turn.id) this.completedTurnId = p.turn.id;
-      this.declinePendingRequests();
+      this.declinePendingRequests("provider_resolved", true);
       this.closeTurnUsage();
       const status = p?.turn?.status;
       if (status === "failed") {
@@ -1088,7 +1145,7 @@ export class CodexAppServerDriver implements Driver {
         }
         return;
       }
-      this.declinePendingRequests();
+      this.declinePendingRequests("provider_resolved", true);
       this.streamedAgentResponse = false;
       this.emitDriverError(p?.error);
       this.closeTurnUsage();

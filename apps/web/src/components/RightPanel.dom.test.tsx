@@ -7,8 +7,19 @@ import type { SessionView } from "@wollipog/protocol";
 import type { TimelineItem } from "../timeline.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
+import { StoreProvider } from "../store.js";
+import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
+
+const connection: UiConnectionRuntime = {
+  instanceId: "right-panel-test", runtimeKey: "right-panel-test",
+  createSocket: () => ({ readyState: UI_SOCKET_OPEN, onopen: null, onmessage: null,
+    onclose: null, onerror: null, send() {}, close() {} }),
+  close() {},
+};
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 const globals: Record<string, unknown> = {
   window: domWindow,
   document: domWindow.document,
@@ -103,7 +114,7 @@ function PanelHarness({
         setSession((current) => ({ ...current, adopted: true, status: "running" }));
         setRunnerOnline(true);
       }}>Adopted Live</button>
-      <RightPanel
+      <StoreProvider connection={connection}><RightPanel
         state={state}
         session={session}
         runnerOnline={runnerOnline}
@@ -114,7 +125,7 @@ function PanelHarness({
         onClearSourceLocation={() => {}}
         onOpenTerminal={() => {}}
         onInsertSideChatDraft={() => {}}
-      />
+      /></StoreProvider>
     </>
   );
 }
@@ -156,6 +167,14 @@ test("RightPanel drops unmounted-generation focus intent and renders honest offl
     assert.equal(state.subagentTarget?.sessionId, "session-1");
     assert.equal(state.subagentTarget?.focusRequest, undefined,
       "a request is consumed when its session generation is not the mounted panel");
+    assert.equal(container.querySelector(".subagent-detail"), null,
+      "a stale target does not select a different session's worker");
+    await act(async () => {
+      const history = [...container.querySelectorAll<HTMLButtonElement>(".agents-filters button")]
+        .find((button) => button.textContent?.startsWith("History"))!;
+      history.click();
+    });
+    await act(async () => container.querySelector<HTMLButtonElement>(".agents-list button")!.click());
     assert.match(container.querySelector(".subagent-detail-meta")?.textContent ?? "", /Recorded Activity/,
       "offline active state is explicitly recorded rather than current");
 

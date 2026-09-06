@@ -1990,6 +1990,41 @@ textarea {
   display: flex;
   flex-direction: column;
 }
+.agents-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.agents-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.agents-list button[aria-current="true"] {
+  background: var(--bg-elev-2);
+  outline: 1px solid var(--border);
+}
+.agents-attention {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agents-attention > button {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.agents-list .subagent-list-meta {
+  flex-wrap: wrap;
+}
+.agents-panel > .subagents-panel {
+  min-height: 0;
+}
 .background-work-panel {
   display: flex;
   min-height: 100%;

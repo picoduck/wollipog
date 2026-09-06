@@ -320,7 +320,11 @@
 //      can resume an established provider conversation after runner/process loss without replay.
 //      A runner-owned recovery occurrence id prevents provider request-id reuse from aliasing two
 //      different interrupted questions.
-export const PROTOCOL_VERSION = 107;
+// 108: optional worker ownership and concurrent provider requests in the existing approval
+//      record. Ownership is a normalized spawning-tool id, never a raw provider thread id.
+export const PROTOCOL_VERSION = 108;
+import { pendingRequests } from "./worker-attention.js";
+export { pendingRequests, addPendingRequest, removePendingRequest } from "./worker-attention.js";
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -446,6 +450,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   ungatedConductorAdvertisement: 91,
   managedBackgroundDelivery: 82,
   managedBackgroundInventory: 82,
+  workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
   stopFailureRecovery: 85,
@@ -1653,7 +1658,28 @@ export interface SessionAttentionStatus {
 export function sessionAttentionStatus(
   session: Pick<SessionView, "status" | "pendingApproval">,
 ): SessionAttentionStatus | null {
+  const result = singleSessionAttentionStatus(session);
+  if (!result || !session.pendingApproval?.ownerToolUseId || session.pendingApproval.additionalRequests?.length) return result;
+  return { ...result, label: `Child ${result.label}`,
+    description: `A child agent owns this request. ${result.description} Open Agents to inspect the owner and exact request.` };
+}
+
+function singleSessionAttentionStatus(
+  session: Pick<SessionView, "status" | "pendingApproval">,
+): SessionAttentionStatus | null {
   const pending = session.pendingApproval;
+  const requests = pendingRequests(pending);
+  if (requests.length > 1) {
+    const children = requests.filter((request) => request.ownerToolUseId).length;
+    const questions = requests.filter((request) => request.kind === "question").length;
+    const authentication = requests.filter((request) => request.kind === "authentication").length;
+    const approvals = requests.length - questions - authentication;
+    return {
+      kind: "input_required",
+      label: `${requests.length} Actions Required`,
+      description: `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`,
+    };
+  }
   if (pending?.kind === "question" && pending.recoveryReason === "provider_restart") {
     return {
       kind: "recovery_required",
@@ -1858,6 +1884,11 @@ export type ApprovalKind =
   | "question";
 
 export interface PendingApproval {
+  /** v108: runner-verified spawning tool identity; never a raw provider thread id. */
+  ownerToolUseId?: string;
+  /** v108: other concurrent provider requests in this SAME approval store. The first request
+   * remains the legacy presentation. Entries never contain another additionalRequests array. */
+  additionalRequests?: PendingApproval[];
   requestId: string;
   title: string;
   options: PermissionOption[];
@@ -2541,14 +2572,14 @@ export type SessionEventPayload =
       restoresElicitation?: boolean;
     }
   | ({ kind: "review_decision" } & ReviewDecision)
-  | { kind: "permission_request"; requestId: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication" }
+  | { kind: "permission_request"; requestId: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication"; ownerToolUseId?: string }
   | {
       kind: "permission_resolved";
       requestId: string;
       optionId: string | null;
       resolutionReason?: StructuredRequestResolutionReason;
     }
-  | { kind: "question_request"; requestId: string; questions: AgentQuestion[] }
+  | { kind: "question_request"; requestId: string; questions: AgentQuestion[]; ownerToolUseId?: string }
   | {
       kind: "question_resolved";
       requestId: string;

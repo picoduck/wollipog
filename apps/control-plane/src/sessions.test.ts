@@ -31,6 +31,7 @@ import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WORKSPACE_REFERENCE_MIME_TYPE,
+  pendingRequests,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { parseRateTable } from "./usage-pricing.js";
@@ -5096,13 +5097,75 @@ test("approve fails 409 when the runner is offline (online guard)", () => {
   assert.equal(hub.sentToRunner.length, before);
 });
 
+test("child attention resolves by exact identity and preserves unrelated requests", (t) => {
+  const requestedAt = Date.now();
+  t.mock.method(Date, "now", () => requestedAt);
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  for (const requestId of ["child-b", "child-a"]) svc.onSessionEvent(id, {
+    kind: "permission_request", requestId, ownerToolUseId: requestId + "-tool",
+    title: "Allow Tool", options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }],
+  });
+  assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
+  assert.deepEqual(svc.approvalQueue().filter((item) => item.sessionId === id)
+    .map((item) => item.requestId), ["child-a", "child-b"]);
+  const settlements: string[] = [];
+  const reconcile = (svc as any).reconcileWorkflowSessionStatus.bind(svc);
+  (svc as any).reconcileWorkflowSessionStatus = (sessionId: string, status: string, now: number) => {
+    settlements.push(status);
+    return reconcile(sessionId, status, now);
+  };
+  svc.onSessionStatus(id, "idle");
+  assert.equal(db.getSession(id)!.status, "input_required");
+  assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
+  assert.deepEqual(settlements, ["idle"], "foreground settlement still reaches workflow consumers");
+  assert.equal(svc.approve(id, "child-b", "not-offered").ok, false);
+  assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
+  assert.equal(svc.approve(id, "child-b", "yes").ok, true);
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, "child-a");
+  assert.equal(db.getSession(id)!.status, "input_required");
+  svc.onSessionEvent(id, { kind: "permission_resolved", requestId: "child-b", optionId: "yes" });
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, "child-a");
+  assert.equal(svc.approve(id, "child-b", "yes").ok, false);
+  assert.equal(svc.approve(id, "child-a", "yes").ok, true);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+});
+
+test("child requests displace, rather than share, a control-plane-only policy card", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.setPendingApproval(id, { requestId: "guardrail", kind: "cost_budget", title: "Budget", options: [] });
+  svc.onSessionEvent(id, { kind: "permission_request", requestId: "child",
+    ownerToolUseId: "spawn", title: "Read", options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }] });
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, "child");
+  assert.equal(db.getSession(id)!.pendingApproval?.additionalRequests, undefined);
+  assert.equal(svc.approve(id, "child", "yes").ok, true);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+});
+
+test("child attention stays pending when response delivery fails", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  for (const requestId of ["child-a", "child-b"]) svc.onSessionEvent(id, {
+    kind: "question_request", requestId, ownerToolUseId: requestId + "-tool",
+    questions: [{ id: "q", question: "Continue?", options: [] }],
+  });
+  hub.deliver = false;
+  assert.equal(svc.answerQuestion(id, "child-b", {}, undefined, "dismiss").ok, false);
+  assert.equal(pendingRequests(db.getSession(id)!.pendingApproval).length, 2);
+  hub.deliver = true;
+  assert.equal(svc.answerQuestion(id, "child-b", {}, undefined, "dismiss").ok, true);
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, "child-a");
+  assert.equal(db.getSession(id)!.status, "input_required");
+});
+
 test("approve fails 409 if the runner does not actually receive the message", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   // Online by the guard's reckoning, but delivery fails.
   hub.online = true;
   hub.deliver = false;
-  db.setPendingApproval(id, { requestId: "req-1", title: "t", options: [] });
+  db.setPendingApproval(id, { requestId: "req-1", title: "t", options: [{ optionId: "opt-1", name: "Allow", kind: "allow_once" }] });
 
   const res = svc.approve(id, "req-1", "opt-1");
   assert.equal(res.ok, false);
@@ -5118,7 +5181,7 @@ test("approve fails 409 if the runner does not actually receive the message", ()
 test("approve delivers resolve_permission and clears the pending approval", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
-  db.setPendingApproval(id, { requestId: "req-1", title: "t", options: [] });
+  db.setPendingApproval(id, { requestId: "req-1", title: "t", options: [{ optionId: "opt-1", name: "Allow", kind: "allow_once" }] });
   db.updateSessionStatus(id, "input_required", Date.now());
 
   const res = svc.approve(id, "req-1", "opt-1");

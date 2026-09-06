@@ -179,12 +179,17 @@ function sessionStatusBadgeMeta(
       : statusMeta(status);
 }
 
-export function AttentionBadge({ session, ariaLabel }: {
+export function AttentionBadge({ session, ariaLabel, onOpen }: {
   session: Pick<SessionView, "status" | "pendingApproval">;
   ariaLabel?: string;
+  onOpen?: () => void;
 }) {
   const attention = sessionAttentionStatus(session);
   if (!attention) return null;
+  if (onOpen) return <button type="button" className="status-badge st-input" title={attention.description}
+    aria-label={ariaLabel ?? attention.label} onClick={onOpen}>
+    <span className="status-dot2" aria-hidden="true" />{attention.label}
+  </button>;
   return (
     <span className="status-badge st-input" title={attention.description} aria-label={ariaLabel ?? attention.label}>
       <span className="status-dot2" aria-hidden="true" />
@@ -193,9 +198,10 @@ export function AttentionBadge({ session, ariaLabel }: {
   );
 }
 
-export function SessionStatusIndicators({ session, disconnected = false }: {
+export function SessionStatusIndicators({ session, disconnected = false, onOpenAttention }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" | "stopOperation">;
   disconnected?: boolean;
+  onOpenAttention?: () => void;
 }) {
   const lifecycle = sessionStatusBadgeMeta(
     session.status,
@@ -213,7 +219,7 @@ export function SessionStatusIndicators({ session, disconnected = false }: {
         stopOperation={session.stopOperation}
         ariaLabel={`Activity: ${lifecycle.label}`}
       />
-      <AttentionBadge session={session} ariaLabel={attention ? `Attention: ${attention.label}` : undefined} />
+      <AttentionBadge session={session} ariaLabel={attention ? `Attention: ${attention.label}` : undefined} onOpen={onOpenAttention} />
       {disconnected && (
         <span className="status-badge st-failed" title="The session runner is disconnected." aria-label="Health: Disconnected">
           <span className="status-dot2" aria-hidden="true" />
@@ -342,10 +348,11 @@ export function UntrackedBackgroundWorkBadge({ onOpen }: { onOpen?: () => void }
   );
 }
 
-export function ActiveSubagentsBadge({ count, onOpen }: { count: number; onOpen: () => void }) {
+export function ActiveSubagentsBadge({ count, onOpen, workers = false }: { count: number; onOpen: () => void; workers?: boolean }) {
   if (count < 1) return null;
-  const label = count === 1 ? "1 Subagent Active" : `${count} Subagents Active`;
-  const visibleLabel = count === 1 ? "1 Subagent" : `${count} Subagents`;
+  const noun = workers ? "Worker" : "Subagent";
+  const visibleLabel = `${count} ${noun}${count === 1 ? "" : "s"}`;
+  const label = `${visibleLabel} Active`;
   return (
     <button
       type="button"

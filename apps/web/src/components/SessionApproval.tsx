@@ -191,6 +191,17 @@ function requestRegionFor(element: Element | null): HTMLElement | null {
   return element?.closest<HTMLElement>("[data-session-request-id]") ?? null;
 }
 
+/** Navigate to an existing request without making a response button the implicit Enter target. */
+export function focusSessionRequest(sessionId: string, requestId: string): void {
+  const region = [...document.querySelectorAll<HTMLElement>("[data-session-request-id]")]
+    .find((candidate) => candidate.dataset.sessionRequestId === requestId &&
+      candidate.dataset.sessionRequestSession === sessionId);
+  if (!region) return;
+  region.tabIndex = -1;
+  region.scrollIntoView?.({ block: "nearest" });
+  region.focus();
+}
+
 function enabledRequestControl(
   sessionId: string,
   requestId: string,
