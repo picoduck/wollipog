@@ -6,7 +6,9 @@ Status: managed deployment and Git snapshot import implemented; remaining design
 
 The Skills view's **Import from Git** action accepts HTTPS and SSH remotes (or GitHub
 `owner/repository` shorthand), a branch/tag/commit, and an optional repository subdirectory.
-Owners and administrators can use the control plane's ambient Git credentials. Credential-bearing
+Only the instance's local owner identity can use the control plane's ambient Git credentials,
+including from a paired device. Organization owners and administrators do not acquire that
+authority from their organization role. Credential-bearing
 URLs, local-file transports, symlinks, and submodules are refused. Git objects are read without a
 checkout, hooks, or script execution. Fetches have a 60-second command timeout, a 90-second overall
 deadline, and a monitored 128 MiB temporary repository budget; skill payload limits also apply.
@@ -19,6 +21,8 @@ content requires explicit diff acceptance and updates existing track-latest assi
 content reuses the current version. A concurrent library change invalidates acceptance. Previews
 are scoped to the requesting human and organization, expire after ten minutes, and are discarded
 on restart. At most four previews and one discovery are active at once.
+The existing skill-file format does not preserve executable bits: imported scripts deploy as
+content and should be invoked through their interpreter.
 
 Git-imported versions retain URL, requested ref, repository path, and resolved commit separately
 from skill content. **Check for Updates** repeats the preview flow; there is no automatic polling

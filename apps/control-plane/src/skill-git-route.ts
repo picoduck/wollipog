@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { SkillsRouteDeps } from "./skills-route.js";
+import { LOCAL_OWNER_USER_ID } from "./identity.js";
+import { SkillImportConflictError } from "./db.js";
 import { discoverGitSkills, parseSkillGitSource, type SkillGitCandidate } from "./skill-git.js";
 
 export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDeps,
@@ -15,8 +17,8 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
 
   app.post("/api/skill-git/preview", async (req, reply) => {
     const principal = deps.requestHuman(req);
-    if (!principal || !["owner", "admin"].includes(principal.role)) {
-      return reply.code(403).send({ error: "An owner or administrator is required to access control-plane Git credentials." });
+    if (!principal || principal.userId !== LOCAL_OWNER_USER_ID || !["owner", "admin"].includes(principal.role)) {
+      return reply.code(403).send({ error: "Only the instance owner can import from Git using the control plane's credentials." });
     }
     purge();
     if (discovering || snapshots.size >= 4) return reply.code(429).send({ error: "Another import is in progress. Finish or cancel a preview first." });
@@ -55,7 +57,9 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
 
   app.post("/api/skill-git/import", async (req, reply) => {
     const principal = deps.requestHuman(req);
-    if (!principal || !["owner", "admin"].includes(principal.role)) return reply.code(403).send({ error: "An owner or administrator is required." });
+    if (!principal || principal.userId !== LOCAL_OWNER_USER_ID || !["owner", "admin"].includes(principal.role)) {
+      return reply.code(403).send({ error: "Only the instance owner can import from Git using the control plane's credentials." });
+    }
     purge();
     const body = (req.body ?? {}) as { previewId?: string; path?: string; acceptUpdate?: boolean };
     const snapshot = typeof body.previewId === "string" ? snapshots.get(body.previewId) : undefined;
@@ -66,6 +70,9 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
     if (!candidate) return reply.code(400).send({ error: "Select a skill from the preview." });
     const existing = deps.db.getSkillByName(candidate.name);
     if (existing && !deps.db.canAccessSkill(principal, existing.id)) return reply.code(404).send({ error: "Skill not found." });
+    if ((existing?.latestVersion?.id ?? null) !== snapshot.versions.get(candidate.name)) {
+      return reply.code(409).send({ error: "The library changed after preview. Preview the import again." });
+    }
     if (existing && existing.latestVersion?.digest !== candidate.digest && body.acceptUpdate !== true) {
       return reply.code(409).send({ error: "Accept the version diff explicitly before updating an existing skill." });
     }
@@ -81,6 +88,9 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
         for (const runner of deps.db.listRunners()) deps.pushSkillsSync(runner.runnerId);
       }
       return { skill };
-    } catch (error) { return reply.code(409).send({ error: (error as Error).message }); }
+    } catch (error) {
+      if (error instanceof SkillImportConflictError) return reply.code(409).send({ error: error.message });
+      return reply.code(500).send({ error: "Skill import failed. Preview the source again before retrying." });
+    }
   });
 }

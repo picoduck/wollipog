@@ -81,7 +81,8 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
           {paths.map((path) => {
             const before = candidate.previousFiles.find((file) => file.path === path);
             const after = candidate.files.find((file) => file.path === path);
-            return <details key={path}><summary>{path}{candidate.executablePaths.includes(path) || /\.(sh|py|js|mjs|ts|ps1|bat|cmd)$/.test(path) ? " · Script" : ""}{before && after && contents(before) === contents(after) ? " · Unchanged" : " · Changed"}</summary>
+            const change = !before ? "Added" : !after ? "Removed" : contents(before) === contents(after) ? "Unchanged" : "Changed";
+            return <details key={path}><summary>{path}{candidate.executablePaths.includes(path) || /\.(sh|py|js|mjs|ts|ps1|bat|cmd)$/.test(path) ? " · Script" : ""} · {change}</summary>
               {candidate.disposition !== "new" && <><h4>Current</h4><pre className="skill-import-content">{contents(before)}</pre></>}
               <h4>Proposed</h4><pre className="skill-import-content">{contents(after)}</pre>
             </details>;

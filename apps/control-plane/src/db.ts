@@ -2673,6 +2673,8 @@ export type SkillAgentSelector =
 
 export type SkillAssignmentScopeKind = "instance" | "runner";
 
+export class SkillImportConflictError extends Error {}
+
 export interface SkillVersionSummary {
   id: string;
   digest: string;
@@ -5600,7 +5602,7 @@ export class ControlPlaneDb {
     return this.atomic(() => {
       const current = this.getSkillByName(input.name);
       if ((current?.latestVersion?.id ?? null) !== input.expectedVersionId) {
-        throw new Error("The library changed after preview. Preview the import again.");
+        throw new SkillImportConflictError("The library changed after preview. Preview the import again.");
       }
       if (current?.latestVersion?.digest === input.digest) {
         // An identical local version can acquire provenance without duplicating its content.

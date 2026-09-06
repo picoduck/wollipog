@@ -15,8 +15,10 @@ test("Git preview is read-only; acceptance is scoped, deduplicated, atomic and g
     userName: "Owner", organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Personal", role: "owner", deviceId: null, localBootstrap: true };
   let content = "Original";
   let discoveries = 0;
+  const pushes: string[] = [];
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [], workspaces: [] }, 1, 108);
   registerSkillGitRoutes(app, { db, requestHuman: () => principal, requestPrincipal: () => principal,
-    hub: {} as SkillsRouteDeps["hub"], pushSkillsSync: (() => {}) as unknown as SkillsSyncPusher }, async (source) => {
+    hub: {} as SkillsRouteDeps["hub"], pushSkillsSync: ((id: string) => { pushes.push(id); }) as SkillsSyncPusher }, async (source) => {
     discoveries++;
     const payload = validateSkillPayload({ name: "alpha", files: [{ path: "SKILL.md", encoding: "utf8", content: `---\nname: alpha\n---\n${content}` }] });
     assert.equal(payload.ok, true);
@@ -32,7 +34,7 @@ test("Git preview is read-only; acceptance is scoped, deduplicated, atomic and g
   const first = await preview();
   assert.equal(db.listSkills().length, 0);
   const owner = principal;
-  principal = { ...owner, userId: "other-user" };
+  principal = { ...owner, organizationId: "other-org" };
   assert.equal((await accept(first.previewId)).statusCode, 404);
   principal = owner;
   const created = await accept(first.previewId);
@@ -41,17 +43,21 @@ test("Git preview is read-only; acceptance is scoped, deduplicated, atomic and g
   const version = db.getSkillVersion(skill.latestVersion.id)!;
   assert.equal(version.gitSource?.commit, "a".repeat(40));
   assert.equal(db.listSkillAssignments(skill.id).length, 0);
+  assert.deepEqual(pushes, []);
   assert.equal((await accept(first.previewId)).statusCode, 404);
   const duplicate = await preview();
   assert.equal(duplicate.candidates[0].disposition, "identical");
   assert.equal((await accept(duplicate.previewId)).json().skill.latestVersion.id, version.id);
+  assert.deepEqual(pushes, []);
   content = "Changed";
   const update = await preview();
   assert.equal(update.candidates[0].previousFiles[0].content, version.files[0]!.content);
   assert.equal((await accept(update.previewId)).statusCode, 409);
+  assert.deepEqual(pushes, []);
   assert.equal(db.getSkill(skill.id)!.latestVersion!.id, version.id);
   const newer = await preview();
   assert.equal((await accept(newer.previewId, true)).statusCode, 200);
+  assert.deepEqual(pushes, ["runner-1"]);
   assert.equal((await accept(update.previewId, true)).statusCode, 409);
   const final = db.getSkill(skill.id)!;
   assert.notEqual(final.latestVersion!.id, version.id);
@@ -61,4 +67,17 @@ test("Git preview is read-only; acceptance is scoped, deduplicated, atomic and g
   principal = { ...owner, role: "operator" };
   assert.equal((await app.inject({ method: "POST", url: "/api/skill-git/preview", payload: { url: "team/repo" } })).statusCode, 403);
   assert.equal(discoveries, 4);
+  for (const role of ["admin", "owner"] as const) {
+    principal = { ...owner, userId: "usr_foreign", actorId: "usr_foreign", organizationId: "org_foreign", role, localBootstrap: false };
+    assert.equal((await app.inject({ method: "POST", url: "/api/skill-git/preview", payload: { url: "team/private" } })).statusCode, 403);
+    assert.equal((await accept(update.previewId, true)).statusCode, 403);
+  }
+  assert.equal(discoveries, 4, "foreign organization admins and owners never reach ambient credentials");
+  principal = owner;
+  content = "Another update";
+  const failing = await preview();
+  db.importGitSkill = () => { throw new Error("sensitive internal SQL details"); };
+  const failure = await accept(failing.previewId, true);
+  assert.equal(failure.statusCode, 500);
+  assert.doesNotMatch(failure.body, /sensitive|SQL/);
 });

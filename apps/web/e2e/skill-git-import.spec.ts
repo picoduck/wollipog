@@ -1,6 +1,21 @@
 import { expect, test } from "@playwright/test";
 
 test.use({ video: "on" });
+test("Check for Updates preserves the source and previews the recorded skill directory", async ({ page }) => {
+  await page.route("**/api/skill-git/preview", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ url: "https://github.com/example/skills.git", ref: "stable", subdirectory: "skills/code-review" });
+    await route.fulfill({ json: { previewId: "updates", candidates: [] } });
+  });
+  await page.goto("/skills-removals-e2e.html");
+  await page.getByRole("button", { name: /code-review/i }).click();
+  await expect(page.getByRole("heading", { name: "Git Source" })).toBeVisible();
+  await page.getByRole("button", { name: "Check for Updates" }).click();
+  await expect(page.getByLabel("Git Repository", { exact: true })).toHaveValue("https://github.com/example/skills.git");
+  await expect(page.getByLabel("Ref", { exact: true })).toHaveValue("stable");
+  await expect(page.getByLabel("Repository Subdirectory")).toHaveValue("skills/code-review");
+  await page.getByRole("button", { name: "Preview Skills" }).click();
+  await expect(page.getByText("No remaining skill candidates in this preview.")).toBeVisible();
+});
 for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
   test(`Git import previews files and requires update acceptance at ${width} in ${theme}`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 900 });
