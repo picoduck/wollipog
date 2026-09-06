@@ -1871,7 +1871,13 @@ const TimelineRow = memo(function TimelineRow({
       const summary = firstQuestion ? structuredQuestionSummary(firstQuestion.question) : "Question";
       const historicalQuestion = (
         <div className="tl-perm tl-question">
-          <details className="question-history">
+          <details
+            className="question-history"
+            open={disclosureOpen}
+            onToggle={(event) => {
+              if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
+            }}
+          >
             <summary className="tl-perm-head">
               <span className="perm-icon" aria-hidden="true">❓</span>
               <span className="question-history-summary">
