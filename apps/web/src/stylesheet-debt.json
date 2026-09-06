@@ -337,7 +337,6 @@
     "|.tl-output pre,.tl-stderr pre|font-size|12",
     "|.tl-perm|font-size|12.5",
     "|.tl-plan li|font-size|13",
-    "|.tl-question .question-recap|font-size|12",
     "|.tl-reasoning|font-size|13",
     "|.tl-subagent>.subagent-head|font-size|12",
     "|.tl-thought|font-size|12.5",

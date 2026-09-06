@@ -4733,8 +4733,7 @@ button.file-head.source-path-link {
   border-radius: var(--radius-sm);
 }
 .tl-perm > .bubble-text,
-.tl-perm > .perm-context,
-.tl-perm > .question-recap {
+.tl-perm > .perm-context {
   flex: 1 1 100%;
   min-width: 0;
   max-width: 100%;
