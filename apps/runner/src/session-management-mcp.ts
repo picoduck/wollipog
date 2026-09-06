@@ -1,28 +1,8 @@
-/**
- * Conductor MCP server ("manager") — the runner executable's `--conductor-mcp` mode.
- *
- * The conductor is a normal claude-code session whose `claude -p` process is given
- * `--mcp-config` pointing here (see conductor.ts). This process speaks newline-delimited
- * JSON-RPC 2.0 over stdio (hand-rolled — minimal-deps policy, no @modelcontextprotocol/sdk;
- * framing idiom shared with jsonrpc.ts) and proxies a CURATED subset of the control-plane
- * REST API via fetch. Safety properties live in the tool table, not the model:
- *  - reads are pre-allowed via --allowedTools; every mutation parks on the CLI's own
- *    stdio permission gate, surfacing as the existing Allow/Reject card in the UI;
- *  - no approve tool (the conductor never resolves permission/guardrail cards);
- *  - self-targeting and conductor-recursion are refused script-side, as is
- *    bypassPermissions for worker sessions;
- *  - REST errors are TOOL results ({isError:true}), never protocol errors, so the model
- *    can relay 409 semantics (runner offline / busy / guardrail-parked) to the user.
- *
- * `--cp-url` and `--self-session-id` ride argv (written into the per-session mcp-config
- * file); MANAGER_TOKEN rides env only so the secret never appears in any process listing.
- */
+/** Shared session-management tools for the session-scoped CLI and MCP server. */
 
 import type { Readable, Writable } from "node:stream";
-import { readFileSync } from "node:fs";
 import {
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
-  WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
 import { VERSION } from "./version.js";
 
@@ -37,7 +17,7 @@ const MAX_LINE = 400;
 
 /** Worker sessions the conductor creates may use any interactive/fixed mode EXCEPT
  * bypassPermissions (and codex danger-full-access) — the human still sees the create card. */
-const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan"] as const;
+const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "orchestrator"] as const;
 
 /** The conductor's own agent id — a contract constant shared with the runner's agent
  * synthesis + provisioning and the control plane's permissionMode clamp. */
@@ -74,7 +54,8 @@ export interface McpDeps {
   token: string;
   /** Conductor compatibility uses its historical header; general sessions use the exact-session
    * credential header. Device-token CLI calls omit actorHeader entirely. */
-  actorHeader?: typeof WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER | typeof WOLLIPOG_AGENT_ACTOR_SESSION_HEADER | null;
+  actorHeader?: typeof WOLLIPOG_AGENT_ACTOR_SESSION_HEADER | null;
+  orchestrator?: boolean;
   /** Deterministic scheduling hooks for wait-session tests. */
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -116,11 +97,11 @@ async function cpFetch(
   method: string,
   path: string,
   body?: unknown,
-): Promise<{ ok: true; data: Json } | { ok: false; message: string }> {
+): Promise<{ ok: true; data: Json } | { ok: false; message: string; status?: number }> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["content-type"] = "application/json";
   if (deps.token) headers["authorization"] = `Bearer ${deps.token}`;
-  const actorHeader = deps.actorHeader === undefined ? WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER : deps.actorHeader;
+  const actorHeader = deps.actorHeader === undefined ? WOLLIPOG_AGENT_ACTOR_SESSION_HEADER : deps.actorHeader;
   if (actorHeader && deps.selfSessionId) headers[actorHeader] = deps.selfSessionId;
   let res: McpFetchResponse;
   try {
@@ -149,7 +130,7 @@ async function cpFetch(
   }
   if (!res.ok) {
     const detail = typeof data?.error === "string" ? data.error : truncate(raw, MAX_LINE);
-    return { ok: false, message: `HTTP ${res.status}: ${detail}` };
+    return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
 }
@@ -164,6 +145,7 @@ function mapSession(s: Json): Json {
     workspaceId: s?.workspaceId ?? null,
     agentId: s?.agentId ?? null,
     runId: s?.runId ?? null,
+    parentSessionId: s?.parentSessionId ?? null,
     costUsd: s?.costUsd,
     costBudgetUsd: s?.costBudgetUsd ?? null,
     costCheckpointsUsd: s?.costCheckpointsUsd ?? null,
@@ -180,7 +162,10 @@ function mapSession(s: Json): Json {
 function worktreeTarget(args: Json, deps: McpDeps): string | ToolResult {
   const sessionId = typeof args?.sessionId === "string" && args.sessionId ? args.sessionId : deps.selfSessionId;
   if (!sessionId) return errorResult("sessionId is required");
-  if (deps.actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER && sessionId !== deps.selfSessionId) {
+  if (deps.orchestrator && sessionId === deps.selfSessionId) {
+    return errorResult("the orchestrator preset cannot manage its own worktrees; select a child session");
+  }
+  if (!deps.orchestrator && deps.actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER && sessionId !== deps.selfSessionId) {
     return errorResult("refusing: a session credential may manage only its own worktrees");
   }
   return sessionId;
@@ -338,6 +323,10 @@ const GOVERNANCE_POLICY_PROPERTIES: Json = {
 /* -------------------------------------------------------------------------- */
 /* Tool table (tool ids as claude sees them: mcp__manager__<name>)             */
 /* -------------------------------------------------------------------------- */
+
+const ORCHESTRATOR_TOOLS = new Set(["list_runners", "list_sessions", "get_session", "get_session_events",
+  "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
+  "stop_session", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree"]);
 
 export const TOOLS: McpTool[] = [
   /* ------------------------------- READS --------------------------------- */
@@ -649,7 +638,7 @@ export const TOOLS: McpTool[] = [
   /* ---------------- MUTATIONS (each call parks on a human card) ----------- */
   {
     name: "upsert_governance_policy",
-    description: "Create or replace one validated non-built-in governance policy. The user must approve.",
+    description: "Create or replace one validated non-built-in governance policy. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: GOVERNANCE_POLICY_PROPERTIES,
@@ -669,7 +658,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "delete_governance_policy",
-    description: "Delete one exact non-built-in governance policy. The user must approve.",
+    description: "Delete one exact non-built-in governance policy. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { policyId: { type: "string" } },
@@ -685,7 +674,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_workflow_definition",
-    description: "Create a validated custom workflow definition at immutable version 1. The user must approve.",
+    description: "Create a validated custom workflow definition at immutable version 1. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: WORKFLOW_SPEC_PROPERTIES,
@@ -707,7 +696,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_workflow_version",
-    description: "Create the next immutable version of an existing custom workflow definition. The user must approve.",
+    description: "Create the next immutable version of an existing custom workflow definition. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { workflowId: { type: "string" }, ...WORKFLOW_SPEC_PROPERTIES },
@@ -730,7 +719,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_workflow_run",
-    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. The user must approve.",
+    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -776,7 +765,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "dispatch_workflow_node",
-    description: "Dispatch one ready workflow agent node with a caller-stable idempotency key. The user must approve.",
+    description: "Dispatch one ready workflow agent node with a caller-stable idempotency key. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { instanceId: { type: "string" }, nodeId: { type: "string" }, dispatchKey: { type: "string" } },
@@ -799,7 +788,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_workflow_artifact",
-    description: "Publish an immutable, attributed workflow artifact for a run or worker session. The user must approve.",
+    description: "Publish an immutable, attributed workflow artifact for a run or worker session. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -829,7 +818,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "complete_workflow_attempt",
-    description: "Complete an awaiting workflow attempt with exact artifact-contract bindings. The user must approve.",
+    description: "Complete an awaiting workflow attempt with exact artifact-contract bindings. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -855,7 +844,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "resolve_workflow_gate",
-    description: "Resolve a waiting human workflow gate; named policy decisions remain non-bypassable. The user must approve.",
+    description: "Resolve a waiting human workflow gate; named policy decisions remain non-bypassable. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -882,7 +871,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_worktree",
-    description: "Create and select a session worktree at an exact branch and optional base ref. The user must approve.",
+    description: "Create and select a session worktree at an exact branch and optional base ref. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -906,7 +895,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "attach_worktree",
-    description: "Attach and select an existing registered worktree for a session. The user must approve.",
+    description: "Attach and select an existing registered worktree for a session. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -927,7 +916,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "select_worktree",
-    description: "Select one of a session's attached worktrees for future turns. The user must approve.",
+    description: "Select one of a session's attached worktrees for future turns. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -948,7 +937,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "discard_worktree",
-    description: "Permanently remove an inactive runner-owned worktree and branch only when they are clean and fully pushed. The user must approve.",
+    description: "Permanently remove an inactive runner-owned worktree and branch only when they are clean and fully pushed. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -970,7 +959,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a new agent session on a runner, optionally with the initial task prompt and guardrails. The user must approve.",
+      "Start a new agent session on a runner, optionally with the initial task prompt and guardrails. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -994,7 +983,7 @@ export const TOOLS: McpTool[] = [
         return errorResult("runnerId and agentId are required");
       }
       if (args.agentId === CONDUCTOR_AGENT_ID) {
-        return errorResult("refusing to start another conductor (a conductor must not spawn conductors)");
+        return errorResult("refusing to start another conductor (the Conductor agent is retired)");
       }
       if (!args.workspaceId && !args.workspacePath) {
         return errorResult("workspaceId or workspacePath is required — pick one from list_runners");
@@ -1007,6 +996,8 @@ export const TOOLS: McpTool[] = [
       const config: Json = {};
       if (typeof args.model === "string") config.model = args.model;
       if (typeof args.permissionMode === "string") config.permissionMode = args.permissionMode;
+      if (typeof args.costBudgetUsd === "number") config.costBudgetUsd = args.costBudgetUsd;
+      if (typeof args.maxToolCalls === "number") config.maxToolCalls = args.maxToolCalls;
       const body: Json = { runnerId: args.runnerId, agentId: args.agentId };
       if (typeof args.workspaceId === "string") body.workspaceId = args.workspaceId;
       if (typeof args.workspacePath === "string") body.workspacePath = args.workspacePath;
@@ -1015,27 +1006,21 @@ export const TOOLS: McpTool[] = [
       if (typeof args.useWorktree === "boolean") body.useWorktree = args.useWorktree;
       if (Object.keys(config).length) body.config = config;
 
-      const created = await cpFetch(deps, "POST", "/api/sessions", body);
+      let created = await cpFetch(deps, "POST", "/api/sessions", body);
+      // Keep the exact invocation alive while its CP-owned approval is pending. Polling the
+      // unchanged request also maintains the existing durable-approval abandonment fence.
+      while (!created.ok && created.status === 428) {
+        await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(1000);
+        created = await cpFetch(deps, "POST", "/api/sessions", body);
+      }
       if (!created.ok) return errorResult(created.message);
       const view = created.data;
-      // Budgets can't ride create (the CP persists only model/effort/permissionMode there) —
-      // arm them with a follow-up config write under this SAME gated tool call.
-      const guardrails: Json = {};
-      if (typeof args.costBudgetUsd === "number") guardrails.costBudgetUsd = args.costBudgetUsd;
-      if (typeof args.maxToolCalls === "number") guardrails.maxToolCalls = args.maxToolCalls;
-      if (Object.keys(guardrails).length) {
-        const armed = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(view?.id)}/config`, guardrails);
-        if (!armed.ok) {
-          return errorResult(`session ${view?.id} was created, but arming its guardrails failed — ${armed.message}`);
-        }
-        return textResult({ session: mapSession(armed.data) });
-      }
       return textResult({ session: mapSession(view) });
     },
   },
   {
     name: "prompt_session",
-    description: "Send a message/task to an existing session. The user must approve.",
+    description: "Send a message/task to an existing session. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" }, text: { type: "string" } },
@@ -1047,7 +1032,7 @@ export const TOOLS: McpTool[] = [
         return errorResult("sessionId and a non-empty text are required");
       }
       if (args.sessionId === deps.selfSessionId) {
-        return errorResult("refusing: that is my own session (the conductor never prompts itself)");
+        return errorResult("refusing: that is my own session (an agent cannot prompt itself)");
       }
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/prompt`, {
         text: args.text,
@@ -1058,7 +1043,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "stop_session",
-    description: "Stop a session's agent process. The user must approve.",
+    description: "Stop a session's agent process. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },
@@ -1068,7 +1053,7 @@ export const TOOLS: McpTool[] = [
     handler: async (args, deps) => {
       if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
       if (args.sessionId === deps.selfSessionId) {
-        return errorResult("refusing: that is my own session (the conductor never stops itself)");
+        return errorResult("refusing: that is my own session (an agent cannot stop itself)");
       }
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/stop`);
       if (!r.ok) return errorResult(r.message);
@@ -1077,7 +1062,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "set_guardrails",
-    description: "Set or clear a session's cost budget (USD) and/or tool-call limit; 0 clears. The user must approve.",
+    description: "Set or clear a session's cost budget (USD) and/or tool-call limit; 0 clears. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1091,7 +1076,7 @@ export const TOOLS: McpTool[] = [
     handler: async (args, deps) => {
       if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
       if (args.sessionId === deps.selfSessionId) {
-        return errorResult("refusing: that is my own session (the conductor never reconfigures itself)");
+        return errorResult("refusing: that is my own session (an agent cannot reconfigure itself)");
       }
       // ONLY guardrail keys ever ride this call — never model/effort/permissionMode.
       const body: Json = {};
@@ -1108,7 +1093,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_run",
     description:
-      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. The user must approve.",
+      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1194,13 +1179,14 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
       return isRequest ? reply({}) : null;
     case "tools/list":
       return isRequest
-        ? reply({ tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
+        ? reply({ tools: TOOLS.filter((tool) => !deps.orchestrator || ORCHESTRATOR_TOOLS.has(tool.name)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
         : null;
     case "tools/call": {
       if (!isRequest) return null;
       const name = m.params?.name;
       if (typeof name !== "string") return rpcError(-32602, "tools/call requires params.name");
       const tool = TOOLS.find((t) => t.name === name);
+      if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return reply(errorResult("the orchestrator preset does not allow this tool"));
       // Unknown tool → an isError TOOL result (not a protocol error) so the model can
       // recover in-conversation instead of the client tearing the turn down.
       if (!tool) return reply(errorResult(`unknown tool '${name}'`));
@@ -1219,6 +1205,7 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
 /** Direct programmatic access for the CLI. It deliberately executes the exact MCP tool table so
  * schemas, response projection, self-targeting checks, and REST routes cannot drift. */
 export async function executeManagerTool(name: string, args: Json, deps: McpDeps): Promise<ToolResult> {
+  if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return errorResult("the orchestrator preset does not allow this tool");
   const tool = TOOLS.find((candidate) => candidate.name === name);
   if (!tool) return errorResult(`unknown tool '${name}'`);
   try {
@@ -1236,7 +1223,7 @@ export async function executeManagerTool(name: string, args: Json, deps: McpDeps
  * would head-of-line block every tool — even ping and the pre-allowed reads — behind one
  * stalled CP request, bricking the whole server for the duration of a tunnel blip.
  */
-export function serveConductorMcp(input: Readable, output: Writable, deps: McpDeps): void {
+export function serveSessionManagementMcp(input: Readable, output: Writable, deps: McpDeps): void {
   let buffer = "";
   const handleLine = (line: string) => {
     const trimmed = line.trim();
@@ -1253,7 +1240,7 @@ export function serveConductorMcp(input: Readable, output: Writable, deps: McpDe
       })
       .catch((err) => {
         // dispatch never rejects by design; belt so a bad frame can't become an unhandled rejection.
-        console.error(`[conductor-mcp] dispatch failed: ${(err as Error)?.message ?? String(err)}`);
+        console.error(`[session-management-mcp] dispatch failed: ${(err as Error)?.message ?? String(err)}`);
       });
   };
   input.setEncoding("utf8");
@@ -1266,45 +1253,4 @@ export function serveConductorMcp(input: Readable, output: Writable, deps: McpDe
       handleLine(line);
     }
   });
-}
-
-/** `--flag value` / `--flag=value` (the mcp-config file writes the former). */
-function argValue(argv: string[], flag: string): string | undefined {
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i] ?? "";
-    if (a === flag) return argv[i + 1];
-    if (a.startsWith(`${flag}=`)) return a.slice(flag.length + 1);
-  }
-  return undefined;
-}
-
-/** Entry for the `--conductor-mcp` mode (dispatched by cli.ts). */
-export function runConductorMcp(argv: string[], env: NodeJS.ProcessEnv): void {
-  const cpUrl = argValue(argv, "--cp-url");
-  const selfSessionId = argValue(argv, "--self-session-id");
-  if (!cpUrl || !selfSessionId) {
-    // stderr only — stdout is the JSON-RPC channel.
-    console.error("[conductor-mcp] --cp-url and --self-session-id are required");
-    process.exit(1);
-  }
-  let token = env.MANAGER_TOKEN ?? "";
-  if (env.MANAGER_TOKEN_FILE) {
-    try {
-      token = readFileSync(env.MANAGER_TOKEN_FILE, "utf8").trim();
-    } catch (error) {
-      console.error(`[conductor-mcp] could not read MANAGER_TOKEN_FILE: ${(error as Error).message}`);
-      process.exit(1);
-    }
-  }
-  const deps: McpDeps = {
-    fetch: globalThis.fetch,
-    cpUrl: cpUrl.replace(/\/+$/, ""),
-    selfSessionId,
-    token,
-    actorHeader: WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
-  };
-  serveConductorMcp(process.stdin, process.stdout, deps);
-  // The claude CLI owns our lifetime: stdin EOF means the session process is gone.
-  process.stdin.on("end", () => process.exit(0));
-  console.error(`[conductor-mcp] serving ${TOOLS.length} manager tools for session ${selfSessionId} -> ${deps.cpUrl}`);
 }

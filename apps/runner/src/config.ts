@@ -353,7 +353,7 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
       throw new Error(`runner config: workspace '${workspace.id}' exceeds 64 additional-directory grants`);
     }
   }
-  const agents = overrides.agents ?? file.agents ?? [];
+  const agents = (overrides.agents ?? file.agents ?? []).filter((agent) => agent.id !== "conductor");
   const containerTargets = validateContainerTargets(overrides.containerTargets ?? file.containerTargets ?? []);
   const cloudTargets = validateCloudTargets(overrides.cloudTargets ?? file.cloudTargets ?? []);
   const remoteEnabled = overrides.features?.acpRemoteTransports ?? file.features?.acpRemoteTransports ?? false;

@@ -111,7 +111,7 @@ test("capability config validation rejects unverified effort and permission mode
   assert.match(capabilityConfigError({ model: "legacy", effort: "low" }, perModelCaps)!, /effort/);
 });
 
-test("persisted Claude config normalization drops stale knobs and preserves the conductor gate", () => {
+test("persisted Claude config normalization drops stale knobs for every agent", () => {
   const caps = {
     models: [], effortLevels: ["low"], slashCommands: [], supportsImages: false,
     supportsApprovals: true, permissionModes: ["default", "acceptEdits"],
@@ -122,7 +122,7 @@ test("persisted Claude config normalization drops stale knobs and preserves the 
   );
   assert.equal(
     normalizeClaudePersistedConfig({ permissionMode: "auto" }, caps, CONDUCTOR_ID, "claude-code").permissionMode,
-    "default",
+    undefined,
   );
   const liveCaps = {
     ...caps,
@@ -396,8 +396,8 @@ function runnerMeta(): RunnerMetadata {
         context: { kind: "native" },
       },
       {
-        id: CONDUCTOR_ID,
-        name: "Conductor (agent manager)",
+        id: "test-orchestrator",
+        name: "Planner",
         command: "claude",
         args: [],
         env: {},
@@ -489,6 +489,125 @@ function makeTeamOwnedProject(db: ControlPlaneDb): {
   const updated = db.getProject(project.id)!;
   return { project: updated, location: updated.locations[0]!, scope };
 }
+
+test("the retired conductor cannot be advertised, created, or restored through durable creation", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.agents.push({ id: CONDUCTOR_ID, name: "Stale Conductor", command: "claude", args: [], env: {}, driver: "claude-code" });
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(db.getRunner(RUNNER_ID)!.agents.some((agent) => agent.id === CONDUCTOR_ID), false);
+    for (const permissionMode of [undefined, "default", "acceptEdits"]) {
+      const result = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CONDUCTOR_ID,
+        config: { permissionMode } }, {
+        sessionId: "stale-conductor",
+        stage() { assert.fail("retired agent must not reach staging"); },
+        activate() { assert.fail("retired agent must not launch"); },
+      });
+      assert.equal(result.status, 409);
+      assert.match(result.error!, /retired/);
+    }
+    assert.equal(db.listSessions().length, 0);
+    assert.equal(hub.sentToRunner.length, 0);
+  } finally { db.close(); }
+});
+
+test("orchestrator is creation-only and requires the negotiated native harness boundary", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const agent = meta.agents.find((item) => item.id === AGENT_ID)!;
+    agent.capabilities = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"] };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const created = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } });
+    assert.equal(created.ok, true, created.error);
+    assert.equal(created.data!.permissionMode, "orchestrator");
+    assert.equal(svc.setConfig(created.data!.id, { permissionMode: "default" }).status, 409);
+    assert.equal(svc.prompt(created.data!.id, "continue", undefined, undefined, { permissionMode: "default" }).status, 409);
+    const ordinary = svc.createSession(request).data!;
+    assert.equal(svc.setConfig(ordinary.id, { permissionMode: "orchestrator" }).status, 409);
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.sessionOrchestration - 1);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409);
+    agent.driver = "acp";
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409);
+  } finally { db.close(); }
+});
+
+test("session spawn policy parks the exact child request and creates only after its human approval", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const parent = svc.createSession(request).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+      enabled: true, scope: { toolName: "wollipog.create_session" },
+    }).ok);
+    const create = () => svc.createSession({ ...request, title: "Requested Child" },
+      undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    const asked = create();
+    assert.equal(asked.status, 428, asked.error);
+    const stagedAttempt = svc.createSession({ ...request, title: "Requested Child" }, {
+      sessionId: "not-staged-before-approval",
+      stage() { assert.fail("unapproved child must not enter the durable launch queue"); },
+      activate() { assert.fail("unapproved child must not launch"); },
+    }, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(stagedAttempt.status, 428, stagedAttempt.error);
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+    const pending = db.getSession(parent.id)!.pendingApproval!;
+    assert.match(pending.title, /Requested Child/);
+    assert.equal(db.getSession(parent.id)!.status, "input_required");
+    assert.equal(create().status, 428);
+    assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, pending.requestId);
+    assert.ok(svc.approve(parent.id, pending.requestId, "allow").ok);
+    const created = create();
+    assert.equal(created.ok, true, created.error);
+    assert.equal(created.data!.parentSessionId, parent.id);
+    assert.equal(created.data!.costBudgetUsd, 5);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+    assert.equal(create().status, 428, "a second child requires a fresh approval");
+  } finally {
+    db.close();
+  }
+});
+
+test("agent-created sessions retain trusted parent attribution and reserve bounded child allowances", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const owner = db.localIdentityContext();
+    const parent = svc.createSession({ ...request, projectId: null, config: { costBudgetUsd: 20, maxToolCalls: 400 } },
+      undefined, { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } }).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const children: SessionView[] = [];
+    for (let i = 0; i < 4; i++) {
+      const result = svc.createSession(request, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      });
+      assert.equal(result.ok, true, result.error);
+      children.push(result.data!);
+      assert.equal(result.data!.parentSessionId, parent.id);
+      assert.equal(result.data!.costBudgetUsd, 5);
+      assert.equal(result.data!.maxToolCalls, 100);
+    }
+    const denied = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(denied.ok, false);
+    assert.match(denied.error!, /spawn cap/);
+    db.deleteSession(children[0]!.id);
+    assert.equal(db.childSessionAllocations(parent.id).count, 4);
+    assert.equal(svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id }).ok, false);
+    // Ordinary human creation retains its existing unlimited default.
+    const ordinary = svc.createSession(request).data!;
+    assert.equal(ordinary.parentSessionId, null);
+    assert.equal(ordinary.costBudgetUsd, null);
+    assert.equal(ordinary.maxToolCalls, null);
+  } finally {
+    db.close();
+  }
+});
 
 /** Create a session through the service (runner online) and return its id. */
 function seedSession(
@@ -1880,76 +1999,9 @@ test("createSession recovery materializes from the staged launch snapshot after 
   db.close();
 });
 
-test("createSession recovery cannot resurrect a conductor removed from current discovery", () => {
-  const { db, svc } = makeHarness();
-  const request = {
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentId: CONDUCTOR_ID,
-    prompt: "resume orchestration",
-  };
-  let staged: PreStagedDeliveryPlan | undefined;
-  assert.throws(() => svc.createSession(request, {
-    sessionId: "s_disabled_conductor",
-    stage(plan) {
-      staged = plan;
-      throw new Error("simulated crash after durable staging");
-    },
-    activate() { assert.fail("must not activate before materialization"); },
-  }), /simulated crash/);
-  assert.equal(db.getSession("s_disabled_conductor"), null);
 
-  const current = runnerMeta();
-  current.agents = current.agents.filter((agent) => agent.id !== CONDUCTOR_ID);
-  db.updateRunnerAgents(RUNNER_ID, current.agents, 500);
 
-  let restaged = false;
-  const recovered = svc.createSession(request, {
-    sessionId: "s_disabled_conductor",
-    commandSnapshots: staged!.commands,
-    stage() { restaged = true; },
-    activate() { assert.fail("disabled conductor recovery must not activate"); },
-  });
-  assert.equal(recovered.status, 404);
-  assert.match(recovered.error ?? "", /unknown agent 'conductor'/);
-  assert.equal(restaged, false);
-  assert.equal(db.getSession("s_disabled_conductor"), null);
-  db.close();
-});
 
-test("createSession recovery defers the conductor decision while runner discovery is pending", () => {
-  const { db, svc } = makeHarness();
-  const request = {
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentId: CONDUCTOR_ID,
-    prompt: "resume orchestration",
-  };
-  let staged: PreStagedDeliveryPlan | undefined;
-  assert.throws(() => svc.createSession(request, {
-    sessionId: "s_pending_conductor_discovery",
-    stage(plan) {
-      staged = plan;
-      throw new Error("simulated crash after durable staging");
-    },
-    activate() { assert.fail("must not activate before materialization"); },
-  }), /simulated crash/);
-
-  const registering = runnerMeta();
-  registering.agents = registering.agents.filter((agent) => agent.id !== CONDUCTOR_ID);
-  db.registerRunner(registering, 500, PROTOCOL_VERSION);
-  assert.equal(db.getRunner(RUNNER_ID)?.agentsRefreshed, false);
-
-  const recovered = svc.createSession(request, {
-    sessionId: "s_pending_conductor_discovery",
-    commandSnapshots: staged!.commands,
-    stage() {},
-    activate() {},
-  });
-  assert.equal(recovered.status, 201,
-    "the runner-side flag guard decides until a completed discovery result proves removal");
-  db.close();
-});
 
 test("createSession does not materialize when durable staging throws", () => {
   const { db, svc } = makeHarness();
@@ -4516,47 +4568,9 @@ test("setConfig persists a cost budget without clobbering model/effort, and clea
 /* Conductor permissionMode clamp (three seams)                                */
 /* -------------------------------------------------------------------------- */
 
-test("createSession for the conductor with no config forces permissionMode 'default' (persisted + spec)", () => {
-  const { db, hub, svc } = makeHarness();
 
-  // The New Session dialog sends NO config — without the clamp the driver would fall back to
-  // "acceptEdits" and every mcp__manager__ mutation would run ungated.
-  const res = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CONDUCTOR_ID });
-  assert.ok(res.ok);
-  const id = res.data!.id;
 
-  assert.equal(db.getSession(id)!.permissionMode, "default");
-  const start = hub.sentOfType("start_session").at(-1)!;
-  assert.equal(start.spec.config!.permissionMode, "default");
-});
 
-test("createSession for the conductor rejects any explicit non-default permissionMode with 409", () => {
-  const { db, hub, svc } = makeHarness();
-  for (const permissionMode of ["acceptEdits", "auto", "plan", "bypassPermissions"]) {
-    const before = hub.sentToRunner.length;
-    const res = svc.createSession({
-      runnerId: RUNNER_ID,
-      workspaceId: WORKSPACE_ID,
-      agentId: CONDUCTOR_ID,
-      config: { permissionMode },
-    });
-    assert.equal(res.ok, false, permissionMode);
-    assert.equal(res.status, 409, permissionMode);
-    assert.match(res.error ?? "", /conductor/, permissionMode);
-    assert.equal(hub.sentToRunner.length, before, "nothing routed to the runner");
-  }
-  assert.equal(db.listSessions().length, 0, "no session persisted on rejection");
-
-  // An explicit "default" is fine (it IS the clamp value).
-  const ok = svc.createSession({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentId: CONDUCTOR_ID,
-    config: { permissionMode: "default", model: "opus" },
-  });
-  assert.ok(ok.ok);
-  assert.equal(db.getSession(ok.data!.id)!.model, "opus");
-});
 
 test("createSession clamp does not touch non-conductor agents", () => {
   const { db, hub, svc } = makeHarness();
@@ -4570,44 +4584,9 @@ test("createSession clamp does not touch non-conductor agents", () => {
   assert.equal(db.getSession(res.data!.id)!.permissionMode, "acceptEdits");
 });
 
-test("setConfig on a conductor session rejects a permissionMode change; guardrail-only writes pass", () => {
-  const { db, hub, svc } = makeHarness();
-  const id = seedSession(svc, hub, { agentId: CONDUCTOR_ID });
 
-  const res = svc.setConfig(id, { permissionMode: "auto" });
-  assert.equal(res.ok, false);
-  assert.equal(res.status, 409);
-  assert.equal(db.getSession(id)!.permissionMode, "default", "the clamped mode is untouched");
 
-  // Guardrails ride their own columns — arming a budget on the conductor itself must work
-  // (the recommended runaway-conductor protection).
-  const budget = svc.setConfig(id, { costBudgetUsd: 5, maxToolCalls: 50 });
-  assert.ok(budget.ok);
-  const s = db.getSession(id)!;
-  assert.equal(s.costBudgetUsd, 5);
-  assert.equal(s.maxToolCalls, 50);
-  assert.equal(s.permissionMode, "default");
-});
 
-test("prompt-time config with a non-default permissionMode on a conductor session -> 409; plain prompt passes", () => {
-  const { db, hub, svc } = makeHarness();
-  const id = seedSession(svc, hub, { agentId: CONDUCTOR_ID });
-
-  const before = hub.sentOfType("prompt_session").length;
-  const res = svc.prompt(id, "go wild", [], undefined, { permissionMode: "acceptEdits" });
-  assert.equal(res.ok, false);
-  assert.equal(res.status, 409);
-  assert.equal(hub.sentOfType("prompt_session").length, before, "no prompt forwarded");
-  assert.equal(db.getSession(id)!.permissionMode, "default", "nothing persisted before the guard");
-
-  // A plain prompt (and one that echoes "default") sails through with the clamped config.
-  const plain = svc.prompt(id, "what is running?");
-  assert.ok(plain.ok);
-  const msg = sentPromptCommands(hub).at(-1)!;
-  assert.equal(msg.config!.permissionMode, "default");
-  const explicit = svc.prompt(id, "list sessions", [], undefined, { permissionMode: "default" });
-  assert.ok(explicit.ok);
-});
 
 test("pods group isolated sessions and manual relay preflights every target before delivery", () => {
   const { db, hub, svc } = makeHarness();
@@ -5023,35 +5002,7 @@ test("pod membership spans runners without conflating their workspace ownership"
   assert.deepEqual(result.data!.sessions.map((session) => session.runnerId), [RUNNER_ID, "runner-2"]);
 });
 
-test("createRun clamps a conductor member to 'default' (persisted + spec + later prompt echo)", () => {
-  const { db, hub, svc } = makeHarness();
-  // NewRunDialog default-selects EVERY agent, so a run routinely includes the conductor.
-  const res = svc.createRun({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    agentIds: [AGENT_ID, CONDUCTOR_ID],
-    task: "compare approaches",
-  });
-  assert.ok(res.ok && res.data);
 
-  const conductorMember = res.data!.sessions.find((s) => s.agentId === CONDUCTOR_ID)!;
-  assert.ok(conductorMember, "the conductor member session was created");
-  // Persisted row carries "default" — a NULL row would echo undefined on the next prompt and
-  // the driver's "acceptEdits" fallback would run the manager tools ungated from turn 2 on.
-  assert.equal(db.getSession(conductorMember.id)!.permissionMode, "default");
-  const start = hub.sentOfType("start_session").find((m) => m.spec.agentId === CONDUCTOR_ID)!;
-  assert.equal(start.spec.config!.permissionMode, "default");
-
-  // The follow-up prompt's config echo (re-read from the DB) carries the gate too.
-  db.updateSessionStatus(conductorMember.id, "idle", Date.now());
-  assert.ok(svc.prompt(conductorMember.id, "carry on").ok);
-  const echoed = hub.sentOfType("prompt_session").at(-1)!;
-  assert.equal(echoed.config!.permissionMode, "default");
-
-  // Non-conductor members keep the shared config untouched (none sent here -> null).
-  const worker = res.data!.sessions.find((s) => s.agentId === AGENT_ID)!;
-  assert.equal(db.getSession(worker.id)!.permissionMode, null);
-});
 
 test("createRun with a conductor member and an explicit non-default mode -> 409, atomically", () => {
   const { db, hub, svc } = makeHarness();
@@ -6524,33 +6475,7 @@ test("hard deny cancels when a provider offers only persistent or no reject opti
   assert.ok(audit.some((entry) => entry.stage === "resolution" && entry.outcome === "denied"));
 });
 
-test("built-in conductor safety policy cannot be overridden by a stored auto-allow", () => {
-  const { db, hub, svc } = makeHarness();
-  const id = seedSession(svc, hub, { agentId: CONDUCTOR_ID });
-  svc.upsertGovernancePolicy({
-    policyId: "allow-all-conductor",
-    name: "Attempted conductor bypass",
-    effect: "allow",
-    priority: 100_000,
-    enabled: true,
-    scope: { agentId: CONDUCTOR_ID },
-  });
-  svc.onSessionEvent(id, {
-    kind: "permission_request",
-    requestId: "conductor-gate",
-    title: "Mutate repository?",
-    options: [
-      { optionId: "allow", name: "Allow", kind: "allow_once" },
-      { optionId: "deny", name: "Deny", kind: "reject_once" },
-    ],
-    context: { toolName: "mcp__manager__git_commit" },
-  });
-  assert.equal(hub.sentOfType("resolve_permission").length, 0);
-  assert.equal(db.getSession(id)!.pendingApproval?.requestId, "conductor-gate");
-  const decision = svc.governanceAudit(id).find((entry) => entry.requestId === "conductor-gate" && entry.stage === "policy_decision")!;
-  assert.deepEqual([decision.outcome, decision.governancePolicyId], ["asked", "builtin:conductor-human-gate"]);
-  assert.equal(svc.deleteGovernancePolicy("builtin:conductor-human-gate").status, 409);
-});
+
 
 test("governance policy writes reject typo-broadened selectors and support deletion", () => {
   const { svc } = makeHarness();
@@ -11181,7 +11106,7 @@ test("workflow durable delivery stages every deterministic start before resource
     workflowId: "builtin:build-review",
     task: "Build and review durably",
     agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: CONDUCTOR_ID,
+    orchestratorAgentId: "test-orchestrator",
   };
   const delivery = {
     runId: "r_automation_exact",
@@ -11221,7 +11146,7 @@ test("workflow durable delivery stages every deterministic start before resource
   const orchestrator = staged!.commands.at(-1)!;
   assert.match(orchestrator.initialPrompt!, /wfi_automation_exact/);
   assert.match(orchestrator.initialPrompt!, /r_automation_exact/);
-  assert.equal(orchestrator.spec.agentId, CONDUCTOR_ID);
+  assert.equal(orchestrator.spec.agentId, "test-orchestrator");
   assert.deepEqual(db.sessionScope(orchestrator.spec.sessionId)?.owner, {
     kind: "organization", organizationId: local.organizationId,
   });
@@ -11247,58 +11172,7 @@ test("workflow durable delivery stages every deterministic start before resource
   db.close();
 });
 
-test("workflow recovery cannot resurrect a conductor orchestrator removed from current discovery", () => {
-  const { db, svc } = makeHarness();
-  const request = {
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    workflowId: "builtin:build-review",
-    task: "Recover orchestration durably",
-    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: CONDUCTOR_ID,
-  };
-  const deliveryIds = {
-    runId: "r_disabled_conductor",
-    workflowInstanceId: "wfi_disabled_conductor",
-    memberSessionId: (index: number) => `s_disabled_conductor_member_${index}`,
-  };
-  let staged: PreStagedDeliveryPlan | undefined;
 
-  assert.throws(() => svc.createWorkflowRun(request, { kind: "system", id: "automation:test" }, {
-    ...deliveryIds,
-    stage(plan) {
-      staged = plan;
-      throw new Error("simulated crash after durable workflow staging");
-    },
-    activate() { assert.fail("must not activate before materialization"); },
-  }), /simulated crash/);
-  assert.equal(db.getRun(deliveryIds.runId), null);
-  assert.equal(db.getWorkflowInstance(deliveryIds.workflowInstanceId), null);
-  for (let index = 0; index < 3; index++) {
-    assert.equal(db.getSession(deliveryIds.memberSessionId(index)), null);
-  }
-
-  const current = runnerMeta();
-  current.agents = current.agents.filter((agent) => agent.id !== CONDUCTOR_ID);
-  db.updateRunnerAgents(RUNNER_ID, current.agents, 500);
-
-  let restaged = false;
-  const recovered = svc.createWorkflowRun(request, { kind: "system", id: "automation:test" }, {
-    ...deliveryIds,
-    commandSnapshots: staged!.commands,
-    stage() { restaged = true; },
-    activate() { assert.fail("disabled conductor workflow recovery must not activate"); },
-  });
-  assert.equal(recovered.status, 404);
-  assert.match(recovered.error ?? "", /unknown orchestrator agent 'conductor'/);
-  assert.equal(restaged, false);
-  assert.equal(db.getRun(deliveryIds.runId), null);
-  assert.equal(db.getWorkflowInstance(deliveryIds.workflowInstanceId), null);
-  for (let index = 0; index < 3; index++) {
-    assert.equal(db.getSession(deliveryIds.memberSessionId(index)), null);
-  }
-  db.close();
-});
 
 test("workflow runs preserve an exact Project Location for every member", () => {
   const { db, svc } = makeHarness();
@@ -11312,7 +11186,7 @@ test("workflow runs preserve an exact Project Location for every member", () => 
     workflowId: "builtin:build-review",
     task: "Implement and review in one Project",
     agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: CONDUCTOR_ID,
+    orchestratorAgentId: "test-orchestrator",
   });
 
   assert.ok(created.ok && created.data);
@@ -11342,10 +11216,10 @@ test("workflow workers adopt team Project scope while a trusted orchestrator sta
     assert.deepEqual(db.sessionScope(session.id), scope);
   }
 
-  const withOrchestrator = svc.createWorkflowRun({ ...request, orchestratorAgentId: CONDUCTOR_ID });
+  const withOrchestrator = svc.createWorkflowRun({ ...request, orchestratorAgentId: "test-orchestrator" });
   assert.ok(withOrchestrator.ok && withOrchestrator.data);
-  const orchestrator = withOrchestrator.data!.sessions.find((session) => session.agentId === CONDUCTOR_ID)!;
-  const workers = withOrchestrator.data!.sessions.filter((session) => session.agentId !== CONDUCTOR_ID);
+  const orchestrator = withOrchestrator.data!.sessions.find((session) => session.agentId === "test-orchestrator")!;
+  const workers = withOrchestrator.data!.sessions.filter((session) => session.agentId !== "test-orchestrator");
   assert.equal(orchestrator.projectId, null);
   assert.equal(db.sessionScope(orchestrator.id)?.owner.kind, "organization");
   for (const session of workers) {
@@ -11373,7 +11247,7 @@ test("workflow runs reject a mismatched exact Project Location before persistenc
   assert.equal(db.listSessions({ includeArchived: true }).length, 0);
 });
 
-test("workflow run preset creates idle role-bound workers and prompts only its conductor", () => {
+test("workflow run preset creates idle role-bound workers and prompts only its ordinary orchestrator", () => {
   const { db, hub, svc } = makeHarness();
   const local = db.localIdentityContext();
   const userScope = {
@@ -11389,7 +11263,7 @@ test("workflow run preset creates idle role-bound workers and prompts only its c
     workflowId: "builtin:build-review",
     task: "Implement and independently review the change",
     agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: CONDUCTOR_ID,
+    orchestratorAgentId: "test-orchestrator",
   }, { kind: "human", id: "device-1" });
   assert.equal(created.status, 201);
   assert.equal(created.ok, true);
@@ -11400,12 +11274,12 @@ test("workflow run preset creates idle role-bound workers and prompts only its c
   assert.equal(db.runMemberSessions(result.run.id, "claude").length, 1);
   assert.equal(db.runMemberSessions(result.run.id, "codex").length, 1);
   const conductorSession = db.runMemberSessions(result.run.id, "__orchestrator__")[0]!;
-  assert.equal(conductorSession.agentId, CONDUCTOR_ID);
+  assert.equal(conductorSession.agentId, "test-orchestrator");
   const conductorScope = db.sessionScope(conductorSession.id)!;
   assert.deepEqual(conductorScope.owner, {
     kind: "organization", organizationId: local.organizationId,
   });
-  for (const worker of result.sessions.filter((session) => session.agentId !== CONDUCTOR_ID)) {
+  for (const worker of result.sessions.filter((session) => session.agentId !== "test-orchestrator")) {
     assert.deepEqual(db.sessionScope(worker.id), userScope);
   }
   const conductorPrincipal: AgentPrincipal = {
@@ -11420,10 +11294,10 @@ test("workflow run preset creates idle role-bound workers and prompts only its c
   const starts = hub.sentOfType("start_session");
   assert.equal(starts.length, 3);
   assert.equal(starts.filter((message) => message.initialPrompt !== undefined).length, 1);
-  const conductorStart = starts.find((message) => message.spec.agentId === CONDUCTOR_ID)!;
+  const conductorStart = starts.find((message) => message.spec.agentId === "test-orchestrator")!;
   assert.match(conductorStart.initialPrompt!, new RegExp(result.instance.instanceId));
   assert.equal(conductorStart.spec.useWorktree, false);
-  for (const worker of starts.filter((message) => message.spec.agentId !== CONDUCTOR_ID)) {
+  for (const worker of starts.filter((message) => message.spec.agentId !== "test-orchestrator")) {
     assert.equal(worker.initialPrompt, undefined, "workers wait for exact graph-node dispatch");
     assert.equal(worker.spec.useWorktree, true);
   }
@@ -11470,7 +11344,7 @@ test("workflow run preset creates idle role-bound workers and prompts only its c
     workflowId: "builtin:build-review",
     task: "fail closed if the runner disconnects after preflight",
     agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
-    orchestratorAgentId: CONDUCTOR_ID,
+    orchestratorAgentId: "test-orchestrator",
   });
   assert.equal(raced.status, 409);
   const failedRun = db.listRuns().find((run) => !existingRunIds.has(run.id))!;

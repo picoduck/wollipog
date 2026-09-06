@@ -139,6 +139,8 @@ test("PROTOCOL_VERSION is 111", () => {
   assert.equal(runnerSupportsProtocol(111, "machineSkillSnapshots"), true);
   assert.equal(runnerSupportsProtocol(109, "conversationHandoff"), false);
   assert.equal(runnerSupportsProtocol(110, "conversationHandoff"), true);
+  assert.equal(runnerSupportsProtocol(108, "sessionOrchestration"), false);
+  assert.equal(runnerSupportsProtocol(109, "sessionOrchestration"), true);
   assert.equal(runnerSupportsProtocol(107, "workerAttention"), false);
   assert.equal(runnerSupportsProtocol(108, "workerAttention"), true);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.resumableQuestionAnswers, 107);

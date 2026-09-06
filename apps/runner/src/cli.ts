@@ -16,7 +16,8 @@ if (process.argv.includes("--state-doctor")) {
 } else if (process.argv.includes("--policy-hook")) {
   void import("./policy-hook.js").then((m) => m.runPolicyHookCli(process.argv, process.env));
 } else if (process.argv.includes("--conductor-mcp")) {
-  void import("./conductor-mcp.js").then((m) => m.runConductorMcp(process.argv, process.env));
+  console.error("The Conductor MCP server is retired. Use the session-scoped Wollipog MCP server.");
+  process.exitCode = 1;
 } else if (process.argv.includes("--agent-control-mcp")) {
   void import("./wollipog-cli.js").then((m) => m.runAgentControlMcp(process.env));
 } else if (process.argv.includes("--wollipog-cli") || /(?:^|[\\/])wollipog(?:\.exe)?$/iu.test(process.argv[0] ?? "")) {

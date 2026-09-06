@@ -33,6 +33,7 @@ import type {
 } from "./driver.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
+import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -175,6 +176,11 @@ export function buildCodexTurnParams(
   input: Json[],
 ): Json {
   const mode = cfg.permissionMode || AUTO_REVIEW_MODE;
+  if (mode === "orchestrator") {
+    return { threadId, input, approvalPolicy: "never", sandboxPolicy: { type: "readOnly" }, cwd,
+      ...(cfg.model && cfg.model !== "default" ? { model: cfg.model } : {}),
+      ...(cfg.effort ? { effort: cfg.effort } : {}) };
+  }
   const autoReview = mode === AUTO_REVIEW_MODE;
   const askMode = ASK_MODES.has(mode)
     ? mode
@@ -335,9 +341,12 @@ export class CodexAppServerDriver implements Driver {
     return exit;
   }
   private async startAppServer(enableDefaultModeQuestions: boolean): Promise<void> {
+    const isolationArgs = this.config.permissionMode === "orchestrator"
+      ? await codexOrchestratorMcpArgs(this.opts, this.cwd) : [];
+    if (this.disposed) throw new Error("session disposed before provider launch");
     const child = this.spawn({
       command: this.opts.command,
-      args: codexAppServerArgs(this.opts.args, enableDefaultModeQuestions),
+      args: codexAppServerArgs([...this.opts.args, ...isolationArgs], enableDefaultModeQuestions),
       cwd: this.cwd,
       env: this.opts.env,
       context: this.opts.context,
@@ -903,7 +912,9 @@ export class CodexAppServerDriver implements Driver {
     // (command/file -> {decision}; permissions -> {permissions, scope}).
     const makeApprover = (method: string) => (params: Json, rpcRequestId: number | string) =>
       new Promise<Json>((resolve) => {
-        if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, null));
+        if (this.disposed || this.cancelled || this.config.permissionMode === "orchestrator") {
+          return resolve(approvalResponse(method, params, null));
+        }
         const id = String(rpcRequestId ?? params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
         const ownership = this.prepareAttention(params, id);
         if (!ownership) return resolve(approvalResponse(method, params, null));

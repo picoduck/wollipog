@@ -24,7 +24,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { AgentDefinition, ElicitationTransport, SessionLaunchSpec } from "@wollipog/protocol";
-import { deriveCpHttpUrl } from "./conductor.js";
+import { deriveCpHttpUrl } from "./runner-credential-file.js";
 import { effectiveClaudePermissionMode } from "./claude-permission.js";
 import {
   defaultRunnerReentryHost,

@@ -82,6 +82,20 @@ test("a user- or team-scoped conductor cannot mutate organization-global resourc
   }), null);
 });
 
+test("orchestrators can mutate only trusted direct children and cannot operate on their own worktree", () => {
+  const credential: AgentPrincipal = {
+    kind: "agent", actorId: "s_parent", credentialSessionId: "s_parent", orchestrator: true,
+    organizationId: "org_1", delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
+  };
+  for (const route of ["/api/sessions/:id/worktrees", "/api/sessions/:id/worktrees/discard", "/api/sessions/:id/prompt", "/api/sessions/:id/stop"]) {
+    assert.equal(agentCredentialSessionTargetError(route, credential, "s_child", "s_parent"), null);
+    for (const [target, parent] of [["s_parent", undefined], ["s_other", undefined], ["s_grandchild", "s_child"]]) {
+      assert.match(agentCredentialSessionTargetError(route, credential, target!, parent)!, /direct child/);
+    }
+  }
+  assert.equal(agentDelegationAuthorizationError("/api/governance/policies", credential), null);
+});
+
 test("a purpose-bound credential confines worktree routes without blocking delegated sibling operations", () => {
   const credential: AgentPrincipal = {
     kind: "agent",

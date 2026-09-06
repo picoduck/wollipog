@@ -35,7 +35,10 @@ function useSessionConfig(session: SessionView) {
   const caps = resolveCaps(runner, session);
   const effectiveCaps = resolveEffectiveCaps(runner, session);
   const models = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
-  const permModes = (caps?.permissionModes ?? []).filter((p) => p !== "plan");
+  // The orchestration tool boundary is established at process creation and cannot
+  // safely be entered or escaped by changing a live provider permission mode.
+  const permModes = session.permissionMode === "orchestrator" ? ["orchestrator"]
+    : (caps?.permissionModes ?? []).filter((p) => p !== "plan" && p !== "orchestrator");
 
   const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort, caps);
   const modelVal = effective.model?.id ?? "";

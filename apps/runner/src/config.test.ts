@@ -20,6 +20,14 @@ test("parseArgs defaults to runner.config.json (absolute)", () => {
   assert.ok(configPath.endsWith("runner.config.json"));
 });
 
+test("stale configured conductor entries are ignored without breaking ordinary startup", () => {
+  const config = resolveConfig({ runnerId: "r", controlPlaneUrl: "ws://localhost", agents: [
+    { id: "conductor", name: "Conductor", command: "claude" },
+    { id: "worker", name: "Worker", command: "codex" },
+  ] });
+  assert.deepEqual(config.agents.map((agent) => agent.id), ["worker"]);
+});
+
 test("parseArgs handles --config <path>, --config=<path>, and -c <path>", () => {
   assert.ok(parseArgs(["--config", "a.json"]).configPath.endsWith("a.json"));
   assert.ok(parseArgs(["--config=b.json"]).configPath.endsWith("b.json"));

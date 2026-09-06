@@ -21,10 +21,12 @@ import {
   type RunnerReentryHost,
 } from "./runner-reentry.js";
 import { assertSafeSessionFileId } from "./session-file-id.js";
+import { ORCHESTRATOR_ENV_KEY, orchestratorLaunchArgs, stripOrchestratorLaunchArgs } from "./orchestrator-preset.js";
 
 const TOKEN_PREFIX = "wollipoga_";
 const TOKEN_PATTERN = /^wollipoga_[A-Za-z0-9_-]{43}$/u;
 const AGENT_CONTROL_ENV_KEYS = [
+  ORCHESTRATOR_ENV_KEY,
   "WOLLIPOG_CONTROL_PLANE_URL",
   "WOLLIPOG_SESSION_ID",
   "WOLLIPOG_SESSION_TOKEN_FILE",
@@ -92,6 +94,7 @@ function writeMcpConfig(
   cpUrl: string,
   sessionId: string,
   readyFile: string,
+  orchestrator = false,
 ): void {
   mkdirSync(dirname(file), { recursive: true });
   const body = {
@@ -105,6 +108,7 @@ function writeMcpConfig(
           WOLLIPOG_SESSION_ID: sessionId,
           WOLLIPOG_SESSION_TOKEN_FILE: tokenFile,
           WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
+          ...(orchestrator ? { [ORCHESTRATOR_ENV_KEY]: "orchestrator" } : {}),
         },
       },
     },
@@ -130,7 +134,7 @@ function removeAgentControlLaunchState(
 /** Mutates only ephemeral runner-side launch state. The credential bytes never cross the runner
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
-  spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "args" | "env">,
+  spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "args" | "env"> & Partial<Pick<SessionLaunchSpec, "config">>,
   config: {
     controlPlaneUrl: string;
     controlPlaneProtocolVersion: number | null;
@@ -143,6 +147,11 @@ export function provisionAgentControl(
   const supported = runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionAgentControl");
   const hostExecution = (spec.context?.kind ?? "native") === "native" &&
     (!spec.executionTarget || spec.executionTarget.adapter === "host");
+  const orchestrator = spec.config?.permissionMode === "orchestrator";
+  if (orchestrator && (!hostExecution || !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionOrchestration") ||
+      !["codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp"))) {
+    throw new Error("the orchestrator preset requires a current native Codex or Claude harness on the host");
+  }
   if (!supported || !hostExecution) {
     removeAgentControlLaunchState(spec, host);
     if (!hostExecution) {
@@ -171,10 +180,24 @@ export function provisionAgentControl(
     WOLLIPOG_CLI: cli.command,
     WOLLIPOG_CLI_ARGS: JSON.stringify(cli.args),
   };
+  delete spec.env[ORCHESTRATOR_ENV_KEY];
+  if (orchestrator) {
+    spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
+    spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
+    const mcp = {
+      ...runnerReentryCommand(host, "--agent-control-mcp"),
+      env: {
+        WOLLIPOG_CONTROL_PLANE_URL: cpUrl, WOLLIPOG_SESSION_ID: spec.sessionId,
+        WOLLIPOG_SESSION_TOKEN_FILE: tokenFile, WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
+        [ORCHESTRATOR_ENV_KEY]: "orchestrator",
+      },
+    };
+    spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp));
+  }
 
   if (spec.driver === "claude-code") {
     const file = agentControlMcpConfigPath(host.configDir, spec.sessionId);
-    writeMcpConfig(file, runnerReentryCommand(host, "--agent-control-mcp"), tokenFile, cpUrl, spec.sessionId, readyFile);
+    writeMcpConfig(file, runnerReentryCommand(host, "--agent-control-mcp"), tokenFile, cpUrl, spec.sessionId, readyFile, orchestrator);
     let already = false;
     for (let i = 0; i < spec.args.length - 1; i++) {
       if (spec.args[i] === "--mcp-config" && spec.args[i + 1] === file) already = true;

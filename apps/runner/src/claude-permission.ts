@@ -4,5 +4,5 @@ import type { SessionConfig } from "@wollipog/protocol";
 export function effectiveClaudePermissionMode(
   config: Pick<SessionConfig, "permissionMode">,
 ): string {
-  return config.permissionMode || "acceptEdits";
+  return config.permissionMode === "orchestrator" ? "default" : config.permissionMode || "acceptEdits";
 }

@@ -1864,6 +1864,12 @@ test("re-entrant cancellation while resolving a replacement cannot strand the ne
   assert.equal((h.driver as any).pendingApprovals.size, 0);
 });
 
+test("buildCodexTurnParams: orchestrator cannot request sandbox escalation", () => {
+  const params = buildCodexTurnParams(cfg("orchestrator"), "t1", "/w", []);
+  assert.equal(params.approvalPolicy, "never");
+  assert.deepEqual(params.sandboxPolicy, { type: "readOnly" });
+});
+
 test("buildCodexTurnParams: default and 'auto-review' use Guardian with an escapable workspace sandbox", () => {
   const p = buildCodexTurnParams(cfg("auto-review"), "t1", "/w", [{ type: "text", text: "hi" }]);
   assert.equal(p.approvalPolicy, "on-request");

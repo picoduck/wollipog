@@ -56,14 +56,10 @@ import {
   type RunnerConfig,
 } from "./config.js";
 import {
-  fenceConductorAdvertisement,
-  withConductorAgent,
-  defaultConductorHost,
-  provisionConductor,
   removeConductorMcpConfig,
   sweepConductorMcpConfigs,
   stageRunnerCredentialFile,
-} from "./conductor.js";
+} from "./runner-credential-file.js";
 import {
   applyClaudeHookCapability,
   claudeHookRunnerConfigDir,
@@ -83,6 +79,7 @@ import {
   removeAgentControlFiles,
   sweepAgentControlFiles,
 } from "./agent-control.js";
+import { withOrchestratorPreset } from "./orchestrator-preset.js";
 import {
   GitOpError,
   gitDiff,
@@ -309,7 +306,6 @@ const stagedRunnerCredential = stageRunnerCredentialFile(
 );
 const runnerCredentialFile = stagedRunnerCredential.activePath;
 const conductorHost = {
-  ...defaultConductorHost(),
   // The pre-attestation default root also used ~/.agent-manager/conductor. Always add an
   // attested leaf so startup sweeping can never delete unattributable legacy configurations.
   configDir: resolve(config.dataDir, "conductor", "runner-instances", dataDirLease.ownerHash),
@@ -327,7 +323,7 @@ const runnerHostname = hostname();
 const sessionNamingCustomModel = new RunnerSessionNamingCustomModel(resolve(config.dataDir, "session-naming"));
 const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHostname, config.containerTargets);
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
-const configuredAgentDefinitions = config.agents.map((a) => {
+const configuredAgentDefinitions = config.agents.filter((a) => a.id !== "conductor").map((a) => {
   const driver = a.driver ?? "acp";
   return {
     id: a.id,
@@ -355,8 +351,8 @@ const metadata: RunnerMetadata = {
   os: detectOs(),
   version: VERSION,
   // Pre-discovery config rows go out verbatim so live discovery can still authoritatively
-  // fill availability and capabilities; conductor synthesis happens after every merge.
-  agents: configuredAgentDefinitions,
+  // fill availability and capabilities; supported native agents gain the runner-owned preset.
+  agents: withOrchestratorPreset(configuredAgentDefinitions),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -379,13 +375,15 @@ const metadata: RunnerMetadata = {
 const configAgents = metadata.agents;
 const acpAuthStatus = new Map<string, AcpAuthRuntime>();
 
-/** The control plane receives neither values nor fromEnv reference names. The synthesized
- * conductor is fenced here — at send time, with the CURRENT socket's negotiated version — so a
- * cached list can never carry it to a pre-v91 control plane, and a list merged before
- * registration still advertises it to a v91+ control plane on the post-register re-push. */
+/** Never advertise secret environment data, retired identities, or an orchestration preset
+ * to a control plane that cannot enforce its credential boundary. */
 function agentsForControlPlane() {
-  return fenceConductorAdvertisement(metadata.agents, controlPlaneProtocolVersion)
-    .map((agent) => ({ ...agent, env: {} }));
+  return metadata.agents.filter((agent) => agent.id !== "conductor")
+    .map((agent) => ({ ...agent, env: {},
+      ...(!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") && agent.capabilities
+        ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
+        : {}),
+    }));
 }
 
 /** Resolve exact configured/discovered agent env at the last responsible moment. */
@@ -497,16 +495,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   config.agents.map((agent) => agent.context ?? { kind: "native" as const }),
   async (meta) => {
     meta.env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
-    provisionConductor(
-      meta,
-      {
-        controlPlaneUrl: config.controlPlaneUrl,
-        tokenFile: runnerCredentialFile,
-        allowInsecureTransport,
-      },
-      log,
-      conductorHost,
-    );
+    if (meta.agentId === "conductor") throw new Error("The Conductor agent is retired; create an ordinary session to orchestrate children.");
     provisionClaudeHooks(
       meta,
       {
@@ -960,17 +949,15 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     const discovered = [...nativeAgents, ...registryAgents];
     // Enrich the merged list with dynamic per-version/context models (live app-server model/list,
     // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
-    // The conductor is synthesized AFTER the merge — inside discovery, a configured claude entry
-    // sharing the launch key would silently suppress it via the merge's usedKeys check.
     metadata.agents = applyClaudeHookCapability(
-      await enrichAgentModels(withConductorAgent(
-        mergeAgents(configAgents, discovered),
-      ), {
+      await enrichAgentModels(
+        mergeAgents(configAgents, discovered).filter((agent) => agent.id !== "conductor"), {
         refresh: refreshModels,
       }),
       claudeHookFeatureEnabled,
       log,
     );
+    metadata.agents = withOrchestratorPreset(metadata.agents);
     // A definitive native discovery result is newer authoritative evidence than the process-local
     // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
     // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.
@@ -1123,7 +1110,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       log(`registration rejected: ${msg.reason}`);
       // Keep the staged bytes for the reconnect loop. A transient rejection can be followed by a
       // successful registration with the same pending token; discarding here would make promote()
-      // a no-op and leave conductor processes on the revoked prior credential after cutover.
+      // a no-op and leave runner credential consumers on the revoked prior credential after cutover.
       ws?.close();
       break;
     case "policy_hook_credential_registered":
@@ -1156,21 +1143,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log("ignored start_session with malformed prompt images");
         break;
       }
-      // Provision the conductor BEFORE sessions.start(): start() persists spec.args/config
-      // into the box store's meta, so the injected MCP flags survive restarts and the
-      // resume path reuses them. A provisioning failure fails the session loudly — a
-      // conductor without its manager tools would only look broken in confusing ways.
+      // Provision managed hooks before persisting launch metadata; refuse retired identities.
       try {
-        provisionConductor(
-          msg.spec,
-          {
-            controlPlaneUrl: config.controlPlaneUrl,
-            tokenFile: runnerCredentialFile,
-                allowInsecureTransport,
-          },
-          log,
-          conductorHost,
-        );
+        if (msg.spec.agentId === "conductor") throw new Error("The Conductor agent is retired.");
         provisionClaudeHooks(
           msg.spec,
           {
@@ -1284,16 +1259,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       const lifecycle = durableLifecycle(claim.handle);
       if (msg.command.type === "start_session") {
         try {
-          provisionConductor(
-            msg.command.spec,
-            {
-              controlPlaneUrl: config.controlPlaneUrl,
-              tokenFile: runnerCredentialFile,
-                    allowInsecureTransport,
-            },
-            log,
-            conductorHost,
-          );
+          if (msg.command.spec.agentId === "conductor") throw new Error("The Conductor agent is retired.");
           provisionClaudeHooks(
             msg.command.spec,
             {

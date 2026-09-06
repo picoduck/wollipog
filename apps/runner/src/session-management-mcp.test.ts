@@ -9,11 +9,11 @@ import {
 import {
   dispatch,
   nextWaitSessionIntervalMs,
-  serveConductorMcp,
+  serveSessionManagementMcp,
   TOOLS,
   type McpDeps,
   type McpFetch,
-} from "./conductor-mcp.js";
+} from "./session-management-mcp.js";
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures: an injected fetch stub recording every request                    */
@@ -71,6 +71,22 @@ function resultJson(result: any): any {
 function resultText(result: any): string {
   return result.content.map((c: { text: string }) => c.text).join("\n");
 }
+
+test("orchestrator MCP lists only management tools and rejects hidden mutations before HTTP", async () => {
+  const { deps, calls } = makeDeps();
+  deps.orchestrator = true;
+  const response = await dispatch({ jsonrpc: "2.0", id: 3, method: "tools/list" }, deps);
+  const names = (response!.result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
+  assert.ok(names.includes("create_session"));
+  assert.ok(names.includes("list_governance_policies"));
+  for (const name of ["create_run", "set_session_config", "upsert_governance_policy", "create_workflow"]) {
+    assert.equal(names.includes(name), false);
+    assert.equal((await callTool(deps, name)).isError, true);
+  }
+  assert.equal(calls.length, 0);
+  assert.equal((await callTool(deps, "create_worktree", { sessionId: SELF_ID, branch: "fix/self" })).isError, true);
+  assert.equal(calls.length, 0);
+});
 
 /* -------------------------------------------------------------------------- */
 /* Protocol surface                                                            */
@@ -177,7 +193,7 @@ test("wait_session uses adaptive delays and preserves its exact timeout boundary
   assert.equal(calls.length, 5, "one immediate read plus four adaptively delayed reads");
 });
 
-test("every mutating tool's description tells the model the user must approve (card legibility)", () => {
+test("mutating tools describe governance instead of promising a now-optional human gate", () => {
   const mutations = [
     "upsert_governance_policy", "delete_governance_policy",
     "create_workflow_definition", "create_workflow_version", "create_workflow_run",
@@ -187,7 +203,7 @@ test("every mutating tool's description tells the model the user must approve (c
   ];
   for (const name of mutations) {
     const tool = TOOLS.find((t) => t.name === name)!;
-    assert.match(tool.description, /The user must approve\.$/, name);
+    assert.match(tool.description, /Subject to session permissions and governance policies\.$/, name);
   }
 });
 
@@ -222,7 +238,7 @@ test("framing round-trip: split chunks are reassembled, non-JSON lines skipped, 
   const input = new PassThrough();
   const output = new PassThrough();
   const { deps } = makeDeps();
-  serveConductorMcp(input, output, deps);
+  serveSessionManagementMcp(input, output, deps);
 
   let out = "";
   output.setEncoding("utf8");
@@ -257,7 +273,7 @@ test("a stalled CP request does not head-of-line block other tools (concurrent d
     stalled++;
     return new Promise(() => {});
   };
-  serveConductorMcp(input, output, { fetch: stallingFetch, cpUrl: CP_URL, selfSessionId: SELF_ID, token: "" });
+  serveSessionManagementMcp(input, output, { fetch: stallingFetch, cpUrl: CP_URL, selfSessionId: SELF_ID, token: "" });
 
   let out = "";
   output.setEncoding("utf8");
@@ -505,12 +521,26 @@ test("create_session -> POST /api/sessions with prompt riding create and config.
   assert.equal(resultJson(result).session.id, "s_new");
 });
 
-test("create_session with budgets issues a follow-up POST /config carrying ONLY guardrail keys", async () => {
-  const { deps, calls } = makeDeps((call) =>
-    call.url.endsWith("/config")
-      ? { status: 200, body: { id: "s_new", costBudgetUsd: 5, maxToolCalls: 40 } }
-      : { status: 201, body: { id: "s_new" } },
-  );
+test("create_session polls an exact pending spawn approval until it can create the child", async () => {
+  let attempts = 0;
+  const { deps, calls } = makeDeps(() => ++attempts === 1
+    ? { status: 428, body: { error: "Child creation requires approval" } }
+    : { status: 201, body: { id: "s_child", parentSessionId: SELF_ID } });
+  const sleeps: number[] = [];
+  deps.sleep = async (ms) => { sleeps.push(ms); };
+  const result = await callTool(deps, "create_session", {
+    runnerId: "r1", agentId: "claude-code", workspaceId: "workspace",
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(resultJson(result).session.id, "s_child");
+  assert.deepEqual(calls[0]!.body, calls[1]!.body);
+  assert.deepEqual(sleeps, [1000]);
+});
+
+test("create_session arms budgets before the initial prompt can execute", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 201, body: { id: "s_new", parentSessionId: SELF_ID, costBudgetUsd: 5, maxToolCalls: 40 },
+  }));
   const result = await callTool(deps, "create_session", {
     runnerId: "r1",
     agentId: "claude-code",
@@ -519,11 +549,12 @@ test("create_session with budgets issues a follow-up POST /config carrying ONLY 
     costBudgetUsd: 5,
     maxToolCalls: 40,
   });
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1]!.method, "POST");
-  assert.equal(calls[1]!.url, `${CP_URL}/api/sessions/s_new/config`);
-  assert.deepEqual(calls[1]!.body, { costBudgetUsd: 5, maxToolCalls: 40 }, "never model/effort/permissionMode");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.method, "POST");
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions`);
+  assert.deepEqual((calls[0]!.body as any).config, { model: "opus", costBudgetUsd: 5, maxToolCalls: 40 });
   assert.equal(resultJson(result).session.costBudgetUsd, 5);
+  assert.equal(resultJson(result).session.parentSessionId, SELF_ID);
 });
 
 test("prompt_session -> POST /api/sessions/:id/prompt {text}", async () => {
@@ -682,13 +713,14 @@ test("every request carries exact conductor provenance and bearer auth when conf
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { sessions: [] } }));
   await callTool(deps, "list_sessions");
   assert.equal(calls[0]!.headers["authorization"], `Bearer ${TOKEN}`);
-  assert.equal(calls[0]!.headers[WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER], SELF_ID);
+  assert.equal(calls[0]!.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], SELF_ID);
+  assert.equal(calls[0]!.headers[WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER], undefined);
   assert.equal(calls[0]!.headers[LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER], undefined);
 
   const bare = makeDeps(() => ({ status: 200, body: { sessions: [] } }), "");
   await callTool(bare.deps, "list_sessions");
   assert.equal(bare.calls[0]!.headers["authorization"], undefined);
-  assert.equal(bare.calls[0]!.headers[WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER], SELF_ID);
+  assert.equal(bare.calls[0]!.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], SELF_ID);
   assert.equal(bare.calls[0]!.headers[LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER], undefined);
 });
 

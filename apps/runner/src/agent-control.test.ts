@@ -51,6 +51,31 @@ function spec(driver: SessionLaunchSpec["driver"] = "codex"): SessionLaunchSpec 
   };
 }
 
+test("orchestrator provisioning restricts native tools and refuses unsupported launch boundaries", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-control-"));
+  try {
+    const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root };
+    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION };
+    for (const driver of ["codex", "claude-code"] as const) {
+      const launch = spec(driver);
+      launch.config = { permissionMode: "orchestrator" };
+      provisionAgentControl(launch, control, () => {}, host);
+      const args = [...launch.args];
+      assert.equal(launch.env.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
+      provisionAgentControl(launch, control, () => {}, host);
+      assert.deepEqual(launch.args, args, "resume is idempotent");
+      assert.ok(launch.args.includes(driver === "codex" ? "--strict-config" : "--strict-mcp-config"));
+    }
+    for (const driver of ["acp", "codex"] as const) {
+      const launch = spec(driver);
+      launch.config = { permissionMode: "orchestrator" };
+      assert.throws(() => provisionAgentControl(launch, { ...control,
+        controlPlaneProtocolVersion: driver === "codex" ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionOrchestration - 1 : PROTOCOL_VERSION,
+      }, () => {}, host), /current native/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("native sessions receive a purpose-bound token file and CLI environment without plaintext persistence", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-"));
   try {

@@ -91,7 +91,7 @@ test("the snapshot is referentially stable between writes", () => {
   // infinite render loop, so stability is part of the store's contract rather than a nicety.
   assert.equal(getExperimentFlags(), getExperimentFlags());
   const before = getExperimentFlags();
-  setExperimentFlag("conductor", false);
+  setExperimentFlag("pods", false);
   assert.notEqual(getExperimentFlags(), before, "a write must produce a new snapshot");
 });
 
@@ -145,8 +145,8 @@ test("every surface that exposes a gated feature consults the flags", () => {
       "a direct route into a hidden feature must render the notice, not the feature"],
     ["./App.tsx", /flags\.multiAgent[\s\S]{0,200}New Multi-Agent Run/,
       "the topbar create button is a creation surface and gates with its view"],
-    ["./components/NewSessionDialog.tsx", /conductorExperimentEnabled/,
-      "the conductor preset must gate, or New Session re-exposes the hidden experiment"],
+    ["./components/NewSessionDialog.tsx", /includeConductor: false/,
+      "New Session must ignore retired Conductor advertisements"],
     ["./components/AutomationsView.tsx", /multiAgentEnabled \|\| form\.actionKind === "workflow_run"/,
       "Automations must not OFFER workflow runs while multi-agent is off, but an automation already using one keeps rendering truthfully"],
     ["./components/Board.tsx", /multiAgentEnabled/,
@@ -190,13 +190,13 @@ test("a legacy conductor value is never an opt-in, in either direction", () => {
   assert.equal(parseExperimentFlags(JSON.stringify({ conductor: true })).conductor, false);
 });
 
-test("a v2 payload's conductor value is an explicit choice in both directions", () => {
-  assert.equal(parseExperimentFlags(JSON.stringify({ v: 2, conductor: true })).conductor, true);
+test("retired conductor ignores even an explicit v2 opt-in", () => {
+  assert.equal(parseExperimentFlags(JSON.stringify({ v: 2, conductor: true })).conductor, false);
   assert.equal(parseExperimentFlags(JSON.stringify({ v: 2, conductor: false })).conductor, false);
 });
 
-test("writes are versioned so the next read trusts the stored conductor value", () => {
+test("attempting to enable the retired conductor flag cannot resurrect it", () => {
   setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
   resetExperimentFlagsForTest();
-  assert.equal(getExperimentFlags(LOCAL_INSTANCE_SCOPE).conductor, true);
+  assert.equal(getExperimentFlags(LOCAL_INSTANCE_SCOPE).conductor, false);
 });

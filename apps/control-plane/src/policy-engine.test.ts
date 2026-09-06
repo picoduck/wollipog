@@ -3,7 +3,7 @@ import { test } from "node:test";
 import {
   approvalForDecision,
   budgetDecision,
-  conductorSafetyPolicy,
+  sessionSpawnSafetyPolicy,
   evaluateApprovalPolicies,
   evaluateHookApprovalPolicies,
   evaluatePolicies,
@@ -256,11 +256,12 @@ test("hook request parser accepts only bounded content-minimized selector contex
   }
 });
 
-test("declarative conductor safety policy outranks mutable auto-allow policies", () => {
-  const input = approvalInput({ scope: { ...approvalInput().scope, agentId: "conductor" } });
-  const decision = evaluateApprovalPolicies(input, [storedPolicy({ priority: 100_000 }), conductorSafetyPolicy()]);
-  assert.equal(decision.effect, "ask");
-  assert.equal(decision.policy?.policyId, "builtin:conductor-human-gate");
+test("the default spawn policy asks for shared audiences and allows an individual owner", () => {
+  const input = approvalInput({ scope: { ...approvalInput().scope, toolName: "wollipog.create_session" } });
+  assert.equal(evaluateApprovalPolicies(input, [sessionSpawnSafetyPolicy()]).effect, "ask");
+  assert.equal(evaluateApprovalPolicies(input, [sessionSpawnSafetyPolicy(true)]).effect, "allow");
+  const decision = evaluateApprovalPolicies(input, [storedPolicy({ effect: "ask", priority: 100 }), sessionSpawnSafetyPolicy(true)]);
+  assert.equal(decision.effect, "ask", "an owner can opt in through an explicit policy");
 });
 
 test("scope matching is exact unless '*' is explicit; missing context fails closed", () => {
