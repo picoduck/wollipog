@@ -150,6 +150,7 @@ export function BackgroundWorkPanel({
   onOpenParentTurn,
   inventoryError,
   onRetryInventory,
+  selectedJobId,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -158,10 +159,14 @@ export function BackgroundWorkPanel({
   onOpenParentTurn: (eventId: number) => void;
   inventoryError?: string | null;
   onRetryInventory?: () => void;
+  selectedJobId?: string;
 }) {
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
-  const jobs = session.backgroundJobs ?? [];
-  const deliveries = session.backgroundDeliveries ?? [];
+  const jobs = useMemo(() => (session.backgroundJobs ?? []).filter((job) =>
+    selectedJobId === undefined || job.id === selectedJobId), [session.backgroundJobs, selectedJobId]);
+  const deliveries = useMemo(() => (session.backgroundDeliveries ?? []).filter((delivery) =>
+    selectedJobId === undefined || jobs.some((job) => job.parentTurnId !== "unknown" && job.parentTurnId === delivery.parentTurnId)),
+  [session.backgroundDeliveries, selectedJobId, jobs]);
   const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
   // Every visible relative timestamp ages, including settled history left open for inspection.
   const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0);

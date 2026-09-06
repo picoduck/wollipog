@@ -1730,6 +1730,39 @@ test("unsupported MCP modes cancel safely and provider resolution clears a parke
   });
 });
 
+test("negotiated child questions coexist and completion cancels only their exact owner", async () => {
+  const h = makeHarness();
+  (h.driver as any).cb.supportsWorkerAttention = () => true;
+  (h.driver as any).threadId = "root";
+  const requests = new Map<string, (params: any, id: string) => Promise<any>>();
+  const notifications = new Map<string, (params: any) => void>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: any) => requests.set(method, handler),
+    onNotification: (method: string, handler: any) => notifications.set(method, handler),
+  });
+  for (const child of ["a", "b"]) notifications.get("item/completed")!({
+    threadId: "root",
+    item: { type: "collabAgentToolCall", id: "spawn-" + child, tool: "spawnAgent",
+      status: "completed", senderThreadId: "root", receiverThreadIds: [child],
+      agentsStates: { [child]: { status: "running" } } },
+  });
+  const ask = (threadId: string) => requests.get("item/tool/requestUserInput")!({
+    threadId, questions: [{ id: "choice", header: "Choice", question: "Choose",
+      isOther: false, options: [{ label: "A", description: "A" }] }],
+  }, "ask-" + threadId);
+  const a = ask("a");
+  const b = ask("b");
+  assert.deepEqual(h.events.filter((event) => event.kind === "question_request")
+    .map((event) => event.ownerToolUseId), ["spawn-a", "spawn-b"]);
+  const replacementB = ask("b");
+  assert.deepEqual(await b, { answers: {} }, "a repeated child RPC id settles its old promise");
+  (h.driver as any).updateSubagentStates({ a: { status: "completed" } });
+  assert.deepEqual(await a, { answers: {} });
+  assert.equal(h.driver.answerQuestion("ask-a", { choice: "A" }), false);
+  assert.equal(h.driver.answerQuestion("ask-b", { choice: "A" }), true);
+  assert.deepEqual(await replacementB, { answers: { choice: { answers: ["A"] } } });
+});
+
 test("a newer structured request settles and resolves the displaced request exactly once", async () => {
   const h = makeHarness();
   const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();

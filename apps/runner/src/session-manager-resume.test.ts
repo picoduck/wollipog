@@ -23,6 +23,32 @@ import {
   type SessionMeta,
 } from "./session-store.js";
 
+test("restart recovers exact unresolved child questions as dismiss-only and drops stale callbacks", () => {
+  const a = { requestId: "a", ownerToolUseId: "tool-a", kind: "question" as const,
+    title: "Choose A", options: [], questions: [{ id: "a", question: "Choose A" }] };
+  const b = { ...a, requestId: "b", ownerToolUseId: "tool-b" };
+  const h = harness({ status: "input_required", pendingApproval: { ...a, additionalRequests: [b] } });
+  try {
+    h.store.appendEvent("resume-session", { kind: "question_request",
+      requestId: "a", ownerToolUseId: "tool-a", questions: a.questions });
+    h.store.appendEvent("resume-session", { kind: "question_request",
+      requestId: "b", ownerToolUseId: "tool-b", questions: b.questions });
+    h.store.appendEvent("resume-session", { kind: "question_resolved", requestId: "a", answered: true });
+    h.manager.reconcileStore();
+    const pending = h.store.readMeta("resume-session")!.pendingApproval!;
+    assert.equal(pending.requestId, "b");
+    assert.equal(pending.ownerToolUseId, "tool-b");
+    assert.equal(pending.recoveryReason, "provider_restart");
+    assert.equal(pending.recoveryAction, undefined, "a parent resume cannot answer a child callback");
+    assert.equal(pending.additionalRequests, undefined);
+    h.manager.answerQuestion("resume-session", "b", {}, "dismiss");
+    assert.equal(h.store.readMeta("resume-session")!.pendingApproval, null);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const shortDelay = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
 const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();

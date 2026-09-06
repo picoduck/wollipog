@@ -2954,6 +2954,22 @@ test("after dispose, handleEvent is inert (returns null, no events)", () => {
   assert.equal(h.events.length, 0);
 });
 
+test("negotiated Claude child completion resolves only its owned requests", () => {
+  const h = makeHarness();
+  (h.driver as any).cb.supportsWorkerAttention = () => true;
+  (h.driver as any).child = { stdin: { write: () => {} } };
+  for (const owner of ["a", "b"]) h.feed({
+    type: "control_request", request_id: "ask-" + owner, parent_tool_use_id: owner,
+    request: { subtype: "can_use_tool", tool_name: "Read", input: {} },
+  });
+  assert.deepEqual(h.events.filter((event) => event.kind === "permission_request")
+    .map((event) => event.ownerToolUseId), ["a", "b"]);
+  h.feed({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "a", content: "Done" }] } });
+  assert.equal(h.driver.resolvePermission("ask-a", "allow"), false);
+  assert.equal(h.driver.resolvePermission("ask-b", "allow"), true);
+  assert.equal(h.events.filter((event) => event.kind === "permission_resolved" && event.requestId === "ask-a").length, 1);
+});
+
 test("control_request (can_use_tool) -> permission_request with allow/deny options", () => {
   const h = makeHarness();
   // Asks are only meaningful while the process is alive (the child-null guard).

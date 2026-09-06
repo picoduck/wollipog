@@ -26,7 +26,7 @@ import { ReviewPanel } from "./ReviewPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import type { TimelineItem } from "../timeline.js";
-import { SubagentsPanel } from "./SubagentsPanel.js";
+import { AgentsPanel } from "./AgentsPanel.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 
@@ -156,7 +156,7 @@ const MODE_TITLES: Record<RightPanelMode, string> = {
   terminal: "Terminal",
   browser: "Browser",
   sidechat: "Side Chat",
-  subagents: "Subagents",
+  subagents: "Agents",
   background: "Background Work",
 };
 
@@ -394,7 +394,12 @@ export function RightPanel({
               <SideChatPanel session={session} runnerOnline={runnerOnline} onInsertDraft={onInsertSideChatDraft} />
             )}
             {state.mode === "subagents" && (
-              <SubagentsPanel
+              <AgentsPanel
+                runnerProtocolVersion={runnerProtocolVersion}
+                parentTurnEventIds={parentTurnEventIds}
+                onOpenParentTurn={onOpenParentTurn}
+                inventoryError={backgroundInventoryError}
+                onRetryInventory={onRetryBackgroundInventory}
                 session={session}
                 items={items}
                 runnerOnline={runnerOnline}
@@ -527,7 +532,7 @@ function Launcher({
         }
       />
       <LauncherRow
-        label="Subagents"
+        label="Agents"
         onClick={() => onPick("subagents")}
         icon={
           <TeamIcon size={14} />

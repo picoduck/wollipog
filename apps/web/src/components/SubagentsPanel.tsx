@@ -69,6 +69,7 @@ export function SubagentsPanel({
   focusRequest,
   onFocusRequestHandled,
   onSelect,
+  detailOnly = false,
 }: {
   session: SessionView;
   items: TimelineItem[];
@@ -79,6 +80,7 @@ export function SubagentsPanel({
   focusRequest?: number;
   onFocusRequestHandled?: (request: number) => void;
   onSelect: (id: string) => void;
+  detailOnly?: boolean;
 }) {
   const projector = useRef<IncrementalSubagentProjector | null>(null);
   if (!projector.current) projector.current = new IncrementalSubagentProjector();
@@ -146,12 +148,12 @@ export function SubagentsPanel({
           Earlier activity in this session is not loaded, so subagents from those turns are not listed.
         </p>
       )}
-      {session.status === "input_required" && (
+      {!detailOnly && session.status === "input_required" && (
         <div className="hint warn subagents-session-note" role="status">
           The parent session needs input. Current protocol data cannot attribute that request to a specific subagent.
         </div>
       )}
-      <div className="subagents-list" role="list" aria-label="Subagents">
+      {!detailOnly && <div className="subagents-list" role="list" aria-label="Subagents">
         {descriptors.map((descriptor) => {
           const selectedRow = descriptor.id === selectedId;
           const tokens = subagentTokenTotal(descriptor.directUsage);
@@ -183,7 +185,7 @@ export function SubagentsPanel({
             </div>
           );
         })}
-      </div>
+      </div>}
       {selectionUnavailable && (
         <div
           ref={unavailableRef}

@@ -49,6 +49,7 @@ import type {
   SteerSessionResultMessage,
 } from "@wollipog/protocol";
 import {
+  addPendingRequest, removePendingRequest, pendingRequests,
   isPromptImageReference,
   isWorkspaceReference,
   PROTOCOL_VERSION,
@@ -1596,6 +1597,38 @@ export class SessionManager {
     return { scanned: true, question: null, resolvedQuestionIds: resolved };
   }
 
+  /** Reconcile exact concurrent identities against durable events before recovering callbacks.
+   * Pages bound memory even when the owning request is far back in the transcript. */
+  private recoveredWorkerQuestions(sessionId: string, pending: SessionMeta["pendingApproval"]): ReturnType<typeof pendingRequests> {
+    const requests = new Map(pendingRequests(pending).filter((request) => request.kind === "question")
+      .map((request) => [request.requestId, request]));
+    const expectedIds = new Set(requests.keys());
+    let afterSeq = 0;
+    let generation: { logEpoch: number; throughSeq: number } | undefined;
+    for (;;) {
+      const page = this.store.readEventPage(sessionId, { afterSeq, limit: 200, ...generation });
+      if (!page.ok) return []; // Never revive a callback from an unverifiable generation.
+      generation ??= { logEpoch: page.page.logEpoch, throughSeq: page.page.throughSeq };
+      for (const event of page.events) {
+        if (event.payload.kind === "question_request" && expectedIds.has(event.payload.requestId)) {
+          const payload = event.payload;
+          requests.set(payload.requestId, {
+            requestId: payload.requestId, kind: "question", options: [],
+            questions: payload.questions, title: payload.questions[0]?.question ?? "The agent has a question",
+            ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+            recoveryId: `question:${generation.logEpoch}:${event.seq}`,
+          });
+        }
+        if (event.payload.kind === "question_resolved") requests.delete(event.payload.requestId);
+      }
+      const last = page.events.at(-1)?.seq;
+      if (last == null || last >= generation.throughSeq) break;
+      if (last <= afterSeq) return [];
+      afterSeq = last;
+    }
+    return [...requests.values()];
+  }
+
   /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
    * snapshots we report are honest — they remain resumable. */
   reconcileStore(): void {
@@ -1710,6 +1743,18 @@ export class SessionManager {
         });
       } else if (terminal) {
         if (reconciled.pendingApproval) this.store.patchMeta(m.sessionId, { pendingApproval: null });
+      } else if (pendingRequests(reconciled.pendingApproval).some((request) => request.ownerToolUseId)) {
+        // The parent conversation's resume coordinate cannot resume an exact child callback.
+        // Preserve child questions for inspection/dismissal, but never offer parent continuation.
+        const recovered = this.recoveredWorkerQuestions(m.sessionId, reconciled.pendingApproval)
+          .map(({ additionalRequests: _additional, recoveryAction: _action, ...request }) => ({
+            ...request, recoveryReason: "provider_restart" as const,
+          }));
+        const [first, ...rest] = recovered;
+        this.store.patchMeta(m.sessionId, {
+          status: first ? "input_required" : "idle",
+          pendingApproval: first ? { ...first, ...(rest.length ? { additionalRequests: rest } : {}) } : null,
+        });
       } else if (recoverableQuestion) {
         // A provider response callback cannot survive process loss. Preserve the exact durable
         // question and request identity as an explicit recovery card instead of making the
@@ -3178,6 +3223,7 @@ export class SessionManager {
         meta.driver,
         { command: meta.command, args: meta.args, cwd, env: meta.env, config: meta.config, context: meta.context, capabilities: meta.capabilities, resumeId, acpSessionContext: meta.acpSessionContext, isolation, sessionStateDir: this.store.sessionPath(sessionId), initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds },
         {
+        supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
         onEvent: (p) => this.onDriverEvent(sessionId, p),
         onStderr: (t) => this.onDriverStderr(sessionId, t),
         onExit: (code) => this.onDriverExit(sessionId, code, client),
@@ -7809,11 +7855,12 @@ export class SessionManager {
       return;
     }
     const recoveredMeta = this.store.readMeta(sessionId);
-    const recovered = recoveredMeta?.pendingApproval;
+    const recovered = pendingRequests(recoveredMeta?.pendingApproval).find((request) => request.requestId === requestId);
     const recoveredStatus = recoveredMeta?.status ?? "idle";
     if (recovered?.kind === "question" && recovered.requestId === requestId &&
         recovered.recoveryReason === "provider_restart" && action === "dismiss") {
-      const statusAfterDismiss = recoveredStatus === "input_required"
+      const remaining = removePendingRequest(recoveredMeta?.pendingApproval, requestId);
+      const statusAfterDismiss = remaining ? "input_required" : recoveredStatus === "input_required"
         ? "idle"
         : recoveredStatus;
       this.emitEvent(sessionId, {
@@ -9602,7 +9649,10 @@ export class SessionManager {
       this.store.patchMeta(sessionId, { preview: null });
     } else if (payload.kind === "permission_request") {
       const prior = this.store.readMeta(sessionId)?.pendingApproval?.requestId;
-      if (prior && prior !== payload.requestId) this.approvalStarted.delete(`${sessionId}:${prior}`);
+      if (prior && prior !== payload.requestId && !payload.ownerToolUseId &&
+          !pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId)) {
+        this.approvalStarted.delete(`${sessionId}:${prior}`);
+      }
       if (trackApprovalLatency) {
         this.approvalStarted.set(`${sessionId}:${payload.requestId}`, Date.now());
         this.rememberPermissionOptionKinds(sessionId, payload.requestId, payload.options);
@@ -9610,29 +9660,34 @@ export class SessionManager {
       // Persist the pending approval AND the input_required status so a hydrating dashboard files
       // the card under Needs Input (not Running) and fires its notification.
       this.store.patchMeta(sessionId, {
-        pendingApproval: {
+        pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, {
           requestId: payload.requestId,
           title: payload.title,
           options: payload.options,
           ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
           ...(payload.context ? { context: payload.context } : {}),
-        },
+          ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+        }),
         status: "input_required",
       });
     } else if (payload.kind === "question_request") {
       const prior = this.store.readMeta(sessionId)?.pendingApproval?.requestId;
-      if (prior && prior !== payload.requestId) this.approvalStarted.delete(`${sessionId}:${prior}`);
+      if (prior && prior !== payload.requestId && !payload.ownerToolUseId &&
+          !pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId)) {
+        this.approvalStarted.delete(`${sessionId}:${prior}`);
+      }
       if (trackApprovalLatency) this.approvalStarted.set(`${sessionId}:${payload.requestId}`, Date.now());
       // Structured agent question — same approval slot, kind "question" (the web renders a
       // question card; answers ride answer_question, not resolve_permission).
       this.store.patchMeta(sessionId, {
-        pendingApproval: {
+        pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, {
           requestId: payload.requestId,
           title: payload.questions[0]?.question ?? "The agent has a question",
           options: [],
           kind: "question",
           questions: payload.questions,
-        },
+          ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+        }),
         status: "input_required",
       });
     } else if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
@@ -9641,7 +9696,8 @@ export class SessionManager {
         this.forgetPermissionOptionKinds(sessionId, payload.requestId);
       }
       // Card answered — the turn resumes, so clear the approval and restore the running status.
-      this.store.patchMeta(sessionId, { pendingApproval: null, status: "running" });
+      const pendingApproval = removePendingRequest(this.store.readMeta(sessionId)?.pendingApproval, payload.requestId);
+      this.store.patchMeta(sessionId, { pendingApproval, status: pendingApproval ? "input_required" : "running" });
     } else if (payload.kind === "token_usage" && !payload.parentToolUseId) {
       // Subagent usage is retained in the event log for UI rollups; the parentless provider result
       // is the authoritative total and already includes delegated work.
