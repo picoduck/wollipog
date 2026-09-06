@@ -75,6 +75,35 @@ function Harness({
   );
 }
 
+test("Composer Answer Mode renders rich question text and compact plain links", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const signed = "https://evidence.example/private/capture.png?signature=secret#full";
+  try {
+    await act(async () => root.render(<Harness
+      client={{ ...api } as ApiClient}
+      requestId="ask-single"
+      questions={[{
+        id: "target",
+        question: "Choose **one** target.\n\n- `staging`\n- production",
+        context: `Review ${signed}`,
+        options: [{ label: "Staging" }, { label: "Production" }],
+      }]}
+    />));
+
+    assert.match(container.querySelector(".composer-answer-question")?.innerHTML ?? "", /<strong>one<\/strong>/);
+    assert.match(container.querySelector(".composer-answer-question")?.innerHTML ?? "", /<li><code>staging<\/code><\/li>/);
+    const link = container.querySelector<HTMLAnchorElement>(".composer-answer-context a");
+    assert.equal(link?.textContent, "evidence.example/capture.png");
+    assert.equal(link?.href, signed);
+    assert.equal(container.querySelector("img, video"), null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("Enter keeps invalid input focused and submits one deterministic choice through the exact request", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

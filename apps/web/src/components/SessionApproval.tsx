@@ -20,6 +20,7 @@ import {
 } from "../question-response.js";
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
+import { StructuredQuestionText } from "./StructuredQuestionText.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -651,13 +652,17 @@ export function SessionQuestionBanner({
             >
               <div className="question-text" id={questionLabelId}>
                 {question.header && <span className="question-chip">{question.header}</span>}
-                {question.question}
+                <StructuredQuestionText>{question.question}</StructuredQuestionText>
                 {question.multiSelect && <span className="muted sm"> (select all that apply)</span>}
               </div>
               <span className="sr-only" id={requirementId}>
                 {question.required === false ? "This question is optional." : "An answer to this question is required."}
               </span>
-              {question.context && <div className="question-context" id={contextId}>{question.context}</div>}
+              {question.context && (
+                <div className="question-context" id={contextId}>
+                  <StructuredQuestionText>{question.context}</StructuredQuestionText>
+                </div>
+              )}
               {responseStyle === "interactive" && question.options.length > 0 && (
                 <div
                   className="question-options"

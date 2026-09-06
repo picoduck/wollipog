@@ -63,6 +63,27 @@ test("the standalone approval slot keeps a pending question reachable until its 
   assert.equal((html.match(/Agent Questions/g) ?? []).length, 1);
 });
 
+test("Interactive Form renders question and context Markdown with compact plain links", () => {
+  const signed = "https://evidence.example/private/capture.png?signature=secret#full";
+  const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
+    sessionId: "s-markdown",
+    requestId: "ask-markdown",
+    runnerOnline: true,
+    questions: [{
+      id: "target",
+      question: `Choose **one** target.\n\n- \`staging\`\n- production`,
+      context: `Review ${signed}`,
+      options: [{ label: "Staging" }, { label: "Production" }],
+    }],
+  }));
+
+  assert.match(html, /Choose <strong>one<\/strong> target/);
+  assert.match(html, /<li><code>staging<\/code><\/li>/);
+  assert.match(html, />evidence\.example\/capture\.png<\/a>/);
+  assert.match(html, /href="https:\/\/evidence\.example\/private\/capture\.png\?signature=secret#full"/);
+  assert.equal((html.match(/signature=secret/g) ?? []).length, 1);
+});
+
 test("a question stranded by restart preserves context but offers only the explicit safe recovery", () => {
   const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
     sessionId: "s-recovered",

@@ -27,6 +27,64 @@ async function answerLongSet(page: Page) {
   await page.getByRole("radio", { name: /Overnight/ }).click();
 }
 
+const signedEvidenceUrl = "https://evidence.example/private/mobile-capture.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=temporary-access-key&X-Amz-Signature=very-long-private-signature#full-resolution";
+
+test("320 px Interactive Form safely formats rich text and keeps resolved questions compact", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.goto("/agent-questions-e2e.html?set=rich-single");
+
+  const bar = page.getByRole("region", { name: "Agent Questions" });
+  await expect(bar.locator(".question-text strong")).toHaveText("one");
+  await expect(bar.locator(".question-text code")).toHaveText("staging");
+  await expect(bar.locator(".question-text li")).toHaveCount(2);
+  const evidence = bar.getByRole("link", { name: "evidence.example/mobile-capture.png" });
+  await expect(evidence).toHaveAttribute("href", signedEvidenceUrl);
+  await expect(bar.locator("img, video")).toHaveCount(0);
+  expect(await bar.innerText()).not.toContain("X-Amz-Signature");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+
+  await page.getByRole("radio", { name: "Staging" }).click();
+  await page.getByRole("button", { name: "Submit" }).click();
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  const history = page.locator(".tl-question");
+  await expect(history.locator("summary")).toContainText("Choose one deployment target.");
+  expect((await geometry(history)).height).toBeLessThan(80);
+  expect(await history.innerText()).not.toContain("X-Amz-Signature");
+  await history.locator("summary").click();
+  await expect(history.locator(".question-history-body")).toBeVisible();
+  await expect(history.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveAttribute("href", signedEvidenceUrl);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+});
+
+test("390 px Composer Answer Mode formats multi-question text and discloses the complete outcome", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=rich&style=composer");
+
+  const composer = page.locator(".composer-answer");
+  await expect(composer.locator(".composer-answer-question strong")).toHaveText("one");
+  await expect(composer.locator(".composer-answer-question li")).toHaveCount(2);
+  await expect(composer.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveAttribute("href", signedEvidenceUrl);
+  expect(await composer.innerText()).not.toContain("X-Amz-Signature");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+
+  const input = page.locator(".composer-answer-input");
+  await input.fill("1");
+  await input.press("Enter");
+  await expect(page.getByText("Answering Question 2 of 2")).toBeVisible();
+  await input.fill("1, 2");
+  await input.press("Enter");
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  const history = page.locator(".tl-question");
+  await expect(history.locator("summary")).toContainText("(+1 more)");
+  expect((await geometry(history)).height).toBeLessThan(80);
+  await history.locator("summary").click();
+  await expect(history.locator(".question-history-item")).toHaveCount(2);
+  await expect(history.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveCount(2);
+  await expect(history.locator("img, video")).toHaveCount(0);
+  expect(await history.innerText()).not.toContain("X-Amz-Signature");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
 test("desktop questions select and submit the exact current answers", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/agent-questions-e2e.html");

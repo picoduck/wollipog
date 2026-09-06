@@ -269,9 +269,41 @@ test("a resolved question keeps one compact outcome card at the same timeline ro
   }));
 
   assert.doesNotMatch(html, /aria-label="Agent Questions"/);
-  assert.equal((html.match(/Which language\?/g) ?? []).length, 1);
+  assert.equal((html.match(/Which language\?/g) ?? []).length, 2,
+    "the concise summary and collapsed complete-question body retain the text");
   assert.match(html, /→ Replaced/);
   assert.doesNotMatch(html, /role="radiogroup"/);
+});
+
+test("resolved question cards keep a concise summary and disclose complete rich text", () => {
+  const signed = "https://evidence.example/private/capture.png?signature=secret#full";
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [{
+      kind: "question",
+      id: 5,
+      requestId: "ask-rich",
+      answered: true,
+      questions: [
+        {
+          id: "target",
+          header: "Target",
+          question: `Choose **one** target using ${signed}\n\n- staging\n- production`,
+          context: "Keep `build-42` available.",
+          options: [{ label: "Staging" }],
+        },
+        { id: "checks", question: "Select the checks.", options: [{ label: "Tests" }] },
+      ],
+    }],
+  }));
+
+  assert.match(html, /<details class="question-history">/);
+  assert.match(html, /Choose one target using evidence\.example\/capture\.png \(\+1 more\)/);
+  assert.match(html, /→ Answered/);
+  assert.match(html, /<strong>one<\/strong>/);
+  assert.match(html, /<li>staging<\/li>/);
+  assert.match(html, /<code>build-42<\/code>/);
+  assert.match(html, /href="https:\/\/evidence\.example\/private\/capture\.png\?signature=secret#full"/);
+  assert.equal((html.match(/signature=secret/g) ?? []).length, 1);
 });
 
 test("completed assistant metadata owns enabled and disabled fork controls beside Copy", () => {
