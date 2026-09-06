@@ -39,6 +39,7 @@ test("question patterns are anchored, case-insensitive literals with bounded wil
   assert.equal(questionPatternMatches("May I send this diff for review?", "*send*diff*review?"), true);
   assert.equal(questionPatternMatches("a".repeat(32000), "*a*a*a*a*a*a*a*b"), false);
   assert.equal(questionPatternMatches("abc", "ab*bc"), false);
+  assert.equal(questionPatternMatches("Workspace", "workspace", true), false);
 });
 
 test("question policies resolve complete validated forms only for their owner", () => {
@@ -51,6 +52,9 @@ test("question policies resolve complete validated forms only for their owner", 
   }
   assert.equal(questionPolicyAnswers([question, { ...question, id: "other", question: "Merge?" }], [policy], owner, session), null);
   assert.equal(questionPolicyAnswers([question], [{ ...policy, enabled: false }], owner, session), null);
+  assert.equal(questionPolicyAnswers([question], [{ ...policy, scope: { workspaceId: "*a*a*a*a*a*a*a*b" } }],
+    owner, { ...session, workspaceId: "a".repeat(60) }), null);
+  assert.equal(questionPolicyAnswers([question], [{ ...policy, scope: { workspaceId: "Workspace" } }], owner, session), null);
   const text = { ...policy, questionRule: { headerPattern: "review", answer: { text: "Proceed" } } };
   assert.equal(questionPolicyAnswers([question], [text], owner, session)?.answers.q, "Proceed");
   assert.equal(questionPolicyAnswers([{ ...question, allowOther: false }], [text], owner, session), null);
@@ -77,11 +81,12 @@ test("starters recognize only self-contained routine actions, including option a
     ["evidence", "May I upload UI evidence to the private evidence bucket?"],
   ] as const) {
     const starter = { ...policy, questionRule: { starterCategory: category, questionPattern: "*?", answer: { text: "Yes" } } };
-    const q = { ...question, question: text };
+    const q = { ...question, header: category, question: text };
     assert.ok(questionPolicyAnswers([q], [starter], owner, session), text);
     for (const extra of ["and land the PR", "then drop the branch", "and file a bug", "and grant admin access", "and approve all future actions"]) {
       assert.equal(questionPolicyAnswers([{ ...q, question: text.slice(0, -1) + " " + extra + "?" }], [starter], owner, session), null, extra);
       assert.equal(questionPolicyAnswers([{ ...q, context: extra }], [starter], owner, session), null, extra);
+      assert.equal(questionPolicyAnswers([{ ...q, header: extra }], [starter], owner, session), null, extra);
       assert.equal(questionPolicyAnswers([{ ...q, options: [{ label: "Yes", description: extra }] }], [starter], owner, session), null, extra);
       assert.equal(questionPolicyAnswers([{ ...q, options: [{ label: "Yes, " + extra }] }], [starter], owner, session), null, extra);
     }

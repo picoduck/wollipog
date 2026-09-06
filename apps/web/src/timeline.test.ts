@@ -46,6 +46,18 @@ test("a provider-rejected policy answer does not claim a successful policy resol
   assert.equal(question?.answered, false);
   assert.equal(question?.answeredByPolicies, undefined);
 });
+test("indexed replay attribution cannot overwrite an already rejected question", () => {
+  const request = ev({ kind: "question_request", requestId: "ask", questions: [] });
+  const timeline = deriveTimeline([
+    request,
+    ev({ kind: "question_resolved", requestId: "ask", answered: false }),
+    ev({ kind: "question_policy_answered", requestId: "ask", questionEventSeq: request.seq,
+      policies: [{ policyId: "routine", name: "Routine Review" }] }),
+  ]);
+  const question = timeline.find((item) => item.kind === "question");
+  assert.equal(question?.answered, false);
+  assert.equal(question?.answeredByPolicies, undefined);
+});
 function ev(payload: SessionEventPayload): SessionEvent {
   seq += 1;
   return { id: seq, sessionId: "s", seq, ts: seq, payload };

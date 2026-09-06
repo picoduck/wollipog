@@ -1,5 +1,4 @@
 import { validateQuestionAnswers, type AgentQuestion, type GovernancePolicy, type SessionView } from "@wollipog/protocol";
-import { scopePatternMatches } from "./policy-engine.js";
 
 export function canMutateQuestionPolicy(
   existing: GovernancePolicy | undefined,
@@ -18,10 +17,10 @@ export function canMutateQuestionPolicy(
 }
 
 /** Literal segments avoid regex backtracking for adversarial near-misses. */
-export function questionPatternMatches(value: string | undefined, pattern: string): boolean {
+export function questionPatternMatches(value: string | undefined, pattern: string, caseSensitive = false): boolean {
   if (value === undefined || value.length > 32768) return false;
-  value = value.toLowerCase();
-  const segments = pattern.toLowerCase().split("*");
+  if (!caseSensitive) value = value.toLowerCase();
+  const segments = (caseSensitive ? pattern : pattern.toLowerCase()).split("*");
   if (segments.length === 1) return value === segments[0];
   const first = segments.shift()!;
   const last = segments.pop()!;
@@ -57,6 +56,13 @@ function starterActionMatches(category: StarterCategory, text: string): boolean 
 }
 
 function starterQuestionMatches(category: StarterCategory, question: AgentQuestion): boolean {
+  const headers: Record<StarterCategory, string[]> = {
+    review: ["review", "review sharing", "review retry", "retry", "review egress"],
+    push: ["push", "pr", "open pr", "push pr", "pull request"],
+    evidence: ["evidence", "upload", "evidence upload", "ui evidence"],
+  };
+  const header = (question.header ?? "").toLowerCase().trim();
+  if (header && !["permission", "permissions", "approval", "proceed", "continue", "workflow", ...headers[category]].includes(header)) return false;
   const normalized = question.question.toLowerCase();
   const prefix = /^(?:may|can) i /.exec(normalized)?.[0];
   if (!prefix || !normalized.endsWith("?") || !starterActionMatches(category, normalized.slice(prefix.length, -1))) return false;
@@ -78,10 +84,11 @@ export function questionPolicyAnswers(
 ): { answers: Record<string, string | string[]>; policies: GovernancePolicy[] } | null {
   if (!owner || !questions.length || questions.some((q) => q.secret)) return null;
   const eligible = policies.filter((p) => p.enabled && p.effect === "allow" && p.questionRule && p.ownerUserId === owner.userId &&
-    Object.entries(p.scope).every(([key, pattern]) => scopePatternMatches(
+    Object.entries(p.scope).every(([key, pattern]) => questionPatternMatches(
       key === "organizationId" ? owner.organizationId : key === "runnerId" ? session.runnerId :
         key === "workspaceId" ? session.workspaceId ?? undefined : key === "agentId" ? session.agentId ?? undefined : undefined,
       pattern,
+      true,
     ))).sort((a, b) => b.priority - a.priority || a.policyId.localeCompare(b.policyId));
   const answers: Record<string, string | string[]> = Object.create(null);
   const used: GovernancePolicy[] = [];
