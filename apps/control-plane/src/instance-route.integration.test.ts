@@ -142,6 +142,7 @@ function startControlPlane(port: number, database: string): { child: ChildProces
       CONTROL_PLANE_PORT: String(port),
       CONTROL_PLANE_DB: database,
       CONTROL_PLANE_TOKEN,
+      CONTROL_PLANE_USAGE_PRICING_URL: "off",
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -153,6 +154,7 @@ function startControlPlane(port: number, database: string): { child: ChildProces
 }
 
 async function waitForChildExit(child: ChildProcess, logs: () => string, timeoutMs = 10_000): Promise<number | null> {
+  // Called synchronously after spawn, before close can fire.
   return await new Promise<number | null>((resolvePromise, reject) => {
     const timer = setTimeout(() => {
       child.removeListener("close", onClose);
@@ -530,6 +532,24 @@ test(`a duplicate start with ${failureMode} leaves the live control plane's runn
     agentToken: "duplicate-start-agent-token",
   };
   seedControlPlane(database, seed, true);
+  if (failureMode === "SQLite contention") {
+    const fixtureDb = ControlPlaneDb.open(database);
+    try {
+      fixtureDb.createAutomation({
+        automationId: "automation_after_contention",
+        spec: {
+          name: "Resume After Contention", cron: "* * * * *", timezone: "UTC", enabled: false,
+          misfirePolicy: { kind: "fire_once" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
+          limits: { maxCostUsd: 1, maxToolCalls: 10 }, notifications: { pushEvents: [] },
+          action: { kind: "prompt_session", sessionId: SHARED_SESSION_ID,
+            request: { text: "Automation resumed after contention" } },
+        },
+        nextFireAt: null, actor: { kind: "system", id: "integration" }, now: Date.now(),
+      });
+    } finally {
+      fixtureDb.close();
+    }
+  }
 
   const children = new Set<ChildProcess>();
   const sockets = new Set<WebSocket>();
@@ -594,6 +614,16 @@ test(`a duplicate start with ${failureMode} leaves the live control plane's runn
   try {
     // WAL permits the first server's readers while this deterministic writer lock is held.
     lock?.exec("BEGIN IMMEDIATE");
+    if (lock) {
+      // Synchronize with an actual periodic write, not a sleep that can miss the 5s timer.
+      // Before the fix, that tick escaped as uncaughtException and shut down the first server.
+      const deadline = Date.now() + 10_000;
+      while (!first.logs().includes('"msg":"automation tick deferred"') && Date.now() < deadline) {
+        assert.equal(first.child.exitCode, null, first.logs());
+        await delay(25);
+      }
+      assert.match(first.logs(), /"msg":"automation tick deferred"/, "automation timer observed the held writer lock");
+    }
     const duplicate = startControlPlane(port, duplicateDatabase);
     children.add(duplicate.child);
     duplicateExit = await waitForChildExit(duplicate.child, duplicate.logs);
@@ -629,6 +659,28 @@ test(`a duplicate start with ${failureMode} leaves the live control plane's runn
   assert.equal(promptResponse.status, 200, promptBody);
   assert.doesNotMatch(promptBody, /runner is offline/i);
   assert.equal((await promptDelivery).text, "Still connected after duplicate start");
+
+  if (lock) {
+    // A caught tick must remain scheduled: prove the next unlocked tick delivers real work.
+    const automationDelivery = waitForSocketMessage(runner, (message) =>
+      message.type === "durable_session_command" &&
+      (message.command as Record<string, unknown> | undefined)?.text === "Automation resumed after contention", 10_000);
+    // If a fixture write fails, preserve that failure without a later unhandled waiter rejection.
+    void automationDelivery.catch(() => {});
+    const liveDb = new DatabaseSync(database);
+    try {
+      // Setup writes may briefly overlap a normal first-server write after the forced lock ends.
+      liveDb.exec("PRAGMA busy_timeout=1000; BEGIN IMMEDIATE");
+      liveDb.prepare("UPDATE sessions SET status='idle' WHERE id=?").run(SHARED_SESSION_ID);
+      liveDb.prepare("UPDATE automations SET enabled=1, next_fire_at=? WHERE automation_id=?")
+        .run(Date.now(), "automation_after_contention");
+      liveDb.exec("COMMIT");
+    } finally {
+      liveDb.close();
+    }
+    const delivered = await automationDelivery;
+    assert.equal((delivered.command as Record<string, unknown>).sessionId, SHARED_SESSION_ID);
+  }
 
   // Keep failure diagnostics after BOTH safety invariants: an unexpected startup error must not
   // prevent us from checking shared rows or delivery through the original runner connection.

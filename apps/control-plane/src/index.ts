@@ -4318,7 +4318,14 @@ app.post("/api/workflow-instances/:instanceId/nodes/:nodeId/resolve", async (req
 // tsx-watch reload in dev, which would otherwise orphan ssh processes + their remote runners.
 const workflowRecoveryTimer = setInterval(() => svc.recoverExpiredWorkflowAttempts(), 5_000);
 workflowRecoveryTimer.unref();
-const automationTimer = setInterval(() => automations.tick(Date.now()), 5_000);
+const automationTimer = setInterval(() => {
+  try {
+    automations.tick(Date.now());
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+      "automation tick deferred");
+  }
+}, 5_000);
 const usagePricingTimer = setInterval(() => {
   void usagePricing.ensure().then(() => db.setUsageRateTable(usagePricing.current()));
 }, 60 * 60 * 1000);
