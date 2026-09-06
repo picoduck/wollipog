@@ -126,7 +126,9 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
  * keystrokes, status flips) skips the whole timeline subtree, not just the row bodies.
  * `onRewind` (when provided — session detail only) must be identity-stable (useCallback)
  * or it defeats the row memoization. */
+const HandoffContext = createContext<{ open: (turn: number) => void; reason?: string } | undefined>(undefined);
 export const EventTimeline = memo(function EventTimeline({
+  handoff,
   items,
   onRewind,
   onFork,
@@ -150,6 +152,7 @@ export const EventTimeline = memo(function EventTimeline({
   onRevealHandled,
   questionContext,
 }: {
+  handoff?: { open: (turn: number) => void; reason?: string };
   items: TimelineItem[];
   onRewind?: (turn: number) => void;
   onFork?: (turn: number) => void;
@@ -185,6 +188,7 @@ export const EventTimeline = memo(function EventTimeline({
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
+    <HandoffContext.Provider value={handoff}>
     <EventTimelineBody
       key={effectiveHistoryKey}
       items={items}
@@ -209,6 +213,7 @@ export const EventTimeline = memo(function EventTimeline({
       onRevealHandled={onRevealHandled}
       questionContext={questionContext}
     />
+    </HandoffContext.Provider>
   );
 });
 
@@ -1571,6 +1576,7 @@ const TimelineRow = memo(function TimelineRow({
   const timingDescriptionId = useId();
   const sessionActive = useContext(TimelineActivityContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
+  const handoff = useContext(HandoffContext);
   switch (item.kind) {
     case "checkpoint":
       // Thin turn divider; the Rewind affordance stays discoverable whenever it is available.
@@ -1599,6 +1605,7 @@ const TimelineRow = memo(function TimelineRow({
         <div className="tl-checkpoint conversation" title={`Conversation and files after turn ${item.turn}`}>
           <span className="checkpoint-line" />
           <span className="checkpoint-label">after turn {item.turn}</span>
+          {handoff && <button className="btn ghost sm" disabled={!!handoff.reason} title={handoff.reason} onClick={() => handoff.open(item.turn)}>Hand Off to Another Agent</button>}
           <span className="checkpoint-line" />
         </div>
       );
@@ -1606,7 +1613,7 @@ const TimelineRow = memo(function TimelineRow({
       return (
         <div className="tl-checkpoint restored">
           <span className="checkpoint-line" />
-          <span className="checkpoint-label">forked from turn {item.turn}</span>
+          <span className="checkpoint-label">{item.handoff ? `Handoff from ${item.handoff.sourceAgent} to ${item.handoff.destinationAgent} after turn ${item.turn}: fresh provider conversation. ${item.handoff.disclosure}` : `forked from turn ${item.turn}`}</span>
           <span className="checkpoint-line" />
         </div>
       );

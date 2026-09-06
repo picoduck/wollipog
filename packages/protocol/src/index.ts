@@ -322,7 +322,11 @@
 //      different interrupted questions.
 // 108: optional worker ownership and concurrent provider requests in the existing approval
 //      record. Ownership is a normalized spawning-tool id, never a raw provider thread id.
-export const PROTOCOL_VERSION = 108;
+// 110: explicit cross-provider checkpoint handoffs carry a bounded portable draft and a fresh
+//      destination identity; v109 is reserved for the concurrent orchestration update.
+export const PROTOCOL_VERSION = 110;
+export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
+export type { ConversationHandoffDraft } from "./conversation-handoff.js";
 import { pendingRequests } from "./worker-attention.js";
 export { pendingRequests, addPendingRequest, removePendingRequest } from "./worker-attention.js";
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
@@ -430,6 +434,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   queuedPromptCancellation: 23,
   checkpointRewind: 25,
   conversationFork: 28,
+  conversationHandoff: 110,
   runtimeDiagnostics: 32,
   acpLogout: 34,
   acpSessionContext: 38,
@@ -2604,7 +2609,7 @@ export type SessionEventPayload =
   | { kind: "checkpoint"; turn: number; tree: string }
   | { kind: "checkpoint_restored"; turn: number }
   | { kind: "conversation_checkpoint"; turn: number }
-  | { kind: "conversation_forked"; sourceSessionId: string; turn: number }
+  | { kind: "conversation_forked"; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
   | {
       kind: "token_usage";
       /** Provider-reported input count. Anthropic reports the uncached portion only; Codex reports
@@ -5030,6 +5035,7 @@ export interface ForkSessionMessage {
   /** Protocol v54+: omit the potentially unbounded inherited event array; the control plane pulls
    * the new session through session_history_page after materializing its snapshot. */
   deferHistory?: boolean;
+  handoff?: { agentId: string; config: SessionConfig };
 }
 
 export interface ForkResultMessage {
@@ -5039,6 +5045,7 @@ export interface ForkResultMessage {
   error?: string;
   snapshot?: SessionSnapshot;
   events?: { seq: number; ts: number; payload: SessionEventPayload }[];
+  handoffDraft?: import("./conversation-handoff.js").ConversationHandoffDraft;
 }
 
 /** Create, attach, or select the worktree targeted by a session's Git/file actions. The runner

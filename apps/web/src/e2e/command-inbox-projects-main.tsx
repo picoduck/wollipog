@@ -2,6 +2,7 @@ import React, { useCallback, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  buildConversationHandoff,
   type AgentSlashCommand,
   type CreateSessionRequest,
   type ControlPlaneToUi,
@@ -297,6 +298,11 @@ function initialModel(): FixtureModel {
       },
     });
   }
+  if (SCENARIO === "conversation-handoff") {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+    });
+  }
   if (SCENARIO === "composer-restart") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       status: "stopped",
@@ -455,6 +461,13 @@ const steeringResolutionRequests: Array<{
 let deferredSteeringResolutionCount = 0;
 const pendingSteeringResolutionSettlements = new Map<string, () => void>();
 const sessionEvents = new Map<string, SessionEvent[]>();
+if (SCENARIO === "conversation-handoff") {
+  sessionEvents.set("session-alpha", [
+    { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
+    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
+    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
+  ]);
+}
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
 if (SCENARIO === "preview-follow" || SCENARIO === "scroll-restore" ||
     SCENARIO === "preview-opening-fill") {
@@ -578,6 +591,12 @@ const runner: RunnerView = {
   lastSeen: 1,
   protocolVersion: PROTOCOL_VERSION,
 };
+if (SCENARIO === "conversation-handoff") runner.agents.push({
+  id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code",
+  authStatus: "authenticated", available: true,
+  capabilities: { models: [{ id: "opus", displayName: "Opus", inputModalities: ["text", "image"] }],
+    effortLevels: ["high"], permissionModes: ["default", "plan"], supportsImages: true, supportsApprovals: true, slashCommands: [] },
+});
 
 const activePod: PodView = {
   id: "pod-active",
@@ -833,6 +852,17 @@ const client = {
     saveModel();
     socket?.push({ type: "session_upsert", session: structuredClone(value) });
     return structuredClone(value);
+  },
+  handoff: async (id: string, turn: number, agentId: string, config: SessionConfig) => {
+    const source = model.sessions.find((candidate) => candidate.id === id)!;
+    const agent = runner.agents.find((candidate) => candidate.id === agentId)!;
+    const handoffDraft = buildConversationHandoff(sessionEvents.get(id) ?? [], 3, agent, config);
+    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config, status: "idle" as const };
+    model.sessions.push(child);
+    sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 4, payload: { kind: "conversation_forked", sourceSessionId: id, turn,
+      handoff: { sourceAgent: source.agentId!, destinationAgent: agentId, disclosure: handoffDraft.disclosure } } }]);
+    pushSession(child);
+    return { ...structuredClone(child), handoffDraft };
   },
   cancelTurn: async (id: string) => {
     const value = model.sessions.find((candidate) => candidate.id === id);

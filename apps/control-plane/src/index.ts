@@ -4,6 +4,7 @@
  */
 
 import os from "node:os";
+import { handoffDestinationError, type SessionConfig } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -3523,6 +3524,7 @@ app.post("/api/sessions/:id/rewind", async (req, reply) => {
 
 // Provider-native conversation fork: the runner owns both the provider transcript and git object
 // database, so it creates the target atomically enough to return a complete box snapshot.
+const conversationBranchesInFlight = new Set<string>();
 app.post("/api/sessions/:id/fork", async (req, reply) => {
   const sourceId = (req.params as { id: string }).id;
   const reconciliationBlock = svc.podReconciliationMutationError(sourceId);
@@ -3534,8 +3536,17 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   const sourceScope = db.sessionScope(sourceId);
   if (!sourceScope) return reply.code(409).send({ error: "source session ownership is unavailable" });
   const sourceAgent = db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === source.agentId);
+  const handoff = (req.body as { handoff?: { agentId: string; config: SessionConfig } })?.handoff;
+  const destination = handoff ? db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === handoff.agentId) : undefined;
+  if (handoff) {
+    if (!handoff.config || typeof handoff.config !== "object" || Array.isArray(handoff.config)) return reply.code(400).send({ error: "handoff config is required" });
+    const error = handoffDestinationError(destination, source.driver, handoff.config);
+    if (error) return reply.code(409).send({ error });
+    const unsupported = runnerCapabilityError(source.runnerId, "conversationHandoff", "Checkpoint handoffs");
+    if (unsupported) return reply.code(409).send({ error: unsupported });
+  }
   const supportsFork = providerSupportsConversationFork(source.driver, sourceAgent?.capabilities);
-  if (!supportsFork) return reply.code(409).send({ error: "this provider session does not support conversation fork" });
+  if (!supportsFork && !handoff) return reply.code(409).send({ error: "this provider session does not support conversation fork" });
   if (!source.worktreePath) return reply.code(409).send({ error: "conversation fork requires a worktree session" });
   if (sessionBlocksConversationFork(source.status)) {
     return reply.code(409).send({ error: "the source session is busy — wait before forking" });
@@ -3547,6 +3558,8 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   const sourceExecutionWorkspacePath = db.getAdHocWorkspacePath(sourceId);
   const targetSessionId = `s_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
   const requestId = `fork_${randomUUID().slice(0, 8)}`;
+  if (conversationBranchesInFlight.has(sourceId)) return reply.code(409).send({ error: "a conversation fork or handoff is already in progress" });
+  conversationBranchesInFlight.add(sourceId);
   let forkCreatedOnRunner = false;
   try {
     const res = await hub.requestFromRunner(
@@ -3558,7 +3571,8 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
         sourceSessionId: sourceId,
         targetSessionId,
         turn,
-        title: `${source.title} (fork)`.slice(0, 120),
+        title: `${source.title} (${handoff ? "handoff" : "fork"})`.slice(0, 120),
+        ...(handoff ? { handoff } : {}),
         ...(deferHistory ? { deferHistory: true } : {}),
       },
       150_000,
@@ -3571,8 +3585,9 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       throw new Error(snapshotIdError);
     }
     forkCreatedOnRunner = true;
+    if (handoff && (!res.handoffDraft || typeof res.handoffDraft.text !== "string" || !Array.isArray(res.handoffDraft.images))) throw new Error("runner returned no valid handoff draft");
     const forkIdentityError = forkSnapshotIdentityError(
-      { ...source, executionWorkspacePath: sourceExecutionWorkspacePath },
+      { ...source, ...(destination ? { agentId: destination.id, driver: destination.driver! } : {}), executionWorkspacePath: sourceExecutionWorkspacePath },
       res.snapshot,
     );
     if (forkIdentityError) throw new Error(forkIdentityError);
@@ -3597,7 +3612,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
     db.setHydratedSeq(targetSessionId, highWater);
     hub.sessionChangedById(session.id);
     if (deferHistory) void svc.hydrateHistory(targetSessionId);
-    return reply.code(201).send(db.getSession(targetSessionId));
+    return reply.code(201).send({ ...db.getSession(targetSessionId), ...(handoff ? { handoffDraft: res.handoffDraft } : {}) });
   } catch (err) {
     const timedOut = isRunnerRequestTimeoutError(err);
     const cleanupTargetSessionId = providerForkCleanupTarget(targetSessionId, forkCreatedOnRunner, timedOut);
@@ -3619,6 +3634,8 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       });
     }
     return reply.code(502).send({ error: message });
+  } finally {
+    conversationBranchesInFlight.delete(sourceId);
   }
 });
 

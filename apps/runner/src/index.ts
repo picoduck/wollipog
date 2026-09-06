@@ -1453,8 +1453,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "fork_session": {
+      const destination = msg.handoff ? metadata.agents.find((agent) => agent.id === msg.handoff!.agentId) : undefined;
+      if (msg.handoff && !destination) {
+        sendUp({ type: "fork_result", requestId: msg.requestId, ok: false, error: "destination agent is not installed on this runner" });
+        break;
+      }
       void sessions
-        .forkConversation(msg.sourceSessionId, msg.targetSessionId, msg.turn, msg.title, msg.deferHistory === true)
+        .forkConversation(msg.sourceSessionId, msg.targetSessionId, msg.turn, msg.title, msg.deferHistory === true,
+          msg.handoff && destination ? { agent: destination, config: msg.handoff.config } : undefined)
         .then((result) =>
           sendUp({
             type: "fork_result",
@@ -1463,6 +1469,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             error: result.error,
             snapshot: result.snapshot,
             events: result.events,
+            handoffDraft: result.handoffDraft,
           }),
         )
         .catch((err) =>
