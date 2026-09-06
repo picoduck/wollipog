@@ -1150,13 +1150,14 @@ export interface ProjectLocationView {
   updatedAt: number;
 }
 
-/** Durable user-visible container for related sessions. A Project remains in this inventory when
- * it has no sessions or every Location is unavailable. */
+/** Fallback allowances for agent-created child sessions. */
 export interface ChildSessionDefaults {
   costBudgetUsd: number;
   maxToolCalls: number;
 }
 
+/** Durable user-visible container for related sessions. A Project remains in this inventory when
+ * it has no sessions or every Location is unavailable. */
 export interface ProjectView {
   id: string;
   name: string;

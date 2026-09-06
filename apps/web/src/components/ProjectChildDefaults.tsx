@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ChildSessionDefaults, ProjectView } from "@wollipog/protocol";
 
 /** Keyed by Project identity by the caller, so switching Projects discards the old draft. */
@@ -10,11 +10,17 @@ export function ProjectChildDefaults({ project, disabled, onSave }: {
   const [cost, setCost] = useState(String(project.childSessionDefaults?.costBudgetUsd ?? 5));
   const [tools, setTools] = useState(String(project.childSessionDefaults?.maxToolCalls ?? 100));
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (dirty || saving) return;
+    setCost(String(project.childSessionDefaults?.costBudgetUsd ?? 5));
+    setTools(String(project.childSessionDefaults?.maxToolCalls ?? 100));
+  }, [project.childSessionDefaults?.costBudgetUsd, project.childSessionDefaults?.maxToolCalls, dirty, saving]);
   const submit = async (defaults: ChildSessionDefaults | null) => {
     setSaving(true);
     setError(null);
-    try { await onSave(defaults); }
+    try { await onSave(defaults); setDirty(false); }
     catch (err) { setError(err instanceof Error ? err.message : "Could not save child session defaults."); }
     finally { setSaving(false); }
   };
@@ -33,12 +39,12 @@ export function ProjectChildDefaults({ project, disabled, onSave }: {
       void submit({ costBudgetUsd, maxToolCalls });
     }}>
       <label className="field"><span>Child Cost Limit (USD)</span>
-        <input type="number" min="0.01" step="any" required value={cost} disabled={disabled || saving}
-          onChange={(event) => setCost(event.target.value)} />
+        <input type="number" min="0" step="any" required value={cost} disabled={disabled || saving}
+          onChange={(event) => { setCost(event.target.value); setDirty(true); }} />
       </label>
       <label className="field"><span>Child Tool-Call Limit</span>
         <input type="number" min="1" step="1" required value={tools} disabled={disabled || saving}
-          onChange={(event) => setTools(event.target.value)} />
+          onChange={(event) => { setTools(event.target.value); setDirty(true); }} />
       </label>
       <button className="btn" type="submit" disabled={disabled || saving}>{saving ? "Saving…" : "Save Child Defaults"}</button>
     </form>

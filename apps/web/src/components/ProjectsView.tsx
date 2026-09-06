@@ -423,7 +423,7 @@ export function ProjectsView({
                 )}
               </section>
               {selected.childSessionDefaults !== undefined && <ProjectChildDefaults
-                key={JSON.stringify([selected.id, selected.childSessionDefaults])}
+                key={selected.id}
                 project={selected}
                 disabled={selected.canManage === false || busy !== null}
                 onSave={async (childSessionDefaults) => {
