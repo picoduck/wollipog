@@ -6530,8 +6530,9 @@ export class SessionsService {
       generatedOwnership && !this.db.hasCompletedUserMessage(sessionId) &&
       (!this.titleGenerationEnabled || this.titleGenerationEnabled(sessionId));
     const shouldRefineTitle = Boolean(this.titleGenerator) && generatedOwnership &&
-      payload.kind === "agent_message" && payload.final === true && !payload.parentToolUseId &&
-      Boolean(payload.text.trim()) && !this.db.hasCompletedAgentMessage(sessionId) &&
+      (payload.kind === "agent_response_completed" ||
+        (payload.kind === "agent_message" && payload.final === true && !payload.parentToolUseId && Boolean(payload.text.trim()))) &&
+      !this.db.hasCompletedAgentMessage(sessionId) &&
       this.db.hasCompletedUserMessage(sessionId) && this.titleGenerationOwnership.get(sessionId) !== "user";
     // Keep the runner-seq cursor gap-free: if a live event is ahead of our high-water (we hydrated a
     // session whose earlier history we haven't pulled yet), don't append it out of order and skip

@@ -14088,10 +14088,10 @@ export class ControlPlaneDb {
   /** Durable first-answer milestone: replay or a CP restart cannot spend refinement again. */
   hasCompletedAgentMessage(sessionId: string): boolean {
     return Boolean(this.stmt(
-      `SELECT 1 FROM session_events WHERE session_id=? AND kind='agent_message'
-       AND json_extract(payload, '$.final') = 1
-       AND trim(json_extract(payload, '$.text')) != ''
-       AND json_type(payload, '$.parentToolUseId') IS NULL LIMIT 1`,
+      `SELECT 1 FROM session_events WHERE session_id=? AND (kind='agent_response_completed'
+       OR (kind='agent_message' AND json_extract(payload, '$.final') = 1
+         AND trim(json_extract(payload, '$.text')) != ''
+         AND json_type(payload, '$.parentToolUseId') IS NULL)) LIMIT 1`,
     ).get(sessionId));
   }
 

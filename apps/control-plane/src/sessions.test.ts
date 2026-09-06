@@ -4058,6 +4058,30 @@ test("first-answer refinement supersedes pending initial naming without allowing
   assert.equal(db.getSession(id)?.title, "Fix Issue #123");
 });
 
+test("native streamed response completion refines once without a final aggregate message", async () => {
+  const contexts: string[] = [];
+  const { db, hub, svc } = makeHarness(async ({ messages }) => {
+    contexts.push(messages.map((message) => message.text).join("\n"));
+    return contexts.length === 1 ? "Choose Priority Issues" : "Fix Issues #123 and #124";
+  });
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Choose and fix priority issues", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const text of ["Selected ", "#123", " and ", "#124", ". Fixes pass."]) {
+    svc.onSessionEvent(id, { kind: "agent_message", messageId: "native-stream", text });
+  }
+  svc.onSessionEvent(id, { kind: "agent_response_completed" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Fix Issues #123 and #124");
+  assert.match(contexts[1]!, /Selected #123 and #124\. Fixes pass\./);
+  assert.equal(db.hasCompletedAgentMessage(id), true, "completion is a durable consumed milestone");
+  svc.onSessionEvent(id, { kind: "agent_message", messageId: "next", text: "More work" });
+  svc.onSessionEvent(id, { kind: "agent_response_completed" });
+  svc.onSessionEvent(id, { kind: "agent_message", text: "Final fallback", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(contexts.length, 2);
+});
+
 test("a prompt-created fallback also schedules semantic naming on its first durable message", async () => {
   const requested: string[][] = [];
   const generator: SessionTitleGenerator = async ({ messages }) => {
