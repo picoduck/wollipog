@@ -29,6 +29,18 @@ export interface SkillVersionSummary {
   note?: string;
   manifest?: unknown;
   files?: SkillFile[];
+  gitSource?: SkillGitSource & { path: string; commit: string };
+}
+
+export interface SkillGitSource { url: string; ref: string; subdirectory: string }
+export interface SkillGitPreview {
+  previewId: string;
+  candidates: Array<{
+    name: string; path: string; commit: string; digest: string; files: SkillFile[];
+    previousFiles: SkillFile[]; source: SkillGitSource;
+    disposition: "new" | "update" | "identical"; assignmentCount: number;
+    executablePaths: string[];
+  }>;
 }
 
 export interface SkillSummary {
@@ -37,6 +49,7 @@ export interface SkillSummary {
   description?: string | null;
   groupId?: string | null;
   source?: string;
+  gitSource?: SkillVersionSummary["gitSource"];
   latestVersion?: SkillVersionSummary | null;
   assignmentCount?: number;
 }

@@ -1,6 +1,34 @@
 # Agent Skills Management and Deployment
 
-Status: design proposal (not yet implemented)
+Status: managed deployment and Git snapshot import implemented; remaining design below is phased.
+
+## Implemented Git import
+
+The Skills view's **Import from Git** action accepts HTTPS and SSH remotes (or GitHub
+`owner/repository` shorthand), a branch/tag/commit, and an optional repository subdirectory.
+Only the instance's local owner identity can use the control plane's ambient Git credentials,
+including from a paired device. Organization owners and administrators do not acquire that
+authority from their organization role. Credential-bearing
+URLs, local-file transports, symlinks, and submodules are refused. Git objects are read without a
+checkout, hooks, or script execution. Fetches have a 60-second command timeout, a 90-second overall
+deadline, and a monitored 128 MiB temporary repository budget; skill payload limits also apply.
+Discovery is capped at 32 candidates and 16 MiB of content; narrow the subdirectory if necessary.
+An invalid candidate fails the preview, so choose a valid skill's exact directory to import it.
+
+Preview shows every proposed and current file, highlights scripts, and records the resolved commit.
+The user selects one or more skills to import. New imports have no assignments. Existing different
+content requires explicit diff acceptance and updates existing track-latest assignments; identical
+content reuses the current version. A concurrent library change invalidates acceptance. Previews
+are scoped to the requesting human and organization, expire after ten minutes, and are discarded
+on restart. At most four previews and one discovery are active at once.
+The existing skill-file format does not preserve executable bits: imported scripts deploy as
+content and should be invoked through their interpreter.
+
+Git-imported versions retain URL, requested ref, repository path, and resolved commit separately
+from skill content. **Check for Updates** repeats the preview flow; there is no automatic polling
+or update. Import does not rename collisions: use a new source name or cancel. Machine snapshot
+import and adoption, assignable groups, version pins/rollback UI, and Windows/WSL deployment remain
+separate work under #251. Later sections describe that broader target design.
 
 This document describes a planned feature that lets users manage a library of agent skills in
 Wollipog and deploy them to the Machines they have connected. A skill is a directory tree containing
