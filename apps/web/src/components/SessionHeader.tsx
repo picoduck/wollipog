@@ -166,7 +166,8 @@ export function SessionHeader({
   const renderBackgroundWork = () => visibleBackgroundWorkState && (
     <BackgroundWorkBadge state={visibleBackgroundWorkState} compact announce={false}
       onOpen={onOpenBackgroundWork ? () => {
-        closeStatusPopover(true);
+        // A direct badge stays mounted; only restore focus when dismissing its popover copy.
+        closeStatusPopover(statusPopoverOpen);
         onOpenBackgroundWork();
       } : undefined} />
   );
@@ -180,7 +181,7 @@ export function SessionHeader({
       <ChangeStatusBadge change={changeStatus ?? null} />
       {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
-          closeStatusPopover(true);
+          closeStatusPopover(statusPopoverOpen);
           onOpenBackgroundWork();
         } : undefined} />
       )}
