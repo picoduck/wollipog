@@ -45,6 +45,7 @@ Session status is multidimensional. A workflow column is organization only; it n
 - Unknown lifecycle values use **Status Unavailable**. An undifferentiated legacy input state uses **Input Required**. Missing Git or background fields produce no affirmative claim.
 - Refreshes, reconnects, and session transitions replace the relevant dimension independently; they must not synthesize a change in another dimension.
 - Managed background indicators open the **Background Work** inventory. Job lifecycle, continuation delivery, and notification delivery are separate fields; offline or stale non-terminal evidence reads **Status Unverified**.
+- Authoritative running, continuation-pending, and orphaned background work stays visible in Inbox rows and expanded Session headers alongside lifecycle. Mobile headers reserve a full-width line for it before the measured lifecycle/change/action line; passive change badges may overflow, but background work never requires opening the status popover. Settled work adds no current-status line.
 
 ## Surface Contract
 

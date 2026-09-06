@@ -627,10 +627,10 @@ test("mobile Session pane and action controls share trailing columns", async ({ 
 });
 
 for (const viewport of [
-  { name: "320-pixel phone", width: 320, hiddenCounts: [4] },
+  { name: "320-pixel phone", width: 320, hiddenCounts: [3] },
   // At this exact threshold Chromium may fit one more badge on a direct load than after a resize.
   // Both outcomes remain unclipped and correctly disclose the statuses they hide.
-  { name: "390-pixel phone", width: 390, hiddenCounts: [3, 4] },
+  { name: "390-pixel phone", width: 390, hiddenCounts: [2, 3] },
 ]) {
   test(`the session bar discloses overflowed statuses on a ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: 800 });
@@ -657,8 +657,8 @@ for (const viewport of [
     await expect(header.locator('[aria-label="Changes: Ready for Review"]')).toHaveCount(1);
     await expect(header.locator('[aria-label="Changes: Uncommitted Changes"]')).toHaveCount(1);
     await expect(header.locator(
-      '.session-header-statuses [aria-label="Background Work: Waiting on External Job"]',
-    )).toHaveCount(1);
+      '.session-header-background-work [aria-label="Background Work: Waiting on External Job"]',
+    )).toBeVisible();
     await expect(header.locator(
       '.sr-only > [role="status"][aria-label="Background Work: Waiting on External Job"]',
     )).toHaveCount(1);
@@ -788,15 +788,14 @@ for (const viewport of [
     expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
     expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
     expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
-    // Five simultaneous statuses remain represented on one compact disclosure line. The Session
-    // topbar is 40px tall, the main body adds 12px of leading space, and the second bar is 44px.
-    expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(96.5);
+    // Background work has a deliberate full-width line above the measured status/action line.
+    expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(130);
     expect(metrics.share.width).toBeGreaterThanOrEqual(36);
     expect(metrics.share.height).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.height).toBeGreaterThanOrEqual(36);
     expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.actions.x - 6);
-    expect(metrics.headerHeight).toBeLessThanOrEqual(45.5);
+    expect(metrics.headerHeight).toBeLessThanOrEqual(79);
     expect(metrics.hasHorizontalOverflow).toBe(false);
     expect(metrics.statusAddsPageOverflow).toBe(false);
     expect(metrics.statusIsClipped).toBe(false);
@@ -815,8 +814,8 @@ for (const viewport of [
     expect(metrics.share.x - metrics.fork.right).toBeCloseTo(7, 0);
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
-    expect(metrics.totalBadgeCount).toBe(5);
-    expect(metrics.badges.length).toBe(5 - hiddenCount);
+    expect(metrics.totalBadgeCount).toBe(4);
+    expect(metrics.badges.length).toBe(4 - hiddenCount);
     expect(metrics.badgeRows).toBe(1);
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
     expect(Math.abs(center(metrics.actions) - center(metrics.firstVisibleStatus))).toBeLessThanOrEqual(1);
@@ -942,11 +941,11 @@ test("status overflow count follows width and live Session status changes", asyn
   });
 
   const header = page.locator(".session-detail > .detail-head");
-  await expect(header.getByRole("button", { name: "Show 4 Hidden Statuses" })).toHaveText("+4");
+  await expect(header.getByRole("button", { name: "Show 3 Hidden Statuses" })).toHaveText("+3");
 
   await page.setViewportSize({ width: 390, height: 800 });
   const landscapeOverflowTrigger = header.locator(".session-status-overflow-trigger");
-  await expect(landscapeOverflowTrigger).toHaveText(/^\+[34]$/);
+  await expect(landscapeOverflowTrigger).toHaveText(/^\+[23]$/);
   await landscapeOverflowTrigger.click();
   await expect(page.getByRole("dialog", { name: "Session Statuses" })).toBeVisible();
 
@@ -956,7 +955,7 @@ test("status overflow count follows width and live Session status changes", asyn
   await expect(header.getByRole("button", { name: "Share" })).toBeFocused();
 
   await page.setViewportSize({ width: 320, height: 800 });
-  await expect(header.getByRole("button", { name: "Show 4 Hidden Statuses" })).toHaveText("+4");
+  await expect(header.getByRole("button", { name: "Show 3 Hidden Statuses" })).toHaveText("+3");
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       backgroundWorkState: undefined,

@@ -1358,6 +1358,7 @@ declare global {
       failNextGit(id: string, action: GitFixtureAction, message?: string): void;
       setGitUnavailable(id: string, unavailable: boolean): void;
       setGitSummary(id: string, patch: Partial<GitSummaryInfo>): void;
+      setGitStatus(id: string, patch: Partial<GitStatusInfo>): void;
       gitRequestCounts(id: string): { status: number; summary: number };
       setSlashCommands(
         commands: AgentSlashCommand[],
@@ -1577,6 +1578,11 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     const fixture = gitFixtures.get(id);
     if (!fixture) throw new Error(`unknown Git fixture: ${id}`);
     Object.assign(fixture.summary, structuredClone(patch));
+  },
+  setGitStatus(id, patch) {
+    const fixture = gitFixtures.get(id);
+    if (!fixture) throw new Error(`unknown Git fixture: ${id}`);
+    Object.assign(fixture.status, structuredClone(patch));
   },
   gitRequestCounts(id) {
     return structuredClone(gitRequestCounts.get(id) ?? { status: 0, summary: 0 });
