@@ -25,6 +25,17 @@ test("policy attribution stays visible through the runner question resolution", 
   assert.equal(question?.answered, true);
   assert.deepEqual(question?.answeredByPolicies, ["Routine Review"]);
 });
+test("replayed attribution targets the original occurrence when a provider reuses question IDs", () => {
+  const first = ev({ kind: "question_request", requestId: "same", questions: [] });
+  const second = ev({ kind: "question_request", requestId: "same", questions: [] });
+  const timeline = deriveTimeline([first, second, ev({
+    kind: "question_policy_answered", requestId: "same", questionEventSeq: first.seq,
+    policies: [{ policyId: "routine", name: "Routine Review" }],
+  })]);
+  const questions = timeline.filter((item) => item.kind === "question");
+  assert.equal(questions[0]?.answered, true);
+  assert.equal(questions[1]?.answered, undefined);
+});
 function ev(payload: SessionEventPayload): SessionEvent {
   seq += 1;
   return { id: seq, sessionId: "s", seq, ts: seq, payload };

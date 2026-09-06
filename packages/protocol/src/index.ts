@@ -2592,7 +2592,7 @@ export type SessionEventPayload =
       resolutionReason?: StructuredRequestResolutionReason;
     }
   | { kind: "question_request"; requestId: string; questions: AgentQuestion[]; ownerToolUseId?: string }
-  | { kind: "question_policy_answered"; requestId: string; policies: { policyId: string; name: string }[] }
+  | { kind: "question_policy_answered"; requestId: string; questionEventSeq?: number; policies: { policyId: string; name: string }[] }
   | {
       kind: "question_resolved";
       requestId: string;

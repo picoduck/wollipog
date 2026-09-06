@@ -6861,10 +6861,10 @@ export class SessionsService {
           requests.add(approval.requestId);
           this.automaticQuestions.set(sessionId, requests);
           const attribution: Extract<SessionEventPayload, { kind: "question_policy_answered" }> = {
-            kind: "question_policy_answered", requestId: approval.requestId,
+            kind: "question_policy_answered", requestId: approval.requestId, questionEventSeq: ev.seq,
             policies: automatic.policies.map(({ policyId, name }) => ({ policyId, name })),
           };
-          this.db.recordQuestionPolicyAnswer(sessionId, payload.questions, attribution, now);
+          this.db.recordQuestionPolicyAnswer(sessionId, payload.questions, attribution, now, runnerSeq);
           this.hub.sessionEvent(this.db.appendEvent(sessionId, attribution, now));
           this.gateOnPolicy(sessionId, now);
           this.hub.sessionChangedById(sessionId);
@@ -7205,12 +7205,12 @@ export class SessionsService {
   }
 
   /** Reconstruct CP-owned attribution after a runner-history cache reset, without delivering
-   * another answer. The question digest disambiguates reused provider request IDs. */
+   * another answer. Runner sequence/epoch and question digest identify the exact occurrence. */
   private restoreQuestionPolicyAttribution(event: SessionEvent): SessionEvent | null {
     if (event.payload.kind !== "question_request") return null;
-    const stored = this.db.questionPolicyAnswer(event.sessionId, event.payload.requestId, event.payload.questions);
+    const stored = this.db.questionPolicyAnswer(event);
     if (!stored) return null;
-    return this.db.appendEvent(event.sessionId, stored.payload, stored.timestamp);
+    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp);
   }
 
   private settleHydratedAsk(sessionId: string, trailingAsk: PendingApproval | null): void {
@@ -7324,7 +7324,7 @@ export class SessionsService {
         for (let i = 0; i < applied.events.length; i++) {
           const event = applied.events[i]!;
           const answered = event.payload.kind === "question_request" &&
-            this.db.questionPolicyAnswer(sessionId, event.payload.requestId, event.payload.questions) !== null;
+            this.db.questionPolicyAnswer(event) !== null;
           this.hub.sessionEvent(event, { suppressReminderWake: answered });
           trailingAsk = this.updateTrailingAsk(trailingAsk, applied.events[i]!.payload);
           const payload = applied.events[i]!.payload;

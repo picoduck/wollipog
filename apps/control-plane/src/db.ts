@@ -934,9 +934,11 @@ CREATE TABLE IF NOT EXISTS question_policy_answers (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   request_id TEXT NOT NULL,
   question_digest TEXT NOT NULL,
+  runner_seq INTEGER NOT NULL,
+  history_epoch INTEGER NOT NULL,
   payload TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY(session_id, request_id, question_digest)
+  PRIMARY KEY(session_id, runner_seq, history_epoch)
 );
 -- Reconcile/hydrate/delete paths filter sessions by owner constantly; without this every
 -- runner reconnect pays O(sessions) scans per lookup.
@@ -11384,19 +11386,26 @@ export class ControlPlaneDb {
     questions: Extract<SessionEventPayload, { kind: "question_request" }>["questions"],
     payload: Extract<SessionEventPayload, { kind: "question_policy_answered" }>,
     timestamp: number,
+    runnerSeq: number | undefined,
   ): void {
+    if (runnerSeq === undefined) return;
     this.stmt(`INSERT OR REPLACE INTO question_policy_answers
-      (session_id, request_id, question_digest, payload, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(sessionId, payload.requestId, createHash("sha256").update(JSON.stringify(questions)).digest("hex"), JSON.stringify(payload), timestamp);
+      (session_id, request_id, question_digest, runner_seq, history_epoch, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(sessionId, payload.requestId, createHash("sha256").update(JSON.stringify(questions)).digest("hex"),
+        runnerSeq, this.getRunnerHistoryState(sessionId)?.historyEpoch ?? -1, JSON.stringify(payload), timestamp);
   }
 
   questionPolicyAnswer(
-    sessionId: string, requestId: string,
-    questions: Extract<SessionEventPayload, { kind: "question_request" }>["questions"],
+    event: SessionEvent,
   ): { payload: Extract<SessionEventPayload, { kind: "question_policy_answered" }>; timestamp: number } | null {
+    if (event.payload.kind !== "question_request") return null;
+    const cached = this.stmt("SELECT runner_seq FROM session_events WHERE id=? AND session_id=?")
+      .get(event.id, event.sessionId) as { runner_seq: number | null } | undefined;
+    if (cached?.runner_seq == null) return null;
     const row = this.stmt(`SELECT payload, created_at FROM question_policy_answers
-      WHERE session_id=? AND request_id=? AND question_digest=?`).get(
-        sessionId, requestId, createHash("sha256").update(JSON.stringify(questions)).digest("hex"),
+      WHERE session_id=? AND request_id=? AND question_digest=? AND runner_seq=? AND history_epoch=? AND created_at=?`).get(
+        event.sessionId, event.payload.requestId, createHash("sha256").update(JSON.stringify(event.payload.questions)).digest("hex"),
+        cached.runner_seq, this.getRunnerHistoryState(event.sessionId)?.historyEpoch ?? -1, event.ts,
       ) as { payload: string; created_at: number } | undefined;
     return row ? { payload: JSON.parse(row.payload), timestamp: row.created_at } : null;
   }
