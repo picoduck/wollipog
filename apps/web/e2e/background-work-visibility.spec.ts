@@ -59,6 +59,21 @@ for (const width of [320, 390, 700, 1280]) {
       }, state);
       await expect(badge).toHaveAccessibleName(`Background Work: ${label}`);
       await expectUnclipped(badge);
+      const statusOverflow = header.locator(".session-status-overflow-trigger");
+      if (width === 390) await expect(statusOverflow).toBeVisible();
+      await badge.focus();
+      await badge.press("Enter");
+      // Wait through deferred focus restoration, not merely the click's synchronous render.
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }));
+      await expect(badge).toBeFocused();
+      await expect(page.getByRole("complementary", { name: "Background Work", exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Close Panel", exact: true }).click();
+      await badge.click();
+      await expect(badge).toBeFocused();
+      await expect(page.getByRole("complementary", { name: "Background Work", exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Close Panel", exact: true }).click();
       await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toBeVisible();
       await expect(header.locator('[aria-label="Changes: No Changes"]')).toHaveCount(1);
       if (width <= 700) {
@@ -74,6 +89,14 @@ for (const width of [320, 390, 700, 1280]) {
         await expect(dialog.getByLabel("Attention: Approval Required")).toBeVisible();
         await expect(dialog.getByLabel("Changes: No Changes")).toBeVisible();
         await page.keyboard.press("Escape");
+        await expect(overflow).toBeFocused();
+        await overflow.click();
+        await dialog.locator(".background-work-badge").press("Enter");
+        await expect(dialog).toHaveCount(0);
+        // The activated popover copy unmounts; restore to its surviving trigger.
+        await expect(overflow).toBeFocused();
+        await expect(page.getByRole("complementary", { name: "Background Work", exact: true })).toBeVisible();
+        await page.getByRole("button", { name: "Close Panel", exact: true }).click();
       }
     }
     await page.evaluate(() => {
