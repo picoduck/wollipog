@@ -119,6 +119,8 @@ import {
   type AgentLaunch,
   type ControlPlaneDb,
 } from "./db.js";
+import { questionPolicyAnswers } from "./question-policy.js";
+import type { SessionEvent } from "@wollipog/protocol";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
@@ -815,6 +817,7 @@ function workflowArtifactPage(rows: WorkflowArtifactView[], limit: number): Work
 }
 
 export class SessionsService {
+  private readonly automaticQuestions = new Map<string, Set<string>>();
   /** Sessions with an in-flight lazy history fetch, so a burst of gapped live events fans into one. */
   private readonly hydrating = new Map<string, Promise<void>>();
   /** Sessions that saw another gap WHILE a fetch was in flight — forces one more pass afterward so a
@@ -6272,6 +6275,11 @@ export class SessionsService {
       }
     }
     if (worktreePath !== undefined) this.db.setWorktreePath(sessionId, worktreePath);
+    if (status === "input_required" && !session.pendingApproval && this.automaticQuestions.get(sessionId)?.size) {
+      this.hub.sessionChangedById(sessionId);
+      return;
+    }
+    if (isTerminal(status) || status === "idle" || status === "running") this.automaticQuestions.delete(sessionId);
     // A control-plane terminal decision must not be resurrected by a stale or
     // in-flight runner status event.
     if (isTerminal(session.status) && !admittedReplacement) {
@@ -6621,7 +6629,7 @@ export class SessionsService {
           now,
         )
       : false;
-    this.hub.sessionEvent(ev);
+    if (payload.kind !== "question_request") this.hub.sessionEvent(ev);
     if (reconciledSteering || reconciledCommand ||
         payload.kind === "background_continuation_delivered") {
       this.hub.sessionChangedById(sessionId);
@@ -6630,6 +6638,7 @@ export class SessionsService {
     // Preserve the authoritative history event, but never let a late permission/question/policy
     // event recreate an approval card or move the control-plane session out of stopped.
     if (this.db.hasSessionStopIntent(sessionId)) {
+      if (payload.kind === "question_request") this.hub.sessionEvent(ev, { suppressReminderWake: true });
       this.db.updateSessionStatus(sessionId, "stopped", now);
       this.sendStopCommand(session.runnerId, sessionId);
       this.hub.sessionChangedById(sessionId);
@@ -6838,6 +6847,7 @@ export class SessionsService {
       );
       const occupiedHook = this.db.getSession(sessionId)?.pendingApproval;
       if (occupiedHook?.kind === "policy_hook") {
+        this.hub.sessionEvent(ev, { suppressReminderWake: true });
         const sent = this.hub.sendToRunner(session.runnerId, {
           type: "answer_question",
           sessionId,
@@ -6857,6 +6867,33 @@ export class SessionsService {
         this.hub.sessionChangedById(sessionId);
         return;
       }
+      const automatic = questionPolicyAnswers(payload.questions, this.db.listGovernancePolicies(), this.db.sessionOwnerUser(sessionId), session);
+      if (automatic) {
+        const sent = this.hub.sendToRunner(session.runnerId, {
+          type: "answer_question", sessionId, requestId: approval.requestId,
+          answers: automatic.answers, action: "submit",
+        });
+        for (const policy of automatic.policies) {
+          this.recordGovernanceAudit(session, approval, "policy_decision", sent ? "answered" : "delivery_failed",
+            { kind: "policy", id: policy.policyId }, now, { governancePolicyId: policy.policyId });
+        }
+        if (sent) {
+          this.hub.sessionEvent(ev, { suppressReminderWake: true });
+          const requests = this.automaticQuestions.get(sessionId) ?? new Set<string>();
+          requests.add(approval.requestId);
+          this.automaticQuestions.set(sessionId, requests);
+          const attribution: Extract<SessionEventPayload, { kind: "question_policy_answered" }> = {
+            kind: "question_policy_answered", requestId: approval.requestId, questionEventSeq: ev.seq,
+            policies: automatic.policies.map(({ policyId, name }) => ({ policyId, name })),
+          };
+          this.db.recordQuestionPolicyAnswer(sessionId, payload.questions, attribution, now, runnerSeq);
+          this.hub.sessionEvent(this.db.appendEvent(sessionId, attribution, now));
+          this.gateOnPolicy(sessionId, now);
+          this.hub.sessionChangedById(sessionId);
+          return;
+        }
+      }
+      this.hub.sessionEvent(ev);
       this.db.setPendingApproval(sessionId, addPendingRequest(this.db.getSession(sessionId)?.pendingApproval, approval));
       this.db.updateSessionStatus(sessionId, "input_required", now);
       this.notifyTransition(session, sessionId);
@@ -6866,6 +6903,11 @@ export class SessionsService {
     // policy card has re-taken the slot (approve() re-gates after a displaced guardrail pause);
     // the runner's trailing resolution must not wipe that re-parked card.
     if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
+      if (payload.kind === "question_resolved") {
+        const requests = this.automaticQuestions.get(sessionId);
+        requests?.delete(payload.requestId);
+        if (!requests?.size) this.automaticQuestions.delete(sessionId);
+      }
       if (!isPolicyApproval(this.db.getSession(sessionId)?.pendingApproval)) {
         this.db.setPendingApproval(sessionId, removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, payload.requestId));
       }
@@ -6881,6 +6923,7 @@ export class SessionsService {
     const now = Date.now();
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
+        this.automaticQuestions.delete(s.id);
         this.abortPolicyHookApprovals(s, now, "runner-disconnected");
         // A disconnect stop is provisional — reconnect hydration can restore this exact run, and
         // an armed delivery-settlement marker must survive to suppress its trailing Ready.
@@ -7184,6 +7227,15 @@ export class SessionsService {
     return trailingAsk;
   }
 
+  /** Reconstruct CP-owned attribution after a runner-history cache reset, without delivering
+   * another answer. Runner sequence/epoch and question digest identify the exact occurrence. */
+  private restoreQuestionPolicyAttribution(event: SessionEvent): SessionEvent | null {
+    if (event.payload.kind !== "question_request") return null;
+    const stored = this.db.questionPolicyAnswer(event);
+    if (!stored) return null;
+    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp);
+  }
+
   private settleHydratedAsk(sessionId: string, trailingAsk: PendingApproval | null): void {
     if (!trailingAsk) return;
     const cur = this.db.getSession(sessionId);
@@ -7293,13 +7345,20 @@ export class SessionsService {
         }
         let projectedBackgroundDelivery = false;
         for (let i = 0; i < applied.events.length; i++) {
-          this.hub.sessionEvent(applied.events[i]!);
+          const event = applied.events[i]!;
+          const answered = event.payload.kind === "question_request" &&
+            this.db.questionPolicyAnswer(event) !== null;
+          this.hub.sessionEvent(event, { suppressReminderWake: answered });
           trailingAsk = this.updateTrailingAsk(trailingAsk, applied.events[i]!.payload);
           const payload = applied.events[i]!.payload;
           if (payload.kind === "background_continuation_delivered") projectedBackgroundDelivery = true;
           if (payload.kind === "policy_transport") {
             this.recordPolicyTransportAudit(session, payload, applied.events[i]!.ts);
           }
+        }
+        for (const event of applied.events) {
+          const attribution = this.restoreQuestionPolicyAttribution(event);
+          if (attribution) this.hub.sessionEvent(attribution);
         }
         if (projectedBackgroundDelivery) this.hub.sessionChangedById(sessionId);
         afterSeq = page.nextAfterSeq;
@@ -7350,7 +7409,9 @@ export class SessionsService {
           cleanupEventPayloadArtifacts(this.db, prepared.artifactIds);
           throw error;
         }
-        this.hub.sessionEvent(ev);
+        const attribution = this.restoreQuestionPolicyAttribution(ev);
+        this.hub.sessionEvent(ev, { suppressReminderWake: attribution !== null });
+        if (attribution) this.hub.sessionEvent(attribution);
         trailingAsk = this.updateTrailingAsk(trailingAsk, ev.payload);
         if (ev.payload.kind === "background_continuation_delivered") {
           this.hub.sessionChangedById(sessionId);

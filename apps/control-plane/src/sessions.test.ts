@@ -185,6 +185,7 @@ class FakeHub {
   sessionChangedCalls: SessionView[] = [];
   sessionChangedByIdCalls: string[] = [];
   sessionEventCalls: SessionEvent[] = [];
+  suppressedReminderEvents: SessionEvent[] = [];
   sessionEventsResetCalls: { sessionId: string; events: SessionEvent[]; eventEpoch?: number }[] = [];
   sessionRemovedCalls: string[] = [];
   runChangedCalls: RunView[] = [];
@@ -270,7 +271,8 @@ class FakeHub {
     this.calls.push({ method: "sessionReminderRemoved", args: [userId, sessionId] });
   }
 
-  sessionEvent(event: SessionEvent): void {
+  sessionEvent(event: SessionEvent, options?: { suppressReminderWake?: boolean }): void {
+    if (options?.suppressReminderWake) this.suppressedReminderEvents.push(event);
     this.calls.push({ method: "sessionEvent", args: [event] });
     this.sessionEventCalls.push(event);
   }
@@ -504,6 +506,70 @@ function seedSession(
   assert.ok(res.ok && res.data, "seed createSession should succeed");
   return res.data!.id;
 }
+
+test("question policy answers avoid input state, record provenance, and survive history cache resets", async () => {
+  const { db, svc, hub } = makeHarness();
+  const local = db.localIdentityContext();
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, undefined,
+    { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } });
+  assert.ok(created.ok && created.data);
+  const id = created.data.id;
+  db.updateSessionStatus(id, "running", Date.now());
+  assert.ok(svc.upsertGovernancePolicy({ policyId: "routine", name: "Routine Review", enabled: true, effect: "allow", priority: 1,
+    ownerUserId: local.userId, scope: {}, questionRule: { headerPattern: "Review", answer: { option: "Proceed" } } }).ok);
+  const payload = { kind: "question_request" as const, requestId: "ask", questions: [{ id: "q", header: "Review", question: "Continue?", options: [{ label: "Proceed" }] }] };
+  db.reconcileRunnerHistory(id, 1, 1);
+  svc.onSessionEvent(id, payload, 1, 100);
+  assert.ok(hub.suppressedReminderEvents.some((event) => event.payload.kind === "question_request"), "automatic questions do not wake reminders");
+  assert.equal(hub.sentOfType("answer_question").at(-1)?.answers.q, "Proceed");
+  assert.equal(db.getSession(id)?.status, "running");
+  assert.equal(db.getSession(id)?.pendingApproval, null);
+  svc.onSessionStatus(id, "input_required");
+  assert.equal(db.getSession(id)?.status, "running", "trailing runner status cannot re-park an automatic answer");
+  svc.onSessionStatus(id, "running");
+  svc.onSessionStatus(id, "input_required");
+  assert.equal(db.getSession(id)?.status, "input_required", "a new park after a running acknowledgement is not swallowed");
+  db.updateSessionStatus(id, "running", Date.now());
+  const audit = svc.governanceAudit(id).find((entry) => entry.actor.kind === "policy");
+  assert.equal(audit?.outcome, "answered");
+  assert.equal(audit?.governancePolicyId, "routine");
+  assert.equal(JSON.stringify(audit).includes("Proceed"), false);
+  assert.ok(db.listEvents(id).some((event) => event.payload.kind === "question_policy_answered"));
+  svc.onSessionEvent(id, { kind: "question_resolved", requestId: "ask", answered: true });
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 3);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload }, { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "ask", answered: true } }, { seq: 3, ts: 102, payload }],
+    page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.ok(db.listEvents(id).some((event) => event.payload.kind === "question_policy_answered"), "attribution must survive rehydration");
+  assert.equal(hub.sentOfType("answer_question").length, 1, "hydration never sends another answer");
+  const requests = db.listEvents(id).filter((event) => event.payload.kind === "question_request");
+  assert.equal(requests.length, 2);
+  assert.ok(db.questionPolicyAnswer(requests[0]!));
+  assert.equal(db.questionPolicyAnswer(requests[1]!), null, "identical later request IDs/text do not inherit the prior answer");
+});
+
+test("unmatched, foreign-owned, and undeliverable question policies retain the ordinary input path", () => {
+  for (const mode of ["no-match", "foreign-owner", "delivery-failure"] as const) {
+    const { db, svc, hub } = makeHarness();
+    const local = db.localIdentityContext();
+    const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, undefined,
+      { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } });
+    assert.ok(created.ok && created.data);
+    const id = created.data.id;
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({ policyId: "routine", name: "Routine", enabled: true, effect: "allow", priority: 1,
+      ownerUserId: mode === "foreign-owner" ? "someone-else" : local.userId, scope: {},
+      questionRule: { headerPattern: mode === "no-match" ? "Other" : "Review", answer: { option: "Proceed" } } }).ok);
+    if (mode === "delivery-failure") hub.deliver = false;
+    svc.onSessionEvent(id, { kind: "question_request", requestId: "ask", questions: [{ id: "q", header: "Review", question: "Continue?", options: [{ label: "Proceed" }] }] });
+    assert.equal(db.getSession(id)?.status, "input_required", mode);
+    assert.equal(db.getSession(id)?.pendingApproval?.requestId, "ask", mode);
+    assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_policy_answered"), false);
+    assert.equal(hub.suppressedReminderEvents.length, 0, "ordinary questions still wake reminders");
+  }
+});
 
 function seedReadyPodSession(
   db: ControlPlaneDb,

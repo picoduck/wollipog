@@ -1965,6 +1965,15 @@ export interface GovernancePolicyConditions {
 }
 
 export type GovernancePolicyEffect = "allow" | "deny" | "ask";
+/** Case-insensitive whole-field patterns; '*' is the only wildcard. Every populated field
+ * must match. Replies are validated against the provider's offered form before delivery. */
+export interface GovernanceQuestionRule {
+  /** Starter rules additionally exclude protected-action language across the complete form. */
+  starterCategory?: "review" | "push" | "evidence";
+  headerPattern?: string;
+  questionPattern?: string;
+  answer: { option: string } | { text: string };
+}
 export interface GovernancePolicy {
   policyId: string;
   name: string;
@@ -1972,6 +1981,9 @@ export interface GovernancePolicy {
   priority: number;
   enabled: boolean;
   scope: GovernancePolicyScope;
+  /** Question policies never participate in command approvals. */
+  ownerUserId?: string;
+  questionRule?: GovernanceQuestionRule;
   conditions?: GovernancePolicyConditions;
   /** Seconds a hook-backed `ask` may wait. Absence means wait indefinitely. */
   askTimeout?: number;
@@ -2580,6 +2592,7 @@ export type SessionEventPayload =
       resolutionReason?: StructuredRequestResolutionReason;
     }
   | { kind: "question_request"; requestId: string; questions: AgentQuestion[]; ownerToolUseId?: string }
+  | { kind: "question_policy_answered"; requestId: string; questionEventSeq?: number; policies: { policyId: string; name: string }[] }
   | {
       kind: "question_resolved";
       requestId: string;

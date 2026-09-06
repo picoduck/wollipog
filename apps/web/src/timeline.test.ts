@@ -15,6 +15,49 @@ import {
 } from "./timeline.js";
 
 let seq = 0;
+test("policy attribution stays visible through the runner question resolution", () => {
+  const timeline = deriveTimeline([
+    ev({ kind: "question_request", requestId: "ask", questions: [{ id: "q", question: "Review?", options: [] }] }),
+    ev({ kind: "question_policy_answered", requestId: "ask", policies: [{ policyId: "routine", name: "Routine Review" }] }),
+    ev({ kind: "question_resolved", requestId: "ask", answered: true }),
+  ]);
+  const question = timeline.find((item) => item.kind === "question");
+  assert.equal(question?.answered, true);
+  assert.deepEqual(question?.answeredByPolicies, ["Routine Review"]);
+});
+test("replayed attribution targets the original occurrence when a provider reuses question IDs", () => {
+  const first = ev({ kind: "question_request", requestId: "same", questions: [] });
+  const second = ev({ kind: "question_request", requestId: "same", questions: [] });
+  const timeline = deriveTimeline([first, second, ev({
+    kind: "question_policy_answered", requestId: "same", questionEventSeq: first.seq,
+    policies: [{ policyId: "routine", name: "Routine Review" }],
+  })]);
+  const questions = timeline.filter((item) => item.kind === "question");
+  assert.equal(questions[0]?.answered, true);
+  assert.equal(questions[1]?.answered, undefined);
+});
+test("a provider-rejected policy answer does not claim a successful policy resolution", () => {
+  const timeline = deriveTimeline([
+    ev({ kind: "question_request", requestId: "ask", questions: [] }),
+    ev({ kind: "question_policy_answered", requestId: "ask", policies: [{ policyId: "routine", name: "Routine Review" }] }),
+    ev({ kind: "question_resolved", requestId: "ask", answered: false }),
+  ]);
+  const question = timeline.find((item) => item.kind === "question");
+  assert.equal(question?.answered, false);
+  assert.equal(question?.answeredByPolicies, undefined);
+});
+test("indexed replay attribution cannot overwrite an already rejected question", () => {
+  const request = ev({ kind: "question_request", requestId: "ask", questions: [] });
+  const timeline = deriveTimeline([
+    request,
+    ev({ kind: "question_resolved", requestId: "ask", answered: false }),
+    ev({ kind: "question_policy_answered", requestId: "ask", questionEventSeq: request.seq,
+      policies: [{ policyId: "routine", name: "Routine Review" }] }),
+  ]);
+  const question = timeline.find((item) => item.kind === "question");
+  assert.equal(question?.answered, false);
+  assert.equal(question?.answeredByPolicies, undefined);
+});
 function ev(payload: SessionEventPayload): SessionEvent {
   seq += 1;
   return { id: seq, sessionId: "s", seq, ts: seq, payload };

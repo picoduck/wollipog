@@ -1,3 +1,4 @@
+import { QuestionPoliciesPanel } from "./components/QuestionPoliciesPanel.js";
 import {
   useCallback,
   useEffect,
@@ -770,10 +771,13 @@ export function Shell() {
                   />
                 ),
                 behavior: (
+                  <>
                   <BehaviorPanel
                     agentHarnessDefaults={<AgentHarnessDefaultsPanel discoveryRevision={runners} />}
                     sessionNaming={<SessionNamingPanel />}
                   />
+                  <QuestionPoliciesPanel />
+                  </>
                 ),
                 network: <NetworkPanel tailnet={tailnet} />,
                 experimental: (

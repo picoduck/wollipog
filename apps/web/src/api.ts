@@ -39,6 +39,7 @@ import type {
   GitDiffScope,
   GitSummaryInfo,
   GovernanceAuditEntry,
+  GovernancePolicy,
   IdentityAdministrationView,
   HostAction,
   MutationAuditView,
@@ -678,6 +679,11 @@ export function createApiClient(transport: ApiTransport) {
     ),
 
   approvalQueue: () => req<{ items: ApprovalQueueItem[] }>("/api/governance/approval-queue"),
+  governancePolicies: () => req<{ policies: GovernancePolicy[] }>("/api/governance/policies"),
+  putGovernancePolicy: (policy: Omit<GovernancePolicy, "createdAt" | "updatedAt">) =>
+    req<GovernancePolicy>(`/api/governance/policies/${encodeURIComponent(policy.policyId)}`, {
+      method: "PUT", body: JSON.stringify(policy),
+    }),
 
   reviewFindings: (sessionId: string) =>
     req<ReviewFindingsResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/review-findings`),
