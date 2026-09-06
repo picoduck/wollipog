@@ -829,15 +829,21 @@ test("session disposal reaps a grandchild that creates a new POSIX session and i
 
 test("termination rescans the exact marker for a helper forked by a SIGTERM handler", {
   skip: process.platform === "win32",
-  timeout: 15_000,
+  timeout: 25_000,
 }, async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-term-handler-escape-"));
   const ready = path.join(dir, "ready.json");
   const providerReady = path.join(dir, "provider-ready");
+  const helperReady = path.join(dir, "helper-ready");
   const helperScript = path.join(dir, "helper.cjs");
   const providerScript = path.join(dir, "provider.cjs");
   let helperPid: number | undefined;
+  let child: AgentProcess | undefined;
   t.after(async () => {
+    if (child) {
+      killTree(child);
+      await waitForPendingKills(8_000);
+    }
     if (helperPid) {
       try { process.kill(helperPid, "SIGKILL"); } catch { /* already reaped */ }
     }
@@ -845,7 +851,10 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
   });
   await fs.writeFile(helperScript, [
     'const fs = require("node:fs");',
-    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));`,
+    // Pin the formerly flaky ordering: cleanup may win before the helper runs its readiness code.
+    // A blocked JS thread still receives the default OS SIGTERM action.
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);',
+    `fs.writeFileSync(${JSON.stringify(helperReady)}, "ready");`,
     "setInterval(() => {}, 1000);",
   ].join("\n"), "utf8");
   await fs.writeFile(providerScript, [
@@ -855,34 +864,46 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
     'process.on("SIGTERM", () => {',
     "  if (stopping) return;",
     "  stopping = true;",
-    `  spawn(process.execPath, [${JSON.stringify(helperScript)}], { detached: true, stdio: "ignore" }).unref();`,
-    "  process.exit(0);",
+    `  const helper = spawn(process.execPath, [${JSON.stringify(helperScript)}], { detached: true, stdio: "ignore" });`,
+    '  helper.on("error", (error) => { console.error(error); process.exit(1); });',
+    '  helper.on("spawn", () => {',
+    `    fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: helper.pid }));`,
+    "    helper.unref();",
+    "    process.exit(0);",
+    "  });",
     "});",
     `fs.writeFileSync(${JSON.stringify(providerReady)}, "ready");`,
     "setInterval(() => {}, 1000);",
   ].join("\n"), "utf8");
 
-  const child = spawnAgent({
+  child = spawnAgent({
     command: process.execPath,
     args: [providerScript],
     cwd: dir,
     windowsShell: false,
     descendantOwner: {},
   });
+  let providerOutput = "";
+  child.stderr.on("data", (chunk: unknown) => { providerOutput = (providerOutput + String(chunk)).slice(-4_096); });
   child.stdin.end();
-  for (let attempt = 0; attempt < 100; attempt++) {
+  const providerDeadline = Date.now() + 5_000;
+  while (Date.now() < providerDeadline) {
     try { await fs.access(providerReady); break; }
     catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
   }
-  await fs.access(providerReady);
+  assert.equal(await fs.access(providerReady).then(() => true, () => false), true,
+    `provider never installed its SIGTERM handler; pid=${child.pid}; stderr=${providerOutput}`);
   killTree(child);
-  for (let attempt = 0; attempt < 100 && !helperPid; attempt++) {
+  const helperDeadline = Date.now() + 5_000;
+  while (Date.now() < helperDeadline && !helperPid) {
     try { helperPid = (JSON.parse(await fs.readFile(ready, "utf8")) as { pid: number }).pid; }
     catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
   }
-  assert.ok(helperPid, "SIGTERM handler forked its detached helper");
+  assert.ok(Number.isSafeInteger(helperPid) && helperPid! > 0,
+    `SIGTERM handler did not report a successful detached spawn; provider=${child.pid}; stderr=${providerOutput}`);
   assert.equal(await waitForPendingKills(8_000), true);
   assert.throws(() => process.kill(helperPid!, 0), /ESRCH/, "final marker rescan reaps the helper");
+  await assert.rejects(fs.access(helperReady), /ENOENT/, "helper reaped without executing readiness code");
 });
 
 test("buildWslArgs scrubs names in-distro and never places agent env values in argv", () => {
