@@ -2731,6 +2731,14 @@ function SessionDetailLoaded({
     turn,
     conversationForkAvailability(turn, latestKnownTurn, forkContext),
   ])), [conversationCheckpointTurns, forkContext, latestKnownTurn]);
+  const handoffControls = useMemo(() => ({
+    open: setHandoffTurn,
+    reason: !runnerOnline ? "The runner is offline."
+      : !runnerSupportsProtocol(runner?.protocolVersion, "conversationHandoff") ? "Update the runner to support checkpoint handoffs."
+      : !session.worktreePath ? "A worktree is required."
+      : busy || forkInProgress || session.queued?.length || ["running", "starting", "queued", "input_required"].includes(session.status) ? "The source session is busy."
+      : undefined,
+  }), [runnerOnline, runner?.protocolVersion, session.worktreePath, session.queued?.length, session.status, busy, forkInProgress]);
   const latestForkAvailability = useMemo(
     () => conversationForkAvailability(latestConversationForkTurn, latestKnownTurn, forkContext),
     [forkContext, latestConversationForkTurn, latestKnownTurn],
@@ -4041,10 +4049,7 @@ function SessionDetailLoaded({
                           : undefined
                       }
                       onFork={mode === "expanded" ? onFork : undefined}
-                      handoff={mode === "expanded" ? {
-                        open: setHandoffTurn,
-                        reason: !runnerOnline ? "The runner is offline." : !runnerSupportsProtocol(runner?.protocolVersion, "conversationHandoff") ? "Update the runner to support checkpoint handoffs." : !session.worktreePath ? "A worktree is required." : busy || forkInProgress || session.queued?.length || ["running", "starting", "queued", "input_required"].includes(session.status) ? "The source session is busy." : undefined,
-                      } : undefined}
+                      handoff={mode === "expanded" ? handoffControls : undefined}
                       onEditAndResend={mode === "expanded" && canPrompt ? openResendAction : undefined}
                       onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
                       editInForkTargets={mode === "expanded" ? editInForkTargets : undefined}
