@@ -31,6 +31,7 @@ type Json = any;
 interface CodexDriverDeps {
   spawn: typeof spawnAgent;
   kill: typeof killTree;
+  orchestratorMcpArgs: typeof codexOrchestratorMcpArgs;
 }
 
 const SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
@@ -118,6 +119,7 @@ export class CodexDriver implements Driver {
     this.deps = {
       spawn: deps.spawn ?? spawnAgent,
       kill: deps.kill ?? killTree,
+      orchestratorMcpArgs: deps.orchestratorMcpArgs ?? codexOrchestratorMcpArgs,
     };
     // Phase 2 resume: a persisted threadId makes the first turn use `codex resume <id>`.
     if (opts.resumeId) this.threadId = opts.resumeId;
@@ -148,9 +150,12 @@ export class CodexDriver implements Driver {
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
+    // Reset the prior turn before the asynchronous probe; a new cancellation during
+    // the probe still wins at the post-await check and must not launch a process.
+    this.cancelled = false;
     let isolationArgs: string[] = [];
     if (this.config.permissionMode === "orchestrator") {
-      try { isolationArgs = await codexOrchestratorMcpArgs(this.opts, this.cwd); }
+      try { isolationArgs = await this.deps.orchestratorMcpArgs(this.opts, this.cwd); }
       catch (err) {
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
         return "refusal";
@@ -158,7 +163,6 @@ export class CodexDriver implements Driver {
       if (this.disposed || this.cancelled) return "cancelled";
     }
     return new Promise<StopReason>((resolve) => {
-      this.cancelled = false;
       this.seenItems.clear(); // dedup is per-turn; each turn re-emits item.started ids
       const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
 
