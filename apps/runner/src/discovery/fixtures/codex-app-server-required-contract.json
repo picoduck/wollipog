@@ -147,6 +147,22 @@
         }
       }
     },
+    "v2/TurnStartResponse.json": {
+      "required": ["turn"],
+      "properties": ["turn"],
+      "propertyRefs": { "turn": "Turn" },
+      "definitions": {
+        "Turn": {
+          "required": ["id", "status"],
+          "properties": ["id", "status"],
+          "propertyTypes": { "id": "string" },
+          "propertyRefs": { "status": "TurnStatus" }
+        },
+        "TurnStatus": {
+          "enumValues": ["inProgress"]
+        }
+      }
+    },
     "v2/TurnSteerResponse.json": {
       "required": [
         "turnId"
