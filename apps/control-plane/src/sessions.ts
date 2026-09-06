@@ -6261,8 +6261,11 @@ export class SessionsService {
       }
     }
     if (worktreePath !== undefined) this.db.setWorktreePath(sessionId, worktreePath);
-    if (status === "input_required" && !session.pendingApproval && this.automaticQuestions.get(sessionId)?.size) return;
-    if (isTerminal(status) || status === "idle") this.automaticQuestions.delete(sessionId);
+    if (status === "input_required" && !session.pendingApproval && this.automaticQuestions.get(sessionId)?.size) {
+      this.hub.sessionChangedById(sessionId);
+      return;
+    }
+    if (isTerminal(status) || status === "idle" || status === "running") this.automaticQuestions.delete(sessionId);
     // A control-plane terminal decision must not be resurrected by a stale or
     // in-flight runner status event.
     if (isTerminal(session.status) && !admittedReplacement) {
@@ -6901,6 +6904,7 @@ export class SessionsService {
     const now = Date.now();
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
+        this.automaticQuestions.delete(s.id);
         this.abortPolicyHookApprovals(s, now, "runner-disconnected");
         // A disconnect stop is provisional — reconnect hydration can restore this exact run, and
         // an armed delivery-settlement marker must survive to suppress its trailing Ready.
@@ -7749,10 +7753,6 @@ export class SessionsService {
         }
       }
       this.db.setHydratedSeq(sessionId, inserted.length ? inserted[inserted.length - 1]!.seq : 0);
-      for (const event of [...inserted]) {
-        const attribution = this.restoreQuestionPolicyAttribution(event);
-        if (attribution) inserted.push(attribution);
-      }
       if (res.snapshot) this.db.updateSessionFromSnapshot(sessionId, res.snapshot, now);
       const updated = this.db.getSession(sessionId)!;
       this.hub.sessionChanged(updated);

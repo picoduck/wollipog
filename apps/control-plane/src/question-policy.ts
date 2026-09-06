@@ -1,10 +1,20 @@
 import { validateQuestionAnswers, type AgentQuestion, type GovernancePolicy, type SessionView } from "@wollipog/protocol";
 import { scopePatternMatches } from "./policy-engine.js";
 
-export function canMutateQuestionPolicy(existing: GovernancePolicy | undefined, incoming: Pick<GovernancePolicy, "questionRule" | "ownerUserId"> | undefined, humanUserId: string | undefined): boolean {
+export function canMutateQuestionPolicy(
+  existing: GovernancePolicy | undefined,
+  incoming: Pick<GovernancePolicy, "questionRule" | "ownerUserId" | "scope"> | undefined,
+  humanUserId: string | undefined,
+  admin?: { organizationId: string; activeMemberUserIds: readonly string[] },
+): boolean {
   if (!existing?.questionRule && !incoming?.questionRule) return true;
-  return !!humanUserId && (!existing?.questionRule || existing.ownerUserId === humanUserId) &&
-    (!incoming?.questionRule || incoming.ownerUserId === humanUserId);
+  if (!humanUserId) return false;
+  if ((!existing?.questionRule || existing.ownerUserId === humanUserId) &&
+      (!incoming?.questionRule || incoming.ownerUserId === humanUserId)) return true;
+  if (!admin || (incoming && !incoming.questionRule)) return false;
+  return [existing, incoming].every((policy) => !policy?.questionRule ||
+    (policy.scope?.organizationId === admin.organizationId && !!policy.ownerUserId &&
+      admin.activeMemberUserIds.includes(policy.ownerUserId)));
 }
 
 /** Literal segments avoid regex backtracking for adversarial near-misses. */
@@ -26,6 +36,40 @@ export function questionPatternMatches(value: string | undefined, pattern: strin
   return true;
 }
 
+type StarterCategory = NonNullable<NonNullable<GovernancePolicy["questionRule"]>["starterCategory"]>;
+/** Closed action grammar: no wildcard may consume an additional grant ("and land the PR").
+ * Unknown context/option prose asks a human instead of guessing its meaning. */
+function starterActionMatches(category: StarterCategory, text: string): boolean {
+  if (text.length > 256) return false;
+  const normalized = text.toLowerCase().trim().replace(/\.$/, "");
+  const actions: Record<StarterCategory, RegExp[]> = {
+    review: [
+      /^(?:send|share) (?:this|the) (?:pr |pull request )?diff (?:to (?:claude|codex|opus) )?for (?:a |an independent |independent |cross-model )?review$/,
+      /^retry (?:this|the|a) (?:cross-model |independent )?review(?: (?:round|attempt)(?: [1-4])?)?$/,
+    ],
+    push: [
+      /^push (?:this|the) branch(?: to (?:origin|github))?$/,
+      /^open (?:a|this|the) (?:pr|pull request)(?: for (?:this|the) branch)?$/,
+    ],
+    evidence: [/^upload (?:this |the )?(?:ui )?evidence to (?:the )?private (?:ui )?evidence bucket$/],
+  };
+  return actions[category].some((pattern) => pattern.test(normalized));
+}
+
+function starterQuestionMatches(category: StarterCategory, question: AgentQuestion): boolean {
+  const normalized = question.question.toLowerCase();
+  const prefix = /^(?:may|can) i /.exec(normalized)?.[0];
+  if (!prefix || !normalized.endsWith("?") || !starterActionMatches(category, normalized.slice(prefix.length, -1))) return false;
+  if (question.context?.trim() && !starterActionMatches(category, question.context)) return false;
+  const inertDescriptions = new Set(["", "proceed", "continue", "do not proceed", "pause", "pause for now", "wait", "wait for now", "keep waiting", "stop"]);
+  return question.options.every((option) => {
+    const label = option.label.toLowerCase().replace(/ \(recommended\)$/, "");
+    if (!["yes", "no", "proceed", "continue", "cancel", "not yet", "approve", "decline", "allow", "deny", "wait"].includes(label)) return false;
+    const description = (option.description ?? "").toLowerCase().trim().replace(/\.$/, "");
+    return inertDescriptions.has(description) || starterActionMatches(category, description);
+  });
+}
+
 /** Resolve the entire form or leave it to a person. Never manufacture an answer for an
  * unmatched sibling, secret field, or provider form that rejects the configured response. */
 export function questionPolicyAnswers(
@@ -41,19 +85,10 @@ export function questionPolicyAnswers(
     ))).sort((a, b) => b.priority - a.priority || a.policyId.localeCompare(b.policyId));
   const answers: Record<string, string | string[]> = Object.create(null);
   const used: GovernancePolicy[] = [];
-  const formText = JSON.stringify(questions).toLowerCase();
   for (const question of questions) {
     const policy = eligible.find((p) => {
       const rule = p.questionRule!;
-      if (rule.starterCategory) {
-        const patterns = {
-          review: ["may i send *diff* for *review?", "may i retry *review*?", "can i send *diff* for *review?", "can i retry *review*?"],
-          push: ["may i push *branch*?", "may i open *pull request*?", "can i push *branch*?", "can i open *pull request*?"],
-          evidence: ["may i upload *evidence*private*bucket*?", "can i upload *evidence*private*bucket*?"],
-        };
-        if (!patterns[rule.starterCategory].some((pattern) => questionPatternMatches(question.question, pattern))) return false;
-      }
-      if (rule.starterCategory && /\b(merg\w*|delet\w*|remov\w*|publish\w*|deploy\w*|releas\w*)\b|\b(file|create|open)\b.{0,32}\bissue\b/.test(formText)) return false;
+      if (rule.starterCategory && !starterQuestionMatches(rule.starterCategory, question)) return false;
       return (rule.headerPattern === undefined || questionPatternMatches(question.header, rule.headerPattern)) &&
         (rule.questionPattern === undefined || questionPatternMatches(question.question, rule.questionPattern));
     });

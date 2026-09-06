@@ -293,6 +293,11 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
     return "policyId must be a non-builtin identifier of at most 128 characters";
   }
   if (typeof policy.name !== "string" || !policy.name.trim() || policy.name.length > 160) return "name must be between 1 and 160 characters";
+  const starterId = /^questions:(review|push|evidence):/.exec(policy.policyId);
+  if (starterId && (policy.questionRule?.starterCategory !== starterId[1] ||
+      policy.policyId !== `questions:${starterId[1]}:${policy.ownerUserId}`)) {
+    return "starter policy identifiers are reserved for their category and owner";
+  }
   if (!(["allow", "deny", "ask"] as unknown[]).includes(policy.effect)) return "effect must be allow, deny, or ask";
   if (!Number.isInteger(policy.priority) || policy.priority < -100_000 || policy.priority > 100_000) {
     return "priority must be an integer between -100000 and 100000";

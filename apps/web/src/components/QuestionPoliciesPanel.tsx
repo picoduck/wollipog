@@ -39,14 +39,17 @@ export function QuestionPoliciesPanel() {
     const current = policies.find((p) => p.policyId === `questions:${category.id}:${owner.userId}`);
     setBusy(category.id); setError(undefined);
     try {
-      const saved = await api.putGovernancePolicy(starterQuestionPolicy(category, owner.userId, owner.organizationId, !current?.enabled));
+      const { createdAt: _created, updatedAt: _updated, builtin: _builtin, ...existing } = current ?? {} as GovernancePolicy;
+      const saved = await api.putGovernancePolicy(current
+        ? { ...existing, enabled: !current.enabled }
+        : starterQuestionPolicy(category, owner.userId, owner.organizationId, true));
       setPolicies((old) => [...old.filter((p) => p.policyId !== saved.policyId), saved]);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(undefined); }
   }
   return <SettingsGroup title="Routine Question Policies">
     <p>Automatically answer routine questions in sessions you own. Each category starts off. Replies use the form’s free-text option; other forms still ask you.</p>
-    <p>Starter policies leave merge, deletion, issue publication, and deployment questions for you, including questions that combine those actions with routine steps.</p>
+    <p>Starters recognize simple “May I” or “Can I” permission questions. Additional actions or unrecognized context still ask you, including merge, deletion, issue publication, and deployment.</p>
     {error && <p role="alert">{error}</p>}
     {QUESTION_POLICY_STARTERS.map((category) => <SwitchRow key={category.id} title={category.title}
       description={category.description} checked={policies.some((p) => p.policyId === `questions:${category.id}:${owner?.userId}` && p.enabled)}

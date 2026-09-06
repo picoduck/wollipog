@@ -990,7 +990,8 @@ export class TimelineBuilder {
         const idx = this.permIndex.get(p.requestId);
         if (idx != null && this.items[idx]!.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
-          this.items[idx] = { ...it, answered: p.answered, resolutionReason: p.resolutionReason };
+          this.items[idx] = { ...it, answered: p.answered, resolutionReason: p.resolutionReason,
+            ...(!p.answered ? { answeredByPolicies: undefined } : {}) };
           this.markDirty(idx);
         }
         break;

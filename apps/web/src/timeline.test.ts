@@ -36,6 +36,16 @@ test("replayed attribution targets the original occurrence when a provider reuse
   assert.equal(questions[0]?.answered, true);
   assert.equal(questions[1]?.answered, undefined);
 });
+test("a provider-rejected policy answer does not claim a successful policy resolution", () => {
+  const timeline = deriveTimeline([
+    ev({ kind: "question_request", requestId: "ask", questions: [] }),
+    ev({ kind: "question_policy_answered", requestId: "ask", policies: [{ policyId: "routine", name: "Routine Review" }] }),
+    ev({ kind: "question_resolved", requestId: "ask", answered: false }),
+  ]);
+  const question = timeline.find((item) => item.kind === "question");
+  assert.equal(question?.answered, false);
+  assert.equal(question?.answeredByPolicies, undefined);
+});
 function ev(payload: SessionEventPayload): SessionEvent {
   seq += 1;
   return { id: seq, sessionId: "s", seq, ts: seq, payload };

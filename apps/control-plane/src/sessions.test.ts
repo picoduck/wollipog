@@ -526,6 +526,10 @@ test("question policy answers avoid input state, record provenance, and survive 
   assert.equal(db.getSession(id)?.pendingApproval, null);
   svc.onSessionStatus(id, "input_required");
   assert.equal(db.getSession(id)?.status, "running", "trailing runner status cannot re-park an automatic answer");
+  svc.onSessionStatus(id, "running");
+  svc.onSessionStatus(id, "input_required");
+  assert.equal(db.getSession(id)?.status, "input_required", "a new park after a running acknowledgement is not swallowed");
+  db.updateSessionStatus(id, "running", Date.now());
   const audit = svc.governanceAudit(id).find((entry) => entry.actor.kind === "policy");
   assert.equal(audit?.outcome, "answered");
   assert.equal(audit?.governancePolicyId, "routine");

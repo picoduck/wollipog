@@ -9,6 +9,16 @@ test("starter categories start off, persist independently, and retain their valu
   await switches.nth(0).click();
   await expect(switches.nth(0)).toHaveAttribute("aria-checked", "true");
   await expect(switches.nth(1)).toHaveAttribute("aria-checked", "false");
+  await page.evaluate(() => {
+    const policies = JSON.parse(sessionStorage.getItem("question-policies")!);
+    policies[0].scope.runnerId = "chosen-runner";
+    policies[0].priority = 7;
+    sessionStorage.setItem("question-policies", JSON.stringify(policies));
+  });
+  await page.reload();
+  await switches.nth(0).click();
+  await switches.nth(0).click();
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("question-policies")!)[0].scope.runnerId)).toBe("chosen-runner");
   await switches.nth(2).click();
   await page.reload();
   await expect(switches.nth(0)).toHaveAttribute("aria-checked", "true");
@@ -24,6 +34,7 @@ test("question policy controls fit mobile and expose policy attribution", async 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/question-policies-e2e.html?theme=dark");
   await expect(page.getByText("Answered by Policy", { exact: true })).toBeVisible();
+  await expect(page.getByText("→ Answered by Policy: Review Sharing and Retries", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole("switch").nth(1).click();
   await expect(page.getByRole("switch").nth(1)).toHaveAttribute("aria-checked", "true");

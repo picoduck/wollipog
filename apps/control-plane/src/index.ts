@@ -3313,17 +3313,26 @@ app.get("/api/sessions/:id/governance-audit", async (req, reply) => {
   return { entries: svc.governanceAudit(id, limit) };
 });
 
-app.get("/api/governance/policies", async (req) => ({
-  policies: svc.governancePolicies().filter((policy) => !policy.questionRule || policy.ownerUserId === requestHuman(req)?.userId),
-}));
+function questionPolicyAdministrator(req: FastifyRequest) {
+  const human = requestHuman(req);
+  if (!human || !canAdministerIdentity(human.role)) return undefined;
+  return { organizationId: human.organizationId,
+    activeMemberUserIds: db.identityAdministration(human).memberships.filter((member) => member.userStatus === "active").map((member) => member.userId) };
+}
+
+app.get("/api/governance/policies", async (req) => {
+  const admin = questionPolicyAdministrator(req);
+  return { policies: svc.governancePolicies().filter((policy) =>
+    !policy.questionRule || canMutateQuestionPolicy(policy, undefined, requestHuman(req)?.userId, admin)) };
+});
 
 app.put("/api/governance/policies/:policyId", async (req, reply) => {
   const policyId = (req.params as { policyId: string }).policyId;
   const body = req.body as Omit<GovernancePolicy, "createdAt" | "updatedAt">;
   if (body?.policyId !== policyId) return reply.code(400).send({ error: "path and body policyId must match" });
   const existing = svc.governancePolicies().find((policy) => policy.policyId === policyId);
-  if (!canMutateQuestionPolicy(existing, body, requestHuman(req)?.userId)) {
-    return reply.code(403).send({ error: "Only the policy owner may change a question policy" });
+  if (!canMutateQuestionPolicy(existing, body, requestHuman(req)?.userId, questionPolicyAdministrator(req))) {
+    return reply.code(403).send({ error: "Question policies require their owner or an admin acting within the owner's organization" });
   }
   return respond(reply, svc.upsertGovernancePolicy(body));
 });
@@ -3331,8 +3340,8 @@ app.put("/api/governance/policies/:policyId", async (req, reply) => {
 app.delete("/api/governance/policies/:policyId", async (req, reply) => {
   const id = (req.params as { policyId: string }).policyId;
   const existing = svc.governancePolicies().find((policy) => policy.policyId === id);
-  if (!canMutateQuestionPolicy(existing, undefined, requestHuman(req)?.userId)) {
-    return reply.code(403).send({ error: "Only the policy owner may delete a question policy" });
+  if (!canMutateQuestionPolicy(existing, undefined, requestHuman(req)?.userId, questionPolicyAdministrator(req))) {
+    return reply.code(403).send({ error: "Question policies require their owner or an admin acting within the owner's organization" });
   }
   return respond(reply, svc.deleteGovernancePolicy(id));
 });
