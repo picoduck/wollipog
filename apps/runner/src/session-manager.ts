@@ -3953,12 +3953,13 @@ export class SessionManager {
     const projectedAuthenticationBlock = isProviderAuthenticationBlock(persistedMeta?.pendingApproval);
     if ((durableAuthenticationBlock || projectedAuthenticationBlock) && syntheticRecovery) return false;
     if (durableAuthenticationBlock && this.providerAuthRecovery && !syntheticRecovery) {
+      const guidance = this.blockedPromptAuthenticationGuidance(persistedMeta!);
       this.emitEvent(sessionId, {
         kind: "stderr",
-        text: "Authentication is still blocked. Use Recheck Authentication after signing in in the exact provider context.",
+        text: guidance,
       });
       this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-      durable?.failed("provider authentication must be revalidated before retry", "PROVIDER_AUTHENTICATION_REQUIRED");
+      durable?.failed(guidance, "PROVIDER_AUTHENTICATION_REQUIRED");
       return false;
     }
     // Adapters without an exact-context status probe receive the bounded legacy projection only.
@@ -9146,6 +9147,22 @@ export class SessionManager {
     });
     if (current.agentId) this.onAgentAuthUpdate?.(current.agentId, { status: "authenticated" });
     return true;
+  }
+
+  private blockedPromptAuthenticationGuidance(meta: SessionMeta): string {
+    const scopeId = meta.providerAuthBlock!.credentialScopeId;
+    if (this.providerAuthRevalidations.has(scopeId)) {
+      return "Authentication is being checked automatically. This prompt was not submitted. Wait for recovery to finish, then retry this prompt.";
+    }
+    if (this.providerAuthOperations.has(scopeId)) {
+      return "Authentication recovery is in progress. This prompt was not submitted. Finish the sign-in or authentication check, then retry this prompt.";
+    }
+    if (isProviderAuthenticationBlock(meta.pendingApproval)) {
+      return "Authentication is still blocked. This prompt was not submitted. Follow this session's Authentication Required card, then choose Recheck Authentication and retry this prompt after recovery completes.";
+    }
+    // Scope ownership spans sessions, but runner metadata does not establish their visibility to
+    // this audience. Point to the Inbox without disclosing a peer's title, ID, or private context.
+    return "Authentication is still blocked. This prompt was not submitted. In Inbox, find the Authentication Required card for this provider and runner. Follow its sign-in instructions, then choose Recheck Authentication. If no matching card is accessible, ask the runner owner to complete authentication recovery. Retry this prompt after recovery completes.";
   }
 
   private providerAuthenticationOptions(
