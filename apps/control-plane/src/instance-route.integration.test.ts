@@ -152,12 +152,19 @@ function startControlPlane(port: number, database: string): { child: ChildProces
   return { child, logs: () => output };
 }
 
-async function waitForChildExit(child: ChildProcess, timeoutMs = 10_000): Promise<number | null> {
-  if (child.exitCode !== null) return child.exitCode;
-  return await Promise.race([
-    new Promise<number | null>((resolvePromise) => child.once("exit", resolvePromise)),
-    delay(timeoutMs).then(() => { throw new Error("child did not exit in time"); }),
-  ]);
+async function waitForChildExit(child: ChildProcess, logs: () => string, timeoutMs = 10_000): Promise<number | null> {
+  return await new Promise<number | null>((resolvePromise, reject) => {
+    const timer = setTimeout(() => {
+      child.removeListener("close", onClose);
+      reject(new Error(`child ${child.pid} did not close within ${timeoutMs}ms: ${logs()}`));
+    }, timeoutMs);
+    const onClose = (code: number | null) => {
+      clearTimeout(timer);
+      resolvePromise(code);
+    };
+    // close, unlike exit, includes the final stdout/stderr diagnostics.
+    child.once("close", onClose);
+  });
 }
 
 async function openWebSocket(url: string): Promise<WebSocket> {
@@ -509,7 +516,8 @@ test("two real control planes isolate identical ids and persist identity and dat
   await assertSeededPayload(secondPort, secondSeed);
 });
 
-test("a duplicate start leaves the live control plane's runner, box, session, and shells untouched", { timeout: 60_000 }, async (t) => {
+for (const failureMode of ["shared database", "occupied port", "SQLite contention"] as const) {
+test(`a duplicate start with ${failureMode} leaves the live control plane's runner, box, session, and shells untouched`, { timeout: 60_000 }, async (t) => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-duplicate-start-"));
   const port = await reservePort();
   const database = join(temp, "control-plane.db");
@@ -575,12 +583,28 @@ test("a duplicate start leaves the live control plane's runner, box, session, an
 
   const beforeDuplicate = sharedRows(database);
   assert.equal(beforeDuplicate.session_shells[0]?.status, "running");
-  const duplicate = startControlPlane(port, database);
-  children.add(duplicate.child);
-  const duplicateExit = await waitForChildExit(duplicate.child);
-  children.delete(duplicate.child);
-  assert.notEqual(duplicateExit, 0, duplicate.logs());
-  assert.match(duplicate.logs(), /EADDRINUSE/);
+  // A distinct, fully seeded database isolates port rejection from writes by the first server.
+  // In the shared-database cases, DB initialization/recovery runs before listen(), so a busy
+  // writer may reject startup before the occupied-port check can run.
+  const duplicateDatabase = failureMode === "occupied port" ? join(temp, "duplicate.db") : database;
+  if (failureMode === "occupied port") seedControlPlane(duplicateDatabase, seed);
+  const lock = failureMode === "SQLite contention" ? new DatabaseSync(database) : undefined;
+  let duplicateExit: number | null;
+  let duplicateLogs = "";
+  try {
+    // WAL permits the first server's readers while this deterministic writer lock is held.
+    lock?.exec("BEGIN IMMEDIATE");
+    const duplicate = startControlPlane(port, duplicateDatabase);
+    children.add(duplicate.child);
+    duplicateExit = await waitForChildExit(duplicate.child, duplicate.logs);
+    children.delete(duplicate.child);
+    duplicateLogs = duplicate.logs();
+  } finally {
+    if (lock) {
+      if (lock.isTransaction) lock.exec("ROLLBACK");
+      lock.close();
+    }
+  }
 
   assert.deepEqual(
     sharedRows(database),
@@ -605,4 +629,12 @@ test("a duplicate start leaves the live control plane's runner, box, session, an
   assert.equal(promptResponse.status, 200, promptBody);
   assert.doesNotMatch(promptBody, /runner is offline/i);
   assert.equal((await promptDelivery).text, "Still connected after duplicate start");
+
+  // Keep failure diagnostics after BOTH safety invariants: an unexpected startup error must not
+  // prevent us from checking shared rows or delivery through the original runner connection.
+  assert.notEqual(duplicateExit, 0, duplicateLogs);
+  assert.match(duplicateLogs, failureMode === "occupied port" ? /EADDRINUSE/
+    : failureMode === "SQLite contention" ? /database is locked/
+    : /EADDRINUSE|database is locked/);
 });
+}
