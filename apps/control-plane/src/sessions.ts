@@ -157,6 +157,7 @@ import {
 } from "./pod-orchestration.js";
 import {
   boundedSessionTitleContext,
+  isLessSpecificSessionTitle,
   normalizeGeneratedSessionTitle,
   SessionTitleGenerationError,
   type SessionTitleGenerator,
@@ -826,6 +827,7 @@ export class SessionsService {
    * the cross-restart fence, so an abandoned request can never overwrite newer state. */
   private readonly titleGenerationEpochs = new Map<string, number>();
   private readonly titleGenerationControllers = new Map<string, AbortController>();
+  private readonly titleGenerationOwnership = new Map<string, "generated" | "user">();
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -4514,6 +4516,7 @@ export class SessionsService {
   private cancelTitleGeneration(sessionId: string): void {
     this.titleGenerationControllers.get(sessionId)?.abort();
     this.titleGenerationControllers.delete(sessionId);
+    this.titleGenerationOwnership.delete(sessionId);
     this.titleGenerationEpochs.delete(sessionId);
   }
 
@@ -4537,15 +4540,19 @@ export class SessionsService {
     const messages = boundedSessionTitleContext(
       this.db.listSessionTitleContextEvents(sessionId),
       (text) => redactOperationalTranscriptText(text, sensitivePaths),
+      [...(session.worktrees ?? [])].sort((left, right) =>
+        Number(left?.path === session.worktreePath) - Number(right?.path === session.worktreePath)),
     );
     if (!messages.length) return fail("the session has no completed conversation context to name", 409);
 
     const epoch = this.bumpTitleGenerationEpoch(sessionId);
     const expectedTitle = session.title;
     const expectedSource = session.titleSource ?? "generated";
+    const preserveSpecificity = expectedSource !== "generated" || this.db.hasSemanticSessionTitle(sessionId);
     const expectedGenerationRevision = this.titleGenerationRevision?.(sessionId);
     const controller = new AbortController();
     this.titleGenerationControllers.set(sessionId, controller);
+    this.titleGenerationOwnership.set(sessionId, ownership);
     const configuredTimeout = typeof this.titleGenerationTimeoutMs === "function"
       ? this.titleGenerationTimeoutMs(sessionId) : this.titleGenerationTimeoutMs;
     let timedOut = false;
@@ -4568,6 +4575,12 @@ export class SessionsService {
       }
       const title = normalizeGeneratedSessionTitle(rawTitle);
       if (!title) throw new SessionTitleGenerationError("invalid_result", "output_validation");
+      if (preserveSpecificity && isLessSpecificSessionTitle(current.title, title)) {
+        // Explicit requests still take ownership when retaining the better existing title.
+        if (ownership === "user") this.db.setSemanticSessionTitle(sessionId, current.title, Date.now(), ownership);
+        this.hub.sessionChangedById(sessionId);
+        return ok({ title: current.title });
+      }
       this.db.setSemanticSessionTitle(sessionId, title, Date.now(), ownership);
       this.hub.sessionChangedById(sessionId);
       return ok({ title });
@@ -4586,6 +4599,7 @@ export class SessionsService {
       clearTimeout(timeout);
       if (this.titleGenerationControllers.get(sessionId) === controller) {
         this.titleGenerationControllers.delete(sessionId);
+        this.titleGenerationOwnership.delete(sessionId);
         this.titleGenerationEpochs.delete(sessionId);
       }
     });
@@ -6516,6 +6530,11 @@ export class SessionsService {
     const shouldGenerateInitialTitle = Boolean(this.titleGenerator) && isCompletedUserMessage &&
       generatedOwnership && !this.db.hasCompletedUserMessage(sessionId) &&
       (!this.titleGenerationEnabled || this.titleGenerationEnabled(sessionId));
+    const shouldRefineTitle = Boolean(this.titleGenerator) && generatedOwnership &&
+      (payload.kind === "agent_response_completed" ||
+        (payload.kind === "agent_message" && payload.final === true && !payload.parentToolUseId && Boolean(payload.text.trim()))) &&
+      !this.db.hasCompletedAgentMessage(sessionId) &&
+      this.db.hasCompletedUserMessage(sessionId) && this.titleGenerationOwnership.get(sessionId) !== "user";
     // Keep the runner-seq cursor gap-free: if a live event is ahead of our high-water (we hydrated a
     // session whose earlier history we haven't pulled yet), don't append it out of order and skip
     // past the gap — pull the ordered history from the box (which includes this event) instead.
@@ -6627,7 +6646,7 @@ export class SessionsService {
       const t = titleFromPrompt(payload.text);
       if (t) this.db.setSessionTitle(sessionId, t, now, "generated");
     }
-    if (shouldGenerateInitialTitle) {
+    if (shouldGenerateInitialTitle || shouldRefineTitle) {
       // Fire-and-forget: the normal turn has already entered the runner independently.
       const started = this.generateSessionTitle(sessionId, "generated");
       if (started.ok) void started.data!.completion;

@@ -3953,6 +3953,144 @@ test("semantic naming keeps the fallback immediate and applies an isolated resul
   assert.equal(db.getSession(id)?.titleSource, "provider");
 });
 
+test("naming refines once at the first completed answer using concrete selected work", async () => {
+  const contexts: string[] = [];
+  const { db, hub, svc } = makeHarness(async ({ messages }) => {
+    contexts.push(messages.map((message) => message.text).join("\n"));
+    return contexts.length === 1 ? "Choose Priority Issues" : "Fix Issues #123 and #124";
+  });
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Choose and fix priority issues", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  svc.onSessionEvent(id, { kind: "agent_message", text: "Selected #123 and #124; fixes pass", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Fix Issues #123 and #124");
+  assert.match(contexts[1]!, /Choose and fix priority issues[\s\S]*Selected #123 and #124/);
+  svc.onSessionEvent(id, { kind: "agent_message", text: "One more minor update", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(contexts.length, 2);
+});
+
+test("active retitle snapshots coalesced visible output without entering the prompt queue", async () => {
+  let context = "";
+  const { db, hub, svc } = makeHarness(async ({ messages }) => {
+    context = messages.map((message) => message.text).join("\n");
+    return "Fix Issues #123 and #124";
+  });
+  const id = seedSession(svc, hub);
+  svc.setTitle(id, "Choose Priority Issues");
+  svc.onSessionEvent(id, { kind: "user_message", text: "Pick the highest priority work", final: true });
+  for (const text of ["Working on ", "#123", " and ", "#124", "; token", "=", "secret-value"]) {
+    svc.onSessionEvent(id, { kind: "agent_message", messageId: "active", text });
+  }
+  const status = db.getSession(id)?.status;
+  const sent = hub.sentToRunner.length;
+  const events = db.listEvents(id).length;
+  assert.ok((await svc.retitleSession(id)).ok);
+  assert.match(context, /Working on #123 and #124/);
+  assert.doesNotMatch(context, /secret-value/);
+  assert.equal(db.getSession(id)?.status, status);
+  assert.equal(hub.sentToRunner.length, sent);
+  assert.equal(db.listEvents(id).length, events);
+  assert.equal(db.getSession(id)?.titleSource, "user");
+});
+
+test("first-answer refinement cannot cancel an explicit rename and never repeats after that milestone", async () => {
+  const pending: Array<(title: string) => void> = [];
+  const { db, hub, svc } = makeHarness(() => new Promise((resolve) => pending.push(resolve)));
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Pick issues", final: true });
+  const explicit = svc.retitleSession(id);
+  svc.onSessionEvent(id, { kind: "agent_message", text: "Selected #123", final: true });
+  assert.equal(pending.length, 2);
+  pending[0]!("Stale Initial Name");
+  pending[1]!("Fix Issue #123");
+  assert.ok((await explicit).ok);
+  svc.onSessionEvent(id, { kind: "agent_message", text: "Completed #123", final: true });
+  assert.equal(pending.length, 2);
+  assert.equal(db.getSession(id)?.title, "Fix Issue #123");
+});
+
+test("a fresh explicit result cannot downgrade an existing concrete title", async () => {
+  const { db, hub, svc } = makeHarness(async () => "Choose Priority Issues");
+  const id = seedSession(svc, hub);
+  svc.setTitle(id, "Fix Issue #123");
+  svc.onSessionEvent(id, { kind: "user_message", text: "Issue work", final: true });
+  assert.deepEqual((await svc.retitleSession(id)).data, { title: "Fix Issue #123" });
+  assert.equal(db.getSession(id)?.titleSource, "user");
+});
+
+test("retitle reads current durable branch and PR targets and manual titles block automatic refinement", async () => {
+  let context = "";
+  let calls = 0;
+  const { db, hub, svc } = makeHarness(async ({ messages }) => {
+    calls += 1;
+    context = messages.map((message) => message.text).join("\n");
+    return "Fix Issue #123";
+  });
+  const id = seedSession(svc, hub);
+  svc.setTitle(id, "My Manual Title");
+  svc.onSessionEvent(id, { kind: "user_message", text: "Pick issues", final: true });
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, worktreePath: "/private/worktree", worktrees: [{
+    id: "work", path: "/private/worktree", branch: "fix/issue-123-parser", source: "created",
+    pullRequest: { url: "https://private.example/org/repo/pull/456?secret=private-value", state: "open" },
+  }] })]);
+  svc.onSessionEvent(id, { kind: "agent_message", text: "Selected issue #123", final: true });
+  assert.equal(calls, 0);
+  assert.equal(db.getSession(id)?.title, "My Manual Title");
+  assert.ok((await svc.retitleSession(id)).ok);
+  assert.match(context, /fix\/issue-123-parser/);
+  assert.match(context, /PR #456/);
+  assert.doesNotMatch(context, /private/);
+});
+
+test("first-answer refinement supersedes pending initial naming without allowing its stale result", async () => {
+  const pending: Array<(title: string) => void> = [];
+  const { db, hub, svc } = makeHarness(() => new Promise((resolve) => pending.push(resolve)));
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Choose issues", final: true });
+  svc.onSessionEvent(id, { kind: "agent_message", text: "Selected #123", final: true });
+  assert.equal(pending.length, 2);
+  pending[1]!("Fix Issue #123");
+  await new Promise((resolve) => setImmediate(resolve));
+  pending[0]!("Choose Priority Issues");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Fix Issue #123");
+});
+
+test("native streamed response completion refines once without a final aggregate message", async () => {
+  const contexts: string[] = [];
+  const { db, hub, svc } = makeHarness(async ({ messages }) => {
+    contexts.push(messages.map((message) => message.text).join("\n"));
+    return contexts.length === 1 ? "Choose Priority Issues" : "Fix Issues #123 and #124";
+  });
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Choose and fix priority issues", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const text of ["Selected ", "#123", " and ", "#124", ". Fixes pass.", ...Array<string>(300).fill(" More")]) {
+    svc.onSessionEvent(id, { kind: "agent_message", messageId: "native-stream", text });
+  }
+  svc.onSessionEvent(id, { kind: "agent_response_completed" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Fix Issues #123 and #124");
+  assert.match(contexts[1]!, /Selected #123 and #124\. Fixes pass\./);
+  assert.equal(db.hasCompletedAgentMessage(id), true, "completion is a durable consumed milestone");
+  svc.onSessionEvent(id, { kind: "agent_message", messageId: "next", text: "More work" });
+  svc.onSessionEvent(id, { kind: "agent_response_completed" });
+  svc.onSessionEvent(id, { kind: "agent_message", text: "Final fallback", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(contexts.length, 2);
+});
+
+test("initial semantic naming can replace an uninformative raw fallback with a triage title", async () => {
+  const { db, hub, svc } = makeHarness(async () => "Triage Inbox Bugs");
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Help me make sense of our backlog", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Triage Inbox Bugs");
+  assert.equal(db.hasSemanticSessionTitle(id), true);
+});
+
 test("a prompt-created fallback also schedules semantic naming on its first durable message", async () => {
   const requested: string[][] = [];
   const generator: SessionTitleGenerator = async ({ messages }) => {
