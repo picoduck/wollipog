@@ -67,7 +67,7 @@ function BarMenu({ align = "left", label, title, permissionMode = false, childre
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "composer-control-menu");
   return (
-    <div className={`cbar-menu ${align}`}>
+    <div className={`cbar-menu ${align}${permissionMode ? " permission-mode-menu" : ""}`}>
       <button
         ref={menu.triggerRef}
         type="button"

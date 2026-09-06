@@ -3405,6 +3405,20 @@ textarea {
 .cbar-pop.permission-mode-pop {
   width: min(390px, calc(100vw - 32px));
 }
+@media (max-width: 760px) {
+  /* Use the inset composer bar as the containing block: viewport width does not
+     account for the approvals trigger's offset or the session's safe-area padding. */
+  .composer-bar {
+    position: relative;
+  }
+  .cbar-menu.permission-mode-menu {
+    position: static;
+  }
+  .cbar-pop.permission-mode-pop {
+    width: min(390px, 100%);
+    min-width: 0;
+  }
+}
 .cbar-menu.right .cbar-pop {
   left: auto;
   right: 0;
