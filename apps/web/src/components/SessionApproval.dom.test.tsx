@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { clearQuestionDrafts } from "../question-response.js";
+import { claimQuestionResponseOperation, clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
 import { SessionQuestionBanner } from "./SessionApproval.js";
 
@@ -28,6 +28,139 @@ for (const [name, value] of Object.entries({
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
+
+function deferredAnswer() {
+  let resolve!: (session: SessionView) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<SessionView>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+for (const action of ["submit", "dismiss"] as const) {
+  for (const transition of ["clear", "replace", "remount", "return", "unchanged"] as const) {
+    for (const result of ["resolve", "reject"] as const) {
+      test(`delayed form ${action} ${result} respects ownership after ${transition}`, async () => {
+        const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+        domWindow.document.body.append(container as never);
+        const root = createRoot(container);
+        const answer = deferredAnswer();
+        const updates: SessionView[] = [];
+        const calls: Parameters<ApiClient["answerQuestion"]>[1][] = [];
+        const client = { ...api, answerQuestion: (_id, body) => { calls.push(body); return answer.promise; } } as ApiClient;
+        const returned = { id: "session-1" } as SessionView;
+        const render = (requestId: string | null) => root.render(<ApiProvider client={client}>
+          {requestId && <SessionQuestionBanner sessionId="session-1" requestId={requestId}
+            questions={[{ id: "note", question: `Question ${requestId}`, options: [], allowOther: true }]}
+            runnerOnline onSessionUpdate={(session) => updates.push(session)} />}
+        </ApiProvider>);
+        try {
+          setQuestionResponseStyle("interactive", domWindow as never);
+          await act(async () => render("question-old"));
+          await act(async () => setInputValue(container.querySelector("input")!, "Old Draft"));
+          await act(async () => container.querySelector<HTMLButtonElement>(`[data-session-request-control=${action}]`)!.click());
+          assert.equal(calls.length, 1);
+          assert.equal(calls[0]!.action, action);
+          assert.deepEqual(calls[0]!.answers, action === "submit" ? { note: "Old Draft" } : {});
+          if (transition === "clear" || transition === "remount") await act(async () => render(null));
+          if (transition === "replace" || transition === "return") await act(async () => render("question-new"));
+          if (transition === "remount" || transition === "return") await act(async () => render("question-old"));
+          const replaced = transition !== "clear" && transition !== "unchanged";
+          const replacement = container.querySelector<HTMLInputElement>("input");
+          if (replaced) {
+            await act(async () => setInputValue(replacement!, "Replacement Draft"));
+            replacement!.focus();
+          }
+          await act(async () => {
+            if (result === "resolve") answer.resolve(returned);
+            else answer.reject(new Error("Old answer rejected"));
+            await tick();
+          });
+          assert.deepEqual(updates, transition === "unchanged" && result === "resolve" ? [returned] : []);
+          assert.equal(container.querySelector('[role="alert"]')?.textContent ?? "",
+            transition === "unchanged" && result === "reject" ? "Could not answer the question: Old answer rejected" : "");
+          if (replaced) {
+            assert.equal(replacement!.value, "Replacement Draft");
+            assert.equal(domWindow.document.activeElement, replacement);
+            assert.equal(container.querySelector("section")!.getAttribute("aria-busy"), "false");
+            assert.deepEqual(storedQuestionDrafts("session-1", transition === "replace" ? "question-new" : "question-old"),
+              { note: { kind: "other", value: "Replacement Draft" } });
+          }
+          const release = claimQuestionResponseOperation("session-1", "question-old");
+          assert.ok(release, "every settled response releases its own lease even when retired");
+          release();
+        } finally {
+          answer.resolve(returned);
+          await act(async () => root.unmount());
+          container.remove();
+        }
+      });
+    }
+  }
+}
+
+for (const action of ["submit", "dismiss"] as const) {
+  test(`retired form ${action} cleanup preserves a replacement operation and newer same-key lease`, async () => {
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    const old = deferredAnswer();
+    const current = deferredAnswer();
+    let calls = 0;
+    const client = { ...api, answerQuestion: () => (++calls === 1 ? old.promise : current.promise) } as ApiClient;
+    let newerLease: (() => void) | null = null;
+    try {
+      const questions = [{ id: "note", question: "Optional note", options: [], allowOther: true, required: false }];
+      await renderBanner(root, questions, true, client, "question-old");
+      await act(async () => container.querySelector<HTMLButtonElement>(`[data-session-request-control=${action}]`)!.click());
+      await renderBanner(root, questions, true, client, "question-new");
+      await act(async () => container.querySelector<HTMLButtonElement>(`[data-session-request-control=${action}]`)!.click());
+      assert.equal(calls, 2, "a replacement request can start while its predecessor is pending");
+      newerLease = claimQuestionResponseOperation("session-1", "question-old", Date.now() + 60_001);
+      assert.ok(newerLease, "expired old lease can be replaced independently");
+      await act(async () => { old.resolve({} as SessionView); await tick(); });
+      assert.equal(container.querySelector("section")!.getAttribute("aria-busy"), "true");
+      assert.equal(claimQuestionResponseOperation("session-1", "question-old"), null,
+        "old finally must not release a newer lease for its key");
+      assert.equal(claimQuestionResponseOperation("session-1", "question-new"), null,
+        "old finally must not release the replacement request lease");
+      await act(async () => { current.reject(new Error("Current failure")); await tick(); });
+      assert.match(container.querySelector('[role="alert"]')!.textContent!, /Current failure/);
+      assert.equal(container.querySelector("section")!.getAttribute("aria-busy"), "false");
+    } finally {
+      old.resolve({} as SessionView);
+      current.resolve({} as SessionView);
+      newerLease?.();
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+}
+
+test("retired form validation cannot focus the replacement question", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const originalRaf = domWindow.requestAnimationFrame;
+  let focusCallback: FrameRequestCallback | undefined;
+  domWindow.requestAnimationFrame = ((callback: FrameRequestCallback) => { focusCallback = callback; return 1; }) as unknown as typeof originalRaf;
+  try {
+    const questions = [{ id: "note", question: "Required note", options: [], allowOther: true }];
+    await renderBanner(root, questions, true, api, "question-old");
+    await act(async () => container.querySelector("section")!.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "Enter", ctrlKey: true, bubbles: true,
+    }) as never));
+    assert.ok(focusCallback);
+    await renderBanner(root, questions, true, api, "question-new");
+    const dismiss = container.querySelector<HTMLButtonElement>('[data-session-request-control="dismiss"]')!;
+    dismiss.focus();
+    focusCallback(0);
+    assert.equal(domWindow.document.activeElement, dismiss);
+  } finally {
+    domWindow.requestAnimationFrame = originalRaf;
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
 
 afterEach(() => {
   for (const requestId of ["question-1", "question-old", "question-new", "question-virtualized"]) {

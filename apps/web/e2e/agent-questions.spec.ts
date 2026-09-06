@@ -1,5 +1,40 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+for (const action of ["submit", "dismiss"] as const) {
+  for (const result of ["resolve", "reject"] as const) {
+    for (const transition of ["replace", "clear and remount"] as const) {
+      test(`late Interactive Form ${action} ${result} cannot disturb a question after ${transition}`, async ({ page }) => {
+        await page.setViewportSize(transition === "replace" ? { width: 1280, height: 800 } : { width: 390, height: 844 });
+        await page.goto(`/agent-questions-e2e.html?hold=1${result === "reject" ? "&failure=1" : ""}`);
+        if (action === "submit") await page.getByRole("radio", { name: /TypeScript/ }).click();
+        await page.getByRole("button", { name: action === "submit" ? "Submit" : "Dismiss", exact: true }).click();
+        const form = page.getByRole("region", { name: "Agent Questions" });
+        await expect(form).toHaveAttribute("aria-busy", "true");
+        if (transition === "clear and remount") {
+          await page.evaluate(() => window.clearAgentQuestion());
+          await expect(form).toHaveCount(0);
+        }
+        await page.evaluate(() => window.replaceAgentQuestion());
+        const fresh = page.getByRole("radio", { name: /Another Fresh Answer/ });
+        await fresh.click();
+        await expect(fresh).toBeFocused();
+        await page.evaluate(() => window.releaseAgentQuestion());
+        await expect(fresh).toBeChecked();
+        await expect(fresh).toBeFocused();
+        await expect(form).toHaveAttribute("aria-busy", "false");
+        await expect(page.getByRole("alert")).toHaveCount(0);
+        await page.getByRole("button", { name: "Submit", exact: true }).click();
+        if (result === "resolve") await expect(page.getByRole("status")).toHaveText("Question Answered");
+        else await expect(page.getByRole("alert")).toContainText("The runner rejected this answer");
+        expect(await page.evaluate(() => window.agentQuestionCalls.map(({ requestId, action, answers }) => ({ requestId, action, answers })))).toEqual([
+          { requestId: "ask-1", action, answers: action === "submit" ? { language: "TypeScript" } : {} },
+          { requestId: "ask-2", action: "submit", answers: { replacement: "Another Fresh Answer" } },
+        ]);
+      });
+    }
+  }
+}
+
 const geometry = (locator: Locator) => locator.evaluate((element) => {
   const rect = element.getBoundingClientRect();
   return {

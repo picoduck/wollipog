@@ -441,7 +441,14 @@ export function SessionQuestionBanner({
   }));
   const [validationAttempted, setValidationAttempted] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const operationPendingRef = useRef(false);
+  const operationPendingRef = useRef<object | null>(null);
+  const liveRequestRef = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    // Retire callbacks at commit, including when the same request is later remounted.
+    liveRequestRef.current = {};
+    operationPendingRef.current = null;
+    return () => { liveRequestRef.current = null; };
+  }, [requestId, sessionId]);
   const questionBlockRefs = useRef(new Map<string, HTMLDivElement | null>());
   const previousDraftRequestRef = useRef({ sessionId, requestId });
   // React's opaque useId contains colons. They are valid in HTML ids but break the selector-based
@@ -512,8 +519,10 @@ export function SessionQuestionBanner({
     if (operationPendingRef.current || busy !== null || !runnerOnline || unsupportedQuestionFormat || recoveryRequiresDismiss) return;
     if (Object.keys(resolved.errors).length > 0) {
       setValidationAttempted(true);
+      const validatingRequest = liveRequestRef.current;
       const firstInvalid = questions.find((question) => Object.hasOwn(resolved.errors, question.id));
       window.requestAnimationFrame(() => {
+        if (liveRequestRef.current !== validatingRequest) return;
         questionBlockRefs.current.get(firstInvalid?.id ?? "")
           ?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled):not([aria-disabled=true])")
           ?.focus();
@@ -525,19 +534,22 @@ export function SessionQuestionBanner({
       setError("Another response is already being submitted for this question.");
       return;
     }
-    operationPendingRef.current = true;
+    const submittedRequest = liveRequestRef.current;
+    const operation = {};
+    operationPendingRef.current = operation;
     setBusy("submit");
     setError(null);
     try {
       const updated = await api.answerQuestion(sessionId, { requestId, answers: resolved.answers, action: "submit" });
+      if (liveRequestRef.current !== submittedRequest) return;
       clearQuestionDrafts(sessionId, requestId);
       onSessionUpdate?.(updated);
     } catch (cause) {
-      setError((cause as Error).message);
+      if (liveRequestRef.current === submittedRequest) setError((cause as Error).message);
     } finally {
       releaseOperation();
-      operationPendingRef.current = false;
-      setBusy(null);
+      if (operationPendingRef.current === operation) operationPendingRef.current = null;
+      if (liveRequestRef.current === submittedRequest) setBusy(null);
     }
   };
 
@@ -548,19 +560,22 @@ export function SessionQuestionBanner({
       setError("Another response is already being submitted for this question.");
       return;
     }
-    operationPendingRef.current = true;
+    const submittedRequest = liveRequestRef.current;
+    const operation = {};
+    operationPendingRef.current = operation;
     setBusy("dismiss");
     setError(null);
     try {
       const updated = await api.answerQuestion(sessionId, { requestId, answers: {}, action: "dismiss" });
+      if (liveRequestRef.current !== submittedRequest) return;
       clearQuestionDrafts(sessionId, requestId);
       onSessionUpdate?.(updated);
     } catch (cause) {
-      setError((cause as Error).message);
+      if (liveRequestRef.current === submittedRequest) setError((cause as Error).message);
     } finally {
       releaseOperation();
-      operationPendingRef.current = false;
-      setBusy(null);
+      if (operationPendingRef.current === operation) operationPendingRef.current = null;
+      if (liveRequestRef.current === submittedRequest) setBusy(null);
     }
   };
 
