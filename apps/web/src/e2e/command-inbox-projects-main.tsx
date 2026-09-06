@@ -1729,7 +1729,8 @@ function FixtureSurface() {
     );
   }
   if (view.name === "session" && SCENARIO !== "conversation-steering" &&
-      SCENARIO !== "preview-follow" && SCENARIO !== "preview-opening-fill") {
+      SCENARIO !== "preview-follow" && SCENARIO !== "preview-opening-fill" &&
+      SCENARIO !== "permission-mode-layout") {
     return (
       <>
         {mobileSessionShell}
@@ -1791,7 +1792,15 @@ createRoot(root).render(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            <FixtureSurface />
+            {SCENARIO === "permission-mode-layout" ? (
+              <div className="app">
+                <main className="main">
+                  <div className="main-body inbox-main-body">
+                    <FixtureSurface />
+                  </div>
+                </main>
+              </div>
+            ) : <FixtureSurface />}
           </StoreProvider>
         </FeedbackProvider>
       </ApiProvider>
