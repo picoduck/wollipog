@@ -54,7 +54,7 @@ export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
       const zone = active instanceof Element ? focusZoneForElement(active) : null;
       if (zone !== null && zone !== "list" && zone !== "detail") return;
       if (active instanceof HTMLElement &&
-          active.matches('button, a[href], input, textarea, select, [role="button"], [role="radio"], [role="checkbox"]') &&
+          active.matches('button, summary, a[href], input, textarea, select, [role="button"], [role="radio"], [role="checkbox"]') &&
           !active.matches(".inbox-list")) return;
       for (const [shortcutId, action] of BINDINGS) {
         if (!matchesShortcut(event, shortcutId)) continue;

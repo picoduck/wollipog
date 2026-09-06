@@ -536,7 +536,7 @@ export function InboxView({
     const frame = window.requestAnimationFrame(() => {
       previousSurfaceRef.current = { expanded, sessionId: surfaceSessionId };
       if (expanded) {
-        if (focusComposerSessionId !== surfaceSessionId) {
+        if (focusComposerSessionId !== surfaceSessionId && !attentionTarget) {
           viewRef.current?.querySelector<HTMLElement>(".detail-scroll")?.focus();
         }
       } else if (shouldRestoreInboxScroll(previous, expanded)) {
@@ -547,7 +547,7 @@ export function InboxView({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [expanded, focusComposerSessionId, instanceScope, surfaceSessionId]);
+  }, [expanded, focusComposerSessionId, instanceScope, surfaceSessionId, attentionTarget]);
 
   const scheduleOrderRelease = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
@@ -728,6 +728,11 @@ export function InboxView({
     selectSession(sessionId, activeSplit?.key ?? null);
     listRef.current?.focus();
   }, [isMobile, expand, selectSession, activeSplit?.key]);
+
+  const handleSelectAttention = useCallback((sessionId: string) => {
+    // Preserve focus on the picker; unlike selecting a mobile row, this must not expand it.
+    selectSession(sessionId, activeSplit?.key ?? null);
+  }, [activeSplit?.key, selectSession]);
 
   const togglePin = useCallback((sessionId: string) => {
     clearHeldOrder();
@@ -1152,6 +1157,7 @@ export function InboxView({
         ) : (
         <InboxList
           onNavigate={navigate}
+          onSelectAttention={handleSelectAttention}
           ref={captureListRef}
           entries={entries}
           selectedSessionId={displayedSelection}

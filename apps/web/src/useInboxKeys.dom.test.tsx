@@ -25,6 +25,7 @@ function Harness({ actions }: { actions: InboxKeyActions }) {
     <div>
       <div className="inbox-list" data-focus-zone="list" role="grid" tabIndex={0}>List</div>
       <textarea aria-label="Composer" />
+      <details><summary>Requests</summary><button type="button">Open Request</button></details>
       <div className="xterm"><textarea aria-label="Terminal" /></div>
       <div data-focus-zone="detail"><button type="button" aria-label="Allow Once">Allow Once</button></div>
     </div>
@@ -78,6 +79,13 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   }
   assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"],
     "typing contexts and native controls own their keys before the Inbox layer");
+
+  container.querySelector<HTMLElement>("summary")!.focus();
+  for (const key of ["Enter", " ", "Tab", "a", "d", "j"]) {
+    domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }));
+  }
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"],
+    "request disclosure summaries own their keys without running any row actions");
 
   previewAvailable = false;
   list.focus();

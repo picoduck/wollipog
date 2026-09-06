@@ -234,7 +234,7 @@ function xtermOwnsKey(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest(".xterm"));
 }
 
-function Shell() {
+export function Shell() {
   const instances = useInstances();
   const reportActiveStatus = instances.reportActiveStatus;
   const activeInstanceKind = instances.activeProfile.kind;

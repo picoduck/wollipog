@@ -39,6 +39,7 @@ export interface InboxRowProps {
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
   onNavigate?: (view: View) => void;
+  onSelectAttention?: (sessionId: string) => void;
   /** Right-click, long-press, or keyboard context menu for this row's session (#154). */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
 }
@@ -58,6 +59,7 @@ function InboxRowInner({
   onSelect,
   onExpand,
   onNavigate,
+  onSelectAttention,
   onSessionMenu,
 }: InboxRowProps) {
   const longPress = useLongPress(({ x, y }) => onSessionMenu(session.id, { x, y }));
@@ -195,7 +197,8 @@ function InboxRowInner({
             </time>
           </span>
         </button>
-        <AttentionRequests session={session} onNavigate={onNavigate} />
+        <AttentionRequests session={session} onNavigate={onNavigate} keyboardActive={selected}
+          onActivate={() => onSelectAttention?.(session.id)} />
       </div>
     </div>
   );

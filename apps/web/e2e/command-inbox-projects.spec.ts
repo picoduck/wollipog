@@ -142,8 +142,15 @@ for (const viewport of [
       });
     });
     await settlePreviewLayout(page);
-    expect((await inboxViewportAnchor(page)).scrollTop).toBe(0);
-    expect(await list.locator(".inbox-row-title").allTextContents()).toEqual(initialTitles);
+    const afterTop = await inboxViewportAnchor(page);
+    expect(afterTop.scrollTop).toBe(0);
+    expect(afterTop.key).toBe(atTop.key);
+    expect(Math.abs((afterTop.offset ?? 0) - (atTop.offset ?? 0))).toBeLessThan(2);
+    // Adding a request disclosure grows the row and legitimately shrinks the overscan set.
+    // Pin the anchor and ordering, not the number of mounted offscreen rows.
+    const afterTitles = await list.locator(".inbox-row-title").allTextContents();
+    expect(afterTitles.length).toBeGreaterThan(1);
+    expect(afterTitles).toEqual(initialTitles.slice(0, afterTitles.length));
 
     await list.evaluate((element) => {
       element.scrollTop = Math.round((element.scrollHeight - element.clientHeight) * 0.55);

@@ -1036,10 +1036,10 @@ function SessionDetailLoaded({
   }, [retitleFeedback, sessionId]);
 
   useLayoutEffect(() => {
-    if (mode !== "expanded" || focusComposerRequestedRef.current) return;
+    if (mode !== "expanded" || focusComposerRequestedRef.current || attentionTarget) return;
     const frame = window.requestAnimationFrame(() => scrollRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
-  }, [mode, sessionId]);
+  }, [mode, sessionId, attentionTarget]);
 
   useEffect(() => {
     if (!focusComposer) return;

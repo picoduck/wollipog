@@ -19,5 +19,7 @@ test("request picker counts normalized requests and bounds high-cardinality rend
   assert.equal((html.match(/<button/g) ?? []).length, 11, "ten exact targets and one bounded full-list entry");
   assert.doesNotMatch(html, /Private Provider Title|private-owner-id/);
   assert.match(html, /View All Requests/);
+  const inactive = renderToStaticMarkup(<AttentionRequests session={session} keyboardActive={false} onNavigate={() => {}} />);
+  assert.equal((inactive.match(/tabindex="-1"/g) ?? []).length, 12, "inactive rows add no sequential tab stops");
   assert.equal(renderToStaticMarkup(<AttentionRequests session={{ ...session, pendingApproval: null }} onNavigate={() => {}} />), "");
 });

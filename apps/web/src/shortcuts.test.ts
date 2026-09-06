@@ -164,7 +164,7 @@ test("sequence matching completes inside 600ms and cancels on mismatch, timeout,
 
 test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
   const expected = [
-    "inbox-next", "inbox-previous", "inbox-expand", "inbox-fork", "inbox-next-split", "inbox-previous-split",
+    "inbox-next", "inbox-previous", "inbox-expand", "inbox-focus-requests", "inbox-fork", "inbox-next-split", "inbox-previous-split",
     "inbox-approve", "inbox-deny", "inbox-archive", "inbox-snooze", "inbox-pin", "inbox-unread",
     "inbox-reply", "inbox-page-down", "inbox-page-up", "inbox-follow-latest", "inbox-follow-latest-end",
   ];

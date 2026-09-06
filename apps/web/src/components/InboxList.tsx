@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useRef, type MutableRefObject } from "react";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { encodeResourceId } from "../navigation.js";
+import { matchesShortcut } from "../shortcuts.js";
 import { useStoreSelector } from "../store.js";
 import { InboxRow, type InboxRowProps } from "./InboxRow.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
@@ -64,6 +65,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
   onNavigate?: (view: import("../navigation.js").View) => void;
+  onSelectAttention?: (sessionId: string) => void;
   onScrollPosition: (scrollTop: number) => void;
   onPointerTargetChange?: (pointerId: number, targeting: boolean, pointerType: string) => void;
   onPointerPressChange?: (pointerId: number, active: boolean, pointerType: string) => void;
@@ -85,6 +87,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onSelect,
   onExpand,
   onNavigate,
+  onSelectAttention,
   onScrollPosition,
   onPointerTargetChange,
   onPointerPressChange,
@@ -147,6 +150,12 @@ export const InboxList = forwardRef<HTMLDivElement, {
       onPointerUp={(event) => onPointerPressChange?.(event.pointerId, false, event.pointerType)}
       onPointerCancel={(event) => onPointerPressChange?.(event.pointerId, false, event.pointerType)}
       onKeyDown={(event) => {
+        if (matchesShortcut(event, "inbox-focus-requests") && event.target === event.currentTarget && selectedSessionId !== null) {
+          const picker = document.getElementById(`inbox-session-${encodeResourceId(selectedSessionId)}`)
+            ?.querySelector<HTMLElement>(".attention-requests > summary");
+          if (picker) { event.preventDefault(); picker.focus(); }
+          return;
+        }
         // The platform context-menu interaction for the focused grid: the menu opens on the
         // ACTIVE row, anchored inside its box, and never navigates into the session.
         if (event.key !== "ContextMenu" && !(event.key === "F10" && event.shiftKey)) return;
@@ -166,8 +175,8 @@ export const InboxList = forwardRef<HTMLDivElement, {
       <MeasuredVirtualList
         items={entries}
         getKey={(entry) => entry.session.id}
-        // The list owns focus and points at its row through `aria-activedescendant`, so NO ROW ever
-        // has DOM focus and the extractor's focused-row pin never fires. Without this the selected
+        // The list owns selection through aria-activedescendant; the selected row's request
+        // picker can also own DOM focus. Without this explicit selection pin the selected
         // row is unmounted as soon as it scrolls out, and the id in aria-activedescendant refers to
         // an element that does not exist — which is what keyboard navigation moves between.
         pinnedKey={selectedSessionId}
@@ -194,6 +203,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
             onSelect,
             onExpand,
             onNavigate,
+            onSelectAttention,
             onSessionMenu,
           } satisfies Omit<InboxRowProps, "activity" | "activityNow">;
           return activityBySession && activityNow !== undefined
