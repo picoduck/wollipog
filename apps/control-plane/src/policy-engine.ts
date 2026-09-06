@@ -163,7 +163,7 @@ export function evaluateApprovalPolicies(
   policies: GovernancePolicy[],
 ): ApprovalPolicyDecision {
   const matched = policies
-    .filter((policy) => policy.enabled && policyMatches(policy, input))
+    .filter((policy) => !policy.questionRule && policy.enabled && policyMatches(policy, input))
     .sort((a, b) => b.priority - a.priority || EFFECT_ORDER[b.effect] - EFFECT_ORDER[a.effect] || a.policyId.localeCompare(b.policyId));
   return {
     effect: matched[0]?.effect ?? "ask",
@@ -285,6 +285,8 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
     "scope",
     "conditions",
     "askTimeout",
+    "ownerUserId",
+    "questionRule",
   ]);
   if (Object.keys(policy).some((key) => !topKeys.has(key))) return "policy contains unsupported fields";
   if (typeof policy.policyId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(policy.policyId) || policy.policyId.startsWith("builtin:")) {
@@ -307,11 +309,11 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
   const scopeKeys = new Set(["organizationId", "runnerId", "workspaceId", "agentId", "toolName", "path", "network", "branch"]);
   if (Object.keys(policy.scope).some((key) => !scopeKeys.has(key))) return "scope contains unsupported fields";
   const scopeValues = Object.values(policy.scope);
-  if (!scopeValues.length || scopeValues.some((value) => typeof value !== "string" || !value || value.length > 1024)) {
+  if ((!scopeValues.length && !policy.questionRule) || scopeValues.some((value) => typeof value !== "string" || !value || value.length > 1024)) {
     return "scope must contain at least one non-empty bounded selector";
   }
   const narrowingScope = [policy.scope.runnerId, policy.scope.workspaceId, policy.scope.agentId, policy.scope.toolName, policy.scope.path, policy.scope.network, policy.scope.branch];
-  if (policy.effect === "allow" && narrowingScope.every((value) => value === undefined)) {
+  if (!policy.questionRule && policy.effect === "allow" && narrowingScope.every((value) => value === undefined)) {
     return "allow policies require a selector narrower than organization";
   }
   if (policy.scope.path) {
@@ -327,6 +329,23 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
       return "network selectors must be host patterns or credential-free URL patterns";
     }
   }
+  if (policy.questionRule !== undefined) {
+    const rule = policy.questionRule;
+    if (!rule || typeof rule !== "object" || Array.isArray(rule) ||
+        Object.keys(rule).some((key) => !["headerPattern", "questionPattern", "answer", "starterCategory"].includes(key))) return "invalid questionRule";
+    if (rule.starterCategory !== undefined && !["review", "push", "evidence"].includes(rule.starterCategory)) return "invalid starter category";
+    if (policy.effect !== "allow" || policy.askTimeout !== undefined || policy.conditions !== undefined) return "question rules require allow without conditions or askTimeout";
+    if (typeof policy.ownerUserId !== "string" || !policy.ownerUserId || policy.ownerUserId.length > 128) return "question rules require ownerUserId";
+    if (!rule.headerPattern && !rule.questionPattern) return "question rules require an explicit header or question pattern";
+    for (const pattern of [rule.headerPattern, rule.questionPattern]) {
+      if (pattern !== undefined && (typeof pattern !== "string" || !pattern.trim().replaceAll("*", "") || pattern.length > 512 || pattern.split("*").length > 9)) return "question patterns must contain literal text and at most eight wildcards";
+    }
+    if (Object.keys(policy.scope).some((key) => !["organizationId", "runnerId", "workspaceId", "agentId"].includes(key))) return "unsupported question scope";
+    const answer = rule.answer;
+    if (!answer || typeof answer !== "object" || Array.isArray(answer) || Object.keys(answer).length !== 1 ||
+        !Object.keys(answer).every((key) => ["option", "text"].includes(key)) ||
+        !Object.values(answer).every((value) => typeof value === "string" && value.length > 0 && value.length <= 4096)) return "question answer must configure one option or text";
+  } else if (policy.ownerUserId !== undefined) return "ownerUserId requires a question rule";
   const c = policy.conditions;
   if (!c) return null;
   if (typeof c !== "object" || Array.isArray(c)) return "conditions must be an object";

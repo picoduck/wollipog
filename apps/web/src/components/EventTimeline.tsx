@@ -1879,7 +1879,7 @@ const TimelineRow = memo(function TimelineRow({
               </span>
               {item.answered !== undefined ? (
                 <span className="perm-resolved">
-                  {item.resolutionReason === "replaced"
+                  {item.answeredByPolicies?.length ? `→ Answered by Policy: ${item.answeredByPolicies.join(", ")}` : item.resolutionReason === "replaced"
                     ? "→ Replaced"
                     : item.resolutionReason === "provider_resolved"
                       ? "→ Resolved by Provider"

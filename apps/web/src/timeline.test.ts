@@ -15,6 +15,16 @@ import {
 } from "./timeline.js";
 
 let seq = 0;
+test("policy attribution stays visible through the runner question resolution", () => {
+  const timeline = deriveTimeline([
+    ev({ kind: "question_request", requestId: "ask", questions: [{ id: "q", question: "Review?", options: [] }] }),
+    ev({ kind: "question_policy_answered", requestId: "ask", policies: [{ policyId: "routine", name: "Routine Review" }] }),
+    ev({ kind: "question_resolved", requestId: "ask", answered: true }),
+  ]);
+  const question = timeline.find((item) => item.kind === "question");
+  assert.equal(question?.answered, true);
+  assert.deepEqual(question?.answeredByPolicies, ["Routine Review"]);
+});
 function ev(payload: SessionEventPayload): SessionEvent {
   seq += 1;
   return { id: seq, sessionId: "s", seq, ts: seq, payload };

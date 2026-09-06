@@ -11,6 +11,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import { canMutateQuestionPolicy } from "./question-policy.js";
 import {
   archiveSessionPage,
   parseArchiveSessionPageQuery,
@@ -3312,18 +3313,29 @@ app.get("/api/sessions/:id/governance-audit", async (req, reply) => {
   return { entries: svc.governanceAudit(id, limit) };
 });
 
-app.get("/api/governance/policies", async () => ({ policies: svc.governancePolicies() }));
+app.get("/api/governance/policies", async (req) => ({
+  policies: svc.governancePolicies().filter((policy) => !policy.questionRule || policy.ownerUserId === requestHuman(req)?.userId),
+}));
 
 app.put("/api/governance/policies/:policyId", async (req, reply) => {
   const policyId = (req.params as { policyId: string }).policyId;
   const body = req.body as Omit<GovernancePolicy, "createdAt" | "updatedAt">;
   if (body?.policyId !== policyId) return reply.code(400).send({ error: "path and body policyId must match" });
+  const existing = svc.governancePolicies().find((policy) => policy.policyId === policyId);
+  if (!canMutateQuestionPolicy(existing, body, requestHuman(req)?.userId)) {
+    return reply.code(403).send({ error: "Only the policy owner may change a question policy" });
+  }
   return respond(reply, svc.upsertGovernancePolicy(body));
 });
 
-app.delete("/api/governance/policies/:policyId", async (req, reply) =>
-  respond(reply, svc.deleteGovernancePolicy((req.params as { policyId: string }).policyId)),
-);
+app.delete("/api/governance/policies/:policyId", async (req, reply) => {
+  const id = (req.params as { policyId: string }).policyId;
+  const existing = svc.governancePolicies().find((policy) => policy.policyId === id);
+  if (!canMutateQuestionPolicy(existing, undefined, requestHuman(req)?.userId)) {
+    return reply.code(403).send({ error: "Only the policy owner may delete a question policy" });
+  }
+  return respond(reply, svc.deleteGovernancePolicy(id));
+});
 
 app.get("/api/governance/approval-queue", async () => ({ items: svc.approvalQueue() }));
 

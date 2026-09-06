@@ -175,6 +175,7 @@ export type TimelineItem =
       questions: AgentQuestion[];
       /** undefined = still pending; true = answered; false = dismissed. */
       answered?: boolean;
+      answeredByPolicies?: string[];
       resolutionReason?: StructuredRequestResolutionReason;
     }
   | { kind: "checkpoint"; id: number; turn: number }
@@ -972,6 +973,15 @@ export class TimelineBuilder {
           this.items.push({ kind: "question", id: ev.seq, requestId: p.requestId, questions: p.questions }) - 1;
         this.permIndex.set(p.requestId, i);
         this.markDirty(i);
+        break;
+      }
+      case "question_policy_answered": {
+        const idx = this.permIndex.get(p.requestId);
+        if (idx != null && this.items[idx]!.kind === "question") {
+          const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
+          this.items[idx] = { ...it, answered: true, answeredByPolicies: p.policies.map((policy) => policy.name) };
+          this.markDirty(idx);
+        }
         break;
       }
       case "question_resolved": {

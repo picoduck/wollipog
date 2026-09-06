@@ -14,6 +14,9 @@ type VisibleAuditOutcome = {
 };
 
 export function governanceAuditPresentation(entry: GovernanceAuditEntry): VisibleOutcome | null {
+  if (entry.approvalKind === "question" && entry.actor.kind === "policy" && entry.outcome === "answered") {
+    return { label: "Answered by Policy", detail: `Question answered by policy ${entry.governancePolicyId ?? entry.actor.id}.`, tone: "policy" };
+  }
   if (entry.approvalKind !== "policy_hook") return null;
   if (entry.stage === "policy_decision" && entry.outcome === "denied") {
     return { label: "Blocked by Policy", detail: "The matched policy denied this tool.", tone: "policy" };

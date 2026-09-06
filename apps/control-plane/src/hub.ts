@@ -941,8 +941,9 @@ export class Hub {
     }
   }
 
-  sessionEvent(event: SessionEvent): void {
+  sessionEvent(event: SessionEvent, options?: { suppressReminderWake?: boolean }): void {
     this.broadcast({ type: "session_event", event });
+    if (options?.suppressReminderWake) return;
     const reason = reminderWakeReasonForEvent(event.payload);
     if (!reason) return;
     for (const item of this.db.fireSessionRemindersForActivity(event.sessionId, event.seq, reason, event.ts)) {

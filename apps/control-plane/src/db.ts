@@ -930,6 +930,14 @@ CREATE TABLE IF NOT EXISTS governance_policies (
 );
 CREATE INDEX IF NOT EXISTS idx_governance_policies_precedence
   ON governance_policies(enabled, priority DESC, policy_id);
+CREATE TABLE IF NOT EXISTS question_policy_answers (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  request_id TEXT NOT NULL,
+  question_digest TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(session_id, request_id, question_digest)
+);
 -- Reconcile/hydrate/delete paths filter sessions by owner constantly; without this every
 -- runner reconnect pays O(sessions) scans per lookup.
 CREATE INDEX IF NOT EXISTS idx_sessions_runner ON sessions(runner_id);
@@ -3824,6 +3832,9 @@ export class ControlPlaneDb {
       db.exec("ALTER TABLE governance_policies ADD COLUMN ask_timeout INTEGER");
     } catch {
       /* column already present */
+    }
+    for (const column of ["owner_user_id TEXT", "question_rule TEXT"]) {
+      try { db.exec(`ALTER TABLE governance_policies ADD COLUMN ${column}`); } catch { /* already present */ }
     }
     for (const column of [
       "remote_provider TEXT",
@@ -11368,9 +11379,31 @@ export class ControlPlaneDb {
     };
   }
 
+  recordQuestionPolicyAnswer(
+    sessionId: string,
+    questions: Extract<SessionEventPayload, { kind: "question_request" }>["questions"],
+    payload: Extract<SessionEventPayload, { kind: "question_policy_answered" }>,
+    timestamp: number,
+  ): void {
+    this.stmt(`INSERT OR REPLACE INTO question_policy_answers
+      (session_id, request_id, question_digest, payload, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(sessionId, payload.requestId, createHash("sha256").update(JSON.stringify(questions)).digest("hex"), JSON.stringify(payload), timestamp);
+  }
+
+  questionPolicyAnswer(
+    sessionId: string, requestId: string,
+    questions: Extract<SessionEventPayload, { kind: "question_request" }>["questions"],
+  ): { payload: Extract<SessionEventPayload, { kind: "question_policy_answered" }>; timestamp: number } | null {
+    const row = this.stmt(`SELECT payload, created_at FROM question_policy_answers
+      WHERE session_id=? AND request_id=? AND question_digest=?`).get(
+        sessionId, requestId, createHash("sha256").update(JSON.stringify(questions)).digest("hex"),
+      ) as { payload: string; created_at: number } | undefined;
+    return row ? { payload: JSON.parse(row.payload), timestamp: row.created_at } : null;
+  }
+
   listGovernancePolicies(): GovernancePolicy[] {
     const rows = this.stmt(
-      `SELECT policy_id, name, effect, priority, enabled, scope, conditions, ask_timeout,
+      `SELECT policy_id, name, effect, priority, enabled, scope, conditions, ask_timeout, owner_user_id, question_rule,
               created_at, updated_at
        FROM governance_policies ORDER BY priority DESC, policy_id`,
     ).all() as unknown as Array<{
@@ -11382,6 +11415,8 @@ export class ControlPlaneDb {
       scope: string;
       conditions: string | null;
       ask_timeout: number | null;
+      owner_user_id: string | null;
+      question_rule: string | null;
       created_at: number;
       updated_at: number;
     }>;
@@ -11394,6 +11429,8 @@ export class ControlPlaneDb {
       scope: JSON.parse(row.scope) as GovernancePolicy["scope"],
       ...(row.conditions ? { conditions: JSON.parse(row.conditions) as GovernancePolicy["conditions"] } : {}),
       ...(row.ask_timeout != null ? { askTimeout: row.ask_timeout } : {}),
+      ...(row.owner_user_id ? { ownerUserId: row.owner_user_id } : {}),
+      ...(row.question_rule ? { questionRule: JSON.parse(row.question_rule) as GovernancePolicy["questionRule"] } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
@@ -11405,12 +11442,13 @@ export class ControlPlaneDb {
   ): GovernancePolicy {
     this.stmt(
       `INSERT INTO governance_policies
-       (policy_id, name, effect, priority, enabled, scope, conditions, ask_timeout, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (policy_id, name, effect, priority, enabled, scope, conditions, ask_timeout, owner_user_id, question_rule, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(policy_id) DO UPDATE SET
          name=excluded.name, effect=excluded.effect, priority=excluded.priority,
          enabled=excluded.enabled, scope=excluded.scope, conditions=excluded.conditions,
          ask_timeout=excluded.ask_timeout,
+         owner_user_id=excluded.owner_user_id, question_rule=excluded.question_rule,
          updated_at=excluded.updated_at`,
     ).run(
       input.policyId,
@@ -11421,6 +11459,8 @@ export class ControlPlaneDb {
       JSON.stringify(input.scope),
       input.conditions ? JSON.stringify(input.conditions) : null,
       input.askTimeout ?? null,
+      input.ownerUserId ?? null,
+      input.questionRule ? JSON.stringify(input.questionRule) : null,
       now,
       now,
     );
