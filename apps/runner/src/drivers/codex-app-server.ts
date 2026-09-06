@@ -265,6 +265,8 @@ export class CodexAppServerDriver implements Driver {
    * not once per cumulative update notification. */
   private readonly pendingSubagentUsage = new Map<string, ReturnType<typeof flattenUsage>>();
   private promptGeneration = 0;
+  private serverIdentity = "unknown";
+  private completedTurnId: string | null = null;
   private promptBusy = false;
   /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
    * retry does not surface a false session error. */
@@ -382,7 +384,8 @@ export class CodexAppServerDriver implements Driver {
     });
 
     this.registerHandlers(peer);
-    await peer.request("initialize", { clientInfo: { name: "wollipog", version: "0.4.0" } });
+    const initialized = await peer.request<Json>("initialize", { clientInfo: { name: "wollipog", version: "0.4.0" } });
+    this.serverIdentity = diagnosticValue(initialized?.userAgent);
     peer.notify("initialized", {});
   }
 
@@ -475,6 +478,16 @@ export class CodexAppServerDriver implements Driver {
     return actualId;
   }
 
+  activeSteeringTurnId(): string | null {
+    return this.promptBusy && this.turnResolve ? this.turnId : null;
+  }
+
+  private setSteeringTurn(id: string | null): void {
+    if (this.turnId === id) return;
+    this.turnId = id;
+    this.cb.onSteeringTurnChanged?.();
+  }
+
   async prompt(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
     if (this.promptBusy) {
       this.cb.onEvent({ kind: "error", message: "codex app-server already has a turn in progress" });
@@ -512,14 +525,27 @@ export class CodexAppServerDriver implements Driver {
       this.turnStop = "end_turn";
       // The manager must never mistake the previous provider turn for this one if turn/start
       // fails or a skewed server omits turn/started.
-      this.turnId = null;
+      this.setSteeringTurn(null);
 
       const base = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
       const input: Json[] = base || !staged.inputs.length ? [{ type: "text", text: base }] : [];
       input.push(...staged.inputs);
       const params = buildCodexTurnParams(this.config, this.threadId, this.cwd, input);
 
-      this.peer!.request("turn/start", params).catch((e: Json) => {
+      this.peer!.request("turn/start", params).then((response: Json) => {
+        // Notifications may precede the response, including completion or a later turn.
+        if (generation !== this.promptGeneration || !this.turnResolve || !this.promptBusy) return;
+        const id = response?.turn?.id;
+        if (!this.turnId && typeof id === "string" && id && id !== this.completedTurnId &&
+            (response?.turn?.status == null || response.turn.status === "inProgress")) {
+          this.lastTurnId = id;
+          this.setSteeringTurn(id);
+        }
+        if (!this.turnId) {
+          this.cb.onStderr(`Codex steering unavailable: turn/start did not confirm an active turn (running server: ${this.serverIdentity}; installed CLI version may differ).`);
+        }
+      }).catch((e: Json) => {
+        if (generation !== this.promptGeneration || !this.turnResolve) return;
         this.emitDriverError(`turn/start failed: ${e?.message ?? String(e)}`);
         this.settleTurn("refusal");
       });
@@ -686,7 +712,8 @@ export class CodexAppServerDriver implements Driver {
     // Close active-turn admission synchronously. In particular, an image stager already awaited by
     // steer() must observe the generation/turn/busy fence before cleanup performs its first await.
     this.lastTurnId = this.turnId ?? this.lastTurnId;
-    this.turnId = null;
+    this.completedTurnId = this.turnId ?? this.completedTurnId;
+    this.setSteeringTurn(null);
     this.promptBusy = false;
     this.promptGeneration++;
     void this.cleanupStagedImages().finally(() => {
@@ -989,11 +1016,12 @@ export class CodexAppServerDriver implements Driver {
     });
     peer.onNotification("turn/started", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) return;
+      if (!this.promptBusy || !this.turnResolve || p?.turn?.id === this.completedTurnId) return;
       this.declinePendingRequests();
       const id = p?.turn?.id;
       if (typeof id === "string" && id) {
-        this.turnId = id;
         this.lastTurnId = id;
+        this.setSteeringTurn(id);
       }
       this.pendingTurnUsage = null;
       this.turnUsageClosed = false;
@@ -1031,6 +1059,9 @@ export class CodexAppServerDriver implements Driver {
         }
         return;
       }
+      if (p?.turn?.id && (p.turn.id === this.completedTurnId ||
+          (this.turnId && p.turn.id !== this.turnId))) return;
+      if (typeof p?.turn?.id === "string" && p.turn.id) this.completedTurnId = p.turn.id;
       this.declinePendingRequests();
       this.closeTurnUsage();
       const status = p?.turn?.status;

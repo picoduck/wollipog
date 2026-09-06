@@ -2911,6 +2911,30 @@ textarea {
 }
 .queued-steer,
 .queued-edit { flex: none; }
+.queued-steer-info { position: relative; }
+.queued-steer-info summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px;
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+}
+.queued-steer-info summary::-webkit-details-marker { display: none; }
+.queued-steer-info summary:focus-visible { outline: 2px solid var(--text); }
+.queued-steer-info[open] > span {
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  z-index: var(--z-popover);
+  width: min(260px, 65vw);
+  padding: 10px;
+  white-space: normal;
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
 .queued-edit {
   display: inline-flex;
   align-items: center;

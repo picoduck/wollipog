@@ -867,6 +867,12 @@ export class Hub {
     return this.queuedBySession.get(sessionId)?.activeTurnId;
   }
 
+  queuedPromptForSession(sessionId: string, promptId: string): QueuedPromptView | undefined {
+    const session = this.db.getSession(sessionId);
+    if (!session || !this.isRunnerOnline(session.runnerId)) return undefined;
+    return this.queuedBySession.get(sessionId)?.queue.find((prompt) => prompt.id === promptId);
+  }
+
   /** Forget queued state for a runner's sessions — its in-memory queues die with the connection, so
    * a fresh register (or a disconnect) must not leave a stale queue showing. Rebroadcasts each
    * affected session: dashboards hold the old queued list in their store, and a session that gets
