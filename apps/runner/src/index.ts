@@ -153,6 +153,7 @@ import {
   storedSkillVersionAvailable,
   type ReconcileSkillEntry,
 } from "./skills.js";
+import { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { ChunkedSkillsSyncAssembler, type ChunkedSyncStep } from "./skills-sync.js";
 import { VERSION } from "./version.js";
 import { overlayAcpAuthStatus, type AcpAuthRuntime } from "./acp-auth-status.js";
@@ -818,6 +819,7 @@ function startTrackedSession(
  * arrives on this process; removal sweeps and store GC never run before then, so a fresh runner
  * cannot tear down links deployed by its previous incarnation on a scan-only pass. */
 let lastDesiredSkills: ReconcileSkillEntry[] | null = null;
+const machineSkillSnapshots = new MachineSkillSnapshots({ home: homedir(), agents: () => metadata.agents });
 const chunkedSkillsSync = new ChunkedSkillsSyncAssembler({
   runnerId: config.runnerId,
   needsContent: (entry) =>
@@ -1667,6 +1669,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       lastDesiredSkills = msg.skills;
       queueSkillsReconcile(msg.requestId);
+      break;
+    case "skill_snapshot":
+      if (msg.runnerId === config.runnerId) sendUp(machineSkillSnapshots.handle(msg));
       break;
     case "skills_sync_manifest":
       beginChunkedSkillsSync(msg);

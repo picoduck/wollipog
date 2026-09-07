@@ -1,6 +1,37 @@
 # Agent Skills Management and Deployment
 
-Status: managed deployment and Git snapshot import implemented; remaining design below is phased.
+Status: managed deployment, Git import, and Linux machine snapshot import implemented; remaining design below is phased.
+
+## Implemented machine snapshot import
+
+**Import from Machine** discovers real skill directories in `.agents/skills` and configured native
+Claude/Codex harness locations on an online Linux runner using protocol 111 or newer. An owner or
+administrator must have access to the source machine. The control plane requests opaque candidate
+IDs from an on-demand inventory, never arbitrary host paths, and never adds file contents to the
+periodic `skills_state` report. Discovery lists at most 64 candidates, examines at most 256 entries
+per harness directory, and retains at most 256 expiring candidate IDs on the runner. Shared harness
+locations are scanned once; divergent same-name directories remain separate candidates.
+
+The runner opens every untrusted path component with `O_NOFOLLOW` relative to pinned Linux
+directory descriptors. Symlinks, hard links, special files, excessive depth/entry counts, and trees
+exceeding the existing 64-file / 512 KiB-per-file / 2 MiB-total limits fail closed. Two bounded reads
+must agree before content is returned. The configured HOME itself may resolve through a symlink;
+its untrusted descendants may not. macOS, Windows, and WSL-context imports are not implemented.
+
+The preview shows the complete proposed files, digest, script-path indicators, and any existing
+version's files. An import commits exactly those previewed bytes with machine/directory/name,
+digest, and import-time provenance, even if the source subsequently changes or disconnects.
+Identical content reuses the latest version. Different same-name content requires explicit
+acceptance as a new version; a changed library version or replaced preview rejects stale acceptance.
+Rename-on-collision is deferred. Four expiring control-plane discoveries each retain at most one
+snapshot; one content/discovery request is active at a time. Internal runner errors are sanitized.
+
+Import is not adoption: new library skills stay unassigned, and no source directory is replaced.
+Explicitly accepted updates to existing skills retain their assignments and trigger the existing
+managed deployment reconciler, which refuses to overwrite unmanaged directories. Git upstream
+metadata remains intact when a machine snapshot updates a Git-backed skill. The separate adoption
+flow (durable snapshot + explicit assignment + source-digest check before replacing a directory)
+remains future work under #251.
 
 ## Implemented Git import
 

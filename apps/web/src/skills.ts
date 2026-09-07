@@ -30,9 +30,16 @@ export interface SkillVersionSummary {
   manifest?: unknown;
   files?: SkillFile[];
   gitSource?: SkillGitSource & { path: string; commit: string };
+  machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number };
 }
 
 export interface SkillGitSource { url: string; ref: string; subdirectory: string }
+export interface MachineSkillDiscovery { discoveryId: string; candidates: import("@wollipog/protocol").MachineSkillCandidate[] }
+export interface MachineSkillPreview {
+  previewId: string; candidate: import("@wollipog/protocol").MachineSkillCandidate;
+  files: SkillFile[]; previousFiles: SkillFile[]; digest: string;
+  disposition: "new" | "identical" | "update"; assignmentCount: number;
+}
 export interface SkillGitPreview {
   previewId: string;
   candidates: Array<{

@@ -467,6 +467,10 @@ export function createApiClient(transport: ApiTransport) {
    * `*FromPayload` helpers in skills.ts, because the routes are versioned separately from this
    * dashboard. */
   listSkills: () => req<SkillListPayload>("/api/skills"),
+  discoverMachineSkills: (runnerId: string) => req<import("./skills.js").MachineSkillDiscovery>(`/api/runners/${encodeURIComponent(runnerId)}/skill-snapshots`, { method: "POST" }),
+  previewMachineSkill: (id: string, candidateId: string) => req<import("./skills.js").MachineSkillPreview>(`/api/skill-machine/${encodeURIComponent(id)}/preview`, { method: "POST", body: JSON.stringify({ candidateId }) }),
+  importMachineSkill: (id: string, previewId: string, acceptUpdate: boolean) => req<SkillDetailPayload>(`/api/skill-machine/${encodeURIComponent(id)}/import`, { method: "POST", body: JSON.stringify({ previewId, acceptUpdate }) }),
+  discardMachineSkillDiscovery: (id: string) => req<void>(`/api/skill-machine/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   previewGitSkills: (source: import("./skills.js").SkillGitSource) =>
     req<import("./skills.js").SkillGitPreview>("/api/skill-git/preview", { method: "POST", body: JSON.stringify(source) }),
