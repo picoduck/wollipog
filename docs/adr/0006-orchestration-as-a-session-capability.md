@@ -72,8 +72,20 @@ directory and refuses launch if MCP isolation cannot be verified. Claude Code st
 built-in tools, disabled hooks, and a strict runner-owned MCP configuration. The shared MCP
 server exposes a reduced management-only tool list, and the control plane independently permits
 mutations only on trusted descendants. Neither the user nor a child can switch this preset
-on an existing session. Native TUI and ACP preset support are deferred until their launch
-boundaries can enforce the same restrictions. Standard ACP sessions remain available.
+on an existing session.
+
+Protocol v112 extends this boundary to native host Claude Code and Codex TUIs. Every initial or
+manual TUI launch re-provisions runner-local credentials and restrictions, and Codex repeats its
+MCP isolation probe at the selected workspace. Cancellation, deletion, replacement launches, and
+workspace changes fence asynchronous preparation before process creation. An idle orchestrator
+credential remains usable only while its online owning runner has a running Agent TUI; ordinary
+idle credentials, exited/reconnecting TUIs, and terminal sessions do not gain authority. Stop also
+closes an orchestrator's TUI. Existing descendant authorization and child admission remain shared
+with structured sessions. The TUI transcript and usage are not imported into structured events.
+
+ACP and non-native execution contexts (including WSL, container, and cloud targets) remain deferred
+until their launch boundaries can enforce the same restrictions and provision target-local control
+credentials. Standard ACP sessions remain available.
 
 The device-local Conductor experiment is a permanently disabled compatibility tombstone;
 saved opt-ins are ignored and the switch is removed. Session creation offers the native preset

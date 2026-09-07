@@ -425,6 +425,10 @@ function authedAgentControl(req: { headers: { authorization?: string; [key: stri
       db.agentControlCredentialValid(session.id, session.runnerId, hashToken(bearer))),
     claimedSessionId: claimed,
     session,
+    hasLiveOrchestratorTui: Boolean(session?.permissionMode === "orchestrator" &&
+      runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "orchestratorNativeTui") &&
+      hub.isRunnerOnline(session.runnerId) &&
+      shellRegistry.list(session.id).some((shell) => shell.kind === "agent_tui" && shell.status === "running")),
   }) ? session : null;
 }
 

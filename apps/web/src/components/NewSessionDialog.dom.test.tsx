@@ -291,6 +291,36 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
   } finally { await unmountFixture(fixture); }
 });
 
+test("Native TUI orchestrator creation is gated by its own runner capability", async () => {
+  for (const protocolVersion of [111, 112]) {
+    const enabledRunner: RunnerView = {
+      ...runner, protocolVersion,
+      agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"],
+      } })),
+    };
+    const fixture = await mountFixture({ runners: [enabledRunner], capabilities: {
+      sessionSubscriptions: false, nativeTuiLaunch: true,
+    } });
+    try {
+      await act(async () => { selectProject(fixture.container, project.id); });
+      const preset = fixture.container.querySelector<HTMLInputElement>("#new-session-orchestrator")!;
+      await act(async () => { preset.click(); });
+      const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+        .find((button) => button.textContent?.includes("Native TUI"))!;
+      assert.ok(tui);
+      assert.equal(tui.disabled, protocolVersion < 112);
+      if (protocolVersion === 112) {
+        await act(async () => { tui.click(); });
+        await act(async () => { createButton(fixture.container).click(); });
+        assert.equal(fixture.requests[0]?.launchSurface, "native_tui");
+        assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
+      }
+    } finally { await unmountFixture(fixture); }
+  }
+});
+
 test("Projects mode requires an explicit Project choice and No Project sends exact null identities", async () => {
   const fixture = await mountFixture();
   try {

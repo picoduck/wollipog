@@ -75,6 +75,16 @@ test("materialized session validation rejects non-host Agent TUI isolation", () 
   assert.match(nativeTuiSessionError(fakeDb(), online, session)!.error, /host execution target/);
 });
 
+test("orchestrator TUI manual attachment requires v112 and an active session", () => {
+  const session = { runnerId: "runner", agentId: "agent", driver: "codex", status: "idle",
+    permissionMode: "orchestrator" } as SessionView;
+  assert.match(nativeTuiSessionError(fakeDb({ protocolVersion: 111 }), online, session)!.error, /protocol v112/i);
+  assert.equal(nativeTuiSessionError(fakeDb({ protocolVersion: 112 }), online, session), null);
+  assert.match(nativeTuiSessionError(fakeDb({ protocolVersion: 112 }), online, {
+    ...session, status: "stopped",
+  })!.error, /active session/);
+});
+
 test("atomic Native TUI launch keeps successful sessions and compensates failed opens", async () => {
   const removed: string[] = [];
   const compensate = (id: string) => {

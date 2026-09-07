@@ -58,14 +58,18 @@ export function extractBearer(header: string | undefined | null): string | null 
 export function isAuthenticatedAgentControlClaim(input: {
   credentialValid: boolean;
   claimedSessionId: unknown;
-  session: { id: string; status: string } | null | undefined;
+  session: { id: string; status: string; permissionMode?: string | null } | null | undefined;
+  /** Computed from the online owning runner and its live Agent TUI registry, never request input. */
+  hasLiveOrchestratorTui?: boolean;
 }): boolean {
   return input.credentialValid &&
     typeof input.claimedSessionId === "string" &&
     input.claimedSessionId.length > 0 &&
     input.claimedSessionId.length <= 256 &&
     input.session?.id === input.claimedSessionId &&
-    ["starting", "running", "input_required"].includes(input.session.status);
+    (["starting", "running", "input_required"].includes(input.session.status) ||
+      (input.session.status === "idle" && input.session.permissionMode === "orchestrator" &&
+        input.hasLiveOrchestratorTui === true));
 }
 
 /** Authenticate one hook sidecar with a credential independently bound to its live Claude session. */

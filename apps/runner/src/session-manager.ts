@@ -2971,6 +2971,11 @@ export class SessionManager {
       !this.store.isDeleted(sessionId) && this.store.has(sessionId);
   }
 
+  /** A completed replacement must still invalidate asynchronous TUI launch preparation. */
+  agentTuiLaunchEpoch(sessionId: string): number {
+    return this.latestLaunchGenerations.get(sessionId) ?? 0;
+  }
+
   private acquireAdmission(sessionId: string): Promise<boolean> {
     if (this.admitted.has(sessionId)) return Promise.resolve(true);
     // A restarted start command supersedes an older not-yet-admitted request for this session.

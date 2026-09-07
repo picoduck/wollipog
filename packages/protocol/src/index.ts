@@ -326,7 +326,8 @@
 // 110: explicit cross-provider checkpoint handoffs carry a bounded portable draft and a fresh
 //      destination identity.
 // 111: on-demand, read-only machine skill discovery and bounded snapshot retrieval.
-export const PROTOCOL_VERSION = 111;
+// 112: isolated native orchestrator TUI launch and live-TUI agent-control authentication.
+export const PROTOCOL_VERSION = 112;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -482,6 +483,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingDriftCodes: 97,
   sessionAgentControl: 100,
   sessionOrchestration: 109,
+  orchestratorNativeTui: 112,
   /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
   usageTokenBuckets: 103,
   /** v104 runners stamp the producing model on token_usage. */

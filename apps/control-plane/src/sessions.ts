@@ -2745,7 +2745,10 @@ export class SessionsService {
     }
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
     if (requestedConfig.permissionMode === "orchestrator") {
-      if (req.launchSurface === "native_tui") return fail("the orchestrator preset requires the structured session harness", 409);
+      if (req.launchSurface === "native_tui") {
+        const tuiUnsupported = this.capabilityFailure(req.runnerId, "orchestratorNativeTui", "Orchestrator Native TUI");
+        if (tuiUnsupported) return tuiUnsupported;
+      }
       const unsupported = this.capabilityFailure(req.runnerId, "sessionOrchestration", "Orchestrator preset");
       if (unsupported) return unsupported;
       if (!["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
