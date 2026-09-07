@@ -30,6 +30,25 @@ test("CLI archive posts archived true and rejects self without issuing a mutatio
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
 });
 
+test("CLI archive JSON distinguishes pending, failed, completed and unknown progress", async () => {
+  for (const archiveStatus of ["stop_pending", "stop_failed", null, undefined]) {
+    let stdout = "";
+    const fetch: McpFetch = async (url) => {
+      const compatibility = url.endsWith("/api/compatibility");
+      return { ok: true, status: compatibility || !archiveStatus ? 200 : 202,
+        text: async () => JSON.stringify(compatibility ? { protocolVersion: PROTOCOL_VERSION }
+          : { id: "child", archived: archiveStatus === null, archiveStatus }) };
+    };
+    const code = await runWollipogCli(["node", "cli.js", "--wollipog-cli", "session", "archive", "child", "--json"],
+      { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "parent" },
+      { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("unexpected CLI error") }, fetch);
+    assert.equal(code, 0);
+    const session = JSON.parse(stdout).session;
+    assert.equal(session.archiveStatus, archiveStatus);
+    assert.equal(session.archived, archiveStatus === null);
+  }
+});
+
 test("CLI emits stable JSON and authenticates list requests as the exact session", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-cli-"));
   try {

@@ -642,6 +642,116 @@ test("agent-created sessions retain trusted parent attribution and reserve bound
   }
 });
 
+for (const kind of ["run", "workflow"] as const) {
+  test(`agent-created ${kind} applies Project defaults and rejects explicit unlimited or invalid allowances`, () => {
+    const { db, svc, hub } = makeHarness();
+    try {
+      const owner = db.localIdentityContext();
+      const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+      const project = db.createProject({ name: "Parent Allowances", scope });
+      db.updateProject(project.id, { childSessionDefaults: { costBudgetUsd: 2.5, maxToolCalls: 30 } });
+      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, projectId: null }, undefined, scope).data!;
+      db.raw().prepare("UPDATE sessions SET project_id=? WHERE id=?").run(project.id, parent.id);
+      db.updateSessionStatus(parent.id, "running", Date.now());
+      const create = (overrides: { costBudgetUsd?: number; maxToolCalls?: number; config?: { maxChildSessions: number } } = {}) => {
+        const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, projectId: null, task: "Build and review", ...overrides };
+        return kind === "run"
+          ? svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
+          : svc.createWorkflowRun({ ...request, workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
+            { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+      };
+      const before = hub.sentOfType("start_session").length;
+      for (const invalid of [{ costBudgetUsd: 0 }, { maxToolCalls: 0 }, { maxToolCalls: 0.5 }, { config: { maxChildSessions: 65 } }]) {
+        assert.equal(create(invalid).ok, false);
+        assert.equal(db.listRuns().length, 0);
+        assert.equal(db.childSessionAllocations(parent.id).count, 0);
+        assert.equal(hub.sentOfType("start_session").length, before);
+      }
+      const created = create();
+      assert.ok(created.ok, created.error);
+      for (const child of created.data!.sessions) {
+        assert.equal(child.costBudgetUsd, 2.5);
+        assert.equal(child.maxToolCalls, 30);
+        assert.equal(child.projectId, null, "defaults come from the parent even when the child is filed elsewhere");
+      }
+      db.updateSessionStatus(parent.id, "completed", Date.now());
+      assert.equal(create().status, 409);
+    } finally { db.close(); }
+  });
+
+  test(`agent-created ${kind} preflights the whole batch and reserves each child's allowance`, () => {
+    const { db, svc, hub } = makeHarness();
+    try {
+      const owner = db.localIdentityContext();
+      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+        projectId: null, config: { costBudgetUsd: 20, maxToolCalls: 400, maxChildSessions: 3 } }, undefined,
+      { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } }).data!;
+      db.updateSessionStatus(parent.id, "running", Date.now());
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review" };
+      const create = () => kind === "run"
+        ? svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
+        : svc.createWorkflowRun({ ...request, workflowId: "builtin:build-review",
+            agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
+          { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+      const before = hub.sentOfType("start_session").length;
+      const created = create();
+      assert.ok(created.ok, created.error);
+      assert.equal(created.data!.sessions.length, 2);
+      for (const child of created.data!.sessions) {
+        assert.equal(child.parentSessionId, parent.id);
+        assert.ok(child.costBudgetUsd! > 0 && child.costBudgetUsd! <= 20 / 3);
+        assert.equal(child.maxToolCalls, 133);
+        const start = hub.sentOfType("start_session").find((message) => message.spec.sessionId === child.id)!;
+        assert.equal(start.spec.config.costBudgetUsd, child.costBudgetUsd);
+        assert.equal(start.spec.config.maxToolCalls, child.maxToolCalls);
+      }
+      assert.equal(db.childSessionAllocations(parent.id).count, 2);
+      assert.equal(hub.sentOfType("start_session").length, before + 2);
+      const denied = create();
+      assert.equal(denied.status, 409);
+      assert.match(denied.error!, /spawn slots/);
+      assert.equal(db.listRuns().length, 1, "a rejected fan-out must not persist an empty or partial run");
+      assert.equal(db.childSessionAllocations(parent.id).count, 2);
+      assert.equal(hub.sentOfType("start_session").length, before + 2);
+    } finally { db.close(); }
+  });
+
+  test(`agent-created ${kind} waits for exact batch approval without launching workers`, () => {
+    const { db, svc, hub } = makeHarness();
+    try {
+      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+      db.updateSessionStatus(parent.id, "running", Date.now());
+      assert.ok(svc.upsertGovernancePolicy({ policyId: "ask-batch", name: "Review Child Sessions",
+        effect: "ask", priority: 100, enabled: true, scope: { toolName: "wollipog.create_session" } }).ok);
+      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", title: "Requested Batch" };
+      const create = (task = request.task) => kind === "run"
+        ? svc.createRun({ ...request, task, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
+        : svc.createWorkflowRun({ ...request, task, workflowId: "builtin:build-review",
+            agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
+          { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+      const before = hub.sentOfType("start_session").length;
+      assert.equal(create().status, 428);
+      const approval = db.getSession(parent.id)!.pendingApproval!;
+      assert.match(approval.title, /2 children: Requested Batch/);
+      assert.equal(create().status, 428);
+      assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, approval.requestId);
+      assert.equal(db.listRuns().length, 0);
+      assert.equal(db.childSessionAllocations(parent.id).count, 0);
+      assert.equal(hub.sentOfType("start_session").length, before);
+      assert.ok(svc.approve(parent.id, approval.requestId, "allow").ok);
+      assert.equal(create("Different task").status, 428, "approval cannot authorize a changed task");
+      const created = create();
+      assert.ok(created.ok, created.error);
+      for (const child of created.data!.sessions) {
+        assert.equal(child.parentSessionId, parent.id);
+        assert.equal(child.costBudgetUsd, 5);
+        assert.equal(child.maxToolCalls, 100);
+      }
+      assert.equal(db.childSessionAllocations(parent.id).count, 2);
+    } finally { db.close(); }
+  });
+}
+
 /** Create a session through the service (runner online) and return its id. */
 function seedSession(
   svc: SessionsService,

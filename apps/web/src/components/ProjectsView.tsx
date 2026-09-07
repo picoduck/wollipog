@@ -151,7 +151,7 @@ export function ProjectsView({
     setError(null);
     setDialog(next);
   };
-  const runProjectMutation = async (key: string, action: () => Promise<ProjectView>) => {
+  const runProjectMutation = async (key: string, action: () => Promise<ProjectView>, reportError = true) => {
     if (busy) return;
     setBusy(key);
     setError(null);
@@ -160,7 +160,7 @@ export function ProjectsView({
       applyProject(project);
       return project;
     } catch (cause) {
-      setError((cause as Error).message);
+      if (reportError) setError((cause as Error).message);
       throw cause;
     } finally {
       setBusy(null);
@@ -428,7 +428,8 @@ export function ProjectsView({
                 disabled={selected.canManage === false || busy !== null}
                 onSave={async (childSessionDefaults) => {
                   const result = await runProjectMutation("child-defaults",
-                    async () => (await api.updateProject(selected.id, { childSessionDefaults })).project);
+                    // This form owns its error alert; do not announce the rejection twice.
+                    async () => (await api.updateProject(selected.id, { childSessionDefaults })).project, false);
                   if (!result) throw new Error("Could not save child session defaults.");
                 }}
               />}

@@ -135,6 +135,17 @@ async function cpFetch(
   return { ok: true, data };
 }
 
+/** Keep the exact invocation alive while its CP-owned child approval is pending, including
+ * run fan-out. Retrying maintains the durable approval's abandonment fence. */
+async function createWithSpawnApproval(deps: McpDeps, path: string, body: unknown) {
+  let result = await cpFetch(deps, "POST", path, body);
+  while (!result.ok && result.status === 428) {
+    await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(1000);
+    result = await cpFetch(deps, "POST", path, body);
+  }
+  return result;
+}
+
 /** Field-map a SessionView to the compact shape every session-returning tool shares. */
 function mapSession(s: Json): Json {
   return {
@@ -156,6 +167,7 @@ function mapSession(s: Json): Json {
     pendingApproval: s?.pendingApproval?.title ?? null,
     updatedAt: s?.updatedAt,
     archived: s?.archived ?? false,
+    archiveStatus: s?.archiveStatus,
   };
 }
 
@@ -754,7 +766,7 @@ export const TOOLS: McpTool[] = [
       for (const key of ["workflowVersion", "title", "useWorktree", "agentBindings", "costBudgetUsd", "maxToolCalls"]) {
         if (args[key] !== undefined) body[key] = args[key];
       }
-      const r = await cpFetch(deps, "POST", "/api/workflow-runs", body);
+      const r = await createWithSpawnApproval(deps, "/api/workflow-runs", body);
       if (!r.ok) return errorResult(r.message);
       return textResult({
         run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },
@@ -1006,13 +1018,7 @@ export const TOOLS: McpTool[] = [
       if (typeof args.useWorktree === "boolean") body.useWorktree = args.useWorktree;
       if (Object.keys(config).length) body.config = config;
 
-      let created = await cpFetch(deps, "POST", "/api/sessions", body);
-      // Keep the exact invocation alive while its CP-owned approval is pending. Polling the
-      // unchanged request also maintains the existing durable-approval abandonment fence.
-      while (!created.ok && created.status === 428) {
-        await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(1000);
-        created = await cpFetch(deps, "POST", "/api/sessions", body);
-      }
+      const created = await createWithSpawnApproval(deps, "/api/sessions", body);
       if (!created.ok) return errorResult(created.message);
       const view = created.data;
       return textResult({ session: mapSession(view) });
@@ -1148,7 +1154,7 @@ export const TOOLS: McpTool[] = [
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.costBudgetUsd === "number") body.costBudgetUsd = args.costBudgetUsd;
       if (typeof args.maxToolCalls === "number") body.maxToolCalls = args.maxToolCalls;
-      const r = await cpFetch(deps, "POST", "/api/runs", body);
+      const r = await createWithSpawnApproval(deps, "/api/runs", body);
       if (!r.ok) return errorResult(r.message);
       return textResult({
         run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },

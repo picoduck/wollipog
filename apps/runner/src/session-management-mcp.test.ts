@@ -586,6 +586,39 @@ test("archive_session sends only archived true, preserves scoped errors, and ref
   assert.equal((await callTool(denied.deps, "archive_session", { sessionId: "s_sibling" })).isError, true);
 });
 
+test("compact archive and inspection responses retain lifecycle progress without inventing legacy state", async () => {
+  for (const archiveStatus of ["stop_pending", "stop_failed", null, undefined]) {
+    const session = { id: "s_child", archived: archiveStatus === null, archiveStatus };
+    const { deps } = makeDeps((call) => ({ status: call.method === "POST" && archiveStatus ? 202 : 200,
+      body: call.url.endsWith("/api/sessions") ? { sessions: [session] } : call.method === "GET" ? { session } : session }));
+    for (const name of ["archive_session", "get_session", "list_sessions"]) {
+      const result = resultJson(await callTool(deps, name, { sessionId: "s_child" }));
+      const mapped = name === "list_sessions" ? result.sessions[0] : result.session;
+      assert.equal(mapped.archiveStatus, archiveStatus, name);
+      assert.equal(mapped.archived, archiveStatus === null, name);
+      if (archiveStatus === undefined) assert.equal(Object.hasOwn(mapped, "archiveStatus"), false);
+    }
+  }
+});
+
+test("run creation tools keep the exact batch request alive until spawn approval resolves", async () => {
+  for (const name of ["create_run", "create_workflow_run"]) {
+    for (const terminal of [201, 403]) {
+      let remaining = 2;
+      let sleeps = 0;
+      const { deps, calls } = makeDeps(() => remaining-- > 0
+        ? { status: 428, body: { error: "Child approval required" } }
+        : { status: terminal, body: terminal === 201 ? { run: { id: "run" }, sessions: [] } : { error: "Rejected" } });
+      deps.sleep = async (ms) => { assert.equal(ms, 1000); sleeps++; };
+      const result = await callTool(deps, name, { runnerId: "r", workspaceId: "w", agentIds: ["a"], workflowId: "workflow", task: "Build" });
+      assert.equal(result.isError === true, terminal === 403);
+      assert.equal(sleeps, 2);
+      assert.equal(calls.length, 3);
+      assert.deepEqual(calls.map((call) => call.body), Array(3).fill(calls[0]!.body));
+    }
+  }
+});
+
 test("set_guardrails -> POST /api/sessions/:id/config with ONLY the given guardrail keys", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "s_2", costBudgetUsd: 3 } }));
   await callTool(deps, "set_guardrails", { sessionId: "s_2", costBudgetUsd: 3 });
