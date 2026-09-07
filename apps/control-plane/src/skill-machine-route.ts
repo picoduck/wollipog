@@ -45,10 +45,11 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       const requestId = randomUUID();
       const result = await deps.hub.requestFromRunner(runnerId, requestId, { type: "skill_snapshot", runnerId, requestId, operation: "list" });
       if (result.type !== "skill_snapshot_result" || result.runnerId !== runnerId || result.error || !Array.isArray(result.candidates) || result.candidates.length > 64) throw new Error();
-      const candidates = result.candidates;
-      if (candidates.some((c) => !c || typeof c.id !== "string" || c.id.length > 64 || !validSkillName(c.name) ||
+      if (result.candidates.some((c) => !c || typeof c.id !== "string" || c.id.length > 64 || !validSkillName(c.name) ||
         ![".agents/skills", ".claude/skills", ".codex/skills"].includes(c.sourceDirectory) || typeof c.generation !== "string" || c.generation.length > 200) ||
-        new Set(candidates.map((c) => c.id)).size !== candidates.length) throw new Error();
+        new Set(result.candidates.map((c) => c.id)).size !== result.candidates.length) throw new Error();
+      // Keep only bounded metadata; unrecognized runner properties must not enter the cache/UI.
+      const candidates = result.candidates.map(({ id, name, sourceDirectory, generation }) => ({ id, name, sourceDirectory, generation }));
       const discoveryId = randomUUID();
       discoveries.set(discoveryId, { owner: ownerKey(principal), runnerId, expires: Date.now() + 600_000, candidates });
       return { discoveryId, candidates };

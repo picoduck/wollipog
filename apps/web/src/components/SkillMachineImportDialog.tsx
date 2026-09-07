@@ -69,7 +69,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
         {!discovery.candidates.length && <p>No importable skill directories were found.</p>}
         {discovery.candidates.map((candidate) => <section className="skills-section" key={candidate.id}>
           <strong>{candidate.name}</strong><p className="skills-hint">{candidate.sourceDirectory}/{candidate.name}</p>
-          <button className="btn sm" type="button" disabled={busy} onClick={() => void read(candidate.id)} aria-label={`Preview ${candidate.name} from ${candidate.sourceDirectory}`}>Preview Files</button>
+          <button className="btn sm" type="button" disabled={busy} onClick={() => void read(candidate.id)} aria-label={`Preview Files for ${candidate.name} from ${candidate.sourceDirectory}`}>Preview Files</button>
         </section>)}
       </>}
       {preview && <section className="skills-section">

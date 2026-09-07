@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, linkSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,6 +52,18 @@ for (const unsafe of ["file-link", "directory-link", "hard-link", "oversized", "
     if (unsafe === "oversized") writeFileSync(join(root, "large"), Buffer.alloc(SKILL_MAX_FILE_BYTES + 1));
     if (unsafe === "too-many") for (let i = 0; i < 65; i++) writeFileSync(join(root, `file-${i}`), "x");
     let now = 1;
+    if (unsafe === "stale") {
+      // CI filesystems can coarsen directory timestamps. Force identical timestamps so adding
+      // a directory entry must be caught by the generation's metadata listing, not clock luck.
+      const original = fs.fstatSync;
+      t.mock.method(fs, "fstatSync", (fd: number) => {
+        const stat = original(fd);
+        if (stat.isDirectory()) { stat.ctimeMs = 0; stat.mtimeMs = 0; }
+        return stat;
+      });
+      syncBuiltinESMExports();
+      t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    }
     const snapshots = new MachineSkillSnapshots({ home, agents: () => agents, now: () => now });
     const candidate = snapshots.handle(message).candidates![0]!;
     if (unsafe === "stale") writeFileSync(join(root, "new-file"), "changed generation");

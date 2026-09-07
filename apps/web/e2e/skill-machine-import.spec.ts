@@ -29,7 +29,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.getByRole("button", { name: "Import from Machine" }).click();
     await expect(page.getByRole("button", { name: "Import Snapshot" })).toBeDisabled();
     await page.getByRole("button", { name: "Discover Skills" }).click();
-    await page.getByRole("button", { name: "Preview code-review from .codex/skills" }).click();
+    await page.getByRole("button", { name: "Preview Files for code-review from .codex/skills" }).click();
     await expect(page.getByRole("heading", { name: "Snapshot Preview" })).toBeVisible();
     await page.getByText("SKILL.md · Changed", { exact: true }).click();
     await expect(page.getByRole("heading", { name: "Current", exact: true })).toBeVisible();
@@ -53,7 +53,7 @@ test("machine snapshot read errors block import", async ({ page }) => {
   await page.goto("/skills-removals-e2e.html");
   await page.getByRole("button", { name: "Import from Machine" }).click();
   await page.getByRole("button", { name: "Discover Skills" }).click();
-  await page.getByRole("button", { name: "Preview alpha from .codex/skills" }).click();
+  await page.getByRole("button", { name: "Preview Files for alpha from .codex/skills" }).click();
   await expect(page.getByRole("alert")).toContainText("Source changed");
   await expect(page.getByRole("button", { name: "Import Snapshot" })).toBeDisabled();
 });

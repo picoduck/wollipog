@@ -20,6 +20,7 @@ test("machine discovery, preview and import are authorized, immutable, deduplica
   let reads = 0;
   const pushes: string[] = [];
   const candidate = { id: "opaque-id", name: "alpha", sourceDirectory: ".codex/skills", generation: "generation-1" };
+  let candidates = [candidate];
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [], workspaces: [] }, 1, 111);
   registerMachineSkillRoutes(app, { db, requestHuman: () => principal, requestPrincipal: () => principal,
     pushSkillsSync: ((id: string) => { pushes.push(id); }) as SkillsSyncPusher,
@@ -28,7 +29,7 @@ test("machine discovery, preview and import are authorized, immutable, deduplica
         assert.equal(request.type, "skill_snapshot");
         if (request.type !== "skill_snapshot") throw new Error();
         reads++;
-        if (request.operation === "list") return { type: "skill_snapshot_result", runnerId, requestId, candidates: [candidate] };
+        if (request.operation === "list") return { type: "skill_snapshot_result", runnerId, requestId, candidates };
         assert.equal(request.candidateId, candidate.id);
         const payload = validateSkillPayload({ name: "alpha", files: [{ path: "SKILL.md", encoding: "utf8", content: `---\nname: alpha\n---\n${content}` }] });
         if (!payload.ok) throw new Error();
@@ -50,9 +51,20 @@ test("machine discovery, preview and import are authorized, immutable, deduplica
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [], workspaces: [] }, 2, 110);
   assert.equal((await discover()).statusCode, 409);
   assert.equal(reads, 0);
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "darwin", version: "1", agents: [], workspaces: [] }, 3, 111);
+  assert.equal((await discover()).statusCode, 409);
+  assert.equal(reads, 0, "unsupported platform never reaches the runner");
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [], workspaces: [] }, 3, 111);
+  for (const malformed of [[{ ...candidate, sourceDirectory: "/etc" }], [candidate, candidate],
+    [{ ...candidate, id: "a".repeat(65) }], [{ ...candidate, name: "../escape" }],
+    [{ ...candidate, generation: "x".repeat(201) }], Array.from({ length: 65 }, (_, i) => ({ ...candidate, id: String(i) }))]) {
+    candidates = malformed;
+    assert.equal((await discover()).statusCode, 502);
+  }
+  candidates = [{ ...candidate, ...{ unexpected: "must not be cached or returned" } }];
   const listed = await discover();
   assert.equal(listed.statusCode, 200, listed.body);
+  assert.doesNotMatch(listed.body, /unexpected|must not/);
   const id = listed.json().discoveryId;
   assert.equal((await preview(id, "/arbitrary/path")).statusCode, 400);
   const first = await preview(id);

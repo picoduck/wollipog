@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, opendirSync, readSync, realpathSync, type Stats } from "node:fs";
 import { SKILL_MAX_FILES, SKILL_MAX_FILE_BYTES, SKILL_MAX_TOTAL_BYTES, validSkillFilePath, validSkillName,
   type AgentDefinition, type MachineSkillCandidate, type SkillFile, type SkillSnapshotMessage,
@@ -9,6 +9,20 @@ import { SKILL_DIRS } from "./skills.js";
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fingerprint = (stat: Stats) => `${stat.dev}:${stat.ino}:${stat.ctimeMs}:${stat.mtimeMs}`;
 const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
+
+/** Directory times can be coarse enough that a newly added entry has the same timestamp.
+ * Include the bounded entry names/types, without reading any file contents during discovery. */
+function directoryGeneration(fd: number): string {
+  const entries: string[] = [];
+  const dir = opendirSync(fdPath(fd));
+  try {
+    for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
+      if (entries.length >= 256) throw new Error();
+      entries.push(JSON.stringify([entry.name, entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other"]));
+    }
+  } finally { dir.closeSync(); }
+  return createHash("sha256").update(JSON.stringify([fingerprint(fstatSync(fd)), entries.sort()])).digest("hex");
+}
 
 /** Linux descriptor-anchored traversal: every untrusted component is opened O_NOFOLLOW relative
  * to a pinned parent. A concurrent parent rename cannot redirect the read outside that parent.
@@ -48,12 +62,12 @@ export class MachineSkillSnapshots {
       const candidate = entry.candidate;
       const fd = this.openDirectory(`${candidate.sourceDirectory}/${candidate.name}`);
       try {
-        if (fingerprint(fstatSync(fd)) !== candidate.generation) throw new Error();
+        if (directoryGeneration(fd) !== candidate.generation) throw new Error();
         const files = this.readTree(fd);
         const digest = skillVersionDigest(files);
         // A second bounded pass rejects concurrent edits to content or the manifest. The returned
         // bytes are an immutable snapshot, not a promise that the source remains unchanged later.
-        if (skillVersionDigest(this.readTree(fd)) !== digest || fingerprint(fstatSync(fd)) !== candidate.generation) throw new Error();
+        if (skillVersionDigest(this.readTree(fd)) !== digest || directoryGeneration(fd) !== candidate.generation) throw new Error();
         return { ...result, snapshot: { candidate, files, digest } };
       } finally { closeSync(fd); }
     } catch {
@@ -78,7 +92,7 @@ export class MachineSkillSnapshots {
               child = openSync(`${fdPath(fd)}/${entry.name}`, directoryFlags);
               manifest = openSync(`${fdPath(child)}/SKILL.md`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
               if (!fstatSync(manifest).isFile()) continue;
-              const candidate = { id: randomUUID(), name: entry.name, sourceDirectory: relative, generation: fingerprint(fstatSync(child)) };
+              const candidate = { id: randomUUID(), name: entry.name, sourceDirectory: relative, generation: directoryGeneration(child) };
               found.push(candidate);
               this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000 });
             } catch { /* Unsupported or concurrently removed candidates are not offered. */ }

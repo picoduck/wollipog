@@ -519,7 +519,7 @@ export function SkillsView() {
               </section>}
               {latest?.machineSource && <section className="skills-section skills-machine-import">
                 <h4>Machine Snapshot Source</h4>
-                <p className="skills-hint">{latest.machineSource.runnerId} · {latest.machineSource.sourceDirectory}/{latest.machineSource.name}</p>
+                <p className="skills-hint">{machineLabels.get(latest.machineSource.runnerId) ?? latest.machineSource.runnerId} · {latest.machineSource.sourceDirectory}/{latest.machineSource.name}</p>
                 <p className="skills-hint">Digest: {latest.machineSource.digest}</p>
                 <p className="skills-hint">Imported {formatTime(latest.machineSource.importedAt)}. This records a snapshot, not an adopted source directory.</p>
               </section>}
