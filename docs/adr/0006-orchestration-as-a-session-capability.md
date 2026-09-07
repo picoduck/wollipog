@@ -49,6 +49,16 @@ policy can override that fallback. Bind each approval to the parent, exact creat
 spawn ordinal. Use the existing durable governance approval queue, audit, expiry, rejection, and
 human response checks. The creating tool polls the same request while awaiting the human's decision.
 
+Agent-initiated ordinary runs and workflow runs use the same child-admission rules. The authenticated
+session is the parent of every member, including an explicitly requested workflow coordinator.
+Preflight the complete member set against the parent's remaining spawn slots and allowances before
+persisting a run or launching any worker. A batch approval names the child count and binds the full
+request and resolved member identities; changing the task or membership requires a new approval.
+Each child persists its own allowance reservation. Human-created runs and system-owned automation
+delivery retain their existing behavior; agent creation cannot use automation delivery snapshots.
+The compact MCP and CLI session responses preserve archive progress when the control plane supplies
+it, so a successful request with Stop Pending or Stop Failed is not confused with completed archival.
+
 The orchestrator preset is a separate permission boundary for an ordinary session. It must expose
 only session-management operations and governance reads, and must enforce refusal of its own
 worktree writes and shell commands. Advertise it only where the harness can enforce that boundary;

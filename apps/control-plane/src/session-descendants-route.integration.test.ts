@@ -7,11 +7,11 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_VERSION, WOLLIPOG_AGENT_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, WOLLIPOG_AGENT_ACTOR_SESSION_HEADER, type GovernancePolicy } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 
-test("HTTP agent management requires visible descendants and archive retains history", { timeout: 30_000 }, async () => {
+test("HTTP agent management scopes descendants and composes governance policy visibility", { timeout: 30_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "descendant-route-"));
   const database = join(root, "control-plane.db");
   const listener = createServer();
@@ -24,7 +24,32 @@ test("HTTP agent management requires visible descendants and archive retains his
   try {
     const local = seed.localIdentityContext();
     seed.createIdentityMember({ userId: "other-user", displayName: "Other", organizationId: local.organizationId, role: "operator", now: 1 });
+    seed.createIdentityMember({ userId: "policy-admin", displayName: "Policy Admin", organizationId: local.organizationId, role: "admin", now: 1 });
+    seed.createIdentityMember({ userId: "inactive-user", displayName: "Inactive", organizationId: local.organizationId, role: "operator", now: 1 });
+    seed.updateIdentityMember({ userId: "inactive-user", displayName: "Inactive", organizationId: local.organizationId, role: "operator", status: "suspended", now: 2 });
+    for (const userId of [local.userId, "policy-admin", "other-user"]) {
+      seed.createDevice({ id: `device-${userId}`, name: "Policy Test", tokenHash: hashToken(`device-${userId}`), userId, organizationId: local.organizationId, now: 2 });
+    }
+    for (const [policyId, ownerUserId, organizationId, question] of [
+      ["fixture-global", undefined, undefined, false],
+      ["fixture-same-org", undefined, local.organizationId, false],
+      ["fixture-foreign-org", undefined, "foreign-org", false],
+      ["fixture-owner-question", local.userId, local.organizationId, true],
+      ["fixture-admin-question", "policy-admin", local.organizationId, true],
+      ["fixture-other-question", "other-user", local.organizationId, true],
+      ["fixture-inactive-question", "inactive-user", local.organizationId, true],
+      ["fixture-foreign-question", "other-user", "foreign-org", true],
+      ["fixture-unscoped-owner-question", local.userId, undefined, true],
+      ["fixture-unscoped-admin-question", "policy-admin", undefined, true],
+    ] as const) {
+      seed.upsertGovernancePolicy({ policyId, name: policyId, enabled: true, effect: "allow", priority: 1,
+        scope: organizationId ? { organizationId } : {}, ownerUserId,
+        ...(question ? { questionRule: { headerPattern: "Test", answer: { option: "Proceed" } } } : {}),
+      }, 2);
+    }
     seed.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "test", agents: [], workspaces: [] }, 1, PROTOCOL_VERSION);
+    seed.createSession({ id: "policy-agent", runnerId: "r", workspaceId: null, agentId: null, title: "Policy Agent", useWorktree: false, driver: "codex", config: {},
+      scope: { organizationId: local.organizationId, owner: { kind: "organization", organizationId: local.organizationId } }, now: 2 });
     for (const mode of ["normal", "orchestrator"]) {
       for (const [suffix, parent] of [["", undefined], ["-child", mode], ["-grandchild", `${mode}-child`], ["-hidden", mode]] as const) {
         seed.createSession({ id: mode + suffix, parentSessionId: parent, runnerId: "r", workspaceId: null,
@@ -54,11 +79,32 @@ test("HTTP agent management requires visible descendants and archive retains his
     assert.ok(healthy, logs);
     const live = ControlPlaneDb.open(database);
     try {
-      for (const mode of ["normal", "orchestrator"]) {
+      for (const mode of ["normal", "orchestrator", "policy-agent"]) {
         live.updateSessionStatus(mode, "running", Date.now());
         assert.equal(live.setAgentControlCredential(mode, "r", hashToken(`token-${mode}`), Date.now()), true);
       }
     } finally { live.close(); }
+    const policies = async (token: string, agent?: string) => fetch(`http://127.0.0.1:${port}/api/governance/policies`, {
+      signal: AbortSignal.timeout(3000), headers: { authorization: `Bearer ${token}`,
+        ...(agent ? { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: agent } : {}) },
+    });
+    const assertPolicies = async (token: string, expected: string[], agent?: string) => {
+      const response = await policies(token, agent);
+      assert.equal(response.status, 200);
+      const result = (await response.json() as { policies: GovernancePolicy[] }).policies;
+      assert.deepEqual(result.map((p) => p.policyId).sort(), [...expected, "builtin:session-spawn-human-gate"].sort());
+    };
+    const ordinary = ["fixture-global", "fixture-same-org", "fixture-foreign-org"];
+    const humanQuestions = ["fixture-owner-question", "fixture-admin-question", "fixture-other-question"];
+    const ownerDb = ControlPlaneDb.open(database);
+    const ownerId = ownerDb.localIdentityContext().userId;
+    ownerDb.close();
+    await assertPolicies(`device-${ownerId}`, [...ordinary, ...humanQuestions, "fixture-unscoped-owner-question"]);
+    await assertPolicies("device-policy-admin", [...ordinary, ...humanQuestions, "fixture-unscoped-admin-question"]);
+    assert.equal((await policies("device-other-user")).status, 403, "ordinary human global-route admission is preserved");
+    assert.equal((await policies("token-normal", "normal")).status, 403, "user-scoped ordinary agents do not gain global routes");
+    await assertPolicies("token-policy-agent", ordinary, "policy-agent");
+    await assertPolicies("token-orchestrator", ["fixture-global", "fixture-same-org"], "orchestrator");
     for (const mode of ["normal", "orchestrator"]) {
       const request = (target: string, operation: string, body: unknown, method = "POST") => fetch(
         `http://127.0.0.1:${port}/api/sessions/${target}${operation ? `/${operation}` : ""}`, {

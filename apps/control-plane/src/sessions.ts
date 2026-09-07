@@ -2388,7 +2388,11 @@ export class SessionsService {
     return ok(projectScope);
   }
 
-  private sessionSpawnGate(parentSessionId: string, request: CreateSessionRequest): ServiceResult<null> {
+  private sessionSpawnGate(
+    parentSessionId: string,
+    request: { title?: string; agentId: string },
+    childCount = 1,
+  ): ServiceResult<null> {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("parent session not found", 404);
     const now = Date.now();
@@ -2405,6 +2409,7 @@ export class SessionsService {
     ]);
     const fingerprint = createHash("sha256").update(JSON.stringify({
       request,
+      ...(childCount === 1 ? {} : { childCount }),
       parentSessionId,
       ordinal: this.db.childSessionAllocations(parentSessionId).count,
     })).digest("hex");
@@ -2424,11 +2429,11 @@ export class SessionsService {
     const approval: PendingApproval = {
       requestId,
       kind: "policy_hook",
-      title: `${parent.title} requests a child: ${request.title || request.agentId}`.slice(0, 240),
+      title: `${parent.title} requests ${childCount === 1 ? "a child" : `${childCount} children`}: ${request.title || request.agentId}`.slice(0, 240),
       context: { toolName },
       governancePolicyId: decision.policy!.policyId,
       options: [
-        { optionId: "allow", name: "Create Child", kind: "allow_once" },
+        { optionId: "allow", name: childCount === 1 ? "Create Child" : "Create Children", kind: "allow_once" },
         { optionId: "deny", name: "Reject", kind: "reject_once" },
       ],
       ...(decision.policy?.askTimeout ? { expiresAt: now + decision.policy.askTimeout * 1000 } : {}),
@@ -2455,6 +2460,62 @@ export class SessionsService {
       status: decision.effect === "allow" ? "allowed" : "denied", approval, audits, now,
     });
     return decision.effect === "allow" ? ok(null) : fail("child session creation is denied by policy", 403);
+  }
+
+  private runMemberConfig(
+    request: Pick<CreateRunRequest, "config" | "costBudgetUsd" | "maxToolCalls">,
+    agentCreated: boolean,
+  ): SessionConfig {
+    const config = { ...(request.config ?? {}) };
+    if (agentCreated) {
+      // Preserve explicit zero/invalid values so child admission rejects, rather than silently
+      // replacing them with defaults. Human run normalization retains its existing semantics.
+      if (request.costBudgetUsd !== undefined) config.costBudgetUsd = request.costBudgetUsd;
+      if (request.maxToolCalls !== undefined) config.maxToolCalls = request.maxToolCalls;
+    } else {
+      if (request.costBudgetUsd && request.costBudgetUsd > 0) config.costBudgetUsd = request.costBudgetUsd;
+      const maxCalls = request.maxToolCalls != null ? Math.floor(request.maxToolCalls) : 0;
+      if (maxCalls > 0) config.maxToolCalls = maxCalls;
+    }
+    return config;
+  }
+
+  /** Preflight the whole fan-out before creating a run or delivering any member. Planning
+   * uses virtual reservations; db.createSession persists each reservation with its child. */
+  private admitRunChildren(
+    parentSessionId: string | undefined,
+    configs: SessionConfig[],
+    request: { title?: string; agentId: string },
+  ): ServiceResult<SessionConfig[]> {
+    if (!parentSessionId || configs.length === 0) return ok(configs);
+    const parent = this.db.getSession(parentSessionId);
+    if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
+      return fail("the creating parent session is no longer active", 409);
+    }
+    const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
+    if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.count) {
+      return fail("the parent session has insufficient remaining child spawn slots for this run", 409);
+    }
+    const applied: SessionConfig[] = [];
+    for (const config of configs) {
+      if (config.maxChildSessions !== undefined && (!Number.isSafeInteger(config.maxChildSessions) ||
+          config.maxChildSessions < 0 || config.maxChildSessions > 64)) {
+        return fail("maxChildSessions must be an integer from 0 to 64", 400);
+      }
+      const guarded = childSessionGuardrails({
+        ...parent,
+        costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
+        toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
+      }, config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.count,
+      parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
+      if ("error" in guarded) return fail(guarded.error, 409);
+      applied.push(guarded.config);
+      reserved.count++;
+      reserved.costBudgetUsd += guarded.config.costBudgetUsd!;
+      reserved.maxToolCalls += guarded.config.maxToolCalls!;
+    }
+    const gate = this.sessionSpawnGate(parentSessionId, request, configs.length);
+    return gate.ok ? ok(applied) : fail(gate.error!, gate.status);
   }
 
   private conductorRemovedFromDiscovery(runnerId: string): boolean {
@@ -5086,7 +5147,10 @@ export class SessionsService {
     req: CreateWorkflowRunRequest,
     actor: GovernanceActor = { kind: "human", id: "local" },
     delivery?: PreStagedDeliveryOptions,
+    creationContext?: { parentSessionId?: string },
   ): ServiceResult<CreateWorkflowRunResult> {
+    const parentSessionId = creationContext?.parentSessionId;
+    if (parentSessionId && delivery) return fail("agent-created workflow runs cannot use automation delivery snapshots", 409);
     if (!req || typeof req !== "object" || Array.isArray(req)) return fail("workflow run request is malformed", 400);
     const allowed = new Set([
       "runnerId", "workspaceId", "projectId", "projectLocationId", "workflowId", "workflowVersion", "task", "title", "useWorktree",
@@ -5229,6 +5293,12 @@ export class SessionsService {
       );
     }
 
+    const memberConfig = this.runMemberConfig(req, Boolean(parentSessionId));
+    const spawnRequest = { title: req.title, agentId: members.map((member) => member.agentId).join(", "),
+      operation: "workflow", request: req, members: members.map((member) => ({ roleId: member.roleId, agentId: member.agentId })) };
+    const admitted = this.admitRunChildren(parentSessionId, members.map(() => ({ ...memberConfig })), spawnRequest);
+    if (!admitted.ok || !admitted.data) return fail(admitted.error!, admitted.status);
+
     const now = Date.now();
     const runId = shortId("r_");
     const title = (req.title?.trim() || req.task.trim().slice(0, 60) || definition.name).slice(0, 120);
@@ -5244,11 +5314,11 @@ export class SessionsService {
 
     const sessions: SessionView[] = [];
     const starts: Array<{ spec: SessionLaunchSpec; orchestrator: boolean }> = [];
-    for (const member of members) {
+    for (const [memberIndex, member] of members.entries()) {
       const id = shortId("s_");
-      const config = { ...(req.config ?? {}) };
-      if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
-      const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
+      const config = admitted.data[memberIndex]!;
+      const maxCalls = parentSessionId ? config.maxToolCalls : req.maxToolCalls;
+      const runMaxCalls = maxCalls != null ? Math.floor(maxCalls) : 0;
       const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
       if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
       const memberTitle = `${title} · ${member.orchestrator ? "orchestrator" : member.roleId}`.slice(0, 120);
@@ -5256,6 +5326,7 @@ export class SessionsService {
       const memberProject = member.orchestrator ? orchestratorProject : requestedProject.data;
       const session = this.db.createSession({
         id,
+        parentSessionId,
         runnerId: req.runnerId,
         workspaceId: req.workspaceId,
         ...memberProject,
@@ -5269,7 +5340,8 @@ export class SessionsService {
         scope: member.orchestrator ? orchestratorScope! : workerSessionScope.data,
         now,
       });
-      if (req.costBudgetUsd && req.costBudgetUsd > 0) this.db.updateSessionCostBudget(id, req.costBudgetUsd, now);
+      const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;
+      if (costBudget && costBudget > 0) this.db.updateSessionCostBudget(id, costBudget, now);
       if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(id, runMaxCalls, now);
       if (runCheckpoints) this.db.updateSessionCostCheckpoints(id, runCheckpoints, now);
       this.db.addRunMember(runId, id, member.roleId);
@@ -6201,7 +6273,8 @@ export class SessionsService {
       .filter((session): session is SessionView => Boolean(session));
   }
 
-  createRun(req: CreateRunRequest): ServiceResult<{ run: RunView; sessions: SessionView[] }> {
+  createRun(req: CreateRunRequest, creationContext?: { parentSessionId?: string }): ServiceResult<{ run: RunView; sessions: SessionView[] }> {
+    const parentSessionId = creationContext?.parentSessionId;
     if (!req.agentIds?.length) return fail("at least one agent is required");
     if (req.agentIds.length > MAX_UI_SESSION_SUBSCRIPTIONS) {
       return fail(`at most ${MAX_UI_SESSION_SUBSCRIPTIONS} agents are allowed in one run`);
@@ -6241,6 +6314,12 @@ export class SessionsService {
       return fail(`no known agents on runner '${req.runnerId}': ${unknown.join(", ")}`, 404);
     }
 
+    const memberConfig = this.runMemberConfig(req, Boolean(parentSessionId));
+    const spawnRequest = { title: req.title, agentId: resolved.map((member) => member.agentId).join(", "),
+      operation: "run", request: req, members: resolved.map((member) => member.agentId) };
+    const admitted = this.admitRunChildren(parentSessionId, resolved.map(() => ({ ...memberConfig })), spawnRequest);
+    if (!admitted.ok || !admitted.data) return fail(admitted.error!, admitted.status);
+
     const now = Date.now();
     const runId = shortId("r_");
     const title = (req.title?.trim() || req.task.trim().slice(0, 60) || "Multi-agent run").slice(0, 120);
@@ -6255,18 +6334,19 @@ export class SessionsService {
     });
 
     const sessions: SessionView[] = [];
-    for (const { agentId, launch } of resolved) {
+    for (const [memberIndex, { agentId, launch }] of resolved.entries()) {
       const id = shortId("s_");
       // Multi-agent runs always isolate in their own worktree (brief: don't let
       // multiple agents write the same working tree).
       // Clone per member so guardrail normalization never changes the shared request.
-      const config = { ...(req.config ?? {}) };
-      if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
-      const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
+      const config = admitted.data[memberIndex]!;
+      const maxCalls = parentSessionId ? config.maxToolCalls : req.maxToolCalls;
+      const runMaxCalls = maxCalls != null ? Math.floor(maxCalls) : 0;
       const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
       if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
       const session = this.db.createSession({
         id,
+        parentSessionId,
         runnerId: req.runnerId,
         workspaceId: req.workspaceId,
         ...requestedProject.data,
@@ -6281,7 +6361,8 @@ export class SessionsService {
         now,
       });
       // Run-level guardrails apply to every member session; each member gates independently.
-      if (req.costBudgetUsd && req.costBudgetUsd > 0) this.db.updateSessionCostBudget(id, req.costBudgetUsd, now);
+      const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;
+      if (costBudget && costBudget > 0) this.db.updateSessionCostBudget(id, costBudget, now);
       if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(id, runMaxCalls, now);
       if (runCheckpoints) this.db.updateSessionCostCheckpoints(id, runCheckpoints, now);
       this.db.addRunMember(runId, id, agentId);

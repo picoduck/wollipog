@@ -4063,7 +4063,8 @@ app.post("/api/runs", async (req, reply) => {
   if (typeof body?.projectId === "string" && (!principal || !db.canAccessProject(principal, body.projectId))) {
     return reply.code(404).send({ error: "project not found" });
   }
-  return respond(reply, svc.createRun(body));
+  return respond(reply, svc.createRun(body,
+    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId } : undefined));
 });
 
 app.get("/api/pods", async () => ({ pods: db.listPods() }));
@@ -4167,7 +4168,8 @@ app.post("/api/workflow-runs", async (req, reply) => {
   if (typeof body?.projectId === "string" && (!principal || !db.canAccessProject(principal, body.projectId))) {
     return reply.code(404).send({ error: "project not found" });
   }
-  return respond(reply, svc.createWorkflowRun(body, workflowActor(req)));
+  return respond(reply, svc.createWorkflowRun(body, workflowActor(req), undefined,
+    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId } : undefined));
 });
 
 app.get("/api/automations", async () => automations.list());

@@ -1230,6 +1230,11 @@ const client = {
     return { project: structuredClone(value) };
   },
   updateProject: async (id: string, patch: import("@wollipog/protocol").UpdateProjectRequest) => {
+    if (nextProjectUpdateError) {
+      const message = nextProjectUpdateError;
+      nextProjectUpdateError = null;
+      throw new Error(message);
+    }
     const value = model.projects.find((candidate) => candidate.id === id);
     if (!value) throw new Error("project not found");
     Object.assign(value, patch, { updatedAt: value.updatedAt + 1 });
@@ -1338,9 +1343,12 @@ const client = {
   revealWorkspace: async () => ({ ok: true as const }),
 } as ApiClient;
 
+let nextProjectUpdateError: string | null = null;
+
 declare global {
   interface Window {
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
+      failNextProjectUpdate(message?: string): void;
       updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults">>): void;
       updateSession(
         id: string,
@@ -1416,6 +1424,7 @@ declare global {
 }
 
 window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
+  failNextProjectUpdate(message = "Could not save Project settings. Please retry.") { nextProjectUpdateError = message; },
   updateProject(id, patch) {
     const value = model.projects.find((candidate) => candidate.id === id);
     if (!value) throw new Error(`unknown Project: ${id}`);
