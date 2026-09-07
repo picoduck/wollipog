@@ -538,5 +538,3 @@ function HunkView({
     </div>
   );
 }
-
-export default GitDiffViewer;
