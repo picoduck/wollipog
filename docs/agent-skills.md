@@ -89,6 +89,29 @@ metadata remains intact when a machine snapshot updates a Git-backed skill. The 
 flow (durable snapshot + explicit assignment + source-digest check before replacing a directory)
 remains future work under #251.
 
+### Read-only adoption preflight
+
+`POST /api/skill-machine/:discoveryId/adoption-preflight` accepts the current `previewId` from
+the machine snapshot preview. Import consumes that preview, so preview the source again after
+importing it and creating an explicit assignment. This owner/admin-only endpoint is read-only:
+it does not adopt a directory, create assignments, change pins, or send a deployment command.
+It uses the same online Linux/protocol-111 gate and bounded opaque-candidate read as import.
+
+The source is read again and must match the preview's full content digest and discovery identity.
+After that read, current ownership, effective direct/group assignments, disabled overrides, and
+machine-wide pins are resolved again. The selected immutable library version must have valid bytes
+matching the source. At least one effective target must read the source's native harness directory
+(or the canonical directory); unsupported manual invocation blocks that target. The report lists
+configured unassigned siblings sharing the source directory instead of promising per-agent file
+isolation. It does not certify which running harnesses have loaded those files.
+
+`status: "prerequisites_met"` is an observation, not an adoption authorization. Every response
+sets `mutationSupported: false`; there is no mutation token. Closing, importing, replacing, or
+expiring the preview during a read invalidates the report. The future replacement transaction must
+recheck source identity/content, durable library state and explicit targeting under the provider-home
+lease, preserve the original directory recoverably, and handle interruption safely. Actual adoption,
+its UI, and non-Linux snapshot/Windows/WSL support remain under #251.
+
 ## Implemented Git import
 
 The Skills view's **Import from Git** action accepts HTTPS and SSH remotes (or GitHub
