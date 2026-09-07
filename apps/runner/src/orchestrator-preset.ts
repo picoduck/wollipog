@@ -39,7 +39,7 @@ export function orchestratorLaunchArgs(
   if (driver === "claude-code") {
     return ["--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--allowedTools", "mcp__wollipog__*",
       "--disallowedTools", "Bash,Write,Edit,MultiEdit,NotebookEdit,Agent,Task",
-      "--settings-sources", "", "--settings", '{"disableAllHooks":true}'];
+      "--setting-sources", "", "--settings", '{"disableAllHooks":true}'];
   }
   if (driver !== "codex" && driver !== "codex-app-server") {
     throw new Error("the orchestrator preset requires a native harness that can disable execution tools");
@@ -58,7 +58,8 @@ export function orchestratorLaunchArgs(
 /** Replace controlled launch flags on every resume, including stale persisted provisioning. */
 export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunchSpec["driver"]): string[] {
   const result: string[] = [];
-  const claudeFlags = new Set(["--tools", "--allowedTools", "--disallowedTools", "--mcp-config", "--settings", "--settings-sources"]);
+  // Retire the old misspelling too: persisted launch arguments may predate the fix.
+  const claudeFlags = new Set(["--tools", "--allowedTools", "--disallowedTools", "--mcp-config", "--settings", "--setting-sources", "--settings-sources"]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     const flag = arg.split("=")[0]!;

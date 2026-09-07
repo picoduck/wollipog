@@ -19,6 +19,9 @@ test("native orchestrator flags disable execution, hooks, and ambient tool sourc
   const claude = orchestratorLaunchArgs("claude-code", mcp);
   assert.equal(claude[claude.indexOf("--tools") + 1], "");
   assert.ok(claude.includes("--strict-mcp-config"));
+  assert.ok(claude.includes("--setting-sources"), "use the option recognized by the Claude CLI");
+  assert.equal(claude[claude.indexOf("--setting-sources") + 1], "");
+  assert.equal(claude.includes("--settings-sources"), false, "the historical spelling prevents launch");
   assert.ok(claude.includes('{"disableAllHooks":true}'));
   const codex = orchestratorLaunchArgs("codex", mcp);
   for (const setting of ['sandbox_mode="read-only"', 'approval_policy="never"', 'web_search="disabled"']) assert.ok(codex.includes(setting));
@@ -43,5 +46,18 @@ test("Codex MCP isolation disables every ambient server and fails closed on unve
   for (const invalid of ["not json", "{}", "[]", '[{"name":"wollipog","enabled":false}]',
     '[{"name":"wollipog","enabled":true},{"name":"unsafe.key"}]']) {
     assert.throws(() => isolateCodexMcpServers(invalid), /cannot verify/);
+  }
+});
+
+test("Claude resume removes both current and historical setting-source overrides", () => {
+  for (const spelling of ["--setting-sources", "--settings-sources"]) {
+    for (const override of [[spelling, "user,project,local"], [`${spelling}=user,project,local`]]) {
+      const stripped = stripOrchestratorLaunchArgs(["--model", "example", ...override], "claude-code");
+      assert.deepEqual(stripped, ["--model", "example"]);
+      const reprovisioned = [...stripped, ...orchestratorLaunchArgs("claude-code", mcp)];
+      assert.equal(reprovisioned.filter((arg) => arg === "--setting-sources").length, 1);
+      assert.equal(reprovisioned[reprovisioned.indexOf("--setting-sources") + 1], "");
+      assert.equal(reprovisioned.some((arg) => arg.startsWith("--settings-sources")), false);
+    }
   }
 });
