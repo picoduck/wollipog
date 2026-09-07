@@ -489,7 +489,6 @@ test("worktree tools use the canonical routes and default to the calling session
 test("create_worktree can finish after the ordinary control-plane request deadline", async () => {
   const { deps } = makeDeps();
   deps.requestTimeoutMs = 1;
-  deps.worktreeCreateTimeoutMs = 5_000;
   deps.fetch = async (_url, init) => {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(resolve, 20);

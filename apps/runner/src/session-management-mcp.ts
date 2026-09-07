@@ -62,7 +62,6 @@ export interface McpDeps {
   sleep?: (milliseconds: number) => Promise<void>;
   /** Deterministic request budgets for timeout tests. */
   requestTimeoutMs?: number;
-  worktreeCreateTimeoutMs?: number;
 }
 
 export interface ToolResult {
@@ -910,7 +909,7 @@ export const TOOLS: McpTool[] = [
         "POST",
         `/api/sessions/${encodeURIComponent(sessionId)}/worktrees`,
         body,
-        deps.worktreeCreateTimeoutMs ?? SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
+        SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
       );
       if (!r.ok) return errorResult(r.message);
       return textResult(mapWorktreeResult(r.data));
