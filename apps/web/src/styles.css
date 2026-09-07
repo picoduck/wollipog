@@ -11238,6 +11238,7 @@ body.shell-dock-dragging * {
 .skill-import-content { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; padding: 12px; background: var(--bg-elev-2); }
 .skills-git-source { min-width: 0; overflow-wrap: anywhere; }
 .skills-machine-import { min-width: 0; overflow-wrap: anywhere; }
+.skill-version-list { max-height: 18rem; overflow: auto; display: grid; gap: 8px; }
 .skills-table { width: 100%; border-collapse: collapse; }
 .skills-table th, .skills-table td { border-top: 1px solid var(--border); padding: 7px 9px; text-align: left; }
 .skills-table thead th { border-top: 0; color: var(--text-dim); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .04em; }

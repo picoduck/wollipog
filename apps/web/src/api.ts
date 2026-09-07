@@ -483,6 +483,10 @@ export function createApiClient(transport: ApiTransport) {
 
   getSkill: (id: string) => req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`),
 
+  listSkillVersions: (id: string, before?: string) => req<{ versions: import("./skills.js").SkillVersionSummary[]; nextCursor: string | null }>(`/api/skills/${encodeURIComponent(id)}/versions${before ? `?before=${encodeURIComponent(before)}` : ""}`),
+  previewSkillVersion: (id: string, versionId: string) => req<import("./skills.js").SkillVersionPreview>(`/api/skills/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}`),
+  restoreSkillVersion: (id: string, versionId: string, expectedLatestVersionId: string) => req<unknown>(`/api/skills/${encodeURIComponent(id)}/restore`, { method: "POST", body: JSON.stringify({ versionId, expectedLatestVersionId }) }),
+
   updateSkill: (id: string, body: { description?: string; groupId?: string | null }) =>
     req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`, {
       method: "PUT",

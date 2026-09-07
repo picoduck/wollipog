@@ -1,6 +1,20 @@
 # Agent Skills Management and Deployment
 
-Status: managed deployment, Git import, and Linux machine snapshot import implemented; remaining design below is phased.
+Status: managed deployment, Git import, Linux machine snapshot import, and version history with library rollback implemented; remaining design below is phased.
+
+## Version History and Library Rollback
+
+Open a skill's **Version History** to browse immutable revisions, 50 at a time.
+**Preview Version** compares every historical file with the current library content, including
+removed files, scripts, and binary content. Preview does not run instructions or scripts.
+After accepting the diff and assignment impact, **Restore Version** copies the selected content
+into a new immutable revision and syncs existing assignments. Earlier and newer revisions remain
+available, with original Git and machine-snapshot provenance preserved. The restore note identifies
+the source revision. A concurrent library update rejects the restore; preview again before retrying.
+
+This is library-wide rollback, not per-assignment version pinning. All assignments still track the
+latest library revision. Offline machines reconcile when they reconnect; unsupported platforms retain
+their existing no-write behavior. Group assignment and version pinning remain follow-ups under #251.
 
 ## Implemented machine snapshot import
 
