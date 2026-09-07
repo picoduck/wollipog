@@ -10,6 +10,8 @@ import {
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
   PROTOCOL_VERSION,
+  SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
+  SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
   providerAuthenticationReceiptCode,
   projectRunnerMessageForProtocol,
   projectSessionEventPayloadForProtocol,
@@ -167,6 +169,15 @@ test("PROTOCOL_VERSION is 111", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundInventory, 82);
   assert.equal(runnerSupportsProtocol(81, "managedBackgroundInventory"), false);
   assert.equal(runnerSupportsProtocol(82, "managedBackgroundInventory"), true);
+});
+
+test("worktree create deadlines preserve transport and error-reporting order", () => {
+  assert.ok(SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS > 30_000,
+    "runner preparation outlives the ordinary client deadline");
+  assert.ok(SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS > SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
+    "the client receives a server-side timeout before its own abort fires");
+  assert.ok(SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS < 300_000,
+    "Node fetch's default transport deadline must not preempt the client signal");
 });
 
 test("v99 queued prompt editing messages preserve opaque revisions and attachments", () => {

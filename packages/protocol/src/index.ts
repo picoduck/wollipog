@@ -327,6 +327,15 @@
 //      destination identity.
 // 111: on-demand, read-only machine skill discovery and bounded snapshot retrieval.
 export const PROTOCOL_VERSION = 111;
+
+/**
+ * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
+ * Keep both budgets below Node fetch's transport deadline, and keep the runner wait below the
+ * caller's HTTP deadline so a real runner failure is not masked by a client-side abort.
+ */
+export const SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS = 4 * 60_000;
+export const SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS =
+  SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS + 30_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
 export type { ConversationHandoffDraft } from "./conversation-handoff.js";
 import { pendingRequests } from "./worker-attention.js";

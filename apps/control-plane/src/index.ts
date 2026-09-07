@@ -33,6 +33,7 @@ import {
 import {
   PROTOCOL_VERSION,
   POLICY_HOOK_POLL_CAPABILITY,
+  SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
   parseMessage,
   CONTROL_PLANE_SERVICE,
   providerSupportsConversationFork,
@@ -3421,7 +3422,7 @@ async function runSessionWorktreeRequest(
       session.runnerId,
       requestId,
       { ...request, type: "session_worktree", requestId, sessionId },
-      150_000,
+      request.operation === "create" ? SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS : 150_000,
     );
     if (res.type !== "session_worktree_result") return reply.code(502).send({ error: "unexpected runner reply" });
     if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "worktree operation failed" });

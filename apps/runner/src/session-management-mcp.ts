@@ -2,6 +2,7 @@
 
 import type { Readable, Writable } from "node:stream";
 import {
+  SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
 import { VERSION } from "./version.js";
@@ -23,8 +24,8 @@ const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "orch
  * synthesis + provisioning and the control plane's permissionMode clamp. */
 const CONDUCTOR_AGENT_ID = "conductor";
 
-/** Cap on one CP round-trip. Without it, a half-open connection (the documented box-tunnel
- * blip) would stall a call for undici's ~300s default header/body timeouts. */
+/** Default cap on one CP round-trip. Without it, a half-open connection (the documented
+ * box-tunnel blip) would stall an ordinary call for undici's ~300s header/body timeouts. */
 const CP_TIMEOUT_MS = 30_000;
 const MAX_WAIT_SESSION_INTERVAL_MS = 10_000;
 
@@ -59,6 +60,8 @@ export interface McpDeps {
   /** Deterministic scheduling hooks for wait-session tests. */
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
+  /** Deterministic request budgets for timeout tests. */
+  requestTimeoutMs?: number;
 }
 
 export interface ToolResult {
@@ -97,6 +100,7 @@ async function cpFetch(
   method: string,
   path: string,
   body?: unknown,
+  timeoutMs = deps.requestTimeoutMs ?? CP_TIMEOUT_MS,
 ): Promise<{ ok: true; data: Json } | { ok: false; message: string; status?: number }> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["content-type"] = "application/json";
@@ -111,7 +115,7 @@ async function cpFetch(
       body: body !== undefined ? JSON.stringify(body) : undefined,
       // Bound the round-trip; the catch below maps the TimeoutError into an isError tool
       // result like any other network failure, so the model can relay "CP unreachable".
-      signal: AbortSignal.timeout(CP_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     return { ok: false, message: `control plane request failed: ${(err as Error)?.message ?? String(err)}` };
@@ -900,7 +904,13 @@ export const TOOLS: McpTool[] = [
       if (typeof sessionId !== "string") return sessionId;
       const body: Json = { branch: args.branch };
       if (typeof args.baseRef === "string") body.baseRef = args.baseRef;
-      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees`, body);
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(sessionId)}/worktrees`,
+        body,
+        SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
+      );
       if (!r.ok) return errorResult(r.message);
       return textResult(mapWorktreeResult(r.data));
     },

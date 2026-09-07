@@ -499,12 +499,13 @@ test("concurrent requests retain every created branch and deletion leaves attach
     });
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
     (manager as unknown as { configuredProjectPaths: string[] }).configuredProjectPaths = [join(root, "operator-location")];
-    const [first, second] = await Promise.all([
+    const [first, repeated, second] = await Promise.all([
+      manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" }),
       manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" }),
       manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/second" }),
     ]);
-    const repeated = await manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" });
-    assert.equal(repeated.worktree.id, first.worktree.id, "an idempotent retry keeps original ownership metadata");
+    assert.equal(repeated.worktree.id, first.worktree.id,
+      "an in-flight idempotent retry keeps original ownership metadata");
     const reattachedCreated = await manager.attachWorktree("s_multi", first.worktree.path);
     assert.equal(reattachedCreated.worktree.source, "created",
       "re-attaching a runner-owned path preserves its destructive cleanup ownership");
