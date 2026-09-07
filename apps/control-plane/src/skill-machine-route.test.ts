@@ -19,6 +19,7 @@ test("adoption preflight revalidates the source and current authority, rejects s
   let reads = 0;
   let beforeRead = async () => {};
   let corrupt = false;
+  let wrongRequestId = false;
   const candidate = { id: "opaque-id", name: "alpha", sourceDirectory: ".codex/skills", generation: "generation-1" };
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [
     { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" },
@@ -36,7 +37,8 @@ test("adoption preflight revalidates the source and current authority, rejects s
         await beforeRead();
         const payload = validateSkillPayload({ name: "alpha", files: [{ path: "SKILL.md", encoding: "utf8", content: `---\nname: alpha\n---\n${content}` }] });
         if (!payload.ok) throw new Error();
-        return { type: "skill_snapshot_result", runnerId, requestId, snapshot: { candidate, files: payload.files, digest: corrupt ? "bad" : payload.digest } };
+        return { type: "skill_snapshot_result", runnerId, requestId: wrongRequestId ? "unrelated-request" : requestId,
+          snapshot: { candidate, files: payload.files, digest: corrupt ? "bad" : payload.digest } };
       } },
   });
   const id = (await app.inject({ method: "POST", url: "/api/runners/runner-1/skill-snapshots" })).json().discoveryId;
@@ -67,6 +69,20 @@ test("adoption preflight revalidates the source and current authority, rejects s
   assert.equal(ready.json().mutationSupported, false);
   assert.match(ready.json().notice, /No directory was changed/);
   assert.equal(ready.json().source.digest, imported.latestVersion.digest);
+  wrongRequestId = true;
+  assert.equal((await check()).statusCode, 502, "uncorrelated runner results cannot satisfy the preflight");
+  wrongRequestId = false;
+  const canAccessSkill = db.canAccessSkill.bind(db);
+  let accessible = false;
+  db.canAccessSkill = (human, skillId) => accessible && canAccessSkill(human, skillId);
+  const readsBeforeDenied = reads;
+  assert.equal((await check()).statusCode, 409);
+  assert.equal(reads, readsBeforeDenied, "inaccessible library names do not trigger a source read");
+  accessible = true;
+  beforeRead = async () => { accessible = false; };
+  assert.equal((await check()).statusCode, 404, "skill access is rechecked after the read");
+  accessible = true;
+  beforeRead = async () => {};
   content = "Changed since preview";
   assert.equal((await check()).statusCode, 502, "generation alone cannot hide edited nested file contents");
   content = "Original";

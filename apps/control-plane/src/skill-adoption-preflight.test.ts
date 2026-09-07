@@ -10,6 +10,8 @@ const agents: AgentDefinition[] = [
   { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" },
   { id: "app", name: "App", command: "codex", args: [], env: {}, driver: "codex-app-server" },
   { id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code" },
+  { id: "conductor", name: "Conductor", command: "claude", args: [], env: {}, driver: "claude-code" },
+  { id: "wsl", name: "WSL", command: "codex", args: [], env: {}, driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } },
 ];
 const candidate = { id: "opaque", name: "alpha", sourceDirectory: ".codex/skills", generation: "one" };
 function payload(content = "Original") {
@@ -31,6 +33,7 @@ test("adoption prerequisites use effective targets and pins, and disclose shared
   assert.deepEqual(check().sharedReaders, ["app"]);
   assert.ok(check(".claude/skills").blockers.includes("source_not_targeted"));
   assert.equal(check(".agents/skills").status, "prerequisites_met");
+  assert.deepEqual(check(".agents/skills").sharedReaders, ["app", "claude"], "non-native contexts and the synthesized conductor are not counted");
   db.updateSkillAssignment(assignment.id, { invocation: "manual" });
   assert.ok(check().blockers.includes("invocation_unsupported"));
   db.updateSkillAssignment(assignment.id, { invocation: "agent", enabled: false });
@@ -43,6 +46,24 @@ test("adoption prerequisites use effective targets and pins, and disclose shared
   assert.equal(check().version!.id, skill.latestVersion!.id);
   assert.equal(db.listSkillAssignments(skill.id).length, 1);
   assert.equal(db.getSkill(skill.id)!.latestVersion!.digest, payload("Newer").digest);
+});
+test("manual Claude exposure is disclosed and mixed shared-directory policies block the preflight", (t) => {
+  const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
+  db.registerRunner({ runnerId: "one", hostname: "host", os: "linux", version: "1", agents: [
+    ...agents, { ...agents[2]!, id: "second-claude" },
+  ], workspaces: [] }, 1, 111);
+  const skill = db.createSkill(payload());
+  const check = (sourceDirectory = ".claude/skills") => skillAdoptionPreflight(db, "one", { ...candidate, sourceDirectory }, payload().digest);
+  db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "claude" }, invocation: "manual" });
+  assert.equal(check().status, "prerequisites_met", "Claude supports manual invocation");
+  assert.deepEqual(check().advisories, ["manual_variant_may_change_content"]);
+  assert.deepEqual(check(".agents/skills").advisories, [], "canonical copy remains untransformed");
+  db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "codex" }, invocation: "agent" });
+  assert.equal(check(".agents/skills").status, "prerequisites_met", "different harness directories may use different policies");
+  db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "second-claude" }, invocation: "agent" });
+  assert.ok(check().blockers.includes("shared_invocation_conflict"));
+  assert.ok(check(".agents/skills").blockers.includes("shared_invocation_conflict"));
+  assert.equal(check().status, "blocked");
 });
 test("adoption preflight respects group inheritance, direct disables, audience containment and invalid library bytes", (t) => {
   const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());

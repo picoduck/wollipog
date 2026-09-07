@@ -26,10 +26,16 @@ export function skillAdoptionPreflight(db: ControlPlaneDb, runnerId: string, can
   if (!targets.some((target) => target.sourceReader)) blockers.push("source_not_targeted");
   if (targets.some((target) => target.sourceReader && target.invocation === "manual" &&
     agents.find((agent) => agent.id === target.agentId)?.driver !== "claude-code")) blockers.push("invocation_unsupported");
+  const sourceClaudeTargets = targets.filter((target) => target.sourceReader &&
+    agents.find((agent) => agent.id === target.agentId)?.driver === "claude-code");
+  if (sourceClaudeTargets.some((target) => target.invocation === "manual") &&
+    sourceClaudeTargets.some((target) => target.invocation === "agent")) blockers.push("shared_invocation_conflict");
   return {
     status: blockers.length ? "blocked" as const : "prerequisites_met" as const,
     mutationSupported: false as const,
     blockers,
+    advisories: candidate.sourceDirectory === ".claude/skills" && sourceClaudeTargets.some((target) => target.invocation === "manual")
+      ? ["manual_variant_may_change_content"] : [],
     skillId: skill?.id ?? null,
     version: version ? { id: version.id, digest: version.digest } : null,
     targets,

@@ -131,7 +131,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       if (!payload.ok || payload.digest !== snapshot.digest || payload.digest !== preview.payload.digest) throw new Error();
       return { ...skillAdoptionPreflight(deps.db, discovery.runnerId, candidate, payload.digest),
         source: { candidate, digest: payload.digest, checkedAt: Date.now() },
-        notice: "Read-only prerequisite report. No directory was changed. A future adoption must revalidate the source and assignments under the provider-home lease before any replacement.",
+        notice: "Read-only prerequisite report. No directory was changed. Reader fields describe configured deployment exposure, not observed reads. A future adoption must revalidate the source and assignments under the provider-home lease before any replacement.",
       };
     } catch {
       return reply.code(502).send({ error: "The source changed or could not be validated. Preview it again before checking adoption prerequisites." });

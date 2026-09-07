@@ -101,9 +101,14 @@ The source is read again and must match the preview's full content digest and di
 After that read, current ownership, effective direct/group assignments, disabled overrides, and
 machine-wide pins are resolved again. The selected immutable library version must have valid bytes
 matching the source. At least one effective target must read the source's native harness directory
-(or the canonical directory); unsupported manual invocation blocks that target. The report lists
-configured unassigned siblings sharing the source directory instead of promising per-agent file
-isolation. It does not certify which running harnesses have loaded those files.
+(or the canonical directory); unsupported manual invocation or conflicting policies in a shared
+Claude directory block the whole report. Manual Claude targets carry a content-transformation
+advisory because the deployed harness variant may inject `disable-model-invocation: true` into
+`SKILL.md`; the canonical copy remains untransformed. The report lists configured siblings without
+an effective target (including disabled assignments) that share the source directory instead of
+promising per-agent file isolation. Reader fields describe potential configured deployment exposure,
+not current filesystem links or observed reads, especially for an unmanaged canonical directory.
+It does not certify which running harnesses have loaded those files.
 
 `status: "prerequisites_met"` is an observation, not an adoption authorization. Every response
 sets `mutationSupported: false`; there is no mutation token. Closing, importing, replacing, or
