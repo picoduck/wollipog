@@ -283,6 +283,34 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   assert.equal(memberCreate.status, 201, "an ordinary member can create a skill");
   const memberSkill = (await memberCreate.json() as { skill: { id: string } }).skill;
 
+  // Exercise group ownership through the real HTTP auth boundary, not only injected handlers.
+  const groupCreate = await api(httpBase, MEMBER_TOKEN, "/api/skill-groups", {
+    method: "POST", body: JSON.stringify({ name: "Member Tools" }),
+  });
+  assert.equal(groupCreate.status, 201);
+  const memberGroup = (await groupCreate.json() as { group: { id: string } }).group;
+  assert.equal((await api(httpBase, MEMBER_TOKEN, `/api/skills/${memberSkill.id}`, {
+    method: "PUT", body: JSON.stringify({ groupId: memberGroup.id }),
+  })).status, 200);
+  const groupRules = `/api/skill-groups/${memberGroup.id}/assignments`;
+  const groupRuleCreate = await api(httpBase, MEMBER_TOKEN, groupRules, {
+    method: "POST", body: JSON.stringify({ scopeKind: "instance", agentSelector: { kind: "all" }, enabled: false }),
+  });
+  assert.equal(groupRuleCreate.status, 201);
+  const groupRule = (await groupRuleCreate.json() as { assignment: { id: string } }).assignment;
+  for (const token of [SECOND_MEMBER_TOKEN, FOREIGN_ADMIN_TOKEN]) {
+    const groups = await (await api(httpBase, token, "/api/skill-groups")).json() as { groups: { id: string }[] };
+    assert.ok(!groups.groups.some(g => g.id === memberGroup.id));
+    assert.equal((await api(httpBase, token, groupRules)).status, 404);
+    assert.equal((await api(httpBase, token, `${groupRules}/${groupRule.id}`, {
+      method: "PATCH", body: JSON.stringify({ enabled: true }),
+    })).status, 404);
+    assert.equal((await api(httpBase, token, `${groupRules}/${groupRule.id}`, { method: "DELETE" })).status, 404);
+    assert.equal((await api(httpBase, token, `/api/skill-groups/${memberGroup.id}`, { method: "DELETE" })).status, 404);
+  }
+  assert.equal((await api(httpBase, MEMBER_TOKEN, `/api/skill-groups/${memberGroup.id}`, { method: "DELETE" })).status, 204);
+  assert.equal((await api(httpBase, MEMBER_TOKEN, groupRules)).status, 404);
+
   const memberAssignments = await api(httpBase, MEMBER_TOKEN, "/api/skill-assignments");
   assert.equal(memberAssignments.status, 200, "an ordinary member can list skill assignments");
 
