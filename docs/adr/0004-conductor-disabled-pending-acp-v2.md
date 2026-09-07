@@ -1,6 +1,6 @@
 # ADR 0004: Disable the Conductor Pending ACP v2
 
-- Status: Accepted (amended 2026-08-23: gate mechanism changed, see Amendment)
+- Status: Superseded by [ADR 0006](0006-orchestration-as-a-session-capability.md)
 - Date: 2026-07-25
 - Decision owners: Wollipog maintainers
 

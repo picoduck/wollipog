@@ -2026,6 +2026,8 @@ interface SessionRow {
   cost_usd: number;
   adopted: number;
   cost_budget_usd: number | null;
+  parent_session_id: string | null;
+  max_child_sessions: number | null;
   cost_budget_step_usd: number | null;
   cost_checkpoints_usd: string | null;
   cost_checkpoint_approved_usd: number | null;
@@ -2861,6 +2863,8 @@ export interface UsageAggregationQuery {
 
 export interface NewSessionInput {
   id: string;
+  /** Trusted creator attribution, derived from the authenticated session credential. */
+  parentSessionId?: string;
   runnerId: string;
   workspaceId: string | null;
   /** CP-owned grouping. Omitted callers are inferred from the exact active runner/workspace link. */
@@ -3932,6 +3936,11 @@ export class ControlPlaneDb {
       // Phase 7 (cost-budget gating): accumulated-cost ceiling (USD). NULL ⇒ unlimited. CP-only —
       // never overwritten by a runner snapshot (like board_column/archived).
       "cost_budget_usd REAL",
+      "parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
+      "child_spawn_count INTEGER NOT NULL DEFAULT 0",
+      "max_child_sessions INTEGER",
+      "child_cost_reserved_usd REAL NOT NULL DEFAULT 0",
+      "child_tool_calls_reserved INTEGER NOT NULL DEFAULT 0",
       // Fixed allowance retained while Continue advances the absolute threshold.
       "cost_budget_step_usd REAL",
       // v105 cost governance: ascending soft checkpoints (JSON array of USD), the highest one the
@@ -3987,6 +3996,9 @@ export class ControlPlaneDb {
       "CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, archived, updated_at DESC, id)",
     );
     backfillLegacyProjects(db, Date.now());
+    db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id, id)");
+    // Retire launch discovery only. Keep definitions and session history for old transcripts.
+    db.exec("DELETE FROM runner_agents WHERE agent_id='conductor'");
     db.exec("UPDATE sessions SET cost_budget_step_usd=cost_budget_usd WHERE cost_budget_step_usd IS NULL AND cost_budget_usd IS NOT NULL");
     db.exec("UPDATE sessions SET max_tool_calls_step=max_tool_calls WHERE max_tool_calls_step IS NULL AND max_tool_calls IS NOT NULL");
     db.exec("UPDATE sessions SET title_source='user' WHERE title_source IS NULL");
@@ -4363,6 +4375,7 @@ export class ControlPlaneDb {
 
   /** Replace a runner's agent rows (used by registerRunner + discovery updates). */
   private replaceAgents(runnerId: string, agents: AgentDefinition[], now: number, persistEnvironment: boolean): void {
+    agents = agents.filter((agent) => agent.id !== "conductor");
     this.stmt("DELETE FROM runner_agents WHERE runner_id = ?").run(runnerId);
     const upAgent = this.stmt(
       `INSERT INTO agent_definitions (id, name, created_at) VALUES (?, ?, ?)
@@ -9491,6 +9504,24 @@ export class ControlPlaneDb {
     ).run(sessionId, scope.organizationId, scope.owner.kind, ownerId, now, now);
   }
 
+  childSessionAllocations(parentSessionId: string): { count: number; costBudgetUsd: number; maxToolCalls: number } {
+    return this.stmt(
+      `SELECT child_spawn_count AS count, child_cost_reserved_usd AS costBudgetUsd,
+              child_tool_calls_reserved AS maxToolCalls
+       FROM sessions WHERE id=?`,
+    ).get(parentSessionId) as unknown as { count: number; costBudgetUsd: number; maxToolCalls: number };
+  }
+
+  sessionHasIndividualOwner(sessionId: string): boolean {
+    const scope = this.sessionScope(sessionId);
+    if (!scope || scope.owner.kind !== "user") return false;
+    return Boolean(this.stmt(`SELECT 1 FROM identity_memberships membership
+      JOIN identity_users user ON user.user_id=membership.user_id
+      WHERE membership.organization_id=? AND membership.user_id=?
+        AND membership.role='owner' AND user.status='active'`)
+      .get(scope.organizationId, scope.owner.userId));
+  }
+
   createSession(input: NewSessionInput): SessionView {
     const scope = input.scope ?? this.inheritedSessionScope(input.runnerId, input.workspaceId);
     const inferredLocation = input.workspaceId ? this.findProjectLocation(input.runnerId, input.workspaceId) : null;
@@ -9551,6 +9582,20 @@ export class ControlPlaneDb {
       if (input.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(input.executionTarget), input.id);
+      }
+      if (input.parentSessionId) {
+        this.stmt("UPDATE sessions SET parent_session_id=? WHERE id=?")
+          .run(input.parentSessionId, input.id);
+        // Keep reservations after child deletion so deleting history cannot replenish a spawn
+        // allowance or spend the same parent budget a second time.
+        this.stmt(`UPDATE sessions SET child_spawn_count=child_spawn_count+1,
+          child_cost_reserved_usd=child_cost_reserved_usd+?,
+          child_tool_calls_reserved=child_tool_calls_reserved+? WHERE id=?`)
+          .run(input.config.costBudgetUsd ?? 0, input.config.maxToolCalls ?? 0, input.parentSessionId);
+      }
+      if (input.config.maxChildSessions !== undefined) {
+        this.stmt("UPDATE sessions SET max_child_sessions=? WHERE id=?")
+          .run(input.config.maxChildSessions, input.id);
       }
       const handoffRequest = validateExecutionHandoffRequest(input.executionHandoffRequest);
       if (handoffRequest) {
@@ -13725,6 +13770,8 @@ export class ControlPlaneDb {
       status,
       column,
       runId: row.run_id,
+      parentSessionId: row.parent_session_id ?? null,
+      maxChildSessions: row.max_child_sessions ?? undefined,
       useWorktree: row.use_worktree === 1,
       worktreePath: row.worktree_path,
       worktrees: (() => {

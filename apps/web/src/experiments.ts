@@ -21,9 +21,7 @@ export interface ExperimentFlags {
   readonly multiAgent: boolean;
   /** Collaboration Pods. */
   readonly pods: boolean;
-  /** The Conductor-Led Work preset. This toggle is the feature's only gate (ADR 0004
-   * amendment): the runner advertises a conductor whenever it can host one, and this
-   * device-local flag decides whether any surface offers it. */
+  /** Retired compatibility tombstone. Old saved opt-ins cannot resurrect Conductor. */
   readonly conductor: boolean;
 }
 
@@ -65,11 +63,10 @@ export function parseExperimentFlags(raw: string | null): ExperimentFlags {
     typeof record[id] === "boolean" ? (record[id] as boolean) : DEFAULT_EXPERIMENT_FLAGS[id];
   // A legacy payload can never prove a conductor opt-in: stored true was the old default and
   // stored false agrees with the new default, so the legacy branch is simply off.
-  const conductor = record.v === EXPERIMENTS_SCHEMA_VERSION ? flag("conductor") : false;
   return {
     multiAgent: flag("multiAgent"),
     pods: flag("pods"),
-    conductor,
+    conductor: false,
   };
 }
 
@@ -114,6 +111,7 @@ export function setExperimentFlag(
   enabled: boolean,
   instanceScope = LOCAL_INSTANCE_SCOPE,
 ): void {
+  if (id === "conductor") return;
   const next = { ...getExperimentFlags(instanceScope), [id]: enabled };
   flagsByScope.set(instanceScope, next);
   // Persistence is best-effort like every other preference; the in-memory value still wins

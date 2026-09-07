@@ -139,17 +139,17 @@ export function parsePolicyHookRequest(input: unknown): ParsedPolicyHookRequest 
   };
 }
 
-/** The conductor may orchestrate broad changes, but no stored rule may silently auto-approve its
- * requests. Keeping this invariant as ordinary policy data makes precedence inspectable/testable. */
-export function conductorSafetyPolicy(now = 0): GovernancePolicy {
+/** Shared audiences require a spawn approval by default; an individual owner may opt in with a
+ * higher-priority stored policy scoped to this same operation. */
+export function sessionSpawnSafetyPolicy(individualOwner = false, now = 0): GovernancePolicy {
   return {
-    policyId: "builtin:conductor-human-gate",
-    name: "Conductor actions require review",
-    effect: "ask",
-    priority: 1_000_000,
+    policyId: "builtin:session-spawn-human-gate",
+    name: "Review Agent-Created Sessions",
+    effect: individualOwner ? "allow" : "ask",
+    priority: -1_000_000,
     enabled: true,
     builtin: true,
-    scope: { agentId: "conductor" },
+    scope: { toolName: "wollipog.create_session" },
     createdAt: now,
     updatedAt: now,
   };

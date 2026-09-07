@@ -270,47 +270,25 @@ test("saved-default recovery buttons name the agent they actually select", async
   }
 });
 
-test("Conductor-Led Work is disabled unless the runner advertises an available conductor", async () => {
-  // The preset renders only behind the device-local experiment flag, which now defaults off;
-  // this test is about runner availability, so it opts in first.
+test("retired Conductor stays hidden and native orchestrator selection is sent at creation", async () => {
   setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
-  const disabledFixture = await mountFixture();
-  try {
-    await act(async () => { selectProject(disabledFixture.container, project.id); });
-    const conductor = [...disabledFixture.container.querySelectorAll('button[role="radio"]')]
-      .find((button) => button.textContent?.includes("Conductor-Led Work")) as HTMLButtonElement | undefined;
-    assert.ok(conductor);
-    assert.equal(conductor.disabled, true);
-    assert.match(conductor.textContent ?? "", /Requires an available native Claude conductor\./);
-  } finally {
-    await unmountFixture(disabledFixture);
-  }
-
   const enabledRunner: RunnerView = {
-    ...runner,
-    agents: [
-      ...runner.agents,
-      {
-        id: "conductor",
-        name: "Conductor (Agent Manager)",
-        command: "claude",
-        args: [],
-        env: {},
-        driver: "claude-code",
-        available: true,
-      },
-    ],
+    ...runner, protocolVersion: 109,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
   };
-  const enabledFixture = await mountFixture({ runners: [enabledRunner] });
+  const fixture = await mountFixture({ runners: [enabledRunner] });
   try {
-    await act(async () => { selectProject(enabledFixture.container, project.id); });
-    const conductor = [...enabledFixture.container.querySelectorAll('button[role="radio"]')]
-      .find((button) => button.textContent?.includes("Conductor-Led Work")) as HTMLButtonElement | undefined;
-    assert.ok(conductor);
-    assert.equal(conductor.disabled, false);
-  } finally {
-    await unmountFixture(enabledFixture);
-  }
+    await act(async () => { selectProject(fixture.container, project.id); });
+    assert.equal(fixture.container.textContent?.includes("Conductor-Led Work"), false);
+    const preset = fixture.container.querySelector<HTMLInputElement>("#new-session-orchestrator");
+    assert.ok(preset);
+    await act(async () => { preset.click(); });
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
+  } finally { await unmountFixture(fixture); }
 });
 
 test("Projects mode requires an explicit Project choice and No Project sends exact null identities", async () => {

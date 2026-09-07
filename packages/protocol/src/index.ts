@@ -322,8 +322,9 @@
 //      different interrupted questions.
 // 108: optional worker ownership and concurrent provider requests in the existing approval
 //      record. Ownership is a normalized spawning-tool id, never a raw provider thread id.
+// 109: session orchestration preset, trusted child attribution, and child creation guardrails.
 // 110: explicit cross-provider checkpoint handoffs carry a bounded portable draft and a fresh
-//      destination identity; v109 is reserved for the concurrent orchestration update.
+//      destination identity.
 // 111: on-demand, read-only machine skill discovery and bounded snapshot retrieval.
 export const PROTOCOL_VERSION = 111;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
@@ -471,6 +472,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingTargets: 95,
   sessionNamingDriftCodes: 97,
   sessionAgentControl: 100,
+  sessionOrchestration: 109,
   /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
   usageTokenBuckets: 103,
   /** v104 runners stamp the producing model on token_usage. */
@@ -981,6 +983,8 @@ export interface ClaudeCodeCapabilities {
 
 /** Resolved per-session knobs (model / reasoning effort / approval preset). */
 export interface SessionConfig {
+  /** Control-plane-owned lifetime cap on directly created child sessions. Default: four. */
+  maxChildSessions?: number;
   model?: string;
   effort?: string;
   permissionMode?: string;
@@ -3359,6 +3363,9 @@ export interface SessionCommandInvocationView {
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
   id: string;
+  /** Control-plane-attributed creator session. Never accepted from a client or runner snapshot. */
+  parentSessionId?: string | null;
+  maxChildSessions?: number;
   runnerId: string;
   workspaceId: string | null;
   workspaceName: string | null;

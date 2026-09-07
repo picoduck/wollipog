@@ -37,14 +37,11 @@ import {
 import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
-import { conductorAgentId, type SessionWorkMode } from "../workflow-presets.js";
-import { useExperiments } from "../use-experiments.js";
 import { handleRovingChoiceKeyDown, rovingChoiceTabIndex } from "./interactions.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
-import { agentDisplayName, GENERATED_CONDUCTOR_DISPLAY_NAME } from "../agent-presentation.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
@@ -158,15 +155,10 @@ export function NewSessionDialog({
         ? initialProjectLocation.workspaceId
       : runner?.workspaces[0]?.id) ?? "",
   );
-  // With the experiment off, no conductor exists anywhere in this dialog — not in the plain
-  // agent picker and not as the Conductor-Led Work preset; the guard effect below also resets
-  // a stranded conductor work mode back to an agent session. Read before the initial options
-  // because the first agent selection must already respect it.
-  const conductorExperimentEnabled = useExperiments().flags.conductor;
-  const initialAgentOptions = agentOptions(runner?.agents ?? [], { includeConductor: conductorExperimentEnabled });
+  const initialAgentOptions = agentOptions(runner?.agents ?? [], { includeConductor: false });
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
-  const [workMode, setWorkMode] = useState<SessionWorkMode>("agent");
+  const [orchestrator, setOrchestrator] = useState(false);
   const [launchSurface, setLaunchSurface] = useState<"direct" | "native_tui">("direct");
   const [advancedOpen, setAdvancedOpen] = useState(
     () => isAdvancedAgentId(initialAgentOptions, initialAgentSelection.agentId),
@@ -191,8 +183,8 @@ export function NewSessionDialog({
     isLaunchableProjectLocation(location, runners)) ?? [];
 
   const agentOpts = useMemo(
-    () => agentOptions(runner?.agents ?? [], { includeConductor: conductorExperimentEnabled }),
-    [runner?.agents, conductorExperimentEnabled],
+    () => agentOptions(runner?.agents ?? [], { includeConductor: false }),
+    [runner?.agents],
   );
   const primaryOpts = useMemo(() => primaryAgentOptions(agentOpts), [agentOpts]);
   const advancedOpts = useMemo(() => advancedAgentOptions(agentOpts), [agentOpts]);
@@ -204,8 +196,10 @@ export function NewSessionDialog({
   const executionTarget = executionTargets.find((target) => target.id === executionTargetId) ??
     executionTargets.find((target) => target.adapter === "host" &&
       target.workspaceStrategy === (useWorktree ? "worktree" : "in_place"));
-  const availableConductorId = conductorExperimentEnabled ? conductorAgentId(runner?.agents ?? []) : undefined;
   const agent = selectedAgentOption?.agent;
+  const orchestratorSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration") &&
+    agent?.capabilities?.permissionModes?.includes("orchestrator") &&
+    (!executionTarget || executionTarget.adapter === "host");
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
   const nativeTuiStartFenceSupported = runnerSupportsProtocol(
     runner?.protocolVersion,
@@ -217,7 +211,7 @@ export function NewSessionDialog({
     "Initial Native TUI launch",
   );
   const nativeTuiHostTarget = !executionTarget || executionTarget.adapter === "host";
-  const nativeTuiSupported = nativeTuiLaunchSupported && workMode === "agent" &&
+  const nativeTuiSupported = nativeTuiLaunchSupported && !orchestrator &&
     nativeTuiRunnerSupported && nativeTuiStartFenceSupported &&
     nativeTuiHostTarget && !selectedAgentOption?.disabled;
   const workspace = runner?.workspaces.find((item) => item.id === workspaceId);
@@ -268,25 +262,13 @@ export function NewSessionDialog({
     }
   };
 
-  const selectWorkMode = (next: SessionWorkMode) => {
-    if (next === "conductor") {
-      if (!availableConductorId) return;
-      setWorkMode("conductor");
-      setAgentId(availableConductorId);
-      selectHostMode(false);
-      return;
-    }
-    setWorkMode("agent");
-    setAgentId(savedSelection.agentId);
-  };
-
   const pickRunner = (id: string) => {
     setRunnerId(id);
     const r = runners.get(id);
     setWorkspaceId(r?.workspaces[0]?.id ?? "");
-    const options = agentOptions(r?.agents ?? [], { includeConductor: conductorExperimentEnabled });
+    const options = agentOptions(r?.agents ?? [], { includeConductor: false });
     const selection = savedAgentSelection(options, agentDefaults[id]);
-    setAgentId(workMode === "conductor" ? (conductorAgentId(r?.agents ?? []) ?? selection.agentId) : selection.agentId);
+    setAgentId(selection.agentId);
     setAdvancedOpen(isAdvancedAgentId(options, selection.agentId));
     setBrowsedPath(null);
     setBrowsing(false);
@@ -304,9 +286,9 @@ export function NewSessionDialog({
     if (!r?.workspaces.some((w) => w.id === loc.workspaceId)) return;
     setRunnerId(loc.runnerId);
     setWorkspaceId(loc.workspaceId);
-    const options = agentOptions(r.agents, { includeConductor: conductorExperimentEnabled });
+    const options = agentOptions(r.agents, { includeConductor: false });
     const selection = savedAgentSelection(options, agentDefaults[loc.runnerId]);
-    setAgentId(workMode === "conductor" ? (conductorAgentId(r.agents) ?? selection.agentId) : selection.agentId);
+    setAgentId(selection.agentId);
     setAdvancedOpen(isAdvancedAgentId(options, selection.agentId));
     setBrowsedPath(null);
     setBrowsing(false);
@@ -383,11 +365,8 @@ export function NewSessionDialog({
   }, [projectLocationId, projectsSupported, selectedProject, runnerId, workspaceId]);
 
   useEffect(() => {
-    if (workMode === "conductor" && !availableConductorId) {
-      setWorkMode("agent");
-      setAgentId(savedSelection.agentId);
-    }
-  }, [workMode, availableConductorId, savedSelection.agentId]);
+    if (!orchestratorSupported) setOrchestrator(false);
+  }, [orchestratorSupported]);
 
   useEffect(() => {
     if (launchSurface === "native_tui" && !nativeTuiSupported) setLaunchSurface("direct");
@@ -453,7 +432,8 @@ export function NewSessionDialog({
         agentId,
         useWorktree,
         executionTargetId: executionTarget?.id,
-        config: executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : undefined,
+        config: orchestrator ? { permissionMode: "orchestrator" }
+          : executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : undefined,
         workspacePath: (!projectsSupported || projectSelection === NO_PROJECT_SELECTION) ? browsedPath ?? undefined : undefined,
         acpSessionContext: additionalDirectories.length ? { additionalDirectories } : undefined,
         ...(launchSurface === "native_tui" ? { launchSurface: "native_tui" as const } : {}),
@@ -711,24 +691,7 @@ export function NewSessionDialog({
             </fieldset>
           )}
 
-          {/* Hidden entirely — not disabled-with-a-reason — when the experiment is off: unlike a
-              missing runner conductor, absence here is this device's own choice, made on the
-              Experimental settings page, and a one-option radiogroup would remain. */}
-          {conductorExperimentEnabled && <div className="field">
-            <span>Preset</span>
-            <div className="workflow-preset-grid" role="radiogroup" aria-label="Session Preset" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-              <button type="button" role="radio" aria-checked={workMode === "agent"} tabIndex={workMode === "agent" || !availableConductorId ? 0 : -1} className={`workflow-preset ${workMode === "agent" ? "on" : ""}`} onClick={() => selectWorkMode("agent")}>
-                <strong>Agent Session</strong>
-                <span>Work directly with one selected provider.</span>
-              </button>
-              <button type="button" role="radio" aria-checked={workMode === "conductor"} tabIndex={workMode === "conductor" && availableConductorId ? 0 : -1} aria-disabled={!availableConductorId} disabled={!availableConductorId} className={`workflow-preset ${workMode === "conductor" ? "on" : ""}`} onClick={() => selectWorkMode("conductor")}>
-                <strong>Conductor-Led Work</strong>
-                <span>{availableConductorId ? "Delegate sessions, workflows, gates, and guardrails." : "Requires an available native Claude conductor."}</span>
-              </button>
-            </div>
-          </div>}
-
-          {workMode === "agent" ? <div className="field">
+          <div className="field">
             <label htmlFor="new-session-agent">Agent</label>
             <div className="agent-select">
               <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={15} />
@@ -764,18 +727,18 @@ export function NewSessionDialog({
                 )}
               </div>
             )}
-          </div> : (
-            <div className="field">
-              <span>Agent</span>
-              <div className="static-pick">
-                <AgentIcon driver={agent?.driver ?? "claude-code"} agentName={agent?.name} size={15} />
-                {agent ? agentDisplayName(agent) : GENERATED_CONDUCTOR_DISPLAY_NAME}
-              </div>
-              <span className="muted">Manager reads are pre-approved; every mutation still presents an Allow/Reject card.</span>
-            </div>
-          )}
+          </div>
 
-          {workMode === "agent" && advancedOpts.length > 0 && (
+          {orchestratorSupported && <div className="field">
+            <label htmlFor="new-session-orchestrator">
+              <input id="new-session-orchestrator" type="checkbox" checked={orchestrator}
+                onChange={(event) => setOrchestrator(event.target.checked)} />
+              {" "}Orchestrator
+            </label>
+            <span className="muted">Manage child sessions without shell or file-write tools. This permission preset cannot change after creation.</span>
+          </div>}
+
+          {advancedOpts.length > 0 && (
             <details
               className="advanced-agents"
               open={advancedOpen}
@@ -804,7 +767,7 @@ export function NewSessionDialog({
             </details>
           )}
 
-          {workMode === "agent" && <div className="field">
+          <div className="field">
             <span>Harness</span>
             <div className="workflow-preset-grid" role="radiogroup" aria-label="Harness" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
               <button
@@ -846,9 +809,9 @@ export function NewSessionDialog({
             {launchSurface === "native_tui" && (
               <span className="muted">No structured events or approval cards. Manager policy hook status appears after launch.</span>
             )}
-          </div>}
+          </div>
 
-          {workMode === "agent" && <div className="field">
+          <div className="field">
             <span>Mode</span>
             {/* §11.1's headline example: this dialog used THREE choice patterns at once inside
                 520px — a native select, aria-checked cards, and this bespoke `.seg`. One of them
@@ -904,12 +867,10 @@ export function NewSessionDialog({
                 </span>
               </label>
             )}
-          </div>}
+          </div>
 
           <p className="muted new-session-hint">
-            {workMode === "conductor"
-              ? "Describe the outcome after the session opens; the conductor will propose each manager mutation for approval."
-              : "Pick the model, effort, approvals, and your first message once the session opens."}
+            Pick the model, effort, and your first message once the session opens.
           </p>
         </div>
     </Modal>}

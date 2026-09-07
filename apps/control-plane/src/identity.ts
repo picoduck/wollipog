@@ -22,6 +22,8 @@ export interface AgentPrincipal {
   actorId: string;
   /** Present only for the general runner-minted credential, which is confined to one session. */
   credentialSessionId?: string;
+  /** Derived from the credential's persisted session, never from request data. */
+  orchestrator?: boolean;
   userId?: undefined;
   organizationId: string;
   delegatedScope: ResourceScope;
@@ -91,6 +93,7 @@ export function mutationAuthorizationError(
 }
 
 export function agentDelegationAuthorizationError(routePath: string, principal: AgentPrincipal): string | null {
+  if (principal.orchestrator && routePath === "/api/governance/policies") return null;
   const resourceRoute = routePath === "/api/compatibility" || routePath === "/api/runners" || routePath === "/api/sessions" ||
     routePath.startsWith("/api/sessions/");
   if (resourceRoute || principal.delegatedScope.owner.kind === "organization") return null;
@@ -101,11 +104,16 @@ export function agentCredentialSessionTargetError(
   routePath: string,
   principal: AgentPrincipal,
   targetSessionId: string,
+  targetParentSessionId?: string | null,
 ): string | null {
   const worktreeRoute = routePath === "/api/sessions/:id/worktrees" ||
     routePath === "/api/sessions/:id/worktrees/attach" ||
     routePath === "/api/sessions/:id/worktrees/select" ||
     routePath === "/api/sessions/:id/worktrees/discard";
+  if (principal.orchestrator && (worktreeRoute || routePath === "/api/sessions/:id/prompt" || routePath === "/api/sessions/:id/stop")) {
+    return principal.credentialSessionId && targetParentSessionId === principal.credentialSessionId &&
+      targetSessionId !== principal.credentialSessionId ? null : "the orchestrator may manage only its direct child sessions";
+  }
   if (!worktreeRoute) return null;
   return principal.credentialSessionId && principal.credentialSessionId !== targetSessionId
     ? "the session credential may manage only its own session"

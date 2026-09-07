@@ -54,23 +54,6 @@ export function extractBearer(header: string | undefined | null): string | null 
   return m ? m[1]!.trim() : null;
 }
 
-/** Authenticate the manager MCP sidecar without turning a runner credential into a general REST
- * credential. The active token must belong to the runner hosting the exact actively executing
- * conductor session; idle, terminal, worker, and fabricated claims fail closed. */
-export function isAuthenticatedConductorClaim(input: {
-  credentialValid: boolean;
-  claimedSessionId: unknown;
-  session: { id: string; agentId: string | null; status: string } | null | undefined;
-}): boolean {
-  return input.credentialValid &&
-    typeof input.claimedSessionId === "string" &&
-    input.claimedSessionId.length > 0 &&
-    input.claimedSessionId.length <= 256 &&
-    input.session?.id === input.claimedSessionId &&
-    input.session.agentId === "conductor" &&
-    ["starting", "running", "input_required"].includes(input.session.status);
-}
-
 /** Authenticate a runner-minted exact-session credential used by the general CLI/MCP surface. */
 export function isAuthenticatedAgentControlClaim(input: {
   credentialValid: boolean;
@@ -105,14 +88,11 @@ export function isPolicyHookApiRouteAllowed(method: string, routePath: string): 
 }
 
 /**
- * Exact HTTP surface the manager conductor may reach with the runner/control-plane token.
- *
- * The conductor sidecar needs enough read/write access to inspect the fabric and operate the
- * workflow tools it exposes, but a runner registration secret must never become a
+ * Exact HTTP surface a purpose-bound agent credential may reach. It must never become a
  * device-equivalent credential. Match Fastify's canonical route pattern (not the raw URL) and
  * the HTTP method so a newly-added API is denied until it is deliberately added here.
  */
-const CONDUCTOR_API_ROUTES = new Set([
+const AGENT_CONTROL_API_ROUTES = new Set([
   "GET /api/compatibility",
   "GET /api/runners",
   "GET /api/sessions",
@@ -145,14 +125,17 @@ const CONDUCTOR_API_ROUTES = new Set([
   "POST /api/artifacts/screenshots",
 ]);
 
-export function isConductorApiRouteAllowed(method: string, routePath: string): boolean {
-  return CONDUCTOR_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
-}
+const ORCHESTRATOR_API_ROUTES = new Set([
+  "GET /api/compatibility", "GET /api/runners", "GET /api/sessions", "GET /api/sessions/:id",
+  "GET /api/sessions/:id/events", "GET /api/governance/policies",
+  "POST /api/sessions", "POST /api/sessions/:id/prompt", "POST /api/sessions/:id/stop",
+  "POST /api/sessions/:id/worktrees", "POST /api/sessions/:id/worktrees/attach",
+  "POST /api/sessions/:id/worktrees/select", "POST /api/sessions/:id/worktrees/discard",
+]);
 
-/** The general surface deliberately reuses the reviewed manager allowlist. Worktree additions are
- * made once here when #583 lands, so the CLI and MCP server cannot diverge. */
-export function isAgentControlApiRouteAllowed(method: string, routePath: string): boolean {
-  return isConductorApiRouteAllowed(method, routePath);
+export function isAgentControlApiRouteAllowed(method: string, routePath: string, permissionMode?: string | null): boolean {
+  if (permissionMode === "orchestrator") return ORCHESTRATOR_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
+  return AGENT_CONTROL_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
 }
 
 /**

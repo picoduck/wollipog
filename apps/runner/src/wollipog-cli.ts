@@ -9,11 +9,11 @@ import {
 } from "@wollipog/protocol";
 import {
   executeManagerTool,
-  serveConductorMcp,
+  serveSessionManagementMcp,
   type McpDeps,
   type McpFetch,
   type ToolResult,
-} from "./conductor-mcp.js";
+} from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
 
 type Write = (text: string) => void;
@@ -272,6 +272,7 @@ export async function runWollipogCli(
     selfSessionId: sessionId,
     token,
     actorHeader: sessionId ? WOLLIPOG_AGENT_ACTOR_SESSION_HEADER : null,
+    orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
   });
   const data = payload(result);
   if (json) io.stdout(`${JSON.stringify(data)}\n`);
@@ -302,8 +303,9 @@ export async function runAgentControlMcp(env: NodeJS.ProcessEnv): Promise<void> 
     selfSessionId,
     token,
     actorHeader: WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+    orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
   };
-  serveConductorMcp(process.stdin, process.stdout, deps);
+  serveSessionManagementMcp(process.stdin, process.stdout, deps);
   process.stdin.on("end", () => process.exit(0));
   console.error(`[wollipog-mcp] serving session-scoped tools for ${selfSessionId}`);
 }

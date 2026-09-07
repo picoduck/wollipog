@@ -9,7 +9,7 @@ import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
-import type { McpFetch } from "./conductor-mcp.js";
+import type { McpFetch } from "./session-management-mcp.js";
 import { runWollipogCli } from "./wollipog-cli.js";
 
 test("CLI emits stable JSON and authenticates list requests as the exact session", async () => {
@@ -47,6 +47,7 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
         id: "s_child", title: "Child", status: "running", runnerId: "r1", workspaceId: null,
         agentId: null, runId: null, costBudgetUsd: null, costCheckpointsUsd: null, costCheckpointApprovedUsd: null, maxToolCalls: null, pendingApproval: null,
         archived: false,
+        parentSessionId: null,
       }],
     });
     assert.equal(calls[1]!.url, "http://127.0.0.1:4317/api/sessions");

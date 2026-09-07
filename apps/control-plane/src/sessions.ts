@@ -123,10 +123,11 @@ import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
+import { childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
 import { type GuardrailFields, normalizeCostCheckpoints,
   approvalForDecision,
-  conductorSafetyPolicy,
+  sessionSpawnSafetyPolicy,
   evaluateApprovalPolicies,
   evaluateHookApprovalPolicies,
   evaluatePolicies,
@@ -443,6 +444,9 @@ export function capabilityConfigError(
   config: SessionConfig | undefined,
   capabilities: AgentCapabilities | undefined,
 ): string | null {
+  if (config?.permissionMode === "orchestrator" && !capabilities?.permissionModes?.includes("orchestrator")) {
+    return "the orchestrator preset requires explicit support from this agent installation";
+  }
   if (!config || !capabilities) return null;
   if (config.model && capabilities.models.length && !capabilities.models.some((model) => model.id === config.model)) {
     return `model ${JSON.stringify(config.model)} is not supported by this agent installation`;
@@ -483,9 +487,7 @@ export function normalizeClaudePersistedConfig(
   const configuredMode = config.permissionMode;
   const permissionMode = configuredMode && (capabilities.permissionModes ?? []).includes(configuredMode)
     ? configuredMode
-    : agentId === CONDUCTOR_AGENT_ID && (capabilities.permissionModes ?? []).includes("default")
-      ? "default"
-      : undefined;
+    : configuredMode === "orchestrator" ? "orchestrator" : undefined;
   return { ...config, effort, permissionMode };
 }
 
@@ -627,27 +629,13 @@ export function defaultPermissionModeForNewSession(
   return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
 }
 
-/** Conductor clamp: sessions of the "conductor" agent must stay in permissionMode "default" —
- * the only mode where every mcp__manager__ mutation parks on a human Allow/Reject card. Any other
- * mode (notably the driver's "acceptEdits" fallback) would let the conductor drive the manager
- * ungated. Returns the rejection text, or null when the config is acceptable. */
-function conductorConfigError(agentId: string | null | undefined, config: SessionConfig | undefined): string | null {
-  if (agentId !== CONDUCTOR_AGENT_ID) return null;
-  if (config?.permissionMode && config.permissionMode !== "default") {
-    return `the conductor only runs in permissionMode "default" (got "${config.permissionMode}")`;
-  }
-  return null;
-}
-
 function workflowMemberCapabilityError(
   agentId: string,
   config: SessionConfig | undefined,
   launch: AgentLaunch,
   orchestrator: boolean,
 ): string | null {
-  const effectiveConfig = orchestrator && agentId === CONDUCTOR_AGENT_ID
-    ? { ...config, permissionMode: "default" }
-    : config;
+  const effectiveConfig = config;
   const error = capabilityConfigError(effectiveConfig, launch.capabilities);
   return error ? `${agentId}: ${error}` : null;
 }
@@ -1382,7 +1370,7 @@ export class SessionsService {
   }
 
   governancePolicies(): GovernancePolicy[] {
-    return [conductorSafetyPolicy(), ...this.db.listGovernancePolicies()];
+    return [sessionSpawnSafetyPolicy(), ...this.db.listGovernancePolicies()];
   }
 
   /** Authenticated, content-minimized transport endpoint used by the runner's Claude hook. */
@@ -2400,6 +2388,75 @@ export class SessionsService {
     return ok(projectScope);
   }
 
+  private sessionSpawnGate(parentSessionId: string, request: CreateSessionRequest): ServiceResult<null> {
+    const parent = this.db.getSession(parentSessionId);
+    if (!parent) return fail("parent session not found", 404);
+    const now = Date.now();
+    const toolName = "wollipog.create_session";
+    const decision = evaluateApprovalPolicies({
+      scope: approvalScope(parent, { context: { toolName } }),
+      status: parent.status === "input_required" ? "running" : parent.status,
+      costUsd: parent.costUsd,
+      toolCallCount: parent.toolCallCount ?? 0,
+      escalated: false,
+    }, [
+      ...this.db.listGovernancePolicies(),
+      sessionSpawnSafetyPolicy(this.db.sessionHasIndividualOwner(parent.id)),
+    ]);
+    const fingerprint = createHash("sha256").update(JSON.stringify({
+      request,
+      parentSessionId,
+      ordinal: this.db.childSessionAllocations(parentSessionId).count,
+    })).digest("hex");
+    const requestId = `spawn_${fingerprint}`;
+    this.reconcilePolicyHookTimeouts(now, parentSessionId);
+    const stored = this.db.getPolicyHookApproval(parentSessionId, requestId);
+    if (stored) {
+      if (stored.status === "allowed") return ok(null);
+      if (stored.status !== "pending" && stored.status !== "queued") {
+        return fail("child session creation was rejected or its approval expired", 403);
+      }
+      this.db.touchPolicyHookApproval(parentSessionId, requestId, now);
+      this.db.promoteNextPolicyHookApproval(parentSessionId, now);
+      this.hub.sessionChangedById(parentSessionId);
+      return fail(`Child creation requires approval in parent session ${parentSessionId} (request ${requestId}). Retry the same request after approval.`, 428);
+    }
+    const approval: PendingApproval = {
+      requestId,
+      kind: "policy_hook",
+      title: `${parent.title} requests a child: ${request.title || request.agentId}`.slice(0, 240),
+      context: { toolName },
+      governancePolicyId: decision.policy!.policyId,
+      options: [
+        { optionId: "allow", name: "Create Child", kind: "allow_once" },
+        { optionId: "deny", name: "Reject", kind: "reject_once" },
+      ],
+      ...(decision.policy?.askTimeout ? { expiresAt: now + decision.policy.askTimeout * 1000 } : {}),
+    };
+    const audits = [
+      this.governanceAuditRecord(parent, approval, "request", "pending", { kind: "agent", id: parentSessionId }, now),
+      this.governanceAuditRecord(parent, approval, "policy_decision",
+        decision.effect === "ask" ? "asked" : decision.effect === "allow" ? "allowed" : "denied",
+        { kind: "policy", id: decision.policy!.policyId }, now),
+    ];
+    if (decision.effect === "ask") {
+      const begun = this.db.beginPolicyHookApproval({
+        sessionId: parentSessionId, requestId, requestFingerprint: fingerprint,
+        governancePolicyId: decision.policy!.policyId, approval, expiresAt: approval.expiresAt, audits, now,
+      });
+      if (begun.kind === "conflict") return fail("another request already owns this child creation approval", 409);
+      this.notifyTransition(parent, parentSessionId);
+      this.hub.sessionChangedById(parentSessionId);
+      return fail(`Child creation requires approval in parent session ${parentSessionId} (request ${requestId}). Retry the same request after approval.`, 428);
+    }
+    this.db.recordTerminalPolicyHookDecision({
+      sessionId: parentSessionId, requestId, requestFingerprint: fingerprint,
+      governancePolicyId: decision.policy!.policyId,
+      status: decision.effect === "allow" ? "allowed" : "denied", approval, audits, now,
+    });
+    return decision.effect === "allow" ? ok(null) : fail("child session creation is denied by policy", 403);
+  }
+
   private conductorRemovedFromDiscovery(runnerId: string): boolean {
     return this.db.getRunner(runnerId)?.agentsRefreshed === true &&
       !this.db.getAgentLaunch(runnerId, CONDUCTOR_AGENT_ID);
@@ -2412,8 +2469,33 @@ export class SessionsService {
     cleanupUndelivered = false,
     initiallyArchived = false,
     allowProjectWithoutLocation = false,
-    creationContext?: { defaultOwnerUserId?: string },
+    creationContext?: { defaultOwnerUserId?: string; parentSessionId?: string },
   ): ServiceResult<SessionView> {
+    // Attribution is supplied only by the authenticated route, never by the request payload.
+    const spawnRequest = req;
+    if (req.agentId === CONDUCTOR_AGENT_ID) {
+      return fail("The Conductor agent is retired; select an ordinary agent to orchestrate child sessions.", 409);
+    }
+    const parentSessionId = creationContext?.parentSessionId;
+    if (parentSessionId) {
+      const parent = this.db.getSession(parentSessionId);
+      if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
+        return fail("the creating parent session is no longer active", 409);
+      }
+      const allocated = this.db.childSessionAllocations(parentSessionId);
+      const guarded = childSessionGuardrails({
+        ...parent,
+        costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
+        toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
+      }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.count);
+      if ("error" in guarded) return fail(guarded.error, 409);
+      req = { ...req, config: guarded.config };
+    }
+    if (req.config?.maxChildSessions !== undefined &&
+        (!Number.isSafeInteger(req.config.maxChildSessions) || req.config.maxChildSessions < 0 ||
+          req.config.maxChildSessions > 64)) {
+      return fail("maxChildSessions must be an integer from 0 to 64", 400);
+    }
     const snapshotCommand = delivery?.commandSnapshots?.[0];
     if (delivery?.commandSnapshots &&
         (delivery.commandSnapshots.length !== 1 || snapshotCommand?.type !== "start_session")) {
@@ -2588,7 +2670,7 @@ export class SessionsService {
           requestedConfig.permissionMode = preference.permissionMode;
         }
       }
-      if (req.agentId !== CONDUCTOR_AGENT_ID && requestedConfig.permissionMode === undefined) {
+      if (requestedConfig.permissionMode === undefined) {
         requestedConfig.permissionMode = defaultPermissionModeForNewSession(launch.driver, agentCapabilities);
       }
       const explicitConfigError = capabilityConfigError(
@@ -2600,6 +2682,15 @@ export class SessionsService {
       if (resolved.value) Object.assign(requestedConfig, resolved.value);
     }
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
+    if (requestedConfig.permissionMode === "orchestrator") {
+      if (req.launchSurface === "native_tui") return fail("the orchestrator preset requires the structured session harness", 409);
+      const unsupported = this.capabilityFailure(req.runnerId, "sessionOrchestration", "Orchestrator preset");
+      if (unsupported) return unsupported;
+      if (!["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
+          (launch.context?.kind ?? "native") !== "native" || executionTarget.adapter !== "host") {
+        return fail("the orchestrator preset requires a native Codex or Claude harness on the host", 409);
+      }
+    }
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);
     if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
@@ -2611,13 +2702,6 @@ export class SessionsService {
     const titleSource = snapshotSpec?.titleSource ?? (req.title?.trim() ? "user" as const : "generated" as const);
     // Cloned so the clamp below never mutates the caller's request object.
     const config = { ...requestedConfig };
-    // Conductor clamp, seam 1/4: reject an explicit non-default mode, and FORCE "default" when
-    // absent — the New Session dialog sends no config and the driver would fall back to
-    // "acceptEdits" (no gate at all). The forced value persists to the DB, rides the launch
-    // spec, and echoes into every later prompt_session config.
-    const conductorErr = conductorConfigError(req.agentId, config);
-    if (conductorErr) return fail(conductorErr, 409);
-    if (req.agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
     if (config.costBudgetUsd !== undefined && config.costBudgetUsd <= 0) delete config.costBudgetUsd;
     if (config.maxToolCalls !== undefined) {
       config.maxToolCalls = Math.floor(config.maxToolCalls);
@@ -2721,10 +2805,14 @@ export class SessionsService {
     }
     // A thrown staging failure leaves no CP resource to orphan. Re-entering with the same
     // deterministic ID reuses the exact row if materialization completed before a crash.
+    if (parentSessionId && !existing) {
+      const gate = this.sessionSpawnGate(parentSessionId, spawnRequest);
+      if (!gate.ok) return fail(gate.error!, gate.status);
+    }
     if (delivery) delivery.stage(plan!);
-
     const session = existing ?? this.db.createSession({
       id,
+      parentSessionId,
       runnerId: req.runnerId,
       workspaceId,
       ...requestedProject.data,
@@ -2855,6 +2943,10 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
+    const incomingMode = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config?.permissionMode : config?.permissionMode;
+    if (incomingMode !== undefined && (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
+      return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
+    }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
@@ -2937,10 +3029,6 @@ export class SessionsService {
       const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
       if (configCapabilityError) return fail(configCapabilityError, 409);
     }
-    // Conductor clamp, seam 3/4: the prompt-time config path also updates permissionMode —
-    // reject before updateSessionConfig can persist an ungated mode.
-    const conductorErr = conductorConfigError(session.agentId, effectiveConfig);
-    if (conductorErr) return fail(conductorErr, 409);
 
     const now = Date.now();
     // A config sent alongside the prompt applies to THIS turn (atomic change + send). A CLI
@@ -3104,6 +3192,9 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
+      return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
+    }
     const agentCapabilities = mergeSessionCapabilities(
       this.db.getRunner(session.runnerId)?.agents.find((agent) => agent.id === session.agentId)?.capabilities,
       session.driver === "acp"
@@ -3125,10 +3216,6 @@ export class SessionsService {
     const validationConfig = claudeModelConfigForValidation(config, agentCapabilities, session.driver);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
     if (configCapabilityError) return fail(configCapabilityError, 409);
-    // Conductor clamp, seam 2/4: guardrail-only writes (costBudgetUsd/maxToolCalls) pass; any
-    // permissionMode other than "default" is refused so the confirm gate can't be switched off.
-    const conductorErr = conductorConfigError(session.agentId, config);
-    if (conductorErr) return fail(conductorErr, 409);
     const merged = normalizeClaudePersistedConfig({
       model: config.model ?? session.model ?? undefined,
       effort: config.effort ?? session.effort ?? undefined,
@@ -5159,7 +5246,6 @@ export class SessionsService {
     for (const member of members) {
       const id = shortId("s_");
       const config = { ...(req.config ?? {}) };
-      if (member.agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
       if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
       const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
       const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
@@ -5318,7 +5404,6 @@ export class SessionsService {
       const snapshot = delivery.commandSnapshots?.[index];
       const config = { ...(snapshot?.type === "start_session" ? snapshot.spec.config : req.config) };
       if (!snapshot) {
-        if (member.agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
         if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
         if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
       }
@@ -6144,12 +6229,7 @@ export class SessionsService {
     const resolved: { agentId: string; launch: AgentLaunch }[] = [];
     const unknown: string[] = [];
     for (const agentId of req.agentIds) {
-      // Conductor clamp, seam 4/4: the run dialog default-selects EVERY agent (conductor
-      // included) and the run config is shared across members. Validate in this PRE-PERSIST
-      // loop so a rejected conductor member fails the whole request atomically — no partial
-      // run, no orphan member sessions.
-      const conductorErr = conductorConfigError(agentId, req.config);
-      if (conductorErr) return fail(conductorErr, 409);
+      if (agentId === CONDUCTOR_AGENT_ID) return fail("the conductor agent is retired", 409);
       const launch = this.db.getAgentLaunch(req.runnerId, agentId);
       const configCapabilityError = capabilityConfigError(req.config, launch?.capabilities);
       if (configCapabilityError) return fail(`${agentId}: ${configCapabilityError}`, 409);
@@ -6178,12 +6258,8 @@ export class SessionsService {
       const id = shortId("s_");
       // Multi-agent runs always isolate in their own worktree (brief: don't let
       // multiple agents write the same working tree).
-      // Per-member clone: a conductor member is forced to "default" (like createSession) so
-      // the persisted row, the launch spec, AND every later prompt's config echo carry the
-      // gate — otherwise the NULL row would echo undefined and the driver's "acceptEdits"
-      // fallback would run the manager tools ungated from turn 2 on.
+      // Clone per member so guardrail normalization never changes the shared request.
       const config = { ...(req.config ?? {}) };
-      if (agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
       if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
       const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
       const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);

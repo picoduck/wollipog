@@ -107,10 +107,8 @@ import {
   extractBearer,
   hashToken,
   isAuthenticatedAgentControlClaim,
-  isAuthenticatedConductorClaim,
   isAuthenticatedPolicyHookClaim,
   isAgentControlApiRouteAllowed,
-  isConductorApiRouteAllowed,
   isPolicyHookApiRouteAllowed,
   isTrustedLoopback,
   newDeviceToken,
@@ -415,24 +413,6 @@ function authedLocalBootstrap(
   return token && tokenMatchesHash(token, LOCAL_DEVICE_TOKEN_HASH) ? localApiPrincipal() : null;
 }
 
-/** Resolve the exact live conductor whose sidecar presented its runner's active credential. The
- * session claim and exact runner binding prevent that secret from becoming an unscoped REST token. */
-function authedConductor(req: { headers: { authorization?: string; [key: string]: unknown } }) {
-  const selected = selectCompatibleHeader(
-    req.headers,
-    WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
-    LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER,
-  );
-  const claimed = selected.ok ? selected.value : undefined;
-  const session = typeof claimed === "string" && claimed.length <= 256 ? db.getSession(claimed) : null;
-  const bearer = extractBearer(req.headers.authorization);
-  return isAuthenticatedConductorClaim({
-    credentialValid: Boolean(session && bearer && db.verifyActiveRunnerCredential(session.runnerId, hashToken(bearer))),
-    claimedSessionId: claimed,
-    session,
-  }) ? session : null;
-}
-
 /** Resolve one live session whose runner-minted control credential is bound to that exact row. */
 function authedAgentControl(req: { headers: { authorization?: string; [key: string]: unknown } }) {
   const claimed = req.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER];
@@ -479,7 +459,7 @@ function authedApiPrincipal(
   if (local) return local;
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
   const agentControl = authedAgentControl(req);
-  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath)) {
+  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, agentControl.permissionMode)) {
     const delegatedScope = db.sessionScope(agentControl.id);
     if (!delegatedScope) return null;
     return {
@@ -489,6 +469,7 @@ function authedApiPrincipal(
         kind: "agent",
         actorId: agentControl.id,
         credentialSessionId: agentControl.id,
+        ...(agentControl.permissionMode === "orchestrator" ? { orchestrator: true } : {}),
         organizationId: delegatedScope.organizationId,
         delegatedScope,
       },
@@ -504,21 +485,6 @@ function authedApiPrincipal(
       principal: {
         kind: "agent",
         actorId: policyHook.id,
-        organizationId: delegatedScope.organizationId,
-        delegatedScope,
-      },
-    };
-  }
-  const conductor = authedConductor(req);
-  if (conductor && isConductorApiRouteAllowed(req.method, routePath)) {
-    const delegatedScope = db.sessionScope(conductor.id);
-    if (!delegatedScope) return null;
-    return {
-      id: conductor.id,
-      name: conductor.agentName ?? "Conductor",
-      principal: {
-        kind: "agent",
-        actorId: conductor.id,
         organizationId: delegatedScope.organizationId,
         delegatedScope,
       },
@@ -632,7 +598,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
   if (sessionId && principal.kind === "agent") {
-    const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId);
+    const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId, db.getSession(sessionId)?.parentSessionId);
     if (credentialTargetError) return { statusCode: 404, error: "session not found" };
   }
   if (sessionId && !db.canAccessSession(principal, sessionId)) {
@@ -3114,6 +3080,8 @@ app.post("/api/sessions/:id/review-findings/bundle", async (req, reply) =>
 
 app.post("/api/sessions", async (req, reply) => {
   const principal = requestHuman(req);
+  const actor = requestPrincipal(req);
+  const parentSessionId = actor?.kind === "agent" ? actor.credentialSessionId : undefined;
   const body = req.body as CreateSessionRequest;
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return reply.code(400).send({ error: "session request is required" });
@@ -3129,11 +3097,11 @@ app.post("/api/sessions", async (req, reply) => {
   const created = svc.createSession(
     ownership.body,
     undefined,
-    ownership.scope,
+    parentSessionId ? db.sessionScope(parentSessionId) ?? undefined : ownership.scope,
     initialNativeTui,
     false,
     false,
-    { defaultOwnerUserId: principal?.userId },
+    { defaultOwnerUserId: principal?.userId, parentSessionId },
   );
   if (!created.ok || !created.data || ownership.body.launchSurface !== "native_tui") return respond(reply, created);
   const sessionId = created.data.id;
@@ -3330,8 +3298,11 @@ function questionPolicyAdministrator(req: FastifyRequest) {
 
 app.get("/api/governance/policies", async (req) => {
   const admin = questionPolicyAdministrator(req);
+  const principal = requestPrincipal(req);
   return { policies: svc.governancePolicies().filter((policy) =>
-    !policy.questionRule || canMutateQuestionPolicy(policy, undefined, requestHuman(req)?.userId, admin)) };
+    (!policy.questionRule || canMutateQuestionPolicy(policy, undefined, requestHuman(req)?.userId, admin)) &&
+    (!(principal?.kind === "agent" && principal.orchestrator) ||
+      !policy.scope.organizationId || policy.scope.organizationId === principal.organizationId)) };
 });
 
 app.put("/api/governance/policies/:policyId", async (req, reply) => {
