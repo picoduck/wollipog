@@ -5,6 +5,7 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type BoxView,
+  type AgentHarnessDefaultsView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
@@ -23,7 +24,8 @@ import {
   suggestedProjectLocation,
 } from "../project-session-selection.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { shortenPath } from "../format.js";
+import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
+import { savedSessionPermissionMode } from "../session-preset-defaults.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import {
   advancedAgentOptions,
@@ -44,7 +46,7 @@ import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
-import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { SegmentedControl, Select } from "./ui/ChoiceControls.js";
 
 /**
  * New Session is intentionally minimal — pick where it runs (runner + agent + workspace) and go.
@@ -158,7 +160,25 @@ export function NewSessionDialog({
   const initialAgentOptions = agentOptions(runner?.agents ?? [], { includeConductor: false });
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
-  const [orchestrator, setOrchestrator] = useState(false);
+  const [presetOverride, setPresetOverride] = useState<"default" | "orchestrator">("default");
+  const [harnessDefaults, setHarnessDefaults] = useState<{
+    api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
+  } | null>(null);
+  const [defaultsRetry, setDefaultsRetry] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setHarnessDefaults(null);
+    void api.agentHarnessDefaults().then(
+      (view) => { if (!cancelled) setHarnessDefaults({ api, scope: instanceScope, view, error: false }); },
+      (caught) => {
+        if (!cancelled) setHarnessDefaults({
+          api, scope: instanceScope, view: null, error: !(caught instanceof ApiError && caught.status === 404),
+        });
+      },
+    );
+    return () => { cancelled = true; };
+  }, [api, instanceScope, defaultsRetry]);
+  const defaultsReady = harnessDefaults?.api === api && harnessDefaults.scope === instanceScope && !harnessDefaults.error;
   const [launchSurface, setLaunchSurface] = useState<"direct" | "native_tui">("direct");
   const [advancedOpen, setAdvancedOpen] = useState(
     () => isAdvancedAgentId(initialAgentOptions, initialAgentSelection.agentId),
@@ -197,6 +217,8 @@ export function NewSessionDialog({
     executionTargets.find((target) => target.adapter === "host" &&
       target.workspaceStrategy === (useWorktree ? "worktree" : "in_place"));
   const agent = selectedAgentOption?.agent;
+  const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
+  const orchestrator = presetOverride === "orchestrator" || savedPermissionMode === "orchestrator";
   const orchestratorSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration") &&
     agent?.capabilities?.permissionModes?.includes("orchestrator") &&
     (!executionTarget || executionTarget.adapter === "host");
@@ -366,7 +388,7 @@ export function NewSessionDialog({
   }, [projectLocationId, projectsSupported, selectedProject, runnerId, workspaceId]);
 
   useEffect(() => {
-    if (!orchestratorSupported) setOrchestrator(false);
+    if (!orchestratorSupported) setPresetOverride("default");
   }, [orchestratorSupported]);
 
   useEffect(() => {
@@ -393,7 +415,9 @@ export function NewSessionDialog({
       : !!selectedProject && projectLocationLaunchable;
   const valid = projectPlacementValid && !!agentId && !!selectedAgentOption && !selectedAgentOption.disabled &&
     (!executionTarget || executionTarget.available) && cloudBudgetValid &&
-    (launchSurface !== "native_tui" || nativeTuiSupported) && !retainedSessionId;
+    (launchSurface !== "native_tui" || nativeTuiSupported) &&
+    (defaultsReady || presetOverride === "orchestrator") &&
+    (!orchestrator || orchestratorSupported) && !retainedSessionId;
 
   // Enter submits from any plain field. Exemptions: the directory browser's path input
   // preventDefaults its own Enter (navigate, not submit); buttons keep Enter as click; selects
@@ -433,7 +457,7 @@ export function NewSessionDialog({
         agentId,
         useWorktree,
         executionTargetId: executionTarget?.id,
-        config: orchestrator ? { permissionMode: "orchestrator" }
+        config: presetOverride === "orchestrator" ? { permissionMode: "orchestrator" }
           : executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : undefined,
         workspacePath: (!projectsSupported || projectSelection === NO_PROJECT_SELECTION) ? browsedPath ?? undefined : undefined,
         acpSessionContext: additionalDirectories.length ? { additionalDirectories } : undefined,
@@ -730,14 +754,25 @@ export function NewSessionDialog({
             )}
           </div>
 
-          {orchestratorSupported && <div className="field">
-            <label htmlFor="new-session-orchestrator">
-              <input id="new-session-orchestrator" type="checkbox" checked={orchestrator}
-                onChange={(event) => setOrchestrator(event.target.checked)} />
-              {" "}Orchestrator
-            </label>
-            <span className="muted">Manage child sessions without shell or file-write tools. This permission preset cannot change after creation.</span>
-          </div>}
+          <div className="field">
+            <span>Permission Preset</span>
+            <Select<"default" | "orchestrator"> label="Permission Preset" value={presetOverride}
+              onChange={setPresetOverride} options={[
+                { value: "default", label: !defaultsReady ? "Default (Not Loaded)"
+                  : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
+                  : "Harness Default" },
+                ...(orchestratorSupported ? [{ value: "orchestrator" as const, label: "Orchestrator" }] : []),
+              ]} />
+            {!defaultsReady && (harnessDefaults?.error ? <>
+              <span className="form-error">Could not load saved permission defaults. Retry before using Default.</span>
+              <button type="button" className="btn ghost sm" onClick={() => setDefaultsRetry((value) => value + 1)}>Retry Defaults</button>
+            </> : <span className="muted">Loading saved permission defaults…</span>)}
+            {orchestrator && <>
+              <span className="muted">Manage child sessions without shell or file-write tools. This permission preset cannot change after creation.</span>
+              {presetOverride === "default" && <span className="muted">Orchestrator is your saved Agent Harness default. Change it in Settings to use another default.</span>}
+              {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset requires a supported native host harness and runner. Choose a compatible target or change the saved default in Settings.</span>}
+            </>}
+          </div>
 
           {advancedOpts.length > 0 && (
             <details
@@ -813,7 +848,7 @@ export function NewSessionDialog({
               <span className="muted">Native TUI currently runs only on the host execution target.</span>
             )}
             {launchSurface === "native_tui" && (
-              <span className="muted">No structured events or approval cards. Manager policy hook status appears after launch.</span>
+              <span className="muted">No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Use Direct for tracked usage and guardrails. Manager policy hook status appears after launch.</span>
             )}
           </div>
 

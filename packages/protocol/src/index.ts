@@ -2977,6 +2977,19 @@ export interface AgentHarnessDefaultsView {
   defaults: AgentHarnessDefaultOption[];
 }
 
+/** Saved defaults apply as a complete combination, never partially under capability drift. */
+export function installationSupportsDefault(
+  installation: Pick<AgentHarnessDefaultInstallation, "models" | "effortLevels" | "permissionModes">,
+  config: AgentHarnessDefaultConfig,
+): boolean {
+  const model = config.model ? installation.models.find((candidate) => candidate.id === config.model) : undefined;
+  if (config.model && !model) return false;
+  const efforts = model?.efforts?.length ? model.efforts : installation.effortLevels;
+  if (config.effort && !efforts.includes(config.effort)) return false;
+  if (config.permissionMode && !installation.permissionModes.includes(config.permissionMode)) return false;
+  return Object.keys(config).length > 0;
+}
+
 export interface UpdateAgentHarnessDefaultRequest extends AgentHarnessIdentity {
   config: AgentHarnessDefaultConfig;
 }

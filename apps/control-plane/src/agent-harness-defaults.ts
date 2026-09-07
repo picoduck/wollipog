@@ -9,6 +9,8 @@ import type {
   AgentModel,
   UpdateAgentHarnessDefaultRequest,
 } from "@wollipog/protocol";
+import { installationSupportsDefault } from "@wollipog/protocol";
+export { installationSupportsDefault } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 
@@ -72,18 +74,6 @@ export function agentHarnessIdentityKey(identity: AgentHarnessIdentity): string 
 
 function visibleModels(capabilities: AgentCapabilities | undefined): AgentModel[] {
   return (capabilities?.models ?? []).filter((model) => model.id !== "default" && !model.hidden);
-}
-
-export function installationSupportsDefault(
-  installation: Pick<AgentHarnessDefaultInstallation, "models" | "effortLevels" | "permissionModes">,
-  config: AgentHarnessDefaultConfig,
-): boolean {
-  const model = config.model ? installation.models.find((candidate) => candidate.id === config.model) : undefined;
-  if (config.model && !model) return false;
-  const efforts = model?.efforts?.length ? model.efforts : installation.effortLevels;
-  if (config.effort && !efforts.includes(config.effort)) return false;
-  if (config.permissionMode && !installation.permissionModes.includes(config.permissionMode)) return false;
-  return Object.keys(config).length > 0;
 }
 
 export class AgentHarnessDefaultsSettings {
