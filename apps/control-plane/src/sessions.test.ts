@@ -95,6 +95,9 @@ test("conversation forks fail closed for every in-progress source lifecycle", ()
 });
 
 test("capability config validation rejects unverified effort and permission modes", () => {
+  assert.match(capabilityConfigError({ permissionMode: "orchestrator" }, undefined)!, /explicit support/);
+  assert.equal(capabilityConfigError({ permissionMode: "default" }, undefined), null,
+    "ordinary legacy sessions retain their existing compatibility behavior");
   const caps = {
     models: [], effortLevels: ["low"], slashCommands: [], supportsImages: false,
     supportsApprovals: false, permissionModes: ["acceptEdits"],
@@ -528,6 +531,14 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     assert.equal(svc.prompt(created.data!.id, "continue", undefined, undefined, { permissionMode: "default" }).status, 409);
     const ordinary = svc.createSession(request).data!;
     assert.equal(svc.setConfig(ordinary.id, { permissionMode: "orchestrator" }).status, 409);
+    const advertised = agent.capabilities;
+    delete agent.capabilities;
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const before = db.listSessions().length;
+    const legacy = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } });
+    assert.equal(legacy.status, 409, "a high protocol version alone cannot prove preset isolation");
+    assert.equal(db.listSessions().length, before, "unsupported preset must not create a session");
+    agent.capabilities = advertised;
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.sessionOrchestration - 1);
     assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409);
     agent.driver = "acp";

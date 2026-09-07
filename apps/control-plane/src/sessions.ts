@@ -444,6 +444,9 @@ export function capabilityConfigError(
   config: SessionConfig | undefined,
   capabilities: AgentCapabilities | undefined,
 ): string | null {
+  if (config?.permissionMode === "orchestrator" && !capabilities?.permissionModes?.includes("orchestrator")) {
+    return "the orchestrator preset requires explicit support from this agent installation";
+  }
   if (!config || !capabilities) return null;
   if (config.model && capabilities.models.length && !capabilities.models.some((model) => model.id === config.model)) {
     return `model ${JSON.stringify(config.model)} is not supported by this agent installation`;
