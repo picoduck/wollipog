@@ -258,6 +258,14 @@ test("machine version policy rejects cross-skill versions, inaccessible machines
   assert.equal((await app.inject(`/api/skills/${one.id}/machines/foreign-pin/version`)).statusCode, 404);
   assert.equal((await app.inject({ method: "PUT", url: `/api/skills/${one.id}/machines/foreign-pin/version`, payload: { ...payload, versionId: null } })).statusCode, 404);
   assert.equal(db.getMachineSkillVersion(one.id, "capable-pin"), null);
+  assert.deepEqual((await app.inject(`${path}-policy`)).json(), { policy: null });
+  assert.equal((await app.inject(`/api/skills/${one.id}/machines/foreign-pin/version-policy`)).statusCode, 404);
+  assert.equal((await app.inject(`/api/skills/missing/machines/capable-pin/version-policy`)).statusCode, 404);
+  db.setMachineSkillVersion(one.id, "capable-pin", one.latestVersion.id, null, one.latestVersion.id);
+  const listed = (await app.inject(`${path}-policy`)).json();
+  assert.equal(listed.policy.versionId, one.latestVersion.id);
+  assert.equal(typeof listed.policy.revision, "string");
+  assert.deepEqual(Object.keys(listed.policy).sort(), ["revision", "versionId"], "policy listing never includes skill files");
 });
 
 test("skill history is paginated without payloads and restore preserves history while fencing stale previews", async (t) => {

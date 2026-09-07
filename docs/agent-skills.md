@@ -400,7 +400,19 @@ removal. Unowned legacy groups cannot have deployable assignments.
 Skill details distinguish inherited group rules from direct assignments. Direct rules win at equal
 targeting specificity, while machine-wide pins still choose the version. These are assignment
 rules, not a claim that every target has successfully deployed; machine-reported state remains
-authoritative. The full Machine × Agents matrix and pin badges remain separate follow-up work.
+authoritative.
+
+The **Machine × Agents** section separates desired invocation from the last reported link for each
+agent and shows each machine's pin or Track Latest policy. Untargeted but still-reported links are
+explicitly labeled: a shared harness directory or a pending reconciliation can leave them visible.
+Unknown/failed reads never become an empty assignment or tracking default. Unsupported execution
+targets are marked unavailable, and offline reports carry their last inventory timestamp. Policy
+metadata is read through the same skill-and-machine authorization checks as version preview, but
+without loading files. The version picker starts from the selected machine's saved policy; saving
+still requires full preview and acceptance with the existing revision/latest-version fences.
+For older control planes lacking the lightweight route, the picker reads the existing authorized
+preview to recover the saved policy; it never infers Track Latest from a failed request. Failed
+desired-state reads stay unknown through manual sync until an authoritative refresh succeeds.
 
 ## Phasing
 

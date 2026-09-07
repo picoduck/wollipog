@@ -484,6 +484,7 @@ export function createApiClient(transport: ApiTransport) {
 
   getSkill: (id: string) => req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`),
   previewMachineSkillVersion: (id: string, runnerId: string, versionId: string | null) => req<import("./skills.js").MachineSkillVersionPreview>(`/api/skills/${encodeURIComponent(id)}/machines/${encodeURIComponent(runnerId)}/version${versionId ? `?versionId=${encodeURIComponent(versionId)}` : ""}`),
+  getMachineSkillVersionPolicy: (id: string, runnerId: string) => req<import("./skills.js").MachineSkillVersionPolicy>(`/api/skills/${encodeURIComponent(id)}/machines/${encodeURIComponent(runnerId)}/version-policy`),
   setMachineSkillVersion: (id: string, runnerId: string, body: { versionId: string | null; expectedRevision: string | null; expectedLatestVersionId: string }) => req<unknown>(`/api/skills/${encodeURIComponent(id)}/machines/${encodeURIComponent(runnerId)}/version`, { method: "PUT", body: JSON.stringify(body) }),
 
   listSkillVersions: (id: string, before?: string) => req<{ versions: import("./skills.js").SkillVersionSummary[]; nextCursor: string | null }>(`/api/skills/${encodeURIComponent(id)}/versions${before ? `?before=${encodeURIComponent(before)}` : ""}`),

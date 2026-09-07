@@ -11241,6 +11241,18 @@ body.shell-dock-dragging * {
 .skills-heading > .skills-section-heading { flex-wrap: wrap; }
 .skill-groups-dialog .skills-section-heading { flex-wrap: wrap; }
 .skill-groups-dialog .btn { white-space: normal; overflow-wrap: anywhere; }
+.skill-assignment-matrix, .skill-assignment-matrix > article { min-width: 0; overflow-wrap: anywhere; }
+.skill-matrix-table-scroll { max-width: 100%; overflow-x: auto; }
+.skill-matrix-table-scroll table { min-width: 360px; }
+.skill-matrix-cell-label { display: none; }
+@media (max-width: 640px) {
+  .skill-matrix-table-scroll table { min-width: 0; }
+  .skill-matrix-table-scroll thead { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
+  .skill-matrix-table-scroll tbody, .skill-matrix-table-scroll tr, .skill-matrix-table-scroll td, .skill-matrix-table-scroll th { display: block; }
+  .skill-matrix-table-scroll tbody tr { padding: 8px 0; border-top: 1px solid var(--border); }
+  .skill-matrix-table-scroll .skills-table td, .skill-matrix-table-scroll .skills-table th { border: 0; padding: 4px 0; }
+  .skill-matrix-cell-label { display: block; font-size: var(--text-xs); color: var(--text-dim); margin-bottom: 2px; }
+}
 .skill-version-list { max-height: 18rem; overflow: auto; display: grid; gap: 8px; }
 .skills-table { width: 100%; border-collapse: collapse; }
 .skills-table th, .skills-table td { border-top: 1px solid var(--border); padding: 7px 9px; text-align: left; }

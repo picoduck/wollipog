@@ -42,6 +42,7 @@ export interface MachineSkillVersionPreview {
   proposedVersion: SkillVersionSummary;
   expectedLatestVersionId: string;
 }
+export interface MachineSkillVersionPolicy { policy: { versionId: string | null; revision: string } | null }
 export interface MachineSkillDiscovery { discoveryId: string; candidates: import("@wollipog/protocol").MachineSkillCandidate[] }
 export interface MachineSkillPreview {
   previewId: string; candidate: import("@wollipog/protocol").MachineSkillCandidate;
@@ -113,6 +114,8 @@ export interface ReportedSkillsState {
 }
 
 export interface RunnerSkillsResponse {
+  /** Dashboard-only fetch failure; never interpret it as an authoritative empty desired state. */
+  loadError?: string;
   desired: RunnerDesiredSkill[];
   reported: ReportedSkillsState | null;
   /** Capability of the runner binary, independent of whether any removal event exists. */
@@ -265,12 +268,16 @@ function badge(status: SkillDeployStatus, detail?: string): SkillDeployBadge {
  * way must be surfaced over everything else the report says (conflict); an explicit error next;
  * anything not yet reconciled to the desired digest and every target linked is pending. */
 export function skillDeployBadge(input: {
+  loadError?: string;
+  loading?: boolean;
   runnerOnline: boolean;
   desired: Pick<RunnerDesiredSkill, "versionDigest" | "targets"> | undefined;
   reported: ReportedSkillsState | null | undefined;
   skillName: string;
 }): SkillDeployBadge {
   if (!input.runnerOnline) return badge("offline");
+  if (input.loading) return badge("pending", "Skills status has not loaded.");
+  if (input.loadError) return badge("error", input.loadError);
   if (!input.desired) return badge("pending", "No assignment targets this machine yet.");
   const deployed = input.reported?.deployed?.find((entry) => entry.name === input.skillName);
   if (!deployed) {
