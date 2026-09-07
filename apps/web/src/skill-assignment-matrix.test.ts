@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentDefinition, RunnerView } from "@wollipog/protocol";
-import type { RunnerSkillsResponse } from "./skills.js";
+import { skillDeployBadge, type RunnerSkillsResponse } from "./skills.js";
 import { skillAgentMatrixCell } from "./skill-assignment-matrix.js";
 const runner = { protocolVersion: 111, os: "linux" } as RunnerView;
 const agent = { id: "codex", driver: "codex", name: "Codex" } as AgentDefinition;
@@ -20,6 +20,8 @@ test("untargeted shared links are not reported as removed", () => {
 test("missing or failed reads remain unknown, never empty assignments", () => {
   assert.equal(skillAgentMatrixCell(runner, agent, "review").desired, "Unknown");
   assert.equal(skillAgentMatrixCell(runner, agent, "review", { ...state(), loadError: "Request failed" }).reported, "Unknown");
+  assert.equal(skillDeployBadge({ runnerOnline: true, desired: undefined, reported: null, skillName: "review", loadError: "Request failed" }).detail, "Request failed");
+  assert.equal(skillDeployBadge({ runnerOnline: true, desired: undefined, reported: null, skillName: "review", loading: true }).detail, "Skills status has not loaded.");
 });
 test("unavailable platforms, contexts and old runners are explicit", () => {
   assert.equal(skillAgentMatrixCell({ ...runner, os: "windows" }, agent, "review", state()).desired, "Unavailable");

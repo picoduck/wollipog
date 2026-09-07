@@ -27,9 +27,9 @@ export function SkillAssignmentMatrix({ skillId, skillName, runners, machineLabe
         <h5>{machineLabels.get(runner.runnerId) ?? runner.runnerId} · {runner.status === "online" ? "Online" : "Offline"}</h5>
         <p className="skills-hint">Version policy: {!policy ? "Loading…" : policy === "error" ? "Unavailable" : policy.policy?.versionId ? `Pinned · ${policy.policy.versionId}` : "Track Latest"}. All assigned agents share this version.</p>
         <button className="btn sm" type="button" disabled={!runnerSupportsProtocol(runner.protocolVersion, "agentSkills")} onClick={() => onManageVersion(runner.runnerId)}>Manage Machine Version</button>
-        <p className="skills-hint">Reported: {state?.reported?.updatedAt === undefined ? "Never" : new Date(state.reported.updatedAt).toLocaleString()}.</p>
+        <p className="skills-hint">Reported: {!state || state.loadError ? "Unknown" : state.reported?.updatedAt === undefined ? "Never" : new Date(state.reported.updatedAt).toLocaleString()}.</p>
         {state?.loadError && <p role="alert" className="form-error">{state.loadError}</p>}
-        {!runner.agents.length ? <p>No agents reported.</p> : <div className="skill-matrix-table-scroll" tabIndex={0} role="region" aria-label={`${machineLabels.get(runner.runnerId) ?? runner.runnerId} Agent States`}><table className="skills-table"><thead><tr><th>Agent</th><th>Desired Invocation</th><th>Reported Link</th></tr></thead>
+        {!runner.agents.length ? <p>No agents reported.</p> : <div className="skill-matrix-table-scroll" tabIndex={0} role="region" aria-label={`${machineLabels.get(runner.runnerId) ?? runner.runnerId} Agent States`}><table className="skills-table"><thead><tr><th scope="col">Agent</th><th scope="col">Desired Invocation</th><th scope="col">Reported Link</th></tr></thead>
           <tbody>{runner.agents.map(agent => { const cell = skillAgentMatrixCell(runner, agent, skillName, state); return <tr key={agent.id}><th scope="row">{agent.name}</th><td><span className="skill-matrix-cell-label" aria-hidden="true">Desired Invocation</span>{cell.desired}</td><td><span className="skill-matrix-cell-label" aria-hidden="true">Reported Link</span>{cell.reported}{cell.detail && <p className="skills-hint">{cell.detail}</p>}</td></tr>; })}</tbody>
         </table></div>}
       </article>;

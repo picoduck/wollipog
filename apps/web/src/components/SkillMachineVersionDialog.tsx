@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { runnerSupportsProtocol, type RunnerView, type SkillFile } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { ApiError } from "../api.js";
 import type { MachineSkillVersionPreview, SkillVersionSummary } from "../skills.js";
 import { Modal } from "./common.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
@@ -29,7 +30,12 @@ export function SkillMachineVersionDialog({ skillId, runners, initialRunnerId, o
     setPolicyLoaded(false); setPreview(null); setAccepted(false); setCurrentPin(null); setVersionId("");
     if (!runnerId) return;
     setPolicyLoading(true);
-    api.getMachineSkillVersionPolicy(skillId, runnerId).then(result => {
+    api.getMachineSkillVersionPolicy(skillId, runnerId).catch(async cause => {
+      // Older control planes expose policy only through the existing, equally scoped preview.
+      // Do not fall back for server/network errors or infer a tracking default from failure.
+      if (!(cause instanceof ApiError) || cause.status !== 404) throw cause;
+      return { policy: (await api.previewMachineSkillVersion(skillId, runnerId, null)).policy };
+    }).then(result => {
       if (active) { setCurrentPin(result.policy?.versionId ?? null); setVersionId(result.policy?.versionId ?? ""); setPolicyLoaded(true); }
     }).catch(cause => { if (active) setError(`Current version policy could not be loaded: ${(cause as Error).message}`); })
       .finally(() => { if (active) setPolicyLoading(false); });

@@ -315,6 +315,7 @@ export function SkillsView() {
           desired: current[runnerId]?.desired ?? [],
           reported,
           removalReporting: current[runnerId]?.removalReporting ?? "unknown",
+          ...(current[runnerId]?.loadError || !current[runnerId] ? { loadError: current[runnerId]?.loadError ?? "Desired skill assignments have not loaded." } : {}),
         },
       }));
       await refreshMachines();
@@ -438,7 +439,7 @@ export function SkillsView() {
               <section className="skills-section" aria-label="Assignments">
                 <div className="skills-section-heading">
                   <h4>Assignments</h4>
-                  <button type="button" className="btn sm" disabled={busy} onClick={() => setDialog("add-assignment")}>
+                  <button type="button" className="btn sm" disabled={busy} onClick={() => { setError(null); setDialog("add-assignment"); }}>
                     Add Assignment
                   </button>
                 </div>
@@ -531,6 +532,8 @@ export function SkillsView() {
                   const machine = machineSkills[runner.runnerId];
                   const desired = machine?.desired.find((entry) => entry.name === detail.name);
                   const badge = skillDeployBadge({
+                    loadError: machine?.loadError,
+                    loading: !machine,
                     runnerOnline: runner.status === "online",
                     desired,
                     reported: machine?.reported,

@@ -11250,7 +11250,7 @@ body.shell-dock-dragging * {
   .skill-matrix-table-scroll thead { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
   .skill-matrix-table-scroll tbody, .skill-matrix-table-scroll tr, .skill-matrix-table-scroll td, .skill-matrix-table-scroll th { display: block; }
   .skill-matrix-table-scroll tbody tr { padding: 8px 0; border-top: 1px solid var(--border); }
-  .skill-matrix-table-scroll td, .skill-matrix-table-scroll th { border: 0; padding: 4px 0; }
+  .skill-matrix-table-scroll .skills-table td, .skill-matrix-table-scroll .skills-table th { border: 0; padding: 4px 0; }
   .skill-matrix-cell-label { display: block; font-size: var(--text-xs); color: var(--text-dim); margin-bottom: 2px; }
 }
 .skill-version-list { max-height: 18rem; overflow: auto; display: grid; gap: 8px; }

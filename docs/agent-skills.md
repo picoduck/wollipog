@@ -410,6 +410,9 @@ targets are marked unavailable, and offline reports carry their last inventory t
 metadata is read through the same skill-and-machine authorization checks as version preview, but
 without loading files. The version picker starts from the selected machine's saved policy; saving
 still requires full preview and acceptance with the existing revision/latest-version fences.
+For older control planes lacking the lightweight route, the picker reads the existing authorized
+preview to recover the saved policy; it never infers Track Latest from a failed request. Failed
+desired-state reads stay unknown through manual sync until an authoritative refresh succeeds.
 
 ## Phasing
 

@@ -268,12 +268,16 @@ function badge(status: SkillDeployStatus, detail?: string): SkillDeployBadge {
  * way must be surfaced over everything else the report says (conflict); an explicit error next;
  * anything not yet reconciled to the desired digest and every target linked is pending. */
 export function skillDeployBadge(input: {
+  loadError?: string;
+  loading?: boolean;
   runnerOnline: boolean;
   desired: Pick<RunnerDesiredSkill, "versionDigest" | "targets"> | undefined;
   reported: ReportedSkillsState | null | undefined;
   skillName: string;
 }): SkillDeployBadge {
   if (!input.runnerOnline) return badge("offline");
+  if (input.loading) return badge("pending", "Skills status has not loaded.");
+  if (input.loadError) return badge("error", input.loadError);
   if (!input.desired) return badge("pending", "No assignment targets this machine yet.");
   const deployed = input.reported?.deployed?.find((entry) => entry.name === input.skillName);
   if (!deployed) {

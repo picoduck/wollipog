@@ -7,6 +7,9 @@ test("direct assignment errors are visible inside the open dialog", async ({ pag
   await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Add Assignment", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("Assignment ownership rejected");
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toHaveCount(0);
 });
 test("version picker explains when no compatible machines exist", async ({ page }) => {
   await page.goto("/skills-removals-e2e.html?legacySkills=1");
@@ -33,6 +36,16 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await matrix.scrollIntoViewIfNeeded();
     await page.screenshot({ path: info.outputPath(`matrix-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    if (width === 320) {
+      await expect(matrix.locator("td").first()).toHaveCSS("padding", "4px 0px");
+      await expect(matrix.locator("td").first()).toHaveCSS("border-top-width", "0px");
+      const cdp = await page.context().newCDPSession(page);
+      const { nodes } = await cdp.send("Accessibility.getFullAXTree");
+      expect(nodes.some(node => !node.ignored && node.role?.value === "columnheader" && node.name?.value === "DESIRED INVOCATION")).toBe(true);
+      expect(nodes.some(node => !node.ignored && node.role?.value === "rowheader" && node.name?.value === "Claude")).toBe(true);
+      expect(nodes.some(node => !node.ignored && node.role?.value === "cell" && node.name?.value === "Manual Only")).toBe(true);
+      await cdp.detach();
+    }
     await matrix.getByRole("button", { name: "Manage Machine Version", exact: true }).first().click();
     await expect(page.getByRole("button", { name: /^Version Policy: Pin v0/ })).toBeVisible();
     await page.getByRole("button", { name: "Preview Version Policy" }).click();
@@ -56,9 +69,40 @@ test("failed reads do not show unassigned or tracking defaults", async ({ page }
   const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
   await expect(matrix.getByRole("row", { name: /^Claude / }).first()).toHaveAccessibleName(/^Claude Unknown Unknown/);
   await expect(matrix).toContainText("Version policy: Unavailable");
+  await expect(matrix).toContainText("Reported: Unknown.");
+  await expect(matrix).not.toContainText("Reported: Never.");
+  await expect(page.getByRole("region", { name: "Deployment", exact: true })).not.toContainText("No assignment targets this machine yet.");
   await matrix.getByRole("button", { name: "Manage Machine Version", exact: true }).first().click();
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("Current version policy could not be loaded");
   await expect(page.getByRole("button", { name: "Preview Version Policy" })).toBeDisabled();
+});
+test("manual sync preserves unknown desired state until authoritative refresh", async ({ page }) => {
+  await installSkillMatrixFixture(page);
+  await page.route("**/api/runners/*/skills", route => route.fulfill({ status: 503, json: { error: "Unavailable" } }));
+  await page.goto("/skills-removals-e2e.html?matrix=1");
+  await page.getByRole("button", { name: /code-review/i }).click();
+  const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
+  await expect(matrix).toContainText("Skills status could not be loaded");
+  let started!: () => void; const refreshing = new Promise<void>(resolve => { started = resolve; });
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/runners/*/skills", async route => { started(); await held; await route.fulfill({ status: 503, json: { error: "Unavailable" } }); });
+  try {
+    await page.getByRole("button", { name: "Sync Now", exact: true }).first().click();
+    await refreshing;
+    await expect(matrix.getByRole("row", { name: /^Claude / }).first()).toHaveAccessibleName(/^Claude Unknown Unknown/);
+    await expect(matrix).not.toContainText("Not Assigned");
+  } finally { release(); }
+});
+test("older control planes use the authorized preview to initialize the saved pin", async ({ page }) => {
+  await installSkillMatrixFixture(page);
+  await page.route("**/api/skills/skill-1/machines/*/version-policy", route => route.fulfill({ status: 404, json: { error: "Route not found" } }));
+  await page.goto("/skills-removals-e2e.html?matrix=1");
+  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.getByRole("button", { name: "Machine Versions", exact: true }).click();
+  await expect(page.getByRole("button", { name: /^Version Policy: Pin v0/ })).toBeEnabled();
+  await page.getByRole("button", { name: "Preview Version Policy" }).click();
+  await expect(page.getByText("Current policy: pinned to v0.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeDisabled();
 });
 test("late policy response cannot overwrite a newly selected machine", async ({ page }) => {
   await installSkillMatrixFixture(page);
