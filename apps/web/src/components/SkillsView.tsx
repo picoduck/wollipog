@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RunnerView, SkillFile, SkillInvocationPolicy } from "@wollipog/protocol";
+import type { SkillFile, SkillInvocationPolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
-import { driverKindLabel } from "../agent-presentation.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { Empty, Modal, Skeleton } from "./common.js";
 import { Select } from "./ui/ChoiceControls.js";
@@ -13,6 +12,9 @@ import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
 import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
 import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
 import { SkillMachineVersionDialog } from "./SkillMachineVersionDialog.js";
+import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
+import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
+import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -23,7 +25,6 @@ import {
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
   skillDeployBadge,
-  skillEligibleAgents,
   skillFilesFromUploads,
   skillFromPayload,
   skillGroupsFromPayload,
@@ -37,9 +38,6 @@ import {
   type SkillGroupView,
   type SkillSummary,
 } from "../skills.js";
-
-/** Drivers the MVP reconciler deploys to; offered even before a machine reports its agents. */
-const ASSIGNABLE_DRIVERS = ["claude-code", "codex", "codex-app-server"] as const;
 
 function formatTime(value: number | undefined): string {
   return value === undefined ? "—" : new Date(value).toLocaleString();
@@ -159,101 +157,6 @@ function NewSkillDialog({ onClose, onCreate, busy }: {
   );
 }
 
-function AddAssignmentDialog({ skill, runners, machineLabels, busy, onClose, onCreate }: {
-  skill: SkillSummary;
-  runners: RunnerView[];
-  machineLabels: Map<string, string>;
-  busy: boolean;
-  onClose: () => void;
-  onCreate: (input: {
-    scopeKind: "instance" | "runner";
-    runnerId?: string;
-    agentSelector: SkillAgentSelector;
-    invocation: SkillInvocationPolicy;
-  }) => Promise<void>;
-}) {
-  const [machineChoice, setMachineChoice] = useState("all");
-  const [agentChoice, setAgentChoice] = useState("all");
-  const [invocation, setInvocation] = useState<SkillInvocationPolicy>("agent");
-  const runnerId = machineChoice === "all" ? "" : machineChoice;
-  const selectedRunner = runners.find((runner) => runner.runnerId === runnerId);
-  const eligibleAgents = selectedRunner ? skillEligibleAgents(selectedRunner.agents) : [];
-
-  const submit = async () => {
-    const agentSelector: SkillAgentSelector = agentChoice === "all"
-      ? { kind: "all" }
-      : agentChoice.startsWith("driver:")
-        ? { kind: "driver", driver: agentChoice.slice("driver:".length) }
-        : { kind: "agent", agentId: agentChoice.slice("agent:".length) };
-    await onCreate({
-      scopeKind: runnerId ? "runner" : "instance",
-      ...(runnerId ? { runnerId } : {}),
-      agentSelector,
-      invocation,
-    });
-  };
-
-  return (
-    <Modal title="Add Assignment" onClose={onClose} footer={
-      <>
-        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn primary" disabled={busy} onClick={() => void submit()}>
-          {busy ? "Adding…" : "Add Assignment"}
-        </button>
-      </>
-    }>
-      <div className="form">
-        <p className="skills-hint">Deploy “{skill.name}” to the machines and agents selected below.</p>
-        <div className="field">
-          <span>Machine</span>
-          <Select
-            label="Machine"
-            value={machineChoice}
-            options={[
-              { value: "all", label: "All Machines" },
-              ...runners.map((runner) => ({
-                value: runner.runnerId,
-                label: machineLabels.get(runner.runnerId) ?? runner.runnerId,
-              })),
-            ]}
-            onChange={(value) => { setMachineChoice(value); setAgentChoice("all"); }}
-          />
-        </div>
-        <div className="field">
-          <span>Agents</span>
-          <Select
-            label="Agents"
-            value={agentChoice}
-            options={[
-              { value: "all", label: "All Agents" },
-              ...ASSIGNABLE_DRIVERS.map((driver) => ({
-                value: `driver:${driver}`,
-                label: driverKindLabel(driver),
-              })),
-              ...eligibleAgents.map((agent) => ({ value: `agent:${agent.id}`, label: agent.name })),
-            ]}
-            onChange={setAgentChoice}
-          />
-        </div>
-        <div className="field">
-          <span>Invocation</span>
-          <Select<SkillInvocationPolicy>
-            label="Invocation"
-            value={invocation}
-            options={[
-              { value: "agent", label: invocationLabel("agent") },
-              { value: "manual", label: invocationLabel("manual") },
-            ]}
-            onChange={setInvocation}
-          />
-        </div>
-        <p className="skills-hint">
-          Manual Only deploys the skill with model invocation disabled, so only a person can run it.
-        </p>
-      </div>
-    </Modal>
-  );
-}
 
 export function SkillsView() {
   const api = useApi();
@@ -275,7 +178,7 @@ export function SkillsView() {
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | null>(null);
+  const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | null>(null);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
   const listGeneration = useRef(0);
@@ -432,6 +335,7 @@ export function SkillsView() {
           <p>Author a skill once, then assign it to machines and agents. Wollipog deploys each machine's selected version and reports its state.</p>
         </div>
         <div className="skills-section-heading">
+          <button className="btn" type="button" onClick={() => setDialog("groups")}>Manage Groups</button>
           <button className="btn" type="button" onClick={() => setDialog("git-import")}>Import from Git</button>
           <button className="btn" type="button" onClick={() => setDialog("machine-import")}>Import from Machine</button>
           <button className="btn primary" type="button" onClick={() => setDialog("new-skill")}>New Skill</button>
@@ -528,6 +432,7 @@ export function SkillsView() {
                 <p className="skills-hint">Imported {formatTime(latest.machineSource.importedAt)}. This records a snapshot, not an adopted source directory.</p>
               </section>}
 
+              {detail.groupId && <SkillInheritedAssignments key={detail.id} groupId={detail.groupId} groups={groups} runners={runners} machineLabels={machineLabels} onManage={() => setDialog("groups")} />}
               <section className="skills-section" aria-label="Assignments">
                 <div className="skills-section-heading">
                   <h4>Assignments</h4>
@@ -536,7 +441,7 @@ export function SkillsView() {
                   </button>
                 </div>
                 {assignments.length === 0 ? (
-                  <p className="skills-hint">Not assigned anywhere yet. Add an assignment to deploy this skill.</p>
+                  <p className="skills-hint">No direct assignments. Group assignments may still deploy this skill.</p>
                 ) : (
                   <table className="skills-table">
                     <thead>
@@ -703,6 +608,11 @@ export function SkillsView() {
         </div>
       </div>
 
+      {dialog === "groups" && <SkillGroupsDialog runners={runners} machineLabels={machineLabels} onClose={() => setDialog(null)} onChanged={async () => {
+        await refreshList();
+        if (selectedId) await refreshDetail(selectedId);
+        await refreshMachines();
+      }} />}
       {dialog === "new-skill" && (
         <NewSkillDialog busy={busy} onClose={() => setDialog(null)} onCreate={createSkill} />
       )}

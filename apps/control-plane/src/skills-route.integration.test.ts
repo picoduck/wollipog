@@ -284,6 +284,9 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   const memberSkill = (await memberCreate.json() as { skill: { id: string } }).skill;
 
   // Exercise group ownership through the real HTTP auth boundary, not only injected handlers.
+  const memberGroups = await (await api(httpBase, MEMBER_TOKEN, "/api/skill-groups")).json() as { creationScope: { organizationId: string; owner: { kind: string; userId: string } } };
+  assert.equal(memberGroups.creationScope.organizationId, identity.organizationId);
+  assert.deepEqual(memberGroups.creationScope.owner, { kind: "user", userId: "usr_skills_member" });
   const groupCreate = await api(httpBase, MEMBER_TOKEN, "/api/skill-groups", {
     method: "POST", body: JSON.stringify({ name: "Member Tools" }),
   });

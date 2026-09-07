@@ -520,7 +520,9 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
   // deployment rule are resource-scoped; no implicit ownership backfill grants deployment rights.
   app.get("/api/skill-groups", async (req) => {
     const principal = deps.requestPrincipal(req);
-    return { groups: principal ? db.listSkillGroups().filter(g => !g.scope || db.canAccessSkillGroup(principal, g.id)) : [] };
+    const human = deps.requestHuman(req);
+    return { groups: principal ? db.listSkillGroups().filter(g => !g.scope || db.canAccessSkillGroup(principal, g.id)) : [],
+      creationScope: human ? defaultSkillScope(human) : null };
   });
 
   app.post("/api/skill-groups", async (req, reply) => {
