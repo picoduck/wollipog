@@ -102,6 +102,66 @@ async function fixture() {
   };
 }
 
+test("machine pins survive updates and registration, preserve targeting, and fence stale pin or unpin previews", async (t) => {
+  const { app, db, online, pushed } = await fixture();
+  t.after(() => { void app.close(); db.close(); });
+  for (const id of ["pinned", "tracking"]) { db.registerRunner(runnerMeta(id), 10, 90); online.add(id); }
+  const skill = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("pinned-skill") })).json().skill;
+  const original = db.getSkillVersion(skill.latestVersion.id)!;
+  const assignment = db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "agent", agentId: "codex" } });
+  const path = `/api/skills/${skill.id}/machines/pinned/version`;
+  const preview = (await app.inject(`${path}?versionId=${original.id}`)).json();
+  assert.equal(preview.policy, null);
+  assert.equal(preview.proposedVersion.id, original.id);
+  pushed.length = 0;
+  const payload = { versionId: original.id, expectedRevision: null, expectedLatestVersionId: original.id };
+  assert.equal((await app.inject({ method: "PUT", url: path, payload })).statusCode, 200);
+  assert.deepEqual(pushed.map((p) => p.runnerId), ["pinned"]);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload })).statusCode, 409);
+  const input = validateSkillPayload({ name: skill.name, files: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: pinned-skill\n---\nUpdated" }] });
+  assert.ok(input.ok);
+  const updated = db.addSkillVersion(skill.id, input)!;
+  db.registerRunner(runnerMeta("pinned"), 20, 90);
+  assert.equal(resolveDesiredSkills(db, "pinned")[0]!.versionDigest, original.digest);
+  assert.equal(resolveDesiredSkills(db, "tracking")[0]!.versionDigest, updated.digest);
+  assert.deepEqual(resolveDesiredSkills(db, "pinned")[0]!.targets.map((a) => a.agentId), ["codex"]);
+  assert.deepEqual(db.listSkillAssignments(skill.id), [assignment]);
+  const beforeClear = (await app.inject(path)).json();
+  assert.equal(beforeClear.currentVersion.id, original.id);
+  assert.equal(beforeClear.proposedVersion.id, updated.id);
+  const clear = { versionId: null, expectedRevision: beforeClear.policy.revision, expectedLatestVersionId: updated.id };
+  assert.equal((await app.inject({ method: "PUT", url: path, payload: clear })).statusCode, 200);
+  assert.equal(resolveDesiredSkills(db, "pinned")[0]!.versionDigest, updated.digest);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload: clear })).statusCode, 409, "track-latest transitions retain unique revisions");
+  const track = db.getMachineSkillVersion(skill.id, "pinned")!;
+  db.addSkillVersion(skill.id, input);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload: { ...payload, expectedRevision: track.revision, expectedLatestVersionId: updated.id } })).statusCode, 409);
+  db.deleteRunner("pinned");
+  assert.equal(db.getMachineSkillVersion(skill.id, "pinned"), null, "deleted machines leave no policy for a reused id");
+  db.setMachineSkillVersion(skill.id, "tracking", original.id, null, db.getSkill(skill.id)!.latestVersion!.id);
+  db.deleteSkill(skill.id);
+  assert.equal(db.getMachineSkillVersion(skill.id, "tracking"), null);
+});
+
+test("machine version policy rejects cross-skill versions, inaccessible machines, invalid bodies, and old runners", async (t) => {
+  const { app, db } = await fixture();
+  t.after(() => { void app.close(); db.close(); });
+  db.registerRunner(runnerMeta("capable-pin"), 10, 90);
+  db.registerRunner(runnerMeta("legacy-pin"), 10, 89);
+  db.registerRunner(runnerMeta("foreign-pin"), 10, 90, { organizationId: "foreign", owner: { kind: "user", userId: "foreign" } });
+  const one = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("pin-one") })).json().skill;
+  const two = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("pin-two") })).json().skill;
+  const path = `/api/skills/${one.id}/machines/capable-pin/version`;
+  const payload = { versionId: two.latestVersion.id, expectedRevision: null, expectedLatestVersionId: one.latestVersion.id };
+  assert.equal((await app.inject(`${path}?versionId=${two.latestVersion.id}`)).statusCode, 404);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload })).statusCode, 404);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload: { versionId: null } })).statusCode, 400);
+  assert.equal((await app.inject({ method: "PUT", url: `/api/skills/${one.id}/machines/legacy-pin/version`, payload: { ...payload, versionId: null } })).statusCode, 409);
+  assert.equal((await app.inject(`/api/skills/${one.id}/machines/foreign-pin/version`)).statusCode, 404);
+  assert.equal((await app.inject({ method: "PUT", url: `/api/skills/${one.id}/machines/foreign-pin/version`, payload: { ...payload, versionId: null } })).statusCode, 404);
+  assert.equal(db.getMachineSkillVersion(one.id, "capable-pin"), null);
+});
+
 test("skill history is paginated without payloads and restore preserves history while fencing stale previews", async (t) => {
   const { app, db, online, pushed } = await fixture();
   t.after(() => { void app.close(); db.close(); });

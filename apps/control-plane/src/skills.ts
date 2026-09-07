@@ -259,10 +259,14 @@ export function resolveDesiredSkillSnapshot(
     const desired = targets.length > 0 ||
       assignments.some((assignment) => assignment.enabled && assignment.agentSelector.kind === "all");
     if (!desired) continue;
+    const policy = db.getMachineSkillVersion(skillId, runnerId);
+    const version = policy?.versionId ? policy.version : skill.latestVersion;
+    // A broken explicit pin must never silently advance to latest.
+    if (!version) continue;
     entries.push({
       name: skill.name,
-      versionId: skill.latestVersion.id,
-      versionDigest: skill.latestVersion.digest,
+      versionId: version.id,
+      versionDigest: version.digest,
       targets,
     });
   }

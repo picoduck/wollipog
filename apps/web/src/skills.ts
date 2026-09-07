@@ -35,6 +35,12 @@ export interface SkillVersionSummary {
 
 export interface SkillGitSource { url: string; ref: string; subdirectory: string }
 export interface SkillVersionPreview { version: SkillVersionSummary; currentVersion: SkillVersionSummary | null }
+export interface MachineSkillVersionPreview {
+  policy: { versionId: string | null; revision: string } | null;
+  currentVersion: SkillVersionSummary | null;
+  proposedVersion: SkillVersionSummary;
+  expectedLatestVersionId: string;
+}
 export interface MachineSkillDiscovery { discoveryId: string; candidates: import("@wollipog/protocol").MachineSkillCandidate[] }
 export interface MachineSkillPreview {
   previewId: string; candidate: import("@wollipog/protocol").MachineSkillCandidate;

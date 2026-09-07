@@ -12,6 +12,7 @@ import { Markdown } from "./Markdown.js";
 import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
 import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
 import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
+import { SkillMachineVersionDialog } from "./SkillMachineVersionDialog.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -274,7 +275,7 @@ export function SkillsView() {
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | null>(null);
+  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | null>(null);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
   const listGeneration = useRef(0);
@@ -428,7 +429,7 @@ export function SkillsView() {
       <div className="view-heading skills-heading">
         <div>
           <h2>Agent Skills</h2>
-          <p>Author a skill once, then assign it to machines and agents. Wollipog deploys the latest version and reports each machine's state.</p>
+          <p>Author a skill once, then assign it to machines and agents. Wollipog deploys each machine's selected version and reports its state.</p>
         </div>
         <div className="skills-section-heading">
           <button className="btn" type="button" onClick={() => setDialog("git-import")}>Import from Git</button>
@@ -504,6 +505,7 @@ export function SkillsView() {
               </div>
 
               <button className="btn sm" type="button" onClick={() => setDialog("version-history")}>Version History</button>
+              <button className="btn sm" type="button" onClick={() => setDialog("machine-versions")}>Machine Versions</button>
               {skillMd && (
                 <section className="skills-section" aria-label="Skill Content">
                   <h4>Content</h4>
@@ -709,6 +711,7 @@ export function SkillsView() {
         await refreshDetail(detail.id);
         await refreshMachines();
       }} />}
+      {dialog === "machine-versions" && detail && <SkillMachineVersionDialog key={detail.id} skillId={detail.id} runners={runners} onClose={() => setDialog(null)} onSaved={refreshMachines} />}
       {dialog === "machine-import" && <SkillMachineImportDialog runners={runners} onClose={() => setDialog(null)} onImported={async () => {
         await refreshList();
         if (selectedId) await refreshDetail(selectedId);

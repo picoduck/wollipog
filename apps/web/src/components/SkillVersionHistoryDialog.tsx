@@ -58,10 +58,10 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
     <button type="button" className="btn primary" disabled={busy || !accepted || !preview?.currentVersion?.id || preview.version.id === preview.currentVersion.id} onClick={() => void restore()}>Restore Version</button>
   </>}>
     <div className="form skills-machine-import">
-      <p>Restore historical content as a new library revision. Existing assignments track the restored content; newer history is kept. This is not per-assignment pinning.</p>
+      <p>Restore historical content as a new library revision. Unpinned machines track the restored content; pinned machines keep their selected revision. Newer history is kept.</p>
       {busy && <p role="status">Loading…</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
-      {restored && <p role="status">Version restored. Existing assignments will sync to the restored content.</p>}
+      {restored && <p role="status">Version restored. Assignments on unpinned machines will sync to the restored content.</p>}
       <div className="skill-version-list" role="region" aria-label="Available Versions" tabIndex={0}>
       {versions.map((version) => <section className="skills-section" key={version.id}>
         <p className="skills-hint">{version.id} · {version.createdAt ? new Date(version.createdAt).toLocaleString() : "Unknown date"}</p>
@@ -77,7 +77,7 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
         {preview.version.note && <p>{preview.version.note}</p>}
         {preview.version.gitSource && <p className="skills-hint">Git source: {preview.version.gitSource.url} · {preview.version.gitSource.commit}</p>}
         {preview.version.machineSource && <p className="skills-hint">Machine snapshot: {preview.version.machineSource.sourceDirectory}/{preview.version.machineSource.name} · {preview.version.machineSource.digest}</p>}
-        <p>Review every file, including scripts. Preview and restore never execute skill contents. Restoring updates all existing assignments.</p>
+        <p>Review every file, including scripts. Preview and restore never execute skill contents. Restoring updates assignments on unpinned machines.</p>
         {[...new Set([...(preview.currentVersion?.files ?? []), ...(preview.version.files ?? [])].map((file) => file.path))].sort().map((path) => {
           const before = preview.currentVersion?.files?.find((file) => file.path === path);
           const after = preview.version.files?.find((file) => file.path === path);

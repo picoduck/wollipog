@@ -56,7 +56,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
     <button className="btn primary" type="button" disabled={busy || !preview || (preview.disposition === "update" && !accepted)} onClick={() => void submit()}>Import Snapshot</button>
   </>}>
     <div className="form skills-machine-import">
-      <p>Import a read-only snapshot. This does not adopt or replace the source directory. New skills stay unassigned; accepted updates to existing skills deploy to their current assignments.</p>
+      <p>Import a read-only snapshot. This does not adopt or replace the source directory. New skills stay unassigned; accepted updates deploy to current assignments on unpinned machines. Pinned machines keep their selected revision.</p>
       <p className="skills-hint">Requires an owner or administrator and a connected Linux machine running protocol 111 or newer. Symlinks, hard links, and special files are not imported.</p>
       <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy || discovery !== null}
         options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={setRunnerId} /></label>
