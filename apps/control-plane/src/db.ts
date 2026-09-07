@@ -8244,6 +8244,8 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM workspace_ownership WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runner_ownership WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(row.runner_id);
+      this.stmt("DELETE FROM runner_skill_state WHERE runner_id=?").run(row.runner_id);
+      this.stmt("DELETE FROM skill_assignments WHERE scope_kind='runner' AND runner_id=?").run(row.runner_id);
       this.clearSessionNamingHarnessTargetsForRunner(row.runner_id, Date.now());
       this.stmt("DELETE FROM skill_machine_versions WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runners WHERE runner_id=?").run(row.runner_id); // cascades workspaces, agents
