@@ -39,6 +39,18 @@ the code.
 - Third-party protocol and platform identifiers are not repository symbols. A doc naming a launchd
   plist key, a provider wire field, or another product's event type has nothing to verify with
   `git grep` against this tree; every symbol-check hit in one run was this class.
+- Gitignored build output (`apps/runner/dist-bin/`, per `.gitignore`) is absent from the tree by
+  design; a doc that names it is describing a build artifact, not a missing file.
+- A path naming a runtime or bundle location is not broken when the same passage gives the
+  repository source — `THIRD-PARTY-NOTICES.md` names `licenses/…` as shipped, with the source at
+  `apps/web/public/licenses/`.
+- `docs/SCOPE.md` carries `Status: design / planning`; its forward-looking paths are exempt, as
+  settled by #293. Four of one run's eighteen raw unresolved references were this file alone.
+- Before reporting an unresolved name, test three resolutions, not one: repo-root-relative,
+  doc-relative, and OUT-OF-REPO. Skill names are the worked example: `issue-workflow` resolves at
+  `~/.agents/skills/issue-workflow` and is fine; `codex-review` resolves nowhere on the machine
+  and was a genuine stale name (the skill had been renamed `cross-model-review`). The identifier
+  gate above covers protocol and platform names; this covers names that live outside the tree.
 
 ## Report
 
