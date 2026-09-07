@@ -1880,6 +1880,11 @@ CREATE TABLE IF NOT EXISTS skill_git_provenance (
   source TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS skill_machine_provenance (
+  version_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS skill_assignments (
   id             TEXT PRIMARY KEY,
   skill_id       TEXT NOT NULL,
@@ -2711,6 +2716,7 @@ export interface SkillVersionView extends SkillVersionSummary {
   files: SkillFile[];
   note: string | null;
   gitSource?: { url: string; ref: string; subdirectory: string; path: string; commit: string };
+  machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number };
 }
 
 export interface SkillGroupView {
@@ -5441,6 +5447,8 @@ export class ControlPlaneDb {
   }
 
   private skillVersionView(row: SkillVersionRow): SkillVersionView {
+    const machineProvenance = this.stmt("SELECT source FROM skill_machine_provenance WHERE version_id=?")
+      .get(row.id) as { source: string } | undefined;
     const provenance = this.stmt("SELECT source FROM skill_git_provenance WHERE version_id=?")
       .get(row.id) as { source: string } | undefined;
     return {
@@ -5450,6 +5458,7 @@ export class ControlPlaneDb {
       manifest: row.manifest,
       files: parseJson<SkillFile[]>(row.files) ?? [],
       note: row.note,
+      ...(machineProvenance ? { machineSource: JSON.parse(machineProvenance.source) as NonNullable<SkillVersionView["machineSource"]> } : {}),
       ...(provenance ? { gitSource: JSON.parse(provenance.source) as NonNullable<SkillVersionView["gitSource"]> } : {}),
       createdAt: row.created_at,
     };
@@ -5634,8 +5643,30 @@ export class ControlPlaneDb {
     });
   }
 
+  /** Accept the exact preview without reading or modifying the source machine. */
+  importMachineSkill(input: {
+    name: string; description: string | null; files: SkillFile[]; manifest: string; digest: string;
+    source: NonNullable<SkillVersionView["machineSource"]>; scope: ResourceScope; expectedVersionId: string | null;
+  }): SkillView {
+    return this.atomic(() => {
+      const current = this.getSkillByName(input.name);
+      if ((current?.latestVersion?.id ?? null) !== input.expectedVersionId) {
+        throw new SkillImportConflictError("The library changed after preview. Preview the import again.");
+      }
+      const identical = current?.latestVersion?.digest === input.digest;
+      const skill = current ?? this.createSkill(input);
+      const versionId = current && !identical ? this.addSkillVersion(current.id, input)!.id : skill.latestVersion!.id;
+      this.stmt("INSERT OR IGNORE INTO skill_machine_provenance (version_id, source) VALUES (?, ?)")
+        .run(versionId, JSON.stringify(input.source));
+      // Preserve Git upstream configuration when a snapshot updates an existing Git-backed skill.
+      if (!current) this.stmt("UPDATE skills SET source='machine' WHERE id=?").run(skill.id);
+      return this.getSkill(skill.id)!;
+    });
+  }
+
   deleteSkill(skillId: string): boolean {
     return this.atomic(() => {
+      this.stmt("DELETE FROM skill_machine_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       this.stmt("DELETE FROM skill_git_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
       this.stmt("DELETE FROM skill_assignments WHERE skill_id=?").run(skillId);

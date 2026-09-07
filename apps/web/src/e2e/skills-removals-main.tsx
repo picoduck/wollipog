@@ -31,7 +31,7 @@ const runner: RunnerView = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 96,
+  protocolVersion: 111,
 };
 
 const snapshot: ControlPlaneToUi = {
@@ -129,6 +129,7 @@ const client = {
     latestVersion: {
       id: "v1",
       digest: "d1",
+      machineSource: { runnerId: "runner-1", sourceDirectory: ".codex/skills", name: "code-review", digest: "b".repeat(64), importedAt: reportedAt },
       createdAt: reportedAt,
       files: [{
         path: "SKILL.md",

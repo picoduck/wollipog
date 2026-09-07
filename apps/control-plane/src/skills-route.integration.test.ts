@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
+import { validateSkillPayload } from "./skills.js";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "./local-device-credential.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -165,7 +166,7 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-skills-route-"));
   const databasePath = join(temp, "control-plane.db");
-  loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
 
   // Personal-organization fixtures: an ordinary (operator) member and a runner credential.
   const seed = ControlPlaneDb.open(databasePath);
@@ -439,5 +440,35 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   await runnerInbox.take((message) =>
     message.type === "skills_sync_complete" && message.syncId === refreshedSync.syncId);
 
+  // Machine snapshot routes are organization-scoped, but reading host files requires admin.
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, `/api/runners/${RUNNER_ID}/skill-snapshots`, { method: "POST" })).status, 404);
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, "/api/skill-machine/nonexistent", { method: "DELETE" })).status, 204,
+    "non-personal admins reach their own scoped discovery routes, not the global-resource gate");
+  assert.equal((await api(httpBase, MEMBER_TOKEN, `/api/runners/${RUNNER_ID}/skill-snapshots`, { method: "POST" })).status, 403);
+  const listingRequest = api(httpBase, ownerToken, `/api/runners/${RUNNER_ID}/skill-snapshots`, { method: "POST" });
+  const listingFrame = await runnerInbox.take((message) => message.type === "skill_snapshot");
+  assert.equal(listingFrame.operation, "list");
+  const candidate = { id: "opaque", name: "machine-skill", sourceDirectory: ".codex/skills", generation: "generation" };
+  runner.send(JSON.stringify({ type: "skill_snapshot_result", runnerId: RUNNER_ID, requestId: listingFrame.requestId, candidates: [candidate] }));
+  const listing = await listingRequest;
+  assert.equal(listing.status, 200);
+  const discoveryId = (await listing.json() as { discoveryId: string }).discoveryId;
+  const previewRequest = api(httpBase, ownerToken, `/api/skill-machine/${discoveryId}/preview`, { method: "POST", body: JSON.stringify({ candidateId: "opaque" }) });
+  const readFrame = await runnerInbox.take((message) => message.type === "skill_snapshot");
+  assert.equal(readFrame.operation, "read");
+  assert.equal(readFrame.candidateId, "opaque");
+  const payload = validateSkillPayload({ name: "machine-skill", files: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: machine-skill\n---\nSnapshot" }] });
+  assert.ok(payload.ok);
+  if (!payload.ok) throw new Error();
+  runner.send(JSON.stringify({ type: "skill_snapshot_result", runnerId: RUNNER_ID, requestId: readFrame.requestId, snapshot: { candidate, files: payload.files, digest: payload.digest } }));
+  const previewResponse = await previewRequest;
+  assert.equal(previewResponse.status, 200);
+  const previewId = (await previewResponse.json() as { previewId: string }).previewId;
+  const imported = await api(httpBase, ownerToken, `/api/skill-machine/${discoveryId}/import`, { method: "POST", body: JSON.stringify({ previewId }) });
+  assert.equal(imported.status, 200);
+  const importedSkill = (await imported.json() as { skill: { id: string; assignmentCount: number } }).skill;
+  assert.equal(importedSkill.assignmentCount, 0);
+  const detail = await (await api(httpBase, ownerToken, `/api/skills/${importedSkill.id}`)).json() as { latestVersion: { machineSource: { digest: string } } };
+  assert.equal(detail.latestVersion.machineSource.digest, payload.digest);
   assert.equal(child.exitCode, null, `control plane exited during the skills scenario\n${output}`);
 });

@@ -599,6 +599,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/skill-assignments" || routePath.startsWith("/api/skill-assignments/") ||
     routePath === "/api/runners/:id/skills" ||
     routePath === "/api/runners/:id/skills/sync" ||
+    routePath === "/api/runners/:id/skill-snapshots" ||
+    routePath.startsWith("/api/skill-machine/") ||
     routePath === "/api/runners/:runnerId/host-action" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
@@ -1327,6 +1329,11 @@ app.register(async (instance) => {
         if (msg.requestId) hub.resolveRunnerRequest({ ...msg, requestId: msg.requestId }, runnerId);
         break;
       }
+      case "skill_snapshot_result":
+        if (runnerId === msg.runnerId && runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "machineSkillSnapshots")) {
+          hub.resolveRunnerRequest(msg, runnerId);
+        }
+        break;
       case "skills_sync_need": {
         if (runnerId !== msg.runnerId) {
           app.log.warn(`runner ${runnerId} sent a mismatched skills content request`);

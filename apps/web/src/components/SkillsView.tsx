@@ -10,6 +10,7 @@ import { Select } from "./ui/ChoiceControls.js";
 import { SkillsIcon } from "./Icons.js";
 import { Markdown } from "./Markdown.js";
 import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
+import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -272,7 +273,7 @@ export function SkillsView() {
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | "git-import" | "git-update" | null>(null);
+  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | null>(null);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
   const listGeneration = useRef(0);
@@ -430,6 +431,7 @@ export function SkillsView() {
         </div>
         <div className="skills-section-heading">
           <button className="btn" type="button" onClick={() => setDialog("git-import")}>Import from Git</button>
+          <button className="btn" type="button" onClick={() => setDialog("machine-import")}>Import from Machine</button>
           <button className="btn primary" type="button" onClick={() => setDialog("new-skill")}>New Skill</button>
         </div>
       </div>
@@ -514,6 +516,12 @@ export function SkillsView() {
                 <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
                 <p className="skills-hint">Commit {gitSource.commit}</p>
                 <button className="btn sm" type="button" onClick={() => setDialog("git-update")}>Check for Updates</button>
+              </section>}
+              {latest?.machineSource && <section className="skills-section skills-machine-import">
+                <h4>Machine Snapshot Source</h4>
+                <p className="skills-hint">{latest.machineSource.runnerId} · {latest.machineSource.sourceDirectory}/{latest.machineSource.name}</p>
+                <p className="skills-hint">Digest: {latest.machineSource.digest}</p>
+                <p className="skills-hint">Imported {formatTime(latest.machineSource.importedAt)}. This records a snapshot, not an adopted source directory.</p>
               </section>}
 
               <section className="skills-section" aria-label="Assignments">
@@ -650,7 +658,7 @@ export function SkillsView() {
                             ))}
                           </ul>
                           <p className="skills-hint">
-                            These skills live on the machine but are not managed here. Adopting them into the library arrives later.
+                            These skills live on the machine but are not managed here. Use Import from Machine to preview a snapshot on a compatible Linux runner. Replacing the original directory with a managed link arrives later.
                           </p>
                         </div>
                       )}
@@ -694,6 +702,11 @@ export function SkillsView() {
       {dialog === "new-skill" && (
         <NewSkillDialog busy={busy} onClose={() => setDialog(null)} onCreate={createSkill} />
       )}
+      {dialog === "machine-import" && <SkillMachineImportDialog runners={runners} onClose={() => setDialog(null)} onImported={async () => {
+        await refreshList();
+        if (selectedId) await refreshDetail(selectedId);
+        await refreshMachines();
+      }} />}
       {(dialog === "git-import" || dialog === "git-update") && <SkillGitImportDialog
         source={dialog === "git-update" && gitSource ? { ...gitSource, subdirectory: gitSource.path } : undefined}
         onClose={() => setDialog(null)} onImported={async () => {

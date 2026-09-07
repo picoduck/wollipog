@@ -324,7 +324,8 @@
 //      record. Ownership is a normalized spawning-tool id, never a raw provider thread id.
 // 110: explicit cross-provider checkpoint handoffs carry a bounded portable draft and a fresh
 //      destination identity; v109 is reserved for the concurrent orchestration update.
-export const PROTOCOL_VERSION = 110;
+// 111: on-demand, read-only machine skill discovery and bounded snapshot retrieval.
+export const PROTOCOL_VERSION = 111;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
 export type { ConversationHandoffDraft } from "./conversation-handoff.js";
 import { pendingRequests } from "./worker-attention.js";
@@ -461,6 +462,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopFailureRecovery: 85,
   stopAttemptCorrelation: 89,
   agentSkills: 90,
+  machineSkillSnapshots: 111,
   chunkedAgentSkills: 96,
   /** v96 runners emit the additive `skills_state.removals` event projection. */
   skillLinkRemovalReporting: 96,
@@ -778,6 +780,31 @@ export interface UnmanagedSkillInfo {
   agentId: string;
   name: string;
   description?: string;
+}
+
+/** Ephemeral discovery identity, not a path accepted from a client. */
+export interface MachineSkillCandidate {
+  id: string;
+  name: string;
+  sourceDirectory: string;
+  generation: string;
+}
+
+export interface SkillSnapshotMessage {
+  type: "skill_snapshot";
+  runnerId: string;
+  requestId: string;
+  operation: "list" | "read";
+  candidateId?: string;
+}
+
+export interface SkillSnapshotResultMessage {
+  type: "skill_snapshot_result";
+  runnerId: string;
+  requestId: string;
+  candidates?: MachineSkillCandidate[];
+  snapshot?: { candidate: MachineSkillCandidate; files: SkillFile[]; digest: string };
+  error?: string;
 }
 
 /** One managed skill link removed during a runner reconciliation pass. */
@@ -4664,6 +4691,7 @@ export type RunnerToControlPlane =
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
   | SkillsStateMessage
+  | SkillSnapshotResultMessage
   | SkillsSyncNeedMessage
   | DurableSessionCommandResultMessage
   | DurableSessionCommandUpdateMessage
@@ -6018,6 +6046,7 @@ export type ControlPlaneToRunner =
   | LogoutAgentMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
+  | SkillSnapshotMessage
   | SkillsSyncManifestMessage
   | SkillsSyncContentMessage
   | SkillsSyncCompleteMessage

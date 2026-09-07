@@ -35,6 +35,7 @@ import type {
   RewindResultMessage,
   ShellOpenResultMessage,
   SkillsStateMessage,
+  SkillSnapshotResultMessage,
   PodContextEntry,
   RunView,
   PodView,
@@ -168,6 +169,7 @@ export type UiSubscriptionApplyResult =
 /** Correlated runner replies the hub awaits (all carry `requestId`). A skills_state is only
  * correlatable when it echoes a solicited sync's requestId; unsolicited ones never enter here. */
 export type RunnerRequestResult =
+  | SkillSnapshotResultMessage
   | (SkillsStateMessage & { requestId: string })
   | GitActionResultMessage
   | AdoptSessionResultMessage
