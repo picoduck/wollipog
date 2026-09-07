@@ -11,11 +11,12 @@ test.beforeEach(async ({ page }) => {
 
 for (const theme of ["light", "dark"] as const) {
   for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844 }]) {
-    test(`orchestrator creation preset ${theme} ${viewport.width}`, async ({ page }, testInfo) => {
+    for (const surface of ["direct", "native_tui"] as const) {
+    test(`orchestrator creation preset ${surface} ${theme} ${viewport.width}`, async ({ page }, testInfo) => {
       await page.setViewportSize(viewport);
       await page.evaluate((theme) => {
         document.documentElement.dataset.theme = theme;
-        window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(109);
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(112);
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "orchestrator"]);
       }, theme);
       await page.getByRole("tab", { name: /Alpha/ }).click();
@@ -28,11 +29,15 @@ for (const theme of ["light", "dark"] as const) {
       await preset.scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath("preset-unselected.png") });
       await preset.check();
+      const tui = dialog.getByRole("radio", { name: /^Native TUI/ });
+      await expect(tui).toBeEnabled();
+      if (surface === "native_tui") await tui.click();
       await page.screenshot({ path: testInfo.outputPath("preset-selected.png") });
       await dialog.getByRole("button", { name: "Create Session" }).click();
       await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
-        .toMatchObject({ config: { permissionMode: "orchestrator" } });
+        .toMatchObject({ config: { permissionMode: "orchestrator" },
+          ...(surface === "native_tui" ? { launchSurface: "native_tui" } : {}) });
     });
+    }
   }
 }
-

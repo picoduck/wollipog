@@ -61,6 +61,19 @@ test("general agent-control claims require an exact active session and purpose-b
   }
 });
 
+test("only a live orchestrator TUI extends an exact credential into idle, never terminal, sessions", () => {
+  const base = { credentialValid: true, claimedSessionId: "parent", hasLiveOrchestratorTui: true,
+    session: { id: "parent", status: "idle", permissionMode: "orchestrator" } };
+  assert.equal(isAuthenticatedAgentControlClaim(base), true);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, credentialValid: false }), false);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, claimedSessionId: "other" }), false);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, hasLiveOrchestratorTui: false }), false);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, session: { ...base.session, permissionMode: "default" } }), false);
+  for (const status of ["completed", "failed", "stopped"]) {
+    assert.equal(isAuthenticatedAgentControlClaim({ ...base, session: { ...base.session, status } }), false, status);
+  }
+});
+
 test("session-management REST access is method- and route-scoped to its published MCP tools", () => {
   for (const [method, route] of [
     ["GET", "/api/compatibility"],

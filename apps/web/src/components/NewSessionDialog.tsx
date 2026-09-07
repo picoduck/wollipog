@@ -211,7 +211,8 @@ export function NewSessionDialog({
     "Initial Native TUI launch",
   );
   const nativeTuiHostTarget = !executionTarget || executionTarget.adapter === "host";
-  const nativeTuiSupported = nativeTuiLaunchSupported && !orchestrator &&
+  const orchestratorTuiSupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorNativeTui");
+  const nativeTuiSupported = nativeTuiLaunchSupported && (!orchestrator || orchestratorTuiSupported) &&
     nativeTuiRunnerSupported && nativeTuiStartFenceSupported &&
     nativeTuiHostTarget && !selectedAgentOption?.disabled;
   const workspace = runner?.workspaces.find((item) => item.id === workspaceId);
@@ -796,6 +797,11 @@ export function NewSessionDialog({
             </div>
             {!nativeTuiLaunchSupported && (
               <span className="muted">Native TUI launch requires a newer control plane.</span>
+            )}
+            {orchestrator && !orchestratorTuiSupported && (
+              <span className="muted">{runnerCapabilityRequirement(
+                runner?.protocolVersion, "orchestratorNativeTui", "Orchestrator Native TUI",
+              )}</span>
             )}
             {nativeTuiLaunchSupported && !nativeTuiRunnerSupported && (
               <span className="muted">Native TUI requires a supported Claude Code or Codex agent on a Windows or Linux runner.</span>

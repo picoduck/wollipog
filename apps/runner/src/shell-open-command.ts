@@ -14,7 +14,8 @@ export interface ShellOpenCommandDependencies {
   consumeCancellation(shellId: string): boolean;
   sessionCanOpen(sessionId: string): boolean;
   resolveTarget(sessionId: string): ShellOpenTarget;
-  resolveAgentTuiLaunch(meta: SessionMeta): ShellProcessLaunch | null;
+  launchEpoch(sessionId: string): number;
+  resolveAgentTuiLaunch(meta: SessionMeta): ShellProcessLaunch | null | Promise<ShellProcessLaunch | null>;
   open(
     message: ShellOpenMessage,
     target: Exclude<ShellOpenTarget, "pending" | null>,
@@ -26,7 +27,7 @@ export interface ShellOpenCommandDependencies {
 
 /** Coordinate a shell open without letting an initial Agent TUI outrun its session start.
  * Ordinary interactive shells intentionally bypass the start fence so manual attachment keeps
- * the legacy v58 behavior. Cancellation is checked on both sides of the only await and again at
+ * the legacy v58 behavior. Cancellation is checked on both sides of asynchronous preparation and at
  * the synchronous spawn boundary. */
 export async function handleShellOpenCommand(
   message: ShellOpenMessage,
@@ -78,8 +79,17 @@ export async function handleShellOpenCommand(
     }
 
     try {
+      // Only launch-relevant fields participate: transcript ticks must not continually
+      // invalidate a slow MCP probe, but a replacement launch or workspace change must.
+      const launchIdentity = (value: Exclude<ShellOpenTarget, "pending" | null>) => JSON.stringify([
+        value.root, value.context, value.meta.agentId, value.meta.driver,
+        value.meta.command, value.meta.args, value.meta.config,
+        value.meta.executionTarget, value.meta.providerCredentialScopeId, value.meta.status,
+      ]);
+      const identity = launchIdentity(target);
+      const epoch = dependencies.launchEpoch(message.sessionId);
       const launch = message.kind === "agent_tui"
-        ? dependencies.resolveAgentTuiLaunch(target.meta) ?? undefined
+        ? (await dependencies.resolveAgentTuiLaunch(target.meta)) ?? undefined
         : undefined;
       if (message.kind === "agent_tui" && !launch) {
         throw new Error("this session's agent does not expose a standalone TUI");
@@ -89,6 +99,13 @@ export async function handleShellOpenCommand(
       }
       if (dependencies.consumeCancellation(message.shellId)) {
         throw new Error("shell open was cancelled");
+      }
+      if (message.kind === "agent_tui") {
+        const current = dependencies.resolveTarget(message.sessionId);
+        if (!current || current === "pending" || launchIdentity(current) !== identity ||
+            dependencies.launchEpoch(message.sessionId) !== epoch) {
+          throw new Error("session launch or workspace changed while preparing Agent TUI; try again");
+        }
       }
       const { pty } = dependencies.open(message, target, launch);
       dependencies.send({ type: "shell_open_result", requestId: message.requestId, ok: true, pty });

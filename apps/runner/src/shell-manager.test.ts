@@ -168,6 +168,25 @@ test("closeForSession kills only that session's shells", async () => {
   await waitFor(() => mgr.count("sess-b") === 0);
 });
 
+test("orchestrator Stop can close its TUI without closing human shells", {
+  skip: !agentTuiPlatformSupported(process.platform, NATIVE),
+}, async () => {
+  const { exits, cb } = collector();
+  const mgr = new ShellManager(cb);
+  try {
+    mgr.open("human", "parent", tmpdir(), NATIVE);
+    mgr.open("tui", "parent", tmpdir(), NATIVE, undefined, {
+      kind: "agent_tui", launch: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
+    });
+    mgr.closeForSession("parent", "agent_tui");
+    await waitFor(() => exits.some((exit) => exit.shellId === "tui"));
+    assert.equal(mgr.snapshots().find((shell) => shell.shellId === "human")?.status, "running");
+  } finally {
+    mgr.dispose();
+    await waitFor(() => mgr.count("parent") === 0);
+  }
+});
+
 test("spawn failure surfaces as stderr + null exit instead of throwing later", async () => {
   const { out, exits } = collector();
   const mgr = new ShellManager({

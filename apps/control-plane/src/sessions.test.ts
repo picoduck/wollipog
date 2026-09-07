@@ -527,6 +527,14 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     const created = svc.createSession({ ...request, config: { permissionMode: "orchestrator" } });
     assert.equal(created.ok, true, created.error);
     assert.equal(created.data!.permissionMode, "orchestrator");
+    assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
+      config: { permissionMode: "orchestrator" } }).ok, true);
+    db.registerRunner(meta, Date.now(), 111);
+    const beforeTui = db.listSessions().length;
+    assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
+      config: { permissionMode: "orchestrator" } }).status, 409);
+    assert.equal(db.listSessions().length, beforeTui, "old runner refusal precedes materialization");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.setConfig(created.data!.id, { permissionMode: "default" }).status, 409);
     assert.equal(svc.prompt(created.data!.id, "continue", undefined, undefined, { permissionMode: "default" }).status, 409);
     const ordinary = svc.createSession(request).data!;

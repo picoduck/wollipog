@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SessionMeta } from "./session-store.js";
-import { agentTuiLaunch } from "./agent-tui.js";
+import { agentTuiLaunch, prepareAgentTuiLaunch } from "./agent-tui.js";
+import { provisionAgentControl } from "./agent-control.js";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { openWindowsConpty } from "./windows-conpty.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
@@ -109,4 +111,63 @@ test("Windows cmd shim launch rejects percent expansion", () => {
     () => agentTuiLaunch(meta({ args: ["%USERPROFILE%"] }), { platform: "win32", comspec: "cmd.exe" }),
     /contains %/,
   );
+});
+
+test("orchestrator TUIs rebuild credentials and restrictions without mutating durable metadata", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orchestrator-tui-"));
+  try {
+    for (const driver of ["claude-code", "codex", "codex-app-server"] as const) {
+      const source = meta({ driver, args: [], env: {}, config: { permissionMode: "orchestrator" } });
+      const original = JSON.stringify(source);
+      let probes = 0;
+      const launch = await prepareAgentTuiLaunch(source, {
+        controlPlaneProtocolVersion: PROTOCOL_VERSION,
+        provision: (prepared) => provisionAgentControl(prepared, {
+          controlPlaneUrl: "ws://127.0.0.1:8787/runner",
+          controlPlaneProtocolVersion: PROTOCOL_VERSION,
+          registerCredential: () => {},
+        }, () => {}, {
+          configDir: dir, execPath: process.execPath, scriptPath: "/runner/cli.ts", execArgv: [], isSea: false,
+        }),
+        probe: async (prepared, cwd) => {
+          probes++;
+          assert.equal(cwd, "/repo-wt");
+          assert.ok(prepared.args.includes("--strict-config"));
+          assert.equal(prepared.env?.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
+          return ["-c", "mcp_servers.ambient.enabled=false"];
+        },
+      });
+      assert.ok(launch);
+      assert.equal(launch.env?.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
+      assert.ok(launch.env?.WOLLIPOG_SESSION_TOKEN_FILE);
+      assert.equal(JSON.stringify(source), original);
+      if (driver === "claude-code") {
+        assert.equal(probes, 0);
+        assert.ok(launch.args.includes("--strict-mcp-config"));
+        assert.equal(launch.args[launch.args.indexOf("--tools") + 1], "");
+        assert.ok(launch.args.includes("--setting-sources"));
+      } else {
+        assert.equal(probes, 1);
+        assert.ok(launch.args.includes("mcp_servers.ambient.enabled=false"));
+        assert.ok(launch.args.includes('sandbox_mode="read-only"'));
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("orchestrator TUI preparation fails closed for old peers, unsupported targets, terminal sessions and probes", async () => {
+  const source = meta({ driver: "codex", config: { permissionMode: "orchestrator" } });
+  const dependencies = { controlPlaneProtocolVersion: PROTOCOL_VERSION, provision: () => {} };
+  await assert.rejects(prepareAgentTuiLaunch(source, { ...dependencies, controlPlaneProtocolVersion: 111 }), /current native/);
+  await assert.rejects(prepareAgentTuiLaunch({ ...source, context: { kind: "wsl", distro: "test" } }, dependencies), /current native/);
+  await assert.rejects(prepareAgentTuiLaunch({ ...source, driver: "acp" }, dependencies), /current native/);
+  for (const status of ["stopped", "failed", "completed"] as const) {
+    await assert.rejects(prepareAgentTuiLaunch({ ...source, status }, dependencies), /active session/);
+  }
+  await assert.rejects(prepareAgentTuiLaunch(source, {
+    ...dependencies, probe: async () => { throw new Error("isolation unavailable"); },
+  }), /isolation unavailable/);
+  assert.deepEqual(await prepareAgentTuiLaunch(meta(), {
+    controlPlaneProtocolVersion: 58, provision: () => assert.fail("ordinary TUI must not reprovision"),
+  }), agentTuiLaunch(meta()));
 });

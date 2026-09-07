@@ -4,8 +4,39 @@
 import type { SessionMeta } from "./session-store.js";
 import type { ShellProcessLaunch } from "./shell-manager.js";
 import { windowsCommandLine } from "./windows-conpty.js";
+import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { codexOrchestratorMcpArgs } from "./orchestrator-preset.js";
 
 const TUI_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
+
+/** Durable metadata intentionally omits credentials. Rebuild runner-owned launch state for
+ * each TUI and probe at its exact cwd, including manual attachment after a runner restart. */
+export async function prepareAgentTuiLaunch(
+  meta: SessionMeta,
+  dependencies: {
+    controlPlaneProtocolVersion: number | null;
+    provision(meta: SessionMeta): void;
+    probe?: typeof codexOrchestratorMcpArgs;
+  },
+): Promise<ShellProcessLaunch | null> {
+  if (meta.config?.permissionMode !== "orchestrator") return agentTuiLaunch(meta);
+  if (!runnerSupportsProtocol(dependencies.controlPlaneProtocolVersion, "orchestratorNativeTui") ||
+      meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host") ||
+      !TUI_DRIVERS.has(meta.driver)) {
+    throw new Error("Orchestrator Native TUI requires a current native host harness and control plane.");
+  }
+  if (!["idle", "starting", "running", "input_required"].includes(meta.status)) {
+    throw new Error("Orchestrator Native TUI requires an active session; resume the session first.");
+  }
+  const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
+  dependencies.provision(prepared);
+  if (prepared.driver !== "claude-code") {
+    prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
+      prepared, prepared.worktreePath ?? prepared.repoPath,
+    ));
+  }
+  return agentTuiLaunch(prepared);
+}
 
 function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
   return driver === "claude-code"

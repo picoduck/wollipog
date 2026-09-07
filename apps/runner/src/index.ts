@@ -129,7 +129,7 @@ import {
   searchWorkspaceReferences,
 } from "./session-files.js";
 import { ShellManager } from "./shell-manager.js";
-import { agentTuiLaunch } from "./agent-tui.js";
+import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
 import {
@@ -1335,6 +1335,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "stop_session":
       try {
         sessions.stop(msg.sessionId);
+        if (store.readMeta(msg.sessionId)?.config?.permissionMode === "orchestrator") {
+          shells.closeForSession(msg.sessionId, "agent_tui");
+        }
         if (msg.operationId) {
           sendUp({
             type: "stop_session_result",
@@ -1720,19 +1723,30 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         consumeCancellation: (shellId) => pendingShellOpenCancellations.consume(shellId),
         sessionCanOpen: (sessionId) => sessions.sessionCanOpen(sessionId),
         resolveTarget: (sessionId) => sessionFilesTarget(sessionId),
-        resolveAgentTuiLaunch: (meta) => {
-          const launch = agentTuiLaunch(meta);
-          if (launch) sessions.acquireAgentTuiProviderHome(meta);
-          return launch;
+        launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
+        resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
+          controlPlaneProtocolVersion,
+          provision: (prepared) => {
+            prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
+            provisionAgentControl(prepared, {
+              controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
+              allowInsecureTransport, registerCredential: registerAgentControlCredential,
+            }, log, agentControlHost);
+            // Even the no-turn MCP configuration probe may initialize provider HOME.
+            sessions.acquireAgentTuiProviderHome(prepared);
+          },
+        }),
+        open: (message, target, launch) => {
+          if (launch) sessions.acquireAgentTuiProviderHome({ ...target.meta, env: launch.env ?? {} });
+          return shells.open(
+            message.shellId,
+            message.sessionId,
+            target.root,
+            target.context,
+            { cols: message.cols, rows: message.rows },
+            { name: message.name, createdAt: message.createdAt, kind: message.kind, launch },
+          );
         },
-        open: (message, target, launch) => shells.open(
-          message.shellId,
-          message.sessionId,
-          target.root,
-          target.context,
-          { cols: message.cols, rows: message.rows },
-          { name: message.name, createdAt: message.createdAt, kind: message.kind, launch },
-        ),
         send: (result) => sendUp(result),
         errorText: (error) => errText(error),
       }));

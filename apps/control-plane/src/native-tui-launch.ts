@@ -147,6 +147,17 @@ export function nativeTuiSessionError(
 ): NativeTuiLaunchError | null {
   const unavailable = runnerError(db, online, session.runnerId);
   if (unavailable) return unavailable;
+  if (session.permissionMode === "orchestrator") {
+    const protocolVersion = db.getRunner(session.runnerId)?.protocolVersion;
+    if (!runnerSupportsProtocol(protocolVersion, "orchestratorNativeTui")) {
+      return { status: 409, error: runnerCapabilityRequirement(
+        protocolVersion, "orchestratorNativeTui", "Orchestrator Native TUI",
+      ) };
+    }
+    if (!["idle", "starting", "running", "input_required"].includes(session.status)) {
+      return { status: 409, error: "Orchestrator Native TUI requires an active session; resume the session first." };
+    }
+  }
   if (requireStartFence) {
     const protocolVersion = db.getRunner(session.runnerId)?.protocolVersion;
     if (!runnerSupportsProtocol(protocolVersion, "sessionStartFencedShells")) {
