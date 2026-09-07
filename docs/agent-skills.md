@@ -387,6 +387,21 @@ Git backs the library as an **upstream source**, not as the distribution transpo
 - **Codex skill support is evolving.** The per-harness adapter table isolates directory paths,
   invocation forms, and sidecar formats from the core model.
 
+## Group Management Dashboard
+
+The Skills view's **Manage Groups** dialog creates ownership-scoped groups, explicitly converts
+legacy metadata groups, and manages membership and group deployment rules. It displays the
+server-computed creation/conversion ownership before acceptance. Conversion is permanent in this
+UI, may restrict visibility, and never changes member ownership. Membership changes, rule edits,
+and deletion require acknowledgment of their group-wide impact; adding a rule explicitly targets
+all current and future members. Library content, direct rules, and machine pins survive group
+removal. Unowned legacy groups cannot have deployable assignments.
+
+Skill details distinguish inherited group rules from direct assignments. Direct rules win at equal
+targeting specificity, while machine-wide pins still choose the version. These are assignment
+rules, not a claim that every target has successfully deployed; machine-reported state remains
+authoritative. The full Machine × Agents matrix and pin badges remain separate follow-up work.
+
 ## Phasing
 
 1. **MVP** — protocol capability, tables, `skills_sync` / `skills_state`; library CRUD via

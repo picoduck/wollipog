@@ -9,6 +9,7 @@ import {
   validSkillFilePath,
   validSkillName,
   type AgentDefinition,
+  type ResourceScope,
   type DeployedSkillState,
   type SkillFile,
   type SkillInvocationPolicy,
@@ -72,7 +73,10 @@ export interface SkillGroupView {
   id: string;
   name: string;
   sortOrder?: number;
+  scope?: ResourceScope;
 }
+
+export type SkillGroupAssignmentView = Omit<SkillAssignmentView, "skillId"> & { groupId: string };
 
 export type SkillAgentSelector =
   | { kind: "all" }
@@ -122,7 +126,7 @@ export function normalizeRemovalReporting(value: unknown): NonNullable<RunnerSki
 /* Wrapped-or-bare payload aliases for the list routes, so the API client stays honest about the
  * two shapes the concurrent control-plane workstream may settle on. */
 export type SkillListPayload = SkillSummary[] | { skills?: SkillSummary[] };
-export type SkillGroupListPayload = SkillGroupView[] | { groups?: SkillGroupView[] };
+export type SkillGroupListPayload = SkillGroupView[] | { groups?: SkillGroupView[]; creationScope?: ResourceScope | null };
 export type SkillAssignmentListPayload = SkillAssignmentView[] | { assignments?: SkillAssignmentView[] };
 export type SkillAssignmentPayload = SkillAssignmentView | { assignment?: SkillAssignmentView };
 export type SkillDetailPayload = SkillSummary | { skill?: SkillSummary };

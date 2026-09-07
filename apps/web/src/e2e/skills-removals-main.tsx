@@ -145,6 +145,9 @@ const client = {
     await new Promise((resolve) => setTimeout(resolve, 750));
     return runnerSkills.reported!;
   },
+  ...(new URLSearchParams(location.search).has("groups") ? {
+    listSkills: api.listSkills, listSkillGroups: api.listSkillGroups, getSkill: api.getSkill,
+  } : {}),
 } as unknown as ApiClient;
 
 function SkillsWhenReady() {

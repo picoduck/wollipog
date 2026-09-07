@@ -129,6 +129,7 @@ import type {
   SkillDetailPayload,
   SkillGroupListPayload,
   SkillGroupView,
+  SkillGroupAssignmentView,
   SkillListPayload,
 } from "./skills.js";
 import { CONTROL_PLANE_HTTP } from "./config.js";
@@ -506,7 +507,16 @@ export function createApiClient(transport: ApiTransport) {
   listSkillGroups: () => req<SkillGroupListPayload>("/api/skill-groups"),
 
   createSkillGroup: (body: { name: string }) =>
-    req<SkillGroupView>("/api/skill-groups", { method: "POST", body: JSON.stringify(body) }),
+    req<{ group: SkillGroupView }>("/api/skill-groups", { method: "POST", body: JSON.stringify(body) }),
+
+  convertSkillGroup: (id: string) => req<{ group: SkillGroupView }>(`/api/skill-groups/${encodeURIComponent(id)}/convert`, { method: "POST", body: JSON.stringify({ accepted: true }) }),
+  listSkillGroupAssignments: (id: string) => req<{ assignments: SkillGroupAssignmentView[] }>(`/api/skill-groups/${encodeURIComponent(id)}/assignments`),
+  createSkillGroupAssignment: (id: string, body: { scopeKind: "instance" | "runner"; runnerId?: string; agentSelector: SkillAgentSelector; invocation: SkillInvocationPolicy }) =>
+    req<{ assignment: SkillGroupAssignmentView }>(`/api/skill-groups/${encodeURIComponent(id)}/assignments`, { method: "POST", body: JSON.stringify(body) }),
+  updateSkillGroupAssignment: (id: string, assignmentId: string, body: { enabled?: boolean; invocation?: SkillInvocationPolicy }) =>
+    req<{ assignment: SkillGroupAssignmentView }>(`/api/skill-groups/${encodeURIComponent(id)}/assignments/${encodeURIComponent(assignmentId)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteSkillGroupAssignment: (id: string, assignmentId: string) =>
+    req<void>(`/api/skill-groups/${encodeURIComponent(id)}/assignments/${encodeURIComponent(assignmentId)}`, { method: "DELETE" }),
 
   deleteSkillGroup: (id: string) =>
     req<void>(`/api/skill-groups/${encodeURIComponent(id)}`, { method: "DELETE" }),

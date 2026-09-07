@@ -149,6 +149,8 @@ test("legacy groups require explicit same-scope conversion; owned groups reject 
   const { app, db } = await fixture();
   t.after(async () => { await app.close(); db.close(); });
   const legacy = db.createSkillGroup("Legacy");
+  assert.deepEqual((await app.inject("/api/skill-groups")).json().creationScope,
+    { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "organization", organizationId: PERSONAL_ORGANIZATION_ID } });
   const rules = `/api/skill-groups/${legacy.id}/assignments`;
   assert.equal((await app.inject({ method: "POST", url: rules, payload: { scopeKind: "instance", agentSelector: { kind: "all" } } })).statusCode, 404);
   assert.equal((await app.inject({ method: "POST", url: `/api/skill-groups/${legacy.id}/convert` })).statusCode, 400);
