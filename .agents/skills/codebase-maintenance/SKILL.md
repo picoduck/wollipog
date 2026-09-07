@@ -145,7 +145,7 @@ weeks of runs reviewed, and roughly 70% or more accepted as real. Below that, th
 source and should be retuned or disabled instead of promoted.
 
 Phase 2 adds, per job: an isolated worktree, one concern per pull request, a diff cap of about
-150-300 lines, the full test suite green, cross-model review through the `codex-review` skill for
+150-300 lines, the full test suite green, cross-model review through the `cross-model-review` skill for
 convergence jobs, and the Definition of Done from the `issue-workflow` skill. No job auto-merges.
 
 ## The Deletion and Generation Jobs Must Agree
