@@ -82,7 +82,8 @@ export async function handleShellOpenCommand(
       // Only launch-relevant fields participate: transcript ticks must not continually
       // invalidate a slow MCP probe, but a replacement launch or workspace change must.
       const launchIdentity = (value: Exclude<ShellOpenTarget, "pending" | null>) => JSON.stringify([
-        value.root, value.context, value.meta.command, value.meta.args, value.meta.config,
+        value.root, value.context, value.meta.agentId, value.meta.driver,
+        value.meta.command, value.meta.args, value.meta.config,
         value.meta.executionTarget, value.meta.providerCredentialScopeId, value.meta.status,
       ]);
       const identity = launchIdentity(target);

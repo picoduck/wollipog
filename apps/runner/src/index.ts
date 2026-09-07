@@ -1336,7 +1336,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       try {
         sessions.stop(msg.sessionId);
         if (store.readMeta(msg.sessionId)?.config?.permissionMode === "orchestrator") {
-          shells.closeForSession(msg.sessionId);
+          shells.closeForSession(msg.sessionId, "agent_tui");
         }
         if (msg.operationId) {
           sendUp({
@@ -1739,12 +1739,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         open: (message, target, launch) => {
           if (launch) sessions.acquireAgentTuiProviderHome({ ...target.meta, env: launch.env ?? {} });
           return shells.open(
-          message.shellId,
-          message.sessionId,
-          target.root,
-          target.context,
-          { cols: message.cols, rows: message.rows },
-          { name: message.name, createdAt: message.createdAt, kind: message.kind, launch },
+            message.shellId,
+            message.sessionId,
+            target.root,
+            target.context,
+            { cols: message.cols, rows: message.rows },
+            { name: message.name, createdAt: message.createdAt, kind: message.kind, launch },
           );
         },
         send: (result) => sendUp(result),

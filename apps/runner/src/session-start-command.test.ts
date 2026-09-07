@@ -59,6 +59,7 @@ test("ordinary start_session exposes materialization before admission and provid
     unregisterPending: () => {},
     consumeCancellation: () => false,
     sessionCanOpen: () => true,
+    launchEpoch: () => 0,
     resolveTarget: () => ({
       root: "/repo",
       context: { kind: "native" },

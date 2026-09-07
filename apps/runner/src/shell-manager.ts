@@ -342,10 +342,10 @@ export class ShellManager {
     this.kill(s); // exit handler emits onExit, then forgets the retained snapshot
   }
 
-  /** Kill every shell belonging to a session (session deleted). */
-  closeForSession(sessionId: string): void {
+  /** Delete closes every shell; orchestrator Stop closes only its provider TUI. */
+  closeForSession(sessionId: string, kind?: ShellKind): void {
     for (const [shellId, s] of this.shells) {
-      if (s.sessionId !== sessionId) continue;
+      if (s.sessionId !== sessionId || (kind && s.kind !== kind)) continue;
       s.forgetAfterExit = true;
       if (s.exited) {
         this.shells.delete(shellId);
