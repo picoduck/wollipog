@@ -8,7 +8,7 @@ import type { RunnerToControlPlane, SessionLaunchSpec } from "@wollipog/protocol
 import { SessionManager } from "./session-manager.js";
 import { BoxAdmission } from "./box-admission.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
-import { WorktreeCleanupJournal } from "./worktree.js";
+import { WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
 
 function meta(sessionId: string, agentId = "claude"): SessionMeta {
   return {
@@ -1392,8 +1392,23 @@ test("a delayed exit from a retired driver cannot tear down its replacement", as
   }
 });
 
-test("failed close and dispose retain lifecycle fences until the exact client exits", async () => {
+test("failed close and dispose retain lifecycle fences until the exact client exits", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-provider-retirement-fence-"));
+  let manager: SessionManager | undefined;
+  let deletion: Promise<void> | undefined;
+  let teardown: Promise<void> | undefined;
+  let releaseDeletionTail!: () => void;
+  const deletionTail = new Promise<void>((resolve) => { releaseDeletionTail = resolve; });
+  const removeFixture = () => teardown ??= (async () => {
+    try {
+      // Row/worktree disappearance precedes boundary cleanup. Await the actual retry, including
+      // its rejection, before shutdown clears the manager's in-flight deletion bookkeeping.
+      await deletion;
+    } finally {
+      manager?.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
   try {
     const repo = join(root, "repo");
     mkdirSync(repo);
@@ -1415,7 +1430,7 @@ test("failed close and dispose retain lifecycle fences until the exact client ex
       reportExit = callbacks.onExit;
       return client;
     };
-    const manager = new SessionManager(
+    manager = new SessionManager(
       () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
     );
     const spec = { ...launchSpec(repo, "retirement-fence"), useWorktree: true };
@@ -1427,6 +1442,8 @@ test("failed close and dispose retain lifecycle fences until the exact client ex
       admitted: Set<string>;
       closing: Map<string, { promise: Promise<void> }>;
       lockOwner: string;
+      deleting: Set<string>;
+      reapWorktree(record: WorktreeCleanupRecord, cleanupCurrentGeneration?: boolean): Promise<void>;
     };
     assert.ok(internals.active.get(spec.sessionId)?.worktreeLeaseOwner);
     assert.equal(store.acquireLock(spec.sessionId, internals.lockOwner), true);
@@ -1444,11 +1461,22 @@ test("failed close and dispose retain lifecycle fences until the exact client ex
     assert.equal(store.has(spec.sessionId), true, "failed deletion retains complete cleanup provenance");
     assert.equal(existsSync(worktreePath), true);
 
+    const deleteSession = manager.delete.bind(manager);
+    t.mock.method(manager, "delete", (sessionId: string) => deletion = deleteSession(sessionId));
+    const reapWorktree = internals.reapWorktree.bind(manager);
+    let deletionTailEntered = false;
+    t.mock.method(internals, "reapWorktree", async (...args: Parameters<typeof reapWorktree>) => {
+      await reapWorktree(...args);
+      // Hold the real deletion after worktree removal but before its final boundary cleanup.
+      deletionTailEntered = true;
+      await deletionTail;
+    });
     reportExit(1);
-    for (let attempt = 0; attempt < 500 &&
-        (store.has(spec.sessionId) || existsSync(worktreePath)); attempt++) {
+    for (let attempt = 0; attempt < 500 && !deletionTailEntered; attempt++) {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
+    assert.equal(deletionTailEntered, true, "deferred deletion must reach the controlled cleanup tail");
+    assert.ok(deletion, "exact-client exit must invoke the real automatic deletion retry");
     assert.equal(internals.closing.has(spec.sessionId), false);
     assert.equal(internals.admitted.has(spec.sessionId), false);
     assert.equal(store.ownsLock(spec.sessionId, internals.lockOwner), false);
@@ -1456,9 +1484,18 @@ test("failed close and dispose retain lifecycle fences until the exact client ex
       "late exact-client exit must automatically resume the already-requested deletion");
     assert.equal(existsSync(worktreePath), false,
       "automatic deletion retry must finish its journaled worktree cleanup");
-    manager.shutdownAll();
+    assert.equal(internals.deleting.has(spec.sessionId), true,
+      "row/worktree disappearance must not be mistaken for complete deletion");
+    const fixtureRemoval = removeFixture();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(existsSync(root), true, "fixture removal must wait for the held deletion tail");
+    assert.equal(internals.deleting.has(spec.sessionId), true, "shutdown must also wait for deletion");
+    releaseDeletionTail();
+    await fixtureRemoval;
+    assert.equal(existsSync(root), false, "the completed deletion permits fixture-root removal");
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    releaseDeletionTail();
+    await removeFixture();
   }
 });
 
