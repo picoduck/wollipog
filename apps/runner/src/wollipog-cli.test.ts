@@ -12,6 +12,24 @@ import {
 import type { McpFetch } from "./session-management-mcp.js";
 import { runWollipogCli } from "./wollipog-cli.js";
 
+test("CLI archive posts archived true and rejects self without issuing a mutation", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    const body = url.endsWith("/api/compatibility") ? { protocolVersion: PROTOCOL_VERSION }
+      : { id: "child", archived: true };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "parent" };
+  const io = { stdout: () => {}, stderr: () => {} };
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "session", "archive", "child", "--json"], env, io, fetch), 0);
+  assert.equal(calls[1]!.url, "http://cp/api/sessions/child/archive");
+  assert.deepEqual(JSON.parse(calls[1]!.body!), { archived: true });
+  calls.length = 0;
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "session", "archive", "parent", "--json"], env, io, fetch), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+});
+
 test("CLI emits stable JSON and authenticates list requests as the exact session", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-cli-"));
   try {

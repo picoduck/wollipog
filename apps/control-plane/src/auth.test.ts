@@ -20,7 +20,7 @@ test("orchestrator credentials expose only session management and governance rea
   for (const [method, route] of [
     ["GET", "/api/sessions"], ["GET", "/api/governance/policies"],
     ["POST", "/api/sessions"], ["POST", "/api/sessions/:id/stop"],
-    ["POST", "/api/sessions/:id/worktrees"],
+    ["POST", "/api/sessions/:id/worktrees"], ["POST", "/api/sessions/:id/archive"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), true, route);
   for (const [method, route] of [
     ["POST", "/api/runs"], ["POST", "/api/sessions/:id/config"], ["POST", "/api/sessions/:id/approve"],

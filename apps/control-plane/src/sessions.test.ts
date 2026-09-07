@@ -585,6 +585,28 @@ test("session spawn policy parks the exact child request and creates only after 
   }
 });
 
+test("children use their parent Project defaults even when filed elsewhere", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const project = db.createProject({ name: "Parent Budget", scope });
+    const defaults = { costBudgetUsd: 2.5, maxToolCalls: 30 };
+    db.updateProject(project.id, { childSessionDefaults: defaults });
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const parent = svc.createSession({ ...request, projectId: null }, undefined, scope).data!;
+    db.raw().prepare("UPDATE sessions SET project_id=? WHERE id=?").run(project.id, parent.id);
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const created = svc.createSession({ ...request, projectId: null }, undefined, undefined, false, false, false,
+      { parentSessionId: parent.id });
+    assert.equal(created.ok, true, created.error);
+    assert.equal(created.data!.costBudgetUsd, defaults.costBudgetUsd);
+    assert.equal(created.data!.maxToolCalls, defaults.maxToolCalls);
+    assert.equal(created.data!.parentSessionId, parent.id);
+    assert.equal(created.data!.projectId, null);
+  } finally { db.close(); }
+});
+
 test("agent-created sessions retain trusted parent attribution and reserve bounded child allowances", () => {
   const { db, svc, hub } = makeHarness();
   try {

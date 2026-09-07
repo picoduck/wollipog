@@ -367,6 +367,12 @@ CREATE TABLE IF NOT EXISTS projects (
   FOREIGN KEY (default_location_id) REFERENCES project_locations(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS project_child_session_defaults (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  cost_budget_usd REAL NOT NULL CHECK (cost_budget_usd > 0),
+  max_tool_calls INTEGER NOT NULL CHECK (max_tool_calls > 0)
+);
+
 CREATE TABLE IF NOT EXISTS project_locations (
   id           TEXT PRIMARY KEY,
   project_id   TEXT NOT NULL,
@@ -4723,6 +4729,7 @@ export class ControlPlaneDb {
       id: row.id,
       name: row.name,
       hidden: row.hidden_at !== null,
+      childSessionDefaults: this.projectChildSessionDefaults(row.id),
       audience: projectScope?.owner.kind,
       ...(projectScope ? { scope: projectScope } : {}),
       canManage: principal ? this.canManageProject(principal, row.id) : true,
@@ -4867,9 +4874,16 @@ export class ControlPlaneDb {
     return Number(changed) > 0 ? this.getProject(projectId) : null;
   }
 
+  projectChildSessionDefaults(projectId: string): import("@wollipog/protocol").ChildSessionDefaults | null {
+    const row = this.stmt(`SELECT cost_budget_usd AS costBudgetUsd, max_tool_calls AS maxToolCalls
+      FROM project_child_session_defaults WHERE project_id=?`).get(projectId) as
+      unknown as import("@wollipog/protocol").ChildSessionDefaults | undefined;
+    return row ? { costBudgetUsd: row.costBudgetUsd, maxToolCalls: row.maxToolCalls } : null;
+  }
+
   updateProject(
     projectId: string,
-    input: { name?: string; hidden?: boolean },
+    input: { name?: string; hidden?: boolean; childSessionDefaults?: import("@wollipog/protocol").ChildSessionDefaults | null },
     now = Date.now(),
   ): ProjectView | null {
     const current = this.stmt(
@@ -4878,7 +4892,21 @@ export class ControlPlaneDb {
     if (!current) return null;
     const name = input.name?.trim();
     if (input.name !== undefined && !name) throw new Error("project name is required");
+    const defaults = input.childSessionDefaults;
+    if (defaults !== undefined && defaults !== null &&
+        (!Number.isFinite(defaults.costBudgetUsd) || defaults.costBudgetUsd <= 0 ||
+         !Number.isSafeInteger(defaults.maxToolCalls) || defaults.maxToolCalls < 1)) {
+      throw new Error("invalid child session defaults");
+    }
     this.atomic(() => {
+      if (defaults === null) {
+        this.stmt("DELETE FROM project_child_session_defaults WHERE project_id=?").run(projectId);
+      } else if (defaults !== undefined) {
+        this.stmt(`INSERT INTO project_child_session_defaults (project_id, cost_budget_usd, max_tool_calls)
+          VALUES (?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET
+          cost_budget_usd=excluded.cost_budget_usd, max_tool_calls=excluded.max_tool_calls`)
+          .run(projectId, defaults.costBudgetUsd, defaults.maxToolCalls);
+      }
       this.stmt(
         `UPDATE projects SET name=?, name_source=?, hidden_at=?, updated_at=? WHERE id=?`,
       ).run(
@@ -9502,6 +9530,19 @@ export class ControlPlaneDb {
        (session_id, organization_id, owner_kind, owner_id, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(sessionId, scope.organizationId, scope.owner.kind, ownerId, now, now);
+  }
+
+  /** Server-owned ancestry only. UNION terminates even if legacy data contains a cycle. */
+  isSessionDescendant(ancestorId: string, targetId: string): boolean {
+    if (ancestorId === targetId) return false;
+    return Boolean(this.stmt(`
+      WITH RECURSIVE ancestry(id) AS (
+        SELECT parent_session_id FROM sessions WHERE id=? AND parent_session_id IS NOT NULL
+        UNION
+        SELECT s.parent_session_id FROM sessions s JOIN ancestry a ON s.id=a.id
+        WHERE s.parent_session_id IS NOT NULL
+      ) SELECT 1 FROM ancestry WHERE id=? LIMIT 1
+    `).get(targetId, ancestorId));
   }
 
   childSessionAllocations(parentSessionId: string): { count: number; costBudgetUsd: number; maxToolCalls: number } {

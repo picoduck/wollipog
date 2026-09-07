@@ -22,8 +22,20 @@ The authenticated creator supplies child attribution. Request bodies and runner 
 choose or overwrite a parent. A nullable parent reference is persisted on the child and exposed in
 session views; removing a parent preserves the child's history and clears the reference.
 
+All session credentials may prompt, stop, or archive only their own visible descendants.
+The control plane walks persisted ancestry rather than trusting request fields, excludes self,
+and retains ordinary audience checks. Missing or deleted ancestry fails closed. Orchestrators
+may manage descendant worktrees; ordinary credentials retain only their own worktree operations.
+The CLI `session archive` and MCP `archive_session` reuse stop-before-archive and retain history.
+Agent credentials cannot unarchive sessions. Human device authority is unchanged.
+
 Agent-created children receive finite guardrails before their initial prompt can execute.
-An unbounded parent defaults each child to $5 and 100 tool calls. A bounded parent divides its
+An unbounded parent defaults each child to the parent Project's human-managed child allowances,
+or $5 and 100 tool calls when no Project override exists. Project settings and the human-only
+`PATCH /api/projects/:id` surface accept `childSessionDefaults` with a positive finite
+`costBudgetUsd` and a positive integer `maxToolCalls`; null restores the installation fallback.
+The parent's Project supplies these defaults even when the child is filed elsewhere.
+A bounded parent divides its
 remaining, unreserved allowance across its remaining spawn slots; explicit child limits can narrow
 that allocation. The default lifetime spawn cap is four, configurable at session creation with
 `config.maxChildSessions` from zero through 64. Reservations survive deletion of child history.
@@ -49,7 +61,7 @@ sandboxing with no approval escalation. Its configuration probe runs at the effe
 directory and refuses launch if MCP isolation cannot be verified. Claude Code starts with no
 built-in tools, disabled hooks, and a strict runner-owned MCP configuration. The shared MCP
 server exposes a reduced management-only tool list, and the control plane independently permits
-mutations only on trusted direct children. Neither the user nor a child can switch this preset
+mutations only on trusted descendants. Neither the user nor a child can switch this preset
 on an existing session. Native TUI and ACP preset support are deferred until their launch
 boundaries can enforce the same restrictions. Standard ACP sessions remain available.
 

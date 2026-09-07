@@ -1150,12 +1150,20 @@ export interface ProjectLocationView {
   updatedAt: number;
 }
 
+/** Fallback allowances for agent-created child sessions. */
+export interface ChildSessionDefaults {
+  costBudgetUsd: number;
+  maxToolCalls: number;
+}
+
 /** Durable user-visible container for related sessions. A Project remains in this inventory when
  * it has no sessions or every Location is unavailable. */
 export interface ProjectView {
   id: string;
   name: string;
   hidden: boolean;
+  /** Finite fallback allowances for agent-created children of sessions in this Project. */
+  childSessionDefaults?: ChildSessionDefaults | null;
   /** Ownership audience for user-facing sharing copy. Older control planes may omit it. */
   audience?: ResourceOwner["kind"];
   /** Exact ownership for explicit access controls. Older control planes may omit it. */
@@ -6416,6 +6424,8 @@ export interface CreateProjectRequest {
 
 /** Rename and/or show/hide a durable Project. Omitted fields remain unchanged. */
 export interface UpdateProjectRequest {
+  /** Human-managed defaults; null restores the installation fallback. */
+  childSessionDefaults?: ChildSessionDefaults | null;
   name?: string;
   hidden?: boolean;
 }

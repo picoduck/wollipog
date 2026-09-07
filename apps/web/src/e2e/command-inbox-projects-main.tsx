@@ -1229,7 +1229,7 @@ const client = {
     window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(value) }), 0);
     return { project: structuredClone(value) };
   },
-  updateProject: async (id: string, patch: { name?: string; hidden?: boolean }) => {
+  updateProject: async (id: string, patch: import("@wollipog/protocol").UpdateProjectRequest) => {
     const value = model.projects.find((candidate) => candidate.id === id);
     if (!value) throw new Error("project not found");
     Object.assign(value, patch, { updatedAt: value.updatedAt + 1 });
@@ -1341,7 +1341,7 @@ const client = {
 declare global {
   interface Window {
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
-      updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden">>): void;
+      updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults">>): void;
       updateSession(
         id: string,
         patch: Partial<Pick<SessionView,

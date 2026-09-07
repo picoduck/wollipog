@@ -1,8 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { childSessionGuardrails } from "./child-session-guardrails.js";
+import { childSessionDefaultsError, childSessionGuardrails } from "./child-session-guardrails.js";
 
 const unlimited = { costBudgetUsd: null, costUsd: 0, maxToolCalls: null, toolCallCount: 0 };
+
+test("project defaults apply independently only to unbounded parent dimensions", () => {
+  const defaults = { costBudgetUsd: 3, maxToolCalls: 60 };
+  assert.deepEqual(childSessionGuardrails(unlimited, {}, 4, defaults), { config: defaults });
+  assert.deepEqual(childSessionGuardrails({ ...unlimited, costBudgetUsd: 8 }, {}, 4, defaults),
+    { config: { costBudgetUsd: 2, maxToolCalls: 60 } });
+  assert.deepEqual(childSessionGuardrails({ ...unlimited, maxToolCalls: 40 }, {}, 4, defaults),
+    { config: { costBudgetUsd: 3, maxToolCalls: 10 } });
+  assert.deepEqual(childSessionGuardrails(unlimited, { costBudgetUsd: 1, maxToolCalls: 2 }, 4, defaults),
+    { config: { costBudgetUsd: 1, maxToolCalls: 2 } });
+});
+
+test("project defaults require finite positive allowances and reject unknown fields", () => {
+  assert.equal(childSessionDefaultsError(null), null);
+  assert.equal(childSessionDefaultsError({ costBudgetUsd: 3, maxToolCalls: 60 }), null);
+  for (const value of [undefined, {}, [], { costBudgetUsd: Infinity, maxToolCalls: 2 },
+    { costBudgetUsd: 0, maxToolCalls: 2 }, { costBudgetUsd: 1, maxToolCalls: 0.5 },
+    { costBudgetUsd: 1, maxToolCalls: 2, extra: true }]) assert.ok(childSessionDefaultsError(value));
+});
 
 test("unlimited parents give children finite defaults and retain model choices", () => {
   assert.deepEqual(childSessionGuardrails(unlimited, { model: "chosen" }, 4), {

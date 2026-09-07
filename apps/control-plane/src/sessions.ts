@@ -2487,7 +2487,8 @@ export class SessionsService {
         ...parent,
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
-      }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.count);
+      }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.count,
+      parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
       if ("error" in guarded) return fail(guarded.error, 409);
       req = { ...req, config: guarded.config };
     }

@@ -82,21 +82,23 @@ test("a user- or team-scoped conductor cannot mutate organization-global resourc
   }), null);
 });
 
-test("orchestrators can mutate only trusted direct children and cannot operate on their own worktree", () => {
+test("orchestrators can mutate only verified descendants and cannot operate on their own worktree", () => {
   const credential: AgentPrincipal = {
     kind: "agent", actorId: "s_parent", credentialSessionId: "s_parent", orchestrator: true,
     organizationId: "org_1", delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
   };
   for (const route of ["/api/sessions/:id/worktrees", "/api/sessions/:id/worktrees/discard", "/api/sessions/:id/prompt", "/api/sessions/:id/stop"]) {
-    assert.equal(agentCredentialSessionTargetError(route, credential, "s_child", "s_parent"), null);
-    for (const [target, parent] of [["s_parent", undefined], ["s_other", undefined], ["s_grandchild", "s_child"]]) {
-      assert.match(agentCredentialSessionTargetError(route, credential, target!, parent)!, /direct child/);
+    assert.equal(agentCredentialSessionTargetError(route, credential, "s_child", true), null);
+    assert.equal(agentCredentialSessionTargetError(route, credential, "s_grandchild", true), null);
+    for (const target of ["s_parent", "s_other", "s_sibling"]) {
+      assert.match(agentCredentialSessionTargetError(route, credential, target)!, /descendants/);
     }
+    assert.match(agentCredentialSessionTargetError(route, credential, "s_parent", true)!, /descendants/);
   }
   assert.equal(agentDelegationAuthorizationError("/api/governance/policies", credential), null);
 });
 
-test("a purpose-bound credential confines worktree routes without blocking delegated sibling operations", () => {
+test("ordinary credentials retain self worktrees but confine prompt, stop, and archive to descendants", () => {
   const credential: AgentPrincipal = {
     kind: "agent",
     actorId: "s_calling",
@@ -111,8 +113,12 @@ test("a purpose-bound credential confines worktree routes without blocking deleg
     credential,
     "s_sibling",
   )!, /only its own session/);
-  assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/prompt", credential, "s_sibling"), null,
-    "the general agent-control credential retains its reviewed delegated sibling-session surface");
+  for (const route of ["/api/sessions/:id/prompt", "/api/sessions/:id/stop", "/api/sessions/:id/archive"]) {
+    assert.equal(agentCredentialSessionTargetError(route, credential, "s_grandchild", true), null);
+    assert.match(agentCredentialSessionTargetError(route, credential, "s_sibling")!, /descendants/);
+    assert.match(agentCredentialSessionTargetError(route, credential, "s_calling", true)!, /descendants/);
+    assert.match(agentCredentialSessionTargetError(route, { ...credential, credentialSessionId: undefined }, "s_child", true)!, /descendants/);
+  }
   assert.equal(agentCredentialSessionTargetError(
     "/api/sessions/:id/worktrees",
     { ...credential, credentialSessionId: undefined },

@@ -104,15 +104,19 @@ export function agentCredentialSessionTargetError(
   routePath: string,
   principal: AgentPrincipal,
   targetSessionId: string,
-  targetParentSessionId?: string | null,
+  targetIsDescendant = false,
 ): string | null {
   const worktreeRoute = routePath === "/api/sessions/:id/worktrees" ||
     routePath === "/api/sessions/:id/worktrees/attach" ||
     routePath === "/api/sessions/:id/worktrees/select" ||
     routePath === "/api/sessions/:id/worktrees/discard";
-  if (principal.orchestrator && (worktreeRoute || routePath === "/api/sessions/:id/prompt" || routePath === "/api/sessions/:id/stop")) {
-    return principal.credentialSessionId && targetParentSessionId === principal.credentialSessionId &&
-      targetSessionId !== principal.credentialSessionId ? null : "the orchestrator may manage only its direct child sessions";
+  // All agent credentials are confined here, not only the optional orchestrator preset.
+  // The caller computes ancestry from server-owned records; visibility is checked separately.
+  const descendantMutation = routePath === "/api/sessions/:id/prompt" ||
+    routePath === "/api/sessions/:id/stop" || routePath === "/api/sessions/:id/archive";
+  if (descendantMutation || (principal.orchestrator && worktreeRoute)) {
+    return principal.credentialSessionId && targetIsDescendant &&
+      targetSessionId !== principal.credentialSessionId ? null : "the session credential may manage only its descendants";
   }
   if (!worktreeRoute) return null;
   return principal.credentialSessionId && principal.credentialSessionId !== targetSessionId
