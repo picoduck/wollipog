@@ -50,6 +50,15 @@ make on its own. See "Promotion Criteria" below.
 
 ## Anchor Every Finding in Ground Truth
 
+Start with `git fetch origin main` (it touches only `.git` refs, never the working tree) and
+`git rev-list --left-right --count HEAD...origin/main`. If HEAD is behind, say so at the top of
+the report and evaluate every candidate against `origin/main` — `git show origin/main:<path>`,
+`git diff --stat HEAD origin/main` — so a file deleted or rewritten upstream is dropped, not
+reported. One sweep ran two commits behind and produced three findings in a file the tip of
+`main` no longer contained; the "differs from `origin/main`" exclusion also silently removed
+twelve files that had merely moved on. The primary checkout is not fast-forwarded on a schedule,
+and Phase 1 forbids this run from pulling it.
+
 A finding that rests only on reading code is a guess. Each job file names the tool that proves its
 category — static analysis, coverage data, test runs, `git log`, `gh`. Run it, and cite what it
 returned.
@@ -145,7 +154,7 @@ weeks of runs reviewed, and roughly 70% or more accepted as real. Below that, th
 source and should be retuned or disabled instead of promoted.
 
 Phase 2 adds, per job: an isolated worktree, one concern per pull request, a diff cap of about
-150-300 lines, the full test suite green, cross-model review through the `codex-review` skill for
+150-300 lines, the full test suite green, cross-model review through the `cross-model-review` skill for
 convergence jobs, and the Definition of Done from the `issue-workflow` skill. No job auto-merges.
 
 ## The Deletion and Generation Jobs Must Agree
