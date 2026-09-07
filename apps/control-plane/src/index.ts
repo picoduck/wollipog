@@ -599,7 +599,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
   if (sessionId && principal.kind === "agent") {
-    const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId, db.getSession(sessionId)?.parentSessionId);
+    const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId,
+      Boolean(principal.credentialSessionId && db.isSessionDescendant(principal.credentialSessionId, sessionId)));
     if (credentialTargetError) return { statusCode: 404, error: "session not found" };
   }
   if (sessionId && !db.canAccessSession(principal, sessionId)) {
@@ -4017,7 +4018,11 @@ app.delete("/api/sessions/:id/reminder", async (req, reply) => {
 
 app.post("/api/sessions/:id/archive", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const body = req.body as SetArchivedRequest;
+  const body = (req.body ?? {}) as SetArchivedRequest;
+  if (typeof body.archived !== "boolean") return reply.code(400).send({ error: "archived must be a boolean" });
+  if (requestPrincipal(req)?.kind === "agent" && !body.archived) {
+    return reply.code(403).send({ error: "session credentials may archive descendants, but cannot unarchive them" });
+  }
   return respond(reply, svc.setArchived(id, body.archived));
 });
 

@@ -326,7 +326,7 @@ const GOVERNANCE_POLICY_PROPERTIES: Json = {
 
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "list_sessions", "get_session", "get_session_events",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
-  "stop_session", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree"]);
+  "stop_session", "archive_session", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree"]);
 
 export const TOOLS: McpTool[] = [
   /* ------------------------------- READS --------------------------------- */
@@ -1020,7 +1020,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "prompt_session",
-    description: "Send a message/task to an existing session. Subject to session permissions and governance policies.",
+    description: "Send a message/task to a descendant session. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" }, text: { type: "string" } },
@@ -1043,7 +1043,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "stop_session",
-    description: "Stop a session's agent process. Subject to session permissions and governance policies.",
+    description: "Stop a descendant session's agent process. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },
@@ -1056,6 +1056,23 @@ export const TOOLS: McpTool[] = [
         return errorResult("refusing: that is my own session (an agent cannot stop itself)");
       }
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/stop`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "archive_session",
+    description: "Archive a descendant session without deleting its history. Existing stop-before-archive and visibility checks apply.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId) return errorResult("refusing: an agent cannot archive its own session");
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/archive`, { archived: true });
       if (!r.ok) return errorResult(r.message);
       return textResult({ session: mapSession(r.data) });
     },

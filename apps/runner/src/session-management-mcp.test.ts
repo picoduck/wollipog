@@ -148,6 +148,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "create_session",
       "prompt_session",
       "stop_session",
+      "archive_session",
       "set_guardrails",
       "create_run",
     ],
@@ -570,6 +571,19 @@ test("stop_session -> POST /api/sessions/:id/stop", async () => {
   await callTool(deps, "stop_session", { sessionId: "s_2" });
   assert.equal(calls[0]!.method, "POST");
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_2/stop`);
+});
+
+test("archive_session sends only archived true, preserves scoped errors, and refuses self", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "s_child", archived: true } }));
+  deps.orchestrator = true;
+  const result = await callTool(deps, "archive_session", { sessionId: "s_child" });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_child/archive`);
+  assert.deepEqual(calls[0]!.body, { archived: true });
+  assert.equal((await callTool(deps, "archive_session", { sessionId: SELF_ID })).isError, true);
+  assert.equal(calls.length, 1);
+  const denied = makeDeps(() => ({ status: 404, body: { error: "session not found" } }));
+  assert.equal((await callTool(denied.deps, "archive_session", { sessionId: "s_sibling" })).isError, true);
 });
 
 test("set_guardrails -> POST /api/sessions/:id/config with ONLY the given guardrail keys", async () => {

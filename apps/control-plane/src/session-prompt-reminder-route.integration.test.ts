@@ -19,6 +19,7 @@ import { ControlPlaneDb } from "./db.js";
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const RUNNER_ID = "runner-prompt-reminder-route";
 const SESSION_ID = "session-prompt-reminder-route";
+const PARENT_SESSION_ID = "session-prompt-reminder-parent";
 const OWNER_TOKEN = "prompt-reminder-owner-token";
 const OTHER_TOKEN = "prompt-reminder-other-token";
 const AGENT_TOKEN = "prompt-reminder-agent-token";
@@ -159,7 +160,23 @@ function seed(database: string, runner: RunnerMetadata): { ownerUserId: string; 
       expiresAt: now + 60_000,
     });
     db.createSession({
+      id: PARENT_SESSION_ID,
+      runnerId: RUNNER_ID,
+      workspaceId: null,
+      agentId: null,
+      title: "Prompt Reminder Parent",
+      useWorktree: false,
+      driver: "acp",
+      config: {},
+      scope: {
+        organizationId: identity.organizationId,
+        owner: { kind: "organization", organizationId: identity.organizationId },
+      },
+      now: now + 4,
+    });
+    db.createSession({
       id: SESSION_ID,
+      parentSessionId: PARENT_SESSION_ID,
       runnerId: RUNNER_ID,
       workspaceId: null,
       agentId: null,
@@ -175,7 +192,8 @@ function seed(database: string, runner: RunnerMetadata): { ownerUserId: string; 
       now: now + 4,
     });
     db.updateSessionStatus(SESSION_ID, "running", now + 5);
-    assert.equal(db.setAgentControlCredential(SESSION_ID, RUNNER_ID, hashToken(AGENT_TOKEN), now + 6), true);
+    db.updateSessionStatus(PARENT_SESSION_ID, "running", now + 5);
+    assert.equal(db.setAgentControlCredential(PARENT_SESSION_ID, RUNNER_ID, hashToken(AGENT_TOKEN), now + 6), true);
 
     const reminderIds = new Map<string, string>();
     for (const [offset, userId] of [identity.userId, OTHER_USER_ID].entries()) {
@@ -238,8 +256,8 @@ test("prompt route acknowledges fired reminders only for accepted human principa
   await waitForHealth(baseUrl, child, () => output);
   const liveDb = new DatabaseSync(database);
   liveDb.exec("PRAGMA busy_timeout=5000");
-  liveDb.prepare("UPDATE sessions SET status='running',updated_at=? WHERE id=?")
-    .run(Date.now(), SESSION_ID);
+  liveDb.prepare("UPDATE sessions SET status='running',updated_at=? WHERE id IN (?,?)")
+    .run(Date.now(), SESSION_ID, PARENT_SESSION_ID);
   liveDb.close();
 
   const humanHeaders = {
@@ -270,8 +288,8 @@ test("prompt route acknowledges fired reminders only for accepted human principa
     token: RUNNER_TOKEN,
     protocolVersion: PROTOCOL_VERSION,
     runner,
-    sessionSnapshots: [{
-      id: SESSION_ID,
+    sessionSnapshots: [SESSION_ID, PARENT_SESSION_ID].map((id) => ({
+      id,
       workspaceId: null,
       agentId: null,
       title: "Prompt Reminder Route",
@@ -289,7 +307,7 @@ test("prompt route acknowledges fired reminders only for accepted human principa
       historyEpoch: 0,
       createdAt: 1,
       updatedAt: 1,
-    }],
+    })),
   }));
   await inbox.take((message) => message.type === "registered");
 
@@ -309,7 +327,7 @@ test("prompt route acknowledges fired reminders only for accepted human principa
 
   const agentDelivery = await deliverPrompt({
     authorization: `Bearer ${AGENT_TOKEN}`,
-    [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: SESSION_ID,
+    [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: PARENT_SESSION_ID,
     "content-type": "application/json",
   }, "automated agent prompt");
   assert.equal(agentDelivery.text, "automated agent prompt");

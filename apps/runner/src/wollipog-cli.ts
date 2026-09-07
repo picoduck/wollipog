@@ -79,7 +79,7 @@ function usage(): string {
   return [
     "Usage: wollipog session <command> [options]",
     "       wollipog worktree <create|attach|select|discard> [options]",
-    "Session Commands: list, get, events, create, prompt, wait, stop",
+    "Session Commands: list, get, events, create, prompt, wait, stop, archive",
     "Worktree Options: --session <id>, --branch <name>, --base <ref>, --path <absolute-path>",
     "Use --json for stable machine-readable output.",
   ].join("\n");
@@ -173,6 +173,8 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         : { error: "session wait requires an id" };
     case "stop":
       return words[2] ? { tool: "stop_session", input: { sessionId: words[2] } } : { error: "session stop requires an id" };
+    case "archive":
+      return words[2] ? { tool: "archive_session", input: { sessionId: words[2] } } : { error: "session archive requires an id" };
     default:
       return { error: usage() };
   }

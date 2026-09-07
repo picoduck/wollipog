@@ -9532,6 +9532,19 @@ export class ControlPlaneDb {
     ).run(sessionId, scope.organizationId, scope.owner.kind, ownerId, now, now);
   }
 
+  /** Server-owned ancestry only. UNION terminates even if legacy data contains a cycle. */
+  isSessionDescendant(ancestorId: string, targetId: string): boolean {
+    if (ancestorId === targetId) return false;
+    return Boolean(this.stmt(`
+      WITH RECURSIVE ancestry(id) AS (
+        SELECT parent_session_id FROM sessions WHERE id=? AND parent_session_id IS NOT NULL
+        UNION
+        SELECT s.parent_session_id FROM sessions s JOIN ancestry a ON s.id=a.id
+        WHERE s.parent_session_id IS NOT NULL
+      ) SELECT 1 FROM ancestry WHERE id=? LIMIT 1
+    `).get(targetId, ancestorId));
+  }
+
   childSessionAllocations(parentSessionId: string): { count: number; costBudgetUsd: number; maxToolCalls: number } {
     return this.stmt(
       `SELECT child_spawn_count AS count, child_cost_reserved_usd AS costBudgetUsd,
