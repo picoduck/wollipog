@@ -6,6 +6,13 @@ import type { SkillsRouteDeps } from "./skills-route.js";
 export function registerSkillVersionPolicyRoutes(app: FastifyInstance, deps: SkillsRouteDeps): void {
   const { db } = deps;
   const path = "/api/skills/:id/machines/:runnerId/version";
+  app.get(`${path}-policy`, async (req, reply) => {
+    const principal = deps.requestPrincipal(req);
+    const { id, runnerId } = req.params as { id: string; runnerId: string };
+    if (!principal || !db.canAccessSkill(principal, id) || !db.canAccessRunner(principal, runnerId)) return reply.code(404).send({ error: "skill or runner not found" });
+    const policy = db.getMachineSkillVersion(id, runnerId);
+    return { policy: policy ? { versionId: policy.versionId, revision: policy.revision } : null };
+  });
   app.get(path, async (req, reply) => {
     const principal = deps.requestPrincipal(req);
     const { id, runnerId } = req.params as { id: string; runnerId: string };

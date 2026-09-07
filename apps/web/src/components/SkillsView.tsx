@@ -15,6 +15,7 @@ import { SkillMachineVersionDialog } from "./SkillMachineVersionDialog.js";
 import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
 import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
 import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
+import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -177,6 +178,7 @@ export function SkillsView() {
   const [machineSkills, setMachineSkills] = useState<Record<string, RunnerSkillsResponse>>({});
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
+  const [versionRunnerId, setVersionRunnerId] = useState<string | undefined>();
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | null>(null);
 
@@ -215,7 +217,7 @@ export function SkillsView() {
         // A machine that predates the skills routes reads as never reported rather than an error
         // banner over the whole view.
         return [runner.runnerId, {
-          desired: [], reported: null, removalReporting: "unknown",
+          desired: [], reported: null, removalReporting: "unknown", loadError: "Skills status could not be loaded. Try Sync Now or reopen this view.",
         } satisfies RunnerSkillsResponse] as const;
       }
     }));
@@ -521,6 +523,7 @@ export function SkillsView() {
                 )}
               </section>
 
+              <SkillAssignmentMatrix key={`matrix-${detail.id}`} skillId={detail.id} skillName={detail.name} runners={runners} machineLabels={machineLabels} machineSkills={machineSkills} onManageVersion={runnerId => { setVersionRunnerId(runnerId); setDialog("machine-versions"); }} />
               <section className="skills-section" aria-label="Deployment">
                 <h4>Deployment</h4>
                 {runners.length === 0 && <p className="skills-hint">Connect a machine to deploy this skill.</p>}
@@ -621,7 +624,7 @@ export function SkillsView() {
         await refreshDetail(detail.id);
         await refreshMachines();
       }} />}
-      {dialog === "machine-versions" && detail && <SkillMachineVersionDialog key={detail.id} skillId={detail.id} runners={runners} onClose={() => setDialog(null)} onSaved={refreshMachines} />}
+      {dialog === "machine-versions" && detail && <SkillMachineVersionDialog key={detail.id} skillId={detail.id} runners={runners} initialRunnerId={versionRunnerId} onClose={() => { setDialog(null); setVersionRunnerId(undefined); }} onSaved={refreshMachines} />}
       {dialog === "machine-import" && <SkillMachineImportDialog runners={runners} onClose={() => setDialog(null)} onImported={async () => {
         await refreshList();
         if (selectedId) await refreshDetail(selectedId);
@@ -640,6 +643,7 @@ export function SkillsView() {
           runners={runners}
           machineLabels={machineLabels}
           busy={busy}
+          error={error}
           onClose={() => setDialog(null)}
           onCreate={createAssignment}
         />

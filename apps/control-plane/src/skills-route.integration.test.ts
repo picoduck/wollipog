@@ -427,6 +427,12 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
 
   // The parameterized per-machine routes are member-scoped too, and resource scoping still
   // applies: the personal-organization member reaches the runner, the foreign admin gets 404.
+  const policyPath = `/api/skills/${memberSkill.id}/machines/${RUNNER_ID}/version-policy`;
+  const memberPolicy = await api(httpBase, MEMBER_TOKEN, policyPath);
+  assert.equal(memberPolicy.status, 200);
+  assert.deepEqual(await memberPolicy.json(), { policy: null });
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, policyPath)).status, 404);
+  assert.equal((await api(httpBase, SECOND_MEMBER_TOKEN, policyPath)).status, 404);
   const memberRunnerView = await api(httpBase, MEMBER_TOKEN, `/api/runners/${RUNNER_ID}/skills`);
   assert.equal(memberRunnerView.status, 200, "an ordinary member can view a machine's skill state");
   assert.equal((await memberRunnerView.json() as { desired: Array<{ name: string }> }).desired[0]?.name,

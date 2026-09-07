@@ -42,6 +42,7 @@ export interface MachineSkillVersionPreview {
   proposedVersion: SkillVersionSummary;
   expectedLatestVersionId: string;
 }
+export interface MachineSkillVersionPolicy { policy: { versionId: string | null; revision: string } | null }
 export interface MachineSkillDiscovery { discoveryId: string; candidates: import("@wollipog/protocol").MachineSkillCandidate[] }
 export interface MachineSkillPreview {
   previewId: string; candidate: import("@wollipog/protocol").MachineSkillCandidate;
@@ -113,6 +114,8 @@ export interface ReportedSkillsState {
 }
 
 export interface RunnerSkillsResponse {
+  /** Dashboard-only fetch failure; never interpret it as an authoritative empty desired state. */
+  loadError?: string;
   desired: RunnerDesiredSkill[];
   reported: ReportedSkillsState | null;
   /** Capability of the runner binary, independent of whether any removal event exists. */

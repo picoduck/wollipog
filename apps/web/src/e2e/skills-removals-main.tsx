@@ -27,11 +27,15 @@ const runner: RunnerView = {
       driver: "claude-code",
       available: true,
     },
+    ...(new URLSearchParams(location.search).has("matrix") ? [
+      { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" as const, available: true },
+      { id: "wsl", name: "WSL Codex", command: "codex", args: [], env: {}, driver: "codex" as const, context: { kind: "wsl" as const, distro: "Ubuntu" }, available: true },
+    ] : []),
   ],
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 111,
+  protocolVersion: new URLSearchParams(location.search).has("legacySkills") ? 1 : 111,
 };
 
 const snapshot: ControlPlaneToUi = {
@@ -42,7 +46,7 @@ const snapshot: ControlPlaneToUi = {
     paginatedSessionHistory: false,
     projects: false,
   },
-  runners: [runner],
+  runners: [runner, ...(new URLSearchParams(location.search).has("matrix") ? [{ ...runner, runnerId: "runner-2", displayName: "Other Machine", status: "offline" as const }] : [])],
   boxes: [],
   sessions: [],
   runs: [],
@@ -141,12 +145,16 @@ const client = {
   }),
   listSkillAssignments: async () => ({ assignments: [] }),
   runnerSkills: async () => runnerSkills,
+  getMachineSkillVersionPolicy: async () => ({ policy: null }),
   syncRunnerSkills: async () => {
     await new Promise((resolve) => setTimeout(resolve, 750));
     return runnerSkills.reported!;
   },
   ...(new URLSearchParams(location.search).has("groups") ? {
     listSkills: api.listSkills, listSkillGroups: api.listSkillGroups, getSkill: api.getSkill,
+  } : {}),
+  ...(new URLSearchParams(location.search).has("matrix") ? {
+    runnerSkills: api.runnerSkills, getMachineSkillVersionPolicy: api.getMachineSkillVersionPolicy,
   } : {}),
 } as unknown as ApiClient;
 
