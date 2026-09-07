@@ -366,6 +366,9 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (body.groupId !== undefined && body.groupId !== null && typeof body.groupId !== "string") {
       return reply.code(400).send({ error: "groupId must be a string" });
     }
+    if (typeof body.groupId === "string" && db.skillGroupScope(body.groupId) && !db.canAccessSkillGroup(principal, body.groupId)) {
+      return reply.code(404).send({ error: "skill group not found" });
+    }
     const note = parseNote(body.note);
     if (note === null) return reply.code(400).send({ error: "note must be 2000 characters or fewer" });
     if (db.getSkillByName(validated.name)) {
@@ -420,6 +423,9 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     }
     if (body.groupId !== undefined && body.groupId !== null && typeof body.groupId !== "string") {
       return reply.code(400).send({ error: "groupId must be a string" });
+    }
+    if (typeof body.groupId === "string" && db.skillGroupScope(body.groupId) && !db.canAccessSkillGroup(principal, body.groupId)) {
+      return reply.code(404).send({ error: "skill group not found" });
     }
     try {
       const skill = db.updateSkill(id, {
@@ -503,26 +509,19 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
     const id = (req.params as { id: string }).id;
     if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
-    const assignments = db.listSkillAssignments(id);
     if (!db.deleteSkill(id)) return reply.code(404).send({ error: "skill not found" });
-    if (assignments.some((assignment) => assignment.scopeKind === "instance")) {
-      pushAffected();
-    } else {
-      for (const runnerId of new Set(assignments.map((a) => a.runnerId).filter((r): r is string => Boolean(r)))) {
-        pushSkillsSync(runnerId);
-      }
-    }
+    pushAffected(); // Includes machines reached through dynamic group assignments.
     return reply.code(204).send();
   });
 
   /* ------------------------------ Skill groups ------------------------------ */
 
-  // Groups carry no ownership rows: they are instance-visible organizational metadata (a name and
-  // a sort order), never a deployment gate — deleting one only detaches member skills' group_id.
-  // Skills themselves are strictly ownership-filtered above, so a group can at most reveal its own
-  // name; member-scoped auth (authorizeApiRequest) still applies to every group route.
-
-  app.get("/api/skill-groups", async () => ({ groups: db.listSkillGroups() }));
+  // Legacy groups remain visible metadata until explicitly converted. Owned groups and every
+  // deployment rule are resource-scoped; no implicit ownership backfill grants deployment rights.
+  app.get("/api/skill-groups", async (req) => {
+    const principal = deps.requestPrincipal(req);
+    return { groups: principal ? db.listSkillGroups().filter(g => !g.scope || db.canAccessSkillGroup(principal, g.id)) : [] };
+  });
 
   app.post("/api/skill-groups", async (req, reply) => {
     const principal = deps.requestHuman(req);
@@ -531,16 +530,96 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (typeof name !== "string" || !name.trim() || name.trim().length > 120) {
       return reply.code(400).send({ error: "name must be 1-120 characters" });
     }
-    return reply.code(201).send({ group: db.createSkillGroup(name) });
+    return reply.code(201).send({ group: db.createSkillGroup(name, Date.now(), defaultSkillScope(principal)) });
+  });
+
+  app.post("/api/skill-groups/:id/convert", async (req, reply) => {
+    const principal = deps.requestHuman(req);
+    if (!principal) return reply.code(403).send({ error: "human identity is required" });
+    const id = (req.params as { id: string }).id;
+    if (!db.listSkillGroups().some(g => g.id === id) ||
+        (db.skillGroupScope(id) && !db.canAccessSkillGroup(principal, id))) {
+      return reply.code(404).send({ error: "skill group not found" });
+    }
+    if ((req.body as { accepted?: unknown } | null)?.accepted !== true) {
+      return reply.code(400).send({ error: "explicit acceptance of group ownership is required" });
+    }
+    try { db.convertSkillGroup(id, defaultSkillScope(principal)); }
+    catch { return reply.code(409).send({ error: "group is already owned or its members do not share your default ownership scope" }); }
+    return { group: db.listSkillGroups().find(g => g.id === id) };
   });
 
   app.delete("/api/skill-groups/:id", async (req, reply) => {
     const principal = deps.requestHuman(req);
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    if (!db.deleteSkillGroup((req.params as { id: string }).id)) {
+    const id = (req.params as { id: string }).id;
+    if (db.skillGroupScope(id) && !db.canAccessSkillGroup(principal, id)) {
       return reply.code(404).send({ error: "skill group not found" });
     }
+    if (!db.deleteSkillGroup(id)) {
+      return reply.code(404).send({ error: "skill group not found" });
+    }
+    pushAffected();
     return reply.code(204).send();
+  });
+
+  const accessibleGroupRule = (principal: AuthPrincipal, rule: { scopeKind: string; runnerId: string | null }) =>
+    rule.scopeKind !== "runner" || (!!rule.runnerId && db.canAccessRunner(principal, rule.runnerId));
+
+  app.get("/api/skill-groups/:id/assignments", async (req, reply) => {
+    const principal = deps.requestPrincipal(req);
+    const id = (req.params as { id: string }).id;
+    if (!principal || !db.canAccessSkillGroup(principal, id)) return reply.code(404).send({ error: "skill group not found" });
+    return { assignments: db.listSkillGroupAssignments(id).filter(a => accessibleGroupRule(principal, a)) };
+  });
+
+  app.post("/api/skill-groups/:id/assignments", async (req, reply) => {
+    const principal = deps.requestHuman(req);
+    if (!principal) return reply.code(403).send({ error: "human identity is required" });
+    const id = (req.params as { id: string }).id;
+    if (!db.canAccessSkillGroup(principal, id)) return reply.code(404).send({ error: "owned skill group not found" });
+    const body = (req.body ?? {}) as { scopeKind?: unknown; runnerId?: unknown; agentSelector?: unknown; invocation?: unknown; enabled?: unknown };
+    if (body.scopeKind !== "runner" && body.scopeKind !== "instance") return reply.code(400).send({ error: "scopeKind must be instance or runner" });
+    if (body.scopeKind === "runner" && (typeof body.runnerId !== "string" || !db.getRunner(body.runnerId) || !db.canAccessRunner(principal, body.runnerId))) {
+      return reply.code(404).send({ error: "runner not found" });
+    }
+    const agentSelector = parseSkillAgentSelector(body.agentSelector);
+    const invocation = parseInvocation(body.invocation);
+    if (!agentSelector || invocation === null || (body.enabled !== undefined && typeof body.enabled !== "boolean")) {
+      return reply.code(400).send({ error: "invalid agentSelector, invocation, or enabled value" });
+    }
+    try {
+      const assignment = db.createSkillGroupAssignment({ groupId: id, scopeKind: body.scopeKind,
+        runnerId: body.scopeKind === "runner" ? body.runnerId as string : null,
+        agentSelector, invocation: invocation ?? "agent", enabled: body.enabled !== false });
+      pushAffected(assignment);
+      return reply.code(201).send({ assignment });
+    } catch { return reply.code(409).send({ error: "the group's access scope does not include this machine" }); }
+  });
+
+  for (const method of ["PATCH", "DELETE"] as const) app.route({
+    method, url: "/api/skill-groups/:id/assignments/:assignmentId",
+    handler: async (req, reply) => {
+      const principal = deps.requestHuman(req);
+      if (!principal) return reply.code(403).send({ error: "human identity is required" });
+      const { id, assignmentId } = req.params as { id: string; assignmentId: string };
+      if (!db.canAccessSkillGroup(principal, id)) return reply.code(404).send({ error: "skill group not found" });
+      const existing = db.listSkillGroupAssignments(id).find(a => a.id === assignmentId);
+      if (!existing || !accessibleGroupRule(principal, existing)) return reply.code(404).send({ error: "group assignment not found" });
+      if (method === "DELETE") {
+        db.deleteSkillGroupAssignment(id, assignmentId);
+        pushAffected(existing);
+        return reply.code(204).send();
+      }
+      const body = (req.body ?? {}) as { enabled?: unknown; invocation?: unknown };
+      const invocation = parseInvocation(body.invocation);
+      if (invocation === null || (body.enabled !== undefined && typeof body.enabled !== "boolean")) return reply.code(400).send({ error: "invalid enabled or invocation value" });
+      const assignment = db.updateSkillGroupAssignment(id, assignmentId, {
+        ...(body.enabled === undefined ? {} : { enabled: body.enabled as boolean }), ...(invocation === undefined ? {} : { invocation }),
+      });
+      pushAffected(existing);
+      return { assignment };
+    },
   });
 
   /* ---------------------------- Skill assignments ---------------------------- */

@@ -2,6 +2,32 @@
 
 Status: managed deployment, Git import, Linux machine snapshot import, version history with library rollback, and machine-wide version pins implemented; remaining design below is phased.
 
+## Assignable Group API
+
+New groups created through `POST /api/skill-groups` carry the creator's default resource scope:
+organization scope for owners/admins, private scope for other members. Legacy groups remain shared
+organizational metadata and cannot deploy until explicitly converted with
+`POST /api/skill-groups/:id/convert` and `{ "accepted": true }`. Conversion requires every current
+member to have the proposed scope; it never transfers skill ownership. Mixed-scope legacy groups
+must be reorganized before conversion. An owned group's members must share its exact ownership scope.
+
+`GET`/`POST /api/skill-groups/:id/assignments` lists or creates group rules. Creation accepts
+`scopeKind` (`instance` or `runner`), `runnerId` for a machine rule, `agentSelector`, `invocation`
+(`agent` or `manual`), and optional `enabled`. `PATCH`/`DELETE` on
+`/api/skill-groups/:id/assignments/:assignmentId` changes policy or removes a rule. Reads and writes
+require group access and, for machine rules, machine access. All writes require a human identity.
+
+Membership is expanded at reconciliation time and ownership is rechecked, including after later
+membership or ownership changes. Existing scope/agent specificity precedence is preserved; a direct
+skill rule beats a group rule at equal specificity. Rules do not override machine-wide version pins.
+Member addition/removal, skill deletion, and group deletion push an authoritative update; deleting a
+group preserves its library skills and their direct assignments. Registration preserves group rules,
+while deleting a machine clears its machine-specific rules. Offline and older runners retain the
+existing reconciliation/capability behavior. Import previews count group rules in assignment impact.
+
+The group-management UI is a separate follow-up slice; this section documents the backend API,
+not a claim that group deployment controls are already exposed in the dashboard.
+
 ## Machine-Wide Version Pins
 
 **Machine Versions** selects one version policy for a skill on a machine: **Track Latest** or a

@@ -102,6 +102,102 @@ async function fixture() {
   };
 }
 
+test("owned group rules expand changing membership, respect direct overrides and pins, and notify removals", async (t) => {
+  const { app, db, online, pushed } = await fixture();
+  t.after(async () => { await app.close(); db.close(); });
+  for (const id of ["one", "two"]) { db.registerRunner(runnerMeta(id), 10, 90); online.add(id); }
+  const group = (await app.inject({ method: "POST", url: "/api/skill-groups", payload: { name: "Tools" } })).json().group;
+  assert.ok(group.scope);
+  const rules = `/api/skill-groups/${group.id}/assignments`;
+  const response = await app.inject({ method: "POST", url: rules, payload: {
+    scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "codex" }, invocation: "manual",
+  } });
+  assert.equal(response.statusCode, 201, response.body);
+  const rule = response.json().assignment;
+  assert.deepEqual(resolveDesiredSkills(db, "one"), [], "empty group is safe and dynamically assignable");
+  const skill = (await app.inject({ method: "POST", url: "/api/skills", payload: { ...skillPayload("grouped"), groupId: group.id } })).json().skill;
+  assert.equal(db.getSkill(skill.id)!.assignmentCount, 1);
+  assert.deepEqual(resolveDesiredSkills(db, "one")[0]!.targets, [{ agentId: "codex", invocation: "manual" }]);
+  assert.deepEqual(resolveDesiredSkills(db, "two"), []);
+  const version = db.getSkillVersion(skill.latestVersion.id)!;
+  db.setMachineSkillVersion(skill.id, "one", version.id, null, version.id);
+  db.addSkillVersion(skill.id, { files: version.files, manifest: version.manifest, digest: "new-digest" });
+  assert.equal(resolveDesiredSkills(db, "one")[0]!.versionDigest, version.digest);
+  const direct = db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one",
+    agentSelector: { kind: "agent", agentId: "codex" }, enabled: false, now: 1 });
+  assert.deepEqual(resolveDesiredSkills(db, "one"), [], "equal-specificity direct disable wins despite older timestamp");
+  db.deleteSkillAssignment(direct.id);
+  assert.equal((await app.inject({ method: "PATCH", url: `${rules}/${rule.id}`, payload: { enabled: false } })).statusCode, 200);
+  assert.deepEqual(resolveDesiredSkills(db, "one"), []);
+  await app.inject({ method: "PATCH", url: `${rules}/${rule.id}`, payload: { enabled: true } });
+  db.registerRunner(runnerMeta("one"), 20, 90);
+  assert.equal(resolveDesiredSkills(db, "one").length, 1, "registration preserves group rules");
+  pushed.length = 0;
+  assert.equal((await app.inject({ method: "PUT", url: `/api/skills/${skill.id}`, payload: { groupId: null } })).statusCode, 200);
+  assert.deepEqual(resolveDesiredSkills(db, "one"), []);
+  assert.ok(pushed.some(p => p.runnerId === "one"), "membership removal sends authoritative sync");
+  await app.inject({ method: "PUT", url: `/api/skills/${skill.id}`, payload: { groupId: group.id } });
+  pushed.length = 0;
+  assert.equal((await app.inject({ method: "DELETE", url: `/api/skills/${skill.id}` })).statusCode, 204);
+  assert.ok(pushed.some(p => p.runnerId === "one"), "deletion notifies group-only deployment");
+  assert.deepEqual(resolveDesiredSkills(db, "one"), []);
+  assert.equal((await app.inject({ method: "DELETE", url: `${rules}/${rule.id}` })).statusCode, 204);
+  assert.deepEqual((await app.inject(rules)).json().assignments, []);
+});
+
+test("legacy groups require explicit same-scope conversion; owned groups reject foreign skills and principals", async (t) => {
+  const { app, db } = await fixture();
+  t.after(async () => { await app.close(); db.close(); });
+  const legacy = db.createSkillGroup("Legacy");
+  const rules = `/api/skill-groups/${legacy.id}/assignments`;
+  assert.equal((await app.inject({ method: "POST", url: rules, payload: { scopeKind: "instance", agentSelector: { kind: "all" } } })).statusCode, 404);
+  assert.equal((await app.inject({ method: "POST", url: `/api/skill-groups/${legacy.id}/convert` })).statusCode, 400);
+  const converted = await app.inject({ method: "POST", url: `/api/skill-groups/${legacy.id}/convert`, payload: { accepted: true } });
+  assert.equal(converted.statusCode, 200);
+  assert.equal((await app.inject({ method: "POST", url: `/api/skill-groups/${legacy.id}/convert`, payload: { accepted: true } })).statusCode, 409);
+  const foreignScope = { organizationId: "foreign", owner: { kind: "organization" as const, organizationId: "foreign" } };
+  const foreignGroup = db.createSkillGroup("Foreign", 10, foreignScope);
+  const data = validateSkillPayload(skillPayload("foreign-skill")); assert.ok(data.ok);
+  const foreignSkill = db.createSkill({ ...data, scope: foreignScope });
+  assert.throws(() => db.updateSkill(foreignSkill.id, { groupId: legacy.id }), /same ownership scope/);
+  assert.throws(() => db.createSkill({ ...data, name: "foreign-other", scope: foreignScope, groupId: legacy.id }), /same ownership scope/);
+  const mixed = db.createSkillGroup("Mixed");
+  db.updateSkill(foreignSkill.id, { groupId: mixed.id });
+  assert.equal((await app.inject({ method: "POST", url: `/api/skill-groups/${mixed.id}/convert`, payload: { accepted: true } })).statusCode, 409);
+  assert.equal(db.skillGroupScope(mixed.id), null, "failed conversion leaves legacy metadata intact");
+  assert.ok(!(await app.inject("/api/skill-groups")).json().groups.some((g: { id: string }) => g.id === foreignGroup.id));
+  for (const method of ["GET", "POST"] as const) assert.equal((await app.inject({ method, url: `/api/skill-groups/${foreignGroup.id}/assignments` })).statusCode, 404);
+  assert.equal((await app.inject({ method: "DELETE", url: `/api/skill-groups/${foreignGroup.id}` })).statusCode, 404);
+  assert.equal((await app.inject({ method: "POST", url: "/api/skills", payload: { ...skillPayload("probe"), groupId: foreignGroup.id } })).statusCode, 404);
+});
+
+test("group expansion fails closed after ownership changes; group and machine deletion preserve unrelated rules", async (t) => {
+  const { app, db, online } = await fixture();
+  t.after(async () => { await app.close(); db.close(); });
+  db.createBox({ boxId: "box", runnerId: "two", sshTarget: "user@host", sshPort: 22, workspaces: [], autoReconnect: false, runnerDataDir: null, now: 1 });
+  for (const id of ["one", "two"]) { db.registerRunner(runnerMeta(id), 10, 90); online.add(id); }
+  const group = (await app.inject({ method: "POST", url: "/api/skill-groups", payload: { name: "Shared" } })).json().group;
+  const skill = (await app.inject({ method: "POST", url: "/api/skills", payload: { ...skillPayload("scope-check"), groupId: group.id } })).json().skill;
+  const input = { groupId: group.id, scopeKind: "instance" as const, runnerId: null, agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const };
+  db.createSkillGroupAssignment(input);
+  for (const runnerId of ["one", "two"]) db.createSkillGroupAssignment({ ...input, scopeKind: "runner", runnerId });
+  const direct = db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "agent", agentId: "claude" } });
+  db.raw().prepare("UPDATE skill_ownership SET owner_kind='user', owner_id='different-user' WHERE skill_id=?").run(skill.id);
+  assert.deepEqual(db.listExpandedSkillGroupAssignments("one"), [], "scope mismatch prevents inherited deployment");
+  db.raw().prepare("UPDATE skill_ownership SET owner_kind='organization', owner_id=? WHERE skill_id=?").run(PERSONAL_ORGANIZATION_ID, skill.id);
+  assert.equal(db.listExpandedSkillGroupAssignments("one").length, 2);
+  db.deleteRunner("one");
+  assert.equal(db.listSkillGroupAssignments(group.id).length, 2);
+  db.deleteBox("box");
+  assert.equal(db.listSkillGroupAssignments(group.id).length, 1);
+  db.deleteSkillGroup(group.id);
+  assert.deepEqual(db.listSkillGroupAssignments(group.id), []);
+  assert.equal(db.skillGroupScope(group.id), null);
+  assert.equal(db.getSkill(skill.id)!.groupId, null);
+  assert.ok(db.getSkillAssignment(direct.id));
+  assert.ok(db.getSkillVersion(skill.latestVersion.id));
+});
+
 test("machine pins survive updates and registration, preserve targeting, and fence stale pin or unpin previews", async (t) => {
   const { app, db, online, pushed } = await fixture();
   t.after(() => { void app.close(); db.close(); });

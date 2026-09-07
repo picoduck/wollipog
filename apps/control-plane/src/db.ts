@@ -1891,6 +1891,26 @@ CREATE TABLE IF NOT EXISTS skill_machine_provenance (
   source TEXT NOT NULL
 );
 
+-- Legacy groups have no ownership row and remain non-deployable until explicit conversion.
+CREATE TABLE IF NOT EXISTS skill_group_ownership (
+  group_id TEXT PRIMARY KEY REFERENCES skill_groups(id) ON DELETE CASCADE,
+  organization_id TEXT NOT NULL,
+  owner_kind TEXT NOT NULL,
+  owner_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS skill_group_assignments (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES skill_groups(id) ON DELETE CASCADE,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('instance', 'runner')),
+  runner_id TEXT,
+  agent_selector TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  invocation TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_group_assignments_group ON skill_group_assignments(group_id, id);
+
 CREATE TABLE IF NOT EXISTS skill_assignments (
   id             TEXT PRIMARY KEY,
   skill_id       TEXT NOT NULL,
@@ -2742,11 +2762,16 @@ export interface SkillGroupView {
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
+  scope?: ResourceScope;
 }
+
+export interface SkillGroupAssignmentView extends Omit<SkillAssignmentView, "skillId"> { groupId: string }
 
 export interface SkillAssignmentView {
   id: string;
   skillId: string;
+  /** Present only on dynamically expanded group rules; never a stored direct assignment. */
+  groupId?: string;
   scopeKind: SkillAssignmentScopeKind;
   runnerId: string | null;
   agentSelector: SkillAgentSelector;
@@ -5478,8 +5503,10 @@ export class ControlPlaneDb {
       ? (this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE id=?")
         .get(row.latest_version_id) as { id: string; digest: string; created_at: number } | undefined)
       : undefined;
-    const assignments = this.stmt("SELECT COUNT(*) AS n FROM skill_assignments WHERE skill_id=?")
-      .get(row.id) as { n: number };
+    const assignments = this.stmt(`SELECT
+      (SELECT COUNT(*) FROM skill_assignments WHERE skill_id=?) +
+      (SELECT COUNT(*) FROM skill_group_assignments WHERE group_id=?) AS n`)
+      .get(row.id, row.group_id) as { n: number };
     return {
       id: row.id,
       name: row.name,
@@ -5584,6 +5611,7 @@ export class ControlPlaneDb {
       if (input.groupId && !this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(input.groupId)) {
         throw new Error("skill group not found");
       }
+      if (input.groupId) this.assertSkillGroupScope(input.groupId, scope);
       this.stmt(
         `INSERT INTO skills (id, name, description, group_id, source, latest_version_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'library', ?, ?, ?)`,
@@ -5630,6 +5658,7 @@ export class ControlPlaneDb {
       if (input.groupId && !this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(input.groupId)) {
         throw new Error("skill group not found");
       }
+      if (input.groupId) this.assertSkillGroupScope(input.groupId, this.skillScope(skillId));
       this.stmt("UPDATE skills SET description=?, group_id=?, updated_at=? WHERE id=?").run(
         input.description === undefined ? current.description : input.description,
         input.groupId === undefined ? current.group_id : input.groupId,
@@ -5788,22 +5817,115 @@ export class ControlPlaneDb {
       sortOrder: row.sort_order,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      ...(this.skillGroupScope(row.id) ? { scope: this.skillGroupScope(row.id)! } : {}),
     }));
   }
 
-  createSkillGroup(name: string, now = Date.now()): SkillGroupView {
-    const trimmed = name.trim();
-    if (!trimmed) throw new Error("skill group name is required");
-    const id = `skillg_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
-    const order = this.stmt("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM skill_groups")
-      .get() as { next: number };
-    this.stmt(
-      "INSERT INTO skill_groups (id, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-    ).run(id, trimmed, Number(order.next), now, now);
-    return { id, name: trimmed, sortOrder: Number(order.next), createdAt: now, updatedAt: now };
+  createSkillGroup(name: string, now = Date.now(), scope?: ResourceScope): SkillGroupView {
+    return this.atomic(() => {
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error("skill group name is required");
+      const id = `skillg_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+      const order = this.stmt("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM skill_groups")
+        .get() as { next: number };
+      this.stmt(
+        "INSERT INTO skill_groups (id, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ).run(id, trimmed, Number(order.next), now, now);
+      if (scope) this.convertSkillGroup(id, scope);
+      return { id, name: trimmed, sortOrder: Number(order.next), createdAt: now, updatedAt: now, ...(scope ? { scope } : {}) };
+    });
   }
 
-  /** Deleting a group only detaches its member skills (groups organize, never gate deployment). */
+  skillGroupScope(groupId: string): ResourceScope | null {
+    const row = this.stmt("SELECT organization_id, owner_kind, owner_id FROM skill_group_ownership WHERE group_id=?")
+      .get(groupId) as { organization_id: string; owner_kind: "organization" | "user" | "team"; owner_id: string } | undefined;
+    return row ? this.scopeFromRow(row) : null;
+  }
+
+  canAccessSkillGroup(principal: AuthPrincipal, groupId: string): boolean {
+    const scope = this.skillGroupScope(groupId);
+    return scope ? this.principalCanAccessScope(principal, scope) : false;
+  }
+
+  private sameSkillGroupScope(a: ResourceScope | null, b: ResourceScope): boolean {
+    return !!a && a.organizationId === b.organizationId && a.owner.kind === b.owner.kind &&
+      this.scopeAudienceContainedWithMembership(a, b) && this.scopeAudienceContainedWithMembership(b, a);
+  }
+
+  private assertSkillGroupScope(groupId: string, scope: ResourceScope | null): void {
+    const groupScope = this.skillGroupScope(groupId);
+    if (groupScope && !this.sameSkillGroupScope(scope, groupScope)) {
+      throw new Error("deployable groups require the same ownership scope as their member skills");
+    }
+  }
+
+  /** Explicit conversion never guesses ownership of existing members or transfers ownership. */
+  convertSkillGroup(groupId: string, scope: ResourceScope): void {
+    this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(groupId)) throw new Error("skill group not found");
+      if (this.skillGroupScope(groupId)) throw new Error("skill group is already owned");
+      const members = this.stmt("SELECT id FROM skills WHERE group_id=?").all(groupId) as { id: string }[];
+      if (members.some(({ id }) => !this.sameSkillGroupScope(this.skillScope(id), scope))) {
+        throw new Error("all member skills must have the proposed group's ownership scope");
+      }
+      const ownerId = scope.owner.kind === "organization" ? scope.owner.organizationId
+        : scope.owner.kind === "user" ? scope.owner.userId : scope.owner.teamId;
+      this.stmt("INSERT INTO skill_group_ownership (group_id, organization_id, owner_kind, owner_id) VALUES (?, ?, ?, ?)")
+        .run(groupId, scope.organizationId, scope.owner.kind, ownerId);
+    });
+  }
+
+  listSkillGroupAssignments(groupId: string): SkillGroupAssignmentView[] {
+    const rows = this.stmt("SELECT *, group_id AS skill_id FROM skill_group_assignments WHERE group_id=? ORDER BY created_at, id")
+      .all(groupId) as unknown as SkillAssignmentRow[];
+    return rows.map(row => { const { skillId, ...rest } = this.skillAssignmentView(row); return { ...rest, groupId: skillId }; });
+  }
+
+  createSkillGroupAssignment(input: Omit<SkillGroupAssignmentView, "id" | "createdAt" | "updatedAt">, now = Date.now()): SkillGroupAssignmentView {
+    return this.atomic(() => {
+      const scope = this.skillGroupScope(input.groupId);
+      if (!scope) throw new Error("group must be explicitly converted before assignment");
+      if (input.scopeKind === "runner") {
+        const runnerScope = input.runnerId ? this.runnerScope(input.runnerId) : null;
+        if (!runnerScope || !this.getRunner(input.runnerId!) || !this.scopeAudienceContainedWithMembership(scope, runnerScope)) {
+          throw new Error("the group's access scope does not include this machine");
+        }
+      }
+      const id = `skillga_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+      this.stmt(`INSERT INTO skill_group_assignments
+        (id, group_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.groupId, input.scopeKind,
+        input.scopeKind === "runner" ? input.runnerId : null, JSON.stringify(input.agentSelector), input.enabled ? 1 : 0, input.invocation, now, now);
+      return this.listSkillGroupAssignments(input.groupId).find(a => a.id === id)!;
+    });
+  }
+
+  updateSkillGroupAssignment(groupId: string, id: string, changes: { enabled?: boolean; invocation?: SkillInvocationPolicy }, now = Date.now()): SkillGroupAssignmentView | null {
+    return this.atomic(() => {
+      const row = this.listSkillGroupAssignments(groupId).find(a => a.id === id);
+      if (!row) return null;
+      this.stmt("UPDATE skill_group_assignments SET enabled=?, invocation=?, updated_at=? WHERE group_id=? AND id=?")
+        .run((changes.enabled ?? row.enabled) ? 1 : 0, changes.invocation ?? row.invocation, now, groupId, id);
+      return this.listSkillGroupAssignments(groupId).find(a => a.id === id)!;
+    });
+  }
+
+  deleteSkillGroupAssignment(groupId: string, id: string): boolean {
+    return this.stmt("DELETE FROM skill_group_assignments WHERE group_id=? AND id=?").run(groupId, id).changes > 0;
+  }
+
+  /** Dynamic expansion retains group provenance and rechecks ownership on every reconciliation. */
+  listExpandedSkillGroupAssignments(runnerId: string): SkillAssignmentView[] {
+    const rows = this.stmt(`SELECT a.*, s.id AS skill_id FROM skill_group_assignments a
+      JOIN skills s ON s.group_id=a.group_id
+      WHERE a.scope_kind='instance' OR (a.scope_kind='runner' AND a.runner_id=?)`).all(runnerId) as unknown as (SkillAssignmentRow & { group_id: string })[];
+    return rows.filter(row => {
+      const scope = this.skillGroupScope(row.group_id);
+      return scope && this.sameSkillGroupScope(this.skillScope(row.skill_id), scope);
+    }).map(row => ({ ...this.skillAssignmentView(row), groupId: row.group_id }));
+  }
+
+  /** Deleting a group detaches members and cascades its rules, preserving direct assignments. */
   deleteSkillGroup(groupId: string, now = Date.now()): boolean {
     return this.atomic(() => {
       if (!this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(groupId)) return false;
@@ -8245,6 +8367,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM runner_ownership WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runner_skill_state WHERE runner_id=?").run(row.runner_id);
+      this.stmt("DELETE FROM skill_group_assignments WHERE scope_kind='runner' AND runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM skill_assignments WHERE scope_kind='runner' AND runner_id=?").run(row.runner_id);
       this.clearSessionNamingHarnessTargetsForRunner(row.runner_id, Date.now());
       this.stmt("DELETE FROM skill_machine_versions WHERE runner_id=?").run(row.runner_id);
@@ -8296,6 +8419,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM runner_ownership WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_skill_state WHERE runner_id=?").run(runnerId);
+      this.stmt("DELETE FROM skill_group_assignments WHERE scope_kind='runner' AND runner_id=?").run(runnerId);
       this.stmt("DELETE FROM skill_assignments WHERE scope_kind='runner' AND runner_id=?").run(runnerId);
       this.stmt("DELETE FROM skill_machine_versions WHERE runner_id=?").run(runnerId);
       this.clearSessionNamingHarnessTargetsForRunner(runnerId, Date.now());

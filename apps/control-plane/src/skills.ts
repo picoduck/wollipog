@@ -233,7 +233,7 @@ export function resolveDesiredSkillSnapshot(
   if (!runnerScope) return [];
   const eligibleAgents = runner.agents.filter(agentEligibleForSkills);
   const bySkill = new Map<string, SkillAssignmentView[]>();
-  for (const assignment of db.listSkillAssignmentsForRunner(runnerId)) {
+  for (const assignment of [...db.listSkillAssignmentsForRunner(runnerId), ...db.listExpandedSkillGroupAssignments(runnerId)]) {
     const list = bySkill.get(assignment.skillId) ?? [];
     list.push(assignment);
     bySkill.set(assignment.skillId, list);
@@ -248,7 +248,8 @@ export function resolveDesiredSkillSnapshot(
     for (const agent of eligibleAgents) {
       const winner = assignments
         .filter((assignment) => selectorMatchesAgent(assignment.agentSelector, agent))
-        .sort((a, b) => assignmentRank(b) - assignmentRank(a) || b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : -1))[0];
+        .sort((a, b) => assignmentRank(b) - assignmentRank(a) || Number(!!a.groupId) - Number(!!b.groupId) ||
+          b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : -1))[0];
       if (winner?.enabled) {
         targets.push({ agentId: agent.id, invocation: winner.invocation as SkillInvocationPolicy });
       }
