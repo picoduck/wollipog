@@ -62,7 +62,7 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
       onClick={() => void submit()}>{busy ? "Working…" : "Import Selected"}</button>}
   </>}>
     <div className="form">
-      <p>Preview an immutable snapshot before importing. New skills stay unassigned. Updates to existing skills deploy to their current assignments after you accept the diff.</p>
+      <p>Preview an immutable snapshot before importing. New skills stay unassigned. Accepted updates deploy to current assignments on unpinned machines; pinned machines keep their selected revision.</p>
       <label className="field"><span>Git Repository</span><input value={url} disabled={busy || preview !== null} placeholder="owner/repository or HTTPS/SSH URL" onChange={(event) => setUrl(event.target.value)} /></label>
       <label className="field"><span>Ref</span><input value={ref} disabled={busy || preview !== null} onChange={(event) => setRef(event.target.value)} /></label>
       <label className="field"><span>Repository Subdirectory</span><input value={subdirectory} disabled={busy || preview !== null} placeholder=".agents/skills" onChange={(event) => setSubdirectory(event.target.value)} /></label>

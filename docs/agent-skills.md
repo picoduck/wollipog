@@ -1,6 +1,22 @@
 # Agent Skills Management and Deployment
 
-Status: managed deployment, Git import, Linux machine snapshot import, and version history with library rollback implemented; remaining design below is phased.
+Status: managed deployment, Git import, Linux machine snapshot import, version history with library rollback, and machine-wide version pins implemented; remaining design below is phased.
+
+## Machine-Wide Version Pins
+
+**Machine Versions** selects one version policy for a skill on a machine: **Track Latest** or a
+specific immutable revision. Preview the current and proposed files and explicitly accept the
+machine-wide impact before saving. Pins affect every assigned agent on that machine without
+creating assignments or changing targeting. Offline machines apply the policy when they reconnect.
+Library imports, updates, and rollback do not advance pinned machines. Returning to **Track Latest**
+adopts the current library revision and future updates. Concurrent library or policy changes reject
+stale previews, including changes away from and back to the same policy.
+
+This follows the explicitly selected single-canonical-copy design: versions are machine-wide,
+not independently pinnable per agent. Conflicting per-agent version requests are not supported.
+Policies persist across runner registration, require access to both skill and machine, and enforce
+the same audience-containment and capability rules as deployment. Groups and actual adoption remain
+separate follow-ups.
 
 ## Version History and Library Rollback
 
@@ -8,13 +24,13 @@ Open a skill's **Version History** to browse immutable revisions, 50 at a time.
 **Preview Version** compares every historical file with the current library content, including
 removed files, scripts, and binary content. Preview does not run instructions or scripts.
 After accepting the diff and assignment impact, **Restore Version** copies the selected content
-into a new immutable revision and syncs existing assignments. Earlier and newer revisions remain
+into a new immutable revision and syncs assignments on unpinned machines. Earlier and newer revisions remain
 available, with original Git and machine-snapshot provenance preserved. The restore note identifies
 the source revision. A concurrent library update rejects the restore; preview again before retrying.
 
-This is library-wide rollback, not per-assignment version pinning. All assignments still track the
-latest library revision. Offline machines reconcile when they reconnect; unsupported platforms retain
-their existing no-write behavior. Group assignment and version pinning remain follow-ups under #251.
+This is library-wide rollback; pinned machines keep their selected revision. Offline machines
+reconcile when they reconnect; unsupported platforms retain their existing no-write behavior.
+Group assignment remains a follow-up under #251.
 
 ## Implemented machine snapshot import
 
@@ -72,7 +88,7 @@ content and should be invoked through their interpreter.
 Git-imported versions retain URL, requested ref, repository path, and resolved commit separately
 from skill content. **Check for Updates** repeats the preview flow; there is no automatic polling
 or update. Import does not rename collisions: use a new source name or cancel. Machine snapshot
-import and adoption, assignable groups, version pins/rollback UI, and Windows/WSL deployment remain
+adoption, non-Linux machine snapshot import, assignable groups, and Windows/WSL deployment remain
 separate work under #251. Later sections describe that broader target design.
 
 This document describes a planned feature that lets users manage a library of agent skills in

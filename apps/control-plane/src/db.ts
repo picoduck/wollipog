@@ -1904,6 +1904,15 @@ CREATE TABLE IF NOT EXISTS skill_assignments (
 );
 CREATE INDEX IF NOT EXISTS idx_skill_assignments_skill ON skill_assignments(skill_id, id);
 
+-- Policy survives runner registration. A null version tracks latest; revision fences all edits.
+CREATE TABLE IF NOT EXISTS skill_machine_versions (
+  skill_id TEXT NOT NULL,
+  runner_id TEXT NOT NULL,
+  version_id TEXT,
+  revision TEXT NOT NULL,
+  PRIMARY KEY (skill_id, runner_id)
+);
+
 CREATE TABLE IF NOT EXISTS runner_skill_state (
   runner_id  TEXT PRIMARY KEY,
   state      TEXT NOT NULL,
@@ -5649,6 +5658,28 @@ export class ControlPlaneDb {
     });
   }
 
+  getMachineSkillVersion(skillId: string, runnerId: string): { versionId: string | null; revision: string; version: SkillVersionSummary | null } | null {
+    const row = this.stmt(`SELECT p.version_id, p.revision, v.id, v.digest, v.created_at
+      FROM skill_machine_versions p LEFT JOIN skill_versions v ON v.id=p.version_id AND v.skill_id=p.skill_id
+      WHERE p.skill_id=? AND p.runner_id=?`).get(skillId, runnerId) as
+      { version_id: string | null; revision: string; id: string | null; digest: string; created_at: number } | undefined;
+    return row ? { versionId: row.version_id, revision: row.revision, version: row.id ? { id: row.id, digest: row.digest, createdAt: row.created_at } : null } : null;
+  }
+
+  setMachineSkillVersion(skillId: string, runnerId: string, versionId: string | null, expectedRevision: string | null, expectedLatestVersionId: string): void {
+    this.atomic(() => {
+      const skill = this.getSkill(skillId);
+      if (!skill || !this.getRunner(runnerId)) throw new Error("skill or runner not found");
+      if ((this.getMachineSkillVersion(skillId, runnerId)?.revision ?? null) !== expectedRevision || skill.latestVersion?.id !== expectedLatestVersionId) {
+        throw new SkillImportConflictError("The library or machine version policy changed. Preview again.");
+      }
+      if (versionId && this.getSkillVersion(versionId)?.skillId !== skillId) throw new Error("version not found");
+      this.stmt(`INSERT INTO skill_machine_versions (skill_id, runner_id, version_id, revision) VALUES (?, ?, ?, ?)
+        ON CONFLICT(skill_id, runner_id) DO UPDATE SET version_id=excluded.version_id, revision=excluded.revision`)
+        .run(skillId, runnerId, versionId, randomUUID());
+    });
+  }
+
   /** Keyset pagination never loads historical file payloads into a library listing. */
   listSkillVersions(skillId: string, before?: string): { versions: SkillVersionSummary[]; nextCursor: string | null } {
     const cursor = before ? this.stmt("SELECT created_at FROM skill_versions WHERE id=? AND skill_id=?").get(before, skillId) as { created_at: number } | undefined : undefined;
@@ -5735,6 +5766,7 @@ export class ControlPlaneDb {
 
   deleteSkill(skillId: string): boolean {
     return this.atomic(() => {
+      this.stmt("DELETE FROM skill_machine_versions WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_machine_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       this.stmt("DELETE FROM skill_git_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
@@ -8213,6 +8245,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM runner_ownership WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(row.runner_id);
       this.clearSessionNamingHarnessTargetsForRunner(row.runner_id, Date.now());
+      this.stmt("DELETE FROM skill_machine_versions WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runners WHERE runner_id=?").run(row.runner_id); // cascades workspaces, agents
       this.db.exec("COMMIT");
     } catch (err) {
@@ -8262,6 +8295,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_skill_state WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM skill_assignments WHERE scope_kind='runner' AND runner_id=?").run(runnerId);
+      this.stmt("DELETE FROM skill_machine_versions WHERE runner_id=?").run(runnerId);
       this.clearSessionNamingHarnessTargetsForRunner(runnerId, Date.now());
       this.stmt("DELETE FROM runners WHERE runner_id=?").run(runnerId); // cascades workspaces, agents
       this.db.exec("COMMIT");
