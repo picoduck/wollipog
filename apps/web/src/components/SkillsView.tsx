@@ -11,6 +11,7 @@ import { SkillsIcon } from "./Icons.js";
 import { Markdown } from "./Markdown.js";
 import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
 import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
+import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -273,7 +274,7 @@ export function SkillsView() {
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | null>(null);
+  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | null>(null);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
   const listGeneration = useRef(0);
@@ -502,6 +503,7 @@ export function SkillsView() {
                 </button>
               </div>
 
+              <button className="btn sm" type="button" onClick={() => setDialog("version-history")}>Version History</button>
               {skillMd && (
                 <section className="skills-section" aria-label="Skill Content">
                   <h4>Content</h4>
@@ -702,6 +704,11 @@ export function SkillsView() {
       {dialog === "new-skill" && (
         <NewSkillDialog busy={busy} onClose={() => setDialog(null)} onCreate={createSkill} />
       )}
+      {dialog === "version-history" && detail && <SkillVersionHistoryDialog key={detail.id} skillId={detail.id} onClose={() => setDialog(null)} onRestored={async () => {
+        await refreshList();
+        await refreshDetail(detail.id);
+        await refreshMachines();
+      }} />}
       {dialog === "machine-import" && <SkillMachineImportDialog runners={runners} onClose={() => setDialog(null)} onImported={async () => {
         await refreshList();
         if (selectedId) await refreshDetail(selectedId);

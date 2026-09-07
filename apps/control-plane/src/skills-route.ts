@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { SkillImportConflictError } from "./db.js";
 import { registerSkillGitRoutes } from "./skill-git-route.js";
 import { registerMachineSkillRoutes } from "./skill-machine-route.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -452,6 +453,47 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (!version) return reply.code(404).send({ error: "skill not found" });
     pushAffected();
     return reply.code(201).send({ version });
+  });
+
+  app.get("/api/skills/:id/versions", async (req, reply) => {
+    const principal = deps.requestPrincipal(req);
+    const { id } = req.params as { id: string };
+    if (!principal || !db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
+    const { before } = req.query as { before?: unknown };
+    if (before !== undefined && (typeof before !== "string" || !before || before.length > 100)) return reply.code(400).send({ error: "invalid version cursor" });
+    try { return db.listSkillVersions(id, before as string | undefined); }
+    catch { return reply.code(400).send({ error: "invalid version cursor" }); }
+  });
+
+  app.get("/api/skills/:id/versions/:versionId", async (req, reply) => {
+    const principal = deps.requestPrincipal(req);
+    const { id, versionId } = req.params as { id: string; versionId: string };
+    if (!principal || !db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
+    const skill = db.getSkill(id)!;
+    const version = db.getSkillVersion(versionId);
+    if (!version || version.skillId !== id) return reply.code(404).send({ error: "version not found" });
+    return { version, currentVersion: skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null };
+  });
+
+  app.post("/api/skills/:id/restore", async (req, reply) => {
+    const principal = deps.requestHuman(req);
+    if (!principal) return reply.code(403).send({ error: "human identity is required" });
+    const { id } = req.params as { id: string };
+    if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
+    const body = (req.body ?? {}) as { versionId?: unknown; expectedLatestVersionId?: unknown };
+    if (typeof body.versionId !== "string" || !body.versionId || body.versionId.length > 100 ||
+        typeof body.expectedLatestVersionId !== "string" || !body.expectedLatestVersionId || body.expectedLatestVersionId.length > 100) {
+      return reply.code(400).send({ error: "versionId and expectedLatestVersionId are required" });
+    }
+    try {
+      const version = db.restoreSkillVersion(id, body.versionId, body.expectedLatestVersionId);
+      if (!version) return reply.code(404).send({ error: "version not found" });
+      pushAffected();
+      return { version };
+    } catch (error) {
+      if (error instanceof SkillImportConflictError) return reply.code(409).send({ error: error.message });
+      throw error;
+    }
   });
 
   app.delete("/api/skills/:id", async (req, reply) => {

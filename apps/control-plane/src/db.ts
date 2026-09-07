@@ -5608,6 +5608,34 @@ export class ControlPlaneDb {
     });
   }
 
+  /** Keyset pagination never loads historical file payloads into a library listing. */
+  listSkillVersions(skillId: string, before?: string): { versions: SkillVersionSummary[]; nextCursor: string | null } {
+    const cursor = before ? this.stmt("SELECT created_at FROM skill_versions WHERE id=? AND skill_id=?").get(before, skillId) as { created_at: number } | undefined : undefined;
+    if (before && !cursor) throw new Error("invalid version cursor");
+    const rows = (cursor
+      ? this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE skill_id=? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT 51").all(skillId, cursor.created_at, cursor.created_at, before!)
+      : this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE skill_id=? ORDER BY created_at DESC, id DESC LIMIT 51").all(skillId)) as unknown as Array<{ id: string; digest: string; created_at: number }>;
+    const versions = rows.slice(0, 50).map((row) => ({ id: row.id, digest: row.digest, createdAt: row.created_at }));
+    return { versions, nextCursor: rows.length > 50 ? versions[versions.length - 1]!.id : null };
+  }
+
+  /** Restore bytes as a new immutable revision; unique latest IDs also fence ABA updates. */
+  restoreSkillVersion(skillId: string, versionId: string, expectedLatestVersionId: string): SkillVersionView | null {
+    return this.atomic(() => {
+      const current = this.getSkill(skillId);
+      const target = this.getSkillVersion(versionId);
+      if (!current || !target || target.skillId !== skillId) return null;
+      if (current.latestVersion?.id !== expectedLatestVersionId) {
+        throw new SkillImportConflictError("The library changed after preview. Preview the version again.");
+      }
+      if (target.id === current.latestVersion.id) return target;
+      const restored = this.addSkillVersion(skillId, { ...target, note: `Restored from ${target.id}` })!;
+      if (target.gitSource) this.stmt("INSERT INTO skill_git_provenance (version_id, source) VALUES (?, ?)").run(restored.id, JSON.stringify(target.gitSource));
+      if (target.machineSource) this.stmt("INSERT INTO skill_machine_provenance (version_id, source) VALUES (?, ?)").run(restored.id, JSON.stringify(target.machineSource));
+      return this.getSkillVersion(restored.id);
+    });
+  }
+
   getSkillVersion(versionId: string): SkillVersionView | null {
     const row = this.stmt(
       "SELECT id, skill_id, digest, manifest, files, note, created_at FROM skill_versions WHERE id=?",
