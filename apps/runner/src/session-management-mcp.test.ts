@@ -486,6 +486,34 @@ test("worktree tools use the canonical routes and default to the calling session
   assert.deepEqual(calls[3]!.body, { path: "/repo/old" });
 });
 
+test("create_worktree can finish after the ordinary control-plane request deadline", async () => {
+  const { deps } = makeDeps();
+  deps.requestTimeoutMs = 1;
+  deps.worktreeCreateTimeoutMs = 5_000;
+  deps.fetch = async (_url, init) => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, 20);
+      init?.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(init.signal!.reason);
+      }, { once: true });
+    });
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        worktree: { id: "wt_slow", path: "/repo/slow", branch: "fix/slow", source: "created" },
+        session: { id: SELF_ID, status: "running", runnerId: "r1" },
+      }),
+    };
+  };
+
+  const result = await callTool(deps, "create_worktree", { branch: "fix/slow" });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(resultJson(result).worktree.id, "wt_slow");
+});
+
 test("an exact-session MCP credential cannot manage another session's worktrees", async () => {
   const { deps, calls } = makeDeps();
   deps.actorHeader = WOLLIPOG_AGENT_ACTOR_SESSION_HEADER;
