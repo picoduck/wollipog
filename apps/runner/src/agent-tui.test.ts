@@ -63,20 +63,28 @@ test("agent TUI launch is provider-gated and never attaches structured session i
 test("Windows agent TUI launch supports cmd shims inside ConPTY", () => {
   assert.deepEqual(agentTuiLaunch(meta(), { platform: "win32", comspec: "C:\\Windows\\cmd.exe" }), {
     command: "C:\\Windows\\cmd.exe",
-    args: ["/d", "/s", "/c", 'claude --profile "team profile"'],
+    args: ["/d", "/v:off", "/s", "/c", '"claude --profile "team profile""'],
     env: { PROVIDER_TOKEN: "runner-local" },
     scrubInheritedEnv: CLAUDE_RUNNER_ENV,
-    verbatimCommandLine: 'C:\\Windows\\cmd.exe /d /s /c "claude --profile "team profile""',
+    verbatimCommandLine: 'C:\\Windows\\cmd.exe /d /v:off /s /c "claude --profile "team profile""',
   });
 });
 
 test("Windows cmd shim receives spaced and metacharacter TUI args intact through ConPTY", { skip: process.platform !== "win32" }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-argv (x86) & Tools "));
+  const capture = join(dir, "capture.cjs");
   const shim = join(dir, "echo args.cmd");
-  writeFileSync(shim, "@echo off\r\necho TUI_ARGV=[%~1][%~2][%~3][%~4][%~5]\r\n", "utf8");
+  writeFileSync(capture, 'process.stdout.write("TUI_ARGV=" + JSON.stringify(process.argv.slice(2)) + "\\n")\n', "utf8");
+  writeFileSync(shim, '@echo off\r\nnode "%~dp0capture.cjs" %*\r\n', "utf8");
+  const argv = [
+    "team profile", "amp&value", 'say "yes"', "paren(value)", "pipe|value", "less<value",
+    "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+    "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+    'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
+  ];
   const launch = agentTuiLaunch(meta({
     command: shim,
-    args: ["team profile", "amp&value", 'say "yes"', "paren(value)", "pipe|value"],
+    args: argv,
   }), {
     platform: "win32",
     comspec: process.env.ComSpec,
@@ -99,7 +107,9 @@ test("Windows cmd shim receives spaced and metacharacter TUI args intact through
     while (!output.includes("TUI_ARGV=") && Date.now() - started < 10_000) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    assert.match(output, /TUI_ARGV=\[team profile\]\[amp&value\]\[say "yes"\]\[paren\(value\)\]\[pipe\|value\]/);
+    const encoded = output.match(/TUI_ARGV=(\[[^\r\n]*\])/u)?.[1];
+    assert.ok(encoded, output);
+    assert.deepEqual(JSON.parse(encoded), argv);
   } finally {
     child.kill();
     rmSync(dir, { recursive: true, force: true });
@@ -109,7 +119,7 @@ test("Windows cmd shim receives spaced and metacharacter TUI args intact through
 test("Windows cmd shim launch rejects percent expansion", () => {
   assert.throws(
     () => agentTuiLaunch(meta({ args: ["%USERPROFILE%"] }), { platform: "win32", comspec: "cmd.exe" }),
-    /contains %/,
+    /contain %/,
   );
 });
 
@@ -143,13 +153,21 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
       assert.equal(JSON.stringify(source), original);
       if (driver === "claude-code") {
         assert.equal(probes, 0);
-        assert.ok(launch.args.includes("--strict-mcp-config"));
-        assert.equal(launch.args[launch.args.indexOf("--tools") + 1], "");
-        assert.ok(launch.args.includes("--setting-sources"));
+        if (process.platform === "win32") {
+          const tail = launch.args.at(-1) ?? "";
+          assert.ok(tail.includes("--strict-mcp-config"));
+          assert.match(tail, /--tools ""/);
+          assert.ok(tail.includes("--setting-sources"));
+        } else {
+          assert.ok(launch.args.includes("--strict-mcp-config"));
+          assert.equal(launch.args[launch.args.indexOf("--tools") + 1], "");
+          assert.ok(launch.args.includes("--setting-sources"));
+        }
       } else {
         assert.equal(probes, 1);
-        assert.ok(launch.args.includes("mcp_servers.ambient.enabled=false"));
-        assert.ok(launch.args.includes('sandbox_mode="read-only"'));
+        const launchText = launch.args.join(" ");
+        assert.ok(launchText.includes("mcp_servers.ambient.enabled=false"));
+        assert.match(launchText, /sandbox_mode=.*read-only/);
       }
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }

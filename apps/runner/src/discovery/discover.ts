@@ -18,9 +18,11 @@ import type {
 import { capabilitiesFor } from "../catalog.js";
 import {
   applyClaudeAgentEnvironment,
+  applyNativeClaudeGitBashReadiness,
   claudeCapabilitiesFromProbe,
   probeNativeClaudeCode,
   probeWslClaudeCode,
+  resolveNativeClaudeGitBash,
   unavailableClaudeCode,
 } from "./claude-code.js";
 import { probeNativeCodexAppServer, probeWslCodexAppServer, unavailableCodexAppServer } from "./codex-app-server.js";
@@ -344,7 +346,10 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         if (k.bin === "claude") found.push(unavailableClaudeAgentDefinition("claude-code", "Claude Code", { kind: "native" }));
         return;
       }
-      const claudeCode = k.bin === "claude" ? await probeNativeClaudeCode(bin.launch, bin.via) : undefined;
+      const gitBashPath = k.bin === "claude" ? await resolveNativeClaudeGitBash() : undefined;
+      const claudeCode = k.bin === "claude"
+        ? applyNativeClaudeGitBashReadiness(await probeNativeClaudeCode(bin.launch, bin.via), gitBashPath)
+        : undefined;
       const { version, authStatus } = claudeCode
         ? { version: claudeCode.installedVersion, authStatus: claudeCode.auth.status }
         : await nativeProbe(k, bin.launch);
@@ -361,7 +366,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         // The logical name is the stable launch-target identity — the node-wrapped launch's
         // command ("node") and entry file (possibly cli.js/index.js) identify nothing.
         bin: k.bin,
-        env: {},
+        env: gitBashPath ? { CLAUDE_CODE_GIT_BASH_PATH: gitBashPath } : {},
         driver: k.driver,
         context: { kind: "native" },
         version,
@@ -508,6 +513,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
     return applyCodexAgentEnvironment(applyClaudeAgentEnvironment({
       ...c,
       ...(adoptLaunch ? { command: d.command, args: [...(d.args ?? [])] } : {}),
+      env: { ...(d.env ?? {}), ...(c.env ?? {}) },
       version: c.version ?? d.version,
       authStatus: c.authStatus ?? d.authStatus,
       available: c.available ?? d.available,

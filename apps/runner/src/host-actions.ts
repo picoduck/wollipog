@@ -16,7 +16,10 @@ import {
   type EditorSourceLocation,
   type HostAction,
 } from "@wollipog/protocol";
-import { resolveNative, run } from "./discovery/resolve.js";
+import { pickWindowsExecutable, resolveNative, run } from "./discovery/resolve.js";
+import { quoteWindowsCmdToken } from "./windows-cmd.js";
+
+export { pickWindowsExecutable };
 
 interface KnownEditor extends EditorInfo {
   /** Binary name to resolve on PATH. */
@@ -46,19 +49,6 @@ export async function discoverEditors(): Promise<EditorInfo[]> {
     name,
     ...(locations ? { locations: { ...locations } } : {}),
   }));
-}
-
-/**
- * Pick the Windows-executable hit out of a `where.exe` listing. Editor bin dirs ship a
- * POSIX shell script FIRST (`...\bin\code`) with the real `.cmd`/`.exe` beside it —
- * spawning the extension-less script fails on Windows, so prefer a real executable.
- */
-export function pickWindowsExecutable(whereStdout: string): string | null {
-  const lines = whereStdout
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  return lines.find((l) => /\.(exe|cmd|bat)$/i.test(l)) ?? lines[0] ?? null;
 }
 
 /** Resolve an editor CLI to a spawnable path (null = not installed). */
@@ -174,16 +164,6 @@ export interface DetachedLaunchSpec {
   windowsVerbatimArguments: boolean;
 }
 
-/** Quote one token in the complete balanced `/s /c` tail. Inside these quotes cmd metacharacters,
- * including `^`, are data; adding carets here survives `%*` expansion in the batch shim and
- * corrupts the editor argv. Delayed expansion is disabled separately below. */
-function cmdShimToken(value: string): string {
-  if (/\r|\n/.test(value)) throw new Error("Windows editor shim arguments cannot contain CR/LF");
-  if (value.includes("%")) throw new Error("Windows editor shim arguments cannot contain %, which cmd.exe would expand");
-  if (value.includes('"')) throw new Error("Windows editor shim arguments cannot contain a double quote");
-  return `"${value}"`;
-}
-
 /** Build a shell-free launch. Windows editor `.cmd` shims still require cmd.exe, but every token
  * receives the same CR/LF/percent/metacharacter treatment as the real ConPTY TUI path. */
 export function detachedLaunchSpec(
@@ -194,7 +174,7 @@ export function detachedLaunchSpec(
   if (host.platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
     // Every token is individually quoted. Metacharacters inside those balanced quotes are data;
     // careting them would survive through a batch shim as literal `^` characters.
-    const tail = [command, ...args].map(cmdShimToken).join(" ");
+    const tail = [command, ...args].map((value) => quoteWindowsCmdToken(value, true)).join(" ");
     return {
       command: host.comspec || "cmd.exe",
       // Host policy can default delayed expansion on; force it off so a legitimate `!` in a

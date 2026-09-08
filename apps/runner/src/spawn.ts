@@ -19,6 +19,7 @@ import { containerLabelArgs } from "./container-identity.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-job.js";
 import { DESCENDANT_MARKER_ENV, PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
+import { quoteWindowsCmdToken } from "./windows-cmd.js";
 
 const isWindows = process.platform === "win32";
 /** Runner policy switches are daemon input and must never become agent input. */
@@ -358,7 +359,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       let rawCommandLine: string | undefined;
       if (shell && !/\.(?:exe|com)$/i.test(file)) {
         if (file.includes('"')) throw new Error(`spawnAgent: executable path contains a quote: ${file}`);
-        const commandToken = /[^\w.:\\/+@-]/.test(file) ? `"${file}"` : file;
+        const commandToken = winQuoteArg(file);
         targetCommand = process.env.ComSpec || win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
         targetArgs = [];
         rawCommandLine = [commandToken, ...args.map(winQuoteArg)].join(" ");
@@ -496,12 +497,12 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
  * not argv; the native CLI drivers do exactly that. We throw on CR/LF so any future
  * multi-line arg fails loudly instead of being silently truncated. */
 export function winQuoteArg(arg: string): string {
-  if (/[\r\n]/.test(arg)) {
-    throw new Error("winQuoteArg: argument contains CR/LF; deliver multi-line content via stdin, not argv");
+  try {
+    return quoteWindowsCmdToken(arg);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`winQuoteArg: ${message}; deliver unsupported content via stdin instead`);
   }
-  if (arg === "") return '""';
-  if (!/[ \t"&|<>^()!]/.test(arg)) return arg;
-  return '"' + arg.replace(/"/g, '""') + '"';
 }
 
 /** Kills in flight. `process.exit()` cancels timers and exec callbacks, so a shutdown that

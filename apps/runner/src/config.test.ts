@@ -9,7 +9,10 @@ import {
   parseArgs,
   parseEnv,
   parseWorkspaceArg,
+  projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
+  resolveAgentEnvironmentValue,
+  resolveRunnerLocalAgentEnvironment,
   resolveConfig,
   resolveWorkspacePath,
 } from "./config.js";
@@ -208,6 +211,44 @@ test("agent env supports runner-local literals and fromEnv references resolved o
     controlPlaneUrl: "ws://localhost/runner",
     agents: [{ id: "agent", name: "Agent", command: "agent", env: { TOKEN: { fromEnv: "bad-name" } } }],
   }), /must be a string/u);
+});
+
+test("configured launches retain discovered non-secret prerequisites with config precedence", () => {
+  const agent = {
+    id: "claude",
+    env: { CONFIGURED: { fromEnv: "HOST_CONFIGURED" }, OVERRIDE: "configured" },
+  };
+  assert.deepEqual(resolveRunnerLocalAgentEnvironment(
+    agent,
+    { CLAUDE_CODE_GIT_BASH_PATH: "D:\\Portable Git\\bin\\bash.exe", OVERRIDE: "discovered" },
+    { HOST_CONFIGURED: "resolved" },
+  ), {
+    CLAUDE_CODE_GIT_BASH_PATH: "D:\\Portable Git\\bin\\bash.exe",
+    OVERRIDE: "configured",
+    CONFIGURED: "resolved",
+  });
+});
+
+test("one readiness prerequisite resolves without eagerly validating unrelated launch secrets", () => {
+  const agent = {
+    id: "claude",
+    env: {
+      CLAUDE_CODE_GIT_BASH_PATH: "C:\\Program Files\\Git\\bin\\bash.exe",
+      ANTHROPIC_API_KEY: { fromEnv: "MISSING_KEY" },
+    },
+  };
+  assert.equal(
+    resolveAgentEnvironmentValue(agent, "CLAUDE_CODE_GIT_BASH_PATH", {}),
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+  );
+  assert.throws(() => resolveAgentEnvironment(agent, {}), /ANTHROPIC_API_KEY/u);
+  assert.deepEqual(projectAgentDiscoveryEnvironment(agent, {}), {
+    CLAUDE_CODE_GIT_BASH_PATH: "C:\\Program Files\\Git\\bin\\bash.exe",
+  });
+  assert.deepEqual(projectAgentDiscoveryEnvironment({
+    id: "claude",
+    env: { CLAUDE_CODE_GIT_BASH_PATH: { fromEnv: "MISSING_BASH" } },
+  }, {}), { CLAUDE_CODE_GIT_BASH_PATH: "" });
 });
 
 test("resolveConfig: config-less from overrides only, agents default to []", () => {

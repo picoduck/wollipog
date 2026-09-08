@@ -2,6 +2,9 @@ import type { AcpImplementationDiagnostics } from "./acp-contract.js";
 import type { AgentDefinition, AgentCapabilities, SessionLaunchSpec } from "@wollipog/protocol";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { windowsCommandSpec } from "./windows-cmd.js";
+import { existsSync } from "node:fs";
+import { verifiedNativeClaudeGitBashPath } from "./discovery/claude-code.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -80,11 +83,17 @@ export function orchestratorAcpSessionMeta(): Record<string, unknown> {
 
 /** A runner-owned capability, distinct from provider permission modes. ACP adapters may execute
  * their own internal tools, so client-side fs/terminal refusal cannot establish this boundary. */
-export function withOrchestratorPreset(agents: AgentDefinition[]): AgentDefinition[] {
+export function withOrchestratorPreset(
+  agents: AgentDefinition[],
+  host: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exists?: typeof existsSync } = {},
+): AgentDefinition[] {
   return agents.filter((agent) => agent.id !== "conductor").map((agent) => {
     const acpSupported = supportsClaudeAgentAcpOrchestrator(agent);
     if ((agent.context?.kind ?? "native") !== "native" ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
+    if ((agent.driver === "claude-code" || acpSupported) && (host.platform ?? process.platform) === "win32") {
+      if (!verifiedNativeClaudeGitBashPath(agent.env ?? {}, { env: host.env, exists: host.exists })) return agent;
+    }
     if (acpSupported && !agent.capabilities) {
       return { ...agent, capabilities: acpOrchestratorCapabilities() };
     }
@@ -189,9 +198,11 @@ export async function codexOrchestratorMcpArgs(
   try {
     // The read-only mcp subcommand rejects --strict-config; retain it on the actual
     // provider launch, where unsupported safety features must fail closed.
-    const { stdout } = await execFileAsync(opts.command, [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"], {
+    const probe = windowsCommandSpec(opts.command, [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"]);
+    const { stdout } = await execFileAsync(probe.file, probe.args, {
       cwd, env: { ...process.env, ...opts.env }, timeout: 10_000, maxBuffer: 1024 * 1024,
       windowsHide: true,
+      ...(probe.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: probe.argv0 } : {}),
     });
     return isolateCodexMcpServers(stdout);
   } catch {

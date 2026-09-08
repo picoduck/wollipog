@@ -53,7 +53,9 @@ import {
   loadConfig,
   parseArgs,
   parseEnv,
+  projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
+  resolveRunnerLocalAgentEnvironment,
   type RunnerConfig,
 } from "./config.js";
 import {
@@ -327,12 +329,16 @@ const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHost
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
 const configuredAgentDefinitions = config.agents.filter((a) => a.id !== "conductor").map((a) => {
   const driver = a.driver ?? "acp";
+  // Git Bash is a non-secret native-provider prerequisite. Project only that one resolved value
+  // into runner-local metadata so Windows readiness can honor literal/fromEnv agent config while
+  // all credentials remain redacted from discovery and the control plane.
+  const projectedEnv = projectAgentDiscoveryEnvironment(a);
   return {
     id: a.id,
     name: a.name,
     command: a.command,
     args: a.args ?? [],
-    env: {},
+    env: projectedEnv,
     // env is redacted above, so the discovery merge cannot see a configured OPENAI_API_KEY.
     // Carry the non-secret fact that auth is configured (literal or fromEnv) as an auth
     // assertion, or the auth gate would disable a deliberately API-keyed Codex whose
@@ -390,9 +396,9 @@ function agentsForControlPlane() {
 
 /** Resolve exact configured/discovered agent env at the last responsible moment. */
 function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, context: AgentContext): Record<string, string> {
-  const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
-  if (configured) return resolveAgentEnvironment(configured);
   const exact = agentId ? metadata.agents.find((agent) => agent.id === agentId) : undefined;
+  const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
+  if (configured) return resolveRunnerLocalAgentEnvironment(configured, exact?.env);
   return { ...(exact?.env ?? resolveLaunchForDriver(metadata.agents, driver, context)?.env ?? {}) };
 }
 

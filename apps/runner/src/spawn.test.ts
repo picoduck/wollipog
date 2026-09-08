@@ -357,10 +357,19 @@ test("winQuoteArg quotes cmd metacharacters", () => {
   assert.equal(winQuoteArg("a&b"), '"a&b"');
   assert.equal(winQuoteArg("a|b"), '"a|b"');
   assert.equal(winQuoteArg("a>b"), '"a>b"');
+  assert.equal(winQuoteArg("a,b"), '"a,b"');
+  assert.equal(winQuoteArg("a;b"), '"a;b"');
+  assert.equal(winQuoteArg("a=b"), '"a=b"');
 });
 
 test("winQuoteArg doubles embedded quotes", () => {
   assert.equal(winQuoteArg('say "hi"'), '"say ""hi"""');
+  assert.equal(winQuoteArg('before\\"after'), `"before${"\\".repeat(2)}""after"`);
+});
+
+test("winQuoteArg doubles trailing backslashes before a closing quote", () => {
+  assert.equal(winQuoteArg("C:\\space path\\"), '"C:\\space path\\\\"');
+  assert.equal(winQuoteArg("equals=tail\\"), '"equals=tail\\\\"');
 });
 
 test("winQuoteArg encodes the empty string as a literal empty arg", () => {
@@ -370,6 +379,10 @@ test("winQuoteArg encodes the empty string as a literal empty arg", () => {
 test("winQuoteArg throws on CR/LF (must go via stdin, not argv)", () => {
   assert.throws(() => winQuoteArg("line1\nline2"), /CR\/LF/);
   assert.throws(() => winQuoteArg("a\rb"), /CR\/LF/);
+});
+
+test("winQuoteArg rejects active cmd percent expansion", () => {
+  assert.throws(() => winQuoteArg("%USERPROFILE%"), /would expand/);
 });
 
 test("buildBwrapArgs makes the host read-only, worktree/tmp writable, and network optionally absent", () => {
@@ -651,7 +664,12 @@ test("Windows Job launcher preserves cmd-shim argument boundaries", { skip: proc
   try {
     const child = spawnAgent({
       command: shim,
-      args: ["two words", "simple"],
+      args: [
+        "two words", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
+        "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+        "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+        'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
+      ],
       cwd: dir,
       isolation: windowsJobIsolation,
     });
@@ -667,7 +685,12 @@ test("Windows Job launcher preserves cmd-shim argument boundaries", { skip: proc
       child.on("close", resolve);
     });
     assert.equal(code, 0, err);
-    assert.deepEqual(JSON.parse(out), ["two words", "simple"]);
+    assert.deepEqual(JSON.parse(out), [
+      "two words", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
+      "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+      "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+      'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
+    ]);
   } finally {
     if (priorComSpec === undefined) delete process.env.ComSpec;
     else process.env.ComSpec = priorComSpec;

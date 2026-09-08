@@ -24,6 +24,28 @@ test("orchestrator capability is native-only and never revives conductor", () =>
   }
 });
 
+test("native Windows Claude advertises orchestrator only with verified Git Bash", () => {
+  const agent: AgentDefinition = {
+    id: "claude-code", name: "Claude Code", command: "claude.cmd", args: [], driver: "claude-code",
+    env: {}, context: { kind: "native" },
+    capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+      supportsApprovals: true, permissionModes: ["default"] },
+  };
+  const exists = (path: string) => path === "C:\\Program Files\\Git\\bin\\bash.exe";
+  assert.equal(withOrchestratorPreset([agent], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
+  const ready = { ...agent, env: { CLAUDE_CODE_GIT_BASH_PATH: "C:\\Program Files\\Git\\bin\\bash.exe" } };
+  assert.equal(withOrchestratorPreset([ready], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
+  const relative = { ...agent, env: { CLAUDE_CODE_GIT_BASH_PATH: "Git\\bin\\bash.exe" } };
+  assert.equal(withOrchestratorPreset([relative], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
+  const acp: AgentDefinition = {
+    id: "claude-acp", name: "Claude ACP", command: "npx.cmd",
+    args: ["-y", `@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION}`],
+    env: {}, driver: "acp", context: { kind: "native" },
+  };
+  assert.equal(withOrchestratorPreset([acp], { platform: "win32", env: {}, exists })[0]!.capabilities, undefined);
+  assert.deepEqual(withOrchestratorPreset([{ ...acp, env: ready.env }], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes, ["orchestrator"]);
+});
+
 test("only the exact audited native Claude ACP adapter advertises orchestrator", () => {
   const configured: AgentDefinition = {
     id: "claude-acp",
