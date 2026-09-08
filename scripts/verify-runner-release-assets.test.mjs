@@ -6,10 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runnerArtifactNames, RUNNER_TARGET_TRIPLES } from "../apps/runner/scripts/runner-artifacts.mjs";
+import { controlPlaneArtifactName, headlessArtifactNames, runnerArtifactNames, RUNNER_TARGET_TRIPLES, WEB_BUNDLE_ASSET_NAME } from "../apps/runner/scripts/runner-artifacts.mjs";
 import {
   checksumManifest,
   EXPECTED_RELEASE_ASSET_COUNT,
+  expectedManifestAssetNames,
   expectedRunnerAssetNames,
   verifyHostedRelease,
   verifyLocalRunnerAssets,
@@ -22,7 +23,9 @@ async function fixture() {
     const { canonical, legacy } = runnerArtifactNames(triple);
     writeFileSync(join(root, canonical), bytes);
     writeFileSync(join(root, legacy), bytes);
+    writeFileSync(join(root, controlPlaneArtifactName(triple)), Buffer.from(`native control plane for ${triple}`));
   }
+  writeFileSync(join(root, WEB_BUNDLE_ASSET_NAME), Buffer.from("web bundle"));
   return root;
 }
 
@@ -31,8 +34,12 @@ test("local runner verification emits a complete deterministic SHA256SUMS manife
   try {
     const digests = await verifyLocalRunnerAssets(root);
     const manifest = checksumManifest(digests);
-    assert.equal(manifest.trimEnd().split("\n").length, 12);
-    assert.deepEqual(manifest.trimEnd().split("\n").map((line) => line.slice(66)), expectedRunnerAssetNames());
+    assert.equal(manifest.trimEnd().split("\n").length, 19);
+    assert.deepEqual(manifest.trimEnd().split("\n").map((line) => line.slice(66)), expectedManifestAssetNames());
+    assert.deepEqual(headlessArtifactNames(), [...RUNNER_TARGET_TRIPLES.map((triple) => controlPlaneArtifactName(triple)), WEB_BUNDLE_ASSET_NAME].sort());
+    assert.equal(controlPlaneArtifactName("x86_64-pc-windows-msvc"), "wollipog-control-plane-x86_64-pc-windows-msvc.exe");
+    assert.equal(controlPlaneArtifactName("x86_64-unknown-linux-gnu"), "wollipog-control-plane-x86_64-unknown-linux-gnu");
+    for (const name of expectedRunnerAssetNames()) assert.ok(expectedManifestAssetNames().includes(name));
     for (const triple of RUNNER_TARGET_TRIPLES) {
       const { canonical, legacy } = runnerArtifactNames(triple);
       assert.equal(digests.get(canonical), digests.get(legacy));
@@ -53,6 +60,11 @@ test("local runner verification rejects extra, missing, and divergent aliases", 
     await assert.rejects(verifyLocalRunnerAssets(root), /missing=\[agent-manager-runner-aarch64-apple-darwin\]/);
     writeFileSync(join(root, legacy), "different");
     await assert.rejects(verifyLocalRunnerAssets(root), /runner aliases differ/);
+    writeFileSync(join(root, legacy), `native runner for ${RUNNER_TARGET_TRIPLES[0]}`);
+    rmSync(join(root, WEB_BUNDLE_ASSET_NAME));
+    await assert.rejects(verifyLocalRunnerAssets(root), /missing=\[wollipog-web\.tar\.gz\]/);
+    writeFileSync(join(root, WEB_BUNDLE_ASSET_NAME), "");
+    await assert.rejects(verifyLocalRunnerAssets(root), /release asset is empty: wollipog-web\.tar\.gz/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -63,7 +75,7 @@ test("hosted verification enforces the exact release count, manifest, and six re
   try {
     const digests = await verifyLocalRunnerAssets(root);
     const manifest = checksumManifest(digests);
-    const runners = expectedRunnerAssetNames().map((name) => ({
+    const runners = expectedManifestAssetNames().map((name) => ({
       name,
       size: 100,
       digest: `sha256:${digests.get(name)}`,
@@ -82,14 +94,14 @@ test("hosted verification enforces the exact release count, manifest, and six re
       })),
     ];
     const assetPages = [assets.slice(0, 13), assets.slice(13)];
-    assert.equal(EXPECTED_RELEASE_ASSET_COUNT, 14 + RUNNER_TARGET_TRIPLES.length * 2 + 1);
-    assert.equal(EXPECTED_RELEASE_ASSET_COUNT, 27);
+    assert.equal(EXPECTED_RELEASE_ASSET_COUNT, 14 + RUNNER_TARGET_TRIPLES.length * 2 + RUNNER_TARGET_TRIPLES.length + 1 + 1);
+    assert.equal(EXPECTED_RELEASE_ASSET_COUNT, 34);
     assert.equal(assets.length, EXPECTED_RELEASE_ASSET_COUNT);
     assert.doesNotThrow(() => verifyHostedRelease(assetPages, manifest));
 
     assert.throws(
       () => verifyHostedRelease([assets.slice(0, -1)], manifest),
-      /expected exactly 27/,
+      /expected exactly 34/,
     );
     const badManifestDigest = structuredClone(assetPages);
     badManifestDigest.flat().find((asset) => asset.name === "SHA256SUMS").digest = `sha256:${"f".repeat(64)}`;
@@ -133,7 +145,11 @@ test("hosted verification enforces the exact release count, manifest, and six re
       manifestPath,
     ], { encoding: "utf8" });
     assert.equal(cliResult.status, 0, cliResult.stderr);
-    assert.match(cliResult.stdout, /verified exact 27-asset release inventory/u);
+    assert.match(cliResult.stdout, /verified exact 34-asset release inventory/u);
+    const missingControlPlane = structuredClone(assetPages);
+    const cpAsset = missingControlPlane.flat().find((asset) => asset.name === controlPlaneArtifactName("x86_64-unknown-linux-gnu"));
+    cpAsset.digest = `sha256:${"e".repeat(64)}`;
+    assert.throws(() => verifyHostedRelease(missingControlPlane, manifest), /does not match SHA256SUMS: wollipog-control-plane-x86_64-unknown-linux-gnu/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
