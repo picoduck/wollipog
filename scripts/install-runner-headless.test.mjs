@@ -47,11 +47,11 @@ function harness(options = {}) {
     tag_name: releaseTag,
     assets: [
       ...names.map((name) => ({ name, digest: `sha256:${digests[name]}`, browser_download_url: `https://download.test/${releaseTag}/${name}` })),
-      { name: "SHA256SUMS", digest: `sha256:${sha256(Buffer.from(manifest))}`, browser_download_url: `https://download.test/${releaseTag}/SHA256SUMS` },
+      ...(options.omitManifest ? [] : [{ name: "SHA256SUMS", digest: `sha256:${sha256(Buffer.from(manifest))}`, browser_download_url: `https://download.test/${releaseTag}/SHA256SUMS` }]),
     ],
   });
   writeFileSync(join(root, "release.json"), assetsJson);
-  executable(join(fakeBin, "uname"), '[ "${1:-}" = "-s" ] && echo Linux || echo x86_64\n');
+  executable(join(fakeBin, "uname"), `[ "\${1:-}" = "-s" ] && echo ${options.os ?? "Linux"} || echo x86_64\n`);
   executable(join(fakeBin, "hostname"), "echo test-host\n");
   executable(join(fakeBin, "curl"), `
 out=
@@ -102,6 +102,22 @@ posixTest("install-runner.sh --control-plane fails closed on a tampered control 
   const missing = old.run("--control-plane");
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /has no wollipog-control-plane-x86_64-unknown-linux-gnu; update to a release that publishes headless assets/u);
+
+  // Without SHA256SUMS the headless assets cannot be cross-checked, so nothing headless is installed.
+  const unverifiable = harness({ omitManifest: true });
+  t.after(() => rmSync(unverifiable.root, { recursive: true, force: true }));
+  const noManifest = unverifiable.run("--control-plane");
+  assert.notEqual(noManifest.status, 0);
+  assert.match(noManifest.stderr, /has no SHA256SUMS; refusing a headless install/u);
+  assert.ok(!existsSync(join(unverifiable.home, ".local", "bin", "wollipog-control-plane")));
+
+  // --control-plane is a Linux/systemd flow; on macOS it stops before downloading anything.
+  const mac = harness({ os: "Darwin" });
+  t.after(() => rmSync(mac.root, { recursive: true, force: true }));
+  const darwin = mac.run("--control-plane");
+  assert.notEqual(darwin.status, 0);
+  assert.match(darwin.stderr, /--control-plane needs Linux with systemd/u);
+  assert.ok(!existsSync(join(mac.home, ".local", "bin", "wollipog-runner")), "nothing is installed before the platform check");
 
   const plain = harness();
   t.after(() => rmSync(plain.root, { recursive: true, force: true }));

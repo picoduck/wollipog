@@ -160,7 +160,12 @@ export function defaultServiceHost(fetchImpl: McpFetch = globalThis.fetch): Serv
         renameSync(from, to);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-        cpSync(from, to, { recursive: true, force: true });
+        // Across filesystems, copy beside the destination first so the destination itself is only
+        // ever created by a rename and can never be observed half-written.
+        const staged = `${to}.tmp-${process.pid}`;
+        rmSync(staged, { recursive: true, force: true });
+        cpSync(from, staged, { recursive: true, force: true });
+        renameSync(staged, to);
         rmSync(from, { recursive: true, force: true });
       }
     },
@@ -493,6 +498,13 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   const controlPlaneBin = wantControlPlane ? resolveExecutable("control-plane", option(args, "--control-plane-bin"), defaultControlPlaneExecutable(host), host) : null;
   const runnerBin = wantRunner ? resolveExecutable("runner", option(args, "--runner-bin"), defaultRunnerExecutable(host), host) : null;
   const webDist = option(args, "--web-dist") ?? defaultWebDist(host, controlPlaneBin) ?? undefined;
+  if (controlPlaneBin && option(args, "--control-plane-bin") === undefined && webDist === undefined && !host.exists(layout.controlPlaneEnvFile)) {
+    // The installer's layout always carries a dashboard bundle; a control plane found by default but
+    // without one would start API-only and serve 404 for the dashboard, which nobody asked for.
+    throw new CliError(
+      `no dashboard bundle found for ${controlPlaneBin} (looked for web/index.html in ${dirname(controlPlaneBin)} and ${resolve(dirname(controlPlaneBin), "..", "share", "wollipog", "web")}); ` +
+      "reinstall with `install-runner.sh --control-plane`, or pass --web-dist <dir>", 2);
+  }
   if (wantRunner && !wantControlPlane && !host.exists(layout.controlPlaneEnvFile) && !host.exists(layout.runnerTokenFile)) {
     // A colocated runner gets its credential from the local control plane. Without one here and
     // without a token already in place there is nothing to connect to.
@@ -859,74 +871,71 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     staged.set(target.component, destination);
   }
   let stagedWeb: string | null = null;
-  const warnings: string[] = [];
   if (webDist) {
+    // A control plane that serves the dashboard is upgraded together with its bundle or not at all.
     const webAsset = release.assets.find((asset) => asset.name === WEB_BUNDLE_ASSET_NAME);
-    if (webAsset) {
-      const tarball = join(staging, WEB_BUNDLE_ASSET_NAME);
-      await downloadVerifiedAsset(host.download, webAsset, tarball, { manifest, token });
-      const extracted = await host.exec("tar", ["-xzf", tarball, "-C", staging], { timeoutMs: 120_000 });
-      if (extracted.code !== 0 || !host.exists(join(staging, "web", "index.html"))) {
-        throw new CliError(`could not extract ${WEB_BUNDLE_ASSET_NAME}: ${extracted.stderr.trim() || "no web/index.html in the archive"}; nothing was installed`);
-      }
-      stagedWeb = join(staging, "web");
-    } else {
-      warnings.push(`${release.tag} has no ${WEB_BUNDLE_ASSET_NAME}; the dashboard bundle at ${webDist} was left unchanged`);
+    if (!webAsset) throw new CliError(`${release.tag} has no ${WEB_BUNDLE_ASSET_NAME}, but this control plane serves the dashboard from ${webDist}; nothing was installed`);
+    const tarball = join(staging, WEB_BUNDLE_ASSET_NAME);
+    await downloadVerifiedAsset(host.download, webAsset, tarball, { manifest, token });
+    const extracted = await host.exec("tar", ["-xzf", tarball, "-C", staging], { timeoutMs: 120_000 });
+    if (extracted.code !== 0 || !host.exists(join(staging, "web", "index.html"))) {
+      throw new CliError(`could not extract ${WEB_BUNDLE_ASSET_NAME}: ${extracted.stderr.trim() || "no web/index.html in the archive"}; nothing was installed`);
     }
-  }
-
-  // Swap: keep exactly one previous generation of each executable and of the web bundle.
-  const previous = (path: string) => `${path}.previous`;
-  const swapped: string[] = [];
-  const swapIn = (target: UpgradeTarget) => {
-    host.removeFile(previous(target.path));
-    if (host.exists(target.path)) host.move(target.path, previous(target.path));
-    host.move(staged.get(target.component)!, target.path);
-    host.chmod(target.path, 0o755);
-    swapped.push(target.path);
-  };
-  const refreshAlias = (alias: string, source: string) => {
-    const partial = `${alias}.upgrade-${release.tag}`;
-    host.removeFile(partial);
-    host.copyTree(source, partial);
-    host.chmod(partial, 0o755);
-    host.removeFile(previous(alias));
-    host.move(alias, previous(alias));
-    host.move(partial, alias);
-    swapped.push(alias);
-  };
-  const rollBack = async (reason: string): Promise<CliError> => {
-    for (const path of [...targets.map((target) => target.path), ...aliases]) {
-      if (!swapped.includes(path)) continue;
-      if (host.exists(previous(path))) {
-        host.removeFile(path);
-        host.move(previous(path), path);
-      }
-    }
-    if (stagedWeb && webDist && host.exists(previous(webDist))) {
-      host.removeTree(webDist);
-      host.move(previous(webDist), webDist);
-    }
-    for (const target of targets) await systemctl(host, mode, ["restart", target.unit]);
-    const healthy = await waitFor(host, 60_000, async () => (await probeHealth(host, effective.port)).ok);
-    return new CliError(`${reason}; rolled back to the previous executables${healthy ? " (control plane healthy again)" : " but the control plane is still not healthy: inspect with `wollipog service logs control-plane`"}`);
-  };
-
-  try {
-    for (const target of targets) swapIn(target);
-    for (const alias of aliases) refreshAlias(alias, runnerTarget!.path);
-    if (stagedWeb && webDist) {
-      host.removeTree(previous(webDist));
-      if (host.exists(webDist)) host.move(webDist, previous(webDist));
-      host.move(stagedWeb, webDist);
-    }
-    if (mode === "system") await host.exec("chown", ["-R", `${layout.account}:${layout.account}`, ...targets.map((target) => target.path), ...aliases, ...(webDist ? [webDist] : [])], { timeoutMs: 60_000 });
-  } catch (error) {
-    throw await rollBack(`installing the new executables failed (${(error as Error).message})`);
+    stagedWeb = join(staging, "web");
   }
 
   const controlPlane = targets.find((target) => target.component === "control-plane");
   const runner = targets.find((target) => target.component === "runner");
+
+  // Swap: keep exactly one previous generation of each executable and of the web bundle. Every path
+  // is recorded before its first mutation, so a swap that fails midway is undone as well.
+  const previous = (path: string) => `${path}.previous`;
+  const swapped: Array<{ path: string; hadPrevious: boolean; tree: boolean }> = [];
+  const replace = (path: string, source: string, tree: boolean) => {
+    const hadPrevious = host.exists(path);
+    swapped.push({ path, hadPrevious, tree });
+    if (tree) host.removeTree(previous(path)); else host.removeFile(previous(path));
+    if (hadPrevious) host.move(path, previous(path));
+    host.move(source, path);
+    if (!tree) host.chmod(path, 0o755);
+  };
+  const aliasPartial = (alias: string) => `${alias}.upgrade-${release.tag}`;
+  const rollBack = async (reason: string): Promise<CliError> => {
+    const problems: string[] = [];
+    for (const entry of [...swapped].reverse()) {
+      try {
+        if (entry.tree) host.removeTree(entry.path); else host.removeFile(entry.path);
+        if (entry.hadPrevious && host.exists(previous(entry.path))) host.move(previous(entry.path), entry.path);
+      } catch (error) {
+        problems.push(`could not restore ${entry.path}: ${(error as Error).message}`);
+      }
+    }
+    for (const alias of aliases) host.removeFile(aliasPartial(alias));
+    for (const target of targets) {
+      const restarted = await systemctl(host, mode, ["restart", target.unit]);
+      if (restarted.code !== 0) problems.push(`could not restart ${target.unit}: ${restarted.stderr.trim()}`);
+    }
+    const healthy = controlPlane ? await waitFor(host, 60_000, async () => (await probeHealth(host, effective.port)).ok) : true;
+    if (!healthy) problems.push("the control plane is still not healthy: inspect with `wollipog service logs control-plane`");
+    return new CliError(`${reason}; rolled back to the previous executables${problems.length ? `, with problems: ${problems.join("; ")}` : controlPlane ? " (control plane healthy again)" : ""}`);
+  };
+
+  try {
+    for (const target of targets) replace(target.path, staged.get(target.component)!, false);
+    for (const alias of aliases) {
+      host.removeFile(aliasPartial(alias));
+      host.copyTree(runnerTarget!.path, aliasPartial(alias));
+      replace(alias, aliasPartial(alias), false);
+    }
+    if (stagedWeb && webDist) replace(webDist, stagedWeb, true);
+    if (mode === "system") {
+      const owned = await host.exec("chown", ["-R", `${layout.account}:${layout.account}`, ...targets.map((target) => target.path), ...aliases, ...(stagedWeb && webDist ? [webDist] : [])], { timeoutMs: 60_000 });
+      if (owned.code !== 0) throw new Error(`chown to ${layout.account} failed: ${owned.stderr.trim()}`);
+    }
+  } catch (error) {
+    throw await rollBack(`installing the new executables failed (${(error as Error).message})`);
+  }
+
   if (controlPlane) {
     const restart = await systemctl(host, mode, ["restart", controlPlane.unit]);
     if (restart.code !== 0) throw await rollBack(`could not restart ${controlPlane.unit}: ${restart.stderr.trim()}`);
@@ -941,12 +950,17 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     const restart = await systemctl(host, mode, ["restart", runner.unit]);
     if (restart.code !== 0) throw await rollBack(`could not restart ${runner.unit}: ${restart.stderr.trim()}`);
     const runnerId = (() => { try { return (JSON.parse(host.readFile(layout.runnerConfigFile)) as { runnerId?: string }).runnerId ?? null; } catch { return null; } })();
-    if (runnerId) {
+    if (controlPlane && runnerId) {
       const online = await waitFor(host, 90_000, async () => {
         const status = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string; version?: string }> } }>(host, effective, ["status"]);
         return status.data?.runners?.items?.some((item) => item.runnerId === runnerId && item.status === "online") === true;
       });
       if (!online) throw await rollBack(`runner ${runnerId} did not register as online within 90s after the upgrade`);
+    } else {
+      // A runner-only host reports to a remote control plane this command cannot query; the unit
+      // staying active is the readiness signal here.
+      const active = await waitFor(host, 30_000, async () => (await unitState(host, mode, runner.unit)).activeState === "active");
+      if (!active) throw await rollBack(`${runner.unit} did not become active within 30s after the upgrade`);
     }
   }
   host.removeTree(staging);
@@ -957,13 +971,11 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     components: targets.map((target) => ({ component: target.component, path: target.path, previousKept: host.exists(previous(target.path)) ? previous(target.path) : null })),
     aliases,
     webDist: stagedWeb ? webDist : null,
-    warnings,
   };
-  for (const warning of warnings) io.stderr(`warning: ${warning}\n`);
   emit(report, [
     `Upgraded to ${release.tag}: ${targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ")}${aliases.length ? `, ${aliases.map((alias) => basename(alias)).join(" and ")} refreshed` : ""}${stagedWeb ? ", web bundle refreshed" : ""}.`,
     `Previous executables kept as ${targets.map((target) => previous(target.path)).join(" and ")}; the next upgrade replaces them.`,
-    "Control plane healthy" + (runner ? " and runner online." : "."),
+    controlPlane ? `Control plane healthy${runner ? " and runner online." : "."}` : "Runner active.",
   ].join("\n"));
   return 0;
 }

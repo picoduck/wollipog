@@ -43,6 +43,10 @@ case "$arch" in
   *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
 esac
 triple="${cpu}-${sys}"
+if [ "$with_control_plane" -eq 1 ] && [ "$sys" != unknown-linux-gnu ]; then
+  echo "--control-plane needs Linux with systemd (wollipog service install); on $os install only the runner." >&2
+  exit 1
+fi
 canonical="wollipog-runner-${triple}"
 legacy="agent-manager-runner-${triple}"
 control_plane_asset="wollipog-control-plane-${triple}"
@@ -288,6 +292,7 @@ fetch_verified_asset() {
   fi
 }
 if [ "$with_control_plane" -eq 1 ]; then
+  [ -n "$checksum_dl" ] || { echo "Release $release_tag has no SHA256SUMS; refusing a headless install that cannot be cross-checked." >&2; exit 1; }
   cp_bin="$bindir/wollipog-control-plane"
   cp_partial="${cp_bin}.download.$$"
   web_dir="$HOME/.local/share/wollipog/web"

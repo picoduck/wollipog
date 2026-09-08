@@ -498,6 +498,16 @@ test("service install defaults to the installer's sibling control plane and web 
   assert.ok(cpUnit.includes(`ExecStart="${join(bin, "wollipog-control-plane")}"`), cpUnit);
   const envText = readFileSync(f.layout.controlPlaneEnvFile, "utf8");
   assert.ok(envText.includes(`WOLLIPOG_WEB_DIST="${join(f.root, "local", "share", "wollipog", "web")}"`), envText);
+
+  // The same layout without a dashboard bundle is refused instead of silently installing API-only.
+  const bare = fake(t);
+  const bareBin = join(bare.root, "bin");
+  mkdirSync(bareBin, { recursive: true });
+  for (const name of ["wollipog", "wollipog-runner", "wollipog-control-plane"]) writeFileSync(join(bareBin, name), "#!/bin/sh\n", { mode: 0o755 });
+  const bareHost = { ...bare.host, isSea: true, execPath: join(bareBin, "wollipog") };
+  assert.equal(await runServiceCli(["service", "install", "--no-start"], bareHost, bare.io), 2);
+  assert.match(bare.stderr(), /no dashboard bundle found for .*wollipog-control-plane .*; reinstall with `install-runner\.sh --control-plane`, or pass --web-dist/u);
+  assert.ok(!existsSync(join(bare.layout.unitDir, CONTROL_PLANE_UNIT)), "no unit is written");
 });
 
 function releaseFixture(f: Fake, options: { version?: string; webBundle?: boolean; badVersion?: boolean; manifest?: boolean } = {}) {
@@ -648,4 +658,75 @@ test("service upgrade rolls back when the new control plane does not report the 
   assert.match(unverifiable.stderr(), /has no SHA256SUMS/u);
   assert.deepEqual(noManifest.downloads, []);
   assert.match(nothing.stderr(), /no Wollipog units are installed/u);
+
+  // A failure between the move and the chmod is still undone: the path was recorded before it changed.
+  const chmodFails = makeIo();
+  const chmodHost: ServiceHost = { ...host, chmod: (path, modeBits) => { if (path === join(f.root, "wollipog-runner")) throw new Error("EPERM: chmod refused"); fixture.host.chmod(path, modeBits); } };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], chmodHost, chmodFails.io), 1);
+  assert.match(JSON.parse(chmodFails.stdout()).error, /installing the new executables failed \(EPERM: chmod refused\); rolled back/u);
+  assert.equal(readFileSync(cpBin, "utf8"), "#!/bin/sh\n", "the control plane, swapped first, is restored");
+  assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n", "the runner, whose chmod failed, is restored too");
+
+  // Rollback reports a restart that fails instead of claiming the previous generation is back up.
+  const restartFails = makeIo();
+  const brokenRestartFixture = fake(t, { systemctlFail: `restart ${RUNNER_UNIT}` });
+  assert.equal(await runServiceCli(["service", "install", ...bins(brokenRestartFixture), "--no-start", "--json"], brokenRestartFixture.host, brokenRestartFixture.io), 0, brokenRestartFixture.stderr());
+  const brokenRelease = releaseFixture(brokenRestartFixture, { webBundle: false });
+  const brokenHost: ServiceHost = { ...brokenRelease.host, exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? brokenRelease.version : "0.22.0"}\n`, stderr: "" } : brokenRelease.host.exec(command, args, options) };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], brokenHost, restartFails.io), 1);
+  assert.match(JSON.parse(restartFails.stdout()).error, /rolled back to the previous executables, with problems: could not restart wollipog-runner\.service: fake failure/u);
+
+  // With no previous generation to restore, rollback removes what the upgrade introduced.
+  const fresh = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(fresh), "--json"], fresh.host, fresh.io), 0, fresh.stderr());
+  const freshCp = join(fresh.root, "control-plane");
+  rmSync(freshCp);
+  const freshRelease = releaseFixture(fresh, { webBundle: false });
+  const freshHost: ServiceHost = { ...freshRelease.host, exec: async (command, args, options) => args[0] === "--version" ? { code: command.includes("/upgrades/") ? 0 : 1, stdout: command.includes("/upgrades/") ? `${freshRelease.version}\n` : "", stderr: "" } : freshRelease.host.exec(command, args, options) };
+  const freshIo = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], freshHost, freshIo.io), 1);
+  assert.match(JSON.parse(freshIo.stdout()).error, /reports version 0\.22\.0, not 9\.9\.9; rolled back/u);
+  assert.ok(!existsSync(freshCp), "the newly introduced executable is removed rather than left behind");
+  assert.ok(!existsSync(`${freshCp}.previous`));
+});
+
+test("service upgrade refuses a release without the web bundle when the control plane serves the dashboard, and upgrades runner-only hosts by unit state", async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  const cpBin = join(f.root, "control-plane");
+  const webDist = join(f.root, "web");
+  mkdirSync(webDist, { recursive: true });
+  writeFileSync(join(webDist, "index.html"), "old");
+  writeFileSync(f.layout.controlPlaneEnvFile, readFileSync(f.layout.controlPlaneEnvFile, "utf8") + `WOLLIPOG_WEB_DIST="${webDist}"\n`);
+  const fixture = releaseFixture(f, { webBundle: false });
+  const execs: string[] = [];
+  const host: ServiceHost = { ...fixture.host, exec: async (command, args, options) => { execs.push([command, ...args].join(" ")); return args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options); } };
+  const { io, stdout } = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io), 1);
+  assert.match(JSON.parse(stdout()).error, /has no wollipog-web\.tar\.gz, but this control plane serves the dashboard from .*; nothing was installed/u);
+  assert.equal(readFileSync(cpBin, "utf8"), "#!/bin/sh\n", "nothing was swapped");
+  assert.equal(execs.filter((line) => line.includes("restart")).length, 0, "nothing was restarted");
+
+  // Runner-only host: the local admin API is not this runner's control plane, so the unit staying
+  // active is what proves the upgrade.
+  const g = fake(t);
+  mkdirSync(g.layout.configDir, { recursive: true, mode: 0o700 });
+  writeFileSync(g.layout.runnerTokenFile, "remote-token\n", { mode: 0o600 });
+  const runnerBin = join(g.root, "wollipog-runner");
+  writeFileSync(runnerBin, "#!/bin/sh\n", { mode: 0o755 });
+  assert.equal(await runServiceCli(["service", "install", "--runner", "--runner-bin", runnerBin, "--no-start", "--json"], g.host, g.io), 0, g.stderr() + g.stdout());
+  const runnerRelease = releaseFixture(g);
+  const fetches: string[] = [];
+  const runnerHost: ServiceHost = {
+    ...runnerRelease.host,
+    fetch: async (url, init) => { fetches.push(url); return runnerRelease.host.fetch(url, init); },
+    exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? runnerRelease.version : "0.22.0"}\n`, stderr: "" } : runnerRelease.host.exec(command, args, options),
+  };
+  const runnerIo = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes"], runnerHost, runnerIo.io), 0, runnerIo.stderr() + runnerIo.stdout());
+  assert.match(runnerIo.stdout(), /Upgraded to v9\.9\.9: runner 0\.22\.0 → 9\.9\.9\./u);
+  assert.match(runnerIo.stdout(), /Runner active\./u);
+  assert.equal(readFileSync(runnerBin, "utf8"), "runner 9.9.9");
+  assert.deepEqual(fetches.filter((url) => url.includes("/api/admin/")), [], "no loopback admin API is consulted for a runner-only host");
+  assert.deepEqual(runnerRelease.downloads.map((u) => u.replace("https://dl/", "")).sort(), ["SHA256SUMS", "wollipog-runner-x86_64-unknown-linux-gnu"], "only the runner asset is fetched");
 });

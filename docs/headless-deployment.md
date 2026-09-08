@@ -165,10 +165,14 @@ kept as `<path>.previous`, and the previous `web/` directory beside the new one)
 command and any other sibling that was a hard link or copy of the runner are refreshed from the new
 runner, the control plane is restarted and must become
 healthy and report the new version through the loopback admin API, and the runner is restarted and
-must re-register as online. If any of that fails, the previous executables and bundle are moved back
-and the services are restarted again; the command exits 1 and says so. Configuration, credentials,
-and data are never touched, and `--force` reinstalls the current release. A private repository
-needs `GH_TOKEN` (Contents: read) in the environment.
+must re-register as online (on a runner-only host, whose control plane is elsewhere, the runner unit
+must become active instead). A control plane that serves the dashboard is only upgraded to a
+release that also carries the web bundle. If any of that fails, the previous executables and bundle
+are moved back (anything the upgrade introduced without a previous generation is removed), the
+services are restarted again, and the command exits 1 naming the failure and any step of the
+rollback that did not succeed. Configuration, credentials, and data are never touched, and
+`--force` reinstalls the current release. A private repository needs `GH_TOKEN` (Contents: read)
+in the environment.
 
 ## Uninstall
 
