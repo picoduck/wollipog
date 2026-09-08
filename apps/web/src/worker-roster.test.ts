@@ -15,6 +15,8 @@ const child: SubagentDescriptor = {
   lifecycle: "running", toolStatus: "in_progress", availability: "live",
   directUsage: { inputTokens: 3, outputTokens: 2 },
   inclusiveUsage: { inputTokens: 7, outputTokens: 5 },
+  toolCount: 2,
+  latestTool: { title: "Read Schema", active: true },
 };
 
 test("roster retains distinct job targets, nesting, usage, and deduplicated authorized members", () => {
@@ -27,6 +29,8 @@ test("roster retains distinct job targets, nesting, usage, and deduplicated auth
   assert.equal(rows[0]!.depth, 1);
   assert.equal(rows[0]!.tokens, 5);
   assert.equal(rows[0]!.inclusiveTokens, 12);
+  assert.equal(rows[0]!.toolCount, 2);
+  assert.deepEqual(rows[0]!.latestTool, { title: "Read Schema", active: true });
   assert.deepEqual(rows[1]!.target, { kind: "background", id: "monitor" });
   assert.deepEqual(rows[2]!.target, { kind: "session", id: "reviewer" });
   assert.equal(rows[2]!.role, "reviewer");
@@ -43,6 +47,8 @@ test("offline, recorded, and completed evidence cannot be advertised as active c
   assert.equal(backgroundWorkerState({ ...session.backgroundJobs![0]!, terminalStatus: "completed" }, session, true), "completed");
   assert.equal(backgroundWorkerState(session.backgroundJobs![0]!, { ...session, backgroundWorkState: "resumed" }, true), "unverified");
   assert.equal(backgroundWorkerState({ ...session.backgroundJobs![0]!, sourcePresent: false }, session, true), "unverified");
+  assert.equal(workerRoster(session, [{ ...child, availability: "recorded" }], [], () => true)[0]!.latestTool?.active, false,
+    "recorded history never labels an unfinished tool as current activity");
 });
 
 test("legacy empty evidence has no fabricated workers and unknown ownership is not assigned", () => {

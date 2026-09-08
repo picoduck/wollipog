@@ -74,6 +74,10 @@ function Fixture() {
       <h1 ref={primaryRef} tabIndex={-1}>Agents</h1>
       {params.has("primary-question") && <SessionApprovalRegion session={session} runnerOnline={online}
         fallbackFocusRef={primaryRef} showKeyHints={false} />}
+      {params.has("primary-question") && <button type="button" className="btn" onClick={() => setSession((current) => ({
+        ...current,
+        pendingApproval: removePendingRequest(current.pendingApproval, "permission-a"),
+      }))}>Resolve Primary Request</button>}
       <button type="button" className="btn" style={{ marginBottom: 12 }} onClick={() => setOnline((value) => !value)}>{online ? "Disconnect Runner" : "Reconnect Runner"}</button>
       <AgentsPanel session={session} items={items} runnerOnline={online}
         onOpenPrimaryRequest={params.has("primary-question") ? (requestId) => focusSessionRequest(session.id, requestId) : undefined}

@@ -20,7 +20,7 @@ self.addEventListener("activate", (event) => {
 
 /* ------------------------------- Web Push -------------------------------- */
 // Payloads arrive already decrypted by the browser (RFC 8291); the JSON body is
-// { title, body, sessionId?, view?, notificationKey? } from the control plane.
+// { title, body, sessionId?, eventEpoch?, requestId?, view?, notificationKey? } from the control plane.
 
 // Newest shown state per tag, kept for this worker instance's lifetime: a live notification
 // carries its ts in data, but a DISMISSED one leaves no trace — without this memory, a
@@ -60,12 +60,17 @@ self.addEventListener("push", (event) => {
     /* not JSON — show the generic card below */
   }
   const sessionId = data && typeof data.sessionId === "string" ? data.sessionId : null;
+  const eventEpoch = data && Number.isSafeInteger(data.eventEpoch) && data.eventEpoch >= 0 ? data.eventEpoch : null;
+  const requestId = eventEpoch !== null && data && typeof data.requestId === "string" &&
+    data.requestId.length > 0 && data.requestId.length <= 256 ? data.requestId : null;
   const view = data && data.view === "automations" ? "automations" : null;
   const incoming = {
     title: (data && data.title) || "Wollipog",
     body: (data && data.body) || "A session needs attention.",
     ts: data && typeof data.ts === "number" ? data.ts : 0,
     sessionId,
+    eventEpoch,
+    requestId,
     view,
     receipt: data && data.receipt && typeof data.receipt === "object" ? data.receipt : null,
   };
@@ -88,6 +93,7 @@ self.addEventListener("push", (event) => {
       newestShown.set(tag, {
         title: show.title, body: show.body, ts: show.ts,
         sessionId: show.sessionId || null, view: show.view || null,
+        eventEpoch: show.eventEpoch ?? null, requestId: show.requestId || null,
         receipt: show.receipt || null,
       });
       if (newestShown.size > 500) newestShown.delete(newestShown.keys().next().value); // bound it
@@ -98,6 +104,8 @@ self.addEventListener("push", (event) => {
         badge: "/icons/icon-192.png",
         data: {
           sessionId: show.sessionId || null,
+          eventEpoch: show.eventEpoch ?? null,
+          requestId: show.requestId || null,
           view: show.view || null,
           ts: show.ts,
           title: show.title,
@@ -113,6 +121,8 @@ self.addEventListener("push", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const sessionId = event.notification.data && event.notification.data.sessionId;
+  const eventEpoch = event.notification.data && event.notification.data.eventEpoch;
+  const requestId = event.notification.data && event.notification.data.requestId;
   const view = event.notification.data && event.notification.data.view;
   const receipt = event.notification.data && event.notification.data.receipt;
   event.waitUntil(
@@ -125,10 +135,15 @@ self.addEventListener("notificationclick", (event) => {
         const client = windows[0];
         if (client) {
           await client.focus();
-          if (sessionId) client.postMessage({ type: "wollipog:open-session", sessionId });
+          if (sessionId) client.postMessage({ type: "wollipog:open-session", sessionId,
+            ...(Number.isSafeInteger(eventEpoch) && eventEpoch >= 0 ? { eventEpoch,
+              ...(typeof requestId === "string" && requestId ? { requestId } : {}) } : {}) });
           else if (view === "automations") client.postMessage({ type: "wollipog:open-automations" });
         } else {
-          await self.clients.openWindow(sessionId ? `/sessions/~${encodeRouteId(sessionId)}` : view === "automations" ? "/automations" : "/");
+          const attentionPath = Number.isSafeInteger(eventEpoch) && eventEpoch >= 0
+            ? `/attention${typeof requestId === "string" && requestId ? `/~${encodeRouteId(requestId)}` : ""}?epoch=${eventEpoch}`
+            : "";
+          await self.clients.openWindow(sessionId ? `/sessions/~${encodeRouteId(sessionId)}${attentionPath}` : view === "automations" ? "/automations" : "/");
         }
       } finally {
         // The click is already a fact even if focusing/navigation fails.

@@ -9,7 +9,7 @@
  * input_required status frame for the same request must stay silent.
  */
 
-import { sessionAttentionStatus, type SessionStatus, type SessionView } from "@wollipog/protocol";
+import { pendingRequests, sessionAttentionStatus, type SessionStatus, type SessionView } from "@wollipog/protocol";
 import type { PushMessage } from "./web-push.js";
 
 const BUSY: SessionStatus[] = ["queued", "starting", "running"];
@@ -44,10 +44,13 @@ export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMes
       : attention?.kind === "recovery_required" ? "Recovery required"
         : attention?.kind === "authentication_required" ? "Authentication required"
         : attention?.kind === "approval_required" ? "Approval required" : "Input required";
+    const requests = pendingRequests(next.pendingApproval);
     return {
       title: `${name} needs your input`,
       body: clamp(`${label}${what}`, BODY_MAX),
       sessionId: next.id,
+      eventEpoch: next.eventEpoch ?? 0,
+      ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
       urgency: "high",
     };
   }

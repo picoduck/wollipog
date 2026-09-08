@@ -1920,8 +1920,8 @@ export function StoreProvider({
       for (const [id, s] of cur) {
         const show = (payload: NotifyPayload) => notifier.show(payload, {
           instanceId: connection.instanceId,
-          onClick: (id) => {
-            const view = { name: "session" as const, id };
+          onClick: (id, attention) => {
+            const view = { name: "session" as const, id, ...(attention ? { attention } : {}) };
             if (navigationRef.current?.activate) navigationRef.current.activate(view);
             else store.navigate(view);
           },

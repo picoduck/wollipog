@@ -16,6 +16,7 @@ import {
   MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
   isPolicyApproval,
+  pendingRequests,
   isWorkspaceReference,
   isTerminal,
   runnerCapabilityRequirement,
@@ -3824,7 +3825,13 @@ function SessionDetailLoaded({
             onOpen: () => rightPanel.show("subagents"),
           } : undefined}
           onOpenBackgroundWork={() => rightPanel.show("background")}
-          onOpenAttention={() => rightPanel.show("subagents")}
+          onOpenAttention={() => {
+            const requests = pendingRequests(session.pendingApproval);
+            navigate({ name: "session", id: session.id, attention: {
+              eventEpoch: session.eventEpoch ?? 0,
+              ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
+            } });
+          }}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}

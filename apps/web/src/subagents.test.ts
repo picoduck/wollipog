@@ -49,6 +49,7 @@ test("descriptor projection derives nested identity, activity, direct usage, and
   const items: TimelineItem[] = [
     { kind: "tool_call", id: 1, toolCallId: "outer", title: "Agent: Audit Storage", text: "", toolKind: "agent", status: "in_progress", startedAt: 100, lastActivityAt: 110, subagentRollup: { inputTokens: 10, outputTokens: 2 } },
     { kind: "agent_thought", id: 2, text: "looking", parentToolUseId: "outer", createdAt: 120, lastActivityAt: 130 },
+    { kind: "tool_call", id: 6, toolCallId: "read", title: "Read Schema", text: "", toolKind: "read", status: "completed", parentToolUseId: "outer", startedAt: 125, completedAt: 135 },
     { kind: "tool_call", id: 3, toolCallId: "inner", title: "Agent: Inspect Parser", text: "", toolKind: "agent", status: "completed", parentToolUseId: "outer", startedAt: 140, completedAt: 160, subagentRollup: { inputTokens: 4, outputTokens: 1 } },
     { kind: "agent_message", id: 4, text: "found it", parentToolUseId: "inner", createdAt: 150, completedAt: 170 },
     { kind: "agent_message", id: 5, text: "top level", createdAt: 180 },
@@ -62,6 +63,9 @@ test("descriptor projection derives nested identity, activity, direct usage, and
   assert.equal(subagentTokenTotal(descriptors[0]!.directUsage), 12);
   assert.equal(subagentTokenTotal(descriptors[0]!.inclusiveUsage), 17);
   assert.equal(descriptors[1]!.lastActivityAt, 170);
+  assert.equal(descriptors[0]!.toolCount, 2, "direct tools include the nested agent launch without flattening its own work");
+  assert.deepEqual(descriptors[0]!.latestTool, { title: "Agent: Inspect Parser", active: false });
+  assert.equal(descriptors[1]!.toolCount, undefined, "no tool count is fabricated without direct tool evidence");
 });
 
 test("replayed App Server events retain selectable durable subagent output", () => {

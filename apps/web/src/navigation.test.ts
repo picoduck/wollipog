@@ -188,6 +188,18 @@ test("notification messages navigate both dashboard and isolated-share windows c
   assert.deepEqual(viewFromNotificationMessage({ type: "wollipog:open-session", sessionId: "new/session" }), {
     name: "session", id: "new/session",
   });
+  assert.deepEqual(viewFromNotificationMessage({ type: "wollipog:open-session", sessionId: "new/session",
+    eventEpoch: 3, requestId: "ask / ✅" }), {
+    name: "session", id: "new/session", attention: { eventEpoch: 3, requestId: "ask / ✅" },
+  });
+  assert.deepEqual(viewFromNotificationMessage({ type: "wollipog:open-session", sessionId: "new/session",
+    eventEpoch: 3 }), {
+    name: "session", id: "new/session", attention: { eventEpoch: 3 },
+  });
+  for (const invalid of [-1, 1.5, "3", Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(viewFromNotificationMessage({ type: "wollipog:open-session", sessionId: "new/session",
+      eventEpoch: invalid, requestId: "ask" }), null);
+  }
   assert.deepEqual(viewFromNotificationMessage({ type: "mam:open-automations" }), { name: "automations" });
   assert.deepEqual(viewFromNotificationMessage({ type: "wollipog:open-automations" }), { name: "automations" });
   assert.equal(viewFromNotificationMessage({ type: "mam:open-session", sessionId: "" }), null);

@@ -108,6 +108,7 @@ export function AgentsPanel(props: Props) {
   const primaryInSession = Boolean(props.onOpenPrimaryRequest && selectedRequest?.requestId === session.pendingApproval?.requestId);
   const requestDetailRef = useRef<HTMLDivElement>(null);
   const primaryRequestRef = useRef<HTMLButtonElement>(null);
+  const selectedSecondaryRequestRef = useRef<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const attentionRef = useRef<HTMLElement>(null);
   const requestOwnsFocus = useRef(false);
@@ -118,7 +119,21 @@ export function AgentsPanel(props: Props) {
     }
   }, [selectedRequest?.requestId, primaryInSession, requests.length]);
   useEffect(() => {
-    if (selectedRequest) (primaryInSession ? primaryRequestRef.current : requestDetailRef.current)?.focus();
+    if (!selectedRequest) {
+      selectedSecondaryRequestRef.current = null;
+      return;
+    }
+    if (!primaryInSession) {
+      selectedSecondaryRequestRef.current = selectedRequest.requestId;
+      requestDetailRef.current?.focus();
+      return;
+    }
+    if (selectedSecondaryRequestRef.current === selectedRequest.requestId) {
+      selectedSecondaryRequestRef.current = null;
+      props.onOpenPrimaryRequest?.(selectedRequest.requestId);
+      return;
+    }
+    primaryRequestRef.current?.focus();
   }, [selectedRequest?.requestId, primaryInSession]);
   const selectedKey = requestedId ? `subagent:${requestedId}` : chosen;
   const selected = rows.find((row) => row.id === selectedKey);
@@ -191,6 +206,8 @@ export function AgentsPanel(props: Props) {
                   {row.role && <span>{row.role.charAt(0).toUpperCase() + row.role.slice(1)}</span>}
                   {row.phase && <span>Phase: {row.phase}</span>}
                   {row.activations != null && <span>{row.activations} Activations</span>}
+                  {row.toolCount != null && <span>{row.toolCount} {row.toolCount === 1 ? "Tool Use" : "Tool Uses"}</span>}
+                  {row.latestTool && <span>{row.latestTool.active ? "Current Activity" : "Last Tool"}: {row.latestTool.title}</span>}
                   {row.tokens != null && <span>{row.tokens.toLocaleString()} {row.target.kind === "subagent" ? "Direct Tokens" : "Tokens"}</span>}
                   {row.inclusiveTokens != null && <span>{row.inclusiveTokens.toLocaleString()} Inclusive Tokens</span>}
                   {row.depth > 2 && <span>Depth {row.depth + 1}</span>}

@@ -308,11 +308,19 @@ export function absoluteViewUrl(origin: string, view: View): string {
 
 export function viewFromNotificationMessage(data: unknown): View | null {
   if (!data || typeof data !== "object") return null;
-  const message = data as { type?: unknown; sessionId?: unknown };
+  const message = data as { type?: unknown; sessionId?: unknown; eventEpoch?: unknown; requestId?: unknown };
   const opensSession = message.type === "mam:open-session" || message.type === "wollipog:open-session";
   if (opensSession && typeof message.sessionId === "string" &&
       message.sessionId.trim() && message.sessionId.length <= MAX_RESOURCE_ID_LENGTH) {
-    return { name: "session", id: message.sessionId };
+    const hasAttention = Object.hasOwn(message, "eventEpoch") || Object.hasOwn(message, "requestId");
+    if (!hasAttention) return { name: "session", id: message.sessionId };
+    if (!Number.isSafeInteger(message.eventEpoch) || (message.eventEpoch as number) < 0) return null;
+    if (message.requestId !== undefined &&
+        (typeof message.requestId !== "string" || !message.requestId || message.requestId.length > MAX_RESOURCE_ID_LENGTH)) return null;
+    return { name: "session", id: message.sessionId, attention: {
+      eventEpoch: message.eventEpoch as number,
+      ...(typeof message.requestId === "string" ? { requestId: message.requestId } : {}),
+    } };
   }
   return message.type === "mam:open-automations" || message.type === "wollipog:open-automations"
     ? { name: "automations" }

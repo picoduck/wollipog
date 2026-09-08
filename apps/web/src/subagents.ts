@@ -24,6 +24,10 @@ export interface SubagentDescriptor {
   completedAt?: number;
   directUsage?: SubagentRollup;
   inclusiveUsage?: SubagentRollup;
+  /** Direct child tool evidence from the loaded transcript only. */
+  toolCount?: number;
+  /** Most recently observed direct child tool; never inferred from prose output. */
+  latestTool?: { title: string; active: boolean };
 }
 
 export interface SubagentProjectionContext {
@@ -273,6 +277,14 @@ function deriveIndexedSubagentDescriptors(
     );
     const authoritativelyLive = context.runnerOnline &&
       (lifecycle === "starting" || lifecycle === "running" || lifecycle === "waiting");
+    const directTools = [...(index.parentItems.get(id)?.values() ?? [])]
+      .filter((item): item is ToolItem => item.kind === "tool_call")
+      .sort((left, right) => {
+        const leftAt = maxDefined(recordedTimes(left)) ?? left.id;
+        const rightAt = maxDefined(recordedTimes(right)) ?? right.id;
+        return leftAt - rightAt || left.id - right.id;
+      });
+    const latestTool = directTools.at(-1);
     descriptors.push({
       id,
       ...(effectiveParent.get(id) ? { parentId: effectiveParent.get(id) } : {}),
@@ -288,6 +300,12 @@ function deriveIndexedSubagentDescriptors(
       ...(node.tool.completedAt == null ? {} : { completedAt: node.tool.completedAt }),
       ...(node.tool.subagentRollup == null ? {} : { directUsage: node.tool.subagentRollup }),
       ...(inclusiveUsageById.get(id) == null ? {} : { inclusiveUsage: inclusiveUsageById.get(id) }),
+      ...(directTools.length === 0 ? {} : { toolCount: directTools.length }),
+      ...(latestTool == null ? {} : { latestTool: {
+        title: latestTool.title,
+        active: !["completed", "success", "succeeded", "failed", "error", "rejected", "cancelled", "canceled"]
+          .includes(latestTool.status.toLowerCase()),
+      } }),
     });
     for (const childId of childIds) emit(childId, depth + 1);
   };
