@@ -122,6 +122,14 @@ test("distinct tool counts reuse unchanged history and invalidate append, replac
     assert.ok(initialBytes > 0);
     for (let retry = 0; retry < 10; retry++) assert.equal(store.distinctToolCallCount("s_abc"), 1);
     assert.equal(scannedBytes, initialBytes, "unchanged retries do not parse history again");
+    const activePath = join(root, "s_abc", "events.ndjson");
+    const complete = readFileSync(activePath);
+    appendFileSync(activePath, '{"seq":3,"payload":');
+    assert.equal(store.distinctToolCallCount("s_abc"), 1, "a crash-torn suffix is not an event");
+    const afterTorn = scannedBytes;
+    assert.equal(store.distinctToolCallCount("s_abc"), 1);
+    assert.equal(scannedBytes, afterTorn, "unchanged torn suffixes can also be cached");
+    writeFileSync(activePath, complete);
     store.appendEvent("s_abc", { ...event, toolCallId: "two" });
     assert.equal(store.distinctToolCallCount("s_abc"), 2);
     const path = join(root, "s_abc", "events.ndjson");

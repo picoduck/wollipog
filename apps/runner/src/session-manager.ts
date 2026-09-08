@@ -7346,7 +7346,7 @@ export class SessionManager {
       queued.config = queuedConfig;
     }
     if (maxToolCalls === null) entry.toolCallIds = undefined;
-    if (maxToolCalls != null) {
+    if (maxToolCalls != null && !entry.toolCallIds) {
       entry.toolCallIds = new Set(
         this.store.readEvents(sessionId)
           .filter((event) => event.payload.kind === "tool_call")

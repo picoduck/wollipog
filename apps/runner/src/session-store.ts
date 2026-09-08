@@ -2202,16 +2202,11 @@ export class SessionStore {
       const cached = this.toolCountCache.get(id, before);
       if (cached !== undefined) return cached;
       const ids = new Set<string>();
-      for (const source of layout.sources) {
-        this.verifyHistorySource(source);
-        const raw = readFileSync(source.path, "utf8");
-        this.historyScanObserver?.(0, Buffer.byteLength(raw));
-        for (const line of raw.split("\n")) {
-          if (!line.trim()) continue;
-          const event = JSON.parse(line) as StoredEvent;
-          if (event.payload.kind === "tool_call") ids.add(event.payload.toolCallId);
-        }
-      }
+      // Reuse the bounded authoritative scanner: a torn suffix is not an event, while
+      // complete malformed records, sequence gaps and altered segments still fail closed.
+      this.scanHistoryPrefix(id, layout.totalBytes, (event) => {
+        if (event.payload.kind === "tool_call") ids.add(event.payload.toolCallId);
+      });
       if (before === null || version() !== before) return null;
       this.toolCountCache.set(id, before, ids.size);
       return ids.size;

@@ -76,7 +76,7 @@ test("WSL receipt cache revalidates fingerprints and isolates contexts and comma
     if (args[1]!.includes("find")) return { stdout: `done.output\n${version}\n`, stderr: "" };
     reads++;
     return { stdout: "<task-id>done</task-id><status>killed</status></task-notification>",
-      stderr: changedDuringRead ? "__WOLLIPOG_LEDGER__:changed" : version };
+      stderr: changedDuringRead ? "__WOLLIPOG_LEDGER__:changed" : `WSL startup notice\n${version}\n` };
   };
   const context = { kind: "wsl" as const, distro: "test-distro" };
   const inspect = () => inspectClaudeBackgroundWorkInContext(context, "/repo", "session", ["done", "pending"], { run });

@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import type { AgentContext } from "@wollipog/protocol";
 import { runContextCommand, type ContextCommandResult } from "./context-command.js";
 import { InspectionCache, InspectionLimiter, inspectionFileVersion } from "./inspection-cache.js";
@@ -193,8 +194,11 @@ async function inspectInContext(
     'stat -Lc "__WOLLIPOG_LEDGER__:%d:%i:%s:%y:%z:%a" "${3:-$HOME/.claude/projects}/$key/$2.jsonl" >&2',
   ].join("; ");
   const ids = [...new Set([...knownIds, ...names.map((name) => name.slice(0, -7))])].sort();
-  const cacheKey = JSON.stringify(["context", context, cwd, sessionId, env, options.projectsRoot, ids]);
-  const version = listing.stdout.split(/\r?\n/).find((line) => line.startsWith("__WOLLIPOG_LEDGER__:")) ?? null;
+  const envKey = createHash("sha256").update(JSON.stringify(env)).digest("hex");
+  const cacheKey = JSON.stringify(["context", context, cwd, sessionId, envKey, options.projectsRoot, ids]);
+  const fingerprint = (text: string) => text.split(/\r?\n/)
+    .filter((line) => line.startsWith("__WOLLIPOG_LEDGER__:")).at(-1) ?? null;
+  const version = fingerprint(listing.stdout);
   // Injected command runners are independent contexts too; never share their cached proof.
   let cache = terminalCache;
   if (options.run) {
@@ -213,7 +217,7 @@ async function inspectInContext(
       maxBuffer: 64 * 1024 * 1024,
       });
       statuses = classifyTranscript(result.stdout, ids);
-      if (result.stderr.trim() === version) cacheClassification(cacheKey, version, statuses, cache);
+      if (fingerprint(result.stderr) === version) cacheClassification(cacheKey, version, statuses, cache);
       else if (version !== null) statuses = new Map();
     } catch {
       // Listing proves the artifacts exist. An unreadable or oversized ledger proves nothing.

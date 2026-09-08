@@ -212,6 +212,16 @@ test("removing and re-adding a tool ceiling reconstructs calls made while it was
   } finally { h.sm.shutdownAll(); h.cleanup(); }
 });
 
+test("re-arming preserves live tool counts when durable history cannot be read", (t) => {
+  const h = harness({ maxToolCalls: 10 });
+  try {
+    h.entry.toolCallIds.add("already-counted");
+    t.mock.method(h.store, "readEvents", () => []);
+    h.sm.rearmGovernance("s_governance", { maxToolCalls: 20 });
+    assert.deepEqual([...h.entry.toolCallIds], ["already-counted"]);
+  } finally { h.sm.shutdownAll(); h.cleanup(); }
+});
+
 test("held background paths coalesce broadcasts but periodically restore missing cards", (t) => {
   const h = harness({ costBudgetUsd: 8 });
   let now = 100_000;
