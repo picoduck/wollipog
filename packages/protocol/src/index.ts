@@ -511,8 +511,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
   hostAdminDoctor: 117,
-  /** Structured child display identity on exact agent-spawn tool calls. */
-  childSessionRegistry: 118,
 } as const;
 
 /* ========================================================================== */
