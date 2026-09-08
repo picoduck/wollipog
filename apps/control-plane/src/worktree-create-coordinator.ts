@@ -30,6 +30,13 @@ interface Entry extends WorktreeCreateCoordinates {
 }
 
 const DEFAULT_TERMINAL_RETENTION_MS = 5 * 60_000;
+const WORKTREE_PROGRESS_PHASES = new Set<SessionWorktreeProgressPhase>([
+  "resolving_remote",
+  "fetching_remote",
+  "validating",
+  "materializing",
+  "activating",
+]);
 
 /**
  * Coordinates retryable HTTP requests with one exact runner request. Progress and completion stay
@@ -92,6 +99,7 @@ export class WorktreeCreateCoordinator {
     const entry = this.entriesById.get(message.requestId);
     if (!entry || entry.operation.status !== "in_progress") return false;
     if (entry.runnerId !== runnerId || entry.sessionId !== message.sessionId) return false;
+    if (!WORKTREE_PROGRESS_PHASES.has(message.phase)) return false;
     entry.operation = { id: message.requestId, status: "in_progress", phase: message.phase };
     return true;
   }
@@ -104,7 +112,15 @@ export class WorktreeCreateCoordinator {
 
   invalidateSession(sessionId: string): void {
     for (const entry of this.entriesById.values()) {
-      if (entry.sessionId === sessionId) this.deleteEntry(entry);
+      if (entry.sessionId !== sessionId || entry.operation.status !== "completed") continue;
+      // A later attach/select/discard has superseded the create-and-select result. Preserve a
+      // terminal acknowledgement for its polling caller instead of deleting the entry: deletion
+      // would make that poll start a new create and silently undo the newer operator choice.
+      entry.operation = {
+        id: entry.operation.id,
+        status: "failed",
+        error: "session worktree selection changed after creation completed",
+      };
     }
   }
 

@@ -78,6 +78,37 @@ test("a stalled or failed runner request becomes an explicit terminal failure", 
   }), false, "late progress cannot revive a terminal operation");
 });
 
+test("a later session mutation cannot make an unconsumed create restart and undo it", async () => {
+  let starts = 0;
+  const coordinator = new WorktreeCreateCoordinator(60_000, () => "worktree_superseded");
+  const start = async () => { starts += 1; return { snapshot }; };
+  coordinator.startOrJoin(coordinates, start);
+  await flush();
+
+  coordinator.invalidateSession("session-1");
+  assert.deepEqual(coordinator.startOrJoin(coordinates, start), {
+    id: "worktree_superseded",
+    status: "failed",
+    error: "session worktree selection changed after creation completed",
+  });
+  assert.equal(starts, 1, "polling a superseded terminal result must not restart creation");
+});
+
+test("runtime progress rejects phases outside the bounded protocol enum", () => {
+  const coordinator = new WorktreeCreateCoordinator(60_000, () => "worktree_phase");
+  coordinator.startOrJoin(coordinates, async () => new Promise(() => {}));
+  assert.equal(coordinator.recordProgress("runner-1", {
+    type: "session_worktree_progress",
+    requestId: "worktree_phase",
+    sessionId: "session-1",
+    phase: "unbounded runner text" as never,
+  }), false);
+  assert.deepEqual(coordinator.startOrJoin(coordinates, async () => ({ snapshot })), {
+    id: "worktree_phase",
+    status: "in_progress",
+  });
+});
+
 test("base ref is part of the in-flight identity", async () => {
   let nextId = 0;
   let starts = 0;
