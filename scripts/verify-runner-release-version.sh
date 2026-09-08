@@ -14,7 +14,13 @@ case "$expected" in *"
 
 for runner_binary in "$@"; do
   [ -f "$runner_binary" ] || { echo "runner binary is missing: $runner_binary" >&2; exit 1; }
-  actual=$("$runner_binary" --version | tr -d '\r')
+  # Capture the exit status separately: in a pipeline `set -e` would only see tr's status, so a
+  # binary that prints the right version and then fails would slip through the gate.
+  if ! raw=$("$runner_binary" --version); then
+    echo "runner binary failed to report its version: $runner_binary" >&2
+    exit 1
+  fi
+  actual=$(printf '%s' "$raw" | tr -d '\r')
   if [ "$actual" != "$expected" ]; then
     echo "runner version mismatch: expected $expected, received $actual" >&2
     exit 1

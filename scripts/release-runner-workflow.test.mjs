@@ -35,7 +35,7 @@ test("release workflow natively verifies dual runner assets and gates the final 
     /sh scripts\/verify-runner-release-version\.sh[\s\S]*apps\/runner\/src\/version\.ts[\s\S]*"\$canonical"[\s\S]*"\$legacy"/u,
   );
   assert.match(versionGate, /sed[\s\S]*version_source[\s\S]*tr -d '\\r'/u);
-  assert.match(versionGate, /"\$runner_binary" --version \| tr -d '\\r'/u);
+  assert.match(versionGate, /raw=\$\("\$runner_binary" --version\)[\s\S]*tr -d '\\r'/u);
   assert.match(workflow, /cmp -s "\$canonical" "\$legacy"/u);
   assert.match(workflow, /gh release upload "\$RELEASE_TAG" "\$canonical" "\$legacy"/u);
   assert.match(workflow, /verify-runner-release:[\s\S]*needs: \[preflight, build\]/u);
@@ -51,7 +51,7 @@ test("release workflow natively verifies dual runner assets and gates the final 
   assert.equal(sidecar.match(/publishLegacyRunnerAlias\(out, headlessControlPlane\)/gu)?.length, 1);
   const controlPlaneVersionGate = readFileSync(new URL("./verify-control-plane-release-version.sh", import.meta.url), "utf8");
   assert.match(controlPlaneVersionGate, /APP_RELEASE_VERSION/u);
-  assert.match(controlPlaneVersionGate, /"\$control_plane_binary" --version \| tr -d '\\r'/u);
+  assert.match(controlPlaneVersionGate, /raw=\$\("\$control_plane_binary" --version\)[\s\S]*tr -d '\\r'/u);
   assert.match(releaseDocs, /wollipog-control-plane-<triple>/u);
   assert.match(releaseDocs, /wollipog-web\.tar\.gz/u);
   assert.match(workflow, /--manifest SHA256SUMS[\s\S]*gh release upload "\$RELEASE_TAG" SHA256SUMS/u);

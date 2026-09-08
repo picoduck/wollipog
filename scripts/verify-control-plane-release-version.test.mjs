@@ -36,6 +36,11 @@ test("control-plane release version verification matches APP_RELEASE_VERSION and
   assert.notEqual(mismatch.status, 0);
   assert.match(mismatch.stderr, /control-plane version mismatch: expected 1\.2\.3, received 9\.9\.9/u);
 
+  writeFileSync(binary, "#!/bin/sh\nprintf '1.2.3\\n'\nexit 1\n");
+  const failing = spawnSync(shell, [shellPath(helper), shellPath(source), shellPath(binary)], { encoding: "utf8" });
+  assert.notEqual(failing.status, 0, "a binary that prints the version but exits non-zero must fail the gate");
+  assert.match(failing.stderr, /failed to report its version/u);
+
   const missing = spawnSync(shell, [shellPath(helper), shellPath(source), shellPath(join(root, "absent"))], { encoding: "utf8" });
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /control-plane binary is missing/u);

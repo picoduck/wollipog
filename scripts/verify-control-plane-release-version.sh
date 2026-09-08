@@ -14,7 +14,13 @@ case "$expected" in *"
 
 for control_plane_binary in "$@"; do
   [ -f "$control_plane_binary" ] || { echo "control-plane binary is missing: $control_plane_binary" >&2; exit 1; }
-  actual=$("$control_plane_binary" --version | tr -d '\r')
+  # Capture the exit status separately: in a pipeline `set -e` would only see tr's status, so a
+  # binary that prints the right version and then fails would slip through the gate.
+  if ! raw=$("$control_plane_binary" --version); then
+    echo "control-plane binary failed to report its version: $control_plane_binary" >&2
+    exit 1
+  fi
+  actual=$(printf '%s' "$raw" | tr -d '\r')
   if [ "$actual" != "$expected" ]; then
     echo "control-plane version mismatch: expected $expected, received $actual" >&2
     exit 1
