@@ -10,12 +10,21 @@ export interface WindowsCommandSpec {
   windowsVerbatimArguments?: boolean;
 }
 
-function quoteCmdToken(value: string): string {
+/** Quote one argv token for a `cmd.exe /s /c` tail that ultimately invokes a Windows process.
+ *
+ * Batch shims add a second parsing boundary before the target executable receives its argv. The
+ * doubled quotes preserve literal quotes through cmd, while doubling a run of backslashes before
+ * either an embedded or closing quote preserves that run through the target's Windows argv parser.
+ */
+export function quoteWindowsCmdToken(value: string, force = false): string {
   if (/[\r\n]/.test(value)) throw new Error("Windows command arguments cannot contain CR/LF");
   if (value.includes("%")) throw new Error("Windows command arguments cannot contain %, which cmd.exe would expand");
   if (value === "") return '""';
-  if (!/[ \t",;&|<>^()!=]/.test(value)) return value;
-  return `"${value.replace(/"/g, '""')}"`;
+  if (!force && !/[ \t",;&|<>^()!=]/.test(value)) return value;
+  const body = value
+    .replace(/(\\*)"/g, (_match, slashes: string) => `${slashes}${slashes}""`)
+    .replace(/\\+$/, (slashes) => `${slashes}${slashes}`);
+  return `"${body}"`;
 }
 
 /** Build a forced cmd.exe invocation for a caller, such as ConPTY, that needs cmd lookup. */
@@ -25,12 +34,12 @@ export function windowsCmdInvocationSpec(
   host: WindowsCommandHost = { platform: process.platform, comspec: process.env.ComSpec },
 ): WindowsCommandSpec {
   if (host.platform !== "win32") return { file, args };
-  const commandLine = [quoteCmdToken(file), ...args.map((arg) => quoteCmdToken(arg))].join(" ");
+  const commandLine = [quoteWindowsCmdToken(file), ...args.map((arg) => quoteWindowsCmdToken(arg))].join(" ");
   const comspec = host.comspec || "cmd.exe";
   return {
     file: comspec,
     args: ["/d", "/v:off", "/s", "/c", `"${commandLine}"`],
-    argv0: quoteCmdToken(comspec),
+    argv0: quoteWindowsCmdToken(comspec),
     windowsVerbatimArguments: true,
   };
 }

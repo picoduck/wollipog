@@ -364,6 +364,12 @@ test("winQuoteArg quotes cmd metacharacters", () => {
 
 test("winQuoteArg doubles embedded quotes", () => {
   assert.equal(winQuoteArg('say "hi"'), '"say ""hi"""');
+  assert.equal(winQuoteArg('before\\"after'), `"before${"\\".repeat(2)}""after"`);
+});
+
+test("winQuoteArg doubles trailing backslashes before a closing quote", () => {
+  assert.equal(winQuoteArg("C:\\space path\\"), '"C:\\space path\\\\"');
+  assert.equal(winQuoteArg("equals=tail\\"), '"equals=tail\\\\"');
 });
 
 test("winQuoteArg encodes the empty string as a literal empty arg", () => {
@@ -661,6 +667,8 @@ test("Windows Job launcher preserves cmd-shim argument boundaries", { skip: proc
       args: [
         "two words", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
         "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+        "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+        'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
       ],
       cwd: dir,
       isolation: windowsJobIsolation,
@@ -680,6 +688,8 @@ test("Windows Job launcher preserves cmd-shim argument boundaries", { skip: proc
     assert.deepEqual(JSON.parse(out), [
       "two words", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
       "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+      "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+      'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
     ]);
   } finally {
     if (priorComSpec === undefined) delete process.env.ComSpec;

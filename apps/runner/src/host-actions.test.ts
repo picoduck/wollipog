@@ -123,9 +123,13 @@ test("detachedLaunchSpec routes Windows command shims through a shell-free, quot
     () => detachedLaunchSpec("C:\\code.cmd", ["%USERPROFILE%\\a.ts"], { platform: "win32" }),
     /would expand/,
   );
-  assert.throws(
-    () => detachedLaunchSpec("C:\\code.cmd", ['quote"value'], { platform: "win32" }),
-    /cannot contain a double quote/,
+  assert.deepEqual(
+    detachedLaunchSpec("C:\\code.cmd", ['quote"value', "C:\\space path\\"], { platform: "win32" }),
+    {
+      command: "cmd.exe",
+      args: ["/d", "/v:off", "/s", "/c", '""C:\\code.cmd" "quote""value" "C:\\space path\\\\""'],
+      windowsVerbatimArguments: true,
+    },
   );
 });
 
@@ -151,7 +155,11 @@ test("Windows detached shim launch preserves spaced and metacharacter source arg
     const output = join(dir, "captured args.json");
     writeFileSync(helper, 'require("node:fs").writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));\n');
     writeFileSync(shim, '@echo off\r\nnode "%~dp0capture.cjs" %*\r\n');
-    const expected = ["--goto", "C:\\repo & work\\a (test)!^caret.ts:4:2", "pipe|value"];
+    const expected = [
+      "--goto", "C:\\repo & work\\a (test)!^caret.ts:4:2", "pipe|value",
+      "C:\\space path\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+      'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
+    ];
     const spec = detachedLaunchSpec(shim, [output, ...expected], { platform: "win32", comspec: process.env.ComSpec });
     const result = spawnSync(spec.command, spec.args, {
       encoding: "utf8",

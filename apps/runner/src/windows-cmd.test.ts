@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { windowsCommandSpec } from "./windows-cmd.js";
+import { quoteWindowsCmdToken, windowsCommandSpec } from "./windows-cmd.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "./discovery/resolve.js";
 import { runContextCommand } from "./context-command.js";
 import { codexOrchestratorMcpArgs } from "./orchestrator-preset.js";
+
+test("Windows cmd tokens preserve trailing backslashes and backslashes before quotes", () => {
+  assert.equal(quoteWindowsCmdToken("C:\\plain\\tail\\"), "C:\\plain\\tail\\");
+  assert.equal(quoteWindowsCmdToken("C:\\space path\\"), '"C:\\space path\\\\"');
+  assert.equal(quoteWindowsCmdToken("equals=tail\\"), '"equals=tail\\\\"');
+  assert.equal(quoteWindowsCmdToken('say "yes"'), '"say ""yes"""');
+  assert.equal(quoteWindowsCmdToken('before\\"after'), `"before${"\\".repeat(2)}""after"`);
+  assert.equal(quoteWindowsCmdToken('before\\\\"after'), `"before${"\\".repeat(4)}""after"`);
+  assert.equal(quoteWindowsCmdToken('before"\\'), `"before""${"\\".repeat(2)}"`);
+});
 
 test("Windows batch shims use an explicit non-expanding cmd.exe boundary", () => {
   const spec = windowsCommandSpec(
@@ -53,6 +63,8 @@ test("Windows .cmd probes preserve argv and enforce Codex MCP isolation", { skip
     const argv = [
       "space value", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
       "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+      "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+      'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
     ];
     const probe = await run(shim, argv);
     assert.equal(probe.code, 0, probe.stderr);

@@ -79,6 +79,8 @@ test("Windows cmd shim receives spaced and metacharacter TUI args intact through
   const argv = [
     "team profile", "amp&value", 'say "yes"', "paren(value)", "pipe|value", "less<value",
     "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+    "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+    'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
   ];
   const launch = agentTuiLaunch(meta({
     command: shim,
