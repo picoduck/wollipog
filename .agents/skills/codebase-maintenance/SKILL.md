@@ -24,7 +24,10 @@ Hard rules:
    push, or open a pull request.
 2. Do not run installs, migrations, formatters, code generators, or any command whose purpose is to
    change the tree. Analysis tooling that writes only to caches, `node_modules/.cache`, or the
-   scratch directory below is allowed. Put every scratch file under one run-scoped directory,
+   scratch directory below is allowed. One exception: the preflight install in the ground-truth
+   section below — `pnpm install --frozen-lockfile` cannot change anything git tracks (it refuses
+   to run rather than rewrite the lockfile, and `node_modules` is ignored), and it may run only
+   there, before the first test or analysis command. Put every scratch file under one run-scoped directory,
    `~/.cache/wollipog-maintenance/<job-id>-<YYYY-MM-DD>/` (create it with `mkdir -p`) — date-keyed
    rather than random, so a resumed run can re-derive its own path. Two hard-won properties of
    this location: it survives a reboot, unlike `/tmp`, which this machine wipes at boot — so the
@@ -76,13 +79,19 @@ and Phase 1 forbids this run from pulling it.
 Check install freshness the same way, before any job that executes code (tests, coverage, knip,
 type checks): compare the install stamp to the lockfile's last change —
 `stat -c %Y node_modules/.modules.yaml` against `git log -1 --format=%ct -- pnpm-lock.yaml`. If
-the install is older than the lockfile, say so at the top of the report and treat
-`ERR_MODULE_NOT_FOUND` / "Cannot find package" failures as environmental: they are not broken
-tests and not findings, and they go in Recommended Actions as one `environment` item naming the
-missing package. Phase 1 forbids running the install, so the run cannot close the gap itself. One
+the install is older than the lockfile, run `pnpm install --frozen-lockfile --prefer-offline`
+right then, as part of preflight, and record it in the Tree State section with the packages it
+linked. This is the only install Phase 1 permits, and only at this point: never after a test or
+analysis run has started, and never in response to HEAD moving mid-sweep (that case is handled
+by re-running at the new baseline, not by reinstalling under a running suite). Two jobs share
+the primary checkout an hour apart; the first to find the install stale fixes it in seconds and
+the second finds it fresh, so a preflight install does not race a sibling's suite. If the
+install fails, or if `ERR_MODULE_NOT_FOUND` / "Cannot find package" failures still appear, treat
+them as environmental: they are not broken tests and not findings, and they go in Recommended
+Actions as one `environment` item naming the missing package and the install error. One
 flaky-test sweep ran the unit suite six times before establishing that its 29 identical failures
 were a workspace package added to the lockfile after the checkout's last install; the freshness
-check is one command and would have said so before the first run.
+check is one command and the install is one more.
 
 A finding that rests only on reading code is a guess. Each job file names the tool that proves its
 category — static analysis, coverage data, test runs, `git log`, `gh`. Run it, and cite what it
