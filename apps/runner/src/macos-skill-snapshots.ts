@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { getAsset, isSea } from "node:sea";
 import {
   SKILL_MAX_FILES,
@@ -30,7 +30,8 @@ function sha256(data: Uint8Array): string {
 export function resolveMacosSkillSnapshotHelper(platform = process.platform): string {
   if (platform !== "darwin") throw new Error("the macOS skill snapshot helper requires native macOS");
   if (!isSea()) {
-    if (developmentHelper) return developmentHelper;
+    if (developmentHelper && existsSync(developmentHelper)) return developmentHelper;
+    developmentHelper = null;
     const source = fileURLToPath(new URL("../native/macos-skill-snapshots.c", import.meta.url));
     const root = mkdtempSync(join(tmpdir(), "wollipog-macos-skill-snapshots-"));
     chmodSync(root, 0o700);
@@ -45,7 +46,8 @@ export function resolveMacosSkillSnapshotHelper(platform = process.platform): st
     developmentHelper = target;
     return target;
   }
-  if (packagedHelper) return packagedHelper;
+  if (packagedHelper && existsSync(packagedHelper)) return packagedHelper;
+  packagedHelper = null;
 
   let bytes: Uint8Array;
   try {
@@ -155,7 +157,10 @@ export function parseMacosSkillSnapshot(output: Buffer): {
     total += content.length;
     if (total > SKILL_MAX_TOTAL_BYTES) throw new Error();
     seen.add(path);
-    files.push({ path, encoding: "base64", content: content.toString("base64") });
+    const utf8 = content.toString("utf8");
+    files.push(Buffer.from(utf8).equals(content)
+      ? { path, encoding: "utf8", content: utf8 }
+      : { path, encoding: "base64", content: content.toString("base64") });
     if (executable === 1) executablePaths.push(path);
   }
   reader.end();

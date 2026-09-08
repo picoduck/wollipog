@@ -257,6 +257,18 @@ static int private_journal(const char *name) {
   return strncmp(name, prefix, sizeof(prefix) - 1) == 0;
 }
 
+static int valid_skill_name(const char *name) {
+  size_t length = strlen(name);
+  if (length == 0 || length > 64 || !((name[0] >= 'a' && name[0] <= 'z') ||
+      (name[0] >= '0' && name[0] <= '9'))) return 0;
+  for (size_t index = 1; index < length; index++) {
+    unsigned char current = (unsigned char)name[index];
+    if (!((current >= 'a' && current <= 'z') || (current >= '0' && current <= '9') ||
+        current == '.' || current == '_' || current == '-')) return 0;
+  }
+  return 1;
+}
+
 static void list_candidates(int argc, char **argv) {
   if (argc < 4) fail();
   int home = open_home(argv[2]);
@@ -286,11 +298,13 @@ static void list_candidates(int argc, char **argv) {
       if (++raw > MAX_RAW_ENTRIES) break;
       if (private_journal(entry->d_name)) continue;
       if (++useful > MAX_ENTRIES) break;
+      if (!valid_skill_name(entry->d_name)) continue;
       int child = openat(source, entry->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
       if (child < 0) continue;
       int manifest = openat(child, "SKILL.md", O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
       struct stat manifest_stat;
-      if (manifest < 0 || fstat(manifest, &manifest_stat) != 0 || !S_ISREG(manifest_stat.st_mode)) {
+      if (manifest < 0 || fstat(manifest, &manifest_stat) != 0 ||
+          !S_ISREG(manifest_stat.st_mode) || manifest_stat.st_nlink != 1) {
         if (manifest >= 0) close(manifest);
         close(child);
         continue;

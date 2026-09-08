@@ -35,15 +35,17 @@ test("macOS helper candidate output is strictly projected", () => {
 
 test("macOS helper snapshot output enforces paths, bounds, and canonical bytes", () => {
   const output = Buffer.concat([
-    Buffer.from("WMS1R"), blob("b".repeat(64)), u32(2),
+    Buffer.from("WMS1R"), blob("b".repeat(64)), u32(3),
     blob("SKILL.md"), Buffer.from([0]), blob("---\nname: review\n---\n"),
+    blob("binary"), Buffer.from([0]), blob(Buffer.from([0xff, 0x00])),
     blob("scripts/check.sh"), Buffer.from([1]), blob("#!/bin/sh\n"),
   ]);
   assert.deepEqual(parseMacosSkillSnapshot(output), {
     generation: "b".repeat(64),
     files: [
-      { path: "SKILL.md", encoding: "base64", content: Buffer.from("---\nname: review\n---\n").toString("base64") },
-      { path: "scripts/check.sh", encoding: "base64", content: Buffer.from("#!/bin/sh\n").toString("base64") },
+      { path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\n" },
+      { path: "binary", encoding: "base64", content: Buffer.from([0xff, 0x00]).toString("base64") },
+      { path: "scripts/check.sh", encoding: "utf8", content: "#!/bin/sh\n" },
     ],
     executablePaths: ["scripts/check.sh"],
   });
@@ -64,6 +66,13 @@ test("native macOS snapshots use descriptor-relative no-follow traversal", {
   writeFileSync(join(root, "scripts", "check.sh"), "#!/bin/sh\n");
   chmodSync(join(root, "scripts", "check.sh"), 0o755);
   symlinkSync(root, join(home, ".agents", "skills", "linked"));
+  const invalid = join(home, ".agents", "skills", "_template");
+  mkdirSync(invalid);
+  writeFileSync(join(invalid, "SKILL.md"), "---\nname: template\n---\n");
+  const hardLinked = join(home, ".agents", "skills", "hard-linked");
+  mkdirSync(hardLinked);
+  writeFileSync(join(hardLinked, "SKILL.md"), "---\nname: hard-linked\n---\n");
+  linkSync(join(hardLinked, "SKILL.md"), join(home, "hard-link-copy"));
 
   const candidates = listMacosSkillCandidates(home, [".agents/skills"]);
   assert.deepEqual(candidates.map((entry) => entry.name), ["review"]);
