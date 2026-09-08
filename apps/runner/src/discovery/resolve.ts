@@ -13,6 +13,7 @@ import { execFile } from "node:child_process";
 import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
+import { windowsCommandSpec } from "../windows-cmd.js";
 
 const isWindows = platform() === "win32";
 
@@ -50,9 +51,16 @@ export function run(
   opts: { timeoutMs?: number; env?: Record<string, string>; maxBuffer?: number } = {},
 ): Promise<ExecResult> {
   return new Promise((resolve) => {
+    let spec;
+    try {
+      spec = windowsCommandSpec(file, args);
+    } catch (error) {
+      resolve({ code: 1, stdout: "", stderr: (error as Error).message, errorCode: "EINVAL" });
+      return;
+    }
     execFile(
-      file,
-      args,
+      spec.file,
+      spec.args,
       {
         timeout: opts.timeoutMs ?? 5000,
         windowsHide: true,
@@ -60,6 +68,7 @@ export function run(
         // Default execFile maxBuffer is 1 MB — way too small for catting agent transcripts; let
         // callers raise it so large reads don't silently fail with ENOBUFS.
         maxBuffer: opts.maxBuffer ?? 1024 * 1024,
+        ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       },
       (err, stdout, stderr) => {
         const detail = err as (NodeJS.ErrnoException & { killed?: boolean }) | null;
@@ -95,6 +104,13 @@ function firstLine(s: string): string {
     if (t) return t;
   }
   return "";
+}
+
+/** Prefer a Win32-executable result from `where.exe`. npm/editor directories can put a POSIX
+ * extensionless shell script before the adjacent .cmd shim, which CreateProcess cannot launch. */
+export function pickWindowsExecutable(whereStdout: string): string | null {
+  const lines = whereStdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return lines.find((line) => /\.(?:exe|cmd|bat)$/i.test(line)) ?? lines[0] ?? null;
 }
 
 /** Candidate install dirs to scan when PATH/login-shell miss (per-OS). */
@@ -216,7 +232,7 @@ export async function resolveNative(name: string): Promise<ResolvedBinary | null
   // 1. PATH lookup — `where.exe` (Windows) / `command -v` (POSIX).
   if (isWindows) {
     const r = await run("where.exe", [name], { timeoutMs: 4000 });
-    const hit = firstLine(r.stdout);
+    const hit = pickWindowsExecutable(r.stdout);
     if (r.code === 0 && hit && existsSync(hit)) return { path: hit, via: "path", launch: directLaunch(hit) };
   } else {
     const r = await run("/bin/sh", ["-c", `command -v ${name}`], { timeoutMs: 4000 });

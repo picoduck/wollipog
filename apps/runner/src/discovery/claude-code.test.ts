@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyClaudeConfiguredAuth, CLAUDE_STEERING_MIN_VERSION, claudeCapabilitiesFromProbe, parseClaudeAuthStatus, parseClaudeHelp, probeClaudeCode } from "./claude-code.js";
+import {
+  applyClaudeConfiguredAuth,
+  applyClaudeAgentEnvironment,
+  applyNativeClaudeGitBashReadiness,
+  CLAUDE_STEERING_MIN_VERSION,
+  claudeCapabilitiesFromProbe,
+  nativeClaudeGitBashCandidates,
+  parseClaudeAuthStatus,
+  parseClaudeHelp,
+  probeClaudeCode,
+  resolveNativeClaudeGitBash,
+  verifiedNativeClaudeGitBashPath,
+} from "./claude-code.js";
 
 const ok = (stdout: string) => ({ code: 0, stdout, stderr: "" });
 
@@ -150,4 +162,50 @@ test("unsupported or timed-out auth status remains bounded and unknown", async (
   assert.equal(result.status, "ready");
   assert.deepEqual(result.auth, { status: "unknown", billingSource: "unknown" });
   assert.equal(JSON.stringify(result).includes("unknown command"), false);
+});
+
+test("native Claude Git Bash discovery accepts only existing absolute Git-for-Windows candidates", async () => {
+  const env = {
+    ProgramFiles: "C:\\Program Files",
+    LOCALAPPDATA: "C:\\Users\\runner\\AppData\\Local",
+  };
+  assert.deepEqual(nativeClaudeGitBashCandidates(env, ["D:\\Portable Git\\cmd\\git.exe"]).slice(0, 4), [
+    "D:\\Portable Git\\bin\\bash.exe",
+    "D:\\Portable Git\\usr\\bin\\bash.exe",
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+    "C:\\Users\\runner\\AppData\\Local\\Programs\\Git\\bin\\bash.exe",
+  ]);
+  const path = await resolveNativeClaudeGitBash({
+    platform: "win32",
+    env,
+    exists: (candidate) => candidate === "D:\\Portable Git\\bin\\bash.exe",
+    exec: async () => ({ code: 0, stdout: "D:\\Portable Git\\cmd\\git.exe\r\n", stderr: "" }),
+  });
+  assert.equal(path, "D:\\Portable Git\\bin\\bash.exe");
+  assert.equal(verifiedNativeClaudeGitBashPath(
+    { CLAUDE_CODE_GIT_BASH_PATH: "relative\\bash.exe" },
+    { env, exists: () => true },
+  ), undefined, "an invalid explicit override cannot fall back to another installation");
+  assert.equal(await resolveNativeClaudeGitBash({ platform: "linux" }), undefined);
+});
+
+test("native Windows Claude readiness fails closed without Git-for-Windows Bash", () => {
+  const capability = {
+    status: "ready" as const,
+    effortLevels: [], permissionModes: ["acceptEdits"], streamJsonInput: true, streamJsonImages: true,
+    controlProtocol: true, forkSession: true, replayUserMessages: true,
+    auth: { status: "unknown" as const, billingSource: "unknown" as const },
+  };
+  assert.equal(applyNativeClaudeGitBashReadiness(capability, undefined, "linux").status, "ready");
+  const gated = applyNativeClaudeGitBashReadiness(capability, undefined, "win32");
+  assert.equal(gated.status, "unsupported");
+  assert.equal(gated.failure?.code, "unsupported_mode");
+  assert.equal(applyNativeClaudeGitBashReadiness(capability, "C:\\Git\\bin\\bash.exe", "win32").status, "ready");
+  const agent = {
+    id: "claude", name: "Claude", command: "claude.cmd", args: [], env: {}, driver: "claude-code" as const,
+    context: { kind: "native" as const }, available: true, claudeCode: capability,
+  };
+  const gatedAgent = applyClaudeAgentEnvironment(agent, true, { platform: "win32", exists: () => false });
+  assert.equal(gatedAgent.available, false, "an explicit config availability override cannot bypass the prerequisite");
+  assert.equal(gatedAgent.claudeCode?.status, "unsupported");
 });

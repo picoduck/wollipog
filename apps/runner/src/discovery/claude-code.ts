@@ -7,6 +7,8 @@ import type {
 } from "@wollipog/protocol";
 import type { ExecResult, ResolvedBinary, ResolvedLaunch } from "./resolve.js";
 import { run } from "./resolve.js";
+import { existsSync } from "node:fs";
+import { win32 } from "node:path";
 
 type ProbeExec = (args: string[], timeoutMs?: number) => Promise<ExecResult>;
 
@@ -14,6 +16,76 @@ const SAFE_LABEL = /^[a-zA-Z0-9._ -]{1,40}$/;
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"];
 export const CLAUDE_STEERING_MIN_VERSION = "2.1.241";
+
+/** Candidate Git-for-Windows Bash paths, ordered from explicit provider configuration through
+ * resolved Git installations and standard per-user/system installs. WSL bash.exe is deliberately
+ * excluded: native Claude Code requires the Git-for-Windows runtime. */
+export function nativeClaudeGitBashCandidates(
+  env: NodeJS.ProcessEnv,
+  gitExecutables: string[] = [],
+): string[] {
+  const out = [env.CLAUDE_CODE_GIT_BASH_PATH];
+  for (const git of gitExecutables) {
+    const parent = win32.dirname(git);
+    const root = /^(?:cmd|bin)$/i.test(win32.basename(parent)) ? win32.dirname(parent) : parent;
+    out.push(win32.join(root, "bin", "bash.exe"), win32.join(root, "usr", "bin", "bash.exe"));
+  }
+  for (const root of [env.ProgramFiles, env["ProgramFiles(x86)"], env.LOCALAPPDATA && win32.join(env.LOCALAPPDATA, "Programs")]) {
+    if (root) out.push(win32.join(root, "Git", "bin", "bash.exe"));
+  }
+  return [...new Set(out.filter((candidate): candidate is string => Boolean(candidate?.trim())).map((candidate) => candidate.trim()))];
+}
+
+/** Prove the configured/native Git Bash prerequisite without launching it. An explicit path is
+ * authoritative: if stale or relative, fail closed instead of silently ignoring provider config. */
+export function verifiedNativeClaudeGitBashPath(
+  agentEnv: Record<string, string> = {},
+  host: { env?: NodeJS.ProcessEnv; exists?: typeof existsSync } = {},
+): string | undefined {
+  const env = host.env ?? process.env;
+  const exists = host.exists ?? existsSync;
+  const explicit = agentEnv.CLAUDE_CODE_GIT_BASH_PATH ?? env.CLAUDE_CODE_GIT_BASH_PATH;
+  if (explicit !== undefined) {
+    const candidate = explicit.trim();
+    return candidate && win32.isAbsolute(candidate) && exists(candidate) ? candidate : undefined;
+  }
+  return nativeClaudeGitBashCandidates(env).find((candidate) => win32.isAbsolute(candidate) && exists(candidate));
+}
+
+export async function resolveNativeClaudeGitBash(
+  host: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exists?: typeof existsSync; exec?: typeof run } = {},
+): Promise<string | undefined> {
+  const platform = host.platform ?? process.platform;
+  if (platform !== "win32") return undefined;
+  const env = host.env ?? process.env;
+  const exists = host.exists ?? existsSync;
+  const exec = host.exec ?? run;
+  const explicit = env.CLAUDE_CODE_GIT_BASH_PATH;
+  if (explicit !== undefined) return verifiedNativeClaudeGitBashPath({}, { env, exists });
+  const located = await exec("where.exe", ["git.exe"], { timeoutMs: 4_000 });
+  const gitExecutables = located.code === 0
+    ? located.stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => /git\.exe$/i.test(line))
+    : [];
+  return nativeClaudeGitBashCandidates(env, gitExecutables).find((candidate) =>
+    win32.isAbsolute(candidate) && exists(candidate));
+}
+
+export function applyNativeClaudeGitBashReadiness(
+  capability: ClaudeCodeCapabilities,
+  gitBashPath: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): ClaudeCodeCapabilities {
+  if (platform !== "win32" || gitBashPath) return capability;
+  return {
+    ...capability,
+    status: "unsupported",
+    failure: {
+      code: "unsupported_mode",
+      message: "Native Claude Code requires Git for Windows Bash. Install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH.",
+      retryable: false,
+    },
+  };
+}
 
 function enabledFlag(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true";
@@ -261,13 +333,26 @@ export function unavailableClaudeCode(): ClaudeCodeCapabilities {
   };
 }
 
-export function applyClaudeAgentEnvironment(agent: AgentDefinition, preserveAvailability = false): AgentDefinition {
+export function applyClaudeAgentEnvironment(
+  agent: AgentDefinition,
+  preserveAvailability = false,
+  host: { platform?: NodeJS.Platform; exists?: typeof existsSync } = {},
+): AgentDefinition {
   if (agent.driver !== "claude-code" || !agent.claudeCode) return agent;
-  const claudeCode = applyClaudeConfiguredAuth(agent.claudeCode, agent.env ?? {});
+  const platform = host.platform ?? process.platform;
+  const gitBashPath = platform === "win32"
+    ? verifiedNativeClaudeGitBashPath(agent.env ?? {}, { exists: host.exists })
+    : undefined;
+  const gitBashReady = platform !== "win32" || Boolean(gitBashPath);
+  const claudeCode = applyNativeClaudeGitBashReadiness(
+    applyClaudeConfiguredAuth(agent.claudeCode, agent.env ?? {}),
+    gitBashReady ? gitBashPath : undefined,
+    platform,
+  );
   return {
     ...agent,
     claudeCode,
     authStatus: claudeCode.auth.status,
-    available: preserveAvailability ? agent.available : claudeCode.status === "ready",
+    available: !gitBashReady ? false : preserveAvailability ? agent.available : claudeCode.status === "ready",
   };
 }

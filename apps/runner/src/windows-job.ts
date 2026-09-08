@@ -277,7 +277,7 @@ public static class WollipogWindowsJob {
       InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeSize);
       var line = new StringBuilder(Quote(command));
       if (!String.IsNullOrEmpty(rawCommandLine)) {
-        line.Append(" /d /s /c \"").Append(rawCommandLine).Append('"');
+        line.Append(" /d /v:off /s /c \"").Append(rawCommandLine).Append('"');
       } else {
         foreach (var arg in args) line.Append(' ').Append(Quote(arg));
       }

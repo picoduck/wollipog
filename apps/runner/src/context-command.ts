@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import type { AgentContext } from "@wollipog/protocol";
+import { windowsCommandSpec } from "./windows-cmd.js";
 
 export interface ContextCommandOptions {
   cwd: string;
@@ -19,7 +20,7 @@ export function contextCommandSpec(
   command: string,
   args: string[],
   options: Pick<ContextCommandOptions, "cwd" | "env">,
-): { file: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv } {
+): { file: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv; windowsVerbatimArguments?: boolean } {
   if (context.kind === "wsl") {
     const values = options.env ?? {};
     const existing = (process.env.WSLENV ?? "").split(":").filter(Boolean);
@@ -36,11 +37,13 @@ export function contextCommandSpec(
         : undefined,
     };
   }
+  const spec = windowsCommandSpec(command, args);
   return {
-    file: command,
-    args,
+    file: spec.file,
+    args: spec.args,
     cwd: options.cwd,
     env: options.env ? { ...process.env, ...options.env } : undefined,
+    ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   };
 }
 
@@ -66,6 +69,7 @@ export function runContextCommand(
         killSignal: "SIGKILL",
         maxBuffer,
         windowsHide: true,
+        ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       },
       (error, stdout, stderr) => {
         if (error) {

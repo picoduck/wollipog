@@ -358,7 +358,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       let rawCommandLine: string | undefined;
       if (shell && !/\.(?:exe|com)$/i.test(file)) {
         if (file.includes('"')) throw new Error(`spawnAgent: executable path contains a quote: ${file}`);
-        const commandToken = /[^\w.:\\/+@-]/.test(file) ? `"${file}"` : file;
+        const commandToken = winQuoteArg(file);
         targetCommand = process.env.ComSpec || win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
         targetArgs = [];
         rawCommandLine = [commandToken, ...args.map(winQuoteArg)].join(" ");
@@ -498,6 +498,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
 export function winQuoteArg(arg: string): string {
   if (/[\r\n]/.test(arg)) {
     throw new Error("winQuoteArg: argument contains CR/LF; deliver multi-line content via stdin, not argv");
+  }
+  if (arg.includes("%")) {
+    throw new Error("winQuoteArg: argument contains %, which cmd.exe would expand; deliver it via stdin instead");
   }
   if (arg === "") return '""';
   if (!/[ \t"&|<>^()!]/.test(arg)) return arg;

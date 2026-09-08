@@ -372,6 +372,10 @@ test("winQuoteArg throws on CR/LF (must go via stdin, not argv)", () => {
   assert.throws(() => winQuoteArg("a\rb"), /CR\/LF/);
 });
 
+test("winQuoteArg rejects active cmd percent expansion", () => {
+  assert.throws(() => winQuoteArg("%USERPROFILE%"), /would expand/);
+});
+
 test("buildBwrapArgs makes the host read-only, worktree/tmp writable, and network optionally absent", () => {
   const base = { command: "/usr/bin/agent", args: ["--flag", "value with spaces"], cwd: "/work/tree" };
   const denied = buildBwrapArgs(base, {

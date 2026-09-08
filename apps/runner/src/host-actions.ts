@@ -16,7 +16,9 @@ import {
   type EditorSourceLocation,
   type HostAction,
 } from "@wollipog/protocol";
-import { resolveNative, run } from "./discovery/resolve.js";
+import { pickWindowsExecutable, resolveNative, run } from "./discovery/resolve.js";
+
+export { pickWindowsExecutable };
 
 interface KnownEditor extends EditorInfo {
   /** Binary name to resolve on PATH. */
@@ -53,14 +55,6 @@ export async function discoverEditors(): Promise<EditorInfo[]> {
  * POSIX shell script FIRST (`...\bin\code`) with the real `.cmd`/`.exe` beside it —
  * spawning the extension-less script fails on Windows, so prefer a real executable.
  */
-export function pickWindowsExecutable(whereStdout: string): string | null {
-  const lines = whereStdout
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  return lines.find((l) => /\.(exe|cmd|bat)$/i.test(l)) ?? lines[0] ?? null;
-}
-
 /** Resolve an editor CLI to a spawnable path (null = not installed). */
 async function resolveEditorBin(bin: string): Promise<string | null> {
   if (process.platform === "win32") {

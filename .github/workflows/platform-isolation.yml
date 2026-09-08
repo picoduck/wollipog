@@ -47,3 +47,7 @@ jobs:
 
       - name: Verify Native Isolation Adapter
         run: node --import tsx --test apps/runner/src/execution-isolation.test.ts apps/runner/src/runner-data-dir.test.ts apps/runner/src/spawn.test.ts
+
+      - name: Verify Windows Orchestrator Harness
+        if: matrix.os == 'windows-latest'
+        run: node --import tsx --test apps/runner/src/windows-cmd.test.ts apps/runner/src/context-command.test.ts apps/runner/src/discovery/resolve.test.ts apps/runner/src/discovery/claude-code.test.ts apps/runner/src/discovery/discover.test.ts apps/runner/src/orchestrator-preset.test.ts apps/runner/src/agent-control.test.ts apps/runner/src/agent-tui.test.ts
