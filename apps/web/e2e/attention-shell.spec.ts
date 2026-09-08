@@ -21,11 +21,17 @@ test("real shell preserves global shortcuts and selected-row request traversal",
   }
   await summary.focus();
   await summary.press("Shift+?");
-  await expect(page.getByRole("dialog", { name: "Keyboard Shortcuts", exact: true })).toBeVisible();
+  const shortcutDialog = page.getByRole("dialog", { name: "Keyboard Shortcuts", exact: true });
+  await expect(shortcutDialog).toBeVisible();
   await page.keyboard.press("Escape");
-  await summary.focus();
-  await summary.press("F6");
-  await expect(summary).not.toBeFocused();
+  // The modal owns global shortcuts until React has unmounted it. Refocusing the background and
+  // sending F6 before that boundary settles races the app's intentional shortcut-layer guard on
+  // slower runners. Wait for closure and the modal's asynchronous return-focus contract, then
+  // send the global key from the element that actually owns focus.
+  await expect(shortcutDialog).toBeHidden();
+  await expect(summary).toBeFocused();
+  await page.keyboard.press("F6");
+  await expect(page.locator('[data-focus-zone="detail"] .detail-scroll, [data-focus-zone="detail"] .inbox-preview-empty')).toBeFocused();
   await summary.focus();
   await summary.press("Enter");
   await summary.press("Tab");
