@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
+  auditProtectedCredentialFile,
   defaultLocalDeviceTokenPath,
   loadOrCreateLocalDeviceToken,
   localDeviceTokenPath,
@@ -123,4 +124,42 @@ test("credential permissions are healed on load", { skip: process.platform === "
   chmodSync(path, 0o644);
   assert.equal(loadOrCreateLocalDeviceToken(path), "b".repeat(43));
   assert.equal(lstatSync(path).mode & 0o777, 0o600);
+});
+
+test("auditProtectedCredentialFile reports missing, symlinked, permissive, and foreign-owned credential files", () => {
+  const root = mkdtempSync(join(tmpdir(), "credential-audit-"));
+  try {
+    const dir = join(root, "data");
+    mkdirSync(dir, { mode: 0o700 });
+    const path = join(dir, "control-plane.db.local-device-token");
+    const missing = auditProtectedCredentialFile(path);
+    assert.equal(missing.safe, false);
+    assert.match(missing.issues[0] ?? "", /does not exist/u);
+
+    writeFileSync(path, "x".repeat(43) + "\n", { mode: 0o600 });
+    assert.deepEqual(auditProtectedCredentialFile(path), { path, safe: true, issues: [] });
+
+    const link = join(dir, "link-token");
+    symlinkSync(path, link);
+    const symlinked = auditProtectedCredentialFile(link);
+    assert.equal(symlinked.safe, false);
+    assert.match(symlinked.issues.join("\n"), /symbolic link/u);
+
+    if (process.platform !== "win32") {
+      chmodSync(path, 0o640);
+      const permissive = auditProtectedCredentialFile(path);
+      assert.equal(permissive.safe, false);
+      assert.match(permissive.issues.join("\n"), /mode 0640 grants group or other access/u);
+      chmodSync(path, 0o600);
+      chmodSync(dir, 0o750);
+      assert.match(auditProtectedCredentialFile(path).issues.join("\n"), /directory mode 0750/u);
+      chmodSync(dir, 0o700);
+      const foreign = auditProtectedCredentialFile(path, { uid: (process.getuid?.() ?? 0) + 1 });
+      assert.equal(foreign.safe, false);
+      assert.match(foreign.issues.join("\n"), /owned by uid/u);
+      assert.equal(auditProtectedCredentialFile(path, { platform: "win32", uid: 12345 }).safe, true);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

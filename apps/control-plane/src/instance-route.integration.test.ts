@@ -274,6 +274,8 @@ async function printPairingUrl(
         NO_COLOR: "1",
         CONTROL_PLANE_PORT: String(port),
         CONTROL_PLANE_DB: database,
+        // Recovery is read-only and must not depend on unrelated startup validation succeeding.
+        CONTROL_PLANE_PUBLIC_ORIGIN: "not-an-origin",
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

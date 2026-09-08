@@ -328,7 +328,8 @@
 // 111: on-demand, read-only machine skill discovery and bounded snapshot retrieval.
 // 112: isolated native orchestrator TUI launch and live-TUI agent-control authentication.
 // 113: progress-aware session worktree creation with bounded phase heartbeats.
-export const PROTOCOL_VERSION = 113;
+// 114: loopback host-administration status route and public dashboard origin for pairing links.
+export const PROTOCOL_VERSION = 114;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -498,6 +499,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
   progressAwareSessionWorktrees: 113,
+  /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
+  hostAdministration: 114,
 } as const;
 
 /* ========================================================================== */
@@ -1471,6 +1474,32 @@ export interface DeviceView {
   organizationId: string;
   organizationName: string;
   role: OrganizationRole;
+}
+
+/** Read-only operational facts for `wollipog admin status` (protocol v114+). Never carries secrets. */
+export interface HostAdminStatusView {
+  service: ControlPlaneService;
+  appVersion: string;
+  protocolVersion: number;
+  apiVersion: number;
+  health: { ok: boolean; startedAt: number; uptimeMs: number };
+  bind: {
+    host: string;
+    port: number;
+    mode: "loopback" | "wildcard" | "address";
+    tailnetOnly: boolean;
+    boundBeyondLoopback: boolean;
+  };
+  /** Configured `CONTROL_PLANE_PUBLIC_ORIGIN`, or null when pairing links fall back to bind hosts. */
+  publicOrigin: string | null;
+  dashboard: { webServed: boolean; pairingHosts: string[] };
+  database: { path: string; ready: boolean };
+  artifactStore: { path: string; ready: boolean };
+  /** Protected local bootstrap credential file audit; `issues` is empty when it is safe. */
+  localCredential: { path: string; safe: boolean; issues: string[] };
+  runners: { registered: number; online: number; items: Array<{ runnerId: string; status: string; version: string; protocolVersion: number | null }> };
+  devices: { paired: number };
+  warnings: string[];
 }
 
 export type OrganizationRole = "owner" | "admin" | "operator" | "viewer";

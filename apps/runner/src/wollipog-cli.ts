@@ -15,6 +15,7 @@ import {
   type ToolResult,
 } from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
+import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 
 type Write = (text: string) => void;
 
@@ -79,8 +80,10 @@ function usage(): string {
   return [
     "Usage: wollipog session <command> [options]",
     "       wollipog worktree <create|attach|select|discard> [options]",
+    "       wollipog admin <pairing-url|status|user|device> [options]",
     "Session Commands: list, get, events, create, prompt, wait, stop, archive",
     "Worktree Options: --session <id>, --branch <name>, --base <ref>, --path <absolute-path>",
+    "Admin Commands: run on the control-plane host with its protected local credential; see `wollipog admin`.",
     "Use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -227,14 +230,24 @@ export async function runWollipogCli(
     stderr: (text) => process.stderr.write(text),
   },
   fetchImpl: McpFetch = globalThis.fetch,
+  hostAdminIo: HostAdminIo = { ...defaultHostAdminIo(), stdout: io.stdout, stderr: io.stderr },
 ): Promise<number> {
   const args = invocationArgs(argv);
   if (flag(args, "--version")) {
     io.stdout(`${VERSION} (protocol v${PROTOCOL_VERSION})\n`);
     return 0;
   }
-  const parsed = command(args);
   const json = flag(args, "--json");
+  // Host administration authenticates with the control plane's own protected local credential,
+  // not a session or device token, so it branches before any session plumbing runs.
+  if (positional(args)[0] === "admin") {
+    if (positional(args).length === 1 || flag(args, "--help")) {
+      (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: hostAdminUsage() })}\n` : `${hostAdminUsage()}\n`);
+      return 2;
+    }
+    return runHostAdminCli(args, env, hostAdminIo, fetchImpl);
+  }
+  const parsed = command(args);
   if ("error" in parsed) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: parsed.error })}\n` : `${parsed.error}\n`);
     return 2;

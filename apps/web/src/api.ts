@@ -1133,7 +1133,7 @@ export function createApiClient(transport: ApiTransport) {
     req<{
       device: DeviceView;
       token: string;
-      pairing: { hosts: string[]; port: number; webServed: boolean; boundBeyondLoopback: boolean };
+      pairing: { hosts: string[]; port: number; webServed: boolean; boundBeyondLoopback: boolean; publicOrigin?: string | null };
     }>("/api/devices", { method: "POST", body: JSON.stringify({ name, userId }) }),
   revokeDevice: (deviceId: string) => req<void>(`/api/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" }),
 
