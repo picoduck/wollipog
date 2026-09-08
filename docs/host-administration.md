@@ -134,7 +134,8 @@ disconnect a runner that still has a working credential. If the failure happened
 that the pending credential stays usable until it expires, and prints both ways to resolve it: run
 the command again to supersede it, or revoke it. `--runner` must be the exact id; padded, dot-segment,
 or malformed ids are refused rather than normalized. Any option written without a value
-(`--runner --yes`, `--output --json`) is a usage error rather than a silent fallback. Tokens never
+(`--runner --yes`, `--output --json`, or `--output=` from an unset shell variable) is a usage error
+rather than a silent fallback. Tokens never
 appear in argv, unit files, or logs.
 
 ## Public Dashboard Origin

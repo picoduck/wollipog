@@ -654,7 +654,7 @@ test("admin runner-credential revoke requires confirmation or --yes and reports 
   for (const raw of ["dev-box ", " dev-box", "dev-box\t", ""]) {
     const padded = makeIo();
     assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", raw, "--yes"], env(tokenFile), padded.io, fetch, host), 2, JSON.stringify(raw));
-    assert.match(padded.stderr(), raw === "" ? /requires --runner/u : /exact runner id/u);
+    assert.match(padded.stderr(), raw === "" ? /requires --runner|requires a value/u : /exact runner id/u);
   }
   assert.equal(calls.filter((call) => call.method === "DELETE").length, before, "a padded id must never retarget a revoke");
 
@@ -695,6 +695,10 @@ test("an option with an omitted value is a usage error, never a silent fallback 
     [["admin", "device", "create", "--name", "P", "--user", "--json"], /--user requires a value/u],
     [["admin", "status", "--url", "--json"], /--url requires a value/u],
     [["admin", "status", "--token-file"], /--token-file requires a value/u],
+    [["admin", "runner-credential", "issue", "--runner", "rack-1", "--output="], /--output requires a value/u],
+    [["admin", "runner-credential", "issue", "--runner=", "--output=/x"], /--runner requires a value/u],
+    [["admin", "device", "create", "--name", "P", "--origin=", "--json"], /--origin requires a value/u],
+    [["admin", "status", "--token-file="], /--token-file requires a value/u],
   ];
   for (const [args, expected] of cases) {
     const { io, stdout, stderr } = makeIo(tty);

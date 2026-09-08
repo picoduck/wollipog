@@ -104,7 +104,12 @@ function option(args: string[], name: string): string | undefined {
       if (value === undefined || value.startsWith("--")) throw new CliError(`${name} requires a value`, 2);
       return value;
     }
-    if (args[i]?.startsWith(`${name}=`)) return args[i]!.slice(name.length + 1);
+    if (args[i]?.startsWith(`${name}=`)) {
+      const value = args[i]!.slice(name.length + 1);
+      // `--output="$OUT"` with OUT unset must not silently become "no --output".
+      if (value === "") throw new CliError(`${name} requires a value`, 2);
+      return value;
+    }
   }
   return undefined;
 }
