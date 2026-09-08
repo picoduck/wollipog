@@ -19,6 +19,7 @@ const PAGE_SIZE = 50;
 type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof BackgroundWorkPanel>,
   "runnerProtocolVersion" | "parentTurnEventIds" | "onOpenParentTurn" | "inventoryError" | "onRetryInventory"> & {
     onOpenPrimaryRequest?: (requestId: string) => void;
+    attentionTarget?: import("../navigation.js").AttentionTarget;
   };
 
 /** One roster retains each transport's own detail and response boundary. */
@@ -88,8 +89,26 @@ export function AgentsPanel(props: Props) {
   const [requestLimit, setRequestLimit] = useState(PAGE_SIZE);
   const requests = pendingRequests(session.pendingApproval);
   const selectedRequest = requests.find((request) => request.requestId === requestId);
+  const target = props.attentionTarget;
+  const targetEpochMatches = !target || target.eventEpoch === (session.eventEpoch ?? 0);
+  const linkedRequestMissing = target?.requestId !== undefined && !requests.some((request) => request.requestId === target.requestId);
+  const targetKey = target ? JSON.stringify([session.id, target.eventEpoch, target.requestId]) : null;
+  const handledTarget = useRef<string | null>(null);
+  useEffect(() => {
+    if (!targetKey || handledTarget.current === targetKey) return;
+    handledTarget.current = targetKey;
+    setRequestId(targetEpochMatches && !linkedRequestMissing ? target?.requestId ?? null : null);
+    setChosen(null);
+    setFilter("active");
+    const request = targetEpochMatches ? requests.find((value) => value.requestId === target?.requestId) : undefined;
+    const ownerId = request?.ownerToolUseId;
+    props.onSelect(ownerId && !projection.ambiguousIds.has(ownerId) ? ownerId : "");
+    if (!request) (attentionRef.current ?? panelRef.current)?.focus();
+  }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds, props.onSelect]);
   const primaryInSession = Boolean(props.onOpenPrimaryRequest && selectedRequest?.requestId === session.pendingApproval?.requestId);
   const requestDetailRef = useRef<HTMLDivElement>(null);
+  const primaryRequestRef = useRef<HTMLButtonElement>(null);
+  const selectedSecondaryRequestRef = useRef<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const attentionRef = useRef<HTMLElement>(null);
   const requestOwnsFocus = useRef(false);
@@ -100,7 +119,21 @@ export function AgentsPanel(props: Props) {
     }
   }, [selectedRequest?.requestId, primaryInSession, requests.length]);
   useEffect(() => {
-    if (selectedRequest && !primaryInSession) requestDetailRef.current?.focus();
+    if (!selectedRequest) {
+      selectedSecondaryRequestRef.current = null;
+      return;
+    }
+    if (!primaryInSession) {
+      selectedSecondaryRequestRef.current = selectedRequest.requestId;
+      requestDetailRef.current?.focus();
+      return;
+    }
+    if (selectedSecondaryRequestRef.current === selectedRequest.requestId) {
+      selectedSecondaryRequestRef.current = null;
+      props.onOpenPrimaryRequest?.(selectedRequest.requestId);
+      return;
+    }
+    primaryRequestRef.current?.focus();
   }, [selectedRequest?.requestId, primaryInSession]);
   const selectedKey = requestedId ? `subagent:${requestedId}` : chosen;
   const selected = rows.find((row) => row.id === selectedKey);
@@ -109,6 +142,8 @@ export function AgentsPanel(props: Props) {
   const selectFilter = (value: typeof filter) => { setFilter(value); setLimit(PAGE_SIZE); };
   return (
     <div className="agents-panel" ref={panelRef} tabIndex={-1} role="region" aria-label="Worker Roster">
+      {!targetEpochMatches && <p role="status">This attention link belongs to an earlier session version. No request was selected.</p>}
+      {targetEpochMatches && linkedRequestMissing && <p role="status">The linked request is no longer pending. No replacement request was selected.</p>}
       {requests.length > 0 && <section ref={attentionRef} tabIndex={-1} aria-label="Worker Attention" className="agents-attention">
         {requests.slice(0, requestLimit).map((request) => {
           const owner = !projection.ambiguousIds.has(request.ownerToolUseId ?? "")
@@ -124,7 +159,7 @@ export function AgentsPanel(props: Props) {
           </button>;
         })}
         {requests.length > requestLimit && <button type="button" onClick={() => setRequestLimit((value) => value + PAGE_SIZE)}>Show More Requests</button>}
-        {selectedRequest && primaryInSession && <button type="button" className="btn"
+        {selectedRequest && primaryInSession && <button ref={primaryRequestRef} type="button" className="btn"
           onClick={() => props.onOpenPrimaryRequest?.(selectedRequest.requestId)}>Open Request in Session</button>}
         {selectedRequest && !primaryInSession && <div ref={requestDetailRef} tabIndex={-1} role="region" aria-label="Selected Worker Request"
           onFocusCapture={() => { requestOwnsFocus.current = true; }}
@@ -171,6 +206,8 @@ export function AgentsPanel(props: Props) {
                   {row.role && <span>{row.role.charAt(0).toUpperCase() + row.role.slice(1)}</span>}
                   {row.phase && <span>Phase: {row.phase}</span>}
                   {row.activations != null && <span>{row.activations} Activations</span>}
+                  {row.toolCount != null && <span>{row.toolCount} {row.toolCount === 1 ? "Tool Use" : "Tool Uses"}</span>}
+                  {row.latestTool && <span>{row.latestTool.active ? "Current Activity" : "Last Tool"}: {row.latestTool.title}</span>}
                   {row.tokens != null && <span>{row.tokens.toLocaleString()} {row.target.kind === "subagent" ? "Direct Tokens" : "Tokens"}</span>}
                   {row.inclusiveTokens != null && <span>{row.inclusiveTokens.toLocaleString()} Inclusive Tokens</span>}
                   {row.depth > 2 && <span>Depth {row.depth + 1}</span>}

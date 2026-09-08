@@ -26,7 +26,7 @@ import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { encodeResourceId } from "../navigation.js";
+import { encodeResourceId, type AttentionTarget } from "../navigation.js";
 import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
@@ -143,6 +143,7 @@ export interface InboxViewProps {
   viewMode?: SessionsViewMode;
   expandedSessionId?: string | null;
   sourceLocation?: SourceLocation;
+  attentionTarget?: AttentionTarget;
   /** App-shell control cluster forwarded into the expanded session's unified bar on desktop. */
   topbarControls?: ReactNode;
   rightPanel: RightPanelState;
@@ -160,6 +161,7 @@ export function InboxView({
   viewMode = "list",
   expandedSessionId = null,
   sourceLocation,
+  attentionTarget,
   topbarControls,
   rightPanel,
   onOpenTerminal,
@@ -534,7 +536,7 @@ export function InboxView({
     const frame = window.requestAnimationFrame(() => {
       previousSurfaceRef.current = { expanded, sessionId: surfaceSessionId };
       if (expanded) {
-        if (focusComposerSessionId !== surfaceSessionId) {
+        if (focusComposerSessionId !== surfaceSessionId && !attentionTarget) {
           viewRef.current?.querySelector<HTMLElement>(".detail-scroll")?.focus();
         }
       } else if (shouldRestoreInboxScroll(previous, expanded)) {
@@ -545,7 +547,7 @@ export function InboxView({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [expanded, focusComposerSessionId, instanceScope, surfaceSessionId]);
+  }, [expanded, focusComposerSessionId, instanceScope, surfaceSessionId, attentionTarget]);
 
   const scheduleOrderRelease = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
@@ -726,6 +728,11 @@ export function InboxView({
     selectSession(sessionId, activeSplit?.key ?? null);
     listRef.current?.focus();
   }, [isMobile, expand, selectSession, activeSplit?.key]);
+
+  const handleSelectAttention = useCallback((sessionId: string) => {
+    // Preserve focus on the picker; unlike selecting a mobile row, this must not expand it.
+    selectSession(sessionId, activeSplit?.key ?? null);
+  }, [activeSplit?.key, selectSession]);
 
   const togglePin = useCallback((sessionId: string) => {
     clearHeldOrder();
@@ -1149,6 +1156,8 @@ export function InboxView({
           />
         ) : (
         <InboxList
+          onNavigate={navigate}
+          onSelectAttention={handleSelectAttention}
           ref={captureListRef}
           entries={entries}
           selectedSessionId={displayedSelection}
@@ -1281,6 +1290,7 @@ export function InboxView({
                 sessionId={surfaceSessionId}
                 mode={expanded ? "expanded" : "preview"}
                 sourceLocation={expanded ? sourceLocation : undefined}
+                attentionTarget={expanded ? attentionTarget : undefined}
                 topbarControls={expanded ? topbarControls : undefined}
                 rightPanel={rightPanel}
                 onOpenTerminal={onOpenTerminal}

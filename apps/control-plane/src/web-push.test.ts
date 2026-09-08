@@ -616,6 +616,8 @@ test("pushDecision fires on the attention transitions and stays quiet otherwise"
     pendingApproval: { requestId: "r", title: "Run npm install?", options: [] },
   } as Partial<SessionView>));
   assert.equal(ask?.urgency, "high");
+  assert.equal(ask?.eventEpoch, 0);
+  assert.equal(ask?.requestId, "r");
   assert.match(ask!.body, /Run npm install\?/);
   assert.match(
     pushDecision(prev("running"), view("input_required", { pendingApproval: null }))!.body,
@@ -626,6 +628,18 @@ test("pushDecision fires on the attention transitions and stays quiet otherwise"
     pendingApproval: { requestId: "r", title: "Which DB?", options: [], kind: "question" },
   } as Partial<SessionView>));
   assert.match(q!.body, /^Answer required/);
+  const aggregate = pushDecision(prev("running"), view("input_required", { eventEpoch: 7,
+    pendingApproval: { requestId: "one", title: "One", options: [], ownerToolUseId: "child-one",
+      additionalRequests: [{ requestId: "two", title: "Two", options: [], ownerToolUseId: "child-two" }] },
+  } as Partial<SessionView>))!;
+  assert.equal(aggregate.eventEpoch, 7);
+  assert.equal(aggregate.requestId, undefined);
+  const oversized = pushDecision(prev("running"), view("input_required", {
+    eventEpoch: 8,
+    pendingApproval: { requestId: "r".repeat(257), title: "Bounded", options: [] },
+  } as Partial<SessionView>))!;
+  assert.equal(oversized.eventEpoch, 8);
+  assert.equal(oversized.requestId, undefined, "an oversized exact id degrades to an aggregate push");
   const recovery = pushDecision(prev("running"), view("input_required", {
     pendingApproval: {
       requestId: "recovered",

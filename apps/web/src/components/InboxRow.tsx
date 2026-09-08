@@ -13,6 +13,8 @@ import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { BackgroundWorkBadge } from "./common.js";
 import { sessionAgentLabel } from "./agent-options.js";
+import { AttentionRequests } from "./AttentionRequests.js";
+import type { View } from "../navigation.js";
 
 export interface InboxRowProps {
   optionId: string;
@@ -36,6 +38,8 @@ export interface InboxRowProps {
   /** Take the id, so the parent can pass ONE stable callback to every row. */
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
+  onNavigate?: (view: View) => void;
+  onSelectAttention?: (sessionId: string) => void;
   /** Right-click, long-press, or keyboard context menu for this row's session (#154). */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
 }
@@ -54,6 +58,8 @@ function InboxRowInner({
   reminder,
   onSelect,
   onExpand,
+  onNavigate,
+  onSelectAttention,
   onSessionMenu,
 }: InboxRowProps) {
   const longPress = useLongPress(({ x, y }) => onSessionMenu(session.id, { x, y }));
@@ -191,6 +197,8 @@ function InboxRowInner({
             </time>
           </span>
         </button>
+        <AttentionRequests session={session} onNavigate={onNavigate} keyboardActive={selected}
+          onActivate={() => onSelectAttention?.(session.id)} />
       </div>
     </div>
   );

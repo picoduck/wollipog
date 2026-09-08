@@ -29,6 +29,8 @@ export interface WorkerRow {
   role?: string;
   phase?: string;
   activations?: number;
+  toolCount?: number;
+  latestTool?: { title: string; active: boolean };
 }
 
 export function backgroundWorkerState(job: ManagedBackgroundJobView, session: SessionView, online: boolean): WorkerState {
@@ -66,6 +68,12 @@ export function workerRoster(
       ? { tokens: (agent.directUsage.inputTokens ?? 0) + (agent.directUsage.outputTokens ?? 0) } : {}),
     ...(agent.inclusiveUsage?.inputTokens != null || agent.inclusiveUsage?.outputTokens != null
       ? { inclusiveTokens: (agent.inclusiveUsage.inputTokens ?? 0) + (agent.inclusiveUsage.outputTokens ?? 0) } : {}),
+    ...(agent.toolCount == null ? {} : { toolCount: agent.toolCount }),
+    ...(agent.latestTool == null ? {} : { latestTool: {
+      ...agent.latestTool,
+      active: agent.latestTool.active && agent.availability === "live" &&
+        ["starting", "running", "waiting"].includes(agent.lifecycle),
+    } }),
   }));
   for (const job of session.backgroundJobs ?? []) rows.push({
     id: `background:${job.id}`,

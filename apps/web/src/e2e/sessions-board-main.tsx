@@ -1,4 +1,6 @@
 import React from "react";
+import { Shell } from "../App.js";
+import { ThemeProvider } from "../components/ThemeProvider.js";
 import { createRoot } from "react-dom/client";
 import {
   type BoardColumn,
@@ -30,6 +32,7 @@ import "../styles.css";
  * pushing a bare `/board` would make a reload fetch the production app instead of this fixture.
  */
 const SCOPE = "sessions-board-e2e";
+const fullShell = new URLSearchParams(location.search).has("full-shell");
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -96,6 +99,17 @@ const sessions = [
   }),
   session("s-snoozed", "Snoozed Session", "review"),
 ];
+
+if (fullShell) {
+  for (const [index, value] of sessions.filter(value => !value.archived).entries()) {
+    value.status = "input_required";
+    value.eventEpoch = 7;
+    value.pendingApproval = { requestId: `primary-${index}`, title: "Primary Request", options: [],
+      additionalRequests: [{ requestId: `child-${index}`, ownerToolUseId: "fixture-child",
+        title: `Exact Child Request ${index}`, options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] }] };
+    if (value.id === "s-running") delete value.pendingApproval.additionalRequests;
+  }
+}
 
 const reminders: SessionReminderView[] = [
   {
@@ -225,7 +239,8 @@ const client = {
 const navigation: ViewNavigation = {
   current: () => {
     const path = new URLSearchParams(window.location.search).get("path") ?? "/";
-    return viewFromPath(path) ?? { name: "inbox" };
+    const url = new URL(path, window.location.origin);
+    return viewFromPath(url.pathname, url.search) ?? { name: "inbox" };
   },
   push: (view) => {
     const url = new URL(window.location.href);
@@ -300,7 +315,7 @@ createRoot(root).render(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            <HarnessShell />
+            <ThemeProvider>{fullShell ? <Shell /> : <HarnessShell />}</ThemeProvider>
           </StoreProvider>
         </FeedbackProvider>
       </ApiProvider>

@@ -16,6 +16,7 @@ import {
   MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
   isPolicyApproval,
+  pendingRequests,
   isWorkspaceReference,
   isTerminal,
   runnerCapabilityRequirement,
@@ -400,6 +401,7 @@ export type SessionDetailProps = {
   sessionId: string;
   mode?: SessionDetailMode;
   sourceLocation?: SourceLocation;
+  attentionTarget?: import("../navigation.js").AttentionTarget;
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
   pinnedOpen: boolean;
@@ -537,6 +539,7 @@ export function SessionDetail(props: SessionDetailProps) {
 function SessionDetailLoaded({
   sessionId,
   sourceLocation,
+  attentionTarget,
   rightPanel,
   onOpenTerminal,
   pinnedOpen,
@@ -1036,10 +1039,10 @@ function SessionDetailLoaded({
   }, [retitleFeedback, sessionId]);
 
   useLayoutEffect(() => {
-    if (mode !== "expanded" || focusComposerRequestedRef.current) return;
+    if (mode !== "expanded" || focusComposerRequestedRef.current || attentionTarget) return;
     const frame = window.requestAnimationFrame(() => scrollRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
-  }, [mode, sessionId]);
+  }, [mode, sessionId, attentionTarget]);
 
   useEffect(() => {
     if (!focusComposer) return;
@@ -3832,7 +3835,16 @@ function SessionDetailLoaded({
             onOpen: () => rightPanel.show("subagents"),
           } : undefined}
           onOpenBackgroundWork={() => rightPanel.show("background")}
-          onOpenAttention={() => rightPanel.show("subagents")}
+          onOpenAttention={() => {
+            const requests = pendingRequests(session.pendingApproval);
+            // Navigation makes the target reload-safe; the direct state transition also makes a
+            // repeat press reopen a panel that was closed while the route stayed unchanged.
+            rightPanel.show("subagents");
+            navigate({ name: "session", id: session.id, attention: {
+              eventEpoch: session.eventEpoch ?? 0,
+              ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
+            } });
+          }}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
@@ -4648,6 +4660,7 @@ function SessionDetailLoaded({
           session={session}
           earlierActivityUnloaded={isPartialHistory(eventWindow)}
           sourceLocation={sourceLocation}
+          attentionTarget={attentionTarget}
           onOpenSourceLocation={openSourceLocation}
           onClearSourceLocation={clearSourceLocation}
           runnerOnline={runnerOnline}

@@ -26,6 +26,7 @@ export type ShortcutId =
   | "inbox-next"
   | "inbox-previous"
   | "inbox-expand"
+  | "inbox-focus-requests"
   | "inbox-fork"
   | "inbox-next-split"
   | "inbox-previous-split"
@@ -290,6 +291,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     description: "Expand the selected session",
     scope: "Sessions List",
     binding: { key: "Enter", bare: true },
+  },
+  {
+    id: "inbox-focus-requests",
+    group: "Sessions List",
+    label: "Focus Requests",
+    description: "Focus the selected session's request picker",
+    scope: "Sessions List",
+    binding: { key: "F2", bare: true },
   },
   {
     id: "inbox-fork",

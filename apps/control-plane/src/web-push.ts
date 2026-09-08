@@ -222,6 +222,9 @@ export interface PushMessage {
   body: string;
   /** Session to open on tap. Automation messages instead use `view: "automations"`. */
   sessionId?: string;
+  /** Stale-safe exact or aggregate attention destination. */
+  eventEpoch?: number;
+  requestId?: string;
   view?: "automations";
   /** Coalescing key. Defaults to the session id for backward compatibility. */
   notificationKey?: string;

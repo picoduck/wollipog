@@ -5,8 +5,10 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { InboxRow } from "./InboxRow.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -16,6 +18,34 @@ for (const [name, value] of Object.entries({
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+
+test("Inbox request navigation keeps exact identity and never selects or approves another row", async () => {
+  const session = { id: "session", eventEpoch: 7, runnerId: "runner", title: "Session",
+    status: "input_required", driver: "codex-app-server", pendingApproval: {
+      requestId: "a", options: [], title: "First", additionalRequests: [{
+        requestId: "b / %", options: [], title: "Second", ownerToolUseId: "child",
+      }],
+    } } as unknown as SessionView;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const navigated: unknown[] = [];
+  let selected = 0;
+  try {
+    await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      onSelect={() => { selected++; }} onExpand={() => { selected++; }} onSessionMenu={() => {}}
+      onNavigate={(view) => navigated.push(view)} />));
+    assert.equal(container.querySelector("button button"), null, "request actions are not nested in the row button");
+    const picker = container.querySelector(".attention-requests")!;
+    await act(async () => picker.querySelectorAll("button")[1]!.click());
+    assert.deepEqual(navigated, [{ name: "session", id: "session", attention: { eventEpoch: 7, requestId: "b / %" } }]);
+    assert.equal(selected, 0);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
 
 test("Inbox rows expose plain Stop Failed instead of Diff Ready", async () => {
   const session = {

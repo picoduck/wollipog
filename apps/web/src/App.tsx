@@ -350,6 +350,12 @@ export function Shell() {
     // The scalar route key is the trigger; panel callbacks are intentionally app-state methods.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceLocationKey]);
+  const attentionKey = view.name === "session" && view.attention ? viewPath(view) : null;
+  useEffect(() => {
+    if (attentionKey) rightPanel.show("subagents");
+    // A route change, not unrelated panel state, requests focus/navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attentionKey]);
 
   // Bottom terminal dock visibility (Codex layout: toggled, never an always-visible bar).
   // Migrates the legacy wollipog.shelldock.collapsed pref on first run.
@@ -707,6 +713,7 @@ export function Shell() {
               viewMode={view.name === "board" ? "board" : "list"}
               expandedSessionId={view.name === "session" ? view.id : null}
               sourceLocation={view.name === "session" ? view.location : undefined}
+              attentionTarget={view.name === "session" ? view.attention : undefined}
               topbarControls={!isMobile ? sessionPanelControls : undefined}
               rightPanel={rightPanel}
               onOpenTerminal={() => {

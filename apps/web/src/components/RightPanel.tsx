@@ -171,6 +171,7 @@ export function RightPanel({
   state,
   session,
   sourceLocation,
+  attentionTarget,
   onOpenSourceLocation,
   onClearSourceLocation,
   runnerOnline,
@@ -190,6 +191,7 @@ export function RightPanel({
   state: RightPanelState;
   session: SessionView;
   sourceLocation?: SourceLocation;
+  attentionTarget?: import("../navigation.js").AttentionTarget;
   onOpenSourceLocation: (location: SourceLocation) => void;
   onClearSourceLocation: () => void;
   runnerOnline: boolean;
@@ -396,6 +398,7 @@ export function RightPanel({
             )}
             {state.mode === "subagents" && (
               <AgentsPanel
+                attentionTarget={attentionTarget}
                 key={`${session.id}:${sessionEventEpoch}`}
                 onOpenPrimaryRequest={(requestId) => {
                   state.close();
