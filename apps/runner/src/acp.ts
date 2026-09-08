@@ -65,6 +65,10 @@ import {
 } from "./acp-session-state.js";
 import { AcpFilesystemService, AcpTerminalService } from "./acp-client-services.js";
 import { materializeAcpMcpServers } from "./acp-session-context.js";
+import {
+  assertClaudeAgentAcpOrchestratorIdentity,
+  orchestratorAcpSessionMeta,
+} from "./orchestrator-preset.js";
 
 export type StopReason =
   | "end_turn"
@@ -133,11 +137,13 @@ export class AcpClient {
       isolation?: SpawnIsolation;
       containerAgentLaunch?: boolean;
       cloudAgentLaunch?: boolean;
+      orchestrator?: boolean;
     },
     private readonly ev: AcpEvents,
     deps: Partial<AcpClientDeps> = {},
   ) {
-    this.commands = normalizeAcpCommands(opts.initialCommands);
+    this.orchestrator = opts.orchestrator === true;
+    this.commands = this.orchestrator ? [] : normalizeAcpCommands(opts.initialCommands);
     this.sessionContext = opts.sessionContext;
     this.mcpEnvironment = { ...process.env, ...opts.env };
     const context = opts.context ?? { kind: "native" as const };
@@ -182,6 +188,7 @@ export class AcpClient {
 
   private readonly sessionContext: AcpSessionContextConfig | undefined;
   private readonly mcpEnvironment: NodeJS.ProcessEnv;
+  private readonly orchestrator: boolean;
 
   get pid(): number | undefined {
     return this.child.pid;
@@ -222,6 +229,7 @@ export class AcpClient {
   async initialize(): Promise<void> {
     const res = await this.peer.request("initialize", acpInitializeRequest());
     this.negotiation = negotiateAcpInitialize(res);
+    if (this.orchestrator) assertClaudeAgentAcpOrchestratorIdentity(this.negotiation.agentInfo);
     this.supportsImages = this.negotiation.stable.promptImage;
     this.ev.onAcpCapabilities?.(runtimeCapabilities(this.negotiation));
   }
@@ -309,6 +317,7 @@ export class AcpClient {
       cwd,
       mcpServers,
       ...(additionalDirectories?.length ? { additionalDirectories: [...additionalDirectories] } : {}),
+      ...(this.orchestrator ? { _meta: orchestratorAcpSessionMeta() } : {}),
     };
   }
 
@@ -721,7 +730,7 @@ export class AcpClient {
         });
         break;
       case "available_commands_update":
-        this.commands = normalizeAcpCommands(u.availableCommands);
+        this.commands = this.orchestrator ? [] : normalizeAcpCommands(u.availableCommands);
         this.emitSessionState();
         break;
       case "current_mode_update": {
@@ -808,7 +817,7 @@ export class AcpClient {
   }
 
   private handlePermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-    if (this.disposed) return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    if (this.disposed || this.orchestrator) return Promise.resolve({ outcome: { outcome: "cancelled" } });
     const requestId = `perm_${++this.permCounter}`;
     const options: PermissionOption[] = (params.options ?? []).map((o) => ({
       optionId: o.optionId,
@@ -835,11 +844,13 @@ export class AcpClient {
 
   private async handleRead(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
     this.assertActiveSession(params.sessionId);
+    this.assertOrchestratorClientServiceRefused("filesystem reads");
     return { content: await this.filesystem.read(params.path, params.line ?? undefined, params.limit ?? undefined) };
   }
 
   private async handleWrite(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
     this.assertActiveSession(params.sessionId);
+    this.assertOrchestratorClientServiceRefused("filesystem writes");
     await this.filesystem.write(params.path, params.content);
     this.ev.onEvent({ kind: "file_edit", path: params.path });
     return {};
@@ -847,27 +858,32 @@ export class AcpClient {
 
   private async handleTerminalCreate(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
     this.assertActiveSession(params.sessionId);
+    this.assertOrchestratorClientServiceRefused("terminal commands");
     return this.terminals.create(params);
   }
 
   private handleTerminalOutput(params: TerminalOutputRequest): TerminalOutputResponse {
     this.assertActiveSession(params.sessionId);
+    this.assertOrchestratorClientServiceRefused("terminal commands");
     return this.terminals.output(params.sessionId, params.terminalId);
   }
 
   private handleTerminalWait(params: WaitForTerminalExitRequest): Promise<WaitForTerminalExitResponse> {
     this.assertActiveSession(params.sessionId);
+    this.assertOrchestratorClientServiceRefused("terminal commands");
     return this.terminals.wait(params.sessionId, params.terminalId);
   }
 
   private handleTerminalKill(params: KillTerminalRequest): Record<string, never> {
     this.assertActiveSession(params.sessionId);
+    this.assertOrchestratorClientServiceRefused("terminal commands");
     this.terminals.kill(params.sessionId, params.terminalId);
     return {};
   }
 
   private handleTerminalRelease(params: ReleaseTerminalRequest): Record<string, never> {
     this.assertActiveSession(params.sessionId);
+    this.assertOrchestratorClientServiceRefused("terminal commands");
     this.terminals.release(params.sessionId, params.terminalId);
     this.terminalEventOutput.delete(params.terminalId);
     return {};
@@ -875,6 +891,10 @@ export class AcpClient {
 
   private assertActiveSession(sessionId: unknown): asserts sessionId is string {
     if (!this.sessionId || sessionId !== this.sessionId) throw new Error("ACP request is not for the active session");
+  }
+
+  private assertOrchestratorClientServiceRefused(operation: string): void {
+    if (this.orchestrator) throw new Error(`the Orchestrator preset does not allow ACP ${operation}`);
   }
 }
 

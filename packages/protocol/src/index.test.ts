@@ -37,6 +37,7 @@ import {
   validateQuestionFreeText,
   validatePromptImageInputs,
   providerSupportsConversationFork,
+  isOrchestratorOnlyCapabilities,
   mergeSessionCapabilities,
   nativeTuiHasTrackedGuardrails,
   type SessionStatus,
@@ -526,6 +527,29 @@ test("a complete ACP session capability snapshot remains authoritative when its 
   };
 
   assert.deepEqual(mergeSessionCapabilities(catalog, acpSession), acpSession);
+});
+
+test("an orchestration-only ACP catalog marker never replaces live provider capabilities", () => {
+  const catalog: AgentCapabilities = {
+    models: [],
+    effortLevels: [],
+    slashCommands: [],
+    supportsImages: true,
+    supportsApprovals: true,
+    permissionModes: ["orchestrator"],
+    elicitation: { orchestrator: ["none"] },
+  };
+  const live: AgentCapabilities = {
+    models: [{ id: "provider-model" }],
+    effortLevels: ["provider-effort"],
+    slashCommands: [{ name: "provider-command", source: "builtin" }],
+    supportsImages: false,
+    supportsApprovals: true,
+  };
+  assert.equal(isOrchestratorOnlyCapabilities(catalog), true);
+  assert.equal(mergeSessionCapabilities(catalog, undefined), undefined,
+    "unknown ACP controls stay permissive before the live handshake");
+  assert.deepEqual(mergeSessionCapabilities(catalog, live), live);
 });
 
 test("native session command overlays replace only session-scoped catalog fields", () => {

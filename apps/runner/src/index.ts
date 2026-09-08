@@ -496,6 +496,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   async (meta) => {
     meta.env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
     if (meta.agentId === "conductor") throw new Error("The Conductor agent is retired; create an ordinary session to orchestrate children.");
+    const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
     provisionClaudeHooks(
       meta,
       {
@@ -515,6 +516,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         controlPlaneProtocolVersion,
         allowInsecureTransport,
         registerCredential: registerAgentControlCredential,
+        orchestratorAgent: localAgent,
       },
       log,
       agentControlHost,

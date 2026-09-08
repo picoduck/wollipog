@@ -9,6 +9,7 @@ import { AcpClient, isAgentAuthRequiredError } from "./acp.js";
 import { negotiateAcpInitialize } from "./acp-contract.js";
 import { AcpDriver } from "./drivers/acp-driver.js";
 import type { DriverOptions } from "./drivers/driver.js";
+import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION } from "./orchestrator-preset.js";
 
 const fixtures = new URL("./fixtures/acp/", import.meta.url);
 
@@ -99,6 +100,90 @@ test("real Claude Agent 0.58.1 initialize fixture conforms with stable/preview s
   assert.equal(got.stable.logout, true);
   assert.deepEqual(got.authMethods, []);
   assert.deepEqual(got.experimentalAdvertised, ["session-fork"]);
+});
+
+test("ACP orchestrator sends restrictions and refuses client execution services", async () => {
+  // Exercise the provider-facing boundary without starting another mock agent. This file already
+  // runs enough real adapters concurrently to cover transport integration; the pinned identity
+  // decoder is covered independently in orchestrator-preset.test.ts.
+  const client = Object.create(AcpClient.prototype) as AcpClient;
+  Object.assign(client as any, {
+    orchestrator: true,
+    negotiation: negotiateAcpInitialize({
+      protocolVersion: 1,
+      agentCapabilities: {},
+      agentInfo: {
+        name: "@agentclientprotocol/claude-agent-acp",
+        title: "Claude Agent",
+        version: CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
+      },
+    }),
+    sessionContext: {
+      mcpServers: [{ type: "stdio", name: "wollipog", command: "/runner", args: ["--agent-control-mcp"] }],
+    },
+    mcpEnvironment: {},
+    sessionId: "s_orchestrator",
+    commands: [{ name: "dangerous", source: "provider" }],
+    disposed: false,
+    suppressUpdates: false,
+    establishingSession: false,
+    modes: null,
+    configOptions: [],
+    supportsImages: false,
+    ev: { onEvent: () => undefined },
+  });
+
+  const request = (client as any).sessionRequest("/workspace") as Record<string, any>;
+  assert.deepEqual(request.mcpServers.map((server: { name: string }) => server.name), ["wollipog"]);
+  assert.deepEqual(request._meta.claudeCode.options.tools, []);
+  assert.deepEqual(request._meta.claudeCode.options.allowedTools, ["mcp__wollipog__*"]);
+  assert.deepEqual(request._meta.claudeCode.options.settingSources, []);
+  assert.deepEqual(request._meta.claudeCode.options.settings, { disableAllHooks: true });
+
+  await assert.rejects(
+    (client as any).handleRead({ sessionId: "s_orchestrator", path: "README.md" }),
+    /does not allow ACP filesystem reads/,
+  );
+  await assert.rejects(
+    (client as any).handleWrite({ sessionId: "s_orchestrator", path: "README.md", content: "changed" }),
+    /does not allow ACP filesystem writes/,
+  );
+  await assert.rejects(
+    (client as any).handleTerminalCreate({ sessionId: "s_orchestrator", command: "sh", args: [] }),
+    /does not allow ACP terminal commands/,
+  );
+  for (const method of ["handleTerminalOutput", "handleTerminalWait", "handleTerminalKill", "handleTerminalRelease"]) {
+    assert.throws(
+      () => (client as any)[method]({ sessionId: "s_orchestrator", terminalId: "terminal-1" }),
+      /does not allow ACP terminal commands/,
+      method,
+    );
+  }
+  assert.deepEqual(await (client as any).handlePermission({ options: [] }), {
+    outcome: { outcome: "cancelled" },
+  });
+  (client as any).handleUpdate({
+    sessionId: "s_orchestrator",
+    update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "dangerous" }] },
+  });
+  assert.deepEqual((client as any).commands, []);
+});
+
+test("ACP driver keeps orchestrator out of provider modes and refuses provider commands", async () => {
+  const driver = Object.create(AcpDriver.prototype) as AcpDriver;
+  let applied: SessionConfig | undefined;
+  Object.assign(driver as any, {
+    orchestrator: true,
+    client: { setConfig: async (config: SessionConfig) => { applied = config; } },
+    preparedCommands: new WeakSet<object>(),
+  });
+  assert.throws(() => driver.prepareCommand({
+    commandName: "dangerous",
+    argumentText: "",
+    executionMode: "structured",
+  }), /does not allow ACP provider commands/);
+  await driver.setConfig({ permissionMode: "orchestrator", model: "model-b" });
+  assert.deepEqual(applied, { model: "model-b" });
 });
 
 test("real Gemini CLI 0.50.0 initialize fixture degrades omitted stable capabilities", async () => {

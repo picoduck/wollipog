@@ -18,6 +18,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   isWorkspaceReference,
   isPolicyApproval,
   isTerminal,
+  isOrchestratorOnlyCapabilities,
   mergeSessionCapabilities,
   nativeTuiHasTrackedGuardrails,
   runnerCapabilityRequirement,
@@ -472,6 +473,9 @@ export function capabilityConfigError(
     return "the orchestrator preset requires explicit support from this agent installation";
   }
   if (!config || !capabilities) return null;
+  // This catalog-only ACP marker proves only runner-owned orchestration. Provider controls stay
+  // unknown/permissive until the session publishes its authoritative ACP capability record.
+  if (isOrchestratorOnlyCapabilities(capabilities)) return null;
   if (config.model && capabilities.models.length && !capabilities.models.some((model) => model.id === config.model)) {
     return `model ${JSON.stringify(config.model)} is not supported by this agent installation`;
   }
@@ -2777,9 +2781,10 @@ export class SessionsService {
       }
       const unsupported = this.capabilityFailure(req.runnerId, "sessionOrchestration", "Orchestrator preset");
       if (unsupported) return unsupported;
-      if (!["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
+      if (!(["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
+          (launch.driver === "acp" && req.launchSurface !== "native_tui")) ||
           (launch.context?.kind ?? "native") !== "native" || executionTarget.adapter !== "host") {
-        return fail("the orchestrator preset requires a native Codex or Claude harness on the host", 409);
+        return fail("the orchestrator preset requires a supported native host harness", 409);
       }
     }
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);

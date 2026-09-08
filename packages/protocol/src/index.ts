@@ -891,13 +891,27 @@ export interface SessionCapabilityOverlay {
 
 export type SessionCapabilities = AgentCapabilities | SessionCapabilityOverlay;
 
+/** A catalog-only marker that advertises runner-owned orchestration without inventing provider
+ * controls before an ACP session has negotiated them. Consumers must not treat its empty arrays
+ * as authoritative ACP model/effort/command catalogs. */
+export function isOrchestratorOnlyCapabilities(
+  capabilities: AgentCapabilities | undefined,
+): boolean {
+  const modes = capabilities?.permissionModes;
+  const transports = capabilities?.elicitation?.orchestrator;
+  return capabilities !== undefined && capabilities.models.length === 0 &&
+    capabilities.effortLevels.length === 0 && capabilities.slashCommands.length === 0 &&
+    modes?.length === 1 && modes[0] === "orchestrator" &&
+    transports?.length === 1 && transports[0] === "none";
+}
+
 /** Overlay session-scoped transport truth onto the current catalog. ACP snapshots carry a full
  * capability object and remain authoritative for their provider-native session controls. */
 export function mergeSessionCapabilities(
   catalog: AgentCapabilities | undefined,
   session: SessionCapabilities | undefined,
 ): AgentCapabilities | undefined {
-  if (!session) return catalog;
+  if (!session) return isOrchestratorOnlyCapabilities(catalog) ? undefined : catalog;
   if ("models" in session) return session;
   if (!catalog) return undefined;
   return {

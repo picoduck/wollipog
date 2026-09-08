@@ -109,9 +109,27 @@ waits for preference loading (with a retry on failure); control planes without t
 retain harness-default behavior. The server remains authoritative at creation time, including changes
 to saved preferences made in another tab after the dialog loaded.
 
-ACP and non-native execution contexts (including WSL, container, and cloud targets) remain deferred
-until their launch boundaries can enforce the same restrictions and provision target-local control
-credentials. Standard ACP sessions remain available.
+Native-host structured sessions also support the exact audited
+`@agentclientprotocol/claude-agent-acp` 0.75.1 adapter. The runner advertises the preset only for
+the official Registry identity/version or an exact pinned `npx` package launch, then verifies the
+live ACP initialize name and version before `session/new`. It supplies runner-owned Claude SDK
+options with no built-in tools, settings sources, hooks, ambient MCP servers, additional
+directories, or provider commands; the sole allowed server is the session-scoped Wollipog MCP.
+The pinned adapter routes `session/resume` and its `session/load` fallback through the same query
+creation function, forwarding the request `_meta` and reapplying these options before the resumed
+provider conversation is exposed.
+The ACP client independently refuses filesystem and terminal services and cancels permission asks.
+The management credential and MCP definition are materialized runner-locally from protected file
+references and never persisted as token bytes.
+
+Other ACP adapters and releases remain unavailable until their exact tool-isolation contract is
+audited; ACP transport support or a self-reported display name is not sufficient. WSL, container,
+and cloud targets also remain unavailable for the preset. WSL has no verified in-distro
+credential/reentry bridge. Container targets deliberately advertise `secrets: none` and mount only
+the worktree. Cloud targets accept adapter-owned secret references but define no portable remote
+Wollipog MCP runtime. None can yet provision and clean up the same target-local management
+credential while proving that internal tools stay disabled. These combinations continue to fail
+before provider launch; standard non-Orchestrator sessions remain available.
 
 The device-local Conductor experiment is a permanently disabled compatibility tombstone;
 saved opt-ins are ignored and the switch is removed. Session creation offers the native preset

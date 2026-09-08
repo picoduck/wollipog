@@ -16,9 +16,11 @@ export class AcpDriver implements Driver {
   private sessionId: string | null = null;
   private readonly resumeId: string | undefined;
   private readonly initialConfig: SessionConfig;
+  private readonly orchestrator: boolean;
   private readonly preparedCommands = new WeakSet<object>();
 
   constructor(opts: DriverOptions, cb: DriverCallbacks) {
+    this.orchestrator = opts.config.permissionMode === "orchestrator";
     this.client = new AcpClient(
       {
         command: opts.command,
@@ -31,11 +33,12 @@ export class AcpDriver implements Driver {
         isolation: opts.isolation,
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
+        orchestrator: this.orchestrator,
       },
       cb,
     );
     this.resumeId = opts.resumeId;
-    this.initialConfig = opts.config;
+    this.initialConfig = this.providerConfig(opts.config);
   }
 
   get pid(): number | undefined {
@@ -64,6 +67,9 @@ export class AcpDriver implements Driver {
   }
 
   prepareCommand(input: DriverCommandInput): PreparedDriverCommand {
+    if (this.orchestrator) {
+      throw new Error("the Orchestrator preset does not allow ACP provider commands");
+    }
     if (input.executionMode !== "structured") {
       throw new Error(`ACP does not support ${input.executionMode} session commands`);
     }
@@ -87,7 +93,13 @@ export class AcpDriver implements Driver {
   }
 
   setConfig(config: SessionConfig): Promise<void> {
-    return this.client.setConfig(config);
+    return this.client.setConfig(this.providerConfig(config));
+  }
+
+  private providerConfig(config: SessionConfig): SessionConfig {
+    if (!this.orchestrator || config.permissionMode !== "orchestrator") return config;
+    const { permissionMode: _permissionMode, ...providerConfig } = config;
+    return providerConfig;
   }
 
   cancel(): void {
