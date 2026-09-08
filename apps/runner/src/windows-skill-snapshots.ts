@@ -355,7 +355,13 @@ function invoke(specification: Record<string, unknown>): WindowsSnapshotOutput {
     timeout: 30_000,
     windowsHide: true,
   });
-  if (result.error || result.status !== 0 || !result.stdout.trim()) throw new Error("Windows snapshot helper failed");
+  if (result.error || result.status !== 0 || !result.stdout.trim()) {
+    // MachineSkillSnapshots catches and sanitizes this internal diagnostic before it crosses the
+    // runner protocol; retaining a bounded native error here makes platform failures actionable.
+    const detail = (result.stderr || result.stdout || result.error?.message || "no output")
+      .replace(/\s+/g, " ").trim().slice(0, 1_000);
+    throw new Error(`Windows snapshot helper failed: ${detail}`);
+  }
   return JSON.parse(result.stdout) as WindowsSnapshotOutput;
 }
 
