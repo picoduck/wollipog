@@ -53,24 +53,30 @@ in an environment with its own conventions.
 
 ## Install
 
-```bash
-# Colocated control plane + runner as user services (needs lingering to survive logout):
-wollipog service install --control-plane-bin /opt/wollipog/control-plane \
-  --public-origin https://wollipog.example.ts.net --web-dist /opt/wollipog/web
+On a clean Linux machine, without cloning the repository or installing Node.js:
 
-# System services as root, with a dedicated account:
-sudo wollipog service install --system --control-plane-bin /opt/wollipog/control-plane \
-  --public-origin https://wollipog.example.ts.net --web-dist /opt/wollipog/web
+```bash
+# 1. Verified release assets: runner + CLI, the headless control plane, and the dashboard bundle.
+curl -fsSL https://raw.githubusercontent.com/picoduck/wollipog/main/scripts/install-runner.sh | sh -s -- --control-plane
+
+# 2. Colocated control plane + runner as user services (needs lingering to survive logout):
+wollipog service install --public-origin https://wollipog.example.ts.net
+
+# or as system services under a dedicated account:
+sudo wollipog service install --system --public-origin https://wollipog.example.ts.net
 ```
 
-Options: `--control-plane` / `--runner` to install one component only; `--runner-bin <path>`
-(defaults to the `wollipog-runner` executable next to the standalone `wollipog` CLI);
-`--host <bind>` and `--port <n>` (default `127.0.0.1:4317`); `--tailnet-only`; `--runner-id <id>`
-(default hostname); `--workspace <dir>`; `--no-start`; `--no-linger`; `--json`.
+The installer places `wollipog`, `wollipog-runner`, and `wollipog-control-plane` in `~/.local/bin`
+and the dashboard bundle in `~/.local/share/wollipog/web`, each verified against GitHub's publisher
+digest and the release's `SHA256SUMS`. `service install` then finds the control plane and the
+bundle beside the CLI on its own; `--control-plane-bin`, `--runner-bin`, and `--web-dist` remain
+available for other layouts (for example an executable launched through a wrapper script).
 
-The release does not yet publish a standalone control-plane executable (it ships inside the desktop
-app), so `--control-plane-bin` is required for now; a follow-up adds the verified artifact and makes
-it the default. Install runs the following steps, in order: create directories, write the env file
+Other options: `--control-plane` / `--runner` to install one component only; `--host <bind>` and
+`--port <n>` (default `127.0.0.1:4317`); `--tailnet-only`; `--runner-id <id>` (default hostname);
+`--workspace <dir>`; `--no-start`; `--no-linger`; `--json`.
+
+Install runs the following steps, in order: create directories, write the env file
 and configs (only if absent) and the units, `daemon-reload`, `enable`, enable lingering (user mode),
 start the control plane, wait for `/healthz`, mint the colocated runner's credential into
 `runner.token` through the loopback admin API (only if the file is absent), start the runner, and
@@ -138,8 +144,29 @@ wollipog admin runner-credential rotate --runner <id> --output <token-file>   # 
 wollipog service install --control-plane-bin ... --runner-bin ...             # regenerate units, keep config
 ```
 
-Reinstall is the supported way to regenerate unit files after an upgrade of the executables;
-`service upgrade` with digest verification and rollback is tracked separately.
+Reinstall is the supported way to regenerate unit files; executables are upgraded with
+`wollipog service upgrade` (below).
+
+## Upgrade and rollback
+
+```bash
+wollipog service upgrade                 # latest published release
+wollipog service upgrade --release v0.23.0
+wollipog service upgrade --yes --json    # non-interactive, for automation
+```
+
+Upgrade resolves the release (latest, or an exact tag) from GitHub, downloads the runner and
+control-plane executables for this host's target and the web bundle into a staging directory under
+the data directory, and proves every byte: each asset must carry a GitHub publisher digest that
+matches the downloaded SHA-256, and when the release has a `SHA256SUMS` its entry must agree too.
+Each staged executable is run with `--version` and must report the release version. Only then are
+the executables swapped in atomically (the previous generation is kept as `<path>.previous`, and the
+previous `web/` directory beside the new one), the control plane is restarted and must become
+healthy and report the new version through the loopback admin API, and the runner is restarted and
+must re-register as online. If any of that fails, the previous executables and bundle are moved back
+and the services are restarted again; the command exits 1 and says so. Configuration, credentials,
+and data are never touched, and `--force` reinstalls the current release. A private repository
+needs `GH_TOKEN` (Contents: read) in the environment.
 
 ## Uninstall
 
