@@ -9246,6 +9246,24 @@ test("ACP cumulative runtime cost triggers the existing budget gate without toke
   assert.equal(db.getSession("runtime-cost")!.costUsd, 6, "a stale runtime snapshot cannot roll cost back");
 });
 
+test("an idle orphan runtime snapshot restores the same-cost guardrail card and Continue re-arms it", () => {
+  const { db, svc } = makeHarness();
+  const id = "orphan-budget";
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, costUsd: 8.33, status: "running" })]);
+  db.updateSessionCostBudget(id, 8, Date.now());
+  const paused = snapshot({ id, status: "idle", costUsd: 8.33, backgroundWorkState: "orphaned" });
+  svc.applySessionRuntimeUpdate(RUNNER_ID, paused);
+  const approval = db.getSession(id)!.pendingApproval!;
+  assert.equal(approval?.kind, "cost_budget");
+  assert.equal(db.getSession(id)!.status, "input_required");
+  svc.applySessionRuntimeUpdate(RUNNER_ID, { ...paused, backgroundWorkState: undefined });
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, approval.requestId);
+  assert.equal(db.getSession(id)!.backgroundWorkState, undefined);
+  assert.ok(svc.approve(id, approval.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.status, "idle");
+  assert.equal(db.getSession(id)!.costBudgetUsd, 16.33);
+});
+
 test("hydrateRunnerSessions stops a cached session the box no longer holds", () => {
   const { db, svc } = makeHarness();
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot()]);
