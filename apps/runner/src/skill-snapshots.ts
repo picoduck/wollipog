@@ -46,7 +46,8 @@ export function openSkillDirectory(home: string, relative: string, durable = fal
  * No filesystem writes, subprocesses, script execution, or arbitrary client paths. */
 export class MachineSkillSnapshots {
   private readonly candidates = new Map<string, { candidate: MachineSkillCandidate; expires: number }>();
-  constructor(private readonly options: { home: string; agents: () => AgentDefinition[]; platform?: NodeJS.Platform; now?: () => number }) {}
+  constructor(private readonly options: { home: string; agents: () => AgentDefinition[]; platform?: NodeJS.Platform;
+    now?: () => number; maxRawEntriesPerDirectory?: number }) {}
   private now() { return this.options.now?.() ?? Date.now(); }
   private directories(): string[] {
     const dirs = new Set<string>([".agents/skills"]);
@@ -103,9 +104,10 @@ export class MachineSkillSnapshots {
       try {
         const dir = opendirSync(fdPath(fd));
         try {
-          for (let count = 0; count < 256 && found.length < 64;) {
+          for (let count = 0, raw = 0; count < 256 && found.length < 64;) {
             const entry = dir.readSync();
             if (!entry) break;
+            if (++raw > (this.options.maxRawEntriesPerDirectory ?? 4096)) break;
             // Private recovery journals are never candidates and must not crowd user skills out
             // of the bounded discovery budget. Recovery inspection has its own bounded path.
             if (entry.name.startsWith(".wollipog-adoption-")) continue;

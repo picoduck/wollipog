@@ -145,8 +145,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 115", () => {
-  assert.equal(PROTOCOL_VERSION, 115);
+test("PROTOCOL_VERSION is 116", () => {
+  assert.equal(PROTOCOL_VERSION, 116);
   assert.equal(runnerSupportsProtocol(112, "progressAwareSessionWorktrees"), false);
   assert.equal(runnerSupportsProtocol(113, "progressAwareSessionWorktrees"), true);
   assert.equal(runnerSupportsProtocol(111, "orchestratorNativeTui"), false);
@@ -155,6 +155,8 @@ test("PROTOCOL_VERSION is 115", () => {
   assert.equal(runnerSupportsProtocol(111, "machineSkillSnapshots"), true);
   assert.equal(runnerSupportsProtocol(114, "machineSkillAdoption"), false);
   assert.equal(runnerSupportsProtocol(115, "machineSkillAdoption"), true);
+  assert.equal(runnerSupportsProtocol(115, "machineSkillAdoptionRecovery"), false);
+  assert.equal(runnerSupportsProtocol(116, "machineSkillAdoptionRecovery"), true);
   assert.equal(runnerSupportsProtocol(109, "conversationHandoff"), false);
   assert.equal(runnerSupportsProtocol(110, "conversationHandoff"), true);
   assert.equal(runnerSupportsProtocol(108, "sessionOrchestration"), false);

@@ -432,12 +432,13 @@ test("retained adoption journals do not crowd real skills out of bounded unmanag
     const skills = join(roots.home, ".claude", "skills");
     for (let index = 0; index < SKILL_SCAN_LIMITS.maxEntriesPerDirectory; index += 1) {
       mkdirSync(join(skills, `.wollipog-adoption-${String(index).padStart(3, "0")}`), { recursive: true });
+      const local = join(skills, `local-skill-${String(index).padStart(3, "0")}`);
+      mkdirSync(local);
+      writeFileSync(join(local, "SKILL.md"), `---\nname: local-skill-${index}\n---\nBody`);
     }
-    const local = join(skills, "zz-local-skill");
-    mkdirSync(local);
-    writeFileSync(join(local, "SKILL.md"), "---\nname: zz-local-skill\n---\nBody");
     const result = await reconcile(roots, []);
-    assert.ok(result.unmanaged.some((skill) => skill.agentId === claudeAgent.id && skill.name === "zz-local-skill"));
+    assert.equal(result.unmanaged.filter((skill) => skill.agentId === claudeAgent.id).length,
+      SKILL_SCAN_LIMITS.maxEntriesPerDirectory);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }

@@ -37,7 +37,7 @@ const runner: RunnerView = {
   lastSeen: 1,
   protocolVersion: new URLSearchParams(location.search).has("legacySkills")
     ? 1
-    : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoption,
+    : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery,
 };
 
 const snapshot: ControlPlaneToUi = {
