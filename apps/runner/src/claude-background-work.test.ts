@@ -24,7 +24,7 @@ test("Claude project keys match the provider's Windows path encoding", () => {
   assert.equal(claudeProjectPathKey("C:\\Users\\misko\\repo.with spaces"), "C--Users-misko-repo-with-spaces");
 });
 
-test("native receipt cache avoids repeated reads and invalidates append, replacement, truncation, and roots", (t) => {
+test("native receipt cache avoids repeated reads and invalidates append, replacement, truncation, and roots", async (t) => {
   const f = fixture();
   const notification = (id: string) => `<task-notification><task-id>${id}</task-id><status>completed</status></task-notification>`;
   let reads = 0;
@@ -38,15 +38,17 @@ test("native receipt cache avoids repeated reads and invalidates append, replace
     writeFileSync(f.transcript, `${" ".repeat(8 * 1024 * 1024)}${notification("done")}`);
     const inspect = () => inspectClaudeBackgroundWork(f.cwd, f.sessionId, ["done", "pending"], f);
     assert.deepEqual([...inspect().terminalTaskIds], ["done"]);
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    assert.deepEqual([...inspect().terminalTaskIds], ["done"], "a later fresh observation admits reusable proof");
     for (let attempt = 0; attempt < 10; attempt++) assert.deepEqual([...inspect().terminalTaskIds], ["done"]);
-    assert.equal(reads, 1, "ten unchanged retries read zero additional ledger bytes");
+    assert.equal(reads, 2, "ten unchanged retries after warm-up read zero additional ledger bytes");
     const mutable = inspect();
     mutable.terminalTaskIds.clear();
     mutable.terminalTaskStatuses?.clear();
     assert.ok(inspect().terminalTaskIds.has("done"), "caller mutations do not alter cached proof");
     appendFileSync(f.transcript, notification("pending"));
     assert.equal(inspect().terminalTaskIds.size, 2);
-    assert.equal(reads, 2);
+    assert.equal(reads, 3);
     writeFileSync(`${f.transcript}.new`, notification("pending"));
     renameSync(`${f.transcript}.new`, f.transcript);
     assert.deepEqual([...inspect().terminalTaskIds], ["pending"]);
@@ -81,15 +83,17 @@ test("WSL receipt cache revalidates fingerprints and isolates contexts and comma
   const context = { kind: "wsl" as const, distro: "test-distro" };
   const inspect = () => inspectClaudeBackgroundWorkInContext(context, "/repo", "session", ["done", "pending"], { run });
   assert.equal((await inspect()).terminalTaskStatuses?.get("done"), "killed");
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+  assert.equal((await inspect()).terminalTaskStatuses?.get("done"), "killed");
   for (let retry = 0; retry < 10; retry++) assert.equal((await inspect()).terminalTaskIds.size, 1);
-  assert.equal(reads, 1);
+  assert.equal(reads, 2);
   version += ":replacement";
   await inspect();
-  assert.equal(reads, 2);
-  await inspectClaudeBackgroundWorkInContext({ ...context, distro: "other-distro" }, "/repo", "session", ["done", "pending"], { run });
   assert.equal(reads, 3);
-  await inspectClaudeBackgroundWorkInContext(context, "/repo", "session", ["done", "pending"], { run, projectsRoot: "/sandbox/projects" });
+  await inspectClaudeBackgroundWorkInContext({ ...context, distro: "other-distro" }, "/repo", "session", ["done", "pending"], { run });
   assert.equal(reads, 4);
+  await inspectClaudeBackgroundWorkInContext(context, "/repo", "session", ["done", "pending"], { run, projectsRoot: "/sandbox/projects" });
+  assert.equal(reads, 5);
   version += ":append";
   changedDuringRead = true;
   assert.equal((await inspect()).terminalTaskIds.size, 0, "a changing ledger cannot become cached completion proof");

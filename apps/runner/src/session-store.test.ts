@@ -108,7 +108,7 @@ test("create + readMeta round-trips", () => {
   }
 });
 
-test("distinct tool counts reuse unchanged history and invalidate append, replacement, truncation and reset", () => {
+test("distinct tool counts reuse unchanged history and invalidate append, replacement, truncation and reset", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-tool-count-"));
   let scannedBytes = 0;
   const store = new SessionStore(root, (start, end) => { scannedBytes += end - start; });
@@ -118,6 +118,8 @@ test("distinct tool counts reuse unchanged history and invalidate append, replac
     store.appendEvent("s_abc", event);
     store.appendEvent("s_abc", event);
     assert.equal(store.distinctToolCallCount("s_abc"), 1);
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    assert.equal(store.distinctToolCallCount("s_abc"), 1);
     const initialBytes = scannedBytes;
     assert.ok(initialBytes > 0);
     for (let retry = 0; retry < 10; retry++) assert.equal(store.distinctToolCallCount("s_abc"), 1);
@@ -126,6 +128,8 @@ test("distinct tool counts reuse unchanged history and invalidate append, replac
     const complete = readFileSync(activePath);
     appendFileSync(activePath, '{"seq":3,"payload":');
     assert.equal(store.distinctToolCallCount("s_abc"), 1, "a crash-torn suffix is not an event");
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    assert.equal(store.distinctToolCallCount("s_abc"), 1);
     const afterTorn = scannedBytes;
     assert.equal(store.distinctToolCallCount("s_abc"), 1);
     assert.equal(scannedBytes, afterTorn, "unchanged torn suffixes can also be cached");

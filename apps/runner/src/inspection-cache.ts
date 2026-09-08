@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 
 /** Replacement, append, truncation, same-length edits and permission changes invalidate results. */
 export function inspectionFileVersion(path: string): string | null {
@@ -11,8 +12,8 @@ export function inspectionFileVersion(path: string): string | null {
 
 /** Small LRU of derived data only; callers bound each record's key/value size. */
 export class InspectionCache<T> {
-  private readonly entries = new Map<string, { version: string; value: T }>();
-  constructor(private readonly limit = 128) {}
+  private readonly entries = new Map<string, { version: string; firstSeen: number; value?: T }>();
+  constructor(private readonly limit = 128, private readonly settleMs = 2_000) {}
   get(key: string, version: string | null): T | undefined {
     const entry = this.entries.get(key);
     this.entries.delete(key);
@@ -21,8 +22,15 @@ export class InspectionCache<T> {
     return entry.value;
   }
   set(key: string, version: string, value: T): void {
+    const prior = this.entries.get(key);
+    const now = performance.now();
+    const firstSeen = prior?.version === version ? prior.firstSeen : now;
     this.entries.delete(key);
-    this.entries.set(key, { version, value });
+    // Filesystems can coalesce same-size edits into one timestamp bucket. The first
+    // observation is only a candidate: require a fresh read in a later bucket before
+    // retaining proof. Reads during this window still return their current result.
+    this.entries.set(key, { version, firstSeen,
+      ...(now - firstSeen >= this.settleMs ? { value } : {}) });
     while (this.entries.size > this.limit) this.entries.delete(this.entries.keys().next().value!);
   }
 }

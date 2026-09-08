@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { performance } from "node:perf_hooks";
 import { InspectionCache, InspectionLimiter } from "./inspection-cache.js";
 
 test("inspection cache is LRU bounded and invalidates missing/changed versions", () => {
-  const cache = new InspectionCache<number>(2);
+  const cache = new InspectionCache<number>(2, 0);
   cache.set("a", "1", 0);
   cache.set("b", "1", 2);
   assert.equal(cache.get("a", "1"), 0);
@@ -13,6 +14,24 @@ test("inspection cache is LRU bounded and invalidates missing/changed versions",
   assert.equal(cache.get("a", "1"), undefined);
   assert.equal(cache.get("c", null), undefined);
   assert.equal(cache.get("c", "1"), undefined);
+});
+
+test("coarse unchanged fingerprints require a later fresh observation before reuse", (t) => {
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  const cache = new InspectionCache<number>();
+  cache.set("ledger", "same-timestamp", 1);
+  assert.equal(cache.get("ledger", "same-timestamp"), undefined);
+  now = 1_999;
+  cache.set("ledger", "same-timestamp", 2);
+  assert.equal(cache.get("ledger", "same-timestamp"), undefined);
+  now = 2_000;
+  assert.equal(cache.get("ledger", "same-timestamp"), undefined, "elapsed time alone never promotes old proof");
+  cache.set("ledger", "same-timestamp", 3);
+  assert.equal(cache.get("ledger", "same-timestamp"), 3, "only the newly read result is reusable");
+  assert.equal(cache.get("ledger", "new-timestamp"), undefined);
+  cache.set("ledger", "new-timestamp", 4);
+  assert.equal(cache.get("ledger", "new-timestamp"), undefined, "every changed fingerprint warms separately");
 });
 
 test("inspection slots are released after a failed inspection", async () => {
