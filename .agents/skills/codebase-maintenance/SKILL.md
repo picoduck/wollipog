@@ -73,6 +73,17 @@ reported. One sweep ran two commits behind and produced three findings in a file
 twelve files that had merely moved on. The primary checkout is not fast-forwarded on a schedule,
 and Phase 1 forbids this run from pulling it.
 
+Check install freshness the same way, before any job that executes code (tests, coverage, knip,
+type checks): compare the install stamp to the lockfile's last change —
+`stat -c %Y node_modules/.modules.yaml` against `git log -1 --format=%ct -- pnpm-lock.yaml`. If
+the install is older than the lockfile, say so at the top of the report and treat
+`ERR_MODULE_NOT_FOUND` / "Cannot find package" failures as environmental: they are not broken
+tests and not findings, and they go in Recommended Actions as one `environment` item naming the
+missing package. Phase 1 forbids running the install, so the run cannot close the gap itself. One
+flaky-test sweep ran the unit suite six times before establishing that its 29 identical failures
+were a workspace package added to the lockfile after the checkout's last install; the freshness
+check is one command and would have said so before the first run.
+
 A finding that rests only on reading code is a guess. Each job file names the tool that proves its
 category — static analysis, coverage data, test runs, `git log`, `gh`. Run it, and cite what it
 returned.
