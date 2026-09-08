@@ -344,10 +344,13 @@ if ([string]$spec.operation -eq 'list') {
 
 function invoke(specification: Record<string, unknown>): WindowsSnapshotOutput {
   const encodedSpec = Buffer.from(JSON.stringify(specification), "utf8").toString("base64");
-  // Feed the fixed program over stdin. `-EncodedCommand` would inflate this helper beyond
-  // CreateProcessW's 32,767-character command-line ceiling before PowerShell can start.
+  // A tiny encoded bootstrap explicitly reads the fixed runner-owned program from stdin.
+  // Encoding the complete helper would exceed CreateProcessW's 32,767-character command line;
+  // using `-Command -` directly is not reliable on Windows PowerShell 5.1's redirected stdin.
+  const bootstrap = "$p=[Console]::In.ReadToEnd();if([string]::IsNullOrWhiteSpace($p)){throw 'missing program'};Invoke-Expression $p";
+  const encodedBootstrap = Buffer.from(bootstrap, "utf16le").toString("base64");
   const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-    "-Command", "-"], {
+    "-EncodedCommand", encodedBootstrap], {
     env: { ...process.env, WOLLIPOG_SKILL_SNAPSHOT_SPEC: encodedSpec },
     input: WINDOWS_SKILL_SNAPSHOT_HELPER,
     encoding: "utf8",
