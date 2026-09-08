@@ -8,6 +8,8 @@ import type { McpFetch } from "./session-management-mcp.js";
 import {
   formatStatus,
   isLoopbackHostname,
+  isTailnetIpv4Literal,
+  pairingLinkConsumers,
   readProtectedLocalToken,
   resolveLocalTokenPath,
   runHostAdminCli,
@@ -71,6 +73,7 @@ function server(options: {
   webServed?: boolean;
   revokeNewDeviceStatus?: number;
   mintedToken?: string;
+  omitDevice?: boolean;
 } = {}) {
   const calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: string }> = [];
   const fetch: McpFetch = async (url, init) => {
@@ -97,7 +100,7 @@ function server(options: {
     if (path === "/api/devices" && init?.method === "POST") {
       const body = JSON.parse(init.body ?? "{}") as { name: string; userId?: string };
       return respond(201, {
-        device: { deviceId: "dev_new", name: body.name, createdAt: 1, lastSeenAt: null, userId: body.userId ?? "usr_local", userName: "Local Owner", organizationId: "org_personal", organizationName: "Personal", role: "owner" },
+        ...(options.omitDevice ? {} : { device: { deviceId: "dev_new", name: body.name, createdAt: 1, lastSeenAt: null, userId: body.userId ?? "usr_local", userName: "Local Owner", organizationId: "org_personal", organizationName: "Personal", role: "owner" } }),
         token: options.mintedToken ?? DEVICE_TOKEN,
         pairing: {
           hosts: options.hosts ?? [],
@@ -301,13 +304,16 @@ test("admin device create validates --origin, warns on plain HTTP, and falls bac
   assert.equal(JSON.parse(bindHost.stdout()).pairingUrl, `http://192.168.1.20:4317/#pair=${DEVICE_TOKEN}`);
   assert.equal(JSON.parse(bindHost.stdout()).originSource, "bind-host");
   assert.match(bindHost.stderr(), /no CONTROL_PLANE_PUBLIC_ORIGIN is configured; the link uses plain HTTP/u);
+  assert.match(bindHost.stderr(), /desktop app refuses plain HTTP to 192\.168\.1\.20; this link works only in a browser/u);
+  assert.deepEqual(JSON.parse(bindHost.stdout()).consumers, { browser: true, desktop: false });
 
   const loopback = makeIo(tty);
   assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--json"], env(tokenFile), loopback.io, server({ webServed: false }).fetch, host), 0);
   assert.equal(JSON.parse(loopback.stdout()).pairingUrl, `http://127.0.0.1:4317/#pair=${DEVICE_TOKEN}`);
   assert.equal(JSON.parse(loopback.stdout()).originSource, "loopback");
   assert.match(loopback.stderr(), /only works on this machine/u);
-  assert.match(loopback.stderr(), /serves no web dashboard bundle/u);
+  assert.match(loopback.stderr(), /serves no web dashboard bundle; this link works only in the desktop app/u);
+  assert.deepEqual(JSON.parse(loopback.stdout()).consumers, { browser: false, desktop: true });
 });
 
 test("admin device revoke requires confirmation or --yes and reports control-plane errors", async (t) => {
@@ -447,4 +453,58 @@ test("admin device create revokes a minted device when the token or composed lin
   const rescued = makeIo(tty);
   assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--origin", "https://box.example.ts.net", "--json"], env(tokenFile), rescued.io, server({ hosts: ["fe80::1%eth0"], boundBeyondLoopback: true }).fetch, host), 0);
   assert.equal(JSON.parse(rescued.stdout()).pairingUrl, `https://box.example.ts.net/#pair=${DEVICE_TOKEN}`);
+});
+
+test("pairing link consumer policy mirrors the desktop cleartext rules", () => {
+  for (const ok of ["100.64.0.1", "100.101.58.119", "100.127.255.255"]) assert.equal(isTailnetIpv4Literal(ok), true, ok);
+  for (const bad of ["100.63.255.255", "100.128.0.1", "10.0.0.1", "100.64.0.256", "100.64.0.1.nip.io"]) assert.equal(isTailnetIpv4Literal(bad), false, bad);
+  assert.deepEqual(pairingLinkConsumers("https://box.example.ts.net", false), { browser: false, desktop: true });
+  assert.deepEqual(pairingLinkConsumers("http://100.101.58.119:4317", false), { browser: false, desktop: true });
+  assert.deepEqual(pairingLinkConsumers("http://127.0.0.1:4317", true), { browser: true, desktop: true });
+  assert.deepEqual(pairingLinkConsumers("http://192.168.1.20:4317", true), { browser: true, desktop: false });
+  assert.deepEqual(pairingLinkConsumers("http://192.168.1.20:4317", false), { browser: false, desktop: false });
+});
+
+test("admin device create refuses and revokes a link no advertised consumer can open", async (t) => {
+  const { tokenFile } = fixture(t);
+  const tty = { stdoutIsTTY: true };
+  const dead = server({ hosts: ["192.168.1.20"], boundBeyondLoopback: true, webServed: false });
+  const { io, stdout } = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--json"], env(tokenFile), io, dead.fetch, host), 1);
+  const error = JSON.parse(stdout()).error as string;
+  assert.match(error, /neither a browser nor the desktop app can use the link; set CONTROL_PLANE_PUBLIC_ORIGIN to an HTTPS origin/u);
+  assert.match(error, /device dev_new was revoked/u);
+  assert.ok(!error.includes(DEVICE_TOKEN));
+  assert.ok(dead.calls.some((call) => call.method === "DELETE" && call.url.endsWith("/api/devices/dev_new")));
+
+  const explicitDead = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--origin", "http://box.example:4317"], env(tokenFile), explicitDead.io, server({ webServed: false }).fetch, host), 1);
+  assert.match(explicitDead.stderr(), /neither a browser nor the desktop app can use the link/u);
+
+  const tailnet = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--json"], env(tokenFile), tailnet.io, server({ hosts: ["100.101.58.119"], boundBeyondLoopback: true, webServed: false }).fetch, host), 0);
+  assert.equal(JSON.parse(tailnet.stdout()).pairingUrl, `http://100.101.58.119:4317/#pair=${DEVICE_TOKEN}`);
+  assert.deepEqual(JSON.parse(tailnet.stdout()).consumers, { browser: false, desktop: true });
+  assert.match(tailnet.stderr(), /works only in the desktop app/u);
+});
+
+test("admin device create revokes when the response lacks a device record or the terminal write fails", async (t) => {
+  const { tokenFile } = fixture(t);
+  const tty = { stdoutIsTTY: true };
+
+  const headless = server({ publicOrigin: "https://wollipog.example.ts.net", omitDevice: true });
+  const missing = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--json"], env(tokenFile), missing.io, headless.fetch, host), 1);
+  const missingError = JSON.parse(missing.stdout()).error as string;
+  assert.match(missingError, /returned no device record; the control plane response named no device to revoke/u);
+  assert.ok(!missingError.includes(DEVICE_TOKEN));
+  assert.ok(!headless.calls.some((call) => call.method === "DELETE"));
+
+  const broken = server({ publicOrigin: "https://wollipog.example.ts.net" });
+  const written: string[] = [];
+  const failingStdout = makeIo({ ...tty, stdout: (text) => { if (text.includes("#pair=")) throw new Error("EPIPE"); written.push(text); } });
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P"], env(tokenFile), failingStdout.io, broken.fetch, host), 1);
+  assert.match(failingStdout.stderr(), /EPIPE; the newly minted device dev_new was revoked/u);
+  assert.ok(!written.join("").includes(DEVICE_TOKEN) && !failingStdout.stderr().includes(DEVICE_TOKEN));
+  assert.ok(broken.calls.some((call) => call.method === "DELETE" && call.url.endsWith("/api/devices/dev_new")));
 });

@@ -82,6 +82,12 @@ Instances → Add Remote Instance** in the desktop app. The origin is chosen in 
    plain-HTTP warning;
 4. `http://127.0.0.1:<port>`, with a warning that the link only works on this machine.
 
+Before the link is handed out it must be usable by at least one advertised consumer: a browser
+needs the control plane to serve the built dashboard bundle, and the desktop app accepts plain HTTP
+only for loopback or a literal Tailscale address (anything else must be HTTPS). A link neither can
+open, such as plain HTTP to a LAN address with no dashboard bundle, is refused and the just-minted
+device is revoked; the readable output and the JSON `consumers` field say which consumer applies.
+
 The token is returned exactly once and only its hash persists. By default the link prints only
 when stdout is an interactive terminal; a piped stdout is refused before any device is minted.
 `--output <file>` instead creates a new mode-0600 file atomically (an existing path is never

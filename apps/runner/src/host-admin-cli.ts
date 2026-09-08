@@ -145,6 +145,26 @@ export function isLoopbackHostname(hostname: string): boolean {
   return v4 !== null && v4.slice(1).every((octet) => Number(octet) <= 255);
 }
 
+/** Literal Tailscale IPv4 (100.64.0.0/10), the only non-loopback host the desktop app accepts over plain HTTP. */
+export function isTailnetIpv4Literal(hostname: string): boolean {
+  const v4 = /^100\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(hostname.trim());
+  if (!v4) return false;
+  const second = Number(v4[1]);
+  return second >= 64 && second <= 127 && v4.slice(2).every((octet) => Number(octet) <= 255);
+}
+
+/**
+ * Which advertised consumers can open a pairing link. A browser needs the control plane to serve
+ * the dashboard bundle. The desktop app's Add Remote Instance dialog accepts plain HTTP only for
+ * loopback or a literal Tailscale address (apps/web/src/instance-pairing.ts); everything else must
+ * be HTTPS. A link usable by neither must never be handed out as a success.
+ */
+export function pairingLinkConsumers(origin: string, webServed: boolean): { browser: boolean; desktop: boolean } {
+  const url = new URL(origin);
+  const desktop = url.protocol === "https:" || isLoopbackHostname(url.hostname) || isTailnetIpv4Literal(url.hostname);
+  return { browser: webServed, desktop };
+}
+
 /** The loopback control-plane origin; anything else fails closed because the bootstrap credential is loopback-only. */
 export function resolveLoopbackUrl(args: string[], env: NodeJS.ProcessEnv): { url: string; port: number } {
   const raw = option(args, "--url") ?? `http://127.0.0.1:${env.CONTROL_PLANE_PORT?.trim() || DEFAULT_PORT}`;
@@ -504,6 +524,9 @@ export async function runHostAdminCli(
       // plaintext would otherwise be lost while the credential stayed active.
       let delivered = false;
       try {
+        if (typeof reply.device?.deviceId !== "string" || typeof reply.device.name !== "string") {
+          throw new CliError("control plane returned no device record");
+        }
         if (typeof reply.token !== "string" || !PAIR_TOKEN_RE.test(reply.token)) {
           throw new CliError("control plane returned an unusable device token");
         }
@@ -526,7 +549,6 @@ export async function runHostAdminCli(
           originSource = "loopback";
           warn("control plane is bound to loopback only and no CONTROL_PLANE_PUBLIC_ORIGIN is configured; this link only works on this machine. Set CONTROL_PLANE_PUBLIC_ORIGIN or pass --origin for a remote client.");
         }
-        if (!reply.pairing.webServed) warn("this control plane serves no web dashboard bundle; the desktop app can still use the link via Connections → Instances → Add Remote Instance.");
         const pairingUrl = `${origin}/#pair=${reply.token}`;
         try {
           new URL(pairingUrl);
@@ -534,19 +556,31 @@ export async function runHostAdminCli(
           // A scoped or otherwise unlinkable bind address (fe80::1%eth0) cannot become a link.
           throw new CliError(`${origin} cannot form a valid pairing link; set CONTROL_PLANE_PUBLIC_ORIGIN or pass --origin <public-origin>`);
         }
-        const summary = { device: reply.device, origin, originSource };
+        const consumers = pairingLinkConsumers(origin, reply.pairing.webServed);
+        if (!consumers.browser && !consumers.desktop) {
+          throw new CliError(
+            `${origin} is plain HTTP to a host that is neither loopback nor a Tailscale address, and this control plane serves no web dashboard bundle, ` +
+              "so neither a browser nor the desktop app can use the link; set CONTROL_PLANE_PUBLIC_ORIGIN to an HTTPS origin or pass --origin <https-origin>",
+          );
+        }
+        if (!consumers.desktop) warn(`the desktop app refuses plain HTTP to ${new URL(origin).hostname}; this link works only in a browser. Use an HTTPS or Tailscale origin for Connections → Instances → Add Remote Instance.`);
+        if (!consumers.browser) warn("this control plane serves no web dashboard bundle; this link works only in the desktop app via Connections → Instances → Add Remote Instance.");
+        const howToUse = consumers.browser && consumers.desktop
+          ? "Open it in a browser or paste it into Connections → Instances → Add Remote Instance"
+          : consumers.browser ? "Open it in a browser" : "Paste it into Connections → Instances → Add Remote Instance";
+        const summary = { device: reply.device, origin, originSource, consumers };
+        const heading = `Paired device ${reply.device.deviceId} (${reply.device.name}) for ${reply.device.userName}.\n`;
         if (outputPath) {
           writeProtectedSecretFile(outputPath, `${pairingUrl}\n`);
+          // The file is the delivery; a later stdout failure must not revoke a delivered secret.
           delivered = true;
-          emit({ ...summary, outputPath },
-            `Paired device ${reply.device.deviceId} (${reply.device.name}) for ${reply.device.userName}.\n` +
-              `Pairing link written once to ${outputPath} (mode 0600). Open it in a browser or paste it into Connections → Instances → Add Remote Instance.`);
+          emit({ ...summary, outputPath }, `${heading}Pairing link written once to ${outputPath} (mode 0600). ${howToUse}.`);
         } else {
+          const text = `${heading}This link is shown once; ${howToUse.charAt(0).toLowerCase()}${howToUse.slice(1)}:\n${pairingUrl}`;
+          // Terminal delivery is the write itself: if stdout fails the secret may be lost or
+          // partially shown, so the device is revoked and the operator re-runs the command.
+          emit({ ...summary, pairingUrl }, text);
           delivered = true;
-          emit({ ...summary, pairingUrl },
-            `Paired device ${reply.device.deviceId} (${reply.device.name}) for ${reply.device.userName}.\n` +
-              "This link is shown once; open it in a browser or paste it into Connections → Instances → Add Remote Instance:\n" +
-              pairingUrl);
         }
         return 0;
       } catch (error) {
