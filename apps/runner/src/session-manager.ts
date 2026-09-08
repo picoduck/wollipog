@@ -8856,6 +8856,11 @@ export class SessionManager {
     const jobIds = this.queuedBackgroundJobIds(meta);
     if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
     const entry = this.active.get(sessionId);
+    if (this.backgroundRecoveryHeld(meta)) {
+      if (!entry?.running) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+      this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      return;
+    }
     if (entry?.currentBackgroundJobIds?.some((id) => jobIds.includes(id)) ||
         entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id))) ||
         this.preLaunchQueues.get(sessionId)?.some((prompt) =>
@@ -9082,6 +9087,17 @@ export class SessionManager {
     if (changed) this.store.patchMeta(sessionId, { backgroundJobs });
   }
 
+  /** Automatic background work must not turn a restart into new spending authority. */
+  private backgroundRecoveryHeld(meta: SessionMeta): boolean {
+    const entry = this.active.get(meta.sessionId);
+    if (entry?.governanceTripped || entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId)) return true;
+    if (meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd) return true;
+    if (!meta.config.maxToolCalls) return false;
+    const toolCallIds = entry?.toolCallIds ?? new Set(this.store.readEvents(meta.sessionId)
+      .flatMap((event) => event.payload.kind === "tool_call" ? [event.payload.toolCallId] : []));
+    return toolCallIds.size >= meta.config.maxToolCalls;
+  }
+
   private async runOrphanRecovery(sessionId: string): Promise<void> {
     if (this.shuttingDown || this.orphanRecoveryLaunching.has(sessionId)) return;
     let meta = this.store.readMeta(sessionId);
@@ -9138,12 +9154,7 @@ export class SessionManager {
     }
     if (meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta)) return;
     const entry = this.active.get(sessionId);
-    const costHeld = !!meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd;
-    const toolsHeld = !entry && !!meta.config.maxToolCalls && new Set(this.store.readEvents(sessionId)
-      .filter((event) => event.payload.kind === "tool_call")
-      .map((event) => (event.payload as Extract<SessionEventPayload, { kind: "tool_call" }>).toolCallId))
-      .size >= meta.config.maxToolCalls;
-    if (entry?.governanceTripped || costHeld || toolsHeld) {
+    if (this.backgroundRecoveryHeld(meta)) {
       // Re-publish the settled runtime so the control plane can restore a lost decision card.
       // Rechecking receipts is read-only; the ceiling must not launch or queue a recovery turn.
       if (!entry?.running) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });

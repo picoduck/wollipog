@@ -2619,6 +2619,76 @@ test("an in-turn managed completion is persisted without a synthetic continuatio
   }
 });
 
+for (const ceiling of ["cost", "tools"] as const) test(`restarted background continuation respects the ${ceiling} ceiling until re-arm`, async () => {
+  const h = harness({
+    driver: "claude-code", agentId: "claude-code", command: "claude",
+    agentSessionId: "claude-session", costUsd: 8.33,
+    config: ceiling === "cost" ? { costBudgetUsd: 8 } : { maxToolCalls: 1 },
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "held-job", parentTurnId: "turn-1", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-held",
+    }],
+  });
+  try {
+    if (ceiling === "tools") h.store.appendEvent("resume-session", {
+      kind: "tool_call", toolCallId: "tool-1", title: "Read", status: "completed",
+    });
+    h.manager.reconcileStore();
+    await shortDelay();
+    await tick();
+    assert.equal(h.launches.length, 0, "a held continuation must not initialize a provider");
+    assert.deepEqual(h.prompts, []);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.continuationSubmittedAt, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "continuation_pending");
+    h.manager.rearmGovernance("resume-session", ceiling === "cost" ? { costBudgetUsd: 16.33 } : { maxToolCalls: 2 });
+    await (h.manager as any).runBackgroundContinuation("resume-session");
+    await tick();
+    assert.equal(h.launches.length, 1);
+    assert.equal(h.prompts.length, 1);
+    await (h.manager as any).runBackgroundContinuation("resume-session");
+    assert.equal(h.prompts.length, 1, "repeated recovery must not duplicate accepted delivery");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const hold of ["governance", "control_plane"] as const) test(`live background continuation preserves a ${hold} hold`, async () => {
+  const h = harness({ driver: "claude-code", agentId: "claude-code", command: "claude" });
+  try {
+    h.manager.prompt("resume-session", "warm up");
+    await tick();
+    await tick();
+    const entry = (h.manager as any).active.get("resume-session");
+    assert.ok(entry && !entry.running);
+    if (hold === "governance") entry.governanceTripped = "cost_budget";
+    else h.manager.rearmGovernance("resume-session", {}, "control_plane");
+    h.store.patchMeta("resume-session", {
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [{
+        id: "held-job", parentTurnId: "turn-1", runnerId: "runner", workspaceId: "workspace",
+        context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+        terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+        continuationQueuedAt: 3, continuationId: "bgcont-held",
+      }],
+    });
+    await (h.manager as any).runBackgroundContinuation("resume-session");
+    assert.deepEqual(h.prompts, ["warm up"]);
+    assert.equal(entry.queue.length, 0);
+    assert.ok((h.manager as any).backgroundContinuationTimers.has("resume-session"));
+    h.manager.rearmGovernance("resume-session", { costBudgetUsd: 10 });
+    await (h.manager as any).runBackgroundContinuation("resume-session");
+    await shortDelay();
+    assert.equal(h.prompts.length, 2);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("restart retries queued continuation but never replays a submitted continuation", async () => {
   const queuedJob = {
     id: "queued-job",
