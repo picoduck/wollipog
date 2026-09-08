@@ -1103,7 +1103,8 @@ function linkedStoreVersionKeys(
   const protectDirectStoreLink = (linkPath: string): void => {
     const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
     if (probe.kind !== "ours" || probe.via !== "store") return;
-    const relative = probe.resolvedTarget.slice(realStoreRoot.length + 1).split(sep);
+    const relative = probe.resolvedTarget.slice(realStoreRoot.length + 1)
+      .split(platform === "win32" ? win32.sep : sep);
     if (relative.length !== 2 || !validSkillName(relative[0]!) || !STORE_VERSION_NAME.test(relative[1]!)) return;
     protectedVersions.add(retentionKey(relative[0]!, relative[1]!));
   };

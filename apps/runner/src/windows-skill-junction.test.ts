@@ -9,6 +9,8 @@ test("the Windows junction helper opens the reparse point and verifies its old t
   assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /FILE_FLAG_OPEN_REPARSE_POINT/u);
   assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /FSCTL_GET_REPARSE_POINT/u);
   assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /FSCTL_SET_REPARSE_POINT/u);
+  assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /GetFullPathNameW/u);
+  assert.doesNotMatch(WINDOWS_SKILL_JUNCTION_HELPER, /Path\.GetFullPath/u);
   assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /OrdinalIgnoreCase/u);
   assert.doesNotMatch(WINDOWS_SKILL_JUNCTION_HELPER, /Remove-Item|Directory\.Delete/u);
 });

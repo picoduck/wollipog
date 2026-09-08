@@ -344,10 +344,12 @@ if ([string]$spec.operation -eq 'list') {
 
 function invoke(specification: Record<string, unknown>): WindowsSnapshotOutput {
   const encodedSpec = Buffer.from(JSON.stringify(specification), "utf8").toString("base64");
-  const encodedCommand = Buffer.from(WINDOWS_SKILL_SNAPSHOT_HELPER, "utf16le").toString("base64");
+  // Feed the fixed program over stdin. `-EncodedCommand` would inflate this helper beyond
+  // CreateProcessW's 32,767-character command-line ceiling before PowerShell can start.
   const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-    "-EncodedCommand", encodedCommand], {
+    "-Command", "-"], {
     env: { ...process.env, WOLLIPOG_SKILL_SNAPSHOT_SPEC: encodedSpec },
+    input: WINDOWS_SKILL_SNAPSHOT_HELPER,
     encoding: "utf8",
     maxBuffer: 8 * 1024 * 1024,
     timeout: 30_000,

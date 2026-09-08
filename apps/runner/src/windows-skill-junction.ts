@@ -44,9 +44,21 @@ public static class WollipogSkillJunction {
   static extern bool DeviceIoControl(SafeFileHandle file, uint code, byte[] input, int inputLength,
     byte[] output, int outputLength, out int returned, IntPtr overlapped);
 
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern uint GetFullPathNameW(string path, uint length, StringBuilder buffer, IntPtr filePart);
+
   static string NormalizeTarget(string value) {
-    if (value.StartsWith(@"\??\", StringComparison.Ordinal)) value = value.Substring(4);
-    return Path.GetFullPath(value).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    if (value.StartsWith(@"\??\UNC\", StringComparison.OrdinalIgnoreCase)) value = @"\\" + value.Substring(8);
+    else if (value.StartsWith(@"\??\", StringComparison.Ordinal)) value = value.Substring(4);
+    var buffer = new StringBuilder(32768);
+    uint result = GetFullPathNameW(value, (uint)buffer.Capacity, buffer, IntPtr.Zero);
+    if (result == 0 || result >= (uint)buffer.Capacity) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "the junction target path is invalid");
+    }
+    value = buffer.ToString();
+    if (value.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) value = @"\\" + value.Substring(8);
+    else if (value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) value = value.Substring(4);
+    return value.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
   }
 
   static string CurrentTarget(SafeFileHandle handle) {
@@ -69,7 +81,9 @@ public static class WollipogSkillJunction {
 
   static byte[] Payload(string target) {
     var printName = NormalizeTarget(target);
-    var substituteName = @"\??\" + printName;
+    var substituteName = printName.StartsWith(@"\\", StringComparison.Ordinal)
+      ? @"\??\UNC\" + printName.Substring(2)
+      : @"\??\" + printName;
     var substitute = Encoding.Unicode.GetBytes(substituteName);
     var print = Encoding.Unicode.GetBytes(printName);
     var pathBytes = new byte[substitute.Length + 2 + print.Length + 2];

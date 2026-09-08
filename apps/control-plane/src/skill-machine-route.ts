@@ -43,15 +43,15 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     if (!runnerSupportsProtocol(runner.protocolVersion, "machineSkillSnapshots")) {
       reply.code(409).send({ error: runnerCapabilityRequirement(runner.protocolVersion, "machineSkillSnapshots", "Machine skill snapshots") }); return false;
     }
-    if ((runner.os === "macos" || runner.os === "windows") &&
-        !runnerSupportsProtocol(runner.protocolVersion, "portableMachineSkillSnapshots")) {
+    if (runner.os === "windows" &&
+        !runnerSupportsProtocol(runner.protocolVersion, "nativeWindowsMachineSkillSnapshots")) {
       reply.code(409).send({ error: runnerCapabilityRequirement(
-        runner.protocolVersion, "portableMachineSkillSnapshots", `${runner.os === "macos" ? "macOS" : "Windows"} machine skill snapshots`,
+        runner.protocolVersion, "nativeWindowsMachineSkillSnapshots", "Windows machine skill snapshots",
       ) });
       return false;
     }
-    if (runner.os !== "linux" && runner.os !== "macos" && runner.os !== "windows") {
-      reply.code(409).send({ error: "Machine skill snapshots currently require a Linux, macOS, or Windows runner." });
+    if (runner.os !== "linux" && runner.os !== "windows") {
+      reply.code(409).send({ error: "Machine skill snapshots currently require a Linux or Windows runner." });
       return false;
     }
     return true;

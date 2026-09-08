@@ -41,8 +41,8 @@ const runner: RunnerView = {
     ? 1
     : new URLSearchParams(location.search).has("legacyRecovery")
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery - 1
-      : new URLSearchParams(location.search).has("macos") || new URLSearchParams(location.search).has("windows")
-        ? RUNNER_CAPABILITY_MIN_PROTOCOL.portableMachineSkillSnapshots
+      : new URLSearchParams(location.search).has("windows")
+        ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillSnapshots
         : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery,
 };
 

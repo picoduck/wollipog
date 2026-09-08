@@ -1,6 +1,6 @@
 # Agent Skills Management and Deployment
 
-Status: managed Linux/macOS/Windows deployment, Git import, Linux/macOS/Windows machine snapshots,
+Status: managed Linux/macOS/Windows deployment, Git import, Linux/Windows machine snapshots,
 guarded Linux adoption/recovery, version history with library rollback, machine-wide version pins,
 and assignable groups implemented; remaining mixed-context WSL work is phased.
 
@@ -62,8 +62,8 @@ Group assignments retain the selected machine-wide version policy when they expa
 ## Implemented machine snapshot import
 
 **Import from Machine** discovers real skill directories in `.agents/skills` and configured native
-Claude/Codex harness locations on an online Linux runner using protocol 111 or newer, or a macOS
-or Windows runner using protocol 117 or newer. An owner or administrator must have access to the source
+Claude/Codex harness locations on an online Linux runner using protocol 111 or newer, or a Windows
+runner using protocol 117 or newer. An owner or administrator must have access to the source
 machine. The control plane requests opaque candidate
 IDs from an on-demand inventory, never arbitrary host paths, and never adds file contents to the
 periodic `skills_state` report. Discovery lists at most 64 candidates, examines at most 256 entries
@@ -73,12 +73,12 @@ locations are scanned once; divergent same-name directories remain separate cand
 bound while preserving the 256-entry useful-work budget.
 
 The runner opens every untrusted path component with `O_NOFOLLOW` relative to pinned directory
-descriptors through `/proc/self/fd` on Linux and `/dev/fd` on macOS. Windows uses pinned native
-handles opened with `FILE_FLAG_OPEN_REPARSE_POINT` and without delete sharing. Symlinks, junctions,
+descriptors through `/proc/self/fd` on Linux. Windows uses pinned native handles opened with
+`FILE_FLAG_OPEN_REPARSE_POINT` and without delete sharing. Symlinks, junctions,
 hard links, special files, excessive depth/entry counts, and trees
 exceeding the existing 64-file / 512 KiB-per-file / 2 MiB-total limits fail closed. Two bounded reads
 must agree before content is returned. The configured HOME itself may resolve through a symlink;
-its untrusted descendants may not. Mixed-context WSL imports are not implemented.
+its untrusted descendants may not. macOS and mixed-context WSL imports are not implemented.
 
 The preview shows the complete proposed files, digest, script-path indicators, and any existing
 version's files. An import commits exactly those previewed bytes with machine/directory/name,
@@ -161,8 +161,8 @@ the substituted tree, which is detected as an identity mismatch rather than dele
 with reconciliation/GC, rechecks the latest desired digest and targets, and runs a solicited sync
 first so the target is materialized. Lost or uncorrelated results instruct the operator to inspect
 for a journal before retrying. Backups are intentionally retained without automatic cleanup.
-Mixed-context WSL snapshot/deployment remains under #251. Standalone WSL runners report Linux and
-use this path.
+macOS snapshots and mixed-context WSL snapshot/deployment remain under #251. Standalone WSL
+runners report Linux and use this path.
 
 ### Adoption recovery inspection and restore
 
@@ -220,8 +220,8 @@ rolling-compatible metadata format.
 Git-imported versions retain URL, requested ref, repository path, and resolved commit separately
 from skill content. **Check for Updates** repeats the preview flow; there is no automatic polling
 or update. Import does not rename collisions: use a new source name or cancel. Non-Linux machine
-snapshot import now includes native macOS and Windows; mixed-context WSL deployment remains under
-#251. Native Windows deployment uses directory junctions. Standalone WSL
+snapshot import now includes native Windows; macOS snapshots and mixed-context WSL deployment
+remain under #251. Native Windows deployment uses directory junctions. Standalone WSL
 runners report Linux and use the Linux path. Later
 sections describe that broader target design.
 

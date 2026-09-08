@@ -155,8 +155,8 @@ test("PROTOCOL_VERSION is 119", () => {
   assert.equal(runnerSupportsProtocol(112, "orchestratorNativeTui"), true);
   assert.equal(runnerSupportsProtocol(110, "machineSkillSnapshots"), false);
   assert.equal(runnerSupportsProtocol(111, "machineSkillSnapshots"), true);
-  assert.equal(runnerSupportsProtocol(118, "portableMachineSkillSnapshots"), false);
-  assert.equal(runnerSupportsProtocol(119, "portableMachineSkillSnapshots"), true);
+  assert.equal(runnerSupportsProtocol(118, "nativeWindowsMachineSkillSnapshots"), false);
+  assert.equal(runnerSupportsProtocol(119, "nativeWindowsMachineSkillSnapshots"), true);
   assert.equal(runnerSupportsProtocol(118, "nativeWindowsSkillDeployment"), false);
   assert.equal(runnerSupportsProtocol(119, "nativeWindowsSkillDeployment"), true);
   assert.equal(runnerSupportsProtocol(114, "machineSkillAdoption"), false);

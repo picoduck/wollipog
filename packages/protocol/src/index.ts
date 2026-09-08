@@ -483,7 +483,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopAttemptCorrelation: 89,
   agentSkills: 90,
   machineSkillSnapshots: 111,
-  portableMachineSkillSnapshots: 119,
+  nativeWindowsMachineSkillSnapshots: 119,
   nativeWindowsSkillDeployment: 119,
   machineSkillAdoption: 115,
   machineSkillAdoptionRecovery: 116,
