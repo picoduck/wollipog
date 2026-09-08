@@ -14,7 +14,13 @@ A test that cannot fail is provable, not a matter of taste. For each candidate, 
 these it is:
 
 - **Asserts nothing.** No assertion runs, or every assertion is inside a branch that never executes.
-  `git grep -n "test(\|it(" -- '**/*.test.ts'` to enumerate, then read the body.
+  `git grep -n "test(\|it(" -- '**/*.test.ts'` to enumerate, then read the body. The dominant
+  false positive is an assertion delegated to a helper: an in-file helper, one imported from a
+  sibling or from `@wollipog/test-support` (`waitFor`, `assertRetryableFailure`,
+  `assertRoundTrips`, `expectError`), or a fluent form such as `expect.poll(...).toEqual(...)` that
+  a naive `expect(` / `assert.` regex misses. Resolve assertion reachability transitively through
+  helpers before flagging; every hit this category has produced across three sweeps was one of
+  these.
 - **Asserts only on its own fixture.** The assertions check values the test itself constructed and
   never pass through the code under test.
 - **Tautological.** Asserts a language or library guarantee rather than repository behavior.
