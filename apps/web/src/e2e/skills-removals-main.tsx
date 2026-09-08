@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, RunnerView } from "@wollipog/protocol";
+import { RUNNER_CAPABILITY_MIN_PROTOCOL, type ControlPlaneToUi, type RunnerView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -35,7 +35,9 @@ const runner: RunnerView = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: new URLSearchParams(location.search).has("legacySkills") ? 1 : 113,
+  protocolVersion: new URLSearchParams(location.search).has("legacySkills")
+    ? 1
+    : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoption,
 };
 
 const snapshot: ControlPlaneToUi = {

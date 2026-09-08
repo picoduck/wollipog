@@ -69,7 +69,7 @@ test("manual Claude exposure is disclosed and mixed shared-directory policies bl
 });
 test("adoption preflight blocks executable source files without changing version digests", (t) => {
   const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
-  db.registerRunner({ runnerId: "one", hostname: "host", os: "linux", version: "1", agents, workspaces: [] }, 1, 113);
+  db.registerRunner({ runnerId: "one", hostname: "host", os: "linux", version: "1", agents, workspaces: [] }, 1, 114);
   const original = payload();
   const skill = db.createSkill(original);
   db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "codex" } });
