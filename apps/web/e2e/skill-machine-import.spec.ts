@@ -58,6 +58,23 @@ test("machine snapshot read errors block import", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Import Snapshot" })).toBeDisabled();
 });
 
+test("switching machines clears inspected adoption recovery", async ({ page }) => {
+  const operationId = "123e4567-e89b-42d3-a456-426614174000";
+  await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) => route.fulfill({ json: {
+    operations: [{ operationId, backupDirectory: `.codex/skills/.wollipog-adoption-${operationId}`,
+      sourceDirectory: ".codex/skills", name: "code-review", digest: "a".repeat(64), state: "managed_linked",
+      detail: "The managed link is active and the original is preserved." }], truncated: false,
+  } }));
+  await page.goto("/skills-removals-e2e.html?matrix=1&onlineMatrix=1");
+  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await page.getByRole("button", { name: "Inspect Recovery" }).click();
+  await expect(page.getByRole("heading", { name: "Adoption Recovery" })).toBeVisible();
+  await page.getByRole("button", { name: /^Machine:/ }).click();
+  await page.getByRole("option", { name: "Other Machine", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Adoption Recovery" })).toBeHidden();
+  await expect(page.getByRole("status")).toBeHidden();
+});
+
 for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
   `identical assigned source requires confirmed adoption at ${width} in ${theme}`,
   async ({ page }, info) => {

@@ -124,15 +124,15 @@ function operationView(home: string, dataDir: string, sourceDirectory: string,
     }
     original = openOptionalDirectory(backup, "original");
     const kind = pathKind(parent, parsed.name);
-    if (kind === "directory" && !original) {
+    if (kind === "directory" && original === null) {
       const source = openOptionalDirectory(parent, parsed.name);
       try {
-        if (source && identity(source) === parsed.sourceIdentity) {
+        if (source !== null && identity(source) === parsed.sourceIdentity) {
           return { ...base, state: "intent_only", detail: "The original source is still in place; no restore is needed." };
         }
-      } finally { if (source) closeSync(source); }
+      } finally { if (source !== null) closeSync(source); }
     }
-    if (original && identity(original) === parsed.sourceIdentity) {
+    if (original !== null && identity(original) === parsed.sourceIdentity) {
       if (kind === "absent") {
         return { ...base, state: "source_preserved", detail: "The original is preserved and the source path is empty." };
       }
@@ -149,19 +149,19 @@ function operationView(home: string, dataDir: string, sourceDirectory: string,
         }
       }
     }
-    if (!original && kind === "directory") {
+    if (original === null && kind === "directory") {
       const source = openOptionalDirectory(parent, parsed.name);
       try {
-        if (source && identity(source) === parsed.sourceIdentity) {
+        if (source !== null && identity(source) === parsed.sourceIdentity) {
           return { ...base, state: "restored", detail: "The preserved original has been restored." };
         }
-      } finally { if (source) closeSync(source); }
+      } finally { if (source !== null) closeSync(source); }
     }
     return { ...base, state: "blocked",
       detail: "The journal or source path does not match a safe automatic recovery state." };
   } catch { return null; }
   finally {
-    if (original) closeSync(original);
+    if (original !== null) closeSync(original);
     if (backup !== undefined) closeSync(backup);
     if (parent !== undefined) closeSync(parent);
   }

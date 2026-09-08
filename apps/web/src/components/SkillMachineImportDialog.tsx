@@ -74,8 +74,15 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
       setRecovery(await api.inspectMachineSkillRecovery(runnerId));
       setRestoreConfirmed(null);
       if (result.status === "restored") await onImported();
-    } catch (cause) { setError((cause as Error).message); }
-    finally { setBusy(false); }
+    } catch (cause) { setRecovery(null); setError((cause as Error).message); }
+    finally { setRestoreConfirmed(null); setBusy(false); }
+  };
+  const selectRunner = (selectedRunnerId: string) => {
+    setRunnerId(selectedRunnerId);
+    setRecovery(null);
+    setRestoreConfirmed(null);
+    setAdoptionStatus(null);
+    setError(null);
   };
   const read = async (id: string) => {
     if (!discovery) return;
@@ -129,7 +136,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
       <p>Import a read-only snapshot. After an identical library version is assigned, a separate confirmed action can preserve the original and replace it with a managed link. New skills stay unassigned; accepted updates deploy to current assignments on unpinned machines.</p>
       <p className="skills-hint">Snapshot import requires protocol 111. Adoption requires a connected Linux runner on protocol 115 or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
       <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy || discovery !== null}
-        options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={setRunnerId} /></label>
+        options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={selectRunner} /></label>
       {compatible.length === 0 && <p>No compatible connected machines. Update a Linux runner to enable snapshot imports.</p>}
       <button className="btn" type="button" disabled={busy || !compatible.some((runner) => runner.runnerId === runnerId)} onClick={() => void discover()}>{busy ? "Working…" : "Discover Skills"}</button>
       <button className="btn" type="button" disabled={busy || !runnerSupportsProtocol(
