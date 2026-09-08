@@ -14,6 +14,7 @@ import {
   renderRunnerConfig,
   renderRunnerUnit,
   serviceLayout,
+  execQuote,
   unitPath,
   unitQuote,
 } from "./systemd-service.js";
@@ -135,6 +136,10 @@ test("unit rendering doubles systemd specifiers and only system units wait for t
   assert.ok(unit.includes("WorkingDirectory=/home/od d%%n/.local/share/wollipog/control-plane\n"), unit);
   assert.ok(unit.includes("EnvironmentFile=/home/od d%%n/.config/wollipog/control-plane.env\n"));
   assert.ok(unit.includes('ExecStart="/opt/w%%N/control plane"\n'));
+  const dollar = renderControlPlaneUnit(weird, { executable: "/opt/${release}/control-plane", host: "127.0.0.1", port: 4317, publicOrigin: null, tailnetOnly: false, webDist: null });
+  assert.ok(dollar.includes('ExecStart="/opt/$${release}/control-plane"\n'), "ExecStart words double $ so systemd does not expand them");
+  assert.equal(execQuote("/a$b"), '"/a$$b"');
+  assert.equal(unitQuote("/a$b"), '"/a$b"', "Environment= values are not expanded, so $ stays literal");
   assert.ok(!unit.includes("network-online.target"), "user managers have no network-online.target");
   const runner = renderRunnerUnit(weird, { executable: "/opt/w%N/wollipog-runner" });
   assert.ok(runner.includes(`After=${CONTROL_PLANE_UNIT}\n`) && runner.includes(`Wants=${CONTROL_PLANE_UNIT}\n`));

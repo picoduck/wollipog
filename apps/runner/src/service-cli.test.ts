@@ -12,6 +12,7 @@ const LOCAL_TOKEN = "L".repeat(43);
 const RUNNER_TOKEN = `wollipogr_${"r".repeat(43)}`;
 
 interface Fake {
+  enabled: Set<string>;
   host: ServiceHost;
   io: ServiceIo;
   execs: string[];
@@ -52,10 +53,12 @@ function fake(t: { after(fn: () => void): void }, options: {
   let cpRunning = false;
   let runnerRunning = false;
   let clock = 0;
+  const enabled = new Set<string>();
   const unitState = (unit: string) => {
     const installed = existsSync(join(layout.unitDir, unit));
     const running = unit === CONTROL_PLANE_UNIT ? cpRunning : runnerRunning;
-    return `LoadState=${installed ? "loaded" : "not-found"}\nActiveState=${running ? "active" : "inactive"}\nSubState=${running ? "running" : "dead"}\nUnitFileState=${installed ? "enabled" : ""}\nMainPID=${running ? 4242 : 0}\nNRestarts=0\nExecMainStartTimestamp=\n`;
+    const isEnabled = installed && !existsSync(join(layout.unitDir, `${unit}.disabled`));
+    return `LoadState=${installed ? "loaded" : "not-found"}\nActiveState=${running ? "active" : "inactive"}\nSubState=${running ? "running" : "dead"}\nUnitFileState=${installed ? (isEnabled ? "enabled" : "disabled") : ""}\nMainPID=${running ? 4242 : 0}\nNRestarts=0\nExecMainStartTimestamp=\n`;
   };
   const fetch: McpFetch = async (url, init) => {
     const respond = (statusCode: number, body: unknown) => ({ ok: statusCode >= 200 && statusCode < 300, status: statusCode, text: async () => JSON.stringify(body) });
@@ -100,6 +103,9 @@ function fake(t: { after(fn: () => void): void }, options: {
       if (command === "systemctl") {
         if (options.systemctlFail && line.includes(options.systemctlFail)) return { code: 1, stdout: "", stderr: `fake failure for ${options.systemctlFail}` };
         if (args.includes("--version")) return { code: 0, stdout: "systemd 255\n", stderr: "" };
+        if (args[args.length - 1] === "enable" || args[args.length - 1] === "disable") return { code: 1, stdout: "", stderr: "Too few arguments." };
+        if (args.includes("enable")) for (const unit of args.slice(args.indexOf("enable") + 1)) { enabled.add(unit); rmSync(join(layout.unitDir, `${unit}.disabled`), { force: true }); }
+        if (args.includes("disable")) for (const unit of args.slice(args.indexOf("disable") + 1).filter((a) => a !== "--now")) { enabled.delete(unit); if (existsSync(layout.unitDir)) writeFileSync(join(layout.unitDir, `${unit}.disabled`), ""); }
         if (args.includes("show")) return { code: 0, stdout: unitState(args[args.length - 1]!), stderr: "" };
         if (args.includes("restart") || args.includes("start")) {
           const unit = args[args.length - 1]!;
@@ -141,7 +147,7 @@ function fake(t: { after(fn: () => void): void }, options: {
     stdinIsTTY: options.stdinIsTTY ?? false,
     confirm: options.confirm ?? (async () => false),
   };
-  return { host, io, execs, stdout: () => out.join(""), stderr: () => err.join(""), root, home, layout };
+  return { enabled, host, io, execs, stdout: () => out.join(""), stderr: () => err.join(""), root, home, layout };
 }
 
 function bins(f: Fake): string[] {
@@ -371,9 +377,12 @@ test("service install --system uses the service account's uid for the credential
   assert.ok(f.execs.some((line) => line.startsWith("chown -R wollipog:wollipog ") && line.endsWith(` ${ws}`)), "a workspace created by install is chowned to the account");
   assert.ok(f.execs.some((line) => line.startsWith("chown wollipog:wollipog ") && line.endsWith("runner.token")), "the minted runner token is handed to the service account");
   assert.ok(readFileSync(join(f.layout.unitDir, CONTROL_PLANE_UNIT), "utf8").includes("User=wollipog\n"));
+  // Account missing: it is created, and if its uid still cannot be resolved the install fails closed
+  // instead of skipping the credential owner check.
   const noAccount = fake(t, { uid: 0, accountUid: null, system: true });
-  assert.equal(await runServiceCli(["service", "install", "--system", ...bins(noAccount), "--no-start", "--json"], noAccount.host, noAccount.io), 0, noAccount.stderr());
+  assert.equal(await runServiceCli(["service", "install", "--system", ...bins(noAccount), "--no-start", "--json"], noAccount.host, noAccount.io), 1);
   assert.ok(noAccount.execs.includes(`useradd --system --home-dir ${noAccount.layout.dataDir} --create-home --shell /usr/sbin/nologin wollipog`), noAccount.execs.join("\n"));
+  assert.match(JSON.parse(noAccount.stdout()).error, /could not resolve the uid of service account wollipog/u);
 });
 
 test("service install --no-start leaves the runner unit disabled until its credential exists", async (t) => {
@@ -383,8 +392,27 @@ test("service install --no-start leaves the runner unit disabled until its crede
   assert.deepEqual(report.started, []);
   assert.ok(f.execs.includes(`systemctl --user enable ${CONTROL_PLANE_UNIT}`), f.execs.join("\n"));
   assert.ok(!f.execs.some((line) => line.includes(`enable ${CONTROL_PLANE_UNIT} ${RUNNER_UNIT}`)));
-  assert.match(report.warnings.join("\n"), /wollipog-runner\.service was written but not enabled: no .*runner\.token exists yet/u);
+  assert.match(report.warnings.join("\n"), /wollipog-runner\.service was written but left disabled: no .*runner\.token exists yet/u);
   assert.ok(!existsSync(f.layout.runnerTokenFile));
+  assert.deepEqual([...f.enabled], [CONTROL_PLANE_UNIT]);
+
+  // Runner-only --no-start with a local control plane: nothing to enable, and no empty `enable` call.
+  const g = fake(t);
+  writeFileSync(join(g.root, "wollipog-runner"), "#!/bin/sh\n", { mode: 0o755 });
+  mkdirSync(g.layout.configDir, { recursive: true, mode: 0o700 });
+  writeFileSync(g.layout.controlPlaneEnvFile, "CONTROL_PLANE_PORT=4317\n", { mode: 0o600 });
+  assert.equal(await runServiceCli(["service", "install", "--runner", "--runner-bin", join(g.root, "wollipog-runner"), "--no-start", "--json"], g.host, g.io), 0, g.stderr() + g.stdout());
+  assert.ok(!g.execs.some((line) => /systemctl --user enable$/u.test(line)), g.execs.join("\n"));
+  assert.equal(g.enabled.size, 0);
+
+  // A runner enabled earlier whose token vanished is explicitly disabled on a --no-start reinstall.
+  const h = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(h), "--json"], h.host, h.io), 0, h.stderr());
+  assert.ok(h.enabled.has(RUNNER_UNIT));
+  rmSync(h.layout.runnerTokenFile);
+  const again = fake(t, { home: h.home });
+  assert.equal(await runServiceCli(["service", "install", ...bins(h), "--no-start", "--json"], again.host, again.io), 0, again.stderr());
+  assert.ok(again.execs.includes(`systemctl --user disable ${RUNNER_UNIT}`), again.execs.join("\n"));
 });
 
 test("service install --runner alone needs a local control plane or an existing token", async (t) => {
@@ -401,6 +429,13 @@ test("service install honours a preserved env file's database and credential pat
   const customDb = join(f.root, "elsewhere", "cp.db");
   mkdirSync(join(f.root, "elsewhere"), { recursive: true });
   writeFileSync(f.layout.controlPlaneEnvFile, `CONTROL_PLANE_HOST="127.0.0.1"\nCONTROL_PLANE_PORT=4400\nCONTROL_PLANE_DB="${customDb}"\nCONTROL_PLANE_LOCAL_TOKEN_FILE="${customDb}.local-device-token"\n`, { mode: 0o600 });
+  // A relative path in the env file resolves from the control plane's WorkingDirectory, not the shell cwd.
+  const relative = fake(t, { tokenPathFromEnv: true });
+  mkdirSync(relative.layout.configDir, { recursive: true, mode: 0o700 });
+  mkdirSync(relative.layout.controlPlaneDataDir, { recursive: true, mode: 0o700 });
+  writeFileSync(relative.layout.controlPlaneEnvFile, `CONTROL_PLANE_PORT=4400\nCONTROL_PLANE_DB="custom.db"\nCONTROL_PLANE_LOCAL_TOKEN_FILE="${join(relative.layout.controlPlaneDataDir, "custom.db.local-device-token")}"\n`, { mode: 0o600 });
+  assert.equal(await runServiceCli(["service", "install", ...bins(relative), "--json"], relative.host, relative.io), 0, relative.stderr());
+  assert.equal(JSON.parse(relative.stdout()).health.runnerOnline, true, JSON.parse(relative.stdout()).warnings.join(" | "));
   assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
   const report = JSON.parse(f.stdout());
   assert.equal(report.health.runnerOnline, true, report.warnings.join(" | "));

@@ -121,10 +121,16 @@ export function unitPath(value: string): string {
   return value.replace(/%/gu, "%%");
 }
 
-/** Quote one word for a split directive (ExecStart=, ReadWritePaths=, Environment= values). */
+/** Quote one word for a split directive (ReadWritePaths=, Environment= values): `%` doubled, no `$` expansion there. */
 export function unitQuote(value: string): string {
   assertUnitSafe("unit value", value);
   return `"${value.replace(/%/gu, "%%").replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
+}
+
+/** Quote one ExecStart= word: like unitQuote, plus `$` doubled because systemd expands `${VAR}` even inside quotes. */
+export function execQuote(value: string): string {
+  assertUnitSafe("ExecStart word", value);
+  return `"${value.replace(/%/gu, "%%").replace(/\$/gu, "$$$$").replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
 }
 
 /**
@@ -151,7 +157,7 @@ export function renderControlPlaneUnit(layout: ServiceLayout, options: ControlPl
     ...(layout.mode === "system" ? [`User=${layout.account}`, `Group=${layout.account}`] : []),
     `WorkingDirectory=${unitPath(layout.controlPlaneDataDir)}`,
     `EnvironmentFile=${unitPath(layout.controlPlaneEnvFile)}`,
-    `ExecStart=${unitQuote(options.executable)}`,
+    `ExecStart=${execQuote(options.executable)}`,
     "Restart=on-failure",
     "RestartSec=5s",
     "KillMode=control-group",
@@ -200,7 +206,7 @@ export function renderRunnerUnit(layout: ServiceLayout, options: { executable: s
     `WorkingDirectory=${unitPath(layout.runnerDataDir)}`,
     `Environment=RUNNER_TOKEN_FILE=${unitQuote(layout.runnerTokenFile)}`,
     `Environment=RUNNER_DATA_DIR=${unitQuote(layout.runnerDataDir)}`,
-    `ExecStart=${unitQuote(options.executable)} --config ${unitQuote(layout.runnerConfigFile)}`,
+    `ExecStart=${execQuote(options.executable)} --config ${execQuote(layout.runnerConfigFile)}`,
     "Restart=on-failure",
     "RestartSec=5s",
     "KillMode=control-group",
