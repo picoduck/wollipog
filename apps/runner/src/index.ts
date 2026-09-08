@@ -46,6 +46,7 @@ import {
   type SessionSnapshot,
   type SessionWorktreeView,
   type SkillsSyncManifestMessage,
+  type SkillAdoptionMessage,
   type StartSessionMessage,
 } from "@wollipog/protocol";
 import {
@@ -151,6 +152,7 @@ import {
   type ReconcileSkillEntry,
 } from "./skills.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
+import { handleSkillAdoption } from "./skill-adoption-command.js";
 import { ChunkedSkillsSyncAssembler, type ChunkedSyncStep } from "./skills-sync.js";
 import { VERSION } from "./version.js";
 import { overlayAcpAuthStatus, type AcpAuthRuntime } from "./acp-auth-status.js";
@@ -888,6 +890,26 @@ function queueSkillsReconcile(requestId?: string): void {
         error: `skill reconcile failed: ${errText(error)}`,
       });
     }
+  };
+  skillsReconcileQueue = skillsReconcileQueue.then(run, run);
+}
+
+function queueSkillAdoption(msg: SkillAdoptionMessage): void {
+  const run = async () => {
+    const result = handleSkillAdoption({
+      message: msg,
+      runnerId: config.runnerId,
+      home: homedir(),
+      dataDir: config.dataDir,
+      agents: metadata.agents,
+      snapshots: machineSkillSnapshots,
+      desired: lastDesiredSkills,
+      acquireProviderHomeLease: () => sessions.acquireSkillReconciliationProviderHome(homedir()),
+    });
+    sendUp(result);
+    // A completed or interrupted transaction may have changed the source path. Reconcile and
+    // inventory run next in the same queue so no link/GC pass can interleave with adoption.
+    if (result.status !== "rejected") queueSkillsReconcile();
   };
   skillsReconcileQueue = skillsReconcileQueue.then(run, run);
 }
@@ -1656,6 +1678,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "skill_snapshot":
       if (msg.runnerId === config.runnerId) sendUp(machineSkillSnapshots.handle(msg));
+      break;
+    case "skill_adoption":
+      queueSkillAdoption(msg);
       break;
     case "skills_sync_manifest":
       beginChunkedSkillsSync(msg);

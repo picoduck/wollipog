@@ -110,18 +110,17 @@ promising per-agent file isolation. Reader fields describe potential configured 
 not current filesystem links or observed reads, especially for an unmanaged canonical directory.
 It does not certify which running harnesses have loaded those files.
 
-`status: "prerequisites_met"` is an observation, not an adoption authorization. Every response
-sets `mutationSupported: false`; there is no mutation token. Closing, importing, replacing, or
-expiring the preview during a read invalidates the report. The future replacement transaction must
-recheck source identity/content, durable library state and explicit targeting under the provider-home
-lease, preserve the original directory recoverably, and handle interruption safely. Actual adoption,
-its UI, and non-Linux snapshot/Windows/WSL support remain under #251.
+`status: "prerequisites_met"` is an observation, not an adoption authorization. On a protocol-113
+Linux runner it also mints a one-use, preview-bound adoption token. Closing, importing, replacing,
+or expiring the preview invalidates it. The owner/admin must separately confirm the operation and
+any named shared-directory readers. Manual invocation variants remain blocked because their
+deployed frontmatter can differ from the approved source bytes.
 
 ### Internal recoverable adoption transaction
 
-The runner's `adoptMachineSkill` module implements the Linux filesystem transaction, but is not
-registered as a runner command or exposed by an API/UI. No deployed behavior enables source
-replacement yet. Its trusted caller must resolve the opaque candidate and expiry, verify the durable
+The runner's `adoptMachineSkill` module implements the Linux filesystem transaction. Protocol 113
+exposes it through a serialized runner command, owner/admin API, and the machine-import dialog.
+Its trusted caller must resolve the opaque candidate and expiry, verify the durable
 library version and current explicit assignment/invocation/shared-directory consent, and serialize
 the whole operation with reconciliation and store GC. A read-only preflight report is not that grant.
 The module requires synchronous lease acquisition and an authorization callback, repeats the latter
@@ -130,8 +129,7 @@ before source movement and link publication, and rejects async guards.
 The source and already-materialized untransformed store version are read twice through pinned,
 no-follow descriptors with the existing snapshot bounds. Both must match the approved digest, and
 the source must retain its discovery generation and directory identity. Store/source overlap is
-rejected. The engine supports original agent-invocable content only; manual variant publication
-must be handled by future integration, not inferred from the preflight's manual-support advisory.
+rejected. The engine supports original agent-invocable content only; manual variants fail closed.
 
 Before moving the source, it creates a private mode-0700 sibling directory named
 `.wollipog-adoption-<uuid>` with a mode-0600 `intent.json` describing source/parent/target identities
@@ -149,13 +147,17 @@ occupant. Journals and backups survive runner process death and are not collecte
 disable/GC. Tests kill a child process at each journal boundary; hardware/power-loss recovery has
 not been tested, and durability depends on filesystem support for `fsync`.
 
-The returned backup directory is home-relative to the original parent. If that parent was moved,
+The returned backup directory is home-relative to the original parent and is displayed after
+completion or a recovery-required result. If that parent was moved,
 locate the operation UUID in the moved directory and compare its recorded identity; do not follow a
 replacement parent symlink or blindly restore `original`. A last-instant source-name swap may preserve
-the substituted tree, which is detected as an identity mismatch rather than deleted. Future recovery
-inspection/restore UI, transport authorization, invocation variants and reconciler fencing must be
-implemented before exposing adoption to users. Backups are intentionally retained without automatic
-cleanup. Non-Linux snapshot imports and Windows/WSL deployment also remain under #251.
+the substituted tree, which is detected as an identity mismatch rather than deleted. Future restore
+tooling must inspect these identities and source occupancy before acting. The command is serialized
+with reconciliation/GC, rechecks the latest desired digest and targets, and runs a solicited sync
+first so the target is materialized. Lost or uncorrelated results instruct the operator to inspect
+for a journal before retrying. Backups are intentionally retained without automatic cleanup.
+Non-Linux snapshot imports and native Windows deployment remain under #251; WSL reports Linux and
+uses this path.
 
 ## Implemented Git import
 
@@ -176,14 +178,19 @@ content requires explicit diff acceptance and updates existing track-latest assi
 content reuses the current version. A concurrent library change invalidates acceptance. Previews
 are scoped to the requesting human and organization, expire after ten minutes, and are discarded
 on restart. At most four previews and one discovery are active at once.
-The existing skill-file format does not preserve executable bits: imported scripts deploy as
-content and should be invoked through their interpreter.
+The existing skill-file format and digest do not preserve executable bits. Protocol 113 machine
+snapshots therefore report executable paths separately, without changing version identity. Such a
+snapshot can still be imported as content, but adoption fails closed so replacing the original
+cannot silently discard its execution metadata. Imported scripts deploy as ordinary files and
+should be invoked through their interpreter. Supporting executable adoption requires a future,
+rolling-compatible metadata format.
 
 Git-imported versions retain URL, requested ref, repository path, and resolved commit separately
 from skill content. **Check for Updates** repeats the preview flow; there is no automatic polling
-or update. Import does not rename collisions: use a new source name or cancel. Machine snapshot
-adoption, non-Linux machine snapshot import, assignable groups, and Windows/WSL deployment remain
-separate work under #251. Later sections describe that broader target design.
+or update. Import does not rename collisions: use a new source name or cancel. Non-Linux machine
+snapshot import, assignable groups, and native Windows deployment remain separate work under #251.
+WSL runners report Linux and use the Linux deployment path. Later sections describe that broader
+target design.
 
 This document describes a planned feature that lets users manage a library of agent skills in
 Wollipog and deploy them to the Machines they have connected. A skill is a directory tree containing

@@ -35,7 +35,7 @@ const runner: RunnerView = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: new URLSearchParams(location.search).has("legacySkills") ? 1 : 111,
+  protocolVersion: new URLSearchParams(location.search).has("legacySkills") ? 1 : 113,
 };
 
 const snapshot: ControlPlaneToUi = {

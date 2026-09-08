@@ -17,7 +17,7 @@ test("machine snapshot discovery is bounded metadata; reading pins parents and r
   const root = join(home, ".codex/skills/alpha");
   mkdirSync(join(root, "scripts"), { recursive: true });
   writeFileSync(join(root, "SKILL.md"), "---\nname: alpha\n---\nInstructions");
-  writeFileSync(join(root, "scripts/a.sh"), "echo never-executed");
+  writeFileSync(join(root, "scripts/a.sh"), "echo never-executed", { mode: 0o755 });
   writeFileSync(join(root, "binary"), Buffer.from([0, 255, 254]));
   const snapshots = new MachineSkillSnapshots({ home, agents: () => agents });
   const listed = snapshots.handle(message);
@@ -31,6 +31,7 @@ test("machine snapshot discovery is bounded metadata; reading pins parents and r
   assert.equal(read.snapshot?.files.length, 3);
   assert.equal(read.snapshot?.digest, skillVersionDigest(read.snapshot!.files));
   assert.equal(read.snapshot!.files.find((file) => file.path === "binary")!.encoding, "base64");
+  assert.deepEqual(read.snapshot!.executablePaths, ["scripts/a.sh"]);
   assert.equal(readFileSync(join(root, "scripts/a.sh"), "utf8"), "echo never-executed");
   assert.ok(snapshots.handle({ ...message, operation: "read", candidateId: root }).error);
   renameSync(root, `${root}-old`);

@@ -179,7 +179,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.match(pageText(), /Deployed/);
   assert.match(pageText(), /Unmanaged Skills/);
   assert.match(pageText(), /local-notes/);
-  assert.match(pageText(), /arrives later/);
+  assert.match(pageText(), /can then be adopted with an explicit recovery-aware confirmation/);
   assert.match(pageText(), /Recent Link Removals/);
   assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/);
   assert.match(pageText(), /No longer in the desired skill list\./);

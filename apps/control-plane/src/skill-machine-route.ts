@@ -7,11 +7,17 @@ import type { SkillsRouteDeps } from "./skills-route.js";
 import { skillAdoptionPreflight } from "./skill-adoption-preflight.js";
 
 export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps): void {
-  type Preview = { id: string; candidate: MachineSkillCandidate; payload: ValidatedSkillPayload; expectedVersionId: string | null };
-  type Discovery = { owner: string; runnerId: string; expires: number; candidates: MachineSkillCandidate[]; preview?: Preview };
+  type Preview = { id: string; candidate: MachineSkillCandidate; payload: ValidatedSkillPayload; expectedVersionId: string | null; executablePaths: string[] };
+  type AdoptionApproval = { id: string; preview: Preview };
+  type Discovery = { owner: string; runnerId: string; expires: number; candidates: MachineSkillCandidate[]; preview?: Preview; adoption?: AdoptionApproval };
   const discoveries = new Map<string, Discovery>();
   let pending = false;
   const purge = () => { for (const [id, value] of discoveries) if (value.expires <= Date.now()) discoveries.delete(id); };
+  const executablePaths = (value: unknown, files: ValidatedSkillPayload["files"]): string[] | null => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || !value.every((path) => typeof path === "string" && files.some((file) => file.path === path))) return null;
+    return [...new Set(value)].sort();
+  };
   const timer = setInterval(purge, 60_000); timer.unref();
   app.addHook("onClose", async () => { clearInterval(timer); discoveries.clear(); });
   const authorize = (req: FastifyRequest, reply: FastifyReply, runnerId: string) => {
@@ -72,6 +78,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     if (pending) return reply.code(429).send({ error: "Another machine read is in progress." });
     pending = true;
     delete discovery.preview;
+    delete discovery.adoption;
     try {
       const requestId = randomUUID();
       const result = await deps.hub.requestFromRunner(discovery.runnerId, requestId, { type: "skill_snapshot", runnerId: discovery.runnerId, requestId, operation: "read", candidateId: candidate.id });
@@ -83,9 +90,11 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       if (!payload.ok || payload.digest !== snapshot.digest) throw new Error();
       const existing = deps.db.getSkillByName(candidate.name);
       if (existing && !deps.db.canAccessSkill(principal, existing.id)) return reply.code(409).send({ error: "This skill name is unavailable in the library." });
-      discovery.preview = { id: randomUUID(), candidate, payload, expectedVersionId: existing?.latestVersion?.id ?? null };
+      const executable = executablePaths(snapshot.executablePaths, payload.files);
+      if (!executable) throw new Error();
+      discovery.preview = { id: randomUUID(), candidate, payload, expectedVersionId: existing?.latestVersion?.id ?? null, executablePaths: executable };
       const prior = existing?.latestVersion ? deps.db.getSkillVersion(existing.latestVersion.id) : null;
-      return { previewId: discovery.preview.id, candidate, files: payload.files, digest: payload.digest, previousFiles: prior?.files ?? [],
+      return { previewId: discovery.preview.id, candidate, files: payload.files, digest: payload.digest, executablePaths: executable, previousFiles: prior?.files ?? [],
         disposition: prior?.digest === payload.digest ? "identical" : prior ? "update" : "new", assignmentCount: existing?.assignmentCount ?? 0 };
     } catch { return reply.code(502).send({ error: "Snapshot failed validation or the source changed. Discover it again. Symlinks, hard links, special files, and oversized trees are not supported." }); }
     finally { pending = false; }
@@ -129,12 +138,100 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
         snapshot.candidate.sourceDirectory !== candidate.sourceDirectory || snapshot.candidate.generation !== candidate.generation) throw new Error();
       const payload = validateSkillPayload({ name: candidate.name, files: snapshot.files });
       if (!payload.ok || payload.digest !== snapshot.digest || payload.digest !== preview.payload.digest) throw new Error();
-      return { ...skillAdoptionPreflight(deps.db, discovery.runnerId, candidate, payload.digest),
+      const executable = executablePaths(snapshot.executablePaths, payload.files);
+      if (!executable || JSON.stringify(executable) !== JSON.stringify(preview.executablePaths)) throw new Error();
+      const report = skillAdoptionPreflight(deps.db, discovery.runnerId, candidate, payload.digest, executable);
+      const mutationSupported = report.status === "prerequisites_met" &&
+        runnerSupportsProtocol(deps.db.getRunner(discovery.runnerId)?.protocolVersion, "machineSkillAdoption");
+      const adoptionToken = mutationSupported ? randomUUID() : undefined;
+      if (adoptionToken) discovery.adoption = { id: adoptionToken, preview };
+      else delete discovery.adoption;
+      return { ...report, mutationSupported,
+        ...(adoptionToken ? { adoptionToken } : {}),
         source: { candidate, digest: payload.digest, checkedAt: Date.now() },
-        notice: "Read-only prerequisite report. No directory was changed. Reader fields describe configured deployment exposure, not observed reads. A future adoption must revalidate the source and assignments under the provider-home lease before any replacement.",
+        notice: "Read-only prerequisite report. No directory was changed. Reader fields describe configured deployment exposure, not observed reads. Adoption revalidates the source and assignments under the provider-home lease before replacement.",
       };
     } catch {
       return reply.code(502).send({ error: "The source changed or could not be validated. Preview it again before checking adoption prerequisites." });
+    } finally { pending = false; }
+  });
+
+  app.post("/api/skill-machine/:id/adopt", async (req, reply) => {
+    purge();
+    const id = (req.params as { id: string }).id;
+    const discovery = discoveries.get(id);
+    if (!discovery) return reply.code(404).send({ error: "Discovery expired. Discover the machine again." });
+    const principal = authorize(req, reply, discovery.runnerId);
+    if (!principal || discovery.owner !== ownerKey(principal) || !discovery.preview || !discovery.adoption) {
+      return reply.code(404).send({ error: "Adoption approval not found." });
+    }
+    const body = req.body as { previewId?: unknown; adoptionToken?: unknown; confirmation?: unknown; acceptSharedImpact?: unknown } | null;
+    const preview = discovery.preview;
+    const approval = discovery.adoption;
+    if (body?.previewId !== preview.id || body.adoptionToken !== approval.id || approval.preview !== preview ||
+        body.confirmation !== "explicit") {
+      return reply.code(409).send({ error: "Run and confirm the current adoption preflight first." });
+    }
+    if (!available(discovery.runnerId, reply)) return;
+    const runner = deps.db.getRunner(discovery.runnerId);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "machineSkillAdoption")) {
+      return reply.code(409).send({ error: runnerCapabilityRequirement(runner?.protocolVersion, "machineSkillAdoption", "Machine skill adoption") });
+    }
+    if (pending) return reply.code(429).send({ error: "Another machine skill operation is in progress." });
+    pending = true;
+    try {
+      const sourceRequestId = randomUUID();
+      const source = await deps.hub.requestFromRunner(discovery.runnerId, sourceRequestId, {
+        type: "skill_snapshot", runnerId: discovery.runnerId, requestId: sourceRequestId,
+        operation: "read", candidateId: preview.candidate.id,
+      });
+      purge();
+      const currentPrincipal = authorize(req, reply, discovery.runnerId);
+      if (!currentPrincipal) return;
+      if (discoveries.get(id) !== discovery || discovery.preview !== preview || discovery.adoption !== approval ||
+          ownerKey(currentPrincipal) !== discovery.owner || !available(discovery.runnerId, reply)) {
+        return reply.code(409).send({ error: "The adoption approval changed or expired. Preview the source again." });
+      }
+      if (source.type !== "skill_snapshot_result" || source.requestId !== sourceRequestId ||
+          source.runnerId !== discovery.runnerId || source.error || !source.snapshot) throw new Error();
+      const snapshot = source.snapshot;
+      if (snapshot.candidate.id !== preview.candidate.id || snapshot.candidate.name !== preview.candidate.name ||
+          snapshot.candidate.sourceDirectory !== preview.candidate.sourceDirectory ||
+          snapshot.candidate.generation !== preview.candidate.generation) throw new Error();
+      const payload = validateSkillPayload({ name: preview.candidate.name, files: snapshot.files });
+      if (!payload.ok || payload.digest !== snapshot.digest || payload.digest !== preview.payload.digest) throw new Error();
+      const executable = executablePaths(snapshot.executablePaths, payload.files);
+      if (!executable || JSON.stringify(executable) !== JSON.stringify(preview.executablePaths)) throw new Error();
+      const current = skillAdoptionPreflight(deps.db, discovery.runnerId, preview.candidate, payload.digest, executable);
+      if (current.status !== "prerequisites_met") {
+        return reply.code(409).send({ error: "Assignments or the approved library version changed. Run adoption preflight again.", blockers: current.blockers });
+      }
+      if (current.sharedReaders.length && body.acceptSharedImpact !== true) {
+        return reply.code(409).send({ error: "Confirm that other configured agents can read this shared harness directory." });
+      }
+
+      const syncRequestId = randomUUID();
+      const synced = await deps.pushSkillsSync.request(discovery.runnerId, syncRequestId);
+      if (synced.type !== "skills_state" || synced.requestId !== syncRequestId || synced.runnerId !== discovery.runnerId || synced.error) {
+        return reply.code(409).send({ error: "The approved version could not be prepared on the machine." });
+      }
+      if (discoveries.get(id) !== discovery || discovery.adoption !== approval || !available(discovery.runnerId, reply) ||
+          skillAdoptionPreflight(deps.db, discovery.runnerId, preview.candidate, payload.digest, executable).status !== "prerequisites_met") {
+        return reply.code(409).send({ error: "Assignments or connectivity changed while preparing adoption. Run preflight again." });
+      }
+      const requestId = randomUUID();
+      const result = await deps.hub.requestFromRunner(discovery.runnerId, requestId, {
+        type: "skill_adoption", runnerId: discovery.runnerId, requestId, candidate: preview.candidate,
+        digest: payload.digest, confirmation: "explicit", acceptSharedImpact: body.acceptSharedImpact === true,
+      });
+      delete discovery.adoption;
+      delete discovery.preview;
+      if (result.type !== "skill_adoption_result" || result.requestId !== requestId || result.runnerId !== discovery.runnerId) throw new Error();
+      if (result.status !== "rejected") deps.pushSkillsSync(discovery.runnerId);
+      return result;
+    } catch {
+      delete discovery.adoption;
+      return reply.code(502).send({ error: "Adoption did not return a verified result. Inspect the machine for a recovery journal before retrying." });
     } finally { pending = false; }
   });
 

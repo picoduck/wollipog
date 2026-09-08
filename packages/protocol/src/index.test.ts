@@ -153,6 +153,8 @@ test("PROTOCOL_VERSION is 114", () => {
   assert.equal(runnerSupportsProtocol(112, "orchestratorNativeTui"), true);
   assert.equal(runnerSupportsProtocol(110, "machineSkillSnapshots"), false);
   assert.equal(runnerSupportsProtocol(111, "machineSkillSnapshots"), true);
+  assert.equal(runnerSupportsProtocol(113, "machineSkillAdoption"), false);
+  assert.equal(runnerSupportsProtocol(114, "machineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(109, "conversationHandoff"), false);
   assert.equal(runnerSupportsProtocol(110, "conversationHandoff"), true);
   assert.equal(runnerSupportsProtocol(108, "sessionOrchestration"), false);

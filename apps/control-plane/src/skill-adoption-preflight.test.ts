@@ -55,15 +55,27 @@ test("manual Claude exposure is disclosed and mixed shared-directory policies bl
   const skill = db.createSkill(payload());
   const check = (sourceDirectory = ".claude/skills") => skillAdoptionPreflight(db, "one", { ...candidate, sourceDirectory }, payload().digest);
   db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "claude" }, invocation: "manual" });
-  assert.equal(check().status, "prerequisites_met", "Claude supports manual invocation");
+  assert.equal(check().status, "blocked", "manual variants are not byte-identical adoption targets");
+  assert.ok(check().blockers.includes("manual_variant_adoption_unsupported"));
   assert.deepEqual(check().advisories, ["manual_variant_may_change_content"]);
   assert.deepEqual(check(".agents/skills").advisories, [], "canonical copy remains untransformed");
   db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "codex" }, invocation: "agent" });
-  assert.equal(check(".agents/skills").status, "prerequisites_met", "different harness directories may use different policies");
+  assert.equal(check(".agents/skills").status, "blocked", "the canonical directory includes the manual variant target");
+  assert.ok(check(".agents/skills").blockers.includes("manual_variant_adoption_unsupported"));
   db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "second-claude" }, invocation: "agent" });
   assert.ok(check().blockers.includes("shared_invocation_conflict"));
   assert.ok(check(".agents/skills").blockers.includes("shared_invocation_conflict"));
   assert.equal(check().status, "blocked");
+});
+test("adoption preflight blocks executable source files without changing version digests", (t) => {
+  const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
+  db.registerRunner({ runnerId: "one", hostname: "host", os: "linux", version: "1", agents, workspaces: [] }, 1, 113);
+  const original = payload();
+  const skill = db.createSkill(original);
+  db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "codex" } });
+  const report = skillAdoptionPreflight(db, "one", candidate, original.digest, ["scripts/run.sh"]);
+  assert.equal(report.status, "blocked");
+  assert.ok(report.blockers.includes("executable_mode_adoption_unsupported"));
 });
 test("adoption preflight respects group inheritance, direct disables, audience containment and invalid library bytes", (t) => {
   const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());

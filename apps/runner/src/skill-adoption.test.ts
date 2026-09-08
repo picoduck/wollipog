@@ -20,7 +20,7 @@ function fixture(t: TestContext, sourceDirectory = ".codex/skills") {
   fs.mkdirSync(join(source, "scripts"), { recursive: true });
   fs.mkdirSync(dataDir);
   fs.writeFileSync(join(source, "SKILL.md"), "---\nname: alpha\n---\nOriginal instructions");
-  fs.writeFileSync(join(source, "scripts/run.sh"), "echo must-not-execute", { mode: 0o755 });
+  fs.writeFileSync(join(source, "scripts/run.sh"), "echo must-not-execute", { mode: 0o644 });
   fs.writeFileSync(join(source, "binary"), Buffer.from([0, 255, 254]));
   const snapshots = new MachineSkillSnapshots({ home, agents: () => agents });
   const message = { type: "skill_snapshot" as const, operation: "list" as const, runnerId: "one", requestId: "one" };
@@ -52,7 +52,7 @@ for (const sourceDirectory of [".codex/skills", ".agents/skills"]) {
     assert.ok(fs.existsSync(join(backup, "linked.json")));
     assert.equal(JSON.parse(fs.readFileSync(join(backup, "intent.json"), "utf8")).digest, f.options.digest);
     assert.equal(fs.readFileSync(join(backup, "original/scripts/run.sh"), "utf8"), "echo must-not-execute");
-    assert.equal(fs.statSync(join(backup, "original/scripts/run.sh")).mode & 0o777, 0o755);
+    assert.equal(fs.statSync(join(backup, "original/scripts/run.sh")).mode & 0o777, 0o644);
     assert.deepEqual(fs.readFileSync(join(backup, "original/binary")), Buffer.from([0, 255, 254]));
     assert.equal(fs.realpathSync(f.source), join(f.dataDir, "skills/store/alpha", f.options.digest));
     assert.ok(f.authorized() >= 3);
@@ -67,7 +67,7 @@ for (const sourceDirectory of [".codex/skills", ".agents/skills"]) {
   });
 }
 
-for (const problem of ["lease", "authorization", "async-guard", "changed-source", "bad-generation", "missing-store", "changed-store", "source-link", "store-link", "hard-link", "unsupported-source"]) {
+for (const problem of ["lease", "authorization", "async-guard", "changed-source", "bad-generation", "missing-store", "changed-store", "source-link", "store-link", "hard-link", "executable", "unsupported-source"]) {
   test(`adoption rejects ${problem} before replacing the source`, linux, (t) => {
     const f = fixture(t);
     const target = join(f.dataDir, "skills/store/alpha", f.options.digest);
@@ -81,6 +81,7 @@ for (const problem of ["lease", "authorization", "async-guard", "changed-source"
     if (problem === "source-link") { fs.renameSync(f.source, f.source + "-original"); fs.symlinkSync(f.source + "-original", f.source); }
     if (problem === "store-link") { fs.renameSync(target, target + "-original"); fs.symlinkSync(target + "-original", target); }
     if (problem === "hard-link") fs.linkSync(join(f.source, "SKILL.md"), join(f.root, "hard-link"));
+    if (problem === "executable") fs.chmodSync(join(f.source, "scripts/run.sh"), 0o755);
     if (problem === "unsupported-source") f.options.candidate = { ...f.options.candidate, sourceDirectory: "../../outside" };
     const result = adoptMachineSkill(f.options);
     assert.equal(result.status, "rejected");
