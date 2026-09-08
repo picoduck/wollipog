@@ -117,6 +117,46 @@ recheck source identity/content, durable library state and explicit targeting un
 lease, preserve the original directory recoverably, and handle interruption safely. Actual adoption,
 its UI, and non-Linux snapshot/Windows/WSL support remain under #251.
 
+### Internal recoverable adoption transaction
+
+The runner's `adoptMachineSkill` module implements the Linux filesystem transaction, but is not
+registered as a runner command or exposed by an API/UI. No deployed behavior enables source
+replacement yet. Its trusted caller must resolve the opaque candidate and expiry, verify the durable
+library version and current explicit assignment/invocation/shared-directory consent, and serialize
+the whole operation with reconciliation and store GC. A read-only preflight report is not that grant.
+The module requires synchronous lease acquisition and an authorization callback, repeats the latter
+before source movement and link publication, and rejects async guards.
+
+The source and already-materialized untransformed store version are read twice through pinned,
+no-follow descriptors with the existing snapshot bounds. Both must match the approved digest, and
+the source must retain its discovery generation and directory identity. Store/source overlap is
+rejected. The engine supports original agent-invocable content only; manual variant publication
+must be handled by future integration, not inferred from the preflight's manual-support advisory.
+
+Before moving the source, it creates a private mode-0700 sibling directory named
+`.wollipog-adoption-<uuid>` with a mode-0600 `intent.json` describing source/parent/target identities
+and digest. It flushes content, directory ancestry and the journal, then renames the original into
+that directory as `original` on the same filesystem. It checks the preserved identity/content again,
+records `preserved.json`, and exclusively creates the managed store-target symlink. A newly occupied
+source path makes publication fail; it is never overwritten. `linked.json` records completion.
+Normal serialized reconciliation can subsequently route a harness link through the canonical link.
+
+First adoption has a short gap between source preservation and link publication; it is not an
+atomic directory-to-symlink exchange. `recovery_required` means inspect the operation before any retry
+or further reconciliation: the source may be untouched, absent, newly occupied, or already linked.
+The engine never deletes a backup, auto-restores over a path, or rolls back by removing a concurrent
+occupant. Journals and backups survive runner process death and are not collected by ordinary skill
+disable/GC. Tests kill a child process at each journal boundary; hardware/power-loss recovery has
+not been tested, and durability depends on filesystem support for `fsync`.
+
+The returned backup directory is home-relative to the original parent. If that parent was moved,
+locate the operation UUID in the moved directory and compare its recorded identity; do not follow a
+replacement parent symlink or blindly restore `original`. A last-instant source-name swap may preserve
+the substituted tree, which is detected as an identity mismatch rather than deleted. Future recovery
+inspection/restore UI, transport authorization, invocation variants and reconciler fencing must be
+implemented before exposing adoption to users. Backups are intentionally retained without automatic
+cleanup. Non-Linux snapshot imports and Windows/WSL deployment also remain under #251.
+
 ## Implemented Git import
 
 The Skills view's **Import from Git** action accepts HTTPS and SSH remotes (or GitHub

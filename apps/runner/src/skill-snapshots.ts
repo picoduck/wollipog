@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, opendirSync, readSync, realpathSync, type Stats } from "node:fs";
+import { closeSync, constants, fsyncSync, fstatSync, openSync, opendirSync, readSync, realpathSync, type Stats } from "node:fs";
 import { SKILL_MAX_FILES, SKILL_MAX_FILE_BYTES, SKILL_MAX_TOTAL_BYTES, validSkillFilePath, validSkillName,
   type AgentDefinition, type MachineSkillCandidate, type SkillFile, type SkillSnapshotMessage,
   type SkillSnapshotResultMessage } from "@wollipog/protocol";
@@ -12,7 +12,7 @@ const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
 
 /** Directory times can be coarse enough that a newly added entry has the same timestamp.
  * Include the bounded entry names/types, without reading any file contents during discovery. */
-function directoryGeneration(fd: number): string {
+export function directoryGeneration(fd: number): string {
   const entries: string[] = [];
   const dir = opendirSync(fdPath(fd));
   try {
@@ -22,6 +22,23 @@ function directoryGeneration(fd: number): string {
     }
   } finally { dir.closeSync(); }
   return createHash("sha256").update(JSON.stringify([fingerprint(fstatSync(fd)), entries.sort()])).digest("hex");
+}
+
+/** Internal Linux primitive: resolve a fixed relative directory through pinned no-follow parents. */
+export function openSkillDirectory(home: string, relative: string, durable = false): number {
+  const segments = relative.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("\\"))) throw new Error();
+  let fd = openSync(realpathSync(home), directoryFlags);
+  try {
+    for (const segment of segments) {
+      const next = openSync(`${fdPath(fd)}/${segment}`, directoryFlags);
+      if (durable) {
+        try { fsyncSync(fd); } catch (error) { closeSync(next); throw error; }
+      }
+      closeSync(fd); fd = next;
+    }
+    return fd;
+  } catch (error) { closeSync(fd); throw error; }
 }
 
 /** Linux descriptor-anchored traversal: every untrusted component is opened O_NOFOLLOW relative
@@ -41,14 +58,7 @@ export class MachineSkillSnapshots {
     return [...dirs];
   }
   private openDirectory(relative: string): number {
-    let fd = openSync(realpathSync(this.options.home), directoryFlags);
-    try {
-      for (const segment of relative.split("/")) {
-        const next = openSync(`${fdPath(fd)}/${segment}`, directoryFlags);
-        closeSync(fd); fd = next;
-      }
-      return fd;
-    } catch (error) { closeSync(fd); throw error; }
+    return openSkillDirectory(this.options.home, relative);
   }
   handle(message: SkillSnapshotMessage): SkillSnapshotResultMessage {
     const result: SkillSnapshotResultMessage = { type: "skill_snapshot_result", runnerId: message.runnerId, requestId: message.requestId };
@@ -63,11 +73,11 @@ export class MachineSkillSnapshots {
       const fd = this.openDirectory(`${candidate.sourceDirectory}/${candidate.name}`);
       try {
         if (directoryGeneration(fd) !== candidate.generation) throw new Error();
-        const files = this.readTree(fd);
+        const files = readSkillTree(fd);
         const digest = skillVersionDigest(files);
         // A second bounded pass rejects concurrent edits to content or the manifest. The returned
         // bytes are an immutable snapshot, not a promise that the source remains unchanged later.
-        if (skillVersionDigest(this.readTree(fd)) !== digest || directoryGeneration(fd) !== candidate.generation) throw new Error();
+        if (skillVersionDigest(readSkillTree(fd)) !== digest || directoryGeneration(fd) !== candidate.generation) throw new Error();
         return { ...result, snapshot: { candidate, files, digest } };
       } finally { closeSync(fd); }
     } catch {
@@ -104,7 +114,11 @@ export class MachineSkillSnapshots {
     while (this.candidates.size > 256) this.candidates.delete(this.candidates.keys().next().value!);
     return found;
   }
-  private readTree(root: number): SkillFile[] {
+}
+
+/** Bounded no-follow content validation; adoption may additionally flush files/directories before
+ * preserving them. Snapshot discovery/read never opts into these durability operations. */
+export function readSkillTree(root: number, durable = false): SkillFile[] {
     const files: SkillFile[] = [];
     let total = 0;
     let entries = 0;
@@ -133,6 +147,7 @@ export class MachineSkillSnapshots {
               length += read;
             }
             if (length !== before.size || fingerprint(fstatSync(child)) !== fingerprint(before)) throw new Error();
+            if (durable) fsyncSync(child);
             total += length;
             const content = bytes.subarray(0, length);
             const utf8 = content.toString("utf8");
@@ -140,9 +155,9 @@ export class MachineSkillSnapshots {
           } finally { closeSync(child); }
         }
       } finally { dir.closeSync(); }
+      if (durable) fsyncSync(fd);
     };
     visit(root, "", 0);
     if (!files.some((file) => file.path === "SKILL.md")) throw new Error();
     return files.sort((a, b) => a.path.localeCompare(b.path));
-  }
 }
