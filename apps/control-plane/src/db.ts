@@ -6,6 +6,7 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
+import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -14099,12 +14100,22 @@ export class ControlPlaneDb {
       const rows = this.stmt(
         `SELECT payload FROM session_events
          WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId')=?
-         ORDER BY seq LIMIT 2`,
+         ORDER BY seq LIMIT 3`,
       ).all(sessionId, toolCallId) as Array<{ payload: string }>;
-      if (rows.length !== 1) return [{ requestId: request.requestId, toolCallId, resolved: false }];
       try {
-        const payload = JSON.parse(rows[0]!.payload) as SessionEventPayload;
-        if (payload.kind !== "tool_call" || payload.toolKind !== "agent") {
+        const observations = rows.map((row) => JSON.parse(row.payload) as SessionEventPayload)
+          .filter((payload): payload is Extract<SessionEventPayload, { kind: "tool_call" }> => payload.kind === "tool_call")
+          .map((payload): StructuredAgentSpawnObservation => ({
+            toolCallId: payload.toolCallId,
+            toolKind: payload.toolKind,
+            status: payload.status,
+            ...(payload.parentToolUseId ? { parentToolUseId: payload.parentToolUseId } : {}),
+            ...(payload.subagentLifecycle ? { subagentLifecycle: payload.subagentLifecycle } : {}),
+            ...(payload.subagentName ? { subagentName: payload.subagentName } : {}),
+            ...(payload.subagentRole ? { subagentRole: payload.subagentRole } : {}),
+          }));
+        const identity = observations.length === rows.length ? collapseAgentSpawnObservations(observations) : null;
+        if (!identity) {
           return [{ requestId: request.requestId, toolCallId, resolved: false }];
         }
         const clean = (value: unknown, max: number): string | undefined => {
@@ -14114,8 +14125,8 @@ export class ControlPlaneDb {
           if (!normalized) return undefined;
           return normalized.length > max ? `${normalized.slice(0, max)}…` : normalized;
         };
-        const name = clean(payload.subagentName, 80) ?? "Subagent";
-        const role = clean(payload.subagentRole, 48);
+        const name = clean(identity.subagentName, 80) ?? "Subagent";
+        const role = clean(identity.subagentRole, 48);
         return [{ requestId: request.requestId, toolCallId, resolved: true, name, ...(role ? { role } : {}) }];
       } catch {
         return [{ requestId: request.requestId, toolCallId, resolved: false }];

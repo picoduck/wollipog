@@ -37,8 +37,8 @@ test("projects pending owners on every bounded page and leaves missing or duplic
   const events = [
     event(1, { kind: "tool_call", toolCallId: "first", toolKind: "agent", title: "Task", status: "completed" }),
     event(2, { kind: "tool_call", toolCallId: "owner", toolKind: "agent", title: "Task", status: "running", subagentName: "Owner" }),
-    event(3, { kind: "tool_call", toolCallId: "duplicate", toolKind: "agent", title: "Task", status: "running" }),
-    event(4, { kind: "tool_call", toolCallId: "duplicate", toolKind: "agent", title: "Task", status: "running" }),
+    event(3, { kind: "tool_call", toolCallId: "duplicate", parentToolUseId: "parent-a", toolKind: "agent", title: "Task", status: "running" }),
+    event(4, { kind: "tool_call", toolCallId: "duplicate", parentToolUseId: "parent-b", toolKind: "agent", title: "Task", status: "running" }),
   ];
   const pending: PendingApproval = { requestId: "known", ownerToolUseId: "owner", title: "Known", options: [],
     additionalRequests: [
@@ -106,4 +106,24 @@ test("incremental projection never retains raw tool input or output previews", (
   ]);
   assert.doesNotMatch(serialized, /secret-(?:input|agent)/);
   assert.match(serialized, /Safe Name/);
+});
+
+test("collapses Claude partial and full spawn observations but rejects conflicting reuse", () => {
+  const normal = projectChildSessionRegistry([
+    event(1, { kind: "tool_call", toolCallId: "task", toolKind: "agent", title: "Task", status: "pending" }),
+    event(2, { kind: "tool_call", toolCallId: "task", toolKind: "agent", title: "Task", status: "in_progress",
+      subagentRole: "reviewer" }),
+    event(3, { kind: "tool_call", toolCallId: "read", parentToolUseId: "task", toolKind: "read", title: "Read", status: "pending" }),
+    event(4, { kind: "tool_call", toolCallId: "read", parentToolUseId: "task", toolKind: "read", title: "Read", status: "in_progress" }),
+  ], null, 0, 0, 10);
+  assert.deepEqual(normal.children.map((child) => [child.toolCallId, child.name, child.role, child.status, child.toolCount]),
+    [["task", "Subagent", "reviewer", "in_progress", 1]]);
+  assert.equal(normal.unidentifiedChildren, 0);
+
+  const conflicting = projectChildSessionRegistry([
+    event(1, { kind: "tool_call", toolCallId: "task", parentToolUseId: "a", toolKind: "agent", title: "Task", status: "pending" }),
+    event(2, { kind: "tool_call", toolCallId: "task", parentToolUseId: "b", toolKind: "agent", title: "Task", status: "in_progress" }),
+  ], null, 0, 0, 10);
+  assert.equal(conflicting.children.length, 0);
+  assert.equal(conflicting.unidentifiedChildren, 1);
 });

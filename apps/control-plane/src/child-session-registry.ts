@@ -13,6 +13,32 @@ type ToolCall = Pick<Extract<SessionEvent["payload"], { kind: "tool_call" }>,
 type ToolUpdate = Pick<Extract<SessionEvent["payload"], { kind: "tool_call_update" }>,
   "status" | "subagentLifecycle"> & { seq: number; ts: number };
 
+export type StructuredAgentSpawnObservation = Pick<ToolCall,
+  "toolCallId" | "parentToolUseId" | "toolKind" | "status" | "subagentLifecycle" | "subagentName" | "subagentRole">;
+
+/** Claude's partial stream and full assistant record legitimately observe one spawn twice. Collapse
+ * only compatible structured observations; conflicting identity metadata or a third observation
+ * remains ambiguous and therefore cannot own a child or an attention response. */
+export function collapseAgentSpawnObservations(
+  observations: readonly StructuredAgentSpawnObservation[],
+): StructuredAgentSpawnObservation | null {
+  if (observations.length < 1 || observations.length > 2 || observations.some((value) => value.toolKind !== "agent")) return null;
+  const unique = <K extends "parentToolUseId" | "subagentName" | "subagentRole">(key: K) =>
+    new Set(observations.flatMap((value) => value[key] ? [value[key]!] : []));
+  if (unique("parentToolUseId").size > 1 || unique("subagentName").size > 1 || unique("subagentRole").size > 1) return null;
+  const latest = observations.at(-1)!;
+  const first = observations[0]!;
+  return {
+    toolCallId: latest.toolCallId,
+    toolKind: "agent",
+    status: latest.status,
+    ...(latest.parentToolUseId ?? first.parentToolUseId ? { parentToolUseId: latest.parentToolUseId ?? first.parentToolUseId } : {}),
+    ...(latest.subagentLifecycle ?? first.subagentLifecycle ? { subagentLifecycle: latest.subagentLifecycle ?? first.subagentLifecycle } : {}),
+    ...(latest.subagentName ?? first.subagentName ? { subagentName: latest.subagentName ?? first.subagentName } : {}),
+    ...(latest.subagentRole ?? first.subagentRole ? { subagentRole: latest.subagentRole ?? first.subagentRole } : {}),
+  };
+}
+
 function displayText(value: unknown, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/gu, " ")
@@ -25,10 +51,11 @@ function displayText(value: unknown, max: number): string | undefined {
  * recently viewed session and append only newly hydrated events instead of re-reading full history
  * for every page. Memory scales with exact child identities, not transcript message/output size. */
 export class ChildSessionRegistryProjector {
-  private readonly spawns = new Map<string, { count: number; sawAgent: boolean; firstAgent?: ToolCall }>();
+  private readonly spawns = new Map<string, ToolCall[]>();
   private readonly updates = new Map<string, ToolUpdate>();
   private readonly activity = new Map<string, number>();
-  private readonly directTools = new Map<string, { count: number; latest: { seq: number; title: string; status: string } }>();
+  private readonly directTools = new Map<string, Map<string, { seq: number; title: string; status: string }>>();
+  private readonly directToolParents = new Map<string, string | null>();
 
   append(events: readonly SessionEvent[]): void {
     for (const event of events) {
@@ -37,7 +64,7 @@ export class ChildSessionRegistryProjector {
         ? payload.parentToolUseId : undefined;
       if (parentId) this.activity.set(parentId, Math.max(this.activity.get(parentId) ?? 0, event.ts));
       if (payload.kind === "tool_call") {
-        const call: ToolCall | undefined = payload.toolKind === "agent" ? {
+        const call: ToolCall = {
           toolCallId: payload.toolCallId,
           ...(payload.parentToolUseId ? { parentToolUseId: payload.parentToolUseId } : {}),
           toolKind: payload.toolKind,
@@ -47,24 +74,27 @@ export class ChildSessionRegistryProjector {
           ...(payload.subagentRole ? { subagentRole: payload.subagentRole } : {}),
           seq: event.seq,
           ts: event.ts,
-        } : undefined;
-        const existing = this.spawns.get(payload.toolCallId);
-        if (existing) {
-          existing.count += 1;
-          existing.sawAgent ||= payload.toolKind === "agent";
-          existing.firstAgent ??= call;
-        } else {
-          this.spawns.set(payload.toolCallId, { count: 1, sawAgent: payload.toolKind === "agent",
-            ...(call ? { firstAgent: call } : {}) });
-        }
+        };
+        const observations = this.spawns.get(payload.toolCallId) ?? [];
+        if (observations.length < 3) observations.push(call);
+        this.spawns.set(payload.toolCallId, observations);
         if (parentId) {
           const latest = { seq: event.seq, title: displayText(payload.title, 120) ?? "Tool", status: payload.status };
-          const summary = this.directTools.get(parentId);
-          if (summary) {
-            summary.count += 1;
-            if (latest.seq > summary.latest.seq) summary.latest = latest;
+          if (!this.directToolParents.has(payload.toolCallId)) {
+            this.directToolParents.set(payload.toolCallId, parentId);
+            this.directTools.set(parentId, new Map([
+              ...(this.directTools.get(parentId) ?? new Map()),
+              [payload.toolCallId, latest],
+            ]));
           } else {
-            this.directTools.set(parentId, { count: 1, latest });
+            const knownParent = this.directToolParents.get(payload.toolCallId);
+            if (knownParent === parentId) {
+              const tools = this.directTools.get(parentId)!;
+              if ((tools.get(payload.toolCallId)?.seq ?? -1) < event.seq) tools.set(payload.toolCallId, latest);
+            } else if (typeof knownParent === "string") {
+              this.directTools.get(knownParent)?.delete(payload.toolCallId);
+              this.directToolParents.set(payload.toolCallId, null);
+            }
           }
         }
       } else if (payload.kind === "tool_call_update") {
@@ -79,17 +109,20 @@ export class ChildSessionRegistryProjector {
   page(pendingApproval: PendingApproval | null, eventEpoch: number, after: number, limit: number): ChildSessionRegistryPage {
     const nodes = new Map<string, ChildSessionRegistryEntry>();
     let unidentifiedChildren = 0;
-    for (const [toolCallId, occurrence] of this.spawns) {
-      if (occurrence.count !== 1) {
-        if (occurrence.sawAgent) unidentifiedChildren += 1;
+    for (const [toolCallId, observations] of this.spawns) {
+      const identity = collapseAgentSpawnObservations(observations);
+      if (!identity) {
+        if (observations.some((observation) => observation.toolKind === "agent")) unidentifiedChildren += 1;
         continue;
       }
-      const spawn = occurrence.firstAgent;
-      if (!spawn) continue;
+      const latestSpawn = observations.at(-1)!;
+      const spawn = { ...identity, seq: observations[0]!.seq, ts: observations[0]!.ts };
       const latest = this.updates.get(toolCallId);
-      const status = latest?.status ?? spawn.status;
-      const lifecycle = latest?.subagentLifecycle ?? spawn.subagentLifecycle;
+      const status = latest?.status ?? latestSpawn.status;
+      const lifecycle = latest?.subagentLifecycle ?? latestSpawn.subagentLifecycle ?? spawn.subagentLifecycle;
       const tools = this.directTools.get(toolCallId);
+      const latestTool = tools ? [...tools.values()].reduce((selected, candidate) =>
+        !selected || candidate.seq > selected.seq ? candidate : selected, undefined as { seq: number; title: string; status: string } | undefined) : undefined;
       const terminal = lifecycle === "completed" || lifecycle === "failed" || lifecycle === "interrupted" ||
         ["completed", "success", "succeeded", "failed", "error", "rejected", "cancelled", "canceled"].includes(status.toLowerCase());
       nodes.set(toolCallId, {
@@ -103,10 +136,10 @@ export class ChildSessionRegistryProjector {
         startedAt: spawn.ts,
         lastActivityAt: Math.max(spawn.ts, latest?.ts ?? 0, this.activity.get(toolCallId) ?? 0),
         ...(terminal ? { completedAt: Math.max(latest?.ts ?? 0, this.activity.get(toolCallId) ?? 0, spawn.ts) } : {}),
-        toolCount: tools?.count ?? 0,
-        ...(tools ? { latestTool: {
-          title: tools.latest.title,
-          active: ACTIVE_TOOL_STATUSES.has(tools.latest.status.toLowerCase()),
+        toolCount: tools?.size ?? 0,
+        ...(latestTool ? { latestTool: {
+          title: latestTool.title,
+          active: ACTIVE_TOOL_STATUSES.has(latestTool.status.toLowerCase()),
         } } : {}),
       });
     }

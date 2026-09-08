@@ -2250,17 +2250,15 @@ function boundedSubagentLabel(value: Json, max: number): string | undefined {
   return truncate(normalized, max);
 }
 
-/** Only provider-structured spawn fields become compact identity. Prompt/output text and
- * provider-private process/thread ids are deliberately not consulted. */
+/** Only the provider's explicit child role becomes compact identity. Task `description` is
+ * task-authored prose, so it is deliberately excluded along with prompts/output/private ids. */
 function structuredSubagentIdentity(name: string, input?: Record<string, Json>): {
   subagentName?: string;
   subagentRole?: string;
 } {
   if ((name !== "Task" && name !== "Agent") || !input) return {};
-  const subagentName = boundedSubagentLabel(input.description, 80);
   const subagentRole = boundedSubagentLabel(input.subagent_type, 48);
   return {
-    ...(subagentName ? { subagentName } : {}),
     ...(subagentRole ? { subagentRole } : {}),
   };
 }

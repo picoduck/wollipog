@@ -292,7 +292,7 @@ export function AgentsPanel(props: Props) {
           value,
           label: `${value === "active" ? "Active" : value === "history" ? "History" : "All"} (${rows.filter((row) => value === "all" || (value === "active" ? isCurrentWorker(row) : !isCurrentWorker(row))).length})`,
         }))} />
-      {props.earlierActivityUnloaded && registryUnavailable && <p className="hint" role="status">Earlier transcript activity is not loaded. Workers recorded only in those turns may be missing.</p>}
+      {props.earlierActivityUnloaded && (registryUnavailable || registry?.length === 0 || unidentifiedChildren > 0) && <p className="hint" role="status">Earlier transcript activity is not loaded. Workers recorded only in those turns may be missing.</p>}
       {registryAfter !== null && registry !== null && <p className="hint" role="status">More recorded workers are available.</p>}
       {unidentifiedChildren > 0 && <p className="hint" role="status">{unidentifiedChildren} {unidentifiedChildren === 1 ? "worker has" : "workers have"} an ambiguous provider identity and cannot be listed safely.</p>}
       {registryLoading && registry === null && <p className="hint" role="status">Loading recorded workers…</p>}

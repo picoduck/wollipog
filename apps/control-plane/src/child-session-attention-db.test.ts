@@ -9,12 +9,14 @@ test("session views compactly join current requests to exact structured child ow
   db.createSession({ id: "session", runnerId: "runner", workspaceId: null, agentId: null,
     title: "Session", useWorktree: false, driver: "claude-code", config: {}, now: 1 } satisfies NewSessionInput);
   db.appendEvent("session", { kind: "tool_call", toolCallId: "owner", title: "Task", toolKind: "agent",
-    status: "running", subagentName: "Audit Child", subagentRole: "reviewer" }, 2);
+    status: "pending" }, 2);
+  db.appendEvent("session", { kind: "tool_call", toolCallId: "owner", title: "Task", toolKind: "agent",
+    status: "running", subagentRole: "reviewer" }, 3);
   db.setPendingApproval("session", { requestId: "known", ownerToolUseId: "owner", title: "Allow?", options: [],
     additionalRequests: [{ requestId: "unknown", ownerToolUseId: "missing", title: "Allow?", options: [] }] });
 
   assert.deepEqual(db.getSession("session")?.attentionOwners, [
-    { requestId: "known", toolCallId: "owner", resolved: true, name: "Audit Child", role: "reviewer" },
+    { requestId: "known", toolCallId: "owner", resolved: true, name: "Subagent", role: "reviewer" },
     { requestId: "unknown", toolCallId: "missing", resolved: false },
   ]);
   const plan = db.raw().prepare(
@@ -32,8 +34,10 @@ test("duplicate spawning ids fail closed in compact owner joins", () => {
     agents: [], workspaces: [] }, 1);
   db.createSession({ id: "session", runnerId: "runner", workspaceId: null, agentId: null,
     title: "Session", useWorktree: false, driver: "claude-code", config: {}, now: 1 } satisfies NewSessionInput);
-  for (const ts of [2, 3]) db.appendEvent("session", { kind: "tool_call", toolCallId: "duplicate",
-    title: "Task", toolKind: "agent", status: "running", subagentName: "Unsafe" }, ts);
+  for (const [ts, parentToolUseId] of [[2, "parent-a"], [3, "parent-b"]] as const) {
+    db.appendEvent("session", { kind: "tool_call", toolCallId: "duplicate", parentToolUseId,
+      title: "Task", toolKind: "agent", status: "running", subagentName: "Unsafe" }, ts);
+  }
   db.setPendingApproval("session", { requestId: "ask", ownerToolUseId: "duplicate", title: "Allow?", options: [] });
   assert.deepEqual(db.getSession("session")?.attentionOwners,
     [{ requestId: "ask", toolCallId: "duplicate", resolved: false }]);
