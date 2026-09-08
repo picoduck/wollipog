@@ -7,6 +7,7 @@ import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type HostAdminStatusV
 import type { McpFetch } from "./session-management-mcp.js";
 import {
   formatStatus,
+  isDesktopCleartextHost,
   isLoopbackHostname,
   isTailnetIpv4Literal,
   pairingLinkConsumers,
@@ -20,6 +21,7 @@ import { runWollipogCli } from "./wollipog-cli.js";
 
 const TOKEN = "A".repeat(43);
 const DEVICE_TOKEN = "device-secret-token-0123456789";
+const RUNNER_TOKEN = "wollipogr_" + "r".repeat(43);
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-admin-"));
@@ -74,6 +76,8 @@ function server(options: {
   revokeNewDeviceStatus?: number;
   mintedToken?: string;
   omitDevice?: boolean;
+  runnerToken?: string;
+  runnerRevokeStatus?: number;
 } = {}) {
   const calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: string }> = [];
   const fetch: McpFetch = async (url, init) => {
@@ -110,6 +114,27 @@ function server(options: {
           publicOrigin: options.publicOrigin ?? null,
         },
       });
+    }
+    const credentialRow = (runnerId: string, status: string, label = "Runner credential") => ({
+      credentialId: `rc_${runnerId}`, runnerId, organizationId: "org_personal",
+      scope: { owner: { kind: "organization", organizationId: "org_personal" } }, label, status,
+      createdAt: 1_700_000_000_000, expiresAt: status === "pending" ? 1_700_086_400_000 : null,
+      activatedAt: status === "active" ? 1_700_000_060_000 : null, lastUsedAt: null, revokedAt: null, legacy: false,
+    });
+    if (path === "/api/runner-credentials" && init?.method === "GET") {
+      return respond(200, { credentials: [credentialRow("dev-box", "active"), credentialRow("new-box", "pending", "Rack 2")] });
+    }
+    if (path === "/api/runner-credentials" && init?.method === "POST") {
+      const body = JSON.parse(init.body ?? "{}") as { runnerId: string; label?: string };
+      if (body.runnerId === "dev-box") return respond(409, { error: "registered runner already has an active credential; rotate it instead" });
+      return respond(201, { credential: credentialRow(body.runnerId, "pending", body.label), token: options.runnerToken ?? RUNNER_TOKEN });
+    }
+    if (path === "/api/runner-credentials/dev-box/rotate" && init?.method === "POST") {
+      return respond(200, { credential: credentialRow("dev-box", "pending"), token: options.runnerToken ?? RUNNER_TOKEN });
+    }
+    if (path.startsWith("/api/runner-credentials/") && init?.method === "DELETE") {
+      const statusCode = options.runnerRevokeStatus ?? (path.endsWith("/ghost") ? 404 : 204);
+      return respond(statusCode, statusCode === 204 ? undefined : { error: statusCode === 404 ? "runner not found" : "control plane restarting" });
     }
     if (path === "/api/devices/dev_1" && init?.method === "DELETE") return respond(204, undefined);
     if (path === "/api/devices/dev_new" && init?.method === "DELETE") {
@@ -507,4 +532,115 @@ test("admin device create revokes when the response lacks a device record or the
   assert.match(failingStdout.stderr(), /EPIPE; the newly minted device dev_new was revoked/u);
   assert.ok(!written.join("").includes(DEVICE_TOKEN) && !failingStdout.stderr().includes(DEVICE_TOKEN));
   assert.ok(broken.calls.some((call) => call.method === "DELETE" && call.url.endsWith("/api/devices/dev_new")));
+});
+
+test("pairing link consumer gate accepts every localhost form the desktop accepts without widening --url", () => {
+  for (const ok of ["localhost", "localhost.", "foo.localhost", "FOO.LOCALHOST.", "127.0.0.1", "[::1]", "100.64.0.1"]) assert.equal(isDesktopCleartextHost(ok), true, ok);
+  for (const bad of ["127.evil.example", "box.example", "192.168.1.20", "localhost.example"]) assert.equal(isDesktopCleartextHost(bad), false, bad);
+  assert.deepEqual(pairingLinkConsumers("http://foo.localhost:4317", false), { browser: false, desktop: true });
+  assert.deepEqual(pairingLinkConsumers("http://localhost.:4317", false), { browser: false, desktop: true });
+  assert.equal(isLoopbackHostname("foo.localhost"), false, "--url stays literal-only");
+});
+
+test("admin runner-credential list renders credentials and JSON", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch } = server();
+  const readable = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "list"], env(tokenFile), readable.io, fetch, host), 0);
+  assert.match(readable.stdout(), /^RUNNER ID\s+CREDENTIAL\s+STATUS\s+LABEL\s+CREATED\s+ACTIVATED\s+LAST USED\s+EXPIRES\n/u);
+  assert.match(readable.stdout(), /dev-box\s+rc_dev-box\s+active\s+Runner credential\s+2023-11-14T22:13:20\.000Z\s+2023-11-14T22:14:20\.000Z\s+never\s+never\n/u);
+  assert.match(readable.stdout(), /new-box\s+rc_new-box\s+pending\s+Rack 2\s+.*\s+never\s+never\s+2023-11-15T22:13:20\.000Z\n$/u);
+  const json = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "list", "--json"], env(tokenFile), json.io, fetch, host), 0);
+  assert.equal(JSON.parse(json.stdout()).credentials.length, 2);
+  assert.ok(!json.stdout().includes(RUNNER_TOKEN));
+});
+
+test("admin runner-credential issue writes the token once to a 0600 file and revokes an undeliverable pending credential", async (t) => {
+  const { root, tokenFile } = fixture(t);
+  const issued = server();
+  const output = join(root, "rack2.token");
+  const { io, stdout, stderr } = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-2", "--label", "Rack 2", "--output", output, "--json"], env(tokenFile), io, issued.fetch, host), 0);
+  const parsed = JSON.parse(stdout());
+  assert.equal(parsed.outputPath, output);
+  assert.equal(parsed.operation, "issue");
+  assert.equal(parsed.credential.runnerId, "rack-2");
+  assert.equal(parsed.token, undefined);
+  assert.ok(!stdout().includes(RUNNER_TOKEN) && !stderr().includes(RUNNER_TOKEN));
+  assert.equal(readFileSync(output, "utf8"), `${RUNNER_TOKEN}\n`);
+  if (process.platform !== "win32") assert.equal(statSync(output).mode & 0o777, 0o600);
+  const post = issued.calls.find((call) => call.method === "POST")!;
+  assert.deepEqual(JSON.parse(post.body!), { runnerId: "rack-2", label: "Rack 2" });
+
+  const piped = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-3"], env(tokenFile), piped.io, server().fetch, host), 2);
+  assert.match(piped.stderr(), /refusing to print a one-time runner credential to a non-interactive stdout/u);
+
+  const terminal = makeIo({ stdoutIsTTY: true });
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-3"], env(tokenFile), terminal.io, server().fetch, host), 0);
+  assert.match(terminal.stdout(), /Issued a pending credential rc_rack-3 for runner rack-3; it activates on the runner's first registration/u);
+  assert.match(terminal.stdout(), new RegExp(`--token-file <file> or RUNNER_TOKEN_FILE.*\\n${RUNNER_TOKEN}\\n$`, "u"));
+
+  const conflict = makeIo({ stdoutIsTTY: true });
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "dev-box", "--json"], env(tokenFile), conflict.io, server().fetch, host), 1);
+  assert.match(JSON.parse(conflict.stdout()).error, /already has an active credential; rotate it instead/u);
+
+  const undeliverable = server();
+  const lost = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-4", "--output", join(root, "missing", "t"), "--json"], env(tokenFile), lost.io, undeliverable.fetch, host), 1);
+  const lostError = JSON.parse(lost.stdout()).error as string;
+  assert.match(lostError, /could not create .*; the undelivered pending credential for runner rack-4 was revoked/u);
+  assert.ok(!lostError.includes(RUNNER_TOKEN));
+  assert.ok(undeliverable.calls.some((call) => call.method === "DELETE" && call.url.endsWith("/api/runner-credentials/rack-4")));
+
+  const badToken = makeIo({ stdoutIsTTY: true });
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-5", "--json"], env(tokenFile), badToken.io, server({ runnerToken: "bad token" }).fetch, host), 1);
+  assert.match(JSON.parse(badToken.stdout()).error, /unusable runner token; the undelivered pending credential for runner rack-5 was revoked/u);
+
+  const bad = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "bad/id", "--output", join(root, "x")], env(tokenFile), bad.io, server().fetch, host), 2);
+  assert.match(bad.stderr(), /--runner must be a runner id/u);
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--output", join(root, "y")], env(tokenFile), makeIo().io, server().fetch, host), 2);
+});
+
+test("admin runner-credential rotate keeps the active credential and never revokes on delivery failure", async (t) => {
+  const { root, tokenFile } = fixture(t);
+  const rotated = server();
+  const output = join(root, "devbox.token");
+  const { io, stdout } = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "rotate", "--runner", "dev-box", "--output", output], env(tokenFile), io, rotated.fetch, host), 0);
+  assert.match(stdout(), /Rotated runner dev-box: pending credential rc_dev-box replaces the current one when the runner registers with it; the current credential stays active until then/u);
+  assert.equal(readFileSync(output, "utf8"), `${RUNNER_TOKEN}\n`);
+  assert.equal(rotated.calls.find((call) => call.method === "POST")?.url, "http://127.0.0.1:4317/api/runner-credentials/dev-box/rotate");
+
+  const lost = server();
+  const failed = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "rotate", "--runner", "dev-box", "--output", join(root, "missing", "t"), "--json"], env(tokenFile), failed.io, lost.fetch, host), 1);
+  assert.match(JSON.parse(failed.stdout()).error, /pending replacement for runner dev-box was not delivered and expires unused; run the rotate command again/u);
+  assert.ok(!lost.calls.some((call) => call.method === "DELETE"), "rotation failure must not revoke the still-active credential");
+});
+
+test("admin runner-credential revoke requires confirmation or --yes and reports unknown runners", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch, calls } = server();
+  const piped = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", "dev-box"], env(tokenFile), piped.io, fetch, host), 2);
+  assert.match(piped.stderr(), /pass --yes in non-interactive use/u);
+  assert.ok(!calls.some((call) => call.method === "DELETE"));
+
+  const declined = makeIo({ stdinIsTTY: true, confirm: async () => false });
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", "dev-box"], env(tokenFile), declined.io, fetch, host), 1);
+  assert.match(declined.stdout(), /was not revoked/u);
+
+  const questions: string[] = [];
+  const confirmed = makeIo({ stdinIsTTY: true, confirm: async (q) => { questions.push(q); return true; } });
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", "dev-box", "--json"], env(tokenFile), confirmed.io, fetch, host), 0);
+  assert.deepEqual(JSON.parse(confirmed.stdout()), { revoked: true, runnerId: "dev-box" });
+  assert.match(questions[0] ?? "", /Revoke the active and pending credentials of runner dev-box\?/u);
+  assert.equal(calls.find((call) => call.method === "DELETE")?.url, "http://127.0.0.1:4317/api/runner-credentials/dev-box");
+
+  const missing = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", "ghost", "--yes", "--json"], env(tokenFile), missing.io, fetch, host), 1);
+  assert.match(JSON.parse(missing.stdout()).error, /runner not found/u);
 });
