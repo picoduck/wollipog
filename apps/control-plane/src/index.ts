@@ -26,6 +26,7 @@ import {
   runnerAuthTimeoutMs,
 } from "./runner-channel.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
+import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
   registerAutomationTriggerContentTypeParser,
@@ -315,6 +316,7 @@ if (legacyCredentialMigration.blocked > 0) {
 }
 db.scrubLegacyAgentSecrets(Date.now());
 const hub = new Hub(db);
+const worktreeCreates = new WorktreeCreateCoordinator();
 const shellRegistry = new ShellRegistry(db);
 // Larger body limit so pasted screenshots (base64) fit comfortably.
 const app = Fastify({
@@ -1264,6 +1266,24 @@ app.register(async (instance) => {
       case "session_command_invocation_update":
         svc.onSessionCommandInvocationReceipt(runnerId!, msg);
         break;
+      case "session_worktree_progress": {
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "progressAwareSessionWorktrees")) {
+          app.log.warn(`runner ${runnerId} sent worktree progress without negotiated support`);
+          break;
+        }
+        if (!worktreeCreates.recordProgress(runnerId!, msg)) {
+          app.log.warn(`runner ${runnerId} sent stale or mismatched worktree progress`);
+          break;
+        }
+        if (!hub.refreshRunnerRequestTimeout(
+          runnerId!,
+          msg.requestId,
+          SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
+        )) {
+          app.log.warn(`runner ${runnerId} sent worktree progress for a request that is no longer pending`);
+        }
+        break;
+      }
       case "git_result":
       case "session_history_result":
       case "session_history_page_result":
@@ -3405,7 +3425,7 @@ registerUsageRoutes(app, db, requestPrincipal, hub, {
 async function runSessionWorktreeRequest(
   sessionId: string,
   request:
-    | { operation: "create"; baseRef?: string; branch: string }
+    | { operation: "create"; baseRef?: string; branch: string; progress?: boolean }
     | { operation: "attach" | "select" | "discard"; path: string },
   reply: FastifyReply,
 ) {
@@ -3420,6 +3440,43 @@ async function runSessionWorktreeRequest(
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  if (request.operation === "create" && request.progress === true && runnerSupportsProtocol(
+    db.getRunner(session.runnerId)?.protocolVersion,
+    "progressAwareSessionWorktrees",
+  )) {
+    const operation = worktreeCreates.startOrJoin({
+      runnerId: session.runnerId,
+      sessionId,
+      branch: request.branch,
+      ...(request.baseRef ? { baseRef: request.baseRef } : {}),
+    }, async (requestId) => {
+      const res = await hub.requestFromRunner(
+        session.runnerId,
+        requestId,
+        { ...request, type: "session_worktree", requestId, sessionId, progress: true },
+        SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
+      );
+      if (res.type !== "session_worktree_result") throw new Error("unexpected runner reply");
+      if (res.sessionId !== sessionId || res.operation !== "create") {
+        throw new Error("mismatched runner worktree reply");
+      }
+      if (!res.ok || !res.snapshot) throw new Error(res.error ?? "worktree operation failed");
+      db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
+      return { snapshot: res.snapshot, worktree: res.worktree };
+    });
+    if (operation.status === "in_progress") {
+      return reply.code(202).send({ operation });
+    }
+    worktreeCreates.releaseTerminal(operation.id);
+    if (operation.status === "failed") {
+      return reply.code(409).send({ operation, error: operation.error });
+    }
+    return {
+      operation: { id: operation.id, status: operation.status },
+      worktree: operation.worktree,
+      session: db.getSession(sessionId),
+    };
+  }
   const requestId = `worktree_${randomUUID().slice(0, 8)}`;
   try {
     const res = await hub.requestFromRunner(
@@ -3431,6 +3488,7 @@ async function runSessionWorktreeRequest(
     if (res.type !== "session_worktree_result") return reply.code(502).send({ error: "unexpected runner reply" });
     if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "worktree operation failed" });
     db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
+    if (request.operation !== "create") worktreeCreates.invalidateSession(sessionId);
     return { worktree: res.worktree, session: db.getSession(sessionId) };
   } catch (error) {
     return reply.code(502).send({ error: (error as Error).message });
@@ -3439,17 +3497,21 @@ async function runSessionWorktreeRequest(
 
 app.post("/api/sessions/:id/worktrees", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const body = req.body as { baseRef?: unknown; branch?: unknown };
+  const body = req.body as { baseRef?: unknown; branch?: unknown; progress?: unknown };
   if (typeof body?.branch !== "string" || !body.branch || body.branch.length > 255) {
     return reply.code(400).send({ error: "branch must be a non-empty string of at most 255 characters" });
   }
   if (body.baseRef !== undefined && (typeof body.baseRef !== "string" || !body.baseRef || body.baseRef.length > 1024)) {
     return reply.code(400).send({ error: "baseRef must be a non-empty string of at most 1024 characters" });
   }
+  if (body.progress !== undefined && typeof body.progress !== "boolean") {
+    return reply.code(400).send({ error: "progress must be a boolean" });
+  }
   return runSessionWorktreeRequest(id, {
     operation: "create",
     branch: body.branch,
     ...(typeof body.baseRef === "string" ? { baseRef: body.baseRef } : {}),
+    ...(body.progress === true ? { progress: true } : {}),
   }, reply);
 });
 

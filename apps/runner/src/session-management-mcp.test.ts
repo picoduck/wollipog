@@ -478,7 +478,7 @@ test("worktree tools use the canonical routes and default to the calling session
   await callTool(deps, "select_worktree", { sessionId: "s_child", path: "/repo/wt" });
   await callTool(deps, "discard_worktree", { sessionId: "s_child", path: "/repo/old" });
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/worktrees`);
-  assert.deepEqual(calls[0]!.body, { branch: "fix/one", baseRef: "origin/main" });
+  assert.deepEqual(calls[0]!.body, { branch: "fix/one", baseRef: "origin/main", progress: true });
   assert.equal(calls[1]!.url, `${CP_URL}/api/sessions/s_child/worktrees/attach`);
   assert.deepEqual(calls[1]!.body, { path: "/repo/attached" });
   assert.equal(calls[2]!.url, `${CP_URL}/api/sessions/s_child/worktrees/select`);
@@ -511,6 +511,51 @@ test("create_worktree can finish after the ordinary control-plane request deadli
 
   assert.equal(result.isError, undefined);
   assert.equal(resultJson(result).worktree.id, "wt_slow");
+});
+
+test("create_worktree polls the same coordinates while a progress-aware operation is healthy", async () => {
+  let attempt = 0;
+  const { deps, calls } = makeDeps(() => {
+    attempt += 1;
+    if (attempt < 3) {
+      return { status: 202, body: { operation: { id: "worktree_1", status: "in_progress", phase: "fetching_remote" } } };
+    }
+    return {
+      status: 200,
+      body: {
+        operation: { id: "worktree_1", status: "completed" },
+        worktree: { id: "wt_1", path: "/repo/wt", branch: "fix/one", source: "created" },
+        session: { id: SELF_ID, status: "running", runnerId: "r1" },
+      },
+    };
+  });
+  const sleeps: number[] = [];
+  deps.sleep = async (milliseconds) => { sleeps.push(milliseconds); };
+
+  const result = await callTool(deps, "create_worktree", { branch: "fix/one", baseRef: "origin/main" });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(resultJson(result).worktree.id, "wt_1");
+  assert.deepEqual(sleeps, [1_000, 1_000]);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((call) => call.url === `${CP_URL}/api/sessions/${SELF_ID}/worktrees`));
+  assert.ok(calls.every((call) => JSON.stringify(call.body) === JSON.stringify(calls[0]!.body)));
+});
+
+test("create_worktree reports a bounded progress-aware stall as a terminal error", async () => {
+  let attempt = 0;
+  const { deps } = makeDeps(() => {
+    attempt += 1;
+    return attempt === 1
+      ? { status: 202, body: { operation: { id: "worktree_stalled", status: "in_progress", phase: "materializing" } } }
+      : { status: 409, body: { operation: { id: "worktree_stalled", status: "failed" }, error: "runner request timed out" } };
+  });
+  deps.sleep = async () => {};
+
+  const result = await callTool(deps, "create_worktree", { branch: "fix/stalled" });
+
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /runner request timed out/);
 });
 
 test("an exact-session MCP credential cannot manage another session's worktrees", async () => {

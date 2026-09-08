@@ -327,7 +327,8 @@
 //      destination identity.
 // 111: on-demand, read-only machine skill discovery and bounded snapshot retrieval.
 // 112: isolated native orchestrator TUI launch and live-TUI agent-control authentication.
-export const PROTOCOL_VERSION = 112;
+// 113: progress-aware session worktree creation with bounded phase heartbeats.
+export const PROTOCOL_VERSION = 113;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -496,6 +497,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   resumableQuestionAnswers: 107,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
+  progressAwareSessionWorktrees: 113,
 } as const;
 
 /* ========================================================================== */
@@ -4743,6 +4745,7 @@ export type RunnerToControlPlane =
   | GitActionResultMessage
   | RewindResultMessage
   | ForkResultMessage
+  | SessionWorktreeProgressMessage
   | SessionWorktreeResultMessage
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
@@ -5135,12 +5138,39 @@ export interface ForkResultMessage {
 /** Create, attach, or select the worktree targeted by a session's Git/file actions. The runner
  * revalidates all repository and configured-location boundaries. */
 export type SessionWorktreeRequestMessage =
-  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "create"; baseRef?: string; branch: string }
+  | {
+      type: "session_worktree";
+      requestId: string;
+      sessionId: string;
+      operation: "create";
+      baseRef?: string;
+      branch: string;
+      /** Protocol v113+: ask the runner for bounded, content-free phase heartbeats. */
+      progress?: boolean;
+    }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "discard"; path: string };
+
+export type SessionWorktreeProgressPhase =
+  | "resolving_remote"
+  | "fetching_remote"
+  | "validating"
+  | "materializing"
+  | "activating";
+
+/** Content-free phase heartbeat for one exact runner request. */
+export interface SessionWorktreeProgressMessage {
+  type: "session_worktree_progress";
+  requestId: string;
+  sessionId: string;
+  phase: SessionWorktreeProgressPhase;
+}
 
 export interface SessionWorktreeResultMessage {
   type: "session_worktree_result";
   requestId: string;
+  /** Protocol v113+: exact request coordinates echoed for cross-operation correlation. */
+  sessionId?: string;
+  operation?: "create" | "attach" | "select" | "discard";
   ok: boolean;
   error?: string;
   worktree?: SessionWorktreeView;

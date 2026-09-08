@@ -42,6 +42,7 @@ import type {
   SessionLaunchSpec,
   SessionSnapshot,
   SessionStatus,
+  SessionWorktreeProgressPhase,
   SessionWorktreeView,
   ResolveSteeringAttemptMessage,
   ResolveSteeringAttemptResultMessage,
@@ -795,6 +796,12 @@ export class SessionManager {
   private readonly providerAuthAutomaticAttempted = new Set<string>();
   /** Create/attach/select all merge durable session inventory, so serialize them per session. */
   private readonly worktreeOperations = new Map<string, Promise<unknown>>();
+  /** Exact duplicate create requests join one operation, including after a control-plane retry. */
+  private readonly worktreeCreates = new Map<string, {
+    promise: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }>;
+    observers: Set<(phase: SessionWorktreeProgressPhase) => void>;
+    phase?: SessionWorktreeProgressPhase;
+  }>();
 
   constructor(
     private send: Send,
@@ -971,11 +978,30 @@ export class SessionManager {
   }
 
   /** Session-scoped operation seam consumed by the local CLI/MCP service. */
-  async requestWorktree(
+  requestWorktree(
     sessionId: string,
     request: { baseRef?: string; branch: string },
+    onProgress?: (phase: SessionWorktreeProgressPhase) => void,
   ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }> {
-    return this.runWorktreeOperation(sessionId, async () => {
+    const key = JSON.stringify([sessionId, request.baseRef ?? null, request.branch]);
+    const existing = this.worktreeCreates.get(key);
+    if (existing) {
+      if (onProgress) {
+        existing.observers.add(onProgress);
+        if (existing.phase) onProgress(existing.phase);
+      }
+      return existing.promise;
+    }
+    const observers = new Set<(phase: SessionWorktreeProgressPhase) => void>();
+    if (onProgress) observers.add(onProgress);
+    const report = (phase: SessionWorktreeProgressPhase): void => {
+      const entry = this.worktreeCreates.get(key);
+      if (entry) entry.phase = phase;
+      for (const observer of observers) {
+        try { observer(phase); } catch { /* Progress must never fail the Git operation. */ }
+      }
+    };
+    const operation = this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
       if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
@@ -986,6 +1012,7 @@ export class SessionManager {
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
         allowedProjectPaths: this.configuredProjectPaths,
+        onProgress: report,
       };
       // When no base is chosen we ask the remote, and that answer is authoritative for BOTH the
       // base ref and the repository's default branch. `git fetch` never refreshes the locally
@@ -1009,6 +1036,7 @@ export class SessionManager {
         // contacted nobody and learned nothing, so the stored value is left exactly as it was
         // rather than replaced by a local read that `git fetch` never updates.
         if (advertised) canonical.defaultBranch = advertised.branch;
+        report("activating");
         return { worktree: canonical, snapshot: await this.activateWorktree(meta, canonical) };
       }
       // Stamped once, here, and persisted with the record: `attributedWorktrees` rebuilds views
@@ -1026,6 +1054,7 @@ export class SessionManager {
         ...(defaultBranch ? { defaultBranch } : {}),
       };
       try {
+        report("activating");
         return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
       } catch (error) {
         if (created.created) {
@@ -1038,6 +1067,12 @@ export class SessionManager {
         throw error;
       }
     });
+    let tracked!: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }>;
+    tracked = operation.finally(() => {
+      if (this.worktreeCreates.get(key)?.promise === tracked) this.worktreeCreates.delete(key);
+    });
+    this.worktreeCreates.set(key, { promise: tracked, observers });
+    return tracked;
   }
 
   /** Attach an operator-located, Git-registered worktree and make it the active Git target. */

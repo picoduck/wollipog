@@ -150,6 +150,21 @@ test("verified progress refreshes only the exact runner request inactivity deadl
   });
 });
 
+test("bounded progress can keep a request healthy beyond its original aggregate deadline", async () => {
+  const hub = new Hub(fakeDb);
+  hub.attachRunner("r1", { send() {} });
+  const pending = hub.requestFromRunner("r1", "req-long", gitReq("req-long"), 40);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(hub.refreshRunnerRequestTimeout("r1", "req-long", 40), true);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(hub.refreshRunnerRequestTimeout("r1", "req-long", 40), true);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(hub.resolveRunnerRequest({
+    type: "git_result", requestId: "req-long", ok: true, data: { completed: true },
+  }, "r1"), true);
+  assert.deepEqual((await pending).data, { completed: true });
+});
+
 test("cancelRunnerRequest releases one exact in-flight correlation immediately", async () => {
   const hub = new Hub(fakeDb);
   hub.attachRunner("r1", { send() {} });

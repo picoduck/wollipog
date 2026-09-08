@@ -1449,8 +1449,17 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "session_worktree": {
+      const reportProgress = msg.operation === "create" && msg.progress === true &&
+        runnerSupportsProtocol(controlPlaneProtocolVersion, "progressAwareSessionWorktrees")
+        ? (phase: import("@wollipog/protocol").SessionWorktreeProgressPhase) => sendUp({
+            type: "session_worktree_progress",
+            requestId: msg.requestId,
+            sessionId: msg.sessionId,
+            phase,
+          })
+        : undefined;
       const operation: Promise<{ snapshot: SessionSnapshot; worktree?: SessionWorktreeView }> = msg.operation === "create"
-        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef })
+        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress)
         : msg.operation === "attach"
           ? sessions.attachWorktree(msg.sessionId, msg.path)
           : msg.operation === "select"
@@ -1462,12 +1471,16 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void operation.then((result) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        operation: msg.operation,
         ok: true,
         snapshot: result.snapshot,
         ...(result.worktree ? { worktree: result.worktree } : {}),
       })).catch((error) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        operation: msg.operation,
         ok: false,
         error: errText(error),
       }));
