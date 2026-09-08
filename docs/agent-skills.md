@@ -110,7 +110,7 @@ promising per-agent file isolation. Reader fields describe potential configured 
 not current filesystem links or observed reads, especially for an unmanaged canonical directory.
 It does not certify which running harnesses have loaded those files.
 
-`status: "prerequisites_met"` is an observation, not an adoption authorization. On a protocol-114
+`status: "prerequisites_met"` is an observation, not an adoption authorization. On a protocol-115
 Linux runner it also mints a one-use, preview-bound adoption token. Closing, importing, replacing,
 or expiring the preview invalidates it. The owner/admin must separately confirm the operation and
 any named shared-directory readers. Manual invocation variants remain blocked because their
@@ -118,7 +118,7 @@ deployed frontmatter can differ from the approved source bytes.
 
 ### Internal recoverable adoption transaction
 
-The runner's `adoptMachineSkill` module implements the Linux filesystem transaction. Protocol 114
+The runner's `adoptMachineSkill` module implements the Linux filesystem transaction. Protocol 115
 exposes it through a serialized runner command, owner/admin API, and the machine-import dialog.
 Its trusted caller must resolve the opaque candidate and expiry, verify the durable
 library version and current explicit assignment/invocation/shared-directory consent, and serialize
@@ -178,7 +178,7 @@ content requires explicit diff acceptance and updates existing track-latest assi
 content reuses the current version. A concurrent library change invalidates acceptance. Previews
 are scoped to the requesting human and organization, expire after ten minutes, and are discarded
 on restart. At most four previews and one discovery are active at once.
-The existing skill-file format and digest do not preserve executable bits. Protocol 114 machine
+The existing skill-file format and digest do not preserve executable bits. Protocol 115 machine
 snapshots therefore report executable paths separately, without changing version identity. Such a
 snapshot can still be imported as content, but adoption fails closed so replacing the original
 cannot silently discard its execution metadata. Imported scripts deploy as ordinary files and

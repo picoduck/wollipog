@@ -242,7 +242,7 @@ test("adoption requires a fresh explicit approval, prepares desired state, and c
   let syncRequests = 0;
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [
     { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" },
-  ], workspaces: [] }, 1, 114);
+  ], workspaces: [] }, 1, 115);
   const push = ((_: string) => {}) as SkillsSyncPusher;
   push.handleNeed = async () => {};
   push.request = async (runnerId, requestId) => {

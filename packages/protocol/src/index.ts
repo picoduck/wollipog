@@ -477,7 +477,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopAttemptCorrelation: 89,
   agentSkills: 90,
   machineSkillSnapshots: 111,
-  machineSkillAdoption: 114,
+  machineSkillAdoption: 115,
   chunkedAgentSkills: 96,
   /** v96 runners emit the additive `skills_state.removals` event projection. */
   skillLinkRemovalReporting: 96,
