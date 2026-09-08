@@ -285,3 +285,38 @@ test("a policy pause does not expose Stop Turn or app-owned stop", async ({ page
   await expect(workingRow).toBeVisible();
   await expect(workingRow).toContainText("Waiting for Approval");
 });
+
+for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`composer explains policy, offline, and terminal states at ${viewport.width}px in ${theme}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.emulateMedia({ colorScheme: theme });
+      await openSession(page);
+      await page.evaluate(theme => {
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      }, theme);
+      const composer = page.locator(".composer-input");
+      await expect(composer).toBeEnabled();
+      await expect(composer).toHaveAttribute("placeholder", "Do anything");
+      await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+        status: "input_required",
+        pendingApproval: { kind: "cost_budget", requestId: "budget-copy", title: "Cost Budget Reached", options: [] },
+      }));
+      await expect(composer).toBeDisabled();
+      await expect(composer).toHaveAttribute("placeholder", "Session is paused by guardrails. Review the pending decision to continue.");
+      await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
+      await expect(composer).toBeDisabled();
+      await expect(composer).toHaveAttribute("placeholder", "Runner is offline.");
+      await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "stopped" }));
+      await expect(composer).toBeDisabled();
+      await expect(composer).toHaveAttribute("placeholder", "Session is stopped.");
+      await page.evaluate(() => {
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("online");
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "idle", pendingApproval: null });
+      });
+      await expect(composer).toBeEnabled();
+      await expect(composer).toHaveAttribute("placeholder", "Do anything");
+    });
+  }
+}
