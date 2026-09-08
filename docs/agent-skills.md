@@ -163,7 +163,7 @@ uses this path.
 
 ### Adoption recovery inspection and restore
 
-Protocol 114 adds a bounded recovery command. **Inspect Recovery** asks an online Linux runner to
+Protocol 116 adds a bounded recovery command. **Inspect Recovery** asks an online Linux runner to
 scan at most 4,096 raw entries in each known native harness directory and return at most 64 validated
 journals. The control plane accepts only fixed harness-relative journal paths and projected operation
 fields; arbitrary client paths and malformed runner results are rejected. Inspection and restore are

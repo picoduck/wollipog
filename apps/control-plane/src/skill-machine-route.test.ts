@@ -352,7 +352,7 @@ test("recovery inspection and explicit restore are authorized, capability-gated,
     detail: "The managed link is active and the original is preserved.",
   };
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1",
-    agents: [], workspaces: [] }, 1, 113);
+    agents: [], workspaces: [] }, 1, 115);
   const push = ((runnerId: string) => { pushed.push(runnerId); }) as SkillsSyncPusher;
   registerMachineSkillRoutes(app, { db, requestHuman: () => principal, requestPrincipal: () => principal,
     pushSkillsSync: push,
@@ -374,13 +374,13 @@ test("recovery inspection and explicit restore are authorized, capability-gated,
   const restore = (confirmation = "explicit") => app.inject({ method: "POST",
     url: `/api/runners/runner-1/skill-adoption-recovery/${operation.operationId}/restore`,
     payload: { confirmation } });
-  assert.equal((await inspect()).statusCode, 409, "protocol 113 cannot receive recovery commands");
+  assert.equal((await inspect()).statusCode, 409, "protocol 115 cannot receive recovery commands");
   assert.equal(requests, 0);
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "darwin", version: "1",
-    agents: [], workspaces: [] }, 2, 114);
+    agents: [], workspaces: [] }, 2, 116);
   assert.equal((await inspect()).statusCode, 409, "unsupported platforms do not receive commands");
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1",
-    agents: [], workspaces: [] }, 3, 114);
+    agents: [], workspaces: [] }, 3, 116);
   principal = { ...owner, role: "operator" };
   assert.equal((await inspect()).statusCode, 403);
   assert.equal(requests, 0);
