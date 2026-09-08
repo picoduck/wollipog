@@ -14,6 +14,8 @@ export interface SubagentDescriptor {
   parentId?: string;
   childIds: string[];
   title: string;
+  /** Present only when a provider supplied an explicit structured role. */
+  role?: string;
   depth: number;
   sourceIndex: number;
   lifecycle: SubagentLifecycle;

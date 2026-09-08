@@ -53,6 +53,7 @@ export function workerRoster(
     id: `subagent:${agent.id}`,
     name: agent.title,
     type: "Subagent",
+    ...(agent.role ? { role: agent.role } : {}),
     state: waitingOwners.has(agent.id) && online(session.runnerId) && ["starting", "running", "waiting"].includes(agent.lifecycle) ? "input_required" : agent.availability === "recorded" && ["starting", "running", "waiting"].includes(agent.lifecycle)
       ? "unverified"
       : agent.lifecycle === "starting" || agent.lifecycle === "running" ? "working"

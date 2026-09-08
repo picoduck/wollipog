@@ -23,3 +23,19 @@ test("request picker counts normalized requests and bounds high-cardinality rend
   assert.equal((inactive.match(/tabindex="-1"/g) ?? []).length, 12, "inactive rows add no sequential tab stops");
   assert.equal(renderToStaticMarkup(<AttentionRequests session={{ ...session, pendingApproval: null }} onNavigate={() => {}} />), "");
 });
+
+test("request picker joins only the server-projected safe owner name and explicit role", () => {
+  const session = {
+    id: "s", status: "input_required",
+    pendingApproval: { requestId: "owned", ownerToolUseId: "opaque-owner", title: "Private", options: [],
+      additionalRequests: [{ requestId: "missing", ownerToolUseId: "missing-owner", title: "Private Missing", options: [] }] },
+    attentionOwners: [
+      { requestId: "owned", toolCallId: "opaque-owner", resolved: true, name: "Audit Child", role: "reviewer" },
+      { requestId: "missing", toolCallId: "missing-owner", resolved: false },
+    ],
+  } as unknown as SessionView;
+  const html = renderToStaticMarkup(<AttentionRequests session={session} onNavigate={() => {}} />);
+  assert.match(html, /Audit Child · Reviewer · Child Approval Required/);
+  assert.match(html, /Child Owner Unavailable · Child Approval Required/);
+  assert.doesNotMatch(html, /opaque-owner|missing-owner|Private Missing/);
+});

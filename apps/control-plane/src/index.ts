@@ -142,6 +142,7 @@ import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
 import { childSessionDefaultsError } from "./child-session-guardrails.js";
+import { projectChildSessionRegistry } from "./child-session-registry.js";
 import {
   decideScopedBoxLifecycle,
   parseBoxLifecycleForce,
@@ -2978,6 +2979,33 @@ app.get("/api/sessions/:id", async (req, reply) => {
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
   return { session };
+});
+
+app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
+  const after = query.after === undefined ? 0 : Number(query.after);
+  const limit = query.limit === undefined ? 50 : Number(query.limit);
+  const requestedEpoch = query.eventEpoch === undefined ? undefined : Number(query.eventEpoch);
+  if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+      (requestedEpoch !== undefined && (!Number.isSafeInteger(requestedEpoch) || requestedEpoch < 0))) {
+    return reply.code(400).send({ error: "invalid child-session page" });
+  }
+  const session = db.getSession(id);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  const eventEpoch = session.eventEpoch ?? 0;
+  if (requestedEpoch !== undefined && requestedEpoch !== eventEpoch) {
+    return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+  }
+  // Hydration reads the runner's complete durable SessionStore. The browser receives only this
+  // allowlisted projection, never raw history or a client-selected ownership join.
+  await svc.hydrateHistory(id);
+  const current = db.getSession(id);
+  if (!current) return reply.code(404).send({ error: "session not found" });
+  if ((current.eventEpoch ?? 0) !== eventEpoch) {
+    return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+  }
+  return projectChildSessionRegistry(db.listEvents(id), current.pendingApproval, eventEpoch, after, limit);
 });
 
 app.get("/api/sessions/:id/side-chat", async (req, reply) => {

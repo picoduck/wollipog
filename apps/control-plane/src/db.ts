@@ -27,6 +27,7 @@ import {
   columnForStatus,
   isPolicyApproval,
   isTerminal,
+  pendingRequests,
   runnerSupportsProtocol,
   scopeAudienceContained,
   validatePromptImageInputs,
@@ -55,6 +56,7 @@ import {
   type BackgroundNotificationReceiptView,
   type BackgroundWorkState,
   type BackgroundWorkTracking,
+  type ChildSessionAttentionOwner,
   type ManagedBackgroundJobSnapshot,
   type ManagedBackgroundJobView,
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
@@ -13978,6 +13980,8 @@ export class ControlPlaneDb {
       }
     }
 
+    const attentionOwners = this.childAttentionOwners(row.id, pending);
+
     const durablePromptQueue = this.pendingSessionPromptQueue(row.id);
     const pendingPrompts = this.pendingSessionPrompts(row.id);
     return {
@@ -14048,6 +14052,7 @@ export class ControlPlaneDb {
       eventEpoch: row.event_epoch ?? 0,
       preview: row.preview,
       pendingApproval: pending,
+      ...(attentionOwners.length ? { attentionOwners } : {}),
       ...(durablePromptQueue.length ? { queued: durablePromptQueue } : {}),
       ...(pendingPrompts.length ? { pendingPrompts } : {}),
       ...(() => {
@@ -14080,6 +14085,37 @@ export class ControlPlaneDb {
       // Lazy: sessions without the guardrail never pay the COUNT (same class as messageCount).
       toolCallCount: row.max_tool_calls != null ? this.countToolCalls(row.id) : undefined,
     };
+  }
+
+  private childAttentionOwners(sessionId: string, pending: PendingApproval | null): ChildSessionAttentionOwner[] {
+    return pendingRequests(pending).flatMap((request): ChildSessionAttentionOwner[] => {
+      const toolCallId = request.ownerToolUseId;
+      if (!toolCallId) return [];
+      const rows = this.stmt(
+        `SELECT payload FROM session_events
+         WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId')=?
+         ORDER BY seq LIMIT 2`,
+      ).all(sessionId, toolCallId) as Array<{ payload: string }>;
+      if (rows.length !== 1) return [{ requestId: request.requestId, toolCallId, resolved: false }];
+      try {
+        const payload = JSON.parse(rows[0]!.payload) as SessionEventPayload;
+        if (payload.kind !== "tool_call" || payload.toolKind !== "agent") {
+          return [{ requestId: request.requestId, toolCallId, resolved: false }];
+        }
+        const clean = (value: unknown, max: number): string | undefined => {
+          if (typeof value !== "string") return undefined;
+          const normalized = value.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/gu, " ")
+            .replace(/\s+/gu, " ").trim();
+          if (!normalized) return undefined;
+          return normalized.length > max ? `${normalized.slice(0, max)}…` : normalized;
+        };
+        const name = clean(payload.subagentName, 80) ?? "Subagent";
+        const role = clean(payload.subagentRole, 48);
+        return [{ requestId: request.requestId, toolCallId, resolved: true, name, ...(role ? { role } : {}) }];
+      } catch {
+        return [{ requestId: request.requestId, toolCallId, resolved: false }];
+      }
+    });
   }
 
   /** Commands not yet started remain visible across CP or runner restarts. A live runner queue

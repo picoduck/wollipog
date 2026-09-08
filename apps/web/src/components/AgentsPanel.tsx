@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
-import { pendingRequests, sessionAttentionStatus, type WorkflowInstanceView } from "@wollipog/protocol";
+import { pendingRequests, sessionAttentionStatus, type ChildSessionAttentionOwner,
+  type ChildSessionRegistryEntry, type WorkflowInstanceView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { formatDuration, formatRecordedRelativeTime } from "../format.js";
-import { IncrementalSubagentProjector } from "../subagents.js";
+import { formatDuration, formatRecordedRelativeTime, titleCaseLabel } from "../format.js";
+import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { isCurrentWorker, workerRoster, type WorkerState, type WorkerMemberMetadata } from "../worker-roster.js";
@@ -59,7 +60,85 @@ export function AgentsPanel(props: Props) {
     sessionStatus: session.status, runnerOnline,
     availability: runnerOnline ? "live" : "recorded",
   }), [items, runnerOnline, session.status]);
-  const agents = projection.descriptors;
+  const [registry, setRegistry] = useState<ChildSessionRegistryEntry[] | null>(null);
+  const [attentionOwners, setAttentionOwners] = useState<ChildSessionAttentionOwner[]>([]);
+  const [registryAfter, setRegistryAfter] = useState<number | null>(0);
+  const [registryLoading, setRegistryLoading] = useState(false);
+  const [registryUnavailable, setRegistryUnavailable] = useState(false);
+  const registryRequest = useRef<string | null>(null);
+  const loadRegistry = (after: number) => {
+    const key = `${session.id}:${session.eventEpoch ?? 0}:${after}`;
+    if (registryRequest.current === key || registryLoading) return;
+    registryRequest.current = key;
+    setRegistryLoading(true);
+    void api.childSessions(session.id, session.eventEpoch ?? 0, after, PAGE_SIZE).then((page) => {
+      setRegistry((current) => {
+        const byId = new Map((after === 0 ? [] : current ?? []).map((child) => [child.toolCallId, child]));
+        for (const child of page.children) byId.set(child.toolCallId, child);
+        return [...byId.values()].sort((a, b) => a.sourceSeq - b.sourceSeq);
+      });
+      setAttentionOwners(page.attentionOwners);
+      setRegistryAfter(page.nextAfter);
+      setRegistryUnavailable(false);
+    }).catch(() => {
+      // Rolling compatibility: older control planes keep the existing honest partial-history view.
+      setRegistryUnavailable(true);
+      setRegistry(null);
+      setRegistryAfter(null);
+    }).finally(() => {
+      registryRequest.current = null;
+      setRegistryLoading(false);
+    });
+  };
+  useEffect(() => {
+    setRegistry(null);
+    setAttentionOwners([]);
+    setRegistryAfter(0);
+    setRegistryUnavailable(false);
+    registryRequest.current = null;
+    loadRegistry(0);
+    // Registry generations are scoped by exact session + event epoch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id, session.eventEpoch]);
+  const durableAgents = useMemo((): SubagentDescriptor[] => {
+    if (!registry) return [];
+    const byId = new Map(registry.map((child) => [child.toolCallId, child]));
+    const childIds = new Map<string, string[]>();
+    for (const child of registry) if (child.parentToolUseId && byId.has(child.parentToolUseId)) {
+      childIds.set(child.parentToolUseId, [...(childIds.get(child.parentToolUseId) ?? []), child.toolCallId]);
+    }
+    const depth = (child: ChildSessionRegistryEntry): number => {
+      let value = 0;
+      let parent = child.parentToolUseId;
+      const seen = new Set([child.toolCallId]);
+      while (parent && byId.has(parent) && !seen.has(parent)) { seen.add(parent); value += 1; parent = byId.get(parent)?.parentToolUseId; }
+      return value;
+    };
+    return registry.map((child) => ({
+      id: child.toolCallId,
+      ...(child.parentToolUseId && byId.has(child.parentToolUseId) ? { parentId: child.parentToolUseId } : {}),
+      childIds: childIds.get(child.toolCallId) ?? [],
+      title: child.name,
+      ...(child.role ? { role: child.role } : {}),
+      depth: depth(child),
+      sourceIndex: child.sourceSeq,
+      lifecycle: deriveSubagentLifecycle(child.status, session.status, runnerOnline, child.lifecycle),
+      toolStatus: child.status,
+      availability: runnerOnline ? "live" : "recorded",
+      startedAt: child.startedAt,
+      lastActivityAt: child.lastActivityAt,
+      ...(child.completedAt == null ? {} : { completedAt: child.completedAt }),
+      toolCount: child.toolCount,
+      ...(child.latestTool ? { latestTool: child.latestTool } : {}),
+    }));
+  }, [registry, runnerOnline, session.status]);
+  const agents = useMemo(() => {
+    if (!registry) return projection.descriptors;
+    const loaded = new Map(projection.descriptors.map((agent) => [agent.id, agent]));
+    return durableAgents.map((durable) => ({ ...loaded.get(durable.id), ...durable,
+      directUsage: loaded.get(durable.id)?.directUsage,
+      inclusiveUsage: loaded.get(durable.id)?.inclusiveUsage }));
+  }, [durableAgents, projection.descriptors, registry]);
   const rows = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
     const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
@@ -92,7 +171,7 @@ export function AgentsPanel(props: Props) {
   const target = props.attentionTarget;
   const targetEpochMatches = !target || target.eventEpoch === (session.eventEpoch ?? 0);
   const linkedRequestMissing = target?.requestId !== undefined && !requests.some((request) => request.requestId === target.requestId);
-  const targetKey = target ? JSON.stringify([session.id, target.eventEpoch, target.requestId]) : null;
+  const targetKey = target ? JSON.stringify([session.id, target.eventEpoch, target.requestId, target.activationId ?? 0]) : null;
   const handledTarget = useRef<string | null>(null);
   useEffect(() => {
     if (!targetKey || handledTarget.current === targetKey) return;
@@ -148,14 +227,18 @@ export function AgentsPanel(props: Props) {
         {requests.slice(0, requestLimit).map((request) => {
           const owner = !projection.ambiguousIds.has(request.ownerToolUseId ?? "")
             ? agents.find((agent) => agent.id === request.ownerToolUseId) : undefined;
+          const compactOwner = attentionOwners.find((value) => value.requestId === request.requestId);
+          const ownerRole = owner?.role ?? compactOwner?.role;
           const attention = sessionAttentionStatus({ status: session.status, pendingApproval: request });
           return <button type="button" className="btn" key={request.requestId} onClick={() => {
             setRequestId(request.requestId);
             if (owner) props.onSelect(owner.id);
             else { props.onSelect(""); setChosen(null); }
           }}>
-            {owner?.title ?? "Session"} · {attention?.label ?? "Input Required"}
-            {!owner && request.ownerToolUseId && " · Child Owner Unavailable"}
+            {owner?.title ?? compactOwner?.name ?? (request.ownerToolUseId ? "Subagent" : "Session")}
+            {ownerRole ? ` · ${titleCaseLabel(ownerRole)}` : ""}
+            {` · ${attention?.label ?? "Input Required"}`}
+            {!owner && request.ownerToolUseId && compactOwner?.resolved !== true && " · Child Owner Unavailable"}
           </button>;
         })}
         {requests.length > requestLimit && <button type="button" onClick={() => setRequestLimit((value) => value + PAGE_SIZE)}>Show More Requests</button>}
@@ -175,7 +258,8 @@ export function AgentsPanel(props: Props) {
           value,
           label: `${value === "active" ? "Active" : value === "history" ? "History" : "All"} (${rows.filter((row) => value === "all" || (value === "active" ? isCurrentWorker(row) : !isCurrentWorker(row))).length})`,
         }))} />
-      {props.earlierActivityUnloaded && <p className="hint" role="status">Earlier transcript activity is not loaded. Workers recorded only in those turns may be missing.</p>}
+      {props.earlierActivityUnloaded && registryUnavailable && <p className="hint" role="status">Earlier transcript activity is not loaded. Workers recorded only in those turns may be missing.</p>}
+      {registryLoading && registry === null && <p className="hint" role="status">Loading Recorded Workers…</p>}
       {workflowError && <p className="hint" role="status">Workflow phase details are unavailable. Session status remains visible.</p>}
       {session.backgroundJobsAvailable && !session.backgroundJobs && <p className="hint" role="status">
         {props.inventoryError || "Loading background work…"}
@@ -203,7 +287,7 @@ export function AgentsPanel(props: Props) {
                   {row.startedAt != null && end != null && <span>{formatDuration(Math.max(0, end - row.startedAt))}</span>}
                   {row.lastActivityAt != null && <span>Last Activity {formatRecordedRelativeTime(row.lastActivityAt, now)}</span>}
                   {row.model && <span>{row.model}</span>}{row.effort && <span>{row.effort}</span>}
-                  {row.role && <span>{row.role.charAt(0).toUpperCase() + row.role.slice(1)}</span>}
+                  {row.role && <span>{titleCaseLabel(row.role)}</span>}
                   {row.phase && <span>Phase: {row.phase}</span>}
                   {row.activations != null && <span>{row.activations} Activations</span>}
                   {row.toolCount != null && <span>{row.toolCount} {row.toolCount === 1 ? "Tool Use" : "Tool Uses"}</span>}
@@ -218,6 +302,8 @@ export function AgentsPanel(props: Props) {
         })}
       </div>
       {filtered.length > limit && <button type="button" onClick={() => setLimit((value) => value + PAGE_SIZE)}>Show More Workers</button>}
+      {registryAfter !== null && registry !== null && <button type="button" disabled={registryLoading}
+        onClick={() => loadRegistry(registryAfter)}>{registryLoading ? "Loading More Workers…" : "Load More Recorded Workers"}</button>}
       {(selected?.target.kind === "subagent" || requestedId) &&
         <SubagentsPanel {...props} detailOnly requestedId={requestedId || (selected?.target.kind === "subagent" ? selected.target.id : null)} />}
       {selected?.target.kind === "background" &&

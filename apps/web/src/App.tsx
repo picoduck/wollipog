@@ -350,7 +350,8 @@ export function Shell() {
     // The scalar route key is the trigger; panel callbacks are intentionally app-state methods.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceLocationKey]);
-  const attentionKey = view.name === "session" && view.attention ? viewPath(view) : null;
+  const attentionKey = view.name === "session" && view.attention
+    ? `${viewPath(view)}\0${view.attention.activationId ?? 0}` : null;
   useEffect(() => {
     if (attentionKey) rightPanel.show("subagents");
     // A route change, not unrelated panel state, requests focus/navigation.

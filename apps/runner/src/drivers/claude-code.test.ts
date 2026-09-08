@@ -3353,6 +3353,27 @@ test("parent_tool_use_id is carried onto subagent events; absent for top-level",
   assert.equal("parentToolUseId" in top2, false);
 });
 
+test("agent spawn carries only bounded structured display identity", () => {
+  const h = makeHarness();
+  h.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "task-safe", name: "Task", input: {
+    description: "  Audit\u0000   child  ", subagent_type: "reviewer", prompt: "private prompt must not become identity",
+  } }] } });
+  const tool = h.events.find((event) => event.kind === "tool_call" && event.toolCallId === "task-safe") as
+    Extract<SessionEventPayload, { kind: "tool_call" }>;
+  assert.equal(tool.subagentName, "Audit child");
+  assert.equal(tool.subagentRole, "reviewer");
+  assert.doesNotMatch(tool.subagentName ?? "", /private prompt/);
+
+  const generic = makeHarness();
+  generic.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "task-generic", name: "Task", input: {
+    prompt: "still private",
+  } }] } });
+  const genericTool = generic.events.find((event) => event.kind === "tool_call" && event.toolCallId === "task-generic") as
+    Extract<SessionEventPayload, { kind: "tool_call" }>;
+  assert.equal(genericTool.subagentName, undefined);
+  assert.equal(genericTool.subagentRole, undefined);
+});
+
 test("parented assistant message usage emits a subagent token rollup without duplicating top-level usage", () => {
   const h = makeHarness();
   h.feed({

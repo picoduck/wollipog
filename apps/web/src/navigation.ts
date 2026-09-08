@@ -4,7 +4,9 @@ import {
   type SourceLocation,
 } from "@wollipog/protocol";
 
-export type AttentionTarget = { eventEpoch: number; requestId?: string };
+/** `activationId` is ephemeral and deliberately omitted from viewPath: repeated activation of the
+ * same stable deep link must re-focus its exact request without creating duplicate browser history. */
+export type AttentionTarget = { eventEpoch: number; requestId?: string; activationId?: number };
 
 export type View =
   | { name: "inbox" }

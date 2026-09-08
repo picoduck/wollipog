@@ -2015,6 +2015,7 @@ export class ClaudeCodeDriver implements Driver {
             toolKind: toolKind(name),
             status: "in_progress",
             text: input ? truncate(JSON.stringify(input), 400) : undefined,
+            ...structuredSubagentIdentity(name, input),
             ...pp,
           });
           if ((name === "Edit" || name === "Write" || name === "MultiEdit") && typeof input?.file_path === "string") {
@@ -2239,6 +2240,29 @@ function toolTitle(name: string, input?: Record<string, Json>): string {
     if (typeof input.pattern === "string") return `${name}: ${input.pattern}`;
   }
   return name;
+}
+
+function boundedSubagentLabel(value: Json, max: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/gu, " ")
+    .replace(/\s+/gu, " ").trim();
+  if (!normalized) return undefined;
+  return truncate(normalized, max);
+}
+
+/** Only provider-structured spawn fields become compact identity. Prompt/output text and
+ * provider-private process/thread ids are deliberately not consulted. */
+function structuredSubagentIdentity(name: string, input?: Record<string, Json>): {
+  subagentName?: string;
+  subagentRole?: string;
+} {
+  if ((name !== "Task" && name !== "Agent") || !input) return {};
+  const subagentName = boundedSubagentLabel(input.description, 80);
+  const subagentRole = boundedSubagentLabel(input.subagent_type, 48);
+  return {
+    ...(subagentName ? { subagentName } : {}),
+    ...(subagentRole ? { subagentRole } : {}),
+  };
 }
 
 function toolKind(name: string): string {
