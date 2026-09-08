@@ -79,6 +79,15 @@ wait for it to register as online. Any failure stops the sequence with the comma
 User services stop at logout unless lingering is enabled; install runs `loginctl enable-linger` and
 warns when that needs an administrator. `--no-linger` skips it.
 
+`--no-start` writes and enables the control-plane unit without starting anything. Because the
+runner's credential can only be minted from a running control plane, the runner unit is written
+but left disabled until `runner.token` exists; run install again without `--no-start`, or issue a
+credential to that path and enable the unit. `--runner` alone requires a control plane installed
+on the same host (or an existing `runner.token`); for a remote control plane, issue the credential
+there with `wollipog admin runner-credential issue --output`, place it at the token path, and set
+`controlPlaneUrl` in `runner.config.json`. Install never changes the permissions of directories
+that already exist, so using your home as the default workspace keeps it private.
+
 ## Operate
 
 ```bash
@@ -140,7 +149,8 @@ wollipog service uninstall --purge    # additionally deletes data and configurat
 
 Both ask for interactive confirmation; non-interactive use passes `--yes` and, for purging,
 `--yes-purge` as a separate acknowledgement. Only `wollipog-control-plane.service` and
-`wollipog-runner.service` are touched.
+`wollipog-runner.service` are touched, and nothing is removed unless stopping and disabling them
+succeeded first, so data is never purged underneath a still-running control plane.
 
 ## Native services versus dashboard-managed SSH runners
 

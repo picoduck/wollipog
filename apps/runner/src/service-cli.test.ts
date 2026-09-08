@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
@@ -22,10 +22,16 @@ interface Fake {
   layout: ReturnType<typeof serviceLayout>;
 }
 
+const MY_UID = process.getuid?.() ?? 0;
+
 function fake(t: { after(fn: () => void): void }, options: {
   home?: string; hostname?: string; platform?: NodeJS.Platform; uid?: number; isSea?: boolean; execPath?: string;
   units?: Record<string, string>; healthy?: () => boolean; runnerOnline?: () => boolean;
   systemctlFail?: string; lingerState?: "yes" | "no"; lingerFails?: boolean; stdinIsTTY?: boolean; confirm?: (q: string) => Promise<boolean>;
+  /** Fake `id -u <account>` answer for system mode (the account that owns the credential file). */
+  accountUid?: number | null; tokenPathFromEnv?: boolean;
+  /** Model a system-mode host: the FHS layout is relocated under the temp root via WOLLIPOG_SYSTEM_PREFIX. */
+  system?: boolean;
 } = {}): Fake {
   const root = mkdtempSync(join(tmpdir(), "wollipog-svc-cli-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -34,7 +40,15 @@ function fake(t: { after(fn: () => void): void }, options: {
   const execs: string[] = [];
   const out: string[] = [];
   const err: string[] = [];
-  const layout = serviceLayout("user", { home, user: "op", env: {} });
+  const env: NodeJS.ProcessEnv = options.system ? { WOLLIPOG_SYSTEM_PREFIX: join(root, "sysroot") } : {};
+  const layout = serviceLayout(options.system ? "system" : "user", { home, user: "op", env });
+  const tokenPath = () => {
+    if (options.tokenPathFromEnv && existsSync(layout.controlPlaneEnvFile)) {
+      const match = /CONTROL_PLANE_LOCAL_TOKEN_FILE="([^"]+)"/u.exec(readFileSync(layout.controlPlaneEnvFile, "utf8"));
+      if (match) return match[1]!;
+    }
+    return layout.controlPlaneLocalTokenFile;
+  };
   let cpRunning = false;
   let runnerRunning = false;
   let clock = 0;
@@ -72,13 +86,13 @@ function fake(t: { after(fn: () => void): void }, options: {
   };
   const host: ServiceHost = {
     platform: options.platform ?? "linux",
-    uid: options.uid ?? 1000,
+    uid: options.uid ?? MY_UID,
     user: "op",
     home,
     hostname: options.hostname ?? "box-1",
     execPath: options.execPath ?? "/usr/bin/node",
     isSea: options.isSea ?? false,
-    env: {},
+    env,
     cwd: () => root,
     exec: async (command, args) => {
       const line = [command, ...args].join(" ");
@@ -92,8 +106,9 @@ function fake(t: { after(fn: () => void): void }, options: {
           if (unit === CONTROL_PLANE_UNIT) {
             cpRunning = true;
             // The real control plane publishes its local credential on first start.
-            mkdirSync(layout.controlPlaneDataDir, { recursive: true });
-            if (!existsSync(layout.controlPlaneLocalTokenFile)) writeFileSync(layout.controlPlaneLocalTokenFile, `${LOCAL_TOKEN}\n`, { mode: 0o600 });
+            const file = tokenPath();
+            mkdirSync(join(file, ".."), { recursive: true });
+            if (!existsSync(file)) writeFileSync(file, `${LOCAL_TOKEN}\n`, { mode: 0o600 });
           }
           if (unit === RUNNER_UNIT) runnerRunning = true;
           return { code: 0, stdout: "", stderr: "" };
@@ -101,6 +116,8 @@ function fake(t: { after(fn: () => void): void }, options: {
         if (args.includes("disable")) { cpRunning = false; runnerRunning = false; }
         return { code: 0, stdout: "", stderr: "" };
       }
+      if (command === "id") return options.accountUid === null ? { code: 1, stdout: "", stderr: "no such user" } : { code: 0, stdout: `${options.accountUid ?? MY_UID}\n`, stderr: "" };
+      if (command === "useradd" || command === "chown") return { code: 0, stdout: "", stderr: "" };
       if (command === "loginctl") {
         if (args[0] === "show-user") return { code: 0, stdout: `${options.lingerState ?? "no"}\n`, stderr: "" };
         if (args[0] === "enable-linger") return options.lingerFails ? { code: 1, stdout: "", stderr: "Interactive authentication required." } : { code: 0, stdout: "", stderr: "" };
@@ -113,7 +130,7 @@ function fake(t: { after(fn: () => void): void }, options: {
     now: () => clock,
     exists: (path) => existsSync(path),
     readFile: (path) => readFileSync(path, "utf8"),
-    ensureDir: (path, mode) => mkdirSync(path, { recursive: true, mode }),
+    ensureDir: (path, mode) => { if (existsSync(path)) return false; mkdirSync(path, { recursive: true, mode }); return true; },
     writeFile: (path, contents, mode) => writeFileSync(path, contents, { mode }),
     removeFile: (path) => rmSync(path, { force: true }),
     removeTree: (path) => rmSync(path, { recursive: true, force: true }),
@@ -243,6 +260,9 @@ test("service install --runner without a SEA runner needs --runner-bin, and a SE
   writeFileSync(sibling, "#!/bin/sh\n", { mode: 0o755 });
   writeFileSync(join(f.root, "bin", "wollipog"), "#!/bin/sh\n", { mode: 0o755 });
   const g = fake(t, { isSea: true, execPath: join(f.root, "bin", "wollipog") });
+  // A control plane installed on this host (its env file exists) makes a runner-only install coherent.
+  mkdirSync(g.layout.configDir, { recursive: true, mode: 0o700 });
+  writeFileSync(g.layout.controlPlaneEnvFile, "CONTROL_PLANE_PORT=4317\n", { mode: 0o600 });
   assert.equal(await runServiceCli(["service", "install", "--runner", "--no-start", "--json"], g.host, g.io), 0, g.stderr());
   const unit = readFileSync(join(g.layout.unitDir, RUNNER_UNIT), "utf8");
   assert.ok(unit.includes(`ExecStart="${sibling}"`), unit);
@@ -300,10 +320,24 @@ test("service uninstall preserves data by default, purges only with a separate a
   assert.match(declined.stdout(), /nothing was changed/u);
   assert.ok(existsSync(f.layout.dataDir));
 
+  // A failed stop aborts before anything is removed or purged: the control plane must never keep
+  // running on top of deleted data.
+  const reinstalled = fake(t, { home: f.home });
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], reinstalled.host, reinstalled.io), 0, reinstalled.stderr());
+  const stuck = fake(t, { home: f.home, systemctlFail: "disable --now" });
+  assert.equal(await runServiceCli(["service", "uninstall", "--yes", "--purge", "--yes-purge", "--json"], stuck.host, stuck.io), 1);
+  assert.match(JSON.parse(stuck.stdout()).error, /disable --now .* failed: .*; nothing was removed/u);
+  assert.ok(existsSync(join(f.layout.unitDir, CONTROL_PLANE_UNIT)) && existsSync(f.layout.dataDir) && existsSync(f.layout.runnerTokenFile));
+
   const p = fake(t, { home: f.home });
   assert.equal(await runServiceCli(["service", "uninstall", "--yes", "--purge", "--yes-purge", "--json"], p.host, p.io), 0, p.stderr());
   assert.equal(JSON.parse(p.stdout()).purged, true);
   assert.ok(!existsSync(f.layout.dataDir) && !existsSync(f.layout.configDir));
+  assert.ok(p.execs.includes(`systemctl --user disable --now ${RUNNER_UNIT} ${CONTROL_PLANE_UNIT}`));
+
+  const nothing = fake(t);
+  assert.equal(await runServiceCli(["service", "uninstall", "--yes", "--json"], nothing.host, nothing.io), 0, nothing.stderr());
+  assert.ok(!nothing.execs.some((line) => line.includes("disable")), "nothing installed: no disable is attempted");
 });
 
 test("service usage and option errors", async (t) => {
@@ -313,4 +347,70 @@ test("service usage and option errors", async (t) => {
   const g = fake(t);
   assert.equal(await runServiceCli(["service", "install", "--port", "--json"], g.host, g.io), 2);
   assert.match(g.stdout(), /--port requires a value/u);
+});
+
+test("service install never changes the permissions of an existing workspace or home", async (t) => {
+  const f = fake(t);
+  chmodSync(f.home, 0o700);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  assert.equal(statSync(f.home).mode & 0o777, 0o700, "the home used as the default workspace keeps its private mode");
+  assert.equal(statSync(f.layout.dataDir).mode & 0o777, 0o700);
+  assert.equal(statSync(f.layout.configDir).mode & 0o777, 0o700);
+});
+
+test("service install --system uses the service account's uid for the credential file and owns a new workspace", async (t) => {
+  const f = fake(t, { uid: 0, accountUid: MY_UID, system: true });
+  const ws = join(f.root, "new-workspace");
+  const code = await runServiceCli(["service", "install", "--system", ...bins(f), "--workspace", ws, "--json"], f.host, f.io);
+  assert.equal(code, 0, f.stderr() + f.stdout());
+  const report = JSON.parse(f.stdout());
+  assert.equal(report.mode, "system");
+  assert.equal(report.account, "wollipog");
+  assert.equal(report.health.runnerOnline, true, report.warnings.join(" | "));
+  assert.ok(f.execs.includes("id -u wollipog"));
+  assert.ok(f.execs.some((line) => line.startsWith("chown -R wollipog:wollipog ") && line.endsWith(` ${ws}`)), "a workspace created by install is chowned to the account");
+  assert.ok(f.execs.some((line) => line.startsWith("chown wollipog:wollipog ") && line.endsWith("runner.token")), "the minted runner token is handed to the service account");
+  assert.ok(readFileSync(join(f.layout.unitDir, CONTROL_PLANE_UNIT), "utf8").includes("User=wollipog\n"));
+  const noAccount = fake(t, { uid: 0, accountUid: null, system: true });
+  assert.equal(await runServiceCli(["service", "install", "--system", ...bins(noAccount), "--no-start", "--json"], noAccount.host, noAccount.io), 0, noAccount.stderr());
+  assert.ok(noAccount.execs.includes(`useradd --system --home-dir ${noAccount.layout.dataDir} --create-home --shell /usr/sbin/nologin wollipog`), noAccount.execs.join("\n"));
+});
+
+test("service install --no-start leaves the runner unit disabled until its credential exists", async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--no-start", "--json"], f.host, f.io), 0, f.stderr());
+  const report = JSON.parse(f.stdout());
+  assert.deepEqual(report.started, []);
+  assert.ok(f.execs.includes(`systemctl --user enable ${CONTROL_PLANE_UNIT}`), f.execs.join("\n"));
+  assert.ok(!f.execs.some((line) => line.includes(`enable ${CONTROL_PLANE_UNIT} ${RUNNER_UNIT}`)));
+  assert.match(report.warnings.join("\n"), /wollipog-runner\.service was written but not enabled: no .*runner\.token exists yet/u);
+  assert.ok(!existsSync(f.layout.runnerTokenFile));
+});
+
+test("service install --runner alone needs a local control plane or an existing token", async (t) => {
+  const f = fake(t);
+  writeFileSync(join(f.root, "wollipog-runner"), "#!/bin/sh\n", { mode: 0o755 });
+  assert.equal(await runServiceCli(["service", "install", "--runner", "--runner-bin", join(f.root, "wollipog-runner")], f.host, f.io), 2);
+  assert.match(f.stderr(), /--runner alone needs a control plane installed on this host/u);
+  assert.ok(!f.execs.some((line) => line.includes("daemon-reload")));
+});
+
+test("service install honours a preserved env file's database and credential paths for admin calls", async (t) => {
+  const f = fake(t, { tokenPathFromEnv: true });
+  mkdirSync(f.layout.configDir, { recursive: true, mode: 0o700 });
+  const customDb = join(f.root, "elsewhere", "cp.db");
+  mkdirSync(join(f.root, "elsewhere"), { recursive: true });
+  writeFileSync(f.layout.controlPlaneEnvFile, `CONTROL_PLANE_HOST="127.0.0.1"\nCONTROL_PLANE_PORT=4400\nCONTROL_PLANE_DB="${customDb}"\nCONTROL_PLANE_LOCAL_TOKEN_FILE="${customDb}.local-device-token"\n`, { mode: 0o600 });
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  const report = JSON.parse(f.stdout());
+  assert.equal(report.health.runnerOnline, true, report.warnings.join(" | "));
+  assert.ok(existsSync(`${customDb}.local-device-token`), "the fake control plane published its token at the env file's path");
+  assert.ok(!existsSync(f.layout.controlPlaneLocalTokenFile), "the layout default path was not used");
+});
+
+test("service status exits non-zero when nothing is installed and selects the env file for the requested mode", async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "status"], f.host, f.io), 1);
+  assert.match(f.stdout(), /not-found/u);
+  assert.match(f.stdout(), /no installed control-plane\.env found/u);
 });

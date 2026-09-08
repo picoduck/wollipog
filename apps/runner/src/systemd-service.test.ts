@@ -14,6 +14,7 @@ import {
   renderRunnerConfig,
   renderRunnerUnit,
   serviceLayout,
+  unitPath,
   unitQuote,
 } from "./systemd-service.js";
 
@@ -39,6 +40,9 @@ test("service layout follows XDG in user mode and FHS with a dedicated account i
   assert.equal(SYSTEM_LAYOUT.configDir, "/etc/wollipog");
   assert.equal(SYSTEM_LAYOUT.workspaceDir, "/var/lib/wollipog/workspaces");
   assert.equal(serviceLayout("system", { home: "/root", user: "root", env: {}, account: "svc" }).account, "svc");
+  const relocated = serviceLayout("system", { home: "/root", user: "root", env: { WOLLIPOG_SYSTEM_PREFIX: "/tmp/sysroot/" } });
+  assert.equal(relocated.dataDir, "/tmp/sysroot/var/lib/wollipog");
+  assert.equal(relocated.unitDir, "/tmp/sysroot/etc/systemd/system");
 });
 
 test("control-plane unit has bounded restarts, graceful control-group stop, and no secrets", () => {
@@ -48,7 +52,7 @@ test("control-plane unit has bounded restarts, graceful control-group stop, and 
     "EnvironmentFile=/etc/wollipog/control-plane.env", 'ExecStart="/opt/wollipog/control-plane"',
     "Restart=on-failure", "RestartSec=5s", "StartLimitIntervalSec=300", "StartLimitBurst=10",
     "KillMode=control-group", "KillSignal=SIGTERM", "SendSIGKILL=yes", "TimeoutStopSec=30s",
-    "NoNewPrivileges=yes", "ProtectSystem=strict", "ReadWritePaths=/var/lib/wollipog/control-plane", "WantedBy=multi-user.target",
+    "NoNewPrivileges=yes", "ProtectSystem=strict", 'ReadWritePaths="/var/lib/wollipog/control-plane"', "WantedBy=multi-user.target",
   ]) assert.ok(unit.includes(`\n${line}\n`), line);
   assert.ok(!/token|secret/iu.test(unit));
   const userUnit = renderControlPlaneUnit(USER_LAYOUT, { executable: "/home/op/.local/bin/wollipog-control-plane", host: "127.0.0.1", port: 4317, publicOrigin: null, tailnetOnly: false, webDist: null });
@@ -61,7 +65,7 @@ test("control-plane unit has bounded restarts, graceful control-group stop, and 
 test("runner unit depends on the control plane, reads its token by path, and keeps the descendant-containment settings", () => {
   const unit = renderRunnerUnit(USER_LAYOUT, { executable: "/home/op/.local/bin/wollipog-runner" });
   for (const line of [
-    `After=network-online.target ${CONTROL_PLANE_UNIT}`, `Wants=network-online.target ${CONTROL_PLANE_UNIT}`,
+    `After=${CONTROL_PLANE_UNIT}`, `Wants=${CONTROL_PLANE_UNIT}`,
     'Environment=RUNNER_TOKEN_FILE="/home/op/.config/wollipog/runner.token"',
     'Environment=RUNNER_DATA_DIR="/home/op/.local/share/wollipog/runner"',
     'ExecStart="/home/op/.local/bin/wollipog-runner" --config "/home/op/.config/wollipog/runner.config.json"',
@@ -120,6 +124,41 @@ test("readInstalledControlPlaneEnv finds the user env file, ignores symlinks, an
     rmSync(file);
     symlinkSync("/etc/passwd", file);
     assert.equal(readInstalledControlPlaneEnv({ home, env: {}, platform: "linux" }), null, "a symlinked env file is not trusted");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unit rendering doubles systemd specifiers and only system units wait for the network", () => {
+  const weird = serviceLayout("user", { home: "/home/od d%n", user: "odd", env: {} });
+  const unit = renderControlPlaneUnit(weird, { executable: "/opt/w%N/control plane", host: "127.0.0.1", port: 4317, publicOrigin: null, tailnetOnly: false, webDist: null });
+  assert.ok(unit.includes("WorkingDirectory=/home/od d%%n/.local/share/wollipog/control-plane\n"), unit);
+  assert.ok(unit.includes("EnvironmentFile=/home/od d%%n/.config/wollipog/control-plane.env\n"));
+  assert.ok(unit.includes('ExecStart="/opt/w%%N/control plane"\n'));
+  assert.ok(!unit.includes("network-online.target"), "user managers have no network-online.target");
+  const runner = renderRunnerUnit(weird, { executable: "/opt/w%N/wollipog-runner" });
+  assert.ok(runner.includes(`After=${CONTROL_PLANE_UNIT}\n`) && runner.includes(`Wants=${CONTROL_PLANE_UNIT}\n`));
+  assert.ok(runner.includes('Environment=RUNNER_TOKEN_FILE="/home/od d%%n/.config/wollipog/runner.token"\n'));
+  const system = renderControlPlaneUnit(SYSTEM_LAYOUT, { executable: "/opt/wollipog/control-plane", host: "127.0.0.1", port: 4317, publicOrigin: null, tailnetOnly: false, webDist: null });
+  assert.ok(system.includes("After=network-online.target\nWants=network-online.target\n"));
+  assert.ok(system.includes('ReadWritePaths="/var/lib/wollipog/control-plane"\n'));
+  assert.equal(unitPath("/a%b"), "/a%%b");
+  assert.equal(unitQuote("/a%b \"c\""), '"/a%%b \\"c\\""');
+  assert.throws(() => unitPath("/a\nb"), /newlines/u);
+});
+
+test("readInstalledControlPlaneEnv honours the requested mode and root's system-first preference", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-svc-mode-"));
+  try {
+    const home = join(root, "home");
+    mkdirSync(join(home, ".config", "wollipog"), { recursive: true });
+    const userFile = join(home, ".config", "wollipog", "control-plane.env");
+    writeFileSync(userFile, "CONTROL_PLANE_PORT=4401\n", { mode: 0o600 });
+    assert.equal(readInstalledControlPlaneEnv({ home, env: {}, platform: "linux", mode: "system" }), null, "system mode never falls back to the user file");
+    assert.equal(readInstalledControlPlaneEnv({ home, env: {}, platform: "linux", mode: "user" })?.port, 4401);
+    assert.equal(readInstalledControlPlaneEnv({ home, env: {}, platform: "linux", uid: 1000 })?.port, 4401);
+    // Root prefers /etc/wollipog when present; here it is absent, so the user file still answers.
+    assert.equal(readInstalledControlPlaneEnv({ home, env: {}, platform: "linux", uid: 0 })?.port, 4401);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

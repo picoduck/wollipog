@@ -68,7 +68,12 @@ export const DEFAULT_HOST: HostAdminHost = {
   platform: process.platform,
   uid: typeof process.getuid === "function" ? process.getuid() : null,
   cwd: () => process.cwd(),
-  installedControlPlaneEnv: () => readInstalledControlPlaneEnv({ home: homedir(), env: process.env, platform: process.platform }),
+  installedControlPlaneEnv: () => readInstalledControlPlaneEnv({
+    home: homedir(),
+    env: process.env,
+    platform: process.platform,
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
+  }),
 };
 
 export function defaultHostAdminIo(): HostAdminIo {

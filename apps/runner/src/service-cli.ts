@@ -59,7 +59,8 @@ export interface ServiceHost {
   now(): number;
   exists(path: string): boolean;
   readFile(path: string): string;
-  ensureDir(path: string, mode: number): void;
+  /** Create a directory with `mode` if it does not exist; never changes an existing one. Returns true when created. */
+  ensureDir(path: string, mode: number): boolean;
   /** Replace-capable atomic write (units, configs); mode applies to the new file. */
   writeFile(path: string, contents: string, mode: number): void;
   removeFile(path: string): void;
@@ -106,7 +107,17 @@ export function defaultServiceHost(fetchImpl: McpFetch = globalThis.fetch): Serv
     now: () => Date.now(),
     exists: (path) => { try { lstatSync(path); return true; } catch { return false; } },
     readFile: (path) => readFileSync(path, "utf8"),
-    ensureDir: (path, mode) => { mkdirSync(path, { recursive: true, mode }); try { chmodSync(path, mode); } catch { /* best effort */ } },
+    ensureDir: (path, mode) => {
+      try {
+        if (lstatSync(path).isDirectory()) return false;
+        throw new Error(`${path} exists and is not a directory`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      mkdirSync(path, { recursive: true, mode });
+      try { chmodSync(path, mode); } catch { /* best effort on the new directory only */ }
+      return true;
+    },
     writeFile: (path, contents, mode) => {
       const staged = `${path}.tmp-${process.pid}`;
       const fd = openSync(staged, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode);
@@ -245,8 +256,17 @@ async function waitFor(host: ServiceHost, timeoutMs: number, check: () => Promis
   }
 }
 
+/** Coordinates the installed control plane actually runs with (preserved env wins over layout). */
+interface Effective {
+  port: number;
+  db: string;
+  localTokenFile: string;
+  /** Owner of the protected credential file: the service account in system mode. */
+  uid: number | null;
+}
+
 /** Run an `admin` command in-process against the installed control plane, capturing output. */
-async function adminJson<T>(host: ServiceHost, layout: ServiceLayout, port: number, args: string[]): Promise<{ code: number; data: T | null; text: string }> {
+async function adminJson<T>(host: ServiceHost, effective: Effective, args: string[]): Promise<{ code: number; data: T | null; text: string }> {
   let stdout = "";
   let stderr = "";
   const io: HostAdminIo = {
@@ -257,18 +277,41 @@ async function adminJson<T>(host: ServiceHost, layout: ServiceLayout, port: numb
     confirm: async () => false,
   };
   const env: NodeJS.ProcessEnv = {
-    CONTROL_PLANE_DB: layout.controlPlaneDb,
-    CONTROL_PLANE_PORT: String(port),
-    CONTROL_PLANE_LOCAL_TOKEN_FILE: layout.controlPlaneLocalTokenFile,
+    CONTROL_PLANE_DB: effective.db,
+    CONTROL_PLANE_PORT: String(effective.port),
+    CONTROL_PLANE_LOCAL_TOKEN_FILE: effective.localTokenFile,
   };
   const code = await runHostAdminCli(["admin", ...args, "--json"], env, io, host.fetch, {
     platform: host.platform,
-    uid: host.uid,
+    uid: effective.uid,
     cwd: () => host.cwd(),
   });
   let data: T | null = null;
   try { data = JSON.parse(stdout) as T; } catch { data = null; }
   return { code, data, text: stdout + stderr };
+}
+
+async function accountUid(host: ServiceHost, layout: ServiceLayout): Promise<number | null> {
+  if (layout.mode !== "system") return host.uid;
+  const result = await host.exec("id", ["-u", layout.account], { timeoutMs: 10_000 });
+  const uid = Number(result.stdout.trim());
+  return result.code === 0 && Number.isInteger(uid) ? uid : null;
+}
+
+/** Read the preserved env file (if any) so admin calls use the paths the service really runs with. */
+function effectiveFromEnv(host: ServiceHost, layout: ServiceLayout, fallbackPort: number, uid: number | null): Effective {
+  let db = layout.controlPlaneDb;
+  let localTokenFile = layout.controlPlaneLocalTokenFile;
+  let port = fallbackPort;
+  if (host.exists(layout.controlPlaneEnvFile)) {
+    const existing = parseEnvFile(host.readFile(layout.controlPlaneEnvFile));
+    if (existing.CONTROL_PLANE_DB) db = existing.CONTROL_PLANE_DB;
+    if (existing.CONTROL_PLANE_LOCAL_TOKEN_FILE) localTokenFile = existing.CONTROL_PLANE_LOCAL_TOKEN_FILE;
+    else if (existing.CONTROL_PLANE_DB) localTokenFile = `${existing.CONTROL_PLANE_DB}.local-device-token`;
+    const existingPort = Number(existing.CONTROL_PLANE_PORT);
+    if (Number.isInteger(existingPort) && existingPort > 0) port = existingPort;
+  }
+  return { port, db, localTokenFile, uid };
 }
 
 function validatePort(raw: string | undefined): number {
@@ -387,6 +430,15 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   }
   const controlPlaneBin = wantControlPlane ? resolveExecutable("control-plane", option(args, "--control-plane-bin"), null, host) : null;
   const runnerBin = wantRunner ? resolveExecutable("runner", option(args, "--runner-bin"), defaultRunnerExecutable(host), host) : null;
+  if (wantRunner && !wantControlPlane && !host.exists(layout.controlPlaneEnvFile) && !host.exists(layout.runnerTokenFile)) {
+    // A colocated runner gets its credential from the local control plane. Without one here and
+    // without a token already in place there is nothing to connect to.
+    throw new CliError(
+      `--runner alone needs a control plane installed on this host (${layout.controlPlaneEnvFile} not found) or an existing ${layout.runnerTokenFile}. ` +
+        "Install both with `wollipog service install`, or for a remote control plane issue a credential there with `wollipog admin runner-credential issue --output`, place it at that token path, and set controlPlaneUrl in runner.config.json.",
+      2,
+    );
+  }
   if (mode === "system") {
     const exists = await host.exec("id", ["-u", layout.account], { timeoutMs: 10_000 });
     if (exists.code !== 0) {
@@ -394,13 +446,19 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
       if (created.code !== 0) throw new CliError(`could not create service account ${layout.account}: ${created.stderr.trim()}`);
     }
   }
+  const serviceUid = await accountUid(host, layout);
 
   const written: string[] = [];
   const preserved: string[] = [];
   const dirs = [layout.dataDir, layout.configDir, layout.unitDir];
   if (wantControlPlane) dirs.push(layout.controlPlaneDataDir);
   if (wantRunner) dirs.push(layout.runnerDataDir, layout.workspaceDir);
-  for (const dir of dirs) host.ensureDir(dir, dir === layout.unitDir || dir === layout.workspaceDir ? 0o755 : 0o700);
+  // Existing directories (notably a private home used as the workspace) keep their permissions;
+  // only directories created here get a mode.
+  const createdDirs: string[] = [];
+  for (const dir of dirs) {
+    if (host.ensureDir(dir, dir === layout.unitDir || dir === layout.workspaceDir ? 0o755 : 0o700)) createdDirs.push(dir);
+  }
 
   const cpOptions = { executable: controlPlaneBin ?? "", host: bindHost, port, publicOrigin: publicOrigin.origin, tailnetOnly, webDist: webDist ? resolve(host.cwd(), webDist) : null };
   if (wantControlPlane) {
@@ -420,15 +478,25 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     written.push(unitPath);
   }
   if (mode === "system") {
-    const chown = await host.exec("chown", ["-R", `${layout.account}:${layout.account}`, layout.dataDir, layout.configDir], { timeoutMs: 60_000 });
-    if (chown.code !== 0) warnings.push(`could not chown ${layout.dataDir} and ${layout.configDir} to ${layout.account}: ${chown.stderr.trim()}`);
+    const owned = [layout.dataDir, layout.configDir, ...(createdDirs.includes(layout.workspaceDir) ? [layout.workspaceDir] : [])];
+    const chown = await host.exec("chown", ["-R", `${layout.account}:${layout.account}`, ...owned], { timeoutMs: 60_000 });
+    if (chown.code !== 0) warnings.push(`could not chown ${owned.join(", ")} to ${layout.account}: ${chown.stderr.trim()}`);
   }
+  const effective = effectiveFromEnv(host, layout, port, serviceUid);
 
   const reload = await systemctl(host, mode, ["daemon-reload"]);
   if (reload.code !== 0) throw new CliError(`systemctl daemon-reload failed: ${reload.stderr.trim()}`);
+  const noStart = flag(args, "--no-start");
+  // With --no-start the runner credential cannot be minted (the control plane is not running), so
+  // an enabled runner unit would only crash-loop at boot. It stays disabled until a token exists.
+  const runnerDeferred = wantRunner && noStart && !host.exists(layout.runnerTokenFile);
   const units = components.map(unitFor);
-  const enable = await systemctl(host, mode, ["enable", ...units]);
+  const toEnable = units.filter((unit) => !(runnerDeferred && unit === RUNNER_UNIT));
+  const enable = await systemctl(host, mode, ["enable", ...toEnable]);
   if (enable.code !== 0) throw new CliError(`systemctl enable failed: ${enable.stderr.trim()}`);
+  if (runnerDeferred) {
+    warnings.push(`${RUNNER_UNIT} was written but not enabled: no ${layout.runnerTokenFile} exists yet and --no-start skips minting it. Run \`wollipog service install\` again without --no-start, or issue a credential to that path and then \`systemctl${mode === "user" ? " --user" : ""} enable --now ${RUNNER_UNIT}\`.`);
+  }
 
   let lingering: InstallReport["lingering"] = "not-applicable";
   if (mode === "user" && flag(args, "--no-linger")) {
@@ -446,7 +514,7 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
 
   const started: string[] = [];
   const health: InstallReport["health"] = { controlPlane: null, runnerOnline: null };
-  if (!flag(args, "--no-start")) {
+  if (!noStart) {
     if (wantControlPlane) {
       const start = await systemctl(host, mode, ["restart", CONTROL_PLANE_UNIT]);
       if (start.code !== 0) throw new CliError(`could not start ${CONTROL_PLANE_UNIT}: ${start.stderr.trim()}`);
@@ -462,7 +530,7 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
         // First install of a colocated runner: mint its credential through the loopback admin
         // API using the control plane's own protected credential. An existing token file is never
         // replaced, so reinstalling does not rotate the runner credential.
-        const issued = await adminJson<{ outputPath?: string; error?: string }>(host, layout, port, ["runner-credential", "issue", "--runner", runnerId, "--output", layout.runnerTokenFile]);
+        const issued = await adminJson<{ outputPath?: string; error?: string }>(host, effective, ["runner-credential", "issue", "--runner", runnerId, "--output", layout.runnerTokenFile]);
         if (issued.code !== 0) {
           throw new CliError(`could not issue the colocated runner credential: ${issued.data?.error ?? issued.text.trim()}; issue it manually with: wollipog admin runner-credential issue --runner ${runnerId} --output ${layout.runnerTokenFile}`);
         }
@@ -476,7 +544,7 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
       started.push(RUNNER_UNIT);
       let lastStatusError: string | null = null;
       const online = await waitFor(host, 90_000, async () => {
-        const status = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string }> }; error?: string }>(host, layout, port, ["status"]);
+        const status = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string }> }; error?: string }>(host, effective, ["status"]);
         lastStatusError = status.code === 0 ? null : (status.data?.error ?? status.text.trim());
         return status.data?.runners?.items?.some((runner) => runner.runnerId === runnerId && runner.status === "online") === true;
       });
@@ -509,13 +577,14 @@ async function status(args: string[], host: ServiceHost, emit: (data: unknown, t
   const mode = resolveMode(args, host);
   await requireSystemd(host, mode);
   const layout = layoutFor(args, mode, host);
-  const installed = readInstalledControlPlaneEnv({ home: host.home, env: host.env, platform: host.platform });
+  const installed = readInstalledControlPlaneEnv({ home: host.home, env: host.env, platform: host.platform, uid: host.uid, mode });
   const port = installed?.port ?? DEFAULT_PORT;
   const units = await Promise.all([unitState(host, mode, CONTROL_PLANE_UNIT), unitState(host, mode, RUNNER_UNIT)]);
   const health = units[0]!.loadState === "loaded" ? await probeHealth(host, port) : null;
   let runners: Array<{ runnerId: string; status: string; version: string }> | null = null;
   if (health?.ok) {
-    const admin = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string; version: string }> } }>(host, layout, port, ["status"]);
+    const effective = effectiveFromEnv(host, layout, port, await accountUid(host, layout));
+    const admin = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string; version: string }> } }>(host, effective, ["status"]);
     runners = admin.data?.runners?.items ?? null;
   }
   const data = { mode, cliVersion: VERSION, envFile: installed?.file ?? null, port, units, health, runners, layout: { dataDir: layout.dataDir, configDir: layout.configDir, unitDir: layout.unitDir } };
@@ -530,7 +599,8 @@ async function status(args: string[], host: ServiceHost, emit: (data: unknown, t
   ];
   emit(data, lines.join("\n"));
   const loaded = units.filter((u) => u.loadState === "loaded");
-  const ok = loaded.every((u) => u.activeState === "active") && (health === null || health.ok);
+  // Nothing installed is not "healthy"; automation must see a non-zero exit.
+  const ok = loaded.length > 0 && loaded.every((u) => u.activeState === "active") && (health === null || health.ok);
   return ok ? 0 : 1;
 }
 
@@ -542,7 +612,7 @@ async function restart(args: string[], words: string[], host: ServiceHost, emit:
   const unit = unitFor(component);
   const result = await systemctl(host, mode, ["restart", unit]);
   if (result.code !== 0) throw new CliError(`systemctl restart ${unit} failed: ${result.stderr.trim()}`);
-  const installed = readInstalledControlPlaneEnv({ home: host.home, env: host.env, platform: host.platform });
+  const installed = readInstalledControlPlaneEnv({ home: host.home, env: host.env, platform: host.platform, uid: host.uid, mode });
   const port = installed?.port ?? DEFAULT_PORT;
   let health: { ok: boolean; detail: string } | null = null;
   if (component === "control-plane") {
@@ -586,13 +656,20 @@ async function uninstall(args: string[], host: ServiceHost, io: ServiceIo, emit:
   }
   const removed: string[] = [];
   const units = [RUNNER_UNIT, CONTROL_PLANE_UNIT];
-  await systemctl(host, mode, ["disable", "--now", ...units]);
+  const states = await Promise.all(units.map((unit) => unitState(host, mode, unit)));
+  const present = units.filter((unit, index) => states[index]!.loadState === "loaded" || host.exists(join(layout.unitDir, unit)));
+  if (present.length > 0) {
+    // Stopping must succeed before anything is removed: deleting a unit file or purging data
+    // underneath a still-running control plane would corrupt live state.
+    const disable = await systemctl(host, mode, ["disable", "--now", ...present]);
+    if (disable.code !== 0) throw new CliError(`systemctl disable --now ${present.join(" ")} failed: ${disable.stderr.trim() || `exit ${disable.code}`}; nothing was removed`);
+  }
   for (const unit of units) {
     const path = join(layout.unitDir, unit);
     if (host.exists(path)) { host.removeFile(path); removed.push(path); }
   }
   await systemctl(host, mode, ["daemon-reload"]);
-  await systemctl(host, mode, ["reset-failed", ...units]);
+  if (present.length > 0) await systemctl(host, mode, ["reset-failed", ...present]);
   const preserved: string[] = [];
   if (purge) {
     for (const dir of [layout.dataDir, layout.configDir]) {
