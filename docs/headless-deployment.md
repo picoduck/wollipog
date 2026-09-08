@@ -129,6 +129,7 @@ same care as the database, because they are what a restored host needs to rejoin
 Recovery commands from an SSH session:
 
 ```bash
+wollipog admin doctor                                # pass/warn/fail checks with remedies; exit 1 on any failure
 wollipog service status                              # what is running, what is enabled, health
 wollipog service logs control-plane --lines 500      # why it is not
 wollipog service restart control-plane               # bounded restart with health wait

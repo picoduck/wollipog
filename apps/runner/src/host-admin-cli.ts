@@ -27,14 +27,25 @@ import { dirname, resolve } from "node:path";
 import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   type DeviceView,
+  type HostAdminCheck,
+  type HostAdminDoctorView,
   type HostAdminStatusView,
   type IdentityAdministrationView,
   type RunnerCredentialSecret,
   type RunnerCredentialView,
 } from "@wollipog/protocol";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
+import { readFileSync as readTextFileSync } from "node:fs";
+import { execCapture, type ExecResult } from "./exec-capture.js";
 import type { McpFetch } from "./session-management-mcp.js";
-import { readInstalledControlPlaneEnv } from "./systemd-service.js";
+import {
+  CONTROL_PLANE_UNIT,
+  RUNNER_UNIT,
+  SYSTEMCTL_SHOW_PROPERTIES,
+  parseSystemctlShow,
+  readInstalledControlPlaneEnv,
+  serviceLayout,
+} from "./systemd-service.js";
 import { VERSION } from "./version.js";
 
 export const LOCAL_TOKEN_FILE_ENV = "CONTROL_PLANE_LOCAL_TOKEN_FILE";
@@ -61,7 +72,12 @@ export interface HostAdminHost {
   uid: number | null;
   cwd(): string;
   /** Coordinates recorded by `wollipog service install`, when such a deployment exists. */
-  installedControlPlaneEnv?(): { db?: string; port?: number; localTokenFile?: string } | null;
+  installedControlPlaneEnv?(): { file?: string; db?: string; port?: number; localTokenFile?: string } | null;
+  /** Doctor inputs for the local (client-side) checks; absent means those checks are skipped. */
+  home?: string;
+  user?: string;
+  env?: NodeJS.ProcessEnv;
+  exec?(command: string, args: string[], options?: { timeoutMs?: number }): Promise<ExecResult>;
 }
 
 export const DEFAULT_HOST: HostAdminHost = {
@@ -74,6 +90,10 @@ export const DEFAULT_HOST: HostAdminHost = {
     platform: process.platform,
     uid: typeof process.getuid === "function" ? process.getuid() : null,
   }),
+  home: homedir(),
+  user: (() => { try { return userInfo().username; } catch { return process.env.USER ?? ""; } })(),
+  env: process.env,
+  exec: execCapture,
 };
 
 export function defaultHostAdminIo(): HostAdminIo {
@@ -150,6 +170,7 @@ export function hostAdminUsage(): string {
     "Usage: wollipog admin <command> [options]",
     "  admin pairing-url [--json]",
     "  admin status [--json]",
+    "  admin doctor [--json]",
     "  admin user list [--json]",
     "  admin device list [--json]",
     "  admin device create --name <name> [--user <user-id>] [--origin <public-origin>] [--output <file>] [--json]",
@@ -619,6 +640,154 @@ async function runnerCredentialCommand(
   }
 }
 
+/** Non-reading safety audit of a protected file: type, symlink, mode, and owner. */
+export function auditProtectedFile(path: string, host: HostAdminHost): { exists: boolean; issues: string[] } {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    return { exists: false, issues: (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : [`could not inspect: ${(error as Error).message}`] };
+  }
+  const issues: string[] = [];
+  if (stat.isSymbolicLink()) issues.push("is a symbolic link");
+  else if (!stat.isFile()) issues.push("is not a regular file");
+  if (host.platform !== "win32") {
+    const mode = stat.mode & 0o777;
+    if (mode & 0o077) issues.push(`mode 0${mode.toString(8)} grants group or other access; expected 0600`);
+    if (host.uid !== null && stat.uid !== host.uid) issues.push(`owned by uid ${stat.uid}, not the current account (uid ${host.uid})`);
+  }
+  return { exists: true, issues };
+}
+
+function mark(status: HostAdminCheck["status"]): string {
+  return status === "pass" ? "ok  " : status === "warn" ? "warn" : "FAIL";
+}
+
+/** Terminal output never carries control characters, whatever a remote peer put in a message. */
+function printable(value: string): string {
+  return value.replace(/\r?\n/gu, " ").replace(/[\u0000-\u001f\u007f-\u009f]/gu, "?");
+}
+
+export function formatChecks(checks: HostAdminCheck[]): string {
+  const lines = checks.map((item) => {
+    const head = `${mark(item.status)}  ${printable(item.id).padEnd(28)} ${printable(item.summary)}`;
+    const extra = [item.detail ? `        detail: ${printable(item.detail)}` : null, item.remedy ? `        remedy: ${printable(item.remedy)}` : null].filter(Boolean);
+    return [head, ...extra].join("\n");
+  });
+  const counts = { pass: 0, warn: 0, fail: 0 };
+  for (const item of checks) counts[item.status] += 1;
+  lines.push(`${counts.pass} pass, ${counts.warn} warn, ${counts.fail} fail`);
+  return lines.join("\n");
+}
+
+/**
+ * `admin doctor`: local checks first (they need no running control plane), then the control
+ * plane's own doctor route. Exit 1 when any check fails; warnings alone exit 0.
+ */
+async function doctorCommand(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  io: HostAdminIo,
+  fetchImpl: McpFetch,
+  host: HostAdminHost,
+  installed: { file?: string; db?: string; port?: number; localTokenFile?: string } | null,
+  target: { url: string; port: number },
+  tokenPath: string,
+  emit: (data: unknown, text: string | (() => string)) => void,
+): Promise<number> {
+  const checks: HostAdminCheck[] = [];
+  const add = (id: string, status: HostAdminCheck["status"], summary: string, extra: { detail?: string; remedy?: string } = {}) =>
+    checks.push({ id, status, summary, ...(extra.detail ? { detail: extra.detail } : {}), ...(extra.remedy ? { remedy: extra.remedy } : {}) });
+
+  add("cli", "pass", `wollipog CLI ${VERSION} (protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor}+ required for doctor)`);
+
+  // Installed systemd deployment (Linux only, only when `wollipog service install` left its env file).
+  // In system mode the service account owns the credential files, so owner checks (including the
+  // control plane's own credential below) expect that account's uid, exactly as `wollipog service` does.
+  let expectedOwner = host.uid;
+  if (host.platform === "linux" && installed?.file && host.exec && host.home !== undefined) {
+    // The env file's location decides the mode; compare against the computed system layout so a
+    // relocated layout (WOLLIPOG_SYSTEM_PREFIX) is still recognised as system mode.
+    const systemEnvFile = serviceLayout("system", { home: host.home, user: host.user ?? "", env: host.env ?? {} }).controlPlaneEnvFile;
+    const mode = resolve(installed.file) === systemEnvFile ? "system" : "user";
+    const layout = serviceLayout(mode, { home: host.home, user: host.user ?? "", env: host.env ?? {} });
+    if (mode === "system") {
+      const unitPath = `${layout.unitDir}/${CONTROL_PLANE_UNIT}`;
+      let account = layout.account;
+      try {
+        const match = /^User=([A-Za-z_][A-Za-z0-9_-]{0,31})$/mu.exec(readTextFileSync(unitPath, "utf8"));
+        if (match) account = match[1]!;
+      } catch {
+        /* unit missing or unreadable: fall back to the default account */
+      }
+      const result = await host.exec("id", ["-u", account], { timeoutMs: 10_000 });
+      const uid = Number(result.stdout.trim());
+      if (result.code === 0 && Number.isInteger(uid)) expectedOwner = uid;
+      else add("service-account", "fail", `could not resolve the uid of service account ${account}`, { detail: result.stderr.trim() || `exit ${result.code}`, remedy: "recreate the account or reinstall with `wollipog service install --system`" });
+    }
+    for (const unit of [CONTROL_PLANE_UNIT, RUNNER_UNIT]) {
+      const shown = await host.exec("systemctl", [...(mode === "user" ? ["--user"] : []), "show", "-p", SYSTEMCTL_SHOW_PROPERTIES.join(","), unit], { timeoutMs: 15_000 });
+      const state = parseSystemctlShow(unit, shown.stdout);
+      if (shown.code !== 0) add(`service:${unit}`, "warn", `could not query ${unit}`, { detail: shown.stderr.trim() || `exit ${shown.code}` });
+      else if (state.loadState !== "loaded") add(`service:${unit}`, unit === RUNNER_UNIT ? "warn" : "fail", `${unit} is not installed`, { remedy: "run `wollipog service install`" });
+      else if (state.activeState !== "active") add(`service:${unit}`, "fail", `${unit} is ${state.activeState}/${state.subState}${state.unitFileState ? ` (${state.unitFileState})` : ""}`, { remedy: `wollipog service logs ${unit === RUNNER_UNIT ? "runner" : "control-plane"}${mode === "system" ? " --system" : ""}` });
+      else add(`service:${unit}`, "pass", `${unit} active/${state.subState}${state.mainPid ? ` (pid ${state.mainPid})` : ""}${state.restarts ? `, ${state.restarts} restart(s)` : ""}`);
+    }
+    if (mode === "user" && host.user) {
+      const linger = await host.exec("loginctl", ["show-user", host.user, "-p", "Linger", "--value"], { timeoutMs: 10_000 });
+      if (linger.code === 0 && linger.stdout.trim() === "yes") add("lingering", "pass", `lingering enabled for ${host.user}; user services survive logout`);
+      else add("lingering", "warn", `lingering is not enabled for ${host.user}; user services stop at logout`, { remedy: `loginctl enable-linger ${host.user}` });
+    }
+    for (const [id, path] of [["control-plane-env", layout.controlPlaneEnvFile], ["runner-token", layout.runnerTokenFile]] as const) {
+      const audit = auditProtectedFile(path, { ...host, uid: expectedOwner });
+      if (!audit.exists) { if (id === "runner-token") add(id, "warn", `no runner token at ${path}`, { remedy: "run `wollipog service install` again to mint it, or `wollipog admin runner-credential issue --output`" }); continue; }
+      add(id, audit.issues.length ? "fail" : "pass", audit.issues.length ? `${path} ${audit.issues.join("; ")}` : `${path} is private`, audit.issues.length ? { remedy: `chmod 0600 ${path}` } : {});
+    }
+  } else if (host.platform === "linux") {
+    add("service", "pass", "no `wollipog service` deployment found on this host", { detail: "install one with `wollipog service install` for a durable control plane and runner" });
+  }
+
+  // Local bootstrap credential file (the doctor's own access path).
+  const ownerHost = { ...host, uid: expectedOwner };
+  const credentialAudit = auditProtectedFile(tokenPath, ownerHost);
+  if (!credentialAudit.exists) add("local-credential-file", "fail", `no local credential file at ${tokenPath}`, { remedy: "start the control plane once with the same coordinates, or pass --token-file" });
+  else if (credentialAudit.issues.length) add("local-credential-file", "fail", `${tokenPath} ${credentialAudit.issues.join("; ")}`, { remedy: `chmod 0600 ${tokenPath} and make sure it is owned by the ${expectedOwner === host.uid ? "account running this command" : "service account"}` });
+  else add("local-credential-file", "pass", `${tokenPath} is private`);
+
+  let server: HostAdminDoctorView | null = null;
+  if (credentialAudit.exists && credentialAudit.issues.length === 0) {
+    let client: Client | null = null;
+    let protocol: number | null = null;
+    try {
+      const token = readProtectedLocalToken(tokenPath, ownerHost);
+      client = makeClient(fetchImpl, target.url, token);
+      const compatibility = await client.get<{ protocolVersion?: unknown }>("/api/compatibility");
+      protocol = typeof compatibility.protocolVersion === "number" ? compatibility.protocolVersion : null;
+    } catch (error) {
+      add("control-plane-reachable", "fail", `control plane at ${target.url} is not reachable`, { detail: (error as Error).message, remedy: "wollipog service status" });
+      client = null;
+    }
+    if (client && (protocol === null || protocol < RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor)) {
+      add("control-plane-reachable", protocol === null ? "fail" : "warn", `control plane at ${target.url} speaks protocol v${String(protocol ?? "unknown")}; doctor needs v${RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor}+`, { remedy: "upgrade the control plane to run its server-side checks; `wollipog admin status` may still work" });
+    } else if (client) {
+      // Reachability and the doctor route are separate facts: a reachable control plane whose
+      // doctor route fails must not be reported as unreachable, nor as fully healthy.
+      add("control-plane-reachable", "pass", `control plane at ${target.url} reachable (protocol v${protocol})`);
+      try {
+        server = await client.get<HostAdminDoctorView>("/api/admin/doctor");
+        checks.push(...server.checks);
+        if (server.status.appVersion !== VERSION) add("version-skew", "warn", `CLI ${VERSION} differs from control plane ${server.status.appVersion}`, { remedy: "upgrade both to the same release" });
+      } catch (error) {
+        add("control-plane-doctor", "fail", "the control plane's doctor route failed", { detail: (error as Error).message, remedy: "wollipog service logs control-plane" });
+      }
+    }
+  }
+
+  const ok = checks.every((item) => item.status !== "fail");
+  emit({ ok, generatedAt: server?.generatedAt ?? Date.now(), checks, controlPlane: server?.status ?? null }, () => formatChecks(checks));
+  return ok ? 0 : 1;
+}
+
 interface DeviceCreateReply {
   device: DeviceView;
   token: string;
@@ -654,6 +823,8 @@ export async function runHostAdminCli(
       emit({ pairingUrl: url, tokenFile: tokenPath }, url);
       return 0;
     }
+
+    if (command === "doctor") return await doctorCommand(args, env, io, fetchImpl, host, installed, target, tokenPath, emit);
 
     if (command !== "status" && command !== "user" && command !== "device" && command !== "runner-credential") {
       throw new CliError(hostAdminUsage(), 2);

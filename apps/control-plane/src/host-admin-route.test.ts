@@ -3,10 +3,11 @@ import { test } from "node:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROTOCOL_VERSION, type HostAdminStatusView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type HostAdminDoctorView, type HostAdminStatusView } from "@wollipog/protocol";
 import Fastify, { type FastifyRequest } from "fastify";
 import { registerAuthGate } from "./http-auth.js";
-import { HOST_ADMIN_FORBIDDEN, hostAdminStatus, registerHostAdminRoute, type HostAdminRouteDeps } from "./host-admin-route.js";
+import { HOST_ADMIN_FORBIDDEN, hostAdminDoctor, hostAdminStatus, probePublicOriginWithFetch, registerHostAdminRoute, type HostAdminRouteDeps } from "./host-admin-route.js";
+import { APP_RELEASE_VERSION } from "./release-version.js";
 import { isLoopback } from "./net.js";
 
 const BOOTSTRAP = "local-bootstrap-token";
@@ -140,4 +141,113 @@ test("hostAdminStatus surfaces bind, origin, credential, store, and runner misma
   assert.match(text, /no registered runner is online/u);
   assert.match(text, new RegExp(`old-box speaks protocol v${PROTOCOL_VERSION - 1}`, "u"));
   if (process.platform !== "win32") assert.match(text, /local credential file is unsafe: credential file mode 0644/u);
+});
+
+test("GET /api/admin/doctor shares the bootstrap-only boundary and reports passing checks for a healthy host", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "host-admin-doctor-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const deps = fixture(root, {
+    publicOrigin: "https://box.example.ts.net",
+    doctor: {
+      probePublicOrigin: async () => ({ reachable: true, service: "wollipog-control-plane", detail: "answered" }),
+      legacyRunnerCredentials: () => 0,
+      defaultLegacyToken: false,
+      tailnetAddresses: () => ["100.64.0.5"],
+    },
+  });
+  const app = await buildApp(deps);
+  t.after(() => app.close());
+  const paired = await app.inject({ method: "GET", url: "/api/admin/doctor", remoteAddress: "127.0.0.1", headers: { authorization: `Bearer ${DEVICE}` } });
+  assert.equal(paired.statusCode, 403);
+  const response = await app.inject({ method: "GET", url: "/api/admin/doctor", remoteAddress: "127.0.0.1", headers: { authorization: `Bearer ${BOOTSTRAP}` } });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["cache-control"], "no-store");
+  const doctor = response.json<HostAdminDoctorView>();
+  assert.equal(doctor.ok, true);
+  assert.deepEqual(doctor.checks.map((c) => `${c.id}:${c.status}`), [
+    "control-plane:pass", "database:pass", "artifact-store:pass", "local-credential:pass", "dashboard-bundle:pass",
+    "exposure:pass", "public-origin:pass", "runners:pass", "legacy-credentials:pass", "devices:pass",
+  ]);
+  assert.equal(doctor.status.protocolVersion, PROTOCOL_VERSION);
+  assert.ok(!JSON.stringify(doctor).includes("x".repeat(43)), "no credential contents");
+});
+
+test("hostAdminDoctor turns exposure, reachability, credential, and skew problems into warn/fail with remedies", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "host-admin-doctor-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const base = fixture(root, {
+    bind: { host: "0.0.0.0", port: 4317, tailnetOnly: false },
+    publicOrigin: "http://100.64.0.10:4317",
+    publicOriginWarning: "plain HTTP warning",
+    webServed: () => false,
+    pairingHosts: () => ["100.64.0.10"],
+    runners: () => [
+      { runnerId: "old-box", status: "offline", version: "0.21.0", protocolVersion: PROTOCOL_VERSION - 1 },
+      { runnerId: "new-box", status: "online", version: APP_RELEASE_VERSION, protocolVersion: PROTOCOL_VERSION },
+    ],
+    pairedDeviceCount: () => 0,
+    doctor: {
+      probePublicOrigin: async () => ({ reachable: true, service: "nginx", detail: "answered as nginx" }),
+      legacyRunnerCredentials: () => 2,
+      defaultLegacyToken: true,
+      tailnetAddresses: () => [],
+    },
+  });
+  chmodSync(base.localCredentialPath, 0o644);
+  const doctor = await hostAdminDoctor(base);
+  const byId = Object.fromEntries(doctor.checks.map((c) => [c.id, c]));
+  assert.equal(doctor.ok, false);
+  if (process.platform !== "win32") assert.equal(byId["local-credential"]!.status, "fail");
+  assert.equal(byId["dashboard-bundle"]!.status, "warn");
+  assert.equal(byId.exposure!.status, "warn");
+  assert.match(byId.exposure!.detail ?? "", /plain HTTP warning/u);
+  assert.equal(byId["public-origin"]!.status, "fail", "a different service answering at the public origin is a misconfiguration");
+  assert.equal(byId.runners!.status, "pass");
+  assert.equal(byId["runner-protocol:old-box"]!.status, "warn");
+  assert.equal(byId["runner-version:old-box"]!.status, "warn");
+  assert.equal(byId["runner-version:new-box"], undefined);
+  assert.equal(byId["legacy-credentials"]!.status, "fail", "default token derived credentials beyond loopback");
+  assert.match(byId["legacy-credentials"]!.remedy ?? "", /runner-credential rotate/u);
+  assert.match(byId.devices!.detail ?? "", /admin device create/u);
+  for (const item of doctor.checks) if (item.status !== "pass") assert.ok(item.remedy, `${item.id} needs a remedy`);
+  chmodSync(base.localCredentialPath, 0o600);
+
+  const tailnet = await hostAdminDoctor(fixture(root, {
+    bind: { host: "0.0.0.0", port: 4317, tailnetOnly: true },
+    doctor: { probePublicOrigin: async () => ({ reachable: false, service: null, detail: "ECONNREFUSED" }), legacyRunnerCredentials: () => 1, defaultLegacyToken: true, tailnetAddresses: () => [] },
+  }));
+  const tailnetById = Object.fromEntries(tailnet.checks.map((c) => [c.id, c]));
+  assert.equal(tailnetById.exposure!.status, "fail");
+  assert.match(tailnetById.exposure!.summary, /no Tailscale IPv4 address/u);
+  assert.equal(tailnetById["legacy-credentials"]!.status, "fail");
+
+  const unreachable = await hostAdminDoctor(fixture(root, {
+    publicOrigin: "https://box.example.ts.net",
+    doctor: { probePublicOrigin: async () => ({ reachable: false, service: null, detail: "ENOTFOUND" }), legacyRunnerCredentials: () => 0, defaultLegacyToken: false, tailnetAddresses: () => ["100.64.0.5"] },
+  }));
+  const unreachableById = Object.fromEntries(unreachable.checks.map((c) => [c.id, c]));
+  assert.equal(unreachableById["public-origin"]!.status, "warn", "a host may not reach its own tailnet name; warn, not fail");
+  assert.match(unreachableById["public-origin"]!.detail ?? "", /ENOTFOUND/u);
+  assert.equal(unreachable.ok, true);
+});
+
+test("probePublicOriginWithFetch classifies health answers without throwing", async () => {
+  const ok = await probePublicOriginWithFetch("https://box.example/", (async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, service: "wollipog-control-plane" }) })) as unknown as typeof fetch);
+  assert.deepEqual(ok, { reachable: true, service: "wollipog-control-plane", detail: "answered as wollipog-control-plane" });
+  const html = await probePublicOriginWithFetch("https://box.example", (async () => ({ ok: true, status: 200, text: async () => "<html>" })) as unknown as typeof fetch);
+  assert.equal(html.service, null);
+  const down = await probePublicOriginWithFetch("https://box.example", (async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch);
+  assert.deepEqual(down, { reachable: false, service: null, detail: "ECONNREFUSED" });
+  const denied = await probePublicOriginWithFetch("https://box.example", (async () => ({ ok: false, status: 502, text: async () => "" })) as unknown as typeof fetch);
+  assert.deepEqual(denied, { reachable: true, service: null, detail: "HTTP 502" });
+});
+
+
+test("probePublicOriginWithFetch never echoes an unusable service marker", async () => {
+  const spoofed = await probePublicOriginWithFetch("https://box.example", (async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ service: "\u001b[2Jspoofed" }) })) as unknown as typeof fetch);
+  assert.deepEqual(spoofed, { reachable: true, service: null, detail: "answered with an unusable service marker" });
+  const huge = await probePublicOriginWithFetch("https://box.example", (async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ service: "a".repeat(65) }) })) as unknown as typeof fetch);
+  assert.equal(huge.service, null);
+  const legacy = await probePublicOriginWithFetch("https://box.example", (async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ service: "misko-agent-manager-control-plane" }) })) as unknown as typeof fetch);
+  assert.equal(legacy.service, "misko-agent-manager-control-plane");
 });

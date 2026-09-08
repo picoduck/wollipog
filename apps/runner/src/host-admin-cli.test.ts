@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type HostAdminStatusView } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
 import {
+  formatChecks,
   formatStatus,
   isDesktopCleartextHost,
   isLoopbackHostname,
@@ -732,4 +733,181 @@ test("writeProtectedSecretFile removes the fallback file when the final close fa
   // cleanup) and remove the file.
   assert.throws(() => writeProtectedSecretFile(target, "secret\n", failingClose), /^Error: could not write .*EBADF/u);
   assert.ok(!existsSync(target), "a file whose close failed is not published");
+});
+
+function doctorServer(options: { protocolVersion?: number; fail?: boolean } = {}) {
+  const calls: string[] = [];
+  const view = {
+    generatedAt: 1_700_000_000_000,
+    ok: !options.fail,
+    checks: [
+      { id: "control-plane", status: "pass", summary: "responding" },
+      { id: "exposure", status: "warn", summary: "loopback only", remedy: "set CONTROL_PLANE_PUBLIC_ORIGIN" },
+      ...(options.fail ? [{ id: "database", status: "fail", summary: "not writable", remedy: "chown" }] : []),
+    ],
+    status: status({ appVersion: "9.9.9" }),
+  };
+  const fetch: McpFetch = async (url, init) => {
+    calls.push(url);
+    const respond = (statusCode: number, body: unknown) => ({ ok: statusCode >= 200 && statusCode < 300, status: statusCode, text: async () => JSON.stringify(body) });
+    if (init?.headers?.authorization !== `Bearer ${TOKEN}`) return respond(401, { error: "unauthorized" });
+    const path = url.replace(/^https?:\/\/[^/]+/u, "");
+    if (path === "/api/compatibility") return respond(200, { protocolVersion: options.protocolVersion ?? PROTOCOL_VERSION });
+    if (path === "/api/admin/doctor") return respond(200, view);
+    return respond(404, { error: `unexpected ${path}` });
+  };
+  return { fetch, calls };
+}
+
+test("admin doctor runs local checks, appends the control plane's checks, flags version skew, and exits by severity", async (t) => {
+  const { root, tokenFile } = fixture(t);
+  const home = join(root, "home");
+  mkdirSync(join(home, ".config", "wollipog"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(home, ".config", "systemd", "user"), { recursive: true });
+  const envFile = join(home, ".config", "wollipog", "control-plane.env");
+  writeFileSync(envFile, `CONTROL_PLANE_PORT=4317\nCONTROL_PLANE_LOCAL_TOKEN_FILE="${tokenFile}"\n`, { mode: 0o600 });
+  const runnerToken = join(home, ".config", "wollipog", "runner.token");
+  writeFileSync(runnerToken, "wollipogr_x\n", { mode: 0o640 });
+  const execs: string[] = [];
+  const doctorHost = {
+    ...host,
+    platform: "linux" as const,
+    home,
+    user: "op",
+    env: {},
+    installedControlPlaneEnv: () => ({ file: envFile, port: 4317, localTokenFile: tokenFile }),
+    exec: async (command: string, args: string[]) => {
+      execs.push([command, ...args].join(" "));
+      if (command === "systemctl") {
+        const unit = args[args.length - 1]!;
+        const active = unit === "wollipog-control-plane.service";
+        return { code: 0, stdout: `LoadState=loaded\nActiveState=${active ? "active" : "failed"}\nSubState=${active ? "running" : "failed"}\nUnitFileState=enabled\nMainPID=${active ? 77 : 0}\nNRestarts=3\n`, stderr: "" };
+      }
+      if (command === "loginctl") return { code: 0, stdout: "no\n", stderr: "" };
+      return { code: 1, stdout: "", stderr: "unexpected" };
+    },
+  };
+  const srv = doctorServer();
+  const { io, stdout } = makeIo();
+  const code = await runHostAdminCli(["admin", "doctor", "--json"], {}, io, srv.fetch, doctorHost);
+  const report = JSON.parse(stdout());
+  const byId = Object.fromEntries(report.checks.map((c: { id: string }) => [c.id, c]));
+  assert.equal(code, 1, JSON.stringify(report.checks));
+  assert.equal(report.ok, false);
+  assert.equal(byId.cli.status, "pass");
+  assert.match(byId["service:wollipog-control-plane.service"].summary, /active\/running \(pid 77\), 3 restart\(s\)/u);
+  assert.equal(byId["service:wollipog-runner.service"].status, "fail");
+  assert.match(byId["service:wollipog-runner.service"].remedy, /wollipog service logs runner/u);
+  assert.equal(byId.lingering.status, "warn");
+  assert.match(byId.lingering.remedy, /loginctl enable-linger op/u);
+  assert.equal(byId["control-plane-env"].status, "pass");
+  assert.equal(byId["runner-token"].status, process.platform === "win32" ? "pass" : "fail");
+  assert.equal(byId["local-credential-file"].status, "pass");
+  assert.equal(byId["control-plane-reachable"].status, "pass");
+  assert.equal(byId.exposure.status, "warn", "server checks are appended");
+  assert.equal(byId["version-skew"].status, "warn");
+  assert.match(byId["version-skew"].summary, /differs from control plane 9\.9\.9/u);
+  assert.ok(srv.calls.some((url) => url.endsWith("/api/admin/doctor")));
+  assert.ok(execs.some((line) => line.startsWith("systemctl --user show")));
+  assert.ok(!stdout().includes(TOKEN));
+
+  const readable = makeIo();
+  await runHostAdminCli(["admin", "doctor"], {}, readable.io, srv.fetch, doctorHost);
+  assert.match(readable.stdout(), /FAIL  service:wollipog-runner\.service/u);
+  assert.match(readable.stdout(), /remedy: loginctl enable-linger op/u);
+  assert.match(readable.stdout(), /\d+ pass, \d+ warn, \d+ fail\n$/u);
+});
+
+test("admin doctor degrades when the control plane is down, too old, or the credential file is unsafe", async (t) => {
+  const { tokenFile } = fixture(t);
+  const noService = { ...host, platform: "linux" as const, home: "/nonexistent-home", user: "op", env: {}, installedControlPlaneEnv: () => null, exec: async () => ({ code: 1, stdout: "", stderr: "" }) };
+
+  const down = makeIo();
+  const unreachable: McpFetch = async () => { throw new Error("ECONNREFUSED"); };
+  assert.equal(await runHostAdminCli(["admin", "doctor", "--json"], env(tokenFile), down.io, unreachable, noService), 1);
+  const downById = Object.fromEntries(JSON.parse(down.stdout()).checks.map((c: { id: string }) => [c.id, c]));
+  assert.equal(downById["control-plane-reachable"].status, "fail");
+  assert.match(downById["control-plane-reachable"].detail, /ECONNREFUSED/u);
+  assert.equal(downById.service.status, "pass");
+  assert.match(downById.service.detail, /wollipog service install/u);
+
+  const old = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "doctor", "--json"], env(tokenFile), old.io, doctorServer({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor - 1 }).fetch, noService), 0);
+  const oldById = Object.fromEntries(JSON.parse(old.stdout()).checks.map((c: { id: string }) => [c.id, c]));
+  assert.equal(oldById["control-plane-reachable"].status, "warn");
+  assert.match(oldById["control-plane-reachable"].summary, new RegExp(`doctor needs v${RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor}\\+`, "u"));
+  assert.equal(oldById.exposure, undefined, "no server checks from an old control plane");
+
+  if (process.platform !== "win32") {
+    chmodSync(tokenFile, 0o644);
+    const unsafe = makeIo();
+    const srv = doctorServer();
+    assert.equal(await runHostAdminCli(["admin", "doctor", "--json"], env(tokenFile), unsafe.io, srv.fetch, noService), 1);
+    const unsafeById = Object.fromEntries(JSON.parse(unsafe.stdout()).checks.map((c: { id: string }) => [c.id, c]));
+    assert.equal(unsafeById["local-credential-file"].status, "fail");
+    assert.equal(srv.calls.length, 0, "an unsafe credential file is never read or sent");
+    chmodSync(tokenFile, 0o600);
+  }
+
+  const healthy = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "doctor", "--json"], env(tokenFile), healthy.io, doctorServer().fetch, { ...noService }), 0, healthy.stdout());
+  const failing = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "doctor"], env(tokenFile), failing.io, doctorServer({ fail: true }).fetch, { ...noService }), 1);
+  assert.match(failing.stdout(), /FAIL  database/u);
+});
+
+
+test("admin doctor keeps reachability and a failing doctor route as distinct checks and strips control characters", async (t) => {
+  const { tokenFile } = fixture(t);
+  const noService = { ...host, platform: "linux" as const, home: "/nonexistent-home", user: "op", env: {}, installedControlPlaneEnv: () => null, exec: async () => ({ code: 1, stdout: "", stderr: "" }) };
+  const broken: McpFetch = async (url, init) => {
+    const respond = (statusCode: number, body: unknown) => ({ ok: statusCode >= 200 && statusCode < 300, status: statusCode, text: async () => JSON.stringify(body) });
+    if (init?.headers?.authorization !== `Bearer ${TOKEN}`) return respond(401, { error: "unauthorized" });
+    if (url.endsWith("/api/compatibility")) return respond(200, { protocolVersion: PROTOCOL_VERSION });
+    return respond(500, { error: "doctor exploded \u001b[2J" });
+  };
+  const { io, stdout } = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "doctor", "--json"], env(tokenFile), io, broken, noService), 1);
+  const report = JSON.parse(stdout());
+  const ids = report.checks.map((c: { id: string }) => c.id);
+  assert.equal(new Set(ids).size, ids.length, "check ids are unique");
+  const byId = Object.fromEntries(report.checks.map((c: { id: string }) => [c.id, c]));
+  assert.equal(byId["control-plane-reachable"].status, "pass");
+  assert.equal(byId["control-plane-doctor"].status, "fail");
+  assert.match(byId["control-plane-doctor"].detail, /doctor exploded/u);
+  const readable = formatChecks(report.checks);
+  assert.ok(!readable.includes("\u001b"), "control characters never reach the terminal");
+  assert.ok(!formatChecks([{ id: "x", status: "pass", summary: "a\tb", detail: "c\td" }]).includes("\t"), "tabs are stripped too");
+  assert.match(readable, /FAIL  control-plane-doctor/u);
+});
+
+test("admin doctor on a system-mode deployment expects the service account to own credential files", async (t) => {
+  const { root, tokenFile } = fixture(t);
+  const sysroot = join(root, "sysroot");
+  mkdirSync(join(sysroot, "etc", "wollipog"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(sysroot, "etc", "systemd", "system"), { recursive: true });
+  writeFileSync(join(sysroot, "etc", "systemd", "system", "wollipog-control-plane.service"), "[Service]\nUser=svc-acct\n", { mode: 0o644 });
+  writeFileSync(join(sysroot, "etc", "wollipog", "control-plane.env"), `CONTROL_PLANE_LOCAL_TOKEN_FILE="${tokenFile}"\n`, { mode: 0o600 });
+  writeFileSync(join(sysroot, "etc", "wollipog", "runner.token"), "wollipogr_x\n", { mode: 0o600 });
+  const execs: string[] = [];
+  const rootHost = {
+    ...host, platform: "linux" as const, uid: 0, home: "/root", user: "root", env: { WOLLIPOG_SYSTEM_PREFIX: sysroot },
+    installedControlPlaneEnv: () => ({ file: join(sysroot, "etc", "wollipog", "control-plane.env"), localTokenFile: tokenFile }),
+    exec: async (command: string, args: string[]) => {
+      execs.push([command, ...args].join(" "));
+      if (command === "id") return args[1] === "svc-acct" ? { code: 0, stdout: `${process.getuid?.() ?? 0}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "no such user" };
+      if (command === "systemctl") return { code: 0, stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=5\nNRestarts=0\n", stderr: "" };
+      return { code: 1, stdout: "", stderr: "" };
+    },
+  };
+  const { io, stdout } = makeIo();
+  const code = await runHostAdminCli(["admin", "doctor", "--json"], {}, io, doctorServer().fetch, rootHost);
+  const byId = Object.fromEntries(JSON.parse(stdout()).checks.map((c: { id: string }) => [c.id, c]));
+  assert.equal(code, 0, JSON.stringify(byId));
+  assert.ok(execs.includes("id -u svc-acct"), "the account comes from the installed unit's User= line");
+  assert.equal(byId["local-credential-file"].status, "pass", "root accepts the file because the service account owns it");
+  assert.equal(byId["control-plane-env"].status, "pass");
+  assert.equal(byId["runner-token"].status, "pass");
+  assert.equal(byId["control-plane-reachable"].status, "pass", "root can read the service account's credential to reach the control plane");
+  assert.equal(byId.lingering, undefined, "no lingering check in system mode");
 });

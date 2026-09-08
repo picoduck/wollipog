@@ -331,7 +331,8 @@
 // 114: loopback host-administration status route and public dashboard origin for pairing links.
 // 115: explicitly confirmed, runner-revalidated machine skill adoption.
 // 116: bounded machine skill adoption recovery inspection and explicit restore.
-export const PROTOCOL_VERSION = 116;
+// 117: loopback host-administration doctor route (`wollipog admin doctor`).
+export const PROTOCOL_VERSION = 117;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -505,6 +506,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   progressAwareSessionWorktrees: 113,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
+  /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
+  hostAdminDoctor: 117,
 } as const;
 
 /* ========================================================================== */
@@ -1556,6 +1559,26 @@ export interface HostAdminStatusView {
   runners: { registered: number; online: number; items: Array<{ runnerId: string; status: string; version: string; protocolVersion: number | null }> };
   devices: { paired: number };
   warnings: string[];
+}
+
+export type HostAdminCheckStatus = "pass" | "warn" | "fail";
+
+/** One doctor check. `remedy` is an operator action, never a secret. */
+export interface HostAdminCheck {
+  id: string;
+  status: HostAdminCheckStatus;
+  summary: string;
+  detail?: string;
+  remedy?: string;
+}
+
+/** `GET /api/admin/doctor` (protocol v117+): server-side checks plus the status they were derived from. */
+export interface HostAdminDoctorView {
+  generatedAt: number;
+  /** True when no check failed; warnings do not clear this. */
+  ok: boolean;
+  checks: HostAdminCheck[];
+  status: HostAdminStatusView;
 }
 
 export type OrganizationRole = "owner" | "admin" | "operator" | "viewer";
