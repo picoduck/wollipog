@@ -17,6 +17,12 @@ test("session views compactly join current requests to exact structured child ow
     { requestId: "known", toolCallId: "owner", resolved: true, name: "Audit Child", role: "reviewer" },
     { requestId: "unknown", toolCallId: "missing", resolved: false },
   ]);
+  const plan = db.raw().prepare(
+    `EXPLAIN QUERY PLAN SELECT payload FROM session_events
+     WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId')=?
+     ORDER BY seq LIMIT 2`,
+  ).all("session", "owner") as unknown as Array<{ detail: string }>;
+  assert.ok(plan.some((row) => /idx_session_events_tool_call_id/.test(row.detail)));
   db.close();
 });
 

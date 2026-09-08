@@ -853,6 +853,10 @@ CREATE TABLE IF NOT EXISTS session_events (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
+-- Pending-attention projections resolve an exact structured owner on every session snapshot.
+-- Keep that compact join independent of transcript length.
+CREATE INDEX IF NOT EXISTS idx_session_events_tool_call_id
+  ON session_events(session_id, kind, json_extract(payload,'$.toolCallId'), seq);
 
 CREATE TABLE IF NOT EXISTS review_findings (
   finding_id  TEXT PRIMARY KEY,

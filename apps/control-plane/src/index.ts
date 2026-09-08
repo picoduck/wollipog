@@ -142,7 +142,7 @@ import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
 import { childSessionDefaultsError } from "./child-session-guardrails.js";
-import { projectChildSessionRegistry } from "./child-session-registry.js";
+import { ChildSessionRegistryProjector } from "./child-session-registry.js";
 import {
   decideScopedBoxLifecycle,
   parseBoxLifecycleForce,
@@ -346,6 +346,13 @@ const app = Fastify({
     },
   },
 });
+
+const CHILD_SESSION_REGISTRY_CACHE_LIMIT = 128;
+const childSessionRegistries = new Map<string, {
+  eventEpoch: number;
+  lastSeq: number;
+  projector: ChildSessionRegistryProjector;
+}>();
 const markStartupReady = installStartupReadinessGate(app);
 const warnedLegacyRunnerCredentialIds = new Set<string>();
 
@@ -3005,7 +3012,23 @@ app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
   if ((current.eventEpoch ?? 0) !== eventEpoch) {
     return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
   }
-  return projectChildSessionRegistry(db.listEvents(id), current.pendingApproval, eventEpoch, after, limit);
+  let registry = childSessionRegistries.get(id);
+  if (!registry || registry.eventEpoch !== eventEpoch) {
+    registry = { eventEpoch, lastSeq: 0, projector: new ChildSessionRegistryProjector() };
+  }
+  const appended = db.listEvents(id, registry.lastSeq);
+  registry.projector.append(appended);
+  if (appended.length) registry.lastSeq = appended.at(-1)!.seq;
+  // Refresh insertion order for a small LRU. Cached state contains only structured child facts,
+  // never raw prose/output; old sessions rebuild once if revisited after eviction.
+  childSessionRegistries.delete(id);
+  childSessionRegistries.set(id, registry);
+  while (childSessionRegistries.size > CHILD_SESSION_REGISTRY_CACHE_LIMIT) {
+    const oldest = childSessionRegistries.keys().next().value;
+    if (oldest === undefined) break;
+    childSessionRegistries.delete(oldest);
+  }
+  return registry.projector.page(current.pendingApproval, eventEpoch, after, limit);
 });
 
 app.get("/api/sessions/:id/side-chat", async (req, reply) => {

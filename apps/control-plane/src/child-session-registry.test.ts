@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PendingApproval, SessionEvent } from "@wollipog/protocol";
-import { projectChildSessionRegistry } from "./child-session-registry.js";
+import { ChildSessionRegistryProjector, projectChildSessionRegistry } from "./child-session-registry.js";
 
 const event = (seq: number, payload: SessionEvent["payload"]): SessionEvent => ({
   id: seq,
@@ -33,7 +33,7 @@ test("projects exact nested children from complete structured history with bound
   assert.equal(second.children[0]?.completedAt, 40);
 });
 
-test("forces pending owners into every page and leaves missing or duplicate owners unresolved", () => {
+test("projects pending owners on every bounded page and leaves missing or duplicate owners unresolved", () => {
   const events = [
     event(1, { kind: "tool_call", toolCallId: "first", toolKind: "agent", title: "Task", status: "completed" }),
     event(2, { kind: "tool_call", toolCallId: "owner", toolKind: "agent", title: "Task", status: "running", subagentName: "Owner" }),
@@ -46,7 +46,9 @@ test("forces pending owners into every page and leaves missing or duplicate owne
       { requestId: "duplicate", ownerToolUseId: "duplicate", title: "Duplicate", options: [] },
     ] };
   const page = projectChildSessionRegistry(events, pending, 0, 0, 1);
-  assert.deepEqual(page.children.map((child) => child.toolCallId), ["owner", "first"]);
+  assert.deepEqual(page.children.map((child) => child.toolCallId), ["first"]);
+  assert.equal(page.children.length <= 1, true);
+  assert.equal(page.unidentifiedChildren, 1);
   assert.deepEqual(page.attentionOwners, [
     { requestId: "known", toolCallId: "owner", resolved: true, name: "Owner" },
     { requestId: "missing", toolCallId: "missing", resolved: false },
@@ -63,4 +65,21 @@ test("does not infer children from parented prose and clears cyclic parent claim
   const page = projectChildSessionRegistry(events, null, 0, 0, 10);
   assert.deepEqual(page.children.map((child) => [child.toolCallId, child.parentToolUseId]), [["a", undefined], ["b", undefined]]);
   assert.equal(page.children.some((child) => child.toolCallId === "prose-only"), false);
+});
+
+test("incremental projection appends only new history while retaining exact aggregates", () => {
+  const projector = new ChildSessionRegistryProjector();
+  projector.append([
+    event(1, { kind: "tool_call", toolCallId: "child", toolKind: "agent", title: "Task", status: "running" }),
+    event(2, { kind: "tool_call", toolCallId: "read", parentToolUseId: "child", toolKind: "read", title: "Read", status: "running" }),
+  ]);
+  projector.append([
+    event(3, { kind: "tool_call_update", toolCallId: "read", parentToolUseId: "child", status: "completed" }),
+    event(4, { kind: "tool_call_update", toolCallId: "child", status: "completed", subagentLifecycle: "completed" }),
+  ]);
+  const child = projector.page(null, 0, 0, 10).children[0];
+  assert.equal(child?.toolCount, 1);
+  assert.equal(child?.lastActivityAt, 40);
+  assert.equal(child?.completedAt, 40);
+  assert.equal(child?.lifecycle, "completed");
 });

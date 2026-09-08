@@ -38,9 +38,11 @@ export function AttentionRequests({ session, onNavigate, keyboardActive = true, 
         const ownerLabel = request.ownerToolUseId
           ? owner?.resolved ? `${owner.name ?? "Subagent"}${role ? ` · ${role}` : ""}` : "Child Owner Unavailable"
           : null;
+        const action = sessionAttentionStatus({ status: session.status,
+          pendingApproval: { ...request, ownerToolUseId: undefined } });
         return <button type="button" className="btn sm"
           tabIndex={keyboardActive ? 0 : -1} key={request.requestId} onClick={() => open(request.requestId)}>
-          {ownerLabel ?? `Request ${index + 1}`} · {sessionAttentionStatus({ status: session.status, pendingApproval: request })?.label ?? "Input Required"}
+          {ownerLabel ?? `Request ${index + 1}`} · {action?.label ?? "Input Required"}
         </button>;
       })}
       <button type="button" className="btn sm" tabIndex={keyboardActive ? 0 : -1} onClick={() => open()}>View All Requests</button>

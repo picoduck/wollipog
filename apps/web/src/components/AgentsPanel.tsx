@@ -17,6 +17,18 @@ const STATE_LABELS: Record<WorkerState, string> = {
   completed: "Completed", failed: "Failed", stopped: "Stopped", unverified: "Status Unverified",
 };
 const PAGE_SIZE = 50;
+
+export function mergeDurableAgents(
+  durableAgents: readonly SubagentDescriptor[],
+  loadedAgents: readonly SubagentDescriptor[],
+): SubagentDescriptor[] {
+  const loaded = new Map(loadedAgents.map((agent) => [agent.id, agent]));
+  const durableIds = new Set(durableAgents.map((agent) => agent.id));
+  return [...durableAgents.map((durable) => ({ ...loaded.get(durable.id), ...durable,
+    directUsage: loaded.get(durable.id)?.directUsage,
+    inclusiveUsage: loaded.get(durable.id)?.inclusiveUsage })),
+  ...loadedAgents.filter((agent) => !durableIds.has(agent.id))];
+}
 type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof BackgroundWorkPanel>,
   "runnerProtocolVersion" | "parentTurnEventIds" | "onOpenParentTurn" | "inventoryError" | "onRetryInventory"> & {
     onOpenPrimaryRequest?: (requestId: string) => void;
@@ -63,37 +75,44 @@ export function AgentsPanel(props: Props) {
   const [registry, setRegistry] = useState<ChildSessionRegistryEntry[] | null>(null);
   const [attentionOwners, setAttentionOwners] = useState<ChildSessionAttentionOwner[]>([]);
   const [registryAfter, setRegistryAfter] = useState<number | null>(0);
+  const [unidentifiedChildren, setUnidentifiedChildren] = useState(0);
   const [registryLoading, setRegistryLoading] = useState(false);
   const [registryUnavailable, setRegistryUnavailable] = useState(false);
   const registryRequest = useRef<string | null>(null);
   const loadRegistry = (after: number) => {
     const key = `${session.id}:${session.eventEpoch ?? 0}:${after}`;
-    if (registryRequest.current === key || registryLoading) return;
+    if (registryRequest.current === key) return;
     registryRequest.current = key;
     setRegistryLoading(true);
     void api.childSessions(session.id, session.eventEpoch ?? 0, after, PAGE_SIZE).then((page) => {
+      if (registryRequest.current !== key) return;
       setRegistry((current) => {
         const byId = new Map((after === 0 ? [] : current ?? []).map((child) => [child.toolCallId, child]));
         for (const child of page.children) byId.set(child.toolCallId, child);
         return [...byId.values()].sort((a, b) => a.sourceSeq - b.sourceSeq);
       });
       setAttentionOwners(page.attentionOwners);
+      setUnidentifiedChildren(page.unidentifiedChildren);
       setRegistryAfter(page.nextAfter);
       setRegistryUnavailable(false);
     }).catch(() => {
+      if (registryRequest.current !== key) return;
       // Rolling compatibility: older control planes keep the existing honest partial-history view.
       setRegistryUnavailable(true);
       setRegistry(null);
       setRegistryAfter(null);
     }).finally(() => {
-      registryRequest.current = null;
-      setRegistryLoading(false);
+      if (registryRequest.current === key) {
+        registryRequest.current = null;
+        setRegistryLoading(false);
+      }
     });
   };
   useEffect(() => {
     setRegistry(null);
     setAttentionOwners([]);
     setRegistryAfter(0);
+    setUnidentifiedChildren(0);
     setRegistryUnavailable(false);
     registryRequest.current = null;
     loadRegistry(0);
@@ -134,10 +153,7 @@ export function AgentsPanel(props: Props) {
   }, [registry, runnerOnline, session.status]);
   const agents = useMemo(() => {
     if (!registry) return projection.descriptors;
-    const loaded = new Map(projection.descriptors.map((agent) => [agent.id, agent]));
-    return durableAgents.map((durable) => ({ ...loaded.get(durable.id), ...durable,
-      directUsage: loaded.get(durable.id)?.directUsage,
-      inclusiveUsage: loaded.get(durable.id)?.inclusiveUsage }));
+    return mergeDurableAgents(durableAgents, projection.descriptors);
   }, [durableAgents, projection.descriptors, registry]);
   const rows = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
@@ -171,6 +187,12 @@ export function AgentsPanel(props: Props) {
   const target = props.attentionTarget;
   const targetEpochMatches = !target || target.eventEpoch === (session.eventEpoch ?? 0);
   const linkedRequestMissing = target?.requestId !== undefined && !requests.some((request) => request.requestId === target.requestId);
+  const requestDetailRef = useRef<HTMLDivElement>(null);
+  const primaryRequestRef = useRef<HTMLButtonElement>(null);
+  const selectedSecondaryRequestRef = useRef<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const attentionRef = useRef<HTMLElement>(null);
+  const requestOwnsFocus = useRef(false);
   const targetKey = target ? JSON.stringify([session.id, target.eventEpoch, target.requestId, target.activationId ?? 0]) : null;
   const handledTarget = useRef<string | null>(null);
   useEffect(() => {
@@ -183,14 +205,14 @@ export function AgentsPanel(props: Props) {
     const ownerId = request?.ownerToolUseId;
     props.onSelect(ownerId && !projection.ambiguousIds.has(ownerId) ? ownerId : "");
     if (!request) (attentionRef.current ?? panelRef.current)?.focus();
-  }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds, props.onSelect]);
+    else if (request.requestId === session.pendingApproval?.requestId && props.onOpenPrimaryRequest) {
+      props.onOpenPrimaryRequest(request.requestId);
+    } else {
+      window.requestAnimationFrame(() => requestDetailRef.current?.focus());
+    }
+  }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds,
+    props.onSelect, props.onOpenPrimaryRequest, session.pendingApproval?.requestId]);
   const primaryInSession = Boolean(props.onOpenPrimaryRequest && selectedRequest?.requestId === session.pendingApproval?.requestId);
-  const requestDetailRef = useRef<HTMLDivElement>(null);
-  const primaryRequestRef = useRef<HTMLButtonElement>(null);
-  const selectedSecondaryRequestRef = useRef<string | null>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-  const attentionRef = useRef<HTMLElement>(null);
-  const requestOwnsFocus = useRef(false);
   useLayoutEffect(() => {
     if ((!selectedRequest || primaryInSession) && requestOwnsFocus.current) {
       requestOwnsFocus.current = false;
@@ -229,10 +251,12 @@ export function AgentsPanel(props: Props) {
             ? agents.find((agent) => agent.id === request.ownerToolUseId) : undefined;
           const compactOwner = attentionOwners.find((value) => value.requestId === request.requestId);
           const ownerRole = owner?.role ?? compactOwner?.role;
-          const attention = sessionAttentionStatus({ status: session.status, pendingApproval: request });
+          const attention = sessionAttentionStatus({ status: session.status,
+            pendingApproval: { ...request, ownerToolUseId: undefined } });
           return <button type="button" className="btn" key={request.requestId} onClick={() => {
             setRequestId(request.requestId);
             if (owner) props.onSelect(owner.id);
+            else if (compactOwner?.resolved) props.onSelect(compactOwner.toolCallId);
             else { props.onSelect(""); setChosen(null); }
           }}>
             {owner?.title ?? compactOwner?.name ?? (request.ownerToolUseId ? "Subagent" : "Session")}
@@ -259,6 +283,8 @@ export function AgentsPanel(props: Props) {
           label: `${value === "active" ? "Active" : value === "history" ? "History" : "All"} (${rows.filter((row) => value === "all" || (value === "active" ? isCurrentWorker(row) : !isCurrentWorker(row))).length})`,
         }))} />
       {props.earlierActivityUnloaded && registryUnavailable && <p className="hint" role="status">Earlier transcript activity is not loaded. Workers recorded only in those turns may be missing.</p>}
+      {registryAfter !== null && registry !== null && <p className="hint" role="status">More recorded workers are available.</p>}
+      {unidentifiedChildren > 0 && <p className="hint" role="status">{unidentifiedChildren} {unidentifiedChildren === 1 ? "worker has" : "workers have"} an ambiguous provider identity and cannot be listed safely.</p>}
       {registryLoading && registry === null && <p className="hint" role="status">Loading Recorded Workers…</p>}
       {workflowError && <p className="hint" role="status">Workflow phase details are unavailable. Session status remains visible.</p>}
       {session.backgroundJobsAvailable && !session.backgroundJobs && <p className="hint" role="status">

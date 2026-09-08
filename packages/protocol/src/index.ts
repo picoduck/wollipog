@@ -1885,6 +1885,8 @@ export interface ChildSessionAttentionOwner {
 export interface ChildSessionRegistryPage {
   children: ChildSessionRegistryEntry[];
   attentionOwners: ChildSessionAttentionOwner[];
+  /** Exact agent ids that could not safely become rows because the provider reused an id. */
+  unidentifiedChildren: number;
   eventEpoch: number;
   nextAfter: number | null;
   truncated: boolean;
