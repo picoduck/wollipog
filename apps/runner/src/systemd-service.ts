@@ -5,7 +5,7 @@
  */
 
 import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 export type ServiceMode = "user" | "system";
 export type ServiceComponent = "control-plane" | "runner";
@@ -34,6 +34,8 @@ export interface ServiceLayout {
   runnerTokenFile: string;
   workspaceDir: string;
   units: { controlPlane: string; runner: string };
+  /** Absolute directory the system layout was relocated under (`WOLLIPOG_SYSTEM_PREFIX`), or null for the real FHS paths. */
+  relocatedPrefix: string | null;
 }
 
 export function unitFor(component: ServiceComponent): string {
@@ -57,14 +59,20 @@ export function serviceLayout(
   if (mode === "system") {
     const account = input.account ?? DEFAULT_SYSTEM_ACCOUNT;
     // WOLLIPOG_SYSTEM_PREFIX relocates the whole system layout (tests, image builds); production
-    // installs leave it unset so the FHS paths are used verbatim.
-    const prefix = input.env.WOLLIPOG_SYSTEM_PREFIX?.trim() ? resolve(input.env.WOLLIPOG_SYSTEM_PREFIX.trim()) : "";
+    // installs leave it unset so the FHS paths are used verbatim. It is never applied silently: it
+    // must be an absolute path, and every command reports the relocation (`relocatedPrefix`).
+    const rawPrefix = input.env.WOLLIPOG_SYSTEM_PREFIX?.trim() ?? "";
+    if (rawPrefix && !isAbsolute(rawPrefix)) {
+      throw new Error(`WOLLIPOG_SYSTEM_PREFIX must be an absolute directory, got ${JSON.stringify(rawPrefix)}; unset it for a real system install`);
+    }
+    const prefix = rawPrefix ? resolve(rawPrefix) : "";
     const dataDir = `${prefix}/var/lib/wollipog`;
     const configDir = `${prefix}/etc/wollipog`;
     return finishLayout({
       mode, account, dataDir, configDir,
       unitDir: `${prefix}/etc/systemd/system`,
       workspaceDir: input.workspaceDir ?? join(dataDir, "workspaces"),
+      relocatedPrefix: prefix || null,
     });
   }
   const xdgData = input.env.XDG_DATA_HOME?.trim() || join(input.home, ".local", "share");
@@ -75,11 +83,12 @@ export function serviceLayout(
     configDir: join(xdgConfig, "wollipog"),
     unitDir: join(input.home, ".config", "systemd", "user"),
     workspaceDir: input.workspaceDir ?? input.home,
+    relocatedPrefix: null,
   });
 }
 
 function finishLayout(base: {
-  mode: ServiceMode; account: string; dataDir: string; configDir: string; unitDir: string; workspaceDir: string;
+  mode: ServiceMode; account: string; dataDir: string; configDir: string; unitDir: string; workspaceDir: string; relocatedPrefix: string | null;
 }): ServiceLayout {
   const controlPlaneDataDir = join(base.dataDir, "control-plane");
   const controlPlaneDb = join(controlPlaneDataDir, "control-plane.db");

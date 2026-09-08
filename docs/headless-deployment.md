@@ -51,6 +51,11 @@ Inside the data directory: `control-plane/control-plane.db` (with its `.artifact
 The generated units state the account and the data locations they use; read them before enabling
 in an environment with its own conventions.
 
+`WOLLIPOG_SYSTEM_PREFIX` relocates the whole system layout under a directory; it exists for tests
+and image builds, never for a real install. It must be an absolute path, and every `service`
+command reports the relocation (`Relocated:` in `status`, a warning in `install`, `relocatedPrefix`
+in JSON), so a stray value can never silently redirect an installation.
+
 ## Install
 
 ```bash
@@ -105,7 +110,10 @@ Explicit `--url`, `--token-file`, or `CONTROL_PLANE_*` variables still take prec
 ## Exposure: Tailscale or HTTPS
 
 Keep the control plane bound to loopback and expose it through Tailscale or an HTTPS reverse proxy.
-Set `--public-origin https://...` so pairing links embed the address remote clients reach. A bind
+Set `--public-origin https://...` so pairing links embed the address remote clients reach: both
+`wollipog admin device create` and the dashboard's People & Devices card then hand out
+`<public origin>/#pair=<token>` instead of guessing from the bind address, which is the only link
+that works for a loopback-bound control plane behind a proxy. A bind
 beyond loopback without an HTTPS public origin, or a plain-HTTP public origin beyond loopback, is
 accepted only with an explicit warning: pairing tokens and session data would travel unencrypted,
 and the desktop app refuses plain HTTP to anything other than loopback or a literal Tailscale
@@ -152,6 +160,17 @@ Both ask for interactive confirmation; non-interactive use passes `--yes` and, f
 `--yes-purge` as a separate acknowledgement. Only `wollipog-control-plane.service` and
 `wollipog-runner.service` are touched, and nothing is removed unless stopping and disabling them
 succeeded first, so data is never purged underneath a still-running control plane.
+
+## Continuous verification
+
+Beyond the unit tests, `scripts/systemd-service-e2e.sh` runs `wollipog service` against a real
+systemd in system mode on a disposable Ubuntu VM (the "Systemd Service" GitHub Actions check, run
+whenever the service code changes): install creates the account, units, and 0600 credentials and
+brings both units up with the runner online; a SIGKILLed control plane is restarted by systemd
+and the runner re-registers; with both units stopped, starting only the runner pulls the control
+plane in first; `systemctl stop` completes inside `TimeoutStopSec` with `Result=success`; and
+`uninstall --purge` leaves nothing behind. The script refuses to run on a host that already has
+Wollipog units or data.
 
 ## Native services versus dashboard-managed SSH runners
 

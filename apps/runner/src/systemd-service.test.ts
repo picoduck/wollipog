@@ -44,6 +44,11 @@ test("service layout follows XDG in user mode and FHS with a dedicated account i
   const relocated = serviceLayout("system", { home: "/root", user: "root", env: { WOLLIPOG_SYSTEM_PREFIX: "/tmp/sysroot/" } });
   assert.equal(relocated.dataDir, "/tmp/sysroot/var/lib/wollipog");
   assert.equal(relocated.unitDir, "/tmp/sysroot/etc/systemd/system");
+  assert.equal(relocated.relocatedPrefix, "/tmp/sysroot", "a relocation is always reported, never silent");
+  assert.equal(SYSTEM_LAYOUT.relocatedPrefix, null);
+  assert.equal(serviceLayout("user", { home: "/home/op", user: "op", env: { WOLLIPOG_SYSTEM_PREFIX: "/tmp/sysroot" } }).relocatedPrefix, null, "user mode never relocates");
+  assert.throws(() => serviceLayout("system", { home: "/root", user: "root", env: { WOLLIPOG_SYSTEM_PREFIX: "sysroot" } }), /must be an absolute directory/u);
+  assert.equal(serviceLayout("system", { home: "/root", user: "root", env: { WOLLIPOG_SYSTEM_PREFIX: "   " } }).relocatedPrefix, null, "blank is unset");
 });
 
 test("control-plane unit has bounded restarts, graceful control-group stop, and no secrets", () => {
