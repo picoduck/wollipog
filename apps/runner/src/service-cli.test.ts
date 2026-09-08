@@ -413,6 +413,14 @@ test("service install --no-start leaves the runner unit disabled until its crede
   const again = fake(t, { home: h.home });
   assert.equal(await runServiceCli(["service", "install", ...bins(h), "--no-start", "--json"], again.host, again.io), 0, again.stderr());
   assert.ok(again.execs.includes(`systemctl --user disable ${RUNNER_UNIT}`), again.execs.join("\n"));
+  assert.match(JSON.parse(again.stdout()).warnings.join("\n"), /was written but left disabled/u);
+
+  // When disabling fails, the report must not claim the unit is disabled.
+  const stuck = fake(t, { home: h.home, systemctlFail: `disable ${RUNNER_UNIT}` });
+  assert.equal(await runServiceCli(["service", "install", ...bins(h), "--no-start", "--json"], stuck.host, stuck.io), 0, stuck.stderr());
+  const stuckWarnings = JSON.parse(stuck.stdout()).warnings.join("\n");
+  assert.match(stuckWarnings, /could NOT be disabled .*crash-loop at boot until a token exists/u);
+  assert.ok(!/left disabled/u.test(stuckWarnings), stuckWarnings);
 });
 
 test("service install --runner alone needs a local control plane or an existing token", async (t) => {

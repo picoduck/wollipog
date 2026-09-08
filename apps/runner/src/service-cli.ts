@@ -507,8 +507,13 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   if (runnerDeferred) {
     // A previous install may have enabled the runner; a tokenless unit must not crash-loop at boot.
     const disable = await systemctl(host, mode, ["disable", RUNNER_UNIT]);
-    if (disable.code !== 0) warnings.push(`could not disable ${RUNNER_UNIT}: ${disable.stderr.trim() || `exit ${disable.code}`}`);
-    warnings.push(`${RUNNER_UNIT} was written but left disabled: no ${layout.runnerTokenFile} exists yet and --no-start skips minting it. Run \`wollipog service install\` again without --no-start, or issue a credential to that path and then \`systemctl${mode === "user" ? " --user" : ""} enable --now ${RUNNER_UNIT}\`.`);
+    const remedy = `Run \`wollipog service install\` again without --no-start, or issue a credential to ${layout.runnerTokenFile} and then \`systemctl${mode === "user" ? " --user" : ""} enable --now ${RUNNER_UNIT}\`.`;
+    if (disable.code === 0) {
+      warnings.push(`${RUNNER_UNIT} was written but left disabled: no ${layout.runnerTokenFile} exists yet and --no-start skips minting it. ${remedy}`);
+    } else {
+      // Say what actually happened: an earlier enablement may still start a tokenless runner at boot.
+      warnings.push(`${RUNNER_UNIT} was written without a credential (no ${layout.runnerTokenFile}) and could NOT be disabled (${disable.stderr.trim() || `exit ${disable.code}`}); if it was enabled before, it will crash-loop at boot until a token exists. Disable it with \`systemctl${mode === "user" ? " --user" : ""} disable ${RUNNER_UNIT}\` or ${remedy}`);
+    }
   }
 
   let lingering: InstallReport["lingering"] = "not-applicable";
