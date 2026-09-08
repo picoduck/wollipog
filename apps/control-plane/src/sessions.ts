@@ -19,6 +19,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   isPolicyApproval,
   isTerminal,
   mergeSessionCapabilities,
+  nativeTuiHasTrackedGuardrails,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   validatePromptImageInputs,
@@ -124,6 +125,7 @@ import type { SessionEvent } from "@wollipog/protocol";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
+import { NATIVE_TUI_DAILY_BUDGET_ERROR, NATIVE_TUI_TRACKED_GUARDRAILS_ERROR } from "./native-tui-launch.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
 import { type GuardrailFields, normalizeCostCheckpoints,
   approvalForDecision,
@@ -337,6 +339,28 @@ function ok<T>(data: T, status = 200): ServiceResult<T> {
 }
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
+}
+
+/** HTTP bodies are structurally cast at the route boundary. Validate the guardrail values before
+ * arithmetic, persistence, or Native TUI coexistence checks so SQLite coercion cannot turn a
+ * malformed value into a silently armed limit. Finite non-positive values retain clear semantics. */
+function sessionGuardrailConfigError(config: unknown): string | null {
+  if (config === undefined) return null;
+  if (!config || typeof config !== "object" || Array.isArray(config)) return "config must be an object";
+  const candidate = config as Record<string, unknown>;
+  for (const key of ["costBudgetUsd", "maxToolCalls"] as const) {
+    const value = candidate[key];
+    if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
+      return `${key} must be a finite number`;
+    }
+  }
+  const checkpoints = candidate.costCheckpointsUsd;
+  if (checkpoints !== undefined && (!Array.isArray(checkpoints) || checkpoints.some(
+    (value) => typeof value !== "number" || !Number.isFinite(value),
+  ))) {
+    return "costCheckpointsUsd must be an array of finite numbers";
+  }
+  return null;
 }
 
 function sessionTitleFailureMessage(error: SessionTitleGenerationError): string {
@@ -2534,6 +2558,8 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     // Attribution is supplied only by the authenticated route, never by the request payload.
     const spawnRequest = req;
+    const configInputError = sessionGuardrailConfigError(req.config);
+    if (configInputError) return fail(configInputError, 400);
     if (req.agentId === CONDUCTOR_AGENT_ID) {
       return fail("The Conductor agent is retired; select an ordinary agent to orchestrate child sessions.", 409);
     }
@@ -2777,6 +2803,9 @@ export class SessionsService {
       if (checkpoints) config.costCheckpointsUsd = checkpoints;
       else delete config.costCheckpointsUsd;
     }
+    if (req.launchSurface === "native_tui" && nativeTuiHasTrackedGuardrails(config)) {
+      return fail(NATIVE_TUI_TRACKED_GUARDRAILS_ERROR, 409);
+    }
     if (executionTarget.adapter === "cloud") {
       const policy = executionTarget.policy?.cost;
       const budget = config.costBudgetUsd;
@@ -2814,10 +2843,13 @@ export class SessionsService {
     // The owner's daily allowance is checked against the scope the session will ACTUALLY carry:
     // the explicit one, the Project's, or what the workspace/runner confers — resolved above, so
     // a user-owned Project on an organization workspace cannot slip past its owner's budget.
-    const admissionDenied = this.dailyBudgetAdmissionError(
-      this.db.effectiveSessionScope(req.runnerId, workspaceId, sessionScope),
-    );
+    const effectiveSessionScope = this.db.effectiveSessionScope(req.runnerId, workspaceId, sessionScope);
+    const admissionDenied = this.dailyBudgetAdmissionError(effectiveSessionScope);
     if (admissionDenied) return fail(admissionDenied, 409);
+    if (req.launchSurface === "native_tui" && effectiveSessionScope?.owner.kind === "user" &&
+        this.db.getUsageDailyBudget(effectiveSessionScope.organizationId).perUserUsd !== null) {
+      return fail(NATIVE_TUI_DAILY_BUDGET_ERROR, 409);
+    }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
       workspaceId,
@@ -3007,6 +3039,11 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
+    const configInputError = sessionGuardrailConfigError(requestedConfig);
+    if (configInputError) return fail(configInputError, 400);
+    const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, requestedConfig);
+    if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
     const incomingMode = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config?.permissionMode : config?.permissionMode;
     if (incomingMode !== undefined && (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
@@ -3049,7 +3086,7 @@ export class SessionsService {
     const effectiveText = snapshotCommand?.type === "prompt_session" ? snapshotCommand.text : text;
     const effectiveImages = snapshotCommand?.type === "prompt_session" ? (snapshotCommand.images ?? []) : images;
     const effectiveSlashCommand = snapshotCommand?.type === "prompt_session" ? snapshotCommand.slashCommand : slashCommand;
-    const effectiveConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
+    const effectiveConfig = requestedConfig;
     const imageValidation = validateImagesForDriver(effectiveImages, session.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
     if (effectiveImages.some(isWorkspaceReference)) {
@@ -3249,6 +3286,23 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  private activeAgentTuiGuardrailError(session: SessionView, config: SessionConfig | undefined): string | null {
+    const resultingGuardrails = {
+      costBudgetUsd: config?.costBudgetUsd !== undefined
+        ? (config.costBudgetUsd > 0 ? config.costBudgetUsd : undefined)
+        : session.costBudgetUsd ?? undefined,
+      maxToolCalls: config?.maxToolCalls !== undefined
+        ? (Math.floor(config.maxToolCalls) > 0 ? Math.floor(config.maxToolCalls) : undefined)
+        : session.maxToolCalls ?? undefined,
+      costCheckpointsUsd: config?.costCheckpointsUsd !== undefined
+        ? normalizeCostCheckpoints(config.costCheckpointsUsd) ?? undefined
+        : session.costCheckpointsUsd ?? undefined,
+    };
+    return nativeTuiHasTrackedGuardrails(resultingGuardrails) && this.db.listShells(session.id).some(
+      (shell) => shell.kind === "agent_tui" && shell.status !== "exited",
+    ) ? NATIVE_TUI_TRACKED_GUARDRAILS_ERROR : null;
+  }
+
   /** Change model/effort/approval mode mid-session (applies to the next turn). */
   setConfig(
     sessionId: string,
@@ -3257,6 +3311,10 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const configInputError = sessionGuardrailConfigError(config);
+    if (configInputError) return fail(configInputError, 400);
+    const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, config);
+    if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
       return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
     }

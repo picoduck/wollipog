@@ -15,6 +15,7 @@ function fakeDb(overrides: {
   protocolVersion?: number;
   driver?: string;
   targetAdapter?: string;
+  dailyBudgetUsd?: number | null;
 } = {}): ControlPlaneDb {
   return {
     getRunner: () => ({
@@ -26,6 +27,11 @@ function fakeDb(overrides: {
         : [],
     }),
     getAgentLaunch: () => ({ driver: overrides.driver ?? "claude-code" }),
+    sessionScope: () => overrides.dailyBudgetUsd === undefined ? null : ({
+      organizationId: "org",
+      owner: { kind: "user", userId: "user" },
+    }),
+    getUsageDailyBudget: () => ({ perUserUsd: overrides.dailyBudgetUsd ?? null, updatedAt: 1 }),
   } as unknown as ControlPlaneDb;
 }
 
@@ -42,6 +48,19 @@ function request(overrides: Partial<CreateSessionRequest> = {}): CreateSessionRe
 test("Native TUI preflight accepts supported host launches and leaves Direct unchanged", () => {
   assert.equal(nativeTuiCreationError(fakeDb(), online, request()), null);
   assert.equal(nativeTuiCreationError(fakeDb({ os: "macos" }), online, request({ launchSurface: "direct" })), null);
+});
+
+test("Native TUI preflight rejects every tracked session guardrail", () => {
+  for (const config of [
+    { costBudgetUsd: 2 },
+    { maxToolCalls: 10 },
+    { costCheckpointsUsd: [0.5, 1] },
+  ]) {
+    assert.match(nativeTuiCreationError(fakeDb(), online, request({ config }))!.error, /Use Direct/);
+  }
+  assert.equal(nativeTuiCreationError(fakeDb(), online, request({ config: {
+    costBudgetUsd: 0, maxToolCalls: 0.9, costCheckpointsUsd: [],
+  } })), null);
 });
 
 test("Native TUI preflight rejects unsupported protocol, OS, driver, conductor, and target", () => {
@@ -73,6 +92,33 @@ test("materialized session validation rejects non-host Agent TUI isolation", () 
     executionTarget: { adapter: "cloud" },
   } as unknown as SessionView;
   assert.match(nativeTuiSessionError(fakeDb(), online, session)!.error, /host execution target/);
+});
+
+test("materialized session validation rejects tracked guardrails", () => {
+  const session = {
+    runnerId: "runner",
+    agentId: "agent",
+    driver: "claude-code",
+    costBudgetUsd: 5,
+  } as unknown as SessionView;
+  assert.match(nativeTuiSessionError(fakeDb(), online, session)!.error, /not reported to Wollipog/);
+  assert.match(nativeTuiSessionError(fakeDb(), online, {
+    ...session, costBudgetUsd: null, maxToolCalls: 20,
+  })!.error, /tool-call limit/);
+  assert.match(nativeTuiSessionError(fakeDb(), online, {
+    ...session, costBudgetUsd: null, costCheckpointsUsd: [1],
+  })!.error, /cost checkpoints/);
+});
+
+test("materialized session validation rejects user daily cost governance", () => {
+  const session = {
+    id: "session",
+    runnerId: "runner",
+    agentId: "agent",
+    driver: "claude-code",
+  } as unknown as SessionView;
+  assert.match(nativeTuiSessionError(fakeDb({ dailyBudgetUsd: 5 }), online, session)!.error, /daily cost budget/);
+  assert.equal(nativeTuiSessionError(fakeDb({ dailyBudgetUsd: null }), online, session), null);
 });
 
 test("orchestrator TUI manual attachment requires v112 and an active session", () => {

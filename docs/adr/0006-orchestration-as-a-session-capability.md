@@ -85,6 +85,21 @@ with structured sessions. The TUI transcript and usage are not imported into str
 Native TUI spending and tool calls therefore do not contribute to persisted session usage or the
 parent's remaining-budget calculation. The creation dialog discloses this limitation and directs
 users to Direct for tracked usage and guardrails; it does not promise aggregate TUI budget enforcement.
+A Native TUI now fails closed when its session has a cost budget, cost checkpoints, or a tool-call
+limit, including inherited child limits, and those limits cannot be armed while an Agent TUI is
+running. User-owned Native TUIs also fail closed while their organization has a daily cost budget;
+that daily budget cannot be enabled while any user-owned Agent TUI in the organization is active.
+This preserves the meaning of every displayed guardrail without fabricating usage.
+
+This boundary is imposed by the provider interfaces, not by missing terminal parsing. Claude Code's
+structured output and `--max-budget-usd` are print-mode-only; its interactive process exposes no
+supported event stream. Codex app-server publishes thread-bound token usage, but the standalone Codex
+TUI launch used here does not give Wollipog an authoritative thread binding or subscriber channel.
+Reading provider-local history files or parsing terminal escape output is not an accounting contract:
+concurrent conversations, resume/fork behavior, truncation, and provider format changes would make
+attribution unsafe. A future metered TUI must launch through a provider-supported, runner-owned event
+transport and bind its provider conversation id before the first turn. Until both supported providers
+offer that contract, unguarded Native TUI sessions are labeled **Usage Accounting: Unavailable**.
 
 The creation dialog distinguishes a saved permission default from an explicit Orchestrator override.
 It matches the exact harness identity and uses the server's whole-preference capability check, so a

@@ -48,6 +48,14 @@ Three control-plane guardrails read the ledger; none needs runner support.
 
 Precedence when several rules trip at once: daily budget, unpriced, next checkpoint, budget, tool-call limit.
 
+Native provider TUIs do not emit the structured session events that feed this ledger. Wollipog labels
+their usage accounting unavailable and refuses to create or attach a Native TUI when the session has
+a cost budget, cost checkpoints, or a tool-call limit. It also rejects arming one of those guardrails
+while an Agent TUI is live. User-owned TUIs are incompatible with an enabled organization daily
+budget, and enabling that budget is rejected while any such TUI is active. Unguarded Native TUI
+activity is intentionally absent from session and parent-remainder totals; provider-local files and
+terminal output are not treated as billing evidence.
+
 ## Model rate table
 
 The control plane loads per-token rates from a public price list (LiteLLM's `model_prices_and_context_window.json` by default) once a day, caches the document beside the database, and serves the cached copy when a refresh fails. `CONTROL_PLANE_USAGE_PRICING_URL` overrides the source or, set to `off`, disables outbound fetches entirely; `CONTROL_PLANE_USAGE_PRICING_CACHE` overrides the cache path. Every `GET /api/usage` response carries `pricing` with the table's status (`fresh`, `cached`, or `unavailable`), source, fetch time, and known-model count. Rates are applied at ingestion only; recorded buckets are never re-priced.

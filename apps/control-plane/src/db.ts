@@ -11888,6 +11888,19 @@ export class ControlPlaneDb {
     return rows.map((row) => this.shellView(row));
   }
 
+  /** Daily cost governance cannot cover provider TUIs. The organization setting route uses this
+   * bounded existence query to avoid enabling a budget that a live user-owned TUI can bypass. */
+  hasUserOwnedActiveAgentTui(organizationId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1
+         FROM session_shells shell
+         JOIN session_ownership owner ON owner.session_id=shell.session_id
+        WHERE owner.organization_id=? AND owner.owner_kind='user'
+          AND shell.kind='agent_tui' AND shell.status<>'exited'
+        LIMIT 1`,
+    ).get(organizationId));
+  }
+
   appendShellOutput(
     runnerId: string,
     shellId: string,

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { isTerminal, type ShellKind, type ShellView } from "@wollipog/protocol";
+import { isTerminal, nativeTuiHasTrackedGuardrails, type ShellKind, type ShellView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import {
@@ -64,6 +64,7 @@ export function ShellDock({
   const runner = session ? runners.get(session.runnerId) : undefined;
   const runnerOnline = runner?.status === "online";
   const tuiSupported = supportsAgentTui(session?.driver, runner?.protocolVersion, runner?.os);
+  const tuiGuardrailBlocked = nativeTuiHasTrackedGuardrails(session ?? {});
 
   // `height` is the user's PREFERENCE — only explicit gestures (drag, keyboard, double-click)
   // change it, so a temporary viewport shrink while the dock is collapsed can never clobber
@@ -511,8 +512,10 @@ export function ShellDock({
             id={`${tabsetId}-new-tui`}
             className="btn ghost sm"
             onClick={() => void newShell("agent_tui")}
-            disabled={!runnerOnline || busy || tuiRunning}
-            title="Open the provider's interactive TUI as a separate process from structured agent control"
+            disabled={!runnerOnline || busy || tuiRunning || tuiGuardrailBlocked}
+            title={tuiGuardrailBlocked
+              ? "Tracked usage guardrails require Direct"
+              : "Open the provider's interactive TUI as a separate process from structured agent control"}
           >
             + Agent TUI
           </button>
@@ -537,12 +540,17 @@ export function ShellDock({
         style={{ height: effectiveHeight }}
       >
           {!runnerOnline && <div className="hint warn">Runner is offline — shells are unavailable.</div>}
+          {tuiSupported && tuiGuardrailBlocked && (
+            <div className="hint warn" role="status">
+              Agent TUI is unavailable while this session has a cost budget, cost checkpoint, or tool-call limit. Clear those guardrails or use Direct.
+            </div>
+          )}
           {error && <div className="composer-error">{error}</div>}
           {activeShell?.kind === "agent_tui" && (
             <div className="hint" role="status">
               {hookGovernanceActive
-                ? "No structured events or approval cards. Manager policy hooks remain active."
-                : "No structured events, approval cards, or manager policy interception."}
+                ? "Usage Accounting: Unavailable. No structured events or approval cards. Manager policy hooks remain active."
+                : "Usage Accounting: Unavailable. No structured events, approval cards, or manager policy interception."}
             </div>
           )}
           {active ? (
