@@ -877,6 +877,7 @@ test("admin doctor keeps reachability and a failing doctor route as distinct che
   assert.match(byId["control-plane-doctor"].detail, /doctor exploded/u);
   const readable = formatChecks(report.checks);
   assert.ok(!readable.includes("\u001b"), "control characters never reach the terminal");
+  assert.ok(!formatChecks([{ id: "x", status: "pass", summary: "a\tb", detail: "c\td" }]).includes("\t"), "tabs are stripped too");
   assert.match(readable, /FAIL  control-plane-doctor/u);
 });
 
@@ -891,7 +892,7 @@ test("admin doctor on a system-mode deployment expects the service account to ow
   const execs: string[] = [];
   const rootHost = {
     ...host, platform: "linux" as const, uid: 0, home: "/root", user: "root", env: { WOLLIPOG_SYSTEM_PREFIX: sysroot },
-    installedControlPlaneEnv: () => ({ file: "/etc/wollipog/control-plane.env", localTokenFile: tokenFile }),
+    installedControlPlaneEnv: () => ({ file: join(sysroot, "etc", "wollipog", "control-plane.env"), localTokenFile: tokenFile }),
     exec: async (command: string, args: string[]) => {
       execs.push([command, ...args].join(" "));
       if (command === "id") return args[1] === "svc-acct" ? { code: 0, stdout: `${process.getuid?.() ?? 0}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "no such user" };

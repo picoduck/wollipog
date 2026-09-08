@@ -665,7 +665,7 @@ function mark(status: HostAdminCheck["status"]): string {
 
 /** Terminal output never carries control characters, whatever a remote peer put in a message. */
 function printable(value: string): string {
-  return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "?").replace(/\r?\n/gu, " ");
+  return value.replace(/\r?\n/gu, " ").replace(/[\u0000-\u001f\u007f-\u009f]/gu, "?");
 }
 
 export function formatChecks(checks: HostAdminCheck[]): string {
@@ -706,7 +706,10 @@ async function doctorCommand(
   // control plane's own credential below) expect that account's uid, exactly as `wollipog service` does.
   let expectedOwner = host.uid;
   if (host.platform === "linux" && installed?.file && host.exec && host.home !== undefined) {
-    const mode = installed.file.startsWith("/etc/") ? "system" : "user";
+    // The env file's location decides the mode; compare against the computed system layout so a
+    // relocated layout (WOLLIPOG_SYSTEM_PREFIX) is still recognised as system mode.
+    const systemEnvFile = serviceLayout("system", { home: host.home, user: host.user ?? "", env: host.env ?? {} }).controlPlaneEnvFile;
+    const mode = resolve(installed.file) === systemEnvFile ? "system" : "user";
     const layout = serviceLayout(mode, { home: host.home, user: host.user ?? "", env: host.env ?? {} });
     if (mode === "system") {
       const unitPath = `${layout.unitDir}/${CONTROL_PLANE_UNIT}`;
