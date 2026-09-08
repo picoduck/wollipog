@@ -33,6 +33,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { TextDecoder } from "node:util";
+import { performance } from "node:perf_hooks";
 import { InspectionCache, inspectionFileVersion } from "./inspection-cache.js";
 import {
   PROTOCOL_VERSION,
@@ -2202,13 +2203,14 @@ export class SessionStore {
       const cached = this.toolCountCache.get(id, before);
       if (cached !== undefined) return cached;
       const ids = new Set<string>();
+      const readStartedAt = performance.now();
       // Reuse the bounded authoritative scanner: a torn suffix is not an event, while
       // complete malformed records, sequence gaps and altered segments still fail closed.
       this.scanHistoryPrefix(id, layout.totalBytes, (event) => {
         if (event.payload.kind === "tool_call") ids.add(event.payload.toolCallId);
       });
       if (before === null || version() !== before) return null;
-      this.toolCountCache.set(id, before, ids.size);
+      this.toolCountCache.set(id, before, ids.size, readStartedAt);
       return ids.size;
     } catch { return null; } // Missing/corrupt evidence must never grant spending authority.
   }

@@ -21,7 +21,7 @@ export class InspectionCache<T> {
     this.entries.set(key, entry);
     return entry.value;
   }
-  set(key: string, version: string, value: T): void {
+  set(key: string, version: string, value: T, readStartedAt: number): void {
     const prior = this.entries.get(key);
     const now = performance.now();
     const firstSeen = prior?.version === version ? prior.firstSeen : now;
@@ -30,7 +30,7 @@ export class InspectionCache<T> {
     // observation is only a candidate: require a fresh read in a later bucket before
     // retaining proof. Reads during this window still return their current result.
     this.entries.set(key, { version, firstSeen,
-      ...(now - firstSeen >= this.settleMs ? { value } : {}) });
+      ...(readStartedAt - firstSeen >= this.settleMs ? { value } : {}) });
     while (this.entries.size > this.limit) this.entries.delete(this.entries.keys().next().value!);
   }
 }

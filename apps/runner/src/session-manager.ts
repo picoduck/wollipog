@@ -9110,6 +9110,9 @@ export class SessionManager {
     if (entry?.governanceTripped || entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId)) return true;
     if (meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd) return true;
     if (!meta.config.maxToolCalls) return false;
+    // Live callbacks already maintain this set; don't rescan an actively growing history.
+    // Inactive sessions still use durable history so rewind/restart cannot reuse stale counts.
+    if (entry?.running && entry.toolCallIds) return entry.toolCallIds.size >= meta.config.maxToolCalls;
     const count = this.store.distinctToolCallCount(meta.sessionId);
     return count === null || count >= meta.config.maxToolCalls;
   }

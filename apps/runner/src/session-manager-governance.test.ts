@@ -222,6 +222,17 @@ test("re-arming preserves live tool counts when durable history cannot be read",
   } finally { h.sm.shutdownAll(); h.cleanup(); }
 });
 
+test("running-session admission uses live tool IDs without scanning growing history", (t) => {
+  const h = harness({ maxToolCalls: 2 });
+  try {
+    t.mock.method(h.store, "distinctToolCallCount", () => { throw new Error("must not scan live history"); });
+    h.entry.toolCallIds.add("one");
+    assert.equal((h.sm as any).backgroundRecoveryHeld(h.store.readMeta("s_governance")), false);
+    h.entry.toolCallIds.add("two");
+    assert.equal((h.sm as any).backgroundRecoveryHeld(h.store.readMeta("s_governance")), true);
+  } finally { h.sm.shutdownAll(); h.cleanup(); }
+});
+
 test("held background paths coalesce broadcasts but periodically restore missing cards", (t) => {
   const h = harness({ costBudgetUsd: 8 });
   let now = 100_000;

@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { AgentContext } from "@wollipog/protocol";
 import { runContextCommand, type ContextCommandResult } from "./context-command.js";
 import { InspectionCache, InspectionLimiter, inspectionFileVersion } from "./inspection-cache.js";
@@ -40,9 +41,9 @@ function classifyTranscript(transcript: string, ids: string[]): Map<string, Term
   return statuses;
 }
 
-function cacheClassification(key: string, version: string | null, statuses: Map<string, TerminalStatus>, cache = terminalCache): void {
+function cacheClassification(key: string, version: string | null, statuses: Map<string, TerminalStatus>, readStartedAt: number, cache = terminalCache): void {
   if (version && key.length + JSON.stringify([...statuses]).length <= MAX_CACHE_RECORD_CHARS) {
-    cache.set(key, version, statuses);
+    cache.set(key, version, statuses, readStartedAt);
   }
 }
 
@@ -93,10 +94,11 @@ export function inspectClaudeBackgroundWork(
   let statuses = terminalCache.get(cacheKey, version);
   if (!statuses) {
     statuses = new Map();
+    const readStartedAt = performance.now();
     try {
       if (statSync(transcriptPath).size <= MAX_TRANSCRIPT_BYTES) {
         statuses = classifyTranscript(readFileSync(transcriptPath, "utf8"), ids);
-        if (inspectionFileVersion(transcriptPath) === version) cacheClassification(cacheKey, version, statuses);
+        if (inspectionFileVersion(transcriptPath) === version) cacheClassification(cacheKey, version, statuses, readStartedAt);
         else statuses = new Map();
       }
     } catch {
@@ -208,6 +210,7 @@ async function inspectInContext(
   let statuses = cache.get(cacheKey, version);
   if (!statuses) {
     statuses = new Map();
+    const readStartedAt = performance.now();
     try {
       const result = await run(context, "sh", ["-c", transcriptScript, "wollipog", cwd, sessionId,
       ...(options.projectsRoot ? [options.projectsRoot] : [])], {
@@ -217,7 +220,7 @@ async function inspectInContext(
       maxBuffer: 64 * 1024 * 1024,
       });
       statuses = classifyTranscript(result.stdout, ids);
-      if (fingerprint(result.stderr) === version) cacheClassification(cacheKey, version, statuses, cache);
+      if (fingerprint(result.stderr) === version) cacheClassification(cacheKey, version, statuses, readStartedAt, cache);
       else if (version !== null) statuses = new Map();
     } catch {
       // Listing proves the artifacts exist. An unreadable or oversized ledger proves nothing.
