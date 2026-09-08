@@ -7345,7 +7345,8 @@ export class SessionManager {
       else if (maxToolCalls !== undefined) queuedConfig.maxToolCalls = maxToolCalls;
       queued.config = queuedConfig;
     }
-    if (maxToolCalls != null && !entry.toolCallIds) {
+    if (maxToolCalls === null) entry.toolCallIds = undefined;
+    if (maxToolCalls != null) {
       entry.toolCallIds = new Set(
         this.store.readEvents(sessionId)
           .filter((event) => event.payload.kind === "tool_call")
@@ -8857,7 +8858,7 @@ export class SessionManager {
     if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
     const entry = this.active.get(sessionId);
     if (this.backgroundRecoveryHeld(meta)) {
-      if (!entry?.running) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+      if (!entry?.running) this.publishHeldBackgroundRuntime(meta);
       this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       return;
     }
@@ -9087,15 +9088,30 @@ export class SessionManager {
     if (changed) this.store.patchMeta(sessionId, { backgroundJobs });
   }
 
+  private readonly heldBackgroundPublications = new Map<string, { fingerprint: string; at: number }>();
+
+  private publishHeldBackgroundRuntime(meta: SessionMeta): void {
+    const snapshot = this.snapshot(meta);
+    const fingerprint = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+    const prior = this.heldBackgroundPublications.get(meta.sessionId);
+    const now = Date.now();
+    if (prior?.fingerprint === fingerprint && now - prior.at < ORPHAN_RECOVERY_RETRY_MS) return;
+    this.heldBackgroundPublications.delete(meta.sessionId);
+    this.heldBackgroundPublications.set(meta.sessionId, { fingerprint, at: now });
+    while (this.heldBackgroundPublications.size > 128) {
+      this.heldBackgroundPublications.delete(this.heldBackgroundPublications.keys().next().value!);
+    }
+    this.send({ type: "session_runtime_updated", snapshot });
+  }
+
   /** Automatic background work must not turn a restart into new spending authority. */
   private backgroundRecoveryHeld(meta: SessionMeta): boolean {
     const entry = this.active.get(meta.sessionId);
     if (entry?.governanceTripped || entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId)) return true;
     if (meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd) return true;
     if (!meta.config.maxToolCalls) return false;
-    const toolCallIds = entry?.toolCallIds ?? new Set(this.store.readEvents(meta.sessionId)
-      .flatMap((event) => event.payload.kind === "tool_call" ? [event.payload.toolCallId] : []));
-    return toolCallIds.size >= meta.config.maxToolCalls;
+    const count = this.store.distinctToolCallCount(meta.sessionId);
+    return count === null || count >= meta.config.maxToolCalls;
   }
 
   private async runOrphanRecovery(sessionId: string): Promise<void> {
@@ -9157,7 +9173,7 @@ export class SessionManager {
     if (this.backgroundRecoveryHeld(meta)) {
       // Re-publish the settled runtime so the control plane can restore a lost decision card.
       // Rechecking receipts is read-only; the ceiling must not launch or queue a recovery turn.
-      if (!entry?.running) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+      if (!entry?.running) this.publishHeldBackgroundRuntime(meta);
       this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       return;
     }

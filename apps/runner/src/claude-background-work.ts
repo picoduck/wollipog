@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { runContextCommand, type ContextCommandResult } from "./context-command.js";
+import { InspectionCache, InspectionLimiter, inspectionFileVersion } from "./inspection-cache.js";
 
 export interface ClaudeTaskArtifact {
   id: string;
@@ -24,6 +25,25 @@ export interface ClaudeBackgroundWorkInspection {
 }
 
 const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+type TerminalStatus = "completed" | "failed" | "killed";
+const terminalCache = new InspectionCache<Map<string, TerminalStatus>>();
+const inspectionLimiter = new InspectionLimiter();
+const MAX_CACHE_RECORD_CHARS = 64 * 1024;
+
+function classifyTranscript(transcript: string, ids: string[]): Map<string, TerminalStatus> {
+  const statuses = new Map<string, TerminalStatus>();
+  for (const id of ids) {
+    const status = providerTranscriptTaskTerminalStatus(transcript, id);
+    if (status) statuses.set(id, status);
+  }
+  return statuses;
+}
+
+function cacheClassification(key: string, version: string | null, statuses: Map<string, TerminalStatus>, cache = terminalCache): void {
+  if (version && key.length + JSON.stringify([...statuses]).length <= MAX_CACHE_RECORD_CHARS) {
+    cache.set(key, version, statuses);
+  }
+}
 
 /** Claude uses the same lossy path key for its project transcript and per-session temp tree. */
 export function claudeProjectPathKey(cwd: string): string {
@@ -66,24 +86,31 @@ export function inspectClaudeBackgroundWork(
   }
 
   const transcriptPath = join(roots.projectsRoot ?? join(roots.claudeHome ?? join(homedir(), ".claude"), "projects"), key, `${sessionId}.jsonl`);
-  let transcript: string | null = null;
-  try {
-    if (statSync(transcriptPath).size <= MAX_TRANSCRIPT_BYTES) transcript = readFileSync(transcriptPath, "utf8");
-  } catch {
-    // The artifact proves work existed; without the provider ledger there is no safe completion
-    // inference. The lifecycle policy's fixed tie-break is therefore to keep/recover it.
+  const ids = [...new Set([...knownIds, ...files.map((name) => name.slice(0, -7))])].sort();
+  const cacheKey = JSON.stringify(["native", cwd, sessionId, transcriptPath, tasksDir, ids]);
+  const version = inspectionFileVersion(transcriptPath);
+  let statuses = terminalCache.get(cacheKey, version);
+  if (!statuses) {
+    statuses = new Map();
+    try {
+      if (statSync(transcriptPath).size <= MAX_TRANSCRIPT_BYTES) {
+        statuses = classifyTranscript(readFileSync(transcriptPath, "utf8"), ids);
+        if (inspectionFileVersion(transcriptPath) === version) cacheClassification(cacheKey, version, statuses);
+        else statuses = new Map();
+      }
+    } catch {
+      // Missing/unreadable evidence is not completion proof and must not reuse stale results.
+    }
   }
 
   const incompleteArtifacts = files
     .map((name) => ({ id: name.slice(0, -".output".length), outputFile: join(tasksDir, name) }))
-    .filter(({ id }) => transcript == null || !providerTranscriptProvesTaskTerminal(transcript, id));
+    .filter(({ id }) => !statuses.has(id));
   const terminalTaskIds = new Set<string>();
   const terminalTaskStatuses = new Map<string, "completed" | "failed" | "killed">();
-  if (transcript != null) {
-    for (const id of knownIds) {
-      const status = providerTranscriptTaskTerminalStatus(transcript, id);
-      if (status) { terminalTaskIds.add(id); terminalTaskStatuses.set(id, status); }
-    }
+  for (const id of knownIds) {
+    const status = statuses.get(id);
+    if (status) { terminalTaskIds.add(id); terminalTaskStatuses.set(id, status); }
   }
   return { incompleteArtifacts, terminalTaskIds, terminalTaskStatuses };
 }
@@ -94,6 +121,7 @@ type ContextCommandRunner = (
   args: string[],
   options: { cwd: string; env?: Record<string, string>; timeoutMs?: number; maxBuffer?: number },
 ) => Promise<ContextCommandResult>;
+const injectedCaches = new WeakMap<ContextCommandRunner, InspectionCache<Map<string, TerminalStatus>>>();
 
 export interface ClaudeContextDiscoveryOptions {
   env?: Record<string, string>;
@@ -120,6 +148,13 @@ export async function inspectClaudeBackgroundWorkInContext(
   options: ClaudeContextDiscoveryOptions = {},
 ): Promise<ClaudeBackgroundWorkInspection> {
   const knownIds = [...knownTaskIds];
+  return inspectionLimiter.run(() => inspectInContext(context, cwd, sessionId, knownIds, options));
+}
+
+async function inspectInContext(
+  context: AgentContext, cwd: string, sessionId: string, knownIds: string[],
+  options: ClaudeContextDiscoveryOptions,
+): Promise<ClaudeBackgroundWorkInspection> {
   const env = options.env ?? {};
   if (context.kind === "native") {
     return inspectClaudeBackgroundWork(cwd, sessionId, knownIds, {
@@ -132,12 +167,14 @@ export async function inspectClaudeBackgroundWorkInContext(
   const listScript = [
     'key=$(printf %s "$1" | sed "s/[^A-Za-z0-9]/-/g")',
     'tasks="${TMPDIR:-/tmp}/claude/$key/$2/tasks"',
-    '[ -d "$tasks" ] || exit 0',
-    'find "$tasks" -maxdepth 1 -type f -name "*.output" -printf "%f\\n" 2>/dev/null',
+    'if [ -d "$tasks" ]; then find "$tasks" -maxdepth 1 -type f -name "*.output" -printf "%f\\n" 2>/dev/null; fi',
+    'ledger="${3:-$HOME/.claude/projects}/$key/$2.jsonl"',
+    'stat -Lc "__WOLLIPOG_LEDGER__:%d:%i:%s:%y:%z:%a" "$ledger" 2>/dev/null || true',
   ].join("; ");
   let listing: ContextCommandResult;
   try {
-    listing = await run(context, "sh", ["-c", listScript, "wollipog", cwd, sessionId], {
+    listing = await run(context, "sh", ["-c", listScript, "wollipog", cwd, sessionId,
+      ...(options.projectsRoot ? [options.projectsRoot] : [])], {
       cwd: "/",
       env,
       timeoutMs: 10_000,
@@ -153,32 +190,46 @@ export async function inspectClaudeBackgroundWorkInContext(
   const transcriptScript = [
     'key=$(printf %s "$1" | sed "s/[^A-Za-z0-9]/-/g")',
     'if [ -n "$3" ]; then cat "$3/$key/$2.jsonl" 2>/dev/null; else cat "$HOME/.claude/projects/$key/$2.jsonl" 2>/dev/null; fi',
+    'stat -Lc "__WOLLIPOG_LEDGER__:%d:%i:%s:%y:%z:%a" "${3:-$HOME/.claude/projects}/$key/$2.jsonl" >&2',
   ].join("; ");
-  let transcript: string | null = null;
-  try {
-    transcript = (await run(context, "sh", ["-c", transcriptScript, "wollipog", cwd, sessionId,
+  const ids = [...new Set([...knownIds, ...names.map((name) => name.slice(0, -7))])].sort();
+  const cacheKey = JSON.stringify(["context", context, cwd, sessionId, env, options.projectsRoot, ids]);
+  const version = listing.stdout.split(/\r?\n/).find((line) => line.startsWith("__WOLLIPOG_LEDGER__:")) ?? null;
+  // Injected command runners are independent contexts too; never share their cached proof.
+  let cache = terminalCache;
+  if (options.run) {
+    cache = injectedCaches.get(options.run) ?? new InspectionCache();
+    injectedCaches.set(options.run, cache);
+  }
+  let statuses = cache.get(cacheKey, version);
+  if (!statuses) {
+    statuses = new Map();
+    try {
+      const result = await run(context, "sh", ["-c", transcriptScript, "wollipog", cwd, sessionId,
       ...(options.projectsRoot ? [options.projectsRoot] : [])], {
       cwd: "/",
       env,
       timeoutMs: 10_000,
       maxBuffer: 64 * 1024 * 1024,
-    })).stdout;
-  } catch {
-    // Listing proves the artifacts exist. An unreadable or oversized ledger proves nothing.
+      });
+      statuses = classifyTranscript(result.stdout, ids);
+      if (result.stderr.trim() === version) cacheClassification(cacheKey, version, statuses, cache);
+      else if (version !== null) statuses = new Map();
+    } catch {
+      // Listing proves the artifacts exist. An unreadable or oversized ledger proves nothing.
+    }
   }
   const key = claudeProjectPathKey(cwd);
   const tempRoot = (env.TMPDIR || "/tmp").replace(/\/+$/, "") || "/";
   const tasksDir = `${tempRoot === "/" ? "" : tempRoot}/claude/${key}/${sessionId}/tasks`;
   const incompleteArtifacts = names
     .map((name) => ({ id: name.slice(0, -".output".length), outputFile: `${tasksDir}/${name}` }))
-    .filter(({ id }) => transcript == null || !providerTranscriptProvesTaskTerminal(transcript, id));
+    .filter(({ id }) => !statuses.has(id));
   const terminalTaskIds = new Set<string>();
   const terminalTaskStatuses = new Map<string, "completed" | "failed" | "killed">();
-  if (transcript != null) {
-    for (const id of knownIds) {
-      const status = providerTranscriptTaskTerminalStatus(transcript, id);
-      if (status) { terminalTaskIds.add(id); terminalTaskStatuses.set(id, status); }
-    }
+  for (const id of knownIds) {
+    const status = statuses.get(id);
+    if (status) { terminalTaskIds.add(id); terminalTaskStatuses.set(id, status); }
   }
   return { incompleteArtifacts, terminalTaskIds, terminalTaskStatuses };
 }

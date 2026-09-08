@@ -33,6 +33,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { TextDecoder } from "node:util";
+import { InspectionCache, inspectionFileVersion } from "./inspection-cache.js";
 import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
@@ -438,6 +439,7 @@ export class SessionStore {
   private readonly eventProjectionIndexes = new Map<string, SessionEventProjectionIndex>();
   /** Immutable segment hashes are expensive but only need revalidation when inode metadata changes. */
   private readonly verifiedHistorySegments = new Map<string, string>();
+  private readonly toolCountCache = new InspectionCache<number>();
   private historyMaintenanceCursor: string | null = null;
   constructor(
     private readonly root: string = join(homedir(), ".agent-manager", "sessions"),
@@ -2182,6 +2184,38 @@ export class SessionStore {
       if (error instanceof HistoryStoreError) return { ok: false, code: error.code, error: error.message };
       return { ok: false, code: "history_corrupt", error: (error as Error).message };
     }
+  }
+
+  /** Derived count keyed by the full physical history layout, not just a possibly reused seq. */
+  distinctToolCallCount(id: string): number | null {
+    try {
+      this.recoverHistoryReset(id);
+      const layout = this.historyLayout(id);
+      const version = () => {
+        const versions = layout.sources.map((source) => inspectionFileVersion(source.path));
+        if (versions.some((value) => value === null)) return null;
+        return createHash("sha256").update(JSON.stringify([this.readMeta(id)?.logEpoch ?? 0,
+          inspectionFileVersion(this.historyManifestPath(id)),
+          layout.sources.map((source, index) => [source.file, versions[index]])])).digest("hex");
+      };
+      const before = version();
+      const cached = this.toolCountCache.get(id, before);
+      if (cached !== undefined) return cached;
+      const ids = new Set<string>();
+      for (const source of layout.sources) {
+        this.verifyHistorySource(source);
+        const raw = readFileSync(source.path, "utf8");
+        this.historyScanObserver?.(0, Buffer.byteLength(raw));
+        for (const line of raw.split("\n")) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as StoredEvent;
+          if (event.payload.kind === "tool_call") ids.add(event.payload.toolCallId);
+        }
+      }
+      if (before === null || version() !== before) return null;
+      this.toolCountCache.set(id, before, ids.size);
+      return ids.size;
+    } catch { return null; } // Missing/corrupt evidence must never grant spending authority.
   }
 
   /** Events with seq > afterSeq, in seq order. */
