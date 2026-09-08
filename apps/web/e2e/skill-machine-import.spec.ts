@@ -73,6 +73,14 @@ test("a macOS runner offers snapshots while explaining that adoption remains Lin
   await expect(page.getByText("Recovery inspection and source adoption require a Linux runner.")).toBeVisible();
 });
 
+test("a Windows runner offers snapshots while explaining that adoption remains Linux-only", async ({ page }) => {
+  await page.goto("/skills-removals-e2e.html?windows=1");
+  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await expect(page.getByRole("button", { name: "Discover Skills" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
+  await expect(page.getByText("Recovery inspection and source adoption require a Linux runner.")).toBeVisible();
+});
+
 test("switching machines clears inspected adoption recovery", async ({ page }) => {
   const operationId = "123e4567-e89b-42d3-a456-426614174000";
   await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) => route.fulfill({ json: {

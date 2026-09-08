@@ -13,7 +13,9 @@ import "../styles.css";
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "runner-host",
-  os: new URLSearchParams(location.search).has("macos") ? "macos" : "linux",
+  os: new URLSearchParams(location.search).has("macos")
+    ? "macos"
+    : new URLSearchParams(location.search).has("windows") ? "windows" : "linux",
   version: "1",
   status: "online",
   displayName: "Build Machine",
@@ -39,7 +41,7 @@ const runner: RunnerView = {
     ? 1
     : new URLSearchParams(location.search).has("legacyRecovery")
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery - 1
-      : new URLSearchParams(location.search).has("macos")
+      : new URLSearchParams(location.search).has("macos") || new URLSearchParams(location.search).has("windows")
         ? RUNNER_CAPABILITY_MIN_PROTOCOL.portableMachineSkillSnapshots
         : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery,
 };

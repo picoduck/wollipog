@@ -31,7 +31,8 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   const compatible = runners.filter((runner) => runner.status === "online" && (
     runner.os === "linux"
       ? runnerSupportsProtocol(runner.protocolVersion, "machineSkillSnapshots")
-      : runner.os === "macos" && runnerSupportsProtocol(runner.protocolVersion, "portableMachineSkillSnapshots")
+      : (runner.os === "macos" || runner.os === "windows") &&
+        runnerSupportsProtocol(runner.protocolVersion, "portableMachineSkillSnapshots")
   ));
   const [runnerId, setRunnerId] = useState(compatible[0]?.runnerId ?? "");
   const [discovery, setDiscovery] = useState<MachineSkillDiscovery | null>(null);
@@ -143,10 +144,10 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   </>}>
     <div className="form skills-machine-import">
       <p>Import a read-only snapshot. After an identical library version is assigned, a separate confirmed action can preserve the original and replace it with a managed link. New skills stay unassigned; accepted updates deploy to current assignments on unpinned machines.</p>
-      <p className="skills-hint">Snapshot import requires protocol 111. Adoption requires a connected Linux runner on protocol 115 or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
+      <p className="skills-hint">Snapshot import requires protocol 111 on Linux or protocol 117 on macOS and Windows. Adoption requires a connected Linux runner on protocol 115 or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
       <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy || discovery !== null}
         options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={selectRunner} /></label>
-      {compatible.length === 0 && <p>No compatible connected machines. Update a Linux or macOS runner to enable snapshot imports.</p>}
+      {compatible.length === 0 && <p>No compatible connected machines. Update a Linux, macOS, or Windows runner to enable snapshot imports.</p>}
       <button className="btn" type="button" disabled={busy || !compatible.some((runner) => runner.runnerId === runnerId)} onClick={() => void discover()}>{busy ? "Working…" : "Discover Skills"}</button>
       <button className="btn" type="button" disabled={busy || !recoverySupported}
         onClick={() => void inspectRecovery()}>Inspect Recovery</button>
