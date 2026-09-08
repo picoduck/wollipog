@@ -68,6 +68,8 @@ test("resolveRelease reads latest or an exact tag and keeps only usable digests"
   await assert.rejects(resolveRelease(async () => ({ ok: false, status: 404, text: async () => "" }), {}), /no published release found/u);
   await assert.rejects(resolveRelease(async () => ({ ok: true, status: 200, text: async () => "<html>" }), {}), /not valid JSON/u);
   await assert.rejects(resolveRelease(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ tag_name: "nightly", assets: [] }) }), {}), /no usable tag name/u);
+  // The tag names a staging directory, so a "latest" release with a path-like tag is refused too.
+  await assert.rejects(resolveRelease(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ tag_name: "v1.2.3/../../etc", assets: [] }) }), {}), /no usable tag name/u);
   assert.throws(() => findAsset(latest, "missing"), /has no asset named missing/u);
 });
 

@@ -158,10 +158,12 @@ wollipog service upgrade --yes --json    # non-interactive, for automation
 Upgrade resolves the release (latest, or an exact tag) from GitHub, downloads the runner and
 control-plane executables for this host's target and the web bundle into a staging directory under
 the data directory, and proves every byte: each asset must carry a GitHub publisher digest that
-matches the downloaded SHA-256, and when the release has a `SHA256SUMS` its entry must agree too.
-Each staged executable is run with `--version` and must report the release version. Only then are
-the executables swapped in atomically (the previous generation is kept as `<path>.previous`, and the
-previous `web/` directory beside the new one), the control plane is restarted and must become
+matches the downloaded SHA-256, and the release's `SHA256SUMS` entry must agree with it (a release
+without a manifest is refused). Each staged executable is run with `--version` and must report the
+release version. Only then are the executables swapped in atomically (the previous generation is
+kept as `<path>.previous`, and the previous `web/` directory beside the new one), the `wollipog`
+command and any other sibling that was a hard link or copy of the runner are refreshed from the new
+runner, the control plane is restarted and must become
 healthy and report the new version through the loopback admin API, and the runner is restarted and
 must re-register as online. If any of that fails, the previous executables and bundle are moved back
 and the services are restarted again; the command exits 1 and says so. Configuration, credentials,

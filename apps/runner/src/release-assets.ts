@@ -57,6 +57,9 @@ export interface ResolvedRelease {
   assets: ReleaseAsset[];
 }
 
+/** Release tags are used as staging directory names, so anything but `vX.Y.Z[-pre]` is refused. */
+const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
+
 export type JsonFetch = (url: string, headers: Record<string, string>) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 
 /** Resolve the latest published release, or an exact tag. Drafts are never returned by these endpoints. */
@@ -65,7 +68,7 @@ export async function resolveRelease(
   options: { repository?: string; tag?: string | null; token?: string | null } = {},
 ): Promise<ResolvedRelease> {
   const repository = options.repository ?? RELEASE_REPOSITORY;
-  if (options.tag !== undefined && options.tag !== null && !/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(options.tag)) {
+  if (options.tag !== undefined && options.tag !== null && !RELEASE_TAG_PATTERN.test(options.tag)) {
     throw new Error(`release tag must look like v1.2.3, got ${options.tag}`);
   }
   const url = options.tag
@@ -85,7 +88,7 @@ export async function resolveRelease(
   } catch {
     throw new Error("GitHub release metadata was not valid JSON");
   }
-  if (typeof body.tag_name !== "string" || !/^v\d+\.\d+\.\d+/u.test(body.tag_name)) {
+  if (typeof body.tag_name !== "string" || !RELEASE_TAG_PATTERN.test(body.tag_name)) {
     throw new Error("GitHub release metadata has no usable tag name");
   }
   if (!Array.isArray(body.assets)) throw new Error("GitHub release metadata has no asset list");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -534,6 +534,11 @@ test("service upgrade stages, verifies, swaps, restarts, and keeps the previous 
   const webDist = join(f.root, "web");
   mkdirSync(webDist, { recursive: true });
   writeFileSync(join(webDist, "index.html"), "old");
+  // The installer hard-links the `wollipog` CLI to the runner; an unrelated sibling must be left alone.
+  const cliAlias = join(f.root, "wollipog");
+  linkSync(runnerBin, cliAlias);
+  const foreign = join(f.root, "agent-manager-runner");
+  writeFileSync(foreign, "something else entirely");
   writeFileSync(f.layout.controlPlaneEnvFile, readFileSync(f.layout.controlPlaneEnvFile, "utf8") + `WOLLIPOG_WEB_DIST="${webDist}"\n`);
   const fixture = releaseFixture(f);
   let cpVersion = "0.22.0";
@@ -576,6 +581,11 @@ test("service upgrade stages, verifies, swaps, restarts, and keeps the previous 
   assert.equal(readFileSync(cpBin, "utf8"), "control plane 9.9.9");
   assert.equal(readFileSync(runnerBin, "utf8"), "runner 9.9.9");
   assert.equal(readFileSync(`${cpBin}.previous`, "utf8"), "#!/bin/sh\n", "the previous executable is retained");
+  assert.equal(readFileSync(cliAlias, "utf8"), "runner 9.9.9", "the CLI alias follows the runner");
+  assert.equal(readFileSync(`${cliAlias}.previous`, "utf8"), "#!/bin/sh\n", "the previous CLI is retained");
+  assert.equal(readFileSync(foreign, "utf8"), "something else entirely", "siblings that were not the runner are untouched");
+  assert.ok(!existsSync(`${foreign}.previous`));
+  assert.deepEqual(report.aliases, [cliAlias]);
   assert.equal(readFileSync(join(webDist, "index.html"), "utf8"), "new");
   assert.ok(!existsSync(`${webDist}.previous`) || true);
   assert.deepEqual(fixture.downloads.map((u) => u.replace("https://dl/", "")).sort(), ["SHA256SUMS", "wollipog-control-plane-x86_64-unknown-linux-gnu", "wollipog-runner-x86_64-unknown-linux-gnu", "wollipog-web.tar.gz"]);
@@ -629,5 +639,13 @@ test("service upgrade rolls back when the new control plane does not report the 
   assert.match(piped.stderr(), /pass --yes in non-interactive use/u);
   const nothing = fake(t);
   assert.equal(await runServiceCli(["service", "upgrade", "--yes"], { ...nothing.host, arch: "x64" }, nothing.io), 2);
+
+  // A release without SHA256SUMS cannot be cross-checked and is refused before anything is downloaded.
+  const unverifiable = makeIo();
+  const noManifest = releaseFixture(f, { manifest: false });
+  const noManifestHost: ServiceHost = { ...noManifest.host, exec: host.exec };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes"], noManifestHost, unverifiable.io), 1);
+  assert.match(unverifiable.stderr(), /has no SHA256SUMS/u);
+  assert.deepEqual(noManifest.downloads, []);
   assert.match(nothing.stderr(), /no Wollipog units are installed/u);
 });

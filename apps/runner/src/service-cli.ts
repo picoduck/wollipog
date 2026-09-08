@@ -24,6 +24,7 @@ import {
   parseChecksumManifest,
   resolveRelease,
   runnerAssetName,
+  sha256File,
   type Downloader,
   type JsonFetch,
 } from "./release-assets.js";
@@ -820,18 +821,31 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     }
   }
 
+  // The installer publishes the CLI (`wollipog`) and the legacy name as hard links or copies of the
+  // runner executable. Refresh every sibling that is byte-identical to the runner being replaced, so
+  // the operator's `wollipog` command does not stay behind at the old version.
+  const runnerTarget = targets.find((target) => target.component === "runner");
+  const aliases: string[] = [];
+  if (runnerTarget && host.exists(runnerTarget.path)) {
+    const exe = /\.exe$/iu.test(runnerTarget.path) ? ".exe" : "";
+    const currentDigest = await sha256File(runnerTarget.path);
+    for (const name of ["wollipog", "agent-manager-runner"]) {
+      const candidate = join(dirname(runnerTarget.path), `${name}${exe}`);
+      if (candidate === runnerTarget.path || !host.exists(candidate)) continue;
+      if ((await sha256File(candidate)) === currentDigest) aliases.push(candidate);
+    }
+  }
+
   // Stage every byte under the data directory before touching anything live.
   const staging = join(layout.dataDir, "upgrades", release.tag);
   host.removeTree(staging);
   host.ensureDir(join(layout.dataDir, "upgrades"), 0o700);
   host.ensureDir(staging, 0o700);
-  let manifest: Map<string, string> | null = null;
   const manifestAsset = release.assets.find((asset) => asset.name === CHECKSUM_MANIFEST_NAME);
-  if (manifestAsset) {
-    const manifestPath = join(staging, CHECKSUM_MANIFEST_NAME);
-    await downloadVerifiedAsset(host.download, manifestAsset, manifestPath, { token });
-    manifest = parseChecksumManifest(host.readFile(manifestPath));
-  }
+  if (!manifestAsset) throw new CliError(`${release.tag} has no ${CHECKSUM_MANIFEST_NAME}; refusing to upgrade from a release that cannot be verified`);
+  const manifestPath = join(staging, CHECKSUM_MANIFEST_NAME);
+  await downloadVerifiedAsset(host.download, manifestAsset, manifestPath, { token });
+  const manifest = parseChecksumManifest(host.readFile(manifestPath));
   const staged = new Map<string, string>();
   for (const target of targets) {
     const destination = join(staging, target.assetName);
@@ -871,12 +885,22 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     host.chmod(target.path, 0o755);
     swapped.push(target.path);
   };
+  const refreshAlias = (alias: string, source: string) => {
+    const partial = `${alias}.upgrade-${release.tag}`;
+    host.removeFile(partial);
+    host.copyTree(source, partial);
+    host.chmod(partial, 0o755);
+    host.removeFile(previous(alias));
+    host.move(alias, previous(alias));
+    host.move(partial, alias);
+    swapped.push(alias);
+  };
   const rollBack = async (reason: string): Promise<CliError> => {
-    for (const target of targets) {
-      if (!swapped.includes(target.path)) continue;
-      if (host.exists(previous(target.path))) {
-        host.removeFile(target.path);
-        host.move(previous(target.path), target.path);
+    for (const path of [...targets.map((target) => target.path), ...aliases]) {
+      if (!swapped.includes(path)) continue;
+      if (host.exists(previous(path))) {
+        host.removeFile(path);
+        host.move(previous(path), path);
       }
     }
     if (stagedWeb && webDist && host.exists(previous(webDist))) {
@@ -890,12 +914,13 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
 
   try {
     for (const target of targets) swapIn(target);
+    for (const alias of aliases) refreshAlias(alias, runnerTarget!.path);
     if (stagedWeb && webDist) {
       host.removeTree(previous(webDist));
       if (host.exists(webDist)) host.move(webDist, previous(webDist));
       host.move(stagedWeb, webDist);
     }
-    if (mode === "system") await host.exec("chown", ["-R", `${layout.account}:${layout.account}`, ...targets.map((target) => target.path), ...(webDist ? [webDist] : [])], { timeoutMs: 60_000 });
+    if (mode === "system") await host.exec("chown", ["-R", `${layout.account}:${layout.account}`, ...targets.map((target) => target.path), ...aliases, ...(webDist ? [webDist] : [])], { timeoutMs: 60_000 });
   } catch (error) {
     throw await rollBack(`installing the new executables failed (${(error as Error).message})`);
   }
@@ -930,12 +955,13 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     release: release.tag,
     previous: Object.fromEntries(currentVersions),
     components: targets.map((target) => ({ component: target.component, path: target.path, previousKept: host.exists(previous(target.path)) ? previous(target.path) : null })),
+    aliases,
     webDist: stagedWeb ? webDist : null,
     warnings,
   };
   for (const warning of warnings) io.stderr(`warning: ${warning}\n`);
   emit(report, [
-    `Upgraded to ${release.tag}: ${targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ")}${stagedWeb ? ", web bundle refreshed" : ""}.`,
+    `Upgraded to ${release.tag}: ${targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ")}${aliases.length ? `, ${aliases.map((alias) => basename(alias)).join(" and ")} refreshed` : ""}${stagedWeb ? ", web bundle refreshed" : ""}.`,
     `Previous executables kept as ${targets.map((target) => previous(target.path)).join(" and ")}; the next upgrade replaces them.`,
     "Control plane healthy" + (runner ? " and runner online." : "."),
   ].join("\n"));
