@@ -18,7 +18,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import type { AgentContext, ForgeProvider } from "@wollipog/protocol";
+import type { AgentContext, ForgeProvider, SessionWorktreeProgressPhase } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import {
   captureWorktreeTree,
@@ -74,6 +74,8 @@ export interface WorktreeOptions {
   /** Persisted pre-attestation WSL worktree. Creation may reuse this exact registered path, but
    * must never silently replace or abandon it. */
   legacyWslWorktreePath?: string;
+  /** Content-free progress for independently bounded worktree preparation phases. */
+  onProgress?: (phase: SessionWorktreeProgressPhase) => void;
 }
 
 export interface WorktreeHandle {
@@ -352,8 +354,10 @@ export async function createRequestedWorktree(
   options: RequestedWorktreeOptions = {},
 ): Promise<SessionWorktreeHandle> {
   const context = options.context ?? nativeContext;
+  options.onProgress?.("validating");
   const baseRef = safeGitArgument(request.baseRef, "worktree base ref");
   const branch = await validateBranch(context, repoPath, request.branch);
+  options.onProgress?.("validating");
   const baseCommit = (await command(
     context,
     repoPath,
@@ -364,6 +368,7 @@ export async function createRequestedWorktree(
   const path = context.kind === "wsl"
     ? `${boundary}/${requestedSlot(branch)}`
     : join(boundary, requestedSlot(branch));
+  options.onProgress?.("validating");
   const listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
   const matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));
   if (matching) {
@@ -379,12 +384,14 @@ export async function createRequestedWorktree(
     throw new Error("requested worktree branch is already registered at a different path");
   }
   const branchRef = `refs/heads/${branch}`;
+  options.onProgress?.("validating");
   const existingBranch = (await command(
     context,
     repoPath,
     ["for-each-ref", "--format=%(refname)", branchRef],
   )).trim();
   if (existingBranch === branchRef) throw new Error("requested worktree branch already exists");
+  options.onProgress?.("materializing");
   await removeExternalDirectory(context, path, options);
   await command(context, repoPath, ["worktree", "add", "-b", branch, path, baseCommit], 120_000);
   return { path, branch, baseRef, baseCommit, attached: false, created: true };
@@ -399,6 +406,7 @@ export async function fetchRemoteDefaultBase(
 ): Promise<{ ref: string; branch: string }> {
   const context = options.context ?? nativeContext;
   safeGitArgument(remote, "Git remote");
+  options.onProgress?.("resolving_remote");
   const advertised = await command(context, repoPath, ["ls-remote", "--symref", remote, "HEAD"], 120_000);
   const headRef = advertised.split("\n")
     .map((line) => /^ref:\s+(refs\/heads\/[^\s]+)\s+HEAD$/u.exec(line)?.[1])
@@ -407,6 +415,7 @@ export async function fetchRemoteDefaultBase(
   const branch = headRef.slice("refs/heads/".length);
   safeGitArgument(branch, "remote default branch");
   const trackingRef = `refs/remotes/${remote}/${branch}`;
+  options.onProgress?.("fetching_remote");
   await command(context, repoPath, ["fetch", "--no-tags", remote, `+${headRef}:${trackingRef}`], 120_000);
   // The branch is returned alongside the ref because this call just asked the remote itself, which
   // makes it the only authoritative answer available without a second round trip.

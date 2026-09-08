@@ -167,10 +167,13 @@ test("requested worktree uses the explicit base and branch instead of primary ch
     execFileSync("git", ["-C", repo, "commit", "-am", "primary drift"]);
     const primaryHead = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
+    const phases: string[] = [];
     const handle = await createRequestedWorktree(repo, "s_requested", {
       baseRef: "refs-for-agent",
       branch: "fix/issue-42-short-slug",
-    }, { dataDir });
+    }, { dataDir, onProgress: (phase) => phases.push(phase) });
+    assert.equal(phases[0], "validating");
+    assert.equal(phases.at(-1), "materializing");
     assert.equal(handle.baseCommit, base);
     assert.notEqual(handle.baseCommit, primaryHead);
     assert.equal(execFileSync("git", ["-C", handle.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), base);
@@ -499,11 +502,27 @@ test("concurrent requests retain every created branch and deletion leaves attach
     });
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
     (manager as unknown as { configuredProjectPaths: string[] }).configuredProjectPaths = [join(root, "operator-location")];
+    const firstPhases: string[] = [];
+    const retryPhases: string[] = [];
+    const firstPromise = manager.requestWorktree(
+      "s_multi",
+      { baseRef: "HEAD", branch: "fix/first" },
+      (phase) => firstPhases.push(phase),
+    );
+    const retryPromise = manager.requestWorktree(
+      "s_multi",
+      { baseRef: "HEAD", branch: "fix/first" },
+      (phase) => retryPhases.push(phase),
+    );
+    assert.equal(retryPromise, firstPromise, "an exact in-flight retry joins the original promise");
     const [first, repeated, second] = await Promise.all([
-      manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" }),
-      manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" }),
+      firstPromise,
+      retryPromise,
       manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/second" }),
     ]);
+    assert.equal(firstPhases[0], "validating");
+    assert.deepEqual(firstPhases.slice(-2), ["materializing", "activating"]);
+    assert.deepEqual(retryPhases, firstPhases, "joined callers observe the same bounded phases");
     assert.equal(repeated.worktree.id, first.worktree.id,
       "an in-flight idempotent retry keeps original ownership metadata");
     const reattachedCreated = await manager.attachWorktree("s_multi", first.worktree.path);
@@ -2423,7 +2442,9 @@ test("a remote that moves its default is not tracked by fetch, so the advertised
     // This is the whole reason the create path prefers what the remote advertises: a plain fetch
     // leaves the tracked HEAD on the old default indefinitely.
     assert.equal(await readRepositoryDefaultBranch(clone), "release-2027");
-    const advertised = await fetchRemoteDefaultBase(clone);
+    const phases: string[] = [];
+    const advertised = await fetchRemoteDefaultBase(clone, { onProgress: (phase) => phases.push(phase) });
+    assert.deepEqual(phases, ["resolving_remote", "fetching_remote"]);
     assert.equal(advertised.branch, "develop");
     assert.equal(advertised.ref, "origin/develop");
   } finally {

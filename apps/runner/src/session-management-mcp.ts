@@ -902,17 +902,25 @@ export const TOOLS: McpTool[] = [
       if (typeof args?.branch !== "string" || !args.branch) return errorResult("branch is required");
       const sessionId = worktreeTarget(args, deps);
       if (typeof sessionId !== "string") return sessionId;
-      const body: Json = { branch: args.branch };
+      // Additive opt-in: old control planes ignore this field and preserve their synchronous path;
+      // v113 control planes acknowledge and let this client poll without one absolute HTTP wait.
+      const body: Json = { branch: args.branch, progress: true };
       if (typeof args.baseRef === "string") body.baseRef = args.baseRef;
-      const r = await cpFetch(
-        deps,
-        "POST",
-        `/api/sessions/${encodeURIComponent(sessionId)}/worktrees`,
-        body,
-        SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
-      );
-      if (!r.ok) return errorResult(r.message);
-      return textResult(mapWorktreeResult(r.data));
+      const path = `/api/sessions/${encodeURIComponent(sessionId)}/worktrees`;
+      const sleep = deps.sleep ?? ((milliseconds: number) =>
+        new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+      let result = await cpFetch(deps, "POST", path, body, SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS);
+      while (result.ok && result.data?.operation?.status === "in_progress") {
+        await sleep(1_000);
+        // Repeating the exact coordinates joins the existing v113 operation. Against an older
+        // control plane the first response remains the complete legacy result and never loops.
+        result = await cpFetch(deps, "POST", path, body, SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS);
+      }
+      if (!result.ok) return errorResult(result.message);
+      if (result.data?.operation?.status === "failed") {
+        return errorResult(result.data.operation.error ?? "worktree operation failed");
+      }
+      return textResult(mapWorktreeResult(result.data));
     },
   },
   {

@@ -296,7 +296,11 @@ test("CLI worktree commands adapt to the shared MCP operations", async () => {
   ), 0);
   assert.equal(JSON.parse(output).worktree.branch, "fix/583");
   assert.equal(requests[1]!.url, "http://cp/api/sessions/s1/worktrees");
-  assert.deepEqual(JSON.parse(requests[1]!.body!), { branch: "fix/583", baseRef: "origin/main" });
+  assert.deepEqual(JSON.parse(requests[1]!.body!), {
+    branch: "fix/583",
+    baseRef: "origin/main",
+    progress: true,
+  });
 
   output = "";
   assert.equal(await runWollipogCli(
