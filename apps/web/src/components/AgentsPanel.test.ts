@@ -51,6 +51,21 @@ test("newer durable terminal evidence cannot be reopened by an older loaded wind
   assert.deepEqual(merged.latestTool, { title: "Command", active: false });
 });
 
+test("durable terminal evidence cannot be reopened by a later loaded active observation", () => {
+  const durable = { ...child("child", "completed", 1), lastActivityAt: 200, completedAt: 200,
+    toolStatus: "completed", availability: "recorded" as const,
+    latestTool: { title: "Command", active: false } };
+  const loaded = { ...child("child", "working", 2), lastActivityAt: 300,
+    toolStatus: "running", availability: "live" as const,
+    latestTool: { title: "Read", active: true } };
+  const merged = mergeDurableAgents([durable], [loaded])[0]!;
+  assert.equal(merged.lifecycle, "completed");
+  assert.equal(merged.toolStatus, "completed");
+  assert.equal(merged.availability, "recorded");
+  assert.equal(merged.completedAt, 200);
+  assert.deepEqual(merged.latestTool, { title: "Command", active: false });
+});
+
 test("newer loaded terminal evidence settles older durable active evidence", () => {
   const durable = { ...child("child", "working", 1), lastActivityAt: 100,
     toolStatus: "running", latestTool: { title: "Read", active: true } };

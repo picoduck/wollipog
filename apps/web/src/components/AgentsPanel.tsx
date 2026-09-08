@@ -36,8 +36,11 @@ export function mergeDurableAgents(
     const liveAt = live.lastActivityAt ?? live.completedAt ?? live.startedAt ?? 0;
     const terminal = (value: SubagentDescriptor["lifecycle"]) =>
       value === "completed" || value === "failed" || value === "interrupted";
-    const liveIsNewer = liveAt > durableAt ||
-      (liveAt === durableAt && terminal(live.lifecycle) && !terminal(durable.lifecycle));
+    const durableIsTerminal = terminal(durable.lifecycle);
+    const liveIsTerminal = terminal(live.lifecycle);
+    const liveIsNewer = durableIsTerminal === liveIsTerminal
+      ? liveAt > durableAt
+      : liveIsTerminal;
     const state = liveIsNewer ? live : durable;
     return { ...live, ...durable,
       title: durable.title === "Subagent" ? live.title : durable.title,
