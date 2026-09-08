@@ -61,13 +61,23 @@ export async function probePublicOriginWithFetch(
     const response = await fetchImpl(`${origin.replace(/\/+$/u, "")}/healthz`, { method: "GET", signal: AbortSignal.timeout(5_000), redirect: "manual" });
     if (!response.ok) return { reachable: true, service: null, detail: `HTTP ${response.status}` };
     let service: string | null = null;
+    let unusable = false;
     try {
       const body = JSON.parse(await response.text()) as { service?: unknown };
-      service = typeof body.service === "string" ? body.service : null;
+      if (typeof body.service === "string") {
+        // The origin is operator-configured but could be hijacked; only a short printable marker
+        // is ever echoed back into an operator's terminal.
+        if (/^[A-Za-z0-9._-]{1,64}$/u.test(body.service)) service = body.service;
+        else unusable = true;
+      }
     } catch {
       service = null;
     }
-    return { reachable: true, service, detail: service ? `answered as ${service}` : "answered without a service marker" };
+    return {
+      reachable: true,
+      service,
+      detail: service ? `answered as ${service}` : unusable ? "answered with an unusable service marker" : "answered without a service marker",
+    };
   } catch (error) {
     return { reachable: false, service: null, detail: (error as Error).message };
   }

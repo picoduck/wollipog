@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type HostAdminStatusView } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
 import {
+  formatChecks,
   formatStatus,
   isDesktopCleartextHost,
   isLoopbackHostname,
@@ -853,4 +854,59 @@ test("admin doctor degrades when the control plane is down, too old, or the cred
   const failing = makeIo();
   assert.equal(await runHostAdminCli(["admin", "doctor"], env(tokenFile), failing.io, doctorServer({ fail: true }).fetch, { ...noService }), 1);
   assert.match(failing.stdout(), /FAIL  database/u);
+});
+
+
+test("admin doctor keeps reachability and a failing doctor route as distinct checks and strips control characters", async (t) => {
+  const { tokenFile } = fixture(t);
+  const noService = { ...host, platform: "linux" as const, home: "/nonexistent-home", user: "op", env: {}, installedControlPlaneEnv: () => null, exec: async () => ({ code: 1, stdout: "", stderr: "" }) };
+  const broken: McpFetch = async (url, init) => {
+    const respond = (statusCode: number, body: unknown) => ({ ok: statusCode >= 200 && statusCode < 300, status: statusCode, text: async () => JSON.stringify(body) });
+    if (init?.headers?.authorization !== `Bearer ${TOKEN}`) return respond(401, { error: "unauthorized" });
+    if (url.endsWith("/api/compatibility")) return respond(200, { protocolVersion: PROTOCOL_VERSION });
+    return respond(500, { error: "doctor exploded \u001b[2J" });
+  };
+  const { io, stdout } = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "doctor", "--json"], env(tokenFile), io, broken, noService), 1);
+  const report = JSON.parse(stdout());
+  const ids = report.checks.map((c: { id: string }) => c.id);
+  assert.equal(new Set(ids).size, ids.length, "check ids are unique");
+  const byId = Object.fromEntries(report.checks.map((c: { id: string }) => [c.id, c]));
+  assert.equal(byId["control-plane-reachable"].status, "pass");
+  assert.equal(byId["control-plane-doctor"].status, "fail");
+  assert.match(byId["control-plane-doctor"].detail, /doctor exploded/u);
+  const readable = formatChecks(report.checks);
+  assert.ok(!readable.includes("\u001b"), "control characters never reach the terminal");
+  assert.match(readable, /FAIL  control-plane-doctor/u);
+});
+
+test("admin doctor on a system-mode deployment expects the service account to own credential files", async (t) => {
+  const { root, tokenFile } = fixture(t);
+  const sysroot = join(root, "sysroot");
+  mkdirSync(join(sysroot, "etc", "wollipog"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(sysroot, "etc", "systemd", "system"), { recursive: true });
+  writeFileSync(join(sysroot, "etc", "systemd", "system", "wollipog-control-plane.service"), "[Service]\nUser=svc-acct\n", { mode: 0o644 });
+  writeFileSync(join(sysroot, "etc", "wollipog", "control-plane.env"), `CONTROL_PLANE_LOCAL_TOKEN_FILE="${tokenFile}"\n`, { mode: 0o600 });
+  writeFileSync(join(sysroot, "etc", "wollipog", "runner.token"), "wollipogr_x\n", { mode: 0o600 });
+  const execs: string[] = [];
+  const rootHost = {
+    ...host, platform: "linux" as const, uid: 0, home: "/root", user: "root", env: { WOLLIPOG_SYSTEM_PREFIX: sysroot },
+    installedControlPlaneEnv: () => ({ file: "/etc/wollipog/control-plane.env", localTokenFile: tokenFile }),
+    exec: async (command: string, args: string[]) => {
+      execs.push([command, ...args].join(" "));
+      if (command === "id") return args[1] === "svc-acct" ? { code: 0, stdout: `${process.getuid?.() ?? 0}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "no such user" };
+      if (command === "systemctl") return { code: 0, stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=5\nNRestarts=0\n", stderr: "" };
+      return { code: 1, stdout: "", stderr: "" };
+    },
+  };
+  const { io, stdout } = makeIo();
+  const code = await runHostAdminCli(["admin", "doctor", "--json"], {}, io, doctorServer().fetch, rootHost);
+  const byId = Object.fromEntries(JSON.parse(stdout()).checks.map((c: { id: string }) => [c.id, c]));
+  assert.equal(code, 0, JSON.stringify(byId));
+  assert.ok(execs.includes("id -u svc-acct"), "the account comes from the installed unit's User= line");
+  assert.equal(byId["local-credential-file"].status, "pass", "root accepts the file because the service account owns it");
+  assert.equal(byId["control-plane-env"].status, "pass");
+  assert.equal(byId["runner-token"].status, "pass");
+  assert.equal(byId["control-plane-reachable"].status, "pass", "root can read the service account's credential to reach the control plane");
+  assert.equal(byId.lingering, undefined, "no lingering check in system mode");
 });

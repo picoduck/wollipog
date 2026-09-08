@@ -241,3 +241,13 @@ test("probePublicOriginWithFetch classifies health answers without throwing", as
   const denied = await probePublicOriginWithFetch("https://box.example", (async () => ({ ok: false, status: 502, text: async () => "" })) as unknown as typeof fetch);
   assert.deepEqual(denied, { reachable: true, service: null, detail: "HTTP 502" });
 });
+
+
+test("probePublicOriginWithFetch never echoes an unusable service marker", async () => {
+  const spoofed = await probePublicOriginWithFetch("https://box.example", (async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ service: "\u001b[2Jspoofed" }) })) as unknown as typeof fetch);
+  assert.deepEqual(spoofed, { reachable: true, service: null, detail: "answered with an unusable service marker" });
+  const huge = await probePublicOriginWithFetch("https://box.example", (async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ service: "a".repeat(65) }) })) as unknown as typeof fetch);
+  assert.equal(huge.service, null);
+  const legacy = await probePublicOriginWithFetch("https://box.example", (async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ service: "misko-agent-manager-control-plane" }) })) as unknown as typeof fetch);
+  assert.equal(legacy.service, "misko-agent-manager-control-plane");
+});

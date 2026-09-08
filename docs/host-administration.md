@@ -86,7 +86,10 @@ bind on a host without a Tailscale address), a probe of the configured public or
 reach its own tailnet name), runner registration and online state, per-runner protocol and version
 skew, legacy runner credentials still derived from the default development token (a failure when
 the control plane is reachable beyond loopback), paired-device count, and CLI-versus-control-plane
-version skew. Output is content-free: paths and versions, never credentials. `--json` returns
+version skew. On a system-mode deployment the owner checks expect the service account (read from
+the installed unit's `User=`), so root can run the doctor without `sudo -u`. Output is content-free:
+paths and versions, never credentials; a remote service marker is echoed only when it is a short
+printable token. `--json` returns
 `{ ok, generatedAt, checks, controlPlane }` where `checks` follow the `HostAdminCheck` shape from
 `@wollipog/protocol`.
 

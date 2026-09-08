@@ -35,6 +35,7 @@ import {
   type RunnerCredentialView,
 } from "@wollipog/protocol";
 import { homedir, userInfo } from "node:os";
+import { readFileSync as readTextFileSync } from "node:fs";
 import { execCapture, type ExecResult } from "./exec-capture.js";
 import type { McpFetch } from "./session-management-mcp.js";
 import {
@@ -662,10 +663,15 @@ function mark(status: HostAdminCheck["status"]): string {
   return status === "pass" ? "ok  " : status === "warn" ? "warn" : "FAIL";
 }
 
+/** Terminal output never carries control characters, whatever a remote peer put in a message. */
+function printable(value: string): string {
+  return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "?").replace(/\r?\n/gu, " ");
+}
+
 export function formatChecks(checks: HostAdminCheck[]): string {
   const lines = checks.map((item) => {
-    const head = `${mark(item.status)}  ${item.id.padEnd(28)} ${item.summary}`;
-    const extra = [item.detail ? `        detail: ${item.detail}` : null, item.remedy ? `        remedy: ${item.remedy}` : null].filter(Boolean);
+    const head = `${mark(item.status)}  ${printable(item.id).padEnd(28)} ${printable(item.summary)}`;
+    const extra = [item.detail ? `        detail: ${printable(item.detail)}` : null, item.remedy ? `        remedy: ${printable(item.remedy)}` : null].filter(Boolean);
     return [head, ...extra].join("\n");
   });
   const counts = { pass: 0, warn: 0, fail: 0 };
@@ -696,9 +702,26 @@ async function doctorCommand(
   add("cli", "pass", `wollipog CLI ${VERSION} (protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor}+ required for doctor)`);
 
   // Installed systemd deployment (Linux only, only when `wollipog service install` left its env file).
+  // In system mode the service account owns the credential files, so owner checks (including the
+  // control plane's own credential below) expect that account's uid, exactly as `wollipog service` does.
+  let expectedOwner = host.uid;
   if (host.platform === "linux" && installed?.file && host.exec && host.home !== undefined) {
     const mode = installed.file.startsWith("/etc/") ? "system" : "user";
     const layout = serviceLayout(mode, { home: host.home, user: host.user ?? "", env: host.env ?? {} });
+    if (mode === "system") {
+      const unitPath = `${layout.unitDir}/${CONTROL_PLANE_UNIT}`;
+      let account = layout.account;
+      try {
+        const match = /^User=([A-Za-z_][A-Za-z0-9_-]{0,31})$/mu.exec(readTextFileSync(unitPath, "utf8"));
+        if (match) account = match[1]!;
+      } catch {
+        /* unit missing or unreadable: fall back to the default account */
+      }
+      const result = await host.exec("id", ["-u", account], { timeoutMs: 10_000 });
+      const uid = Number(result.stdout.trim());
+      if (result.code === 0 && Number.isInteger(uid)) expectedOwner = uid;
+      else add("service-account", "fail", `could not resolve the uid of service account ${account}`, { detail: result.stderr.trim() || `exit ${result.code}`, remedy: "recreate the account or reinstall with `wollipog service install --system`" });
+    }
     for (const unit of [CONTROL_PLANE_UNIT, RUNNER_UNIT]) {
       const shown = await host.exec("systemctl", [...(mode === "user" ? ["--user"] : []), "show", "-p", SYSTEMCTL_SHOW_PROPERTIES.join(","), unit], { timeoutMs: 15_000 });
       const state = parseSystemctlShow(unit, shown.stdout);
@@ -713,7 +736,7 @@ async function doctorCommand(
       else add("lingering", "warn", `lingering is not enabled for ${host.user}; user services stop at logout`, { remedy: `loginctl enable-linger ${host.user}` });
     }
     for (const [id, path] of [["control-plane-env", layout.controlPlaneEnvFile], ["runner-token", layout.runnerTokenFile]] as const) {
-      const audit = auditProtectedFile(path, { ...host, uid: mode === "system" ? null : host.uid });
+      const audit = auditProtectedFile(path, { ...host, uid: expectedOwner });
       if (!audit.exists) { if (id === "runner-token") add(id, "warn", `no runner token at ${path}`, { remedy: "run `wollipog service install` again to mint it, or `wollipog admin runner-credential issue --output`" }); continue; }
       add(id, audit.issues.length ? "fail" : "pass", audit.issues.length ? `${path} ${audit.issues.join("; ")}` : `${path} is private`, audit.issues.length ? { remedy: `chmod 0600 ${path}` } : {});
     }
@@ -722,28 +745,38 @@ async function doctorCommand(
   }
 
   // Local bootstrap credential file (the doctor's own access path).
-  const credentialAudit = auditProtectedFile(tokenPath, host);
+  const ownerHost = { ...host, uid: expectedOwner };
+  const credentialAudit = auditProtectedFile(tokenPath, ownerHost);
   if (!credentialAudit.exists) add("local-credential-file", "fail", `no local credential file at ${tokenPath}`, { remedy: "start the control plane once with the same coordinates, or pass --token-file" });
-  else if (credentialAudit.issues.length) add("local-credential-file", "fail", `${tokenPath} ${credentialAudit.issues.join("; ")}`, { remedy: `chmod 0600 ${tokenPath} and make sure it is owned by the account running this command` });
+  else if (credentialAudit.issues.length) add("local-credential-file", "fail", `${tokenPath} ${credentialAudit.issues.join("; ")}`, { remedy: `chmod 0600 ${tokenPath} and make sure it is owned by the ${expectedOwner === host.uid ? "account running this command" : "service account"}` });
   else add("local-credential-file", "pass", `${tokenPath} is private`);
 
   let server: HostAdminDoctorView | null = null;
   if (credentialAudit.exists && credentialAudit.issues.length === 0) {
+    let client: Client | null = null;
+    let protocol: number | null = null;
     try {
-      const token = readProtectedLocalToken(tokenPath, host);
-      const client = makeClient(fetchImpl, target.url, token);
+      const token = readProtectedLocalToken(tokenPath, ownerHost);
+      client = makeClient(fetchImpl, target.url, token);
       const compatibility = await client.get<{ protocolVersion?: unknown }>("/api/compatibility");
-      const protocol = typeof compatibility.protocolVersion === "number" ? compatibility.protocolVersion : null;
-      if (protocol === null || protocol < RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor) {
-        add("control-plane-reachable", protocol === null ? "fail" : "warn", `control plane at ${target.url} speaks protocol v${String(protocol ?? "unknown")}; doctor needs v${RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor}+`, { remedy: "upgrade the control plane to run its server-side checks; `wollipog admin status` may still work" });
-      } else {
-        add("control-plane-reachable", "pass", `control plane at ${target.url} reachable (protocol v${protocol})`);
+      protocol = typeof compatibility.protocolVersion === "number" ? compatibility.protocolVersion : null;
+    } catch (error) {
+      add("control-plane-reachable", "fail", `control plane at ${target.url} is not reachable`, { detail: (error as Error).message, remedy: "wollipog service status" });
+      client = null;
+    }
+    if (client && (protocol === null || protocol < RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor)) {
+      add("control-plane-reachable", protocol === null ? "fail" : "warn", `control plane at ${target.url} speaks protocol v${String(protocol ?? "unknown")}; doctor needs v${RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdminDoctor}+`, { remedy: "upgrade the control plane to run its server-side checks; `wollipog admin status` may still work" });
+    } else if (client) {
+      // Reachability and the doctor route are separate facts: a reachable control plane whose
+      // doctor route fails must not be reported as unreachable, nor as fully healthy.
+      add("control-plane-reachable", "pass", `control plane at ${target.url} reachable (protocol v${protocol})`);
+      try {
         server = await client.get<HostAdminDoctorView>("/api/admin/doctor");
         checks.push(...server.checks);
         if (server.status.appVersion !== VERSION) add("version-skew", "warn", `CLI ${VERSION} differs from control plane ${server.status.appVersion}`, { remedy: "upgrade both to the same release" });
+      } catch (error) {
+        add("control-plane-doctor", "fail", "the control plane's doctor route failed", { detail: (error as Error).message, remedy: "wollipog service logs control-plane" });
       }
-    } catch (error) {
-      add("control-plane-reachable", "fail", `control plane at ${target.url} is not reachable`, { detail: (error as Error).message, remedy: `wollipog service status` });
     }
   }
 
