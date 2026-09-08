@@ -102,6 +102,7 @@ posixTest("install-runner.sh --control-plane fails closed on a tampered control 
   const missing = old.run("--control-plane");
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /has no wollipog-control-plane-x86_64-unknown-linux-gnu; update to a release that publishes headless assets/u);
+  assert.ok(!existsSync(join(old.home, ".local", "bin", "wollipog-runner")), "the runner is not installed either: no mixed generations");
 
   // Without SHA256SUMS the headless assets cannot be cross-checked, so nothing headless is installed.
   const unverifiable = harness({ omitManifest: true });
@@ -110,6 +111,7 @@ posixTest("install-runner.sh --control-plane fails closed on a tampered control 
   assert.notEqual(noManifest.status, 0);
   assert.match(noManifest.stderr, /has no SHA256SUMS; refusing a headless install/u);
   assert.ok(!existsSync(join(unverifiable.home, ".local", "bin", "wollipog-control-plane")));
+  assert.ok(!existsSync(join(unverifiable.home, ".local", "bin", "wollipog-runner")), "refused before the runner was downloaded");
 
   // --control-plane is a Linux/systemd flow; on macOS it stops before downloading anything.
   const mac = harness({ os: "Darwin" });

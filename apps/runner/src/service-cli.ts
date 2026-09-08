@@ -890,12 +890,15 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   // Swap: keep exactly one previous generation of each executable and of the web bundle. Every path
   // is recorded before its first mutation, so a swap that fails midway is undone as well.
   const previous = (path: string) => `${path}.previous`;
-  const swapped: Array<{ path: string; hadPrevious: boolean; tree: boolean }> = [];
+  const swapped: Array<{ path: string; hadPrevious: boolean; movedAside: boolean; tree: boolean }> = [];
   const replace = (path: string, source: string, tree: boolean) => {
-    const hadPrevious = host.exists(path);
-    swapped.push({ path, hadPrevious, tree });
+    const entry = { path, hadPrevious: host.exists(path), movedAside: false, tree };
+    swapped.push(entry);
     if (tree) host.removeTree(previous(path)); else host.removeFile(previous(path));
-    if (hadPrevious) host.move(path, previous(path));
+    if (entry.hadPrevious) {
+      host.move(path, previous(path));
+      entry.movedAside = true;
+    }
     host.move(source, path);
     if (!tree) host.chmod(path, 0o755);
   };
@@ -904,8 +907,10 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     const problems: string[] = [];
     for (const entry of [...swapped].reverse()) {
       try {
+        // A live generation that was never moved aside is still in place: leave it alone.
+        if (entry.hadPrevious && !entry.movedAside) continue;
         if (entry.tree) host.removeTree(entry.path); else host.removeFile(entry.path);
-        if (entry.hadPrevious && host.exists(previous(entry.path))) host.move(previous(entry.path), entry.path);
+        if (entry.movedAside && host.exists(previous(entry.path))) host.move(previous(entry.path), entry.path);
       } catch (error) {
         problems.push(`could not restore ${entry.path}: ${(error as Error).message}`);
       }

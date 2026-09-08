@@ -667,6 +667,15 @@ test("service upgrade rolls back when the new control plane does not report the 
   assert.equal(readFileSync(cpBin, "utf8"), "#!/bin/sh\n", "the control plane, swapped first, is restored");
   assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n", "the runner, whose chmod failed, is restored too");
 
+  // A failure while moving the live executable aside leaves that executable exactly where it was.
+  const moveFails = makeIo();
+  const moveHost: ServiceHost = { ...host, move: (from, to) => { if (from === join(f.root, "wollipog-runner") && to.endsWith(".previous")) throw new Error("EBUSY: text file busy"); fixture.host.move(from, to); } };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], moveHost, moveFails.io), 1);
+  assert.match(JSON.parse(moveFails.stdout()).error, /installing the new executables failed \(EBUSY: text file busy\); rolled back/u);
+  assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n", "the live runner was never removed");
+  assert.equal(readFileSync(cpBin, "utf8"), "#!/bin/sh\n", "the control plane, already swapped, is restored");
+  assert.ok(!existsSync(`${join(f.root, "wollipog-runner")}.previous`), "no stale .previous is left for the runner");
+
   // Rollback reports a restart that fails instead of claiming the previous generation is back up.
   const restartFails = makeIo();
   const brokenRestartFixture = fake(t, { systemctlFail: `restart ${RUNNER_UNIT}` });

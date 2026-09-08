@@ -157,6 +157,56 @@ mkdir -p "$bindir"
 bin="$bindir/wollipog-runner"
 cli_bin="$bindir/wollipog"
 legacy_bin="$bindir/agent-manager-runner"
+# --control-plane: install the headless control plane and dashboard bundle from the same release,
+# verified exactly like the runner (publisher digest, SHA256SUMS entry, atomic promotion). The
+# checksum manifest is kept until every asset is promoted.
+headless_record() {
+  if [ "$use_gh" -eq 1 ]; then
+    printf '%s\n' "$gh_assets" | awk -F '\t' -v wanted="$1" '$1 == wanted { print; exit }'
+  else
+    release_asset_record "$1"
+  fi
+}
+verify_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+manifest_entry() {
+  [ -n "$checksum_dl" ] || return 0
+  awk -v asset="$1" '
+    NF == 2 && $2 == asset && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ { count++; digest=tolower($1) }
+    END { if (count == 1) print digest; else exit 1 }
+  ' "$checksum_partial" || { echo "SHA256SUMS in release $release_tag has no unique exact entry for $1." >&2; return 1; }
+}
+fetch_verified_asset() {
+  # $1 asset name, $2 destination partial path
+  record=$(headless_record "$1")
+  [ -n "$record" ] || { echo "Release $release_tag has no $1; update to a release that publishes headless assets." >&2; return 1; }
+  digest=$(printf '%s\n' "$record" | cut -f2)
+  printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "$1 has no valid GitHub SHA-256 digest; refusing an unverified install." >&2; return 1; }
+  if [ "$use_gh" -eq 1 ]; then
+    gh release download "$release_tag" --repo "$repo" --pattern "$1" --output "$2" || return 1
+  else
+    curl -fL -o "$2" "$(printf '%s\n' "$record" | cut -f3)" || return 1
+  fi
+  actual=$(verify_sha256 "$2")
+  [ "$actual" = "${digest#sha256:}" ] || { echo "$1 failed SHA-256 verification." >&2; rm -f "$2"; return 1; }
+  if [ -n "$checksum_dl" ]; then
+    expected_manifest=$(manifest_entry "$1") || { rm -f "$2"; return 1; }
+    [ "$actual" = "$expected_manifest" ] || { echo "SHA-256 verification failed for $1 from release $release_tag." >&2; rm -f "$2"; return 1; }
+  fi
+}
+# Before the runner is touched, make sure the release can complete the whole headless install, so a
+# refusal never leaves a new runner beside an old control plane.
+if [ "$with_control_plane" -eq 1 ]; then
+  [ -n "$checksum_dl" ] || { echo "Release $release_tag has no SHA256SUMS; refusing a headless install that cannot be cross-checked." >&2; exit 1; }
+  for headless_asset in "$control_plane_asset" "$web_asset"; do
+    [ -n "$(headless_record "$headless_asset")" ] || { echo "Release $release_tag has no $headless_asset; update to a release that publishes headless assets." >&2; exit 1; }
+  done
+fi
 echo "Downloading $asset_name from $release_tag..."
 partial="${bin}.download.$$"
 legacy_partial="${legacy_bin}.alias.$$"
@@ -249,50 +299,7 @@ if ! refresh_cli_alias; then
   rm -f "$cli_partial" || true
 fi
 cli_partial=""
-# --control-plane: install the headless control plane and dashboard bundle from the same release,
-# verified exactly like the runner (publisher digest, SHA256SUMS entry, atomic promotion). The
-# checksum manifest is kept until every asset is promoted.
-headless_record() {
-  if [ "$use_gh" -eq 1 ]; then
-    printf '%s\n' "$gh_assets" | awk -F '\t' -v wanted="$1" '$1 == wanted { print; exit }'
-  else
-    release_asset_record "$1"
-  fi
-}
-verify_sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
-manifest_entry() {
-  [ -n "$checksum_dl" ] || return 0
-  awk -v asset="$1" '
-    NF == 2 && $2 == asset && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ { count++; digest=tolower($1) }
-    END { if (count == 1) print digest; else exit 1 }
-  ' "$checksum_partial" || { echo "SHA256SUMS in release $release_tag has no unique exact entry for $1." >&2; return 1; }
-}
-fetch_verified_asset() {
-  # $1 asset name, $2 destination partial path
-  record=$(headless_record "$1")
-  [ -n "$record" ] || { echo "Release $release_tag has no $1; update to a release that publishes headless assets." >&2; return 1; }
-  digest=$(printf '%s\n' "$record" | cut -f2)
-  printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "$1 has no valid GitHub SHA-256 digest; refusing an unverified install." >&2; return 1; }
-  if [ "$use_gh" -eq 1 ]; then
-    gh release download "$release_tag" --repo "$repo" --pattern "$1" --output "$2" || return 1
-  else
-    curl -fL -o "$2" "$(printf '%s\n' "$record" | cut -f3)" || return 1
-  fi
-  actual=$(verify_sha256 "$2")
-  [ "$actual" = "${digest#sha256:}" ] || { echo "$1 failed SHA-256 verification." >&2; rm -f "$2"; return 1; }
-  if [ -n "$checksum_dl" ]; then
-    expected_manifest=$(manifest_entry "$1") || { rm -f "$2"; return 1; }
-    [ "$actual" = "$expected_manifest" ] || { echo "SHA-256 verification failed for $1 from release $release_tag." >&2; rm -f "$2"; return 1; }
-  fi
-}
 if [ "$with_control_plane" -eq 1 ]; then
-  [ -n "$checksum_dl" ] || { echo "Release $release_tag has no SHA256SUMS; refusing a headless install that cannot be cross-checked." >&2; exit 1; }
   cp_bin="$bindir/wollipog-control-plane"
   cp_partial="${cp_bin}.download.$$"
   web_dir="$HOME/.local/share/wollipog/web"
