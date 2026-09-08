@@ -20,7 +20,7 @@ export function contextCommandSpec(
   command: string,
   args: string[],
   options: Pick<ContextCommandOptions, "cwd" | "env">,
-): { file: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv; windowsVerbatimArguments?: boolean } {
+): { file: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv; argv0?: string; windowsVerbatimArguments?: boolean } {
   if (context.kind === "wsl") {
     const values = options.env ?? {};
     const existing = (process.env.WSLENV ?? "").split(":").filter(Boolean);
@@ -43,7 +43,7 @@ export function contextCommandSpec(
     args: spec.args,
     cwd: options.cwd,
     env: options.env ? { ...process.env, ...options.env } : undefined,
-    ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+    ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: spec.argv0 } : {}),
   };
 }
 
@@ -75,7 +75,7 @@ export function runContextCommand(
         killSignal: "SIGKILL",
         maxBuffer,
         windowsHide: true,
-        ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+        ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: spec.argv0 } : {}),
       },
       (error, stdout, stderr) => {
         if (error) {

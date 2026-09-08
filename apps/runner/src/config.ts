@@ -583,18 +583,26 @@ export function resolveAgentEnvironment(
   hostEnv: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
   const resolved: Record<string, string> = {};
-  for (const [name, source] of Object.entries(agent.env ?? {})) {
-    if (typeof source === "string") {
-      resolved[name] = source;
-      continue;
-    }
-    const value = hostEnv[source.fromEnv];
-    if (value === undefined) {
-      throw new Error(`agent '${agent.id}' requires a runner-local environment variable for '${name}'`);
-    }
-    resolved[name] = value;
+  for (const name of Object.keys(agent.env ?? {})) {
+    const value = resolveAgentEnvironmentValue(agent, name, hostEnv);
+    if (value !== undefined) resolved[name] = value;
   }
   return resolved;
+}
+
+/** Resolve one configured value without eagerly validating unrelated launch-only references. */
+export function resolveAgentEnvironmentValue(
+  agent: Pick<RunnerConfigAgent, "id" | "env">,
+  name: string,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const source = agent.env?.[name];
+  if (source === undefined || typeof source === "string") return source;
+  const value = hostEnv[source.fromEnv];
+  if (value === undefined) {
+    throw new Error(`agent '${agent.id}' requires a runner-local environment variable for '${name}'`);
+  }
+  return value;
 }
 
 /** Merge non-secret discovery prerequisites into the configured launch environment. */

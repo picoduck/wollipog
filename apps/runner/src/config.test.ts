@@ -10,6 +10,7 @@ import {
   parseEnv,
   parseWorkspaceArg,
   resolveAgentEnvironment,
+  resolveAgentEnvironmentValue,
   resolveRunnerLocalAgentEnvironment,
   resolveConfig,
   resolveWorkspacePath,
@@ -225,6 +226,21 @@ test("configured launches retain discovered non-secret prerequisites with config
     OVERRIDE: "configured",
     CONFIGURED: "resolved",
   });
+});
+
+test("one readiness prerequisite resolves without eagerly validating unrelated launch secrets", () => {
+  const agent = {
+    id: "claude",
+    env: {
+      CLAUDE_CODE_GIT_BASH_PATH: "C:\\Program Files\\Git\\bin\\bash.exe",
+      ANTHROPIC_API_KEY: { fromEnv: "MISSING_KEY" },
+    },
+  };
+  assert.equal(
+    resolveAgentEnvironmentValue(agent, "CLAUDE_CODE_GIT_BASH_PATH", {}),
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+  );
+  assert.throws(() => resolveAgentEnvironment(agent, {}), /ANTHROPIC_API_KEY/u);
 });
 
 test("resolveConfig: config-less from overrides only, agents default to []", () => {

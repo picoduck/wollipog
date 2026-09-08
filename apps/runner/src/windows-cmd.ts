@@ -6,6 +6,7 @@ export interface WindowsCommandHost {
 export interface WindowsCommandSpec {
   file: string;
   args: string[];
+  argv0?: string;
   windowsVerbatimArguments?: boolean;
 }
 
@@ -13,7 +14,7 @@ function quoteCmdToken(value: string): string {
   if (/[\r\n]/.test(value)) throw new Error("Windows command arguments cannot contain CR/LF");
   if (value.includes("%")) throw new Error("Windows command arguments cannot contain %, which cmd.exe would expand");
   if (value === "") return '""';
-  if (!/[ \t"&|<>^()!]/.test(value)) return value;
+  if (!/[ \t",;&|<>^()!=]/.test(value)) return value;
   return `"${value.replace(/"/g, '""')}"`;
 }
 
@@ -25,9 +26,11 @@ export function windowsCmdInvocationSpec(
 ): WindowsCommandSpec {
   if (host.platform !== "win32") return { file, args };
   const commandLine = [quoteCmdToken(file), ...args.map((arg) => quoteCmdToken(arg))].join(" ");
+  const comspec = host.comspec || "cmd.exe";
   return {
-    file: host.comspec || "cmd.exe",
+    file: comspec,
     args: ["/d", "/v:off", "/s", "/c", `"${commandLine}"`],
+    argv0: quoteCmdToken(comspec),
     windowsVerbatimArguments: true,
   };
 }

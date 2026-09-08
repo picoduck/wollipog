@@ -11,16 +11,23 @@ import { codexOrchestratorMcpArgs } from "./orchestrator-preset.js";
 test("Windows batch shims use an explicit non-expanding cmd.exe boundary", () => {
   const spec = windowsCommandSpec(
     "C:\\Program Files\\nodejs\\codex.cmd",
-    ["--config", 'mcp_servers={ "wollipog" = true }', "a&b", "bang!kept"],
+    ["--config", 'mcp_servers={ "wollipog" = true }', "a&b", "bang!kept", "comma,value", "semi;value", "equals=value"],
     { platform: "win32", comspec: "C:\\Windows\\System32\\cmd.exe" },
   );
   assert.equal(spec.file, "C:\\Windows\\System32\\cmd.exe");
   assert.deepEqual(spec.args.slice(0, 4), ["/d", "/v:off", "/s", "/c"]);
   assert.equal(spec.windowsVerbatimArguments, true);
+  assert.equal(spec.argv0, "C:\\Windows\\System32\\cmd.exe");
   assert.match(spec.args[4]!, /codex\.cmd/);
   assert.match(spec.args[4]!, /""wollipog""/);
   assert.match(spec.args[4]!, /"a&b"/);
   assert.match(spec.args[4]!, /bang!kept/);
+  assert.match(spec.args[4]!, /"comma,value"/);
+  assert.match(spec.args[4]!, /"semi;value"/);
+  assert.match(spec.args[4]!, /"equals=value"/);
+  assert.equal(windowsCommandSpec("agent.cmd", [], {
+    platform: "win32", comspec: "C:\\My Tools\\cmd.exe",
+  }).argv0, '"C:\\My Tools\\cmd.exe"');
 });
 
 test("Windows command specs reject active cmd expansion and preserve direct executables", () => {

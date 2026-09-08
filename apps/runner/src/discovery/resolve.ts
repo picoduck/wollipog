@@ -68,7 +68,7 @@ export function run(
         // Default execFile maxBuffer is 1 MB — way too small for catting agent transcripts; let
         // callers raise it so large reads don't silently fail with ENOBUFS.
         maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-        ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+        ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: spec.argv0 } : {}),
       },
       (err, stdout, stderr) => {
         const detail = err as (NodeJS.ErrnoException & { killed?: boolean }) | null;

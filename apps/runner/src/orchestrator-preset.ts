@@ -201,7 +201,8 @@ export async function codexOrchestratorMcpArgs(
     const probe = windowsCommandSpec(opts.command, [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"]);
     const { stdout } = await execFileAsync(probe.file, probe.args, {
       cwd, env: { ...process.env, ...opts.env }, timeout: 10_000, maxBuffer: 1024 * 1024,
-      windowsHide: true, ...(probe.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+      windowsHide: true,
+      ...(probe.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: probe.argv0 } : {}),
     });
     return isolateCodexMcpServers(stdout);
   } catch {

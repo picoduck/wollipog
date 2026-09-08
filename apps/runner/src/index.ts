@@ -53,6 +53,7 @@ import {
   parseArgs,
   parseEnv,
   resolveAgentEnvironment,
+  resolveAgentEnvironmentValue,
   resolveRunnerLocalAgentEnvironment,
   type RunnerConfig,
 } from "./config.js";
@@ -329,9 +330,13 @@ const configuredAgentDefinitions = config.agents.filter((a) => a.id !== "conduct
   // Git Bash is a non-secret native-provider prerequisite. Project only that one resolved value
   // into runner-local metadata so Windows readiness can honor literal/fromEnv agent config while
   // all credentials remain redacted from discovery and the control plane.
-  const configuredGitBash = a.env && "CLAUDE_CODE_GIT_BASH_PATH" in a.env
-    ? resolveAgentEnvironment(a).CLAUDE_CODE_GIT_BASH_PATH
-    : undefined;
+  let configuredGitBash: string | undefined;
+  try {
+    configuredGitBash = resolveAgentEnvironmentValue(a, "CLAUDE_CODE_GIT_BASH_PATH");
+  } catch {
+    // A missing explicit fromEnv prerequisite makes this agent unavailable during discovery;
+    // unrelated agents still register, and launch retains its specific configuration error.
+  }
   const projectedEnv: Record<string, string> = configuredGitBash
     ? { CLAUDE_CODE_GIT_BASH_PATH: configuredGitBash }
     : {};
