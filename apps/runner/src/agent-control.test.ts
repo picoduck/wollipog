@@ -15,7 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type SessionLaunchSpec } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type AgentDefinition, type SessionLaunchSpec } from "@wollipog/protocol";
 import {
   agentControlMcpConfigPath,
   agentControlTokenPath,
@@ -27,6 +27,7 @@ import {
   sweepAgentControlFiles,
   type AgentControlHost,
 } from "./agent-control.js";
+import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION } from "./orchestrator-preset.js";
 
 function spec(driver: SessionLaunchSpec["driver"] = "codex"): SessionLaunchSpec {
   return {
@@ -67,13 +68,25 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
       assert.ok(launch.args.includes(driver === "codex" ? "--strict-config" : "--strict-mcp-config"));
     }
     const acp = spec("acp");
+    acp.command = "npx";
+    acp.args = ["-y", `@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION}`];
     acp.config = { permissionMode: "orchestrator" };
     acp.acpSessionContext = {
       additionalDirectories: ["/ambient"],
       mcpServers: [{ type: "stdio", name: "ambient", command: "ambient", args: [] }],
     };
-    provisionAgentControl(acp, control, () => {}, host);
-    assert.deepEqual(acp.args, []);
+    const acpAgent: AgentDefinition = {
+      id: acp.agentId,
+      name: "Claude Agent",
+      command: acp.command,
+      args: [...acp.args],
+      env: {},
+      driver: "acp",
+      context: { kind: "native" },
+      source: "config",
+    };
+    provisionAgentControl(acp, { ...control, orchestratorAgent: acpAgent }, () => {}, host);
+    assert.deepEqual(acp.args, acpAgent.args);
     assert.equal(acp.acpSessionContext?.additionalDirectories, undefined);
     assert.deepEqual(acp.acpSessionContext?.mcpServers?.map((server) => server.name), ["wollipog"]);
     const acpMcp = acp.acpSessionContext?.mcpServers?.[0];
@@ -83,6 +96,15 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
       assert.deepEqual(acpMcp.args, ["--agent-control-mcp"]);
       assert.deepEqual(acpMcp.env?.WOLLIPOG_SESSION_TOKEN_FILE, { fromEnv: "WOLLIPOG_SESSION_TOKEN_FILE" });
     }
+
+    const generic = spec("acp");
+    generic.sessionId = "s_generic_acp";
+    generic.config = { permissionMode: "orchestrator" };
+    assert.throws(() => provisionAgentControl(generic, {
+      ...control,
+      registerCredential: () => assert.fail("unsupported ACP must fail before credential minting"),
+    }, () => {}, host), /exact audited/);
+    assert.equal(existsSync(agentControlTokenPath(root, generic.sessionId)), false);
 
     const old = spec("codex");
     old.config = { permissionMode: "orchestrator" };

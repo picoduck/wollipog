@@ -152,6 +152,13 @@ test("ACP orchestrator sends restrictions and refuses client execution services"
     (client as any).handleTerminalCreate({ sessionId: "s_orchestrator", command: "sh", args: [] }),
     /does not allow ACP terminal commands/,
   );
+  for (const method of ["handleTerminalOutput", "handleTerminalWait", "handleTerminalKill", "handleTerminalRelease"]) {
+    assert.throws(
+      () => (client as any)[method]({ sessionId: "s_orchestrator", terminalId: "terminal-1" }),
+      /does not allow ACP terminal commands/,
+      method,
+    );
+  }
   assert.deepEqual(await (client as any).handlePermission({ options: [] }), {
     outcome: { outcome: "cancelled" },
   });

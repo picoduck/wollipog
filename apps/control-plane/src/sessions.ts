@@ -18,6 +18,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   isWorkspaceReference,
   isPolicyApproval,
   isTerminal,
+  isOrchestratorOnlyCapabilities,
   mergeSessionCapabilities,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -448,6 +449,9 @@ export function capabilityConfigError(
     return "the orchestrator preset requires explicit support from this agent installation";
   }
   if (!config || !capabilities) return null;
+  // This catalog-only ACP marker proves only runner-owned orchestration. Provider controls stay
+  // unknown/permissive until the session publishes its authoritative ACP capability record.
+  if (isOrchestratorOnlyCapabilities(capabilities)) return null;
   if (config.model && capabilities.models.length && !capabilities.models.some((model) => model.id === config.model)) {
     return `model ${JSON.stringify(config.model)} is not supported by this agent installation`;
   }

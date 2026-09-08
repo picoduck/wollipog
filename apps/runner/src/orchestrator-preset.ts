@@ -11,15 +11,19 @@ export const CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION = "0.75.1";
 const CLAUDE_AGENT_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp";
 const CLAUDE_AGENT_ACP_REPOSITORY = "https://github.com/agentclientprotocol/claude-agent-acp";
 
-const ACP_ORCHESTRATOR_CAPABILITIES: AgentCapabilities = {
-  models: [],
-  effortLevels: [],
-  slashCommands: [],
-  supportsImages: false,
-  supportsApprovals: false,
-  permissionModes: [ORCHESTRATOR_PRESET],
-  elicitation: { [ORCHESTRATOR_PRESET]: ["none"] },
-};
+function acpOrchestratorCapabilities(): AgentCapabilities {
+  return {
+    models: [],
+    effortLevels: [],
+    slashCommands: [],
+    // These booleans describe the ACP client transport, not a provider catalog. Unknown model,
+    // effort, and command controls remain permissive until the live session publishes them.
+    supportsImages: true,
+    supportsApprovals: true,
+    permissionModes: [ORCHESTRATOR_PRESET],
+    elicitation: { [ORCHESTRATOR_PRESET]: ["none"] },
+  };
+}
 
 /** Only an exact audited adapter release may receive the provider-specific restriction metadata.
  * Registry identity is runner-verified; configured launches must pin the official package exactly
@@ -29,7 +33,8 @@ export function supportsClaudeAgentAcpOrchestrator(agent: AgentDefinition): bool
   if (agent.registry) {
     return agent.registry.id === "claude-acp" &&
       agent.registry.repository === CLAUDE_AGENT_ACP_REPOSITORY &&
-      agent.registry.adapterVersion === CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION;
+      agent.registry.adapterVersion === CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION &&
+      agent.registry.distribution === "npx" && agent.registry.installStatus === "installed";
   }
   const command = agent.command.replace(/\\/g, "/").split("/").at(-1)?.toLowerCase();
   if (command !== "npx" && command !== "npx.cmd") return false;
@@ -81,7 +86,7 @@ export function withOrchestratorPreset(agents: AgentDefinition[]): AgentDefiniti
     if ((agent.context?.kind ?? "native") !== "native" ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
     if (acpSupported && !agent.capabilities) {
-      return { ...agent, capabilities: { ...ACP_ORCHESTRATOR_CAPABILITIES } };
+      return { ...agent, capabilities: acpOrchestratorCapabilities() };
     }
     if (!agent.capabilities) return agent;
     if (agent.driver === "claude-code" && !agent.capabilities.permissionModes?.includes("default")) return agent;

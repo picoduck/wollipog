@@ -100,6 +100,9 @@ the official Registry identity/version or an exact pinned `npx` package launch, 
 live ACP initialize name and version before `session/new`. It supplies runner-owned Claude SDK
 options with no built-in tools, settings sources, hooks, ambient MCP servers, additional
 directories, or provider commands; the sole allowed server is the session-scoped Wollipog MCP.
+The pinned adapter routes `session/resume` and its `session/load` fallback through the same query
+creation function, forwarding the request `_meta` and reapplying these options before the resumed
+provider conversation is exposed.
 The ACP client independently refuses filesystem and terminal services and cancels permission asks.
 The management credential and MCP definition are materialized runner-locally from protected file
 references and never persisted as token bytes.

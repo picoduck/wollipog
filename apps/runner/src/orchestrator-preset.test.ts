@@ -36,7 +36,13 @@ test("only the exact audited native Claude ACP adapter advertises orchestrator",
     source: "config",
   };
   assert.equal(supportsClaudeAgentAcpOrchestrator(configured), true);
-  assert.deepEqual(withOrchestratorPreset([configured])[0]!.capabilities!.permissionModes, ["orchestrator"]);
+  const advertised = withOrchestratorPreset([configured])[0]!.capabilities!;
+  assert.deepEqual(advertised.permissionModes, ["orchestrator"]);
+  assert.equal(advertised.supportsImages, true);
+  assert.equal(advertised.supportsApprovals, true);
+  const secondAdvertisement = withOrchestratorPreset([configured])[0]!.capabilities!;
+  assert.notEqual(advertised.permissionModes, secondAdvertisement.permissionModes,
+    "catalog advertisements do not share mutable capability arrays");
   for (const unsupported of [
     { ...configured, args: ["-y", "@agentclientprotocol/claude-agent-acp"] },
     { ...configured, args: ["-y", "@agentclientprotocol/claude-agent-acp@0.75.0"] },
@@ -64,6 +70,10 @@ test("only the exact audited native Claude ACP adapter advertises orchestrator",
     },
   };
   assert.equal(supportsClaudeAgentAcpOrchestrator(registry), true);
+  assert.equal(supportsClaudeAgentAcpOrchestrator({
+    ...registry,
+    registry: { ...registry.registry, installStatus: "approved" },
+  }), false);
   assert.equal(supportsClaudeAgentAcpOrchestrator({
     ...registry,
     registry: { ...registry.registry, repository: "https://example.invalid/lookalike" },

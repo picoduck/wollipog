@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { runnerSupportsProtocol, type AcpMcpStdioServer, type SessionLaunchSpec } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type AcpMcpStdioServer, type AgentDefinition, type SessionLaunchSpec } from "@wollipog/protocol";
 import { deriveControlPlaneHttpUrl } from "./control-plane-transport.js";
 import {
   defaultRunnerReentryHost,
@@ -21,7 +21,12 @@ import {
   type RunnerReentryHost,
 } from "./runner-reentry.js";
 import { assertSafeSessionFileId } from "./session-file-id.js";
-import { ORCHESTRATOR_ENV_KEY, orchestratorLaunchArgs, stripOrchestratorLaunchArgs } from "./orchestrator-preset.js";
+import {
+  ORCHESTRATOR_ENV_KEY,
+  orchestratorLaunchArgs,
+  stripOrchestratorLaunchArgs,
+  supportsClaudeAgentAcpOrchestrator,
+} from "./orchestrator-preset.js";
 
 const TOKEN_PREFIX = "wollipoga_";
 const TOKEN_PATTERN = /^wollipoga_[A-Za-z0-9_-]{43}$/u;
@@ -134,13 +139,15 @@ function removeAgentControlLaunchState(
 /** Mutates only ephemeral runner-side launch state. The credential bytes never cross the runner
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
-  spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "args" | "env"> &
+  spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "command" | "args" | "env"> &
     Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext">>,
   config: {
     controlPlaneUrl: string;
     controlPlaneProtocolVersion: number | null;
     allowInsecureTransport?: boolean;
     registerCredential?: (sessionId: string, tokenHash: string) => void;
+    /** Exact runner-local catalog row used to authorize an ACP Orchestrator launch. */
+    orchestratorAgent?: AgentDefinition;
   },
   log: (message: string) => void,
   host: AgentControlHost,
@@ -152,6 +159,14 @@ export function provisionAgentControl(
   if (orchestrator && (!hostExecution || !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionOrchestration") ||
       !["acp", "codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp"))) {
     throw new Error("the orchestrator preset requires a current supported native harness on the host");
+  }
+  if (orchestrator && (spec.driver ?? "acp") === "acp") {
+    const agent = config.orchestratorAgent;
+    const launchMatches = agent && agent.command === spec.command && agent.args.length === spec.args.length &&
+      agent.args.every((arg, index) => arg === spec.args[index]);
+    if (!agent || !launchMatches || !supportsClaudeAgentAcpOrchestrator(agent)) {
+      throw new Error("the Orchestrator preset requires the exact audited Claude Agent ACP adapter");
+    }
   }
   if (!supported || !hostExecution) {
     removeAgentControlLaunchState(spec, host);

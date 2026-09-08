@@ -98,6 +98,13 @@ test("capability config validation rejects unverified effort and permission mode
   assert.match(capabilityConfigError({ permissionMode: "orchestrator" }, undefined)!, /explicit support/);
   assert.equal(capabilityConfigError({ permissionMode: "default" }, undefined), null,
     "ordinary legacy sessions retain their existing compatibility behavior");
+  const orchestrationOnly = {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+    supportsApprovals: true, permissionModes: ["orchestrator"],
+    elicitation: { orchestrator: ["none" as const] },
+  };
+  assert.equal(capabilityConfigError({ effort: "provider-defined", permissionMode: "provider-defined" }, orchestrationOnly), null,
+    "the catalog-only ACP marker does not invent provider controls before negotiation");
   const caps = {
     models: [], effortLevels: ["low"], slashCommands: [], supportsImages: false,
     supportsApprovals: false, permissionModes: ["acceptEdits"],
@@ -550,9 +557,21 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.sessionOrchestration - 1);
     assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409);
     agent.driver = "acp";
+    agent.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["orchestrator"], elicitation: { orchestrator: ["none"] },
+    };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).ok, true,
       "an ACP adapter may advertise a runner-verified structured boundary");
+    const ordinaryAcp = svc.createSession({ ...request, prompt: "inspect", config: {
+      effort: "provider-defined", permissionMode: "provider-defined",
+    }, images: [{
+      mimeType: "image/png",
+      data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    }] });
+    assert.equal(ordinaryAcp.ok, true,
+      `the orchestration-only catalog marker preserves ordinary ACP image and provider controls: ${ordinaryAcp.error}`);
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).status, 409,
     "ACP has no standalone TUI enforcement path");

@@ -153,6 +153,29 @@ type Logger = (msg: string) => void;
 export type AcpContextResolver = (spec: SessionLaunchSpec) => SessionLaunchSpec["acpSessionContext"];
 export type PromptImageResolver = (sessionId: string, references: PromptImageReference[]) => Promise<PromptImage[]>;
 
+/** ACP provider modes/config remain authoritative for ordinary sessions. An Orchestrator session
+ * keeps its runner-owned preset while still accepting live model and effort updates. */
+export function preserveAcpOrchestratorSessionState(
+  current: SessionConfig,
+  state: { capabilities: AgentCapabilities; config: SessionConfig },
+): { capabilities: AgentCapabilities; config: SessionConfig } {
+  const orchestrator = current.permissionMode === "orchestrator";
+  return {
+    capabilities: {
+      ...state.capabilities,
+      ...(orchestrator
+        ? { permissionModes: ["orchestrator"], elicitation: { orchestrator: ["none" as const] } }
+        : {}),
+    },
+    config: {
+      ...current,
+      model: state.config.model,
+      effort: state.config.effort,
+      permissionMode: orchestrator ? "orchestrator" : state.config.permissionMode,
+    },
+  };
+}
+
 export interface SessionLaunchPreparation {
   /** True only when this launch performed a fresh, authoritative provider catalog read. */
   sessionCommandCatalogFresh?: boolean;
@@ -3297,11 +3320,9 @@ export class SessionManager {
           if (this.active.get(sessionId)?.client !== client) return;
           const current = this.store.readMeta(sessionId);
           if (!current) return;
+          const preserved = preserveAcpOrchestratorSessionState(current.config, state);
           const capabilities = {
-            ...state.capabilities,
-            ...(current.config.permissionMode === "orchestrator"
-              ? { permissionModes: ["orchestrator"], elicitation: { orchestrator: ["none" as const] } }
-              : {}),
+            ...preserved.capabilities,
             slashCommands: state.capabilities.slashCommands.map((command) => ({
               name: command.name,
               source: command.source,
@@ -3321,14 +3342,7 @@ export class SessionManager {
           }
           this.store.patchMeta(sessionId, {
             capabilities,
-            config: {
-              ...current.config,
-              model: state.config.model,
-              effort: state.config.effort,
-              permissionMode: current.config.permissionMode === "orchestrator"
-                ? "orchestrator"
-                : state.config.permissionMode,
-            },
+            config: preserved.config,
           });
           const updated = this.store.readMeta(sessionId);
           if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
