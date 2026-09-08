@@ -243,7 +243,8 @@ test("WSL snapshot candidates require protocol 125 and retain distro provenance"
     userName: "Owner", organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Personal",
     role: "owner", deviceId: null, localBootstrap: true };
   const candidate = { id: "wsl-opaque", name: "review", sourceDirectory: ".codex/skills",
-    generation: "a".repeat(64), context: { kind: "wsl" as const, distro: "Ubuntu" } };
+    generation: "a".repeat(64), context: { kind: "wsl" as const, distro: "Ubuntu",
+      privatePath: "\\\\wsl.localhost\\Ubuntu\\home\\owner" } };
   const payload = validateSkillPayload({ name: "review", files: [
     { path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\nWSL\n" },
   ] });
@@ -267,6 +268,7 @@ test("WSL snapshot candidates require protocol 125 and retain distro provenance"
   const listed = await discover();
   assert.equal(listed.statusCode, 200, listed.body);
   assert.deepEqual(listed.json().candidates[0].context, { kind: "wsl", distro: "Ubuntu" });
+  assert.doesNotMatch(listed.body, /privatePath|wsl\.localhost/u);
   const discoveryId = listed.json().discoveryId;
   const preview = await app.inject({ method: "POST", url: `/api/skill-machine/${discoveryId}/preview`,
     payload: { candidateId: candidate.id } });

@@ -1190,6 +1190,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   }
   const bindings = harnessBindings(agents);
   const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
+  const wslAgentIds = new Set(agents.flatMap((agent) =>
+    agent.context?.kind === "wsl" ? [agent.id] : []));
 
   // Materialization is runner-data-dir-local and must remain available even while another runner
   // owns the shared provider HOME. Finish that phase before attempting the provider-home lease;
@@ -1388,7 +1390,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
 
     // WSL targets reconcile inside their distro after this native materialization phase. Their
     // versions remain protected by storeKeep above, but they must not create unused native links.
-    if (!entry.targets.some((target) => agentBinding.has(target.agentId))) {
+    if (entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))) {
       state.links = entry.targets.map((target) => ({
         agentId: target.agentId,
         status: "unsupported" as const,

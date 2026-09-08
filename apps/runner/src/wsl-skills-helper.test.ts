@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
 
 const owner = "a".repeat(64);
@@ -36,6 +37,9 @@ test("the fixed WSL helper atomically deploys, switches, and removes owned links
     writeFileSync(join(version, "SKILL.md"), `---\nname: review\n---\n${digest}\n`);
   }
   const bindings = [{ agentId: "codex-wsl-Ubuntu", driver: "codex", relDir: ".codex/skills" }];
+  const local = join(home, ".codex", "skills", "local");
+  mkdirSync(local, { recursive: true, mode: 0o700 });
+  writeFileSync(join(local, "SKILL.md"), "---\nname: Code Review\ndescription: Local helper\n---\n");
   const spec = (digest: string, skills: unknown[] = [{
     name: "review", versionDigest: digest,
     targets: [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }],
@@ -43,7 +47,9 @@ test("the fixed WSL helper atomically deploys, switches, and removes owned links
 
   const first = await invoke(home, spec(firstDigest));
   assert.equal(first.status, 0, first.stderr || first.stdout);
-  assert.equal(JSON.parse(first.stdout).deployed[0].links[0].status, "linked");
+  const firstOutput = JSON.parse(first.stdout);
+  assert.equal(firstOutput.deployed[0].links[0].status, "linked");
+  assert.deepEqual(firstOutput.unmanaged, [{ agentId: "codex-wsl-Ubuntu", name: "local", description: "Local helper" }]);
   assert.equal(readlinkSync(join(home, ".agents/skills/review")), resolve(store, "review", firstDigest));
   assert.equal(readlinkSync(join(home, ".codex/skills/review")), resolve(home, ".agents/skills/review"));
 
@@ -57,6 +63,27 @@ test("the fixed WSL helper atomically deploys, switches, and removes owned links
     "WSL Ubuntu: ~/.agents/skills/review",
     "WSL Ubuntu: ~/.codex/skills/review",
   ]);
+});
+
+test("the WSL owner marker remains compatible with the native provider-home lease journal", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-native-lease-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const result = await invoke(home, { ownerHash: owner, distro: "Ubuntu", storeRoot: resolve(store),
+    bindings: [], skills: [], allowRemovals: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const lock = join(home, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock");
+  assert.equal(existsSync(join(lock, "owner")), false);
+  const record = JSON.parse(readFileSync(join(lock, "lease.json"), "utf8"));
+  const registry = new ProviderHomeLeaseRegistry(owner, {
+    hostname: record.hostname,
+    isProcessAlive: () => false,
+  });
+  registry.acquireHome(home);
+  registry.releaseAll();
 });
 
 test("the fixed WSL helper refuses a different durable provider-home owner", async (t) => {

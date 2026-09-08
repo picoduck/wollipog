@@ -1,7 +1,7 @@
 /** Fixed in-distro filesystem adapter. JSON carries only validated desired state and store paths;
  * no payload value is evaluated as Python or shell source. */
 export const WSL_SKILLS_HELPER = String.raw`#!/usr/bin/env python3
-import json, os, re, stat, sys, uuid
+import datetime, json, os, re, stat, sys, uuid
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -53,25 +53,41 @@ def acquire_lease(home_fd, owner):
             os.mkdir("mutable-home.lock", 0o700, dir_fd=root)
             lock = child_dir(root, "mutable-home.lock")
             try:
-                marker = os.open("owner", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=lock)
+                # Emit the legacy v1 schema the native lease registry still accepts. The helper
+                # remains durably owner-bound without placing foreign entries in the shared lock.
+                value = json.dumps({"version": 1, "ownerHash": owner, "leaseId": str(uuid.uuid4()),
+                    "pid": os.getpid(), "hostname": os.uname().nodename, "provider": "wsl-skills",
+                    "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}, separators=(",", ":")).encode() + b"\n"
+                marker = os.open("lease.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=lock)
                 try:
-                    os.write(marker, (owner + "\n").encode()); os.fsync(marker)
+                    sent = 0
+                    while sent < len(value): sent += os.write(marker, value[sent:])
+                    os.fsync(marker)
                 finally: os.close(marker)
                 os.fsync(lock)
             finally: os.close(lock)
+            os.fsync(root)
         except FileExistsError:
             lock = child_dir(root, "mutable-home.lock")
             try:
                 entries = os.listdir(lock)
-                if entries != ["owner"]: fail("provider home lease is incomplete or foreign")
-                marker = os.open("owner", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=lock)
+                if entries != ["lease.json"]: fail("provider home lease is incomplete or foreign")
+                marker = os.open("lease.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=lock)
                 try:
                     info = os.fstat(marker)
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 128:
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
                         fail("provider home lease is unsafe")
-                    value = os.read(marker, 129).decode("ascii").strip()
+                    value = json.loads(os.read(marker, info.st_size + 1).decode("utf-8"))
                 finally: os.close(marker)
-                if value != owner: fail("provider home is leased by another runner owner")
+                if not isinstance(value, dict): fail("provider home lease is invalid")
+                try: lease_id = uuid.UUID(value.get("leaseId", ""))
+                except: fail("provider home lease is invalid")
+                if (value.get("version") != 1 or not DIGEST.match(value.get("ownerHash", "")) or
+                    str(lease_id) != value.get("leaseId") or not isinstance(value.get("pid"), int) or value["pid"] <= 0 or
+                    not isinstance(value.get("hostname"), str) or value.get("provider") != "wsl-skills" or
+                    not isinstance(value.get("createdAt"), str)):
+                    fail("provider home lease is invalid")
+                if value["ownerHash"] != owner: fail("provider home is leased by another runner owner")
             finally: os.close(lock)
     finally: os.close(root)
 
@@ -202,7 +218,9 @@ def frontmatter(content, fallback):
         match = re.match(r"^(name|description)\s*:\s*(.*)$", line)
         if match:
             value = re.sub(r"\s+", " ", match.group(2)).strip().strip("\"'")[:280]
-            if value: result[match.group(1)] = value
+            if match.group(1) == "name":
+                if NAME.fullmatch(value): result["name"] = value
+            elif value: result["description"] = value
     return {"name": fallback}
 
 def scan_dir(home_fd, relative, store_root, canonical_dir, owned):

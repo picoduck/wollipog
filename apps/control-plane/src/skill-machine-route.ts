@@ -166,7 +166,8 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
         new Set(result.candidates.map((c) => c.id)).size !== result.candidates.length) throw new Error();
       // Keep only bounded metadata; unrecognized runner properties must not enter the cache/UI.
       const candidates = result.candidates.map(({ id, name, sourceDirectory, generation, context }) =>
-        ({ id, name, sourceDirectory, generation, ...(context?.kind === "wsl" ? { context } : {}) }));
+        ({ id, name, sourceDirectory, generation,
+          ...(context?.kind === "wsl" ? { context: { kind: "wsl" as const, distro: context.distro } } : {}) }));
       const discoveryId = randomUUID();
       discoveries.set(discoveryId, { owner: ownerKey(principal), runnerId, expires: Date.now() + 600_000, candidates });
       return { discoveryId, candidates };
