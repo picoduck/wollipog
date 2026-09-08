@@ -2260,6 +2260,31 @@ test("value-identical session command discovery does not publish a redundant run
   }
 });
 
+test("a restarted over-budget orphan waits for re-arm without launching a provider", async () => {
+  const h = harness({
+    driver: "claude-code", agentId: "claude-code", command: "claude",
+    agentSessionId: "claude-session", config: { costBudgetUsd: 8 }, costUsd: 8.33,
+    backgroundWorkState: "orphaned", pendingBackgroundTaskIds: ["task-held"],
+    orphanedWork: { pendingTaskIds: ["task-held"], markedAt: 10, reason: "process_exit" },
+  });
+  try {
+    await (h.manager as any).runOrphanRecovery("resume-session");
+    assert.equal(h.launches.length, 0);
+    assert.equal(h.prompts.length, 0);
+    assert.equal(h.store.readMeta("resume-session")?.status, "idle");
+    assert.ok(h.sent.some((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.status === "idle" && message.snapshot.costUsd === 8.33));
+    h.manager.rearmGovernance("resume-session", { costBudgetUsd: 16.33 });
+    await (h.manager as any).runOrphanRecovery("resume-session");
+    await shortDelay();
+    assert.equal(h.launches.length, 1);
+    assert.equal(h.prompts.length, 1);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("startup automatically resumes durable Claude orphan work without a user message", async () => {
   const h = harness({
     driver: "claude-code",

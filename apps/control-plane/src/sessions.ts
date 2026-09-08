@@ -7371,7 +7371,8 @@ export class SessionsService {
     }
     // The ledger may price a token residual the runner reported at zero cost (Codex), so the
     // settled session total, not the runner's figure, decides whether a budget gate re-evaluates.
-    if (runtimeSnapshot.costUsd > existing.costUsd || this.db.sessionCostUsd(snapshot.id) > existing.costUsd) {
+    if (runtimeSnapshot.status === "idle" || runtimeSnapshot.costUsd > existing.costUsd ||
+        this.db.sessionCostUsd(snapshot.id) > existing.costUsd) {
       this.gateOnPolicy(snapshot.id, now);
       this.notifyTransition(existing, snapshot.id);
     }

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerToControlPlane, SessionConfig } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { claudeProjectPathKey } from "./claude-background-work.js";
 
 function meta(config: SessionConfig): SessionMeta {
   return {
@@ -67,6 +68,7 @@ function harness(config: SessionConfig) {
   // Deliberately exercise the normalized driver callback seam without spawning a provider.
   (sm as any).active.set("s_governance", entry);
   return {
+    root,
     sm,
     store,
     sent,
@@ -76,6 +78,52 @@ function harness(config: SessionConfig) {
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("a budget trip with managed work settles idle and reconciles a killed receipt without another turn", async () => {
+  const h = harness({ costBudgetUsd: 8 });
+  try {
+    h.store.patchMeta("s_governance", {
+      agentSessionId: "provider-session", env: { HOME: h.root, TMPDIR: h.root },
+    });
+    h.entry.client.prompt = async () => {
+      (h.sm as any).onDriverBackgroundWork("s_governance", {
+        state: "running", pendingTaskIds: ["job"], observedTaskIds: ["job"],
+        jobs: [{ id: "job", launchType: "shell", startedAt: 1 }],
+      });
+      (h.sm as any).onDriverEvent("s_governance", { kind: "token_usage", costUsd: 8.33 });
+      (h.sm as any).onDriverBackgroundWork("s_governance", {
+        state: "orphaned", pendingTaskIds: ["job"], observedTaskIds: ["job"], reason: "process_exit",
+      });
+      return "cancelled";
+    };
+    await (h.sm as any).runPrompt("s_governance", "work", []);
+    h.entry.running = false;
+    assert.equal(h.cancels(), 1);
+    assert.equal(h.store.readMeta("s_governance")!.status, "idle");
+    await (h.sm as any).runOrphanRecovery("s_governance");
+    assert.equal(h.entry.queue.length, 0, "a tripped ceiling cannot queue automatic recovery");
+    assert.equal(h.store.readMeta("s_governance")!.backgroundWorkState, "orphaned", "missing receipts prove nothing");
+    const ledgerDir = join(h.root, ".claude", "projects", claudeProjectPathKey("/repo"));
+    mkdirSync(ledgerDir, { recursive: true });
+    writeFileSync(join(ledgerDir, "provider-session.jsonl"), JSON.stringify({
+      content: "<task-notification><task-id>job</task-id><status>killed</status></task-notification>",
+    }));
+    await (h.sm as any).runOrphanRecovery("s_governance");
+    const settled = h.store.readMeta("s_governance")!;
+    assert.equal(settled.backgroundWorkState, undefined);
+    assert.equal(settled.orphanedWork, undefined);
+    assert.deepEqual(settled.pendingBackgroundTaskIds, []);
+    assert.equal(settled.backgroundJobs?.[0]?.terminalStatus, "killed");
+    assert.equal(h.entry.queue.length, 0);
+    assert.equal(h.entry.governanceTripped, "cost_budget", "receipt settlement never re-arms spending");
+    assert.equal(settled.status, "idle");
+    h.sm.rearmGovernance("s_governance", { costBudgetUsd: 16.33 });
+    assert.equal(h.entry.governanceTripped, undefined);
+  } finally {
+    h.sm.shutdownAll();
+    h.cleanup();
+  }
+});
 
 test("runner cancels once at the distinct tool threshold and ignores duplicate frames", () => {
   const h = harness({ maxToolCalls: 2 });

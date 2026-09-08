@@ -72,7 +72,7 @@ import type {
 } from "./drivers/driver.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { BoxAdmission, type AdmissionRequest } from "./box-admission.js";
-import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext } from "./claude-background-work.js";
+import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from "./config.js";
 import type { RunnerAdmissionPolicy, RunnerExecutionIsolation } from "./config.js";
 import { executionTargetLaunchError } from "./execution-target.js";
@@ -1496,7 +1496,7 @@ export class SessionManager {
       if (stored.status === "stopped") continue;
       const meta = this.discoverOrphanedClaudeWork(stored);
       const automatic = automaticClaudeRecoveryAllowed(meta);
-      if (automatic && meta.orphanedWork && !meta.orphanedWork.recoveryAttemptedAt) {
+      if (automatic && meta.orphanedWork) {
         this.scheduleOrphanRecovery(meta.sessionId);
       } else {
         this.scheduleContextOrphanDiscovery(meta, automatic);
@@ -1748,7 +1748,7 @@ export class SessionManager {
       // background discovery may still run, but it must not submit an unattended recovery turn.
       reconciled = this.reconcileDeliveredBackgroundContinuations(reconciled);
       const automatic = !reconciled.providerAuthBlock && automaticClaudeRecoveryAllowed(reconciled);
-      if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork && !reconciled.orphanedWork.recoveryAttemptedAt) {
+      if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork) {
         this.scheduleOrphanRecovery(m.sessionId);
       } else if (reconciled.status !== "stopped") {
         this.scheduleContextOrphanDiscovery(reconciled, automatic);
@@ -8735,7 +8735,7 @@ export class SessionManager {
     if (!meta) return;
     const discovered = this.discoverOrphanedClaudeWork(meta);
     const allowed = automatic && automaticClaudeRecoveryAllowed(discovered);
-    if (allowed && discovered.orphanedWork && !discovered.orphanedWork.recoveryAttemptedAt) {
+    if (allowed && discovered.orphanedWork) {
       this.scheduleOrphanRecovery(sessionId);
     }
     else this.scheduleContextOrphanDiscovery(discovered, allowed);
@@ -9085,8 +9085,71 @@ export class SessionManager {
   private async runOrphanRecovery(sessionId: string): Promise<void> {
     if (this.shuttingDown || this.orphanRecoveryLaunching.has(sessionId)) return;
     let meta = this.store.readMeta(sessionId);
-    if (!meta?.orphanedWork || meta.driver !== "claude-code") return;
+    if (!meta?.orphanedWork || meta.driver !== "claude-code" || meta.status === "stopped") return;
+    // Terminal receipts settle ownership without a paid recovery turn, including while a
+    // governance ceiling holds that turn. Keep unknown tasks pending; absence is not proof.
+    if (meta.agentSessionId && !this.active.get(sessionId)?.running) {
+      this.orphanRecoveryLaunching.add(sessionId);
+      try {
+        const inspection = await inspectClaudeBackgroundWorkInContext(
+          meta.context, meta.worktreePath ?? meta.repoPath, meta.agentSessionId,
+          meta.pendingBackgroundTaskIds ?? meta.orphanedWork.pendingTaskIds,
+          { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
+            projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(sessionId), "projects"),
+          } : {}) },
+        );
+        const current = this.store.readMeta(sessionId);
+        // A prompt, stop, or replacement during the read invalidates this observation.
+        if (!current || JSON.stringify(current) !== JSON.stringify(meta) || current.status === "stopped" ||
+            !current.orphanedWork || current.agentSessionId !== meta.agentSessionId ||
+            this.active.get(sessionId)?.running) {
+          if (current?.orphanedWork && current.status !== "stopped") {
+            this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+          }
+          return;
+        }
+        if (inspection.terminalTaskIds.size > 0) {
+          this.store.patchMeta(sessionId, {
+            recoveredBackgroundTaskIds: mergeRecoveredBackgroundTaskIds(
+              current.recoveredBackgroundTaskIds, [...inspection.terminalTaskIds],
+            ),
+          });
+          const pending = (current.pendingBackgroundTaskIds ?? current.orphanedWork!.pendingTaskIds)
+            .filter((id) => !inspection.terminalTaskIds.has(id));
+          this.onDriverBackgroundWork(sessionId, {
+            state: pending.length ? "orphaned" : null,
+            pendingTaskIds: pending,
+            reason: current.orphanedWork!.reason,
+            terminalJobs: (current.backgroundJobs ?? [])
+              .filter((job) => inspection.terminalTaskIds.has(job.id))
+              .map((job) => ({
+                id: job.id, toolUseId: job.toolUseId, launchType: job.launchType,
+                startedAt: job.registeredAt, outputFile: job.outputReference,
+                status: inspection.terminalTaskStatuses?.get(job.id) ?? job.terminalStatus ?? "completed",
+                terminalAt: Date.now(), continuationRequired: job.continuationRequired ?? false,
+              })),
+          });
+        }
+        meta = this.store.readMeta(sessionId);
+        if (!meta?.orphanedWork) return;
+      } finally {
+        this.orphanRecoveryLaunching.delete(sessionId);
+      }
+    }
     if (meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta)) return;
+    const entry = this.active.get(sessionId);
+    const costHeld = !!meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd;
+    const toolsHeld = !entry && !!meta.config.maxToolCalls && new Set(this.store.readEvents(sessionId)
+      .filter((event) => event.payload.kind === "tool_call")
+      .map((event) => (event.payload as Extract<SessionEventPayload, { kind: "tool_call" }>).toolCallId))
+      .size >= meta.config.maxToolCalls;
+    if (entry?.governanceTripped || costHeld || toolsHeld) {
+      // Re-publish the settled runtime so the control plane can restore a lost decision card.
+      // Rechecking receipts is read-only; the ceiling must not launch or queue a recovery turn.
+      if (!entry?.running) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+      this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      return;
+    }
     if (meta.orphanedWork.recoveryAttemptedAt) return;
     if (!meta.command) {
       const launch = this.resolveLaunch?.(meta.driver, meta.context) ?? null;
@@ -9104,8 +9167,8 @@ export class SessionManager {
       this.log(`orphan recovery deferred for ${sessionId}: no resumable Claude launch is available`);
       return;
     }
-    const entry = this.active.get(sessionId);
-    if ((entry && this.queueHeld(entry)) || entry?.running || entry?.queue.some((prompt) => prompt.syntheticRecovery)) {
+    if ((entry && this.queueHeld(entry)) || entry?.running ||
+        entry?.queue.some((prompt) => prompt.syntheticRecovery)) {
       this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       return;
     }
