@@ -381,7 +381,7 @@ test("service install --system uses the service account's uid for the credential
   // instead of skipping the credential owner check.
   const noAccount = fake(t, { uid: 0, accountUid: null, system: true });
   assert.equal(await runServiceCli(["service", "install", "--system", ...bins(noAccount), "--no-start", "--json"], noAccount.host, noAccount.io), 1);
-  assert.ok(noAccount.execs.includes(`useradd --system --home-dir ${noAccount.layout.dataDir} --create-home --shell /usr/sbin/nologin wollipog`), noAccount.execs.join("\n"));
+  assert.ok(noAccount.execs.includes(`useradd --system --home-dir ${noAccount.layout.dataDir} --no-create-home --shell /usr/sbin/nologin wollipog`), noAccount.execs.join("\n"));
   assert.match(JSON.parse(noAccount.stdout()).error, /could not resolve the uid of service account wollipog/u);
 });
 

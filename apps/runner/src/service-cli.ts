@@ -443,8 +443,10 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   if (mode === "system") {
     const exists = await host.exec("id", ["-u", layout.account], { timeoutMs: 10_000 });
     if (exists.code !== 0) {
-      const created = await host.exec("useradd", ["--system", "--home-dir", layout.dataDir, "--create-home", "--shell", "/usr/sbin/nologin", layout.account], { timeoutMs: 30_000 });
-      if (created.code !== 0) throw new CliError(`could not create service account ${layout.account}: ${created.stderr.trim()}`);
+      // No skeleton home: install creates and owns the data directory itself, a nologin service
+      // account has no use for dotfiles, and copying /etc/skel can take minutes on some images.
+      const created = await host.exec("useradd", ["--system", "--home-dir", layout.dataDir, "--no-create-home", "--shell", "/usr/sbin/nologin", layout.account], { timeoutMs: 120_000 });
+      if (created.code !== 0) throw new CliError(`could not create service account ${layout.account}: ${created.code === null ? "useradd timed out or could not start" : created.stderr.trim() || `exit ${created.code}`}`);
     }
   }
   const serviceUid = await accountUid(host, layout);

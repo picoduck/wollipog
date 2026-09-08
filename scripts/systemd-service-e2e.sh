@@ -24,7 +24,7 @@ node_bin=${NODE_BIN:-$(command -v node)}
 port=${WOLLIPOG_E2E_PORT:-4390}
 cp_unit=wollipog-control-plane.service
 runner_unit=wollipog-runner.service
-wrapper_dir=/usr/local/lib/wollipog-e2e
+wrapper_dir=""
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo; echo "== $*"; }
@@ -33,7 +33,9 @@ step() { echo; echo "== $*"; }
 [ -d /run/systemd/system ] || fail "systemd is not running as PID 1 here"
 [ "${WOLLIPOG_E2E_CONFIRM:-}" = 1 ] || fail "set WOLLIPOG_E2E_CONFIRM=1 to acknowledge this installs and removes system units on THIS host"
 for unit in "$cp_unit" "$runner_unit"; do
-  [ ! -e "/etc/systemd/system/$unit" ] || fail "$unit already exists; this script only runs on a host without Wollipog installed"
+  # LoadState covers every systemd load path (/etc, /run, /usr/lib, drop-ins), not just /etc.
+  state=$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)
+  [ "$state" = not-found ] || fail "$unit is already known to systemd (LoadState=$state); this script only runs on a host without Wollipog installed"
 done
 [ ! -e /var/lib/wollipog ] && [ ! -e /etc/wollipog ] || fail "/var/lib/wollipog or /etc/wollipog already exists"
 command -v jq >/dev/null || fail "jq is required"
@@ -52,8 +54,24 @@ wait_until() { # wait_until <seconds> <description> <command...>
 healthy() { curl -fsS --max-time 3 "http://127.0.0.1:$port/healthz" 2>/dev/null | jq -e '.ok == true' >/dev/null; }
 runner_online() { cli service status --system --json 2>/dev/null | jq -e '.runners != null and any(.runners[]; .status == "online")' >/dev/null; }
 
+cleanup() {
+  set +e
+  echo
+  echo "== Cleanup"
+  systemctl stop "$runner_unit" "$cp_unit" 2>/dev/null
+  systemctl disable "$runner_unit" "$cp_unit" 2>/dev/null
+  rm -f "/etc/systemd/system/$runner_unit" "/etc/systemd/system/$cp_unit"
+  systemctl daemon-reload
+  rm -rf /var/lib/wollipog /etc/wollipog
+  [ -z "$wrapper_dir" ] || rm -rf "$wrapper_dir"
+}
+trap cleanup EXIT
+
+# A fresh directory of our own (never a fixed path that might already hold something), world
+# readable so the service account can execute the wrappers.
+wrapper_dir=$(mktemp -d /usr/local/lib/wollipog-e2e.XXXXXX)
+chmod 0755 "$wrapper_dir"
 step "Wrapper executables in $wrapper_dir"
-mkdir -p "$wrapper_dir"
 cat > "$wrapper_dir/wollipog-control-plane" <<EOF
 #!/bin/sh
 export TSX_DISABLE_CACHE=1
@@ -66,23 +84,11 @@ exec "$node_bin" --import tsx "$repo/apps/runner/src/cli.ts" "\$@"
 EOF
 chmod 0755 "$wrapper_dir"/wollipog-control-plane "$wrapper_dir"/wollipog-runner
 
-cleanup() {
-  set +e
-  echo
-  echo "== Cleanup"
-  systemctl stop "$runner_unit" "$cp_unit" 2>/dev/null
-  systemctl disable "$runner_unit" "$cp_unit" 2>/dev/null
-  rm -f "/etc/systemd/system/$runner_unit" "/etc/systemd/system/$cp_unit"
-  systemctl daemon-reload
-  rm -rf /var/lib/wollipog /etc/wollipog "$wrapper_dir"
-}
-trap cleanup EXIT
-
 step "1. service install --system"
 install_json=$(cli service install --system --control-plane-bin "$wrapper_dir/wollipog-control-plane" --runner-bin "$wrapper_dir/wollipog-runner" --port "$port" --json) || {
   echo "$install_json"; journalctl -u "$cp_unit" -u "$runner_unit" --no-pager -n 80 || true; fail "install exited non-zero"; }
 echo "$install_json" | jq .
-echo "$install_json" | jq -e '.health.ok == true' >/dev/null || fail "install did not report a healthy control plane"
+echo "$install_json" | jq -e '.health.controlPlane.ok == true' >/dev/null || fail "install did not report a healthy control plane"
 echo "$install_json" | jq -e '.health.runnerOnline == true' >/dev/null || fail "install did not report the runner online"
 id wollipog >/dev/null || fail "service account wollipog was not created"
 sudo -u wollipog test -r "$repo/package.json" || fail "the wollipog account cannot read the checkout at $repo (open the parent directories with chmod o+rx)"
