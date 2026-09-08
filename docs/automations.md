@@ -116,9 +116,10 @@ of these remain online:
 3. the selected runner is reachable and its agent authentication remains valid;
 4. HTTPS or a private authenticated network keeps remote UI and Web Push enrollment available.
 
-Build the repository, set a non-default `CONTROL_PLANE_TOKEN`, an absolute persistent
-`CONTROL_PLANE_DB`, and the intended host/port, then supervise
-`pnpm --filter @wollipog/control-plane start` with the operating system's service manager. Run it as a
+On Linux, `wollipog service install` sets this up as systemd units with the properties below; see
+[headless deployment](./headless-deployment.md). Otherwise build the repository, set a non-default
+`CONTROL_PLANE_TOKEN`, an absolute persistent `CONTROL_PLANE_DB`, and the intended host/port, then
+supervise `pnpm --filter @wollipog/control-plane start` with the operating system's service manager. Run it as a
 dedicated unprivileged account, restart on failure with backoff, preserve graceful termination, and
 monitor process health, free disk, database backups, runner connectivity, and failed/expired
 execution history. Rotate logs and keep the host clock and IANA timezone data current. Use SQLite's

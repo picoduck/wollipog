@@ -16,6 +16,7 @@ import {
 } from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
+import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
 
 type Write = (text: string) => void;
 
@@ -80,10 +81,12 @@ function usage(): string {
   return [
     "Usage: wollipog session <command> [options]",
     "       wollipog worktree <create|attach|select|discard> [options]",
-    "       wollipog admin <pairing-url|status|user|device> [options]",
+    "       wollipog admin <pairing-url|status|user|device|runner-credential> [options]",
+    "       wollipog service <install|status|restart|logs|uninstall> [options]",
     "Session Commands: list, get, events, create, prompt, wait, stop, archive",
     "Worktree Options: --session <id>, --branch <name>, --base <ref>, --path <absolute-path>",
     "Admin Commands: run on the control-plane host with its protected local credential; see `wollipog admin`.",
+    "Service Commands: Linux systemd deployment of the control plane and a colocated runner; see `wollipog service`.",
     "Use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -246,6 +249,13 @@ export async function runWollipogCli(
       return 2;
     }
     return runHostAdminCli(args, env, hostAdminIo, fetchImpl);
+  }
+  if (positional(args)[0] === "service") {
+    if (positional(args).length === 1 || flag(args, "--help")) {
+      (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: serviceUsage() })}\n` : `${serviceUsage()}\n`);
+      return 2;
+    }
+    return runServiceCli(args, defaultServiceHost(fetchImpl), { ...defaultServiceIo(), stdout: io.stdout, stderr: io.stderr });
   }
   const parsed = command(args);
   if ("error" in parsed) {

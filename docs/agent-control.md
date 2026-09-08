@@ -35,12 +35,14 @@ wollipog worktree create [--session ID] --branch NAME [--base REF] --json
 wollipog worktree attach [--session ID] --path PATH --json
 wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
-wollipog admin <pairing-url|status|user list|device list|device create|device revoke> [--json]
+wollipog admin <pairing-url|status|user list|device list|device create|device revoke|runner-credential ...> [--json]
+wollipog service <install|status|restart|logs|uninstall> [options]
 ```
 
 `wollipog admin` is host administration for an SSH operator on the control-plane machine. It
 authenticates with the control plane's protected local credential over loopback instead of a
 session or device token and is documented in [host administration](./host-administration.md).
+`wollipog service` manages the Linux systemd deployment; see [headless deployment](./headless-deployment.md).
 
 An injected session defaults worktree commands to its own id and cannot override that target.
 Paired-device and conductor callers may supply `--session`. A create without `--base` fetches and
