@@ -36,6 +36,7 @@ import type {
   ShellOpenResultMessage,
   SkillsStateMessage,
   SkillSnapshotResultMessage,
+  SkillAdoptionResultMessage,
   PodContextEntry,
   RunView,
   PodView,
@@ -170,6 +171,7 @@ export type UiSubscriptionApplyResult =
  * correlatable when it echoes a solicited sync's requestId; unsolicited ones never enter here. */
 export type RunnerRequestResult =
   | SkillSnapshotResultMessage
+  | SkillAdoptionResultMessage
   | (SkillsStateMessage & { requestId: string })
   | GitActionResultMessage
   | AdoptSessionResultMessage

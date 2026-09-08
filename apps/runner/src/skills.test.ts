@@ -426,6 +426,23 @@ test("unmanaged scan is bounded per harness directory", async () => {
   }
 });
 
+test("retained adoption journals do not crowd real skills out of bounded unmanaged scans", async () => {
+  const roots = makeRoots();
+  try {
+    const skills = join(roots.home, ".claude", "skills");
+    for (let index = 0; index < SKILL_SCAN_LIMITS.maxEntriesPerDirectory; index += 1) {
+      mkdirSync(join(skills, `.wollipog-adoption-${String(index).padStart(3, "0")}`), { recursive: true });
+    }
+    const local = join(skills, "zz-local-skill");
+    mkdirSync(local);
+    writeFileSync(join(local, "SKILL.md"), "---\nname: zz-local-skill\n---\nBody");
+    const result = await reconcile(roots, []);
+    assert.ok(result.unmanaged.some((skill) => skill.agentId === claudeAgent.id && skill.name === "zz-local-skill"));
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("a symlinked store name dir is a reported error, never followed, and never deleted through", async () => {
   const roots = makeRoots();
   try {

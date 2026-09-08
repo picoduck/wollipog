@@ -991,6 +991,7 @@ function scanHarnessSkillDir(
   const found: { name: string; description?: string }[] = [];
   let examined = 0;
   for (const entry of entries) {
+    if (entry.name.startsWith(".wollipog-adoption-")) continue;
     if (++examined > SKILL_SCAN_LIMITS.maxEntriesPerDirectory) break;
     if (entry.isSymbolicLink()) {
       if (!isForeignLink?.(join(dir, entry.name))) continue;
@@ -1097,6 +1098,7 @@ function linkedStoreVersionKeys(
     }
     let examined = 0;
     for (const entry of entries) {
+      if (entry.name.startsWith(".wollipog-adoption-")) continue;
       if (++examined > SKILL_SCAN_LIMITS.maxEntriesPerDirectory) break;
       if (!entry.isSymbolicLink()) continue;
       protectDirectStoreLink(join(dir, entry.name));

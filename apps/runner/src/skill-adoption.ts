@@ -6,7 +6,7 @@ import { closeSync, constants, fsyncSync, fstatSync, mkdirSync, openSync, readli
 import { join, sep } from "node:path";
 import { validSkillName, type AgentDefinition, type MachineSkillCandidate } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
-import { directoryGeneration, openSkillDirectory, readSkillTree } from "./skill-snapshots.js";
+import { directoryGeneration, inspectSkillTree, openSkillDirectory } from "./skill-snapshots.js";
 import { SKILL_DIRS } from "./skills.js";
 
 type Stage = "intent_durable" | "source_preserved" | "link_created";
@@ -75,16 +75,20 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
       const fd = openSkillDirectory(root, relative);
       try { if (identity(fd) !== expected) throw new Error(); } finally { closeSync(fd); }
     };
-    const checkContent = (fd: number) => {
+    const checkContent = (fd: number, rejectExecutable = false) => {
       const generation = directoryGeneration(fd);
-      if (skillVersionDigest(readSkillTree(fd, true)) !== digest || skillVersionDigest(readSkillTree(fd, true)) !== digest) throw new Error();
+      const first = inspectSkillTree(fd, true);
+      const second = inspectSkillTree(fd, true);
+      if (skillVersionDigest(first.files) !== digest || skillVersionDigest(second.files) !== digest ||
+          JSON.stringify(first.executablePaths) !== JSON.stringify(second.executablePaths) ||
+          (rejectExecutable && first.executablePaths.length > 0)) throw new Error();
       if (directoryGeneration(fd) !== generation) throw new Error();
     };
     const checkSource = () => {
       checkPath(home, candidate.sourceDirectory, parentIdentity);
       checkPath(home, `${candidate.sourceDirectory}/${candidate.name}`, sourceIdentity);
       if (directoryGeneration(source) !== candidate.generation) throw new Error();
-      checkContent(source);
+      checkContent(source, true);
       if (directoryGeneration(source) !== candidate.generation) throw new Error();
     };
     checkSource();
@@ -109,7 +113,7 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
     options.checkpoint?.("source_preserved");
     const preserved = keep(openSync(`${fdPath(backup)}/original`, flags));
     if (identity(preserved) !== sourceIdentity) throw new Error();
-    checkContent(preserved);
+    checkContent(preserved, true);
     record(backup, "preserved.json", { sourceIdentity, digest });
     checkPath(home, candidate.sourceDirectory, parentIdentity);
     checkPath(dataDir, targetRelative, targetIdentity);
@@ -129,5 +133,9 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
     return recovery ? { status: "recovery_required", ...recovery,
       error: "Adoption stopped. Inspect the private journal and preserved original; no automatic restore or cleanup was attempted." }
       : { status: "rejected", error: "Adoption authorization, source or stored version could not be validated. No source directory was replaced." };
-  } finally { for (const fd of opened.reverse()) closeSync(fd); }
+  } finally {
+    // A close failure must not discard the recovery receipt; all data safety decisions have
+    // already been made and journaled before descriptor cleanup.
+    for (const fd of opened.reverse()) try { closeSync(fd); } catch { /* receipt remains authoritative */ }
+  }
 }

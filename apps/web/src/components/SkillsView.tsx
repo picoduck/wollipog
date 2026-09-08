@@ -573,7 +573,7 @@ export function SkillsView() {
                             ))}
                           </ul>
                           <p className="skills-hint">
-                            These skills live on the machine but are not managed here. Use Import from Machine to preview a snapshot on a compatible Linux runner. Replacing the original directory with a managed link arrives later.
+                            These skills live on the machine but are not managed here. Use Import from Machine to preview or import a snapshot. On a compatible Linux runner, an identical assigned version can then be adopted with an explicit recovery-aware confirmation.
                           </p>
                         </div>
                       )}

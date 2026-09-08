@@ -60,6 +60,14 @@ export class MachineSkillSnapshots {
   private openDirectory(relative: string): number {
     return openSkillDirectory(this.options.home, relative);
   }
+  /** Resolve only an exact, still-live candidate minted by this runner process. */
+  resolveCandidate(expected: MachineSkillCandidate): MachineSkillCandidate | null {
+    for (const [id, entry] of this.candidates) if (entry.expires <= this.now()) this.candidates.delete(id);
+    const current = this.candidates.get(expected.id)?.candidate;
+    return current && current.name === expected.name && current.sourceDirectory === expected.sourceDirectory &&
+      current.generation === expected.generation && this.directories().includes(current.sourceDirectory)
+      ? current : null;
+  }
   handle(message: SkillSnapshotMessage): SkillSnapshotResultMessage {
     const result: SkillSnapshotResultMessage = { type: "skill_snapshot_result", runnerId: message.runnerId, requestId: message.requestId };
     if ((this.options.platform ?? process.platform) !== "linux") return { ...result, error: "Machine skill snapshots currently require a Linux runner." };
@@ -73,12 +81,15 @@ export class MachineSkillSnapshots {
       const fd = this.openDirectory(`${candidate.sourceDirectory}/${candidate.name}`);
       try {
         if (directoryGeneration(fd) !== candidate.generation) throw new Error();
-        const files = readSkillTree(fd);
-        const digest = skillVersionDigest(files);
+        const first = inspectSkillTree(fd);
+        const digest = skillVersionDigest(first.files);
         // A second bounded pass rejects concurrent edits to content or the manifest. The returned
         // bytes are an immutable snapshot, not a promise that the source remains unchanged later.
-        if (skillVersionDigest(readSkillTree(fd)) !== digest || directoryGeneration(fd) !== candidate.generation) throw new Error();
-        return { ...result, snapshot: { candidate, files, digest } };
+        const second = inspectSkillTree(fd);
+        if (skillVersionDigest(second.files) !== digest ||
+            JSON.stringify(second.executablePaths) !== JSON.stringify(first.executablePaths) ||
+            directoryGeneration(fd) !== candidate.generation) throw new Error();
+        return { ...result, snapshot: { candidate, files: first.files, digest, executablePaths: first.executablePaths } };
       } finally { closeSync(fd); }
     } catch {
       return { ...result, error: "The skill changed, expired, or contains unsupported files. Discover it again; symlinks, special files, and oversized trees cannot be imported." };
@@ -92,9 +103,13 @@ export class MachineSkillSnapshots {
       try {
         const dir = opendirSync(fdPath(fd));
         try {
-          for (let count = 0; count < 256 && found.length < 64; count++) {
+          for (let count = 0; count < 256 && found.length < 64;) {
             const entry = dir.readSync();
             if (!entry) break;
+            // Private recovery journals are never candidates and must not crowd user skills out
+            // of the bounded discovery budget. Recovery inspection has its own bounded path.
+            if (entry.name.startsWith(".wollipog-adoption-")) continue;
+            count++;
             if (!entry.isDirectory() || !validSkillName(entry.name)) continue;
             let child: number | undefined;
             let manifest: number | undefined;
@@ -118,8 +133,9 @@ export class MachineSkillSnapshots {
 
 /** Bounded no-follow content validation; adoption may additionally flush files/directories before
  * preserving them. Snapshot discovery/read never opts into these durability operations. */
-export function readSkillTree(root: number, durable = false): SkillFile[] {
+export function inspectSkillTree(root: number, durable = false): { files: SkillFile[]; executablePaths: string[] } {
     const files: SkillFile[] = [];
+    const executablePaths: string[] = [];
     let total = 0;
     let entries = 0;
     const visit = (fd: number, prefix: string, depth: number) => {
@@ -148,10 +164,13 @@ export function readSkillTree(root: number, durable = false): SkillFile[] {
             }
             if (length !== before.size || fingerprint(fstatSync(child)) !== fingerprint(before)) throw new Error();
             if (durable) fsyncSync(child);
+            if ((before.mode & 0o111) !== 0) executablePaths.push(path);
             total += length;
             const content = bytes.subarray(0, length);
             const utf8 = content.toString("utf8");
-            files.push(Buffer.from(utf8).equals(content) ? { path, encoding: "utf8", content: utf8 } : { path, encoding: "base64", content: content.toString("base64") });
+            files.push(Buffer.from(utf8).equals(content)
+              ? { path, encoding: "utf8", content: utf8 }
+              : { path, encoding: "base64", content: content.toString("base64") });
           } finally { closeSync(child); }
         }
       } finally { dir.closeSync(); }
@@ -159,5 +178,9 @@ export function readSkillTree(root: number, durable = false): SkillFile[] {
     };
     visit(root, "", 0);
     if (!files.some((file) => file.path === "SKILL.md")) throw new Error();
-    return files.sort((a, b) => a.path.localeCompare(b.path));
+    return { files: files.sort((a, b) => a.path.localeCompare(b.path)), executablePaths: executablePaths.sort() };
+}
+
+export function readSkillTree(root: number, durable = false): SkillFile[] {
+  return inspectSkillTree(root, durable).files;
 }

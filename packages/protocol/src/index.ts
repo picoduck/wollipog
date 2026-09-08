@@ -329,7 +329,8 @@
 // 112: isolated native orchestrator TUI launch and live-TUI agent-control authentication.
 // 113: progress-aware session worktree creation with bounded phase heartbeats.
 // 114: loopback host-administration status route and public dashboard origin for pairing links.
-export const PROTOCOL_VERSION = 114;
+// 115: explicitly confirmed, runner-revalidated machine skill adoption.
+export const PROTOCOL_VERSION = 115;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -476,6 +477,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopAttemptCorrelation: 89,
   agentSkills: 90,
   machineSkillSnapshots: 111,
+  machineSkillAdoption: 115,
   chunkedAgentSkills: 96,
   /** v96 runners emit the additive `skills_state.removals` event projection. */
   skillLinkRemovalReporting: 96,
@@ -821,7 +823,29 @@ export interface SkillSnapshotResultMessage {
   runnerId: string;
   requestId: string;
   candidates?: MachineSkillCandidate[];
-  snapshot?: { candidate: MachineSkillCandidate; files: SkillFile[]; digest: string };
+  snapshot?: { candidate: MachineSkillCandidate; files: SkillFile[]; digest: string; executablePaths?: string[] };
+  error?: string;
+}
+
+/** One explicitly confirmed adoption of an opaque, unexpired runner discovery candidate.
+ * The runner independently matches this against its current desired skill snapshot. */
+export interface SkillAdoptionMessage {
+  type: "skill_adoption";
+  runnerId: string;
+  requestId: string;
+  candidate: MachineSkillCandidate;
+  digest: string;
+  confirmation: "explicit";
+  acceptSharedImpact: boolean;
+}
+
+export interface SkillAdoptionResultMessage {
+  type: "skill_adoption_result";
+  runnerId: string;
+  requestId: string;
+  status: "adopted" | "rejected" | "recovery_required";
+  operationId?: string;
+  backupDirectory?: string;
   error?: string;
 }
 
@@ -4794,6 +4818,7 @@ export type RunnerToControlPlane =
   | AcpRegistryApprovalResultMessage
   | SkillsStateMessage
   | SkillSnapshotResultMessage
+  | SkillAdoptionResultMessage
   | SkillsSyncNeedMessage
   | DurableSessionCommandResultMessage
   | DurableSessionCommandUpdateMessage
@@ -6176,6 +6201,7 @@ export type ControlPlaneToRunner =
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
   | SkillSnapshotMessage
+  | SkillAdoptionMessage
   | SkillsSyncManifestMessage
   | SkillsSyncContentMessage
   | SkillsSyncCompleteMessage

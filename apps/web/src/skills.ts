@@ -47,7 +47,24 @@ export interface MachineSkillDiscovery { discoveryId: string; candidates: import
 export interface MachineSkillPreview {
   previewId: string; candidate: import("@wollipog/protocol").MachineSkillCandidate;
   files: SkillFile[]; previousFiles: SkillFile[]; digest: string;
+  executablePaths?: string[];
   disposition: "new" | "identical" | "update"; assignmentCount: number;
+}
+export interface MachineSkillAdoptionPreflight {
+  status: "blocked" | "prerequisites_met";
+  mutationSupported: boolean;
+  blockers: string[];
+  advisories: string[];
+  adoptionToken?: string;
+  sharedReaders: string[];
+  source: { candidate: import("@wollipog/protocol").MachineSkillCandidate; digest: string; checkedAt: number };
+  notice: string;
+}
+export interface MachineSkillAdoptionResult {
+  status: "adopted" | "rejected" | "recovery_required";
+  operationId?: string;
+  backupDirectory?: string;
+  error?: string;
 }
 export interface SkillGitPreview {
   previewId: string;

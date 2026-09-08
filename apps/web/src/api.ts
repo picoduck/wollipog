@@ -470,6 +470,11 @@ export function createApiClient(transport: ApiTransport) {
   listSkills: () => req<SkillListPayload>("/api/skills"),
   discoverMachineSkills: (runnerId: string) => req<import("./skills.js").MachineSkillDiscovery>(`/api/runners/${encodeURIComponent(runnerId)}/skill-snapshots`, { method: "POST" }),
   previewMachineSkill: (id: string, candidateId: string) => req<import("./skills.js").MachineSkillPreview>(`/api/skill-machine/${encodeURIComponent(id)}/preview`, { method: "POST", body: JSON.stringify({ candidateId }) }),
+  preflightMachineSkillAdoption: (id: string, previewId: string) => req<import("./skills.js").MachineSkillAdoptionPreflight>(`/api/skill-machine/${encodeURIComponent(id)}/adoption-preflight`, { method: "POST", body: JSON.stringify({ previewId }) }),
+  adoptMachineSkill: (id: string, body: { previewId: string; adoptionToken: string; acceptSharedImpact: boolean }) =>
+    req<import("./skills.js").MachineSkillAdoptionResult>(`/api/skill-machine/${encodeURIComponent(id)}/adopt`, {
+      method: "POST", body: JSON.stringify({ ...body, confirmation: "explicit" }),
+    }),
   importMachineSkill: (id: string, previewId: string, acceptUpdate: boolean) => req<SkillDetailPayload>(`/api/skill-machine/${encodeURIComponent(id)}/import`, { method: "POST", body: JSON.stringify({ previewId, acceptUpdate }) }),
   discardMachineSkillDiscovery: (id: string) => req<void>(`/api/skill-machine/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
