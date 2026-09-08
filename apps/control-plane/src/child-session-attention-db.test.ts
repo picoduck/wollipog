@@ -11,7 +11,7 @@ test("session views compactly join current requests to exact structured child ow
   db.appendEvent("session", { kind: "tool_call", toolCallId: "owner", title: "Task", toolKind: "agent",
     status: "pending" }, 2);
   db.appendEvent("session", { kind: "tool_call", toolCallId: "owner", title: "Task", toolKind: "agent",
-    status: "running", subagentRole: "reviewer" }, 3);
+    status: "in_progress", subagentRole: "reviewer" }, 3);
   db.setPendingApproval("session", { requestId: "known", ownerToolUseId: "owner", title: "Allow?", options: [],
     additionalRequests: [{ requestId: "unknown", ownerToolUseId: "missing", title: "Allow?", options: [] }] });
 

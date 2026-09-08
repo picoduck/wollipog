@@ -23,7 +23,7 @@ test("projects exact nested children from complete structured history with bound
   assert.equal(page.children.length, 1);
   assert.deepEqual(page.children[0], {
     toolCallId: "outer", name: "Audit Child", role: "reviewer", status: "running", sourceSeq: 1,
-    startedAt: 10, lastActivityAt: 40, toolCount: 2, latestTool: { title: "Task", active: true },
+    startedAt: 10, lastActivityAt: 40, toolCount: 2, latestTool: { title: "Subagent", active: false },
   });
   assert.equal(page.nextAfter, 1);
   assert.equal(page.truncated, true);
@@ -108,6 +108,29 @@ test("incremental projection never retains raw tool input or output previews", (
   assert.match(serialized, /Safe Name/);
 });
 
+test("projects only content-free tool labels and does not retain ordinary root tools", () => {
+  const ordinary = Array.from({ length: 10_000 }, (_, index) => event(index + 1, {
+    kind: "tool_call" as const, toolCallId: `root-${index}`, toolKind: "read",
+    title: `/private/path/${index}`, status: "completed",
+  }));
+  const projector = new ChildSessionRegistryProjector();
+  projector.append(ordinary);
+  const empty = projector as unknown as {
+    spawns: Map<string, unknown>; updates: Map<string, unknown>; activity: Map<string, unknown>;
+    directTools: Map<string, unknown>; directToolParents: Map<string, unknown>;
+  };
+  assert.deepEqual([empty.spawns.size, empty.updates.size, empty.activity.size,
+    empty.directTools.size, empty.directToolParents.size], [0, 0, 0, 0, 0]);
+
+  const page = projectChildSessionRegistry([
+    event(10_001, { kind: "tool_call", toolCallId: "child", toolKind: "agent", title: "Task", status: "running" }),
+    event(10_002, { kind: "tool_call", toolCallId: "secret", parentToolUseId: "child", toolKind: "bash",
+      title: "Bash: curl -H Authorization:Bearer-secret", status: "running", text: "another-secret" }),
+  ], null, 0, 0, 10);
+  assert.deepEqual(page.children[0]?.latestTool, { title: "Command", active: true });
+  assert.doesNotMatch(JSON.stringify(page), /Bearer-secret|another-secret|curl/);
+});
+
 test("collapses Claude partial and full spawn observations but rejects conflicting reuse", () => {
   const normal = projectChildSessionRegistry([
     event(1, { kind: "tool_call", toolCallId: "task", toolKind: "agent", title: "Task", status: "pending" }),
@@ -126,4 +149,18 @@ test("collapses Claude partial and full spawn observations but rejects conflicti
   ], null, 0, 0, 10);
   assert.equal(conflicting.children.length, 0);
   assert.equal(conflicting.unidentifiedChildren, 1);
+
+  const repeatedFull = projectChildSessionRegistry([
+    event(1, { kind: "tool_call", toolCallId: "task", toolKind: "agent", title: "Task", status: "in_progress" }),
+    event(2, { kind: "tool_call", toolCallId: "task", toolKind: "agent", title: "Task", status: "in_progress" }),
+  ], null, 0, 0, 10);
+  assert.equal(repeatedFull.children.length, 0);
+  assert.equal(repeatedFull.unidentifiedChildren, 1);
+
+  const crossKindReuse = projectChildSessionRegistry([
+    event(1, { kind: "tool_call", toolCallId: "task", toolKind: "read", title: "Read", status: "completed" }),
+    event(2, { kind: "tool_call", toolCallId: "task", toolKind: "agent", title: "Task", status: "in_progress" }),
+  ], null, 0, 0, 10);
+  assert.equal(crossKindReuse.children.length, 0);
+  assert.equal(crossKindReuse.unidentifiedChildren, 1);
 });

@@ -13,6 +13,21 @@ type ToolCall = Pick<Extract<SessionEvent["payload"], { kind: "tool_call" }>,
 type ToolUpdate = Pick<Extract<SessionEvent["payload"], { kind: "tool_call_update" }>,
   "status" | "subagentLifecycle"> & { seq: number; ts: number };
 
+function contentFreeToolLabel(toolKind: unknown): string {
+  if (typeof toolKind !== "string") return "Tool";
+  switch (toolKind.toLowerCase()) {
+    case "read": return "Read";
+    case "write":
+    case "edit": return "File Change";
+    case "bash":
+    case "shell":
+    case "command":
+    case "execute": return "Command";
+    case "agent": return "Subagent";
+    default: return "Tool";
+  }
+}
+
 export type StructuredAgentSpawnObservation = Pick<ToolCall,
   "toolCallId" | "parentToolUseId" | "toolKind" | "status" | "subagentLifecycle" | "subagentName" | "subagentRole">;
 
@@ -23,6 +38,14 @@ export function collapseAgentSpawnObservations(
   observations: readonly StructuredAgentSpawnObservation[],
 ): StructuredAgentSpawnObservation | null {
   if (observations.length < 1 || observations.length > 2 || observations.some((value) => value.toolKind !== "agent")) return null;
+  if (observations.length === 2) {
+    const [partial, full] = observations;
+    if (partial!.toolCallId !== full!.toolCallId || partial!.status !== "pending" || full!.status !== "in_progress" ||
+        partial!.parentToolUseId !== full!.parentToolUseId ||
+        partial!.subagentLifecycle !== undefined || partial!.subagentName !== undefined ||
+        partial!.subagentRole !== undefined || full!.subagentLifecycle !== undefined ||
+        full!.subagentName !== undefined) return null;
+  }
   const unique = <K extends "parentToolUseId" | "subagentName" | "subagentRole">(key: K) =>
     new Set(observations.flatMap((value) => value[key] ? [value[key]!] : []));
   if (unique("parentToolUseId").size > 1 || unique("subagentName").size > 1 || unique("subagentRole").size > 1) return null;
@@ -54,15 +77,20 @@ export class ChildSessionRegistryProjector {
   private readonly spawns = new Map<string, ToolCall[]>();
   private readonly updates = new Map<string, ToolUpdate>();
   private readonly activity = new Map<string, number>();
-  private readonly directTools = new Map<string, Map<string, { seq: number; title: string; status: string }>>();
+  private readonly directTools = new Map<string, Map<string, { seq: number; label: string; status: string }>>();
   private readonly directToolParents = new Map<string, string | null>();
 
-  append(events: readonly SessionEvent[]): void {
+  append(events: readonly SessionEvent[], candidateAgentIds?: ReadonlySet<string>): void {
+    const candidates = candidateAgentIds ?? new Set([
+      ...this.spawns.keys(),
+      ...events.flatMap((event) => event.payload.kind === "tool_call" && event.payload.toolKind === "agent"
+        ? [event.payload.toolCallId] : []),
+    ]);
     for (const event of events) {
       const payload = event.payload;
       const parentId = "parentToolUseId" in payload && typeof payload.parentToolUseId === "string"
         ? payload.parentToolUseId : undefined;
-      if (parentId) this.activity.set(parentId, Math.max(this.activity.get(parentId) ?? 0, event.ts));
+      if (parentId && candidates.has(parentId)) this.activity.set(parentId, Math.max(this.activity.get(parentId) ?? 0, event.ts));
       if (payload.kind === "tool_call") {
         const call: ToolCall = {
           toolCallId: payload.toolCallId,
@@ -75,11 +103,13 @@ export class ChildSessionRegistryProjector {
           seq: event.seq,
           ts: event.ts,
         };
-        const observations = this.spawns.get(payload.toolCallId) ?? [];
-        if (observations.length < 3) observations.push(call);
-        this.spawns.set(payload.toolCallId, observations);
-        if (parentId) {
-          const latest = { seq: event.seq, title: displayText(payload.title, 120) ?? "Tool", status: payload.status };
+        if (candidates.has(payload.toolCallId)) {
+          const observations = this.spawns.get(payload.toolCallId) ?? [];
+          if (observations.length < 3) observations.push(call);
+          this.spawns.set(payload.toolCallId, observations);
+        }
+        if (parentId && candidates.has(parentId)) {
+          const latest = { seq: event.seq, label: contentFreeToolLabel(payload.toolKind), status: payload.status };
           if (!this.directToolParents.has(payload.toolCallId)) {
             this.directToolParents.set(payload.toolCallId, parentId);
             this.directTools.set(parentId, new Map([
@@ -101,7 +131,14 @@ export class ChildSessionRegistryProjector {
         const update: ToolUpdate = { status: payload.status,
           ...(payload.subagentLifecycle ? { subagentLifecycle: payload.subagentLifecycle } : {}),
           seq: event.seq, ts: event.ts };
-        if ((this.updates.get(payload.toolCallId)?.seq ?? -1) < event.seq) this.updates.set(payload.toolCallId, update);
+        if (candidates.has(payload.toolCallId) && (this.updates.get(payload.toolCallId)?.seq ?? -1) < event.seq) {
+          this.updates.set(payload.toolCallId, update);
+        }
+        if (parentId && candidates.has(parentId)) {
+          const tools = this.directTools.get(parentId);
+          const tool = tools?.get(payload.toolCallId);
+          if (tool && tool.seq < event.seq) tools!.set(payload.toolCallId, { ...tool, seq: event.seq, status: payload.status });
+        }
       }
     }
   }
@@ -122,7 +159,7 @@ export class ChildSessionRegistryProjector {
       const lifecycle = latest?.subagentLifecycle ?? latestSpawn.subagentLifecycle ?? spawn.subagentLifecycle;
       const tools = this.directTools.get(toolCallId);
       const latestTool = tools ? [...tools.values()].reduce((selected, candidate) =>
-        !selected || candidate.seq > selected.seq ? candidate : selected, undefined as { seq: number; title: string; status: string } | undefined) : undefined;
+        !selected || candidate.seq > selected.seq ? candidate : selected, undefined as { seq: number; label: string; status: string } | undefined) : undefined;
       const terminal = lifecycle === "completed" || lifecycle === "failed" || lifecycle === "interrupted" ||
         ["completed", "success", "succeeded", "failed", "error", "rejected", "cancelled", "canceled"].includes(status.toLowerCase());
       nodes.set(toolCallId, {
@@ -138,7 +175,7 @@ export class ChildSessionRegistryProjector {
         ...(terminal ? { completedAt: Math.max(latest?.ts ?? 0, this.activity.get(toolCallId) ?? 0, spawn.ts) } : {}),
         toolCount: tools?.size ?? 0,
         ...(latestTool ? { latestTool: {
-          title: latestTool.title,
+          title: latestTool.label,
           active: ACTIVE_TOOL_STATUSES.has(latestTool.status.toLowerCase()),
         } } : {}),
       });
@@ -193,6 +230,8 @@ export function projectChildSessionRegistry(
   limit: number,
 ): ChildSessionRegistryPage {
   const projector = new ChildSessionRegistryProjector();
-  projector.append(events);
+  const candidateAgentIds = new Set(events.flatMap((event) =>
+    event.payload.kind === "tool_call" && event.payload.toolKind === "agent" ? [event.payload.toolCallId] : []));
+  projector.append(events, candidateAgentIds);
   return projector.page(pendingApproval, eventEpoch, after, limit);
 }

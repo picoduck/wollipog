@@ -2262,6 +2262,39 @@ test("appendEvent + listEvents return events in seq order with stable ids", () =
   assert.deepEqual(after.map((e) => e.seq), [2, 3]);
 });
 
+test("child registry history scans SQL-filter ordinary tools and page child evidence", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  for (let index = 0; index < 205; index += 1) {
+    db.appendEvent("sess-1", { kind: "tool_call", toolCallId: `root-${index}`, toolKind: "read",
+      title: `/private/${index}`, status: "completed", text: `secret-${index}` }, index + 1);
+  }
+  db.appendEvent("sess-1", { kind: "tool_call", toolCallId: "early", parentToolUseId: "child",
+    toolKind: "read", title: "/private/early", status: "completed" }, 299);
+  db.appendEvent("sess-1", { kind: "tool_call", toolCallId: "child", toolKind: "agent",
+    title: "Task: secret prompt", status: "in_progress" }, 300);
+  db.appendEvent("sess-1", { kind: "tool_call", toolCallId: "nested", parentToolUseId: "child",
+    toolKind: "bash", title: "curl Authorization:secret", status: "running" }, 301);
+
+  const throughSeq = db.sessionEventTailSeq("sess-1");
+  assert.equal(throughSeq, 208);
+  assert.deepEqual(db.listAgentToolCallIds("sess-1", throughSeq), ["child"]);
+  const pages = [];
+  let after = 0;
+  while (true) {
+    const page = db.listChildSessionProjectionPage("sess-1", ["child"], after, throughSeq, 1);
+    assert.ok(page.length <= 1);
+    pages.push(...page);
+    if (page.length < 1) break;
+    after = page.at(-1)!.seq;
+  }
+  assert.deepEqual(pages.map((entry) => entry.payload.kind), ["tool_call", "tool_call", "tool_call"]);
+  assert.deepEqual(pages.map((entry) => entry.seq), [206, 207, 208]);
+  assert.equal(JSON.stringify(pages).includes("root-"), false);
+  assert.deepEqual(db.listChildSessionProjectionPage("sess-1", [], 0, throughSeq, 10), []);
+  assert.throws(() => db.listChildSessionProjectionPage("sess-1", ["child"], 0, throughSeq, 2_001), /invalid event scan page/);
+});
+
 test("event export snapshots retain an immutable sequence boundary", () => {
   const db = withRunner();
   db.createSession(newSession());

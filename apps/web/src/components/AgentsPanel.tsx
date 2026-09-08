@@ -21,10 +21,13 @@ const PAGE_SIZE = 50;
 export function mergeDurableAgents(
   durableAgents: readonly SubagentDescriptor[],
   loadedAgents: readonly SubagentDescriptor[],
+  unresolvedOwnerIds: ReadonlySet<string> = new Set(),
 ): SubagentDescriptor[] {
-  const loaded = new Map(loadedAgents.map((agent) => [agent.id, agent]));
-  const durableIds = new Set(durableAgents.map((agent) => agent.id));
-  return [...durableAgents.map((durable) => {
+  const safeDurable = durableAgents.filter((agent) => !unresolvedOwnerIds.has(agent.id));
+  const safeLoaded = loadedAgents.filter((agent) => !unresolvedOwnerIds.has(agent.id));
+  const loaded = new Map(safeLoaded.map((agent) => [agent.id, agent]));
+  const durableIds = new Set(safeDurable.map((agent) => agent.id));
+  return [...safeDurable.map((durable) => {
     const live = loaded.get(durable.id);
     if (!live) return durable;
     return { ...live, ...durable,
@@ -40,7 +43,32 @@ export function mergeDurableAgents(
       directUsage: live.directUsage,
       inclusiveUsage: live.inclusiveUsage };
   }),
-  ...loadedAgents.filter((agent) => !durableIds.has(agent.id))];
+  ...safeLoaded.filter((agent) => !durableIds.has(agent.id))];
+}
+
+export function mergeRegistrySnapshotPages(
+  pages: readonly (readonly ChildSessionRegistryEntry[])[],
+): ChildSessionRegistryEntry[] {
+  const byId = new Map<string, ChildSessionRegistryEntry>();
+  for (const page of pages) for (const child of page) byId.set(child.toolCallId, child);
+  return [...byId.values()].sort((a, b) => a.sourceSeq - b.sourceSeq);
+}
+
+export function mergeCompactAttentionOwners(
+  registryOwners: readonly ChildSessionAttentionOwner[],
+  sessionOwners: readonly ChildSessionAttentionOwner[],
+): ChildSessionAttentionOwner[] {
+  const key = (owner: ChildSessionAttentionOwner) => JSON.stringify([owner.requestId, owner.toolCallId]);
+  const byRequest = new Map(registryOwners.map((owner) => [key(owner), owner]));
+  for (const owner of sessionOwners) {
+    const ownerKey = key(owner);
+    const current = byRequest.get(ownerKey);
+    if (!current) byRequest.set(ownerKey, owner);
+    else if (!current.resolved || !owner.resolved) {
+      byRequest.set(ownerKey, { requestId: owner.requestId, toolCallId: owner.toolCallId, resolved: false });
+    }
+  }
+  return [...byRequest.values()];
 }
 type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof BackgroundWorkPanel>,
   "runnerProtocolVersion" | "parentTurnEventIds" | "onOpenParentTurn" | "inventoryError" | "onRetryInventory"> & {
@@ -92,6 +120,9 @@ export function AgentsPanel(props: Props) {
   const [registryLoading, setRegistryLoading] = useState(false);
   const [registryUnavailable, setRegistryUnavailable] = useState(false);
   const registryRequest = useRef<string | null>(null);
+  const registryRef = useRef<ChildSessionRegistryEntry[] | null>(null);
+  const lastRegistryRefresh = useRef(0);
+  useEffect(() => { registryRef.current = registry; }, [registry]);
   const loadRegistry = (after: number) => {
     const key = `${session.id}:${session.eventEpoch ?? 0}:${after}`;
     if (registryRequest.current === key) return;
@@ -121,6 +152,42 @@ export function AgentsPanel(props: Props) {
       }
     });
   };
+  const refreshRegistry = (progress: string) => {
+    const key = `${session.id}:${session.eventEpoch ?? 0}:refresh:${progress}`;
+    if (registryRequest.current === key) return;
+    registryRequest.current = key;
+    setRegistryLoading(true);
+    const pageCount = Math.max(1, Math.ceil((registryRef.current?.length ?? 0) / PAGE_SIZE));
+    void (async () => {
+      const pages: ChildSessionRegistryEntry[][] = [];
+      let after = 0;
+      let latestOwners: ChildSessionAttentionOwner[] = [];
+      let latestUnidentified = 0;
+      let nextAfter: number | null = 0;
+      for (let pageIndex = 0; pageIndex < pageCount && nextAfter !== null; pageIndex += 1) {
+        const page = await api.childSessions(session.id, session.eventEpoch ?? 0, after, PAGE_SIZE);
+        pages.push(page.children);
+        latestOwners = page.attentionOwners;
+        latestUnidentified = page.unidentifiedChildren;
+        nextAfter = page.nextAfter;
+        if (nextAfter !== null) after = nextAfter;
+      }
+      if (registryRequest.current !== key) return;
+      setRegistry(mergeRegistrySnapshotPages(pages));
+      setAttentionOwners(latestOwners);
+      setUnidentifiedChildren(latestUnidentified);
+      setRegistryAfter(nextAfter);
+      setRegistryUnavailable(false);
+    })().catch(() => {
+      if (registryRequest.current !== key) return;
+      setRegistryUnavailable(true);
+    }).finally(() => {
+      if (registryRequest.current === key) {
+        registryRequest.current = null;
+        setRegistryLoading(false);
+      }
+    });
+  };
   useEffect(() => {
     setRegistry(null);
     setAttentionOwners([]);
@@ -132,6 +199,24 @@ export function AgentsPanel(props: Props) {
     // Registry generations are scoped by exact session + event epoch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id, session.eventEpoch]);
+  useEffect(() => {
+    if (registryRef.current === null) return;
+    const progress = JSON.stringify([session.lastEventAt, session.status,
+      pendingRequests(session.pendingApproval).map((request) => request.requestId)]);
+    const delay = Math.max(0, 1_000 - (Date.now() - lastRegistryRefresh.current));
+    const timer = setTimeout(() => {
+      lastRegistryRefresh.current = Date.now();
+      refreshRegistry(progress);
+    }, delay);
+    return () => clearTimeout(timer);
+    // Event progress invalidates the durable lifecycle even when its transcript row is not loaded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id, session.eventEpoch, session.lastEventAt, session.status, session.pendingApproval]);
+  const compactAttentionOwners = useMemo(() => mergeCompactAttentionOwners(
+    attentionOwners, session.attentionOwners ?? [],
+  ), [attentionOwners, session.attentionOwners]);
+  const unresolvedOwnerIds = useMemo(() => new Set(compactAttentionOwners
+    .filter((owner) => !owner.resolved).map((owner) => owner.toolCallId)), [compactAttentionOwners]);
   const durableAgents = useMemo((): SubagentDescriptor[] => {
     if (!registry) return [];
     const byId = new Map(registry.map((child) => [child.toolCallId, child]));
@@ -165,9 +250,9 @@ export function AgentsPanel(props: Props) {
     }));
   }, [registry, runnerOnline, session.status]);
   const agents = useMemo(() => {
-    if (!registry) return projection.descriptors;
-    return mergeDurableAgents(durableAgents, projection.descriptors);
-  }, [durableAgents, projection.descriptors, registry]);
+    if (!registry) return projection.descriptors.filter((agent) => !unresolvedOwnerIds.has(agent.id));
+    return mergeDurableAgents(durableAgents, projection.descriptors, unresolvedOwnerIds);
+  }, [durableAgents, projection.descriptors, registry, unresolvedOwnerIds]);
   const rows = useMemo(() => {
     const run = session.runId ? runs.get(session.runId) : undefined;
     const pod = [...pods.values()].find((value) => value.members.some((member) => member.sessionId === session.id));
@@ -195,6 +280,12 @@ export function AgentsPanel(props: Props) {
   const [chosen, setChosen] = useState<string | null>(null);
   const [requestId, setRequestId] = useState<string | null>(null);
   const [requestLimit, setRequestLimit] = useState(PAGE_SIZE);
+  useEffect(() => {
+    if (requestedId && unresolvedOwnerIds.has(requestedId)) {
+      setChosen(null);
+      props.onSelect("");
+    }
+  }, [requestedId, unresolvedOwnerIds, props.onSelect]);
   const requests = pendingRequests(session.pendingApproval);
   const selectedRequest = requests.find((request) => request.requestId === requestId);
   const target = props.attentionTarget;
@@ -216,11 +307,11 @@ export function AgentsPanel(props: Props) {
     setFilter("active");
     const request = targetEpochMatches ? requests.find((value) => value.requestId === target?.requestId) : undefined;
     const ownerId = request?.ownerToolUseId;
-    props.onSelect(ownerId && !projection.ambiguousIds.has(ownerId) ? ownerId : "");
+    props.onSelect(ownerId && !projection.ambiguousIds.has(ownerId) && !unresolvedOwnerIds.has(ownerId) ? ownerId : "");
     if (!request) (attentionRef.current ?? panelRef.current)?.focus();
     else window.requestAnimationFrame(() =>
       (request.requestId === session.pendingApproval?.requestId ? primaryRequestRef.current : requestDetailRef.current)?.focus());
-  }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds,
+  }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds, unresolvedOwnerIds,
     props.onSelect, session.pendingApproval?.requestId]);
   const primaryInSession = Boolean(props.onOpenPrimaryRequest && selectedRequest?.requestId === session.pendingApproval?.requestId);
   useLayoutEffect(() => {
@@ -259,7 +350,8 @@ export function AgentsPanel(props: Props) {
         {requests.slice(0, requestLimit).map((request) => {
           const owner = !projection.ambiguousIds.has(request.ownerToolUseId ?? "")
             ? agents.find((agent) => agent.id === request.ownerToolUseId) : undefined;
-          const compactOwner = attentionOwners.find((value) => value.requestId === request.requestId);
+          const compactOwner = compactAttentionOwners.find((value) => value.requestId === request.requestId &&
+            value.toolCallId === request.ownerToolUseId);
           const ownerRole = owner?.role ?? compactOwner?.role;
           const attention = sessionAttentionStatus({ status: session.status,
             pendingApproval: { ...request, ownerToolUseId: undefined } });
@@ -290,7 +382,7 @@ export function AgentsPanel(props: Props) {
       <SegmentedControl label="Worker Filter" className="agents-filters" value={filter} onChange={selectFilter}
         options={(["active", "history", "all"] as const).map((value) => ({
           value,
-          label: `${value === "active" ? "Active" : value === "history" ? "History" : "All"} (${rows.filter((row) => value === "all" || (value === "active" ? isCurrentWorker(row) : !isCurrentWorker(row))).length})`,
+          label: `${value === "active" ? "Active" : value === "history" ? "History" : "All"} (${rows.filter((row) => value === "all" || (value === "active" ? isCurrentWorker(row) : !isCurrentWorker(row))).length}${registryAfter !== null && registry !== null ? " Loaded" : ""})`,
         }))} />
       {props.earlierActivityUnloaded && (registryUnavailable || registry?.length === 0 || unidentifiedChildren > 0) && <p className="hint" role="status">Earlier transcript activity is not loaded. Workers recorded only in those turns may be missing.</p>}
       {registryAfter !== null && registry !== null && <p className="hint" role="status">More recorded workers are available.</p>}

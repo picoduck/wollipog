@@ -348,9 +348,11 @@ const app = Fastify({
 });
 
 const CHILD_SESSION_REGISTRY_CACHE_LIMIT = 128;
+const CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE = 1_000;
 const childSessionRegistries = new Map<string, {
   eventEpoch: number;
   lastSeq: number;
+  agentIdSignature: string;
   projector: ChildSessionRegistryProjector;
 }>();
 const markStartupReady = installStartupReadinessGate(app);
@@ -3013,12 +3015,27 @@ app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
     return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
   }
   let registry = childSessionRegistries.get(id);
-  if (!registry || registry.eventEpoch !== eventEpoch) {
-    registry = { eventEpoch, lastSeq: 0, projector: new ChildSessionRegistryProjector() };
+  const throughSeq = db.sessionEventTailSeq(id);
+  const candidateAgentIdList = db.listAgentToolCallIds(id, throughSeq);
+  const candidateAgentIds = new Set(candidateAgentIdList);
+  const agentIdSignature = JSON.stringify(candidateAgentIdList);
+  // A newly discovered spawn may own earlier events, so rebuild from bounded pages whenever the
+  // exact identity set changes. Otherwise only scan the append-only suffix.
+  if (!registry || registry.eventEpoch !== eventEpoch || registry.agentIdSignature !== agentIdSignature) {
+    registry = { eventEpoch, lastSeq: 0, agentIdSignature, projector: new ChildSessionRegistryProjector() };
   }
-  const appended = db.listEvents(id, registry.lastSeq);
-  registry.projector.append(appended);
-  if (appended.length) registry.lastSeq = appended.at(-1)!.seq;
+  while (true) {
+    const appended = db.listChildSessionProjectionPage(
+      id, candidateAgentIdList, registry.lastSeq, throughSeq, CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE,
+    );
+    registry.projector.append(appended, candidateAgentIds);
+    if (appended.length) registry.lastSeq = appended.at(-1)!.seq;
+    if (appended.length < CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE) break;
+    // SQLite work is bounded to child-related pages; yield between them so a very large child
+    // hierarchy cannot monopolize the control-plane event loop.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  registry.lastSeq = throughSeq;
   // Refresh insertion order for a small LRU. Cached state contains only structured child facts,
   // never raw prose/output; old sessions rebuild once if revisited after eviction.
   childSessionRegistries.delete(id);

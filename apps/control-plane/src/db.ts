@@ -14546,6 +14546,62 @@ export class ControlPlaneDb {
     }));
   }
 
+  /** A bounded, SQL-filtered page for child projections. Unrelated root messages and tools remain
+   * inside SQLite and are never synchronously parsed on the request path. */
+  listChildSessionProjectionPage(
+    sessionId: string,
+    candidateAgentIds: readonly string[],
+    afterSeq: number,
+    throughSeq: number,
+    limit: number,
+  ): SessionEvent[] {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isSafeInteger(throughSeq) || throughSeq < afterSeq ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 2_000) {
+      throw new Error("invalid event scan page");
+    }
+    if (candidateAgentIds.length === 0) return [];
+    const rows = this.stmt(
+      `WITH candidate_ids(id) AS (SELECT value FROM json_each(?))
+       SELECT id, session_id, seq, ts, payload FROM session_events
+        WHERE session_id=? AND seq>? AND seq<=? AND (
+          (kind IN ('tool_call','tool_call_update')
+            AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids))
+          OR (json_type(payload,'$.parentToolUseId')='text'
+            AND json_extract(payload,'$.parentToolUseId') IN (SELECT id FROM candidate_ids))
+        ) ORDER BY seq LIMIT ?`,
+    ).all(JSON.stringify(candidateAgentIds), sessionId, afterSeq, throughSeq, limit) as unknown as {
+      id: number; session_id: string; seq: number; ts: number; payload: string;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      seq: r.seq,
+      ts: r.ts,
+      payload: JSON.parse(r.payload) as SessionEventPayload,
+    }));
+  }
+
+  /** Exact structured child candidates. No task text, command, path, message, or output crosses
+   * this query boundary. The small identity set drives a second, SQL-filtered history scan. */
+  listAgentToolCallIds(sessionId: string, throughSeq: number): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT json_extract(payload, '$.toolCallId') AS tool_call_id
+         FROM session_events
+        WHERE session_id=? AND seq<=? AND kind='tool_call'
+          AND json_extract(payload, '$.toolKind')='agent'
+          AND json_type(payload, '$.toolCallId')='text'
+        ORDER BY tool_call_id`,
+    ).all(sessionId, throughSeq) as unknown as { tool_call_id: string }[];
+    return rows.map((row) => row.tool_call_id);
+  }
+
+  sessionEventTailSeq(sessionId: string): number {
+    const row = this.stmt(
+      "SELECT COALESCE(MAX(seq),0) AS through_seq FROM session_events WHERE session_id=?",
+    ).get(sessionId) as { through_seq: number };
+    return Number(row.through_seq);
+  }
+
   hasCompletedUserMessage(sessionId: string): boolean {
     return Boolean(this.stmt(
       `SELECT 1 FROM session_events
