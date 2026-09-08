@@ -2167,6 +2167,10 @@ function SessionDetailLoaded({
   // not bypassed by sending a prompt.
   const policyPaused = isPolicyApproval(session.pendingApproval);
   const canPrompt = runnerOnline && !terminal && !policyPaused;
+  const composerPlaceholder = terminal ? `Session is ${session.status}.`
+    : !runnerOnline ? "Runner is offline."
+    : policyPaused ? "Session is paused by guardrails. Review the pending decision to continue."
+    : "Do anything";
   const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
   const composerQuestions = (() => {
     const approvalQuestions = pendingQuestion?.questions ?? [];
@@ -4533,7 +4537,7 @@ function SessionDetailLoaded({
                 }}
                 onKeyDown={onKeyDown}
                 onPaste={onPaste}
-                placeholder={canPrompt ? "Do anything" : terminal ? `Session is ${session.status}.` : "Runner is offline."}
+                placeholder={composerPlaceholder}
                 rows={2}
                 disabled={!canPrompt}
               />
