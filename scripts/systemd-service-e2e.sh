@@ -38,7 +38,10 @@ for unit in "$cp_unit" "$runner_unit"; do
   state=$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)
   [ "$state" = not-found ] || fail "$unit is already known to systemd (LoadState=$state); this script only runs on a host without Wollipog installed"
   for dir in /etc/systemd/system /run/systemd/system /usr/local/lib/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
-    [ ! -e "$dir/$unit" ] && [ ! -e "$dir/$unit.d" ] || fail "$dir/$unit exists; this script only runs on a host without Wollipog installed"
+    # -e follows symlinks (a dangling link reads as absent), so also test the link itself.
+    for entry in "$dir/$unit" "$dir/$unit.d"; do
+      [ ! -e "$entry" ] && [ ! -L "$entry" ] || fail "$entry exists; this script only runs on a host without Wollipog installed"
+    done
   done
 done
 [ ! -e /var/lib/wollipog ] && [ ! -e /etc/wollipog ] || fail "/var/lib/wollipog or /etc/wollipog already exists"
