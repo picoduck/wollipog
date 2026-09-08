@@ -29,6 +29,8 @@ import {
   type DeviceView,
   type HostAdminStatusView,
   type IdentityAdministrationView,
+  type RunnerCredentialSecret,
+  type RunnerCredentialView,
 } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
@@ -39,7 +41,9 @@ const DEFAULT_DB_PATH = "data/control-plane.db";
 const DEFAULT_PORT = 4317;
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/u;
 const PAIR_TOKEN_RE = /^[A-Za-z0-9_-]{16,256}$/u;
-const VALUE_OPTIONS = new Set(["--url", "--token-file", "--name", "--user", "--origin", "--output"]);
+const VALUE_OPTIONS = new Set(["--url", "--token-file", "--name", "--user", "--origin", "--output", "--runner", "--label"]);
+// Current `wollipogr_` and legacy `mamr_` producers both emit exactly 43 base64url characters.
+const RUNNER_TOKEN_RE = /^(?:wollipogr_|mamr_)[A-Za-z0-9_-]{43}$/u;
 
 export interface HostAdminIo {
   stdout(text: string): void;
@@ -87,12 +91,32 @@ class CliError extends Error {
   }
 }
 
+/**
+ * `--name value` or `--name=value`. An option that is present but followed by another option
+ * (`--runner --yes`, `--output --json`) or by nothing has an omitted value: that is a usage error,
+ * never "absent", so an optional option can never silently fall back to its default. Only the `=`
+ * form can supply a value that starts with `--`.
+ */
 function option(args: string[], name: string): string | undefined {
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === name) return args[i + 1];
-    if (args[i]?.startsWith(`${name}=`)) return args[i]!.slice(name.length + 1);
+    if (args[i] === name) {
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith("--")) throw new CliError(`${name} requires a value`, 2);
+      return value;
+    }
+    if (args[i]?.startsWith(`${name}=`)) {
+      const value = args[i]!.slice(name.length + 1);
+      // `--output="$OUT"` with OUT unset must not silently become "no --output".
+      if (value === "") throw new CliError(`${name} requires a value`, 2);
+      return value;
+    }
   }
   return undefined;
+}
+
+/** Single-quote a value for copy-paste into a POSIX shell; runner ids may contain metacharacters. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/gu, "'\\''")}'`;
 }
 
 function flag(args: string[], name: string): boolean {
@@ -120,6 +144,10 @@ export function hostAdminUsage(): string {
     "  admin device list [--json]",
     "  admin device create --name <name> [--user <user-id>] [--origin <public-origin>] [--output <file>] [--json]",
     "  admin device revoke <device-id> [--yes] [--json]",
+    "  admin runner-credential list [--json]",
+    "  admin runner-credential issue --runner <runner-id> [--label <label>] [--output <token-file>] [--json]",
+    "  admin runner-credential rotate --runner <runner-id> [--label <label>] [--output <token-file>] [--json]",
+    "  admin runner-credential revoke --runner <runner-id> [--yes] [--json]",
     "Options: --url <http://127.0.0.1:4317>, --token-file <path to the protected local credential>",
     `Credential lookup: --token-file, ${LOCAL_TOKEN_FILE_ENV}, CONTROL_PLANE_DB${LOCAL_TOKEN_SUFFIX}, then ${DEFAULT_DB_PATH}${LOCAL_TOKEN_SUFFIX}.`,
     "Runs only on the control-plane host over loopback; one-time secrets print only to a terminal or --output.",
@@ -161,8 +189,20 @@ export function isTailnetIpv4Literal(hostname: string): boolean {
  */
 export function pairingLinkConsumers(origin: string, webServed: boolean): { browser: boolean; desktop: boolean } {
   const url = new URL(origin);
-  const desktop = url.protocol === "https:" || isLoopbackHostname(url.hostname) || isTailnetIpv4Literal(url.hostname);
+  const desktop = url.protocol === "https:" || isDesktopCleartextHost(url.hostname);
   return { browser: webServed, desktop };
+}
+
+/**
+ * Hosts the desktop app accepts over plain HTTP (apps/web/src/instance-pairing.ts
+ * `cleartextHostPolicy`): `localhost`, any `*.localhost` name, `[::1]`, 127/8, and literal
+ * Tailscale addresses. Wider than `isLoopbackHostname` on purpose: that predicate decides where
+ * the bootstrap credential is sent and must stay literal-only, while this one only classifies who
+ * can open an already-minted link.
+ */
+export function isDesktopCleartextHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/\.$/u, "");
+  return host === "localhost" || host.endsWith(".localhost") || isLoopbackHostname(host) || isTailnetIpv4Literal(host);
 }
 
 /** The loopback control-plane origin; anything else fails closed because the bootstrap credential is loopback-only. */
@@ -256,6 +296,8 @@ export function pathOccupied(path: string): boolean {
  * hard link publishes the complete contents atomically; an existing path is never overwritten. On
  * filesystems without hard links the fallback is an exclusive create that still never replaces an
  * existing file, and a failed write removes the partial file instead of leaving it behind.
+ * Contract: if this throws, nothing was published at `path`; once the live file exists the call
+ * returns normally even if removing the staged hard link fails (both are the same 0600 inode).
  */
 export function writeProtectedSecretFile(
   path: string,
@@ -289,6 +331,11 @@ export function writeProtectedSecretFile(
         createdLive = true;
         fsHost.write(liveFd, contents);
         fsyncSync(liveFd);
+        const closing = liveFd;
+        liveFd = null;
+        closeSync(closing);
+        // Only a fully written, synced, and closed file counts as published; a close failure above
+        // still removes the file so a throw from this helper never leaves a delivered secret behind.
         published = true;
       } catch (fallbackError) {
         if ((fallbackError as NodeJS.ErrnoException).code === "EEXIST") {
@@ -296,13 +343,18 @@ export function writeProtectedSecretFile(
         }
         throw new CliError(`could not write ${live}: ${(fallbackError as Error).message}`);
       } finally {
-        if (liveFd !== null) closeSync(liveFd);
+        // Cleanup must never replace the real error with a second one from an already-failed fd.
+        if (liveFd !== null) try { closeSync(liveFd); } catch { /* already closed or failed */ }
         if (createdLive && !published) rmSync(live, { force: true });
       }
     }
   } finally {
-    if (fd !== null) closeSync(fd);
-    rmSync(staged, { force: true });
+    if (fd !== null) try { closeSync(fd); } catch { /* already closed or failed */ }
+    try {
+      rmSync(staged, { force: true });
+    } catch {
+      /* The live file is already published; a leftover staged link is the same protected inode. */
+    }
   }
 }
 
@@ -435,6 +487,114 @@ async function abandonMintedDevice(client: Client, deviceId: string | undefined,
   }
 }
 
+function formatCredentialStatus(credential: RunnerCredentialView): string {
+  return credential.legacy ? `${credential.status} (legacy)` : credential.status;
+}
+
+/**
+ * `admin runner-credential list|issue|rotate|revoke`, reusing the owner/admin routes with their
+ * existing activation and cutover semantics: an issued or rotated credential is pending until the
+ * runner's first registration with that exact id; rotation keeps the current credential active
+ * until the replacement registers; revoke closes the runner socket immediately.
+ */
+async function runnerCredentialCommand(
+  args: string[],
+  words: string[],
+  client: Client,
+  io: HostAdminIo,
+  host: HostAdminHost,
+  emit: (data: unknown, text: string) => void,
+): Promise<number> {
+  const verb = words[2];
+  if (verb === "list") {
+    const { credentials } = await client.get<{ credentials: RunnerCredentialView[] }>("/api/runner-credentials");
+    emit({ credentials }, credentials.length
+      ? table([["RUNNER ID", "CREDENTIAL", "STATUS", "LABEL", "CREATED", "ACTIVATED", "LAST USED", "EXPIRES"],
+        ...credentials.map((credential) => [
+          credential.runnerId, credential.credentialId, formatCredentialStatus(credential), credential.label,
+          formatWhen(credential.createdAt), formatWhen(credential.activatedAt), formatWhen(credential.lastUsedAt), formatWhen(credential.expiresAt),
+        ])])
+      : "no runner credentials");
+    return 0;
+  }
+  // The raw value is validated, never normalized: trimming "prod " into "prod" would silently
+  // retarget a destructive command at a different runner (server-side normalization also rejects it).
+  const runnerId = option(args, "--runner");
+  if (verb !== "issue" && verb !== "rotate" && verb !== "revoke") throw new CliError(hostAdminUsage(), 2);
+  if (runnerId === undefined || runnerId === "") throw new CliError(`admin runner-credential ${verb} requires --runner <runner-id>`, 2);
+  // Mirrors the runner's own attestation rules: dot segments would also be rewritten by URL
+  // canonicalization (`/api/runner-credentials/../rotate`), so they must never reach a request.
+  if (/[\u0000-\u0020\u007f/\\?#]/u.test(runnerId) || runnerId.length > 128 || runnerId === "." || runnerId === "..") {
+    throw new CliError("--runner must be an exact runner id without whitespace, control characters, dot segments, or / \\ ? #", 2);
+  }
+  const encodedRunner = encodeURIComponent(runnerId);
+
+  if (verb === "revoke") {
+    if (!flag(args, "--yes")) {
+      if (!io.stdinIsTTY) throw new CliError(`refusing to revoke the credential of runner ${runnerId} without confirmation; pass --yes in non-interactive use`, 2);
+      if (!(await io.confirm(`Revoke the active and pending credentials of runner ${runnerId}? Its connection closes immediately and it cannot reconnect until a new credential is issued.`))) {
+        emit({ revoked: false, runnerId }, `credential of runner ${runnerId} was not revoked`);
+        return 1;
+      }
+    }
+    await client.del(`/api/runner-credentials/${encodedRunner}`);
+    emit({ revoked: true, runnerId }, `revoked the credentials of runner ${runnerId}; its socket was closed and it needs a newly issued credential to reconnect`);
+    return 0;
+  }
+
+  const output = option(args, "--output");
+  if (!output && !io.stdoutIsTTY) {
+    throw new CliError("refusing to print a one-time runner credential to a non-interactive stdout; pass --output <token-file> to write it to a new 0600 file", 2);
+  }
+  const outputPath = output ? resolve(host.cwd(), output) : null;
+  if (outputPath && pathOccupied(outputPath)) throw new CliError(`refusing to overwrite existing output file ${outputPath}`);
+  const label = option(args, "--label")?.trim();
+  const body = label ? { label } : {};
+  const secret = verb === "issue"
+    ? await client.post<RunnerCredentialSecret>("/api/runner-credentials", { runnerId, ...body })
+    : await client.post<RunnerCredentialSecret>(`/api/runner-credentials/${encodedRunner}/rotate`, body);
+  let delivered = false;
+  let deliveryAttempted = false;
+  try {
+    if (typeof secret.credential?.credentialId !== "string") throw new CliError("control plane returned no credential record");
+    if (typeof secret.token !== "string" || !RUNNER_TOKEN_RE.test(secret.token)) throw new CliError("control plane returned an unusable runner token");
+    const summary = { credential: secret.credential, runnerId, operation: verb };
+    const heading = verb === "issue"
+      ? `Issued a pending credential ${secret.credential.credentialId} for runner ${runnerId}; it activates on the runner's first registration and expires if unused for 24 hours.\n`
+      : `Rotated runner ${runnerId}: pending credential ${secret.credential.credentialId} replaces the current one when the runner registers with it; the current credential stays active until then.\n`;
+    const usage = "Start the runner with --token-file <file> or RUNNER_TOKEN_FILE; the token never belongs in argv, unit files, or logs.";
+    if (outputPath) {
+      // The helper either publishes the complete file or throws having published nothing.
+      writeProtectedSecretFile(outputPath, `${secret.token}\n`);
+      delivered = true;
+      emit({ ...summary, outputPath }, `${heading}Token written once to ${outputPath} (mode 0600). ${usage}`);
+    } else {
+      deliveryAttempted = true;
+      emit({ ...summary, token: secret.token }, `${heading}This token is shown once. ${usage}\n${secret.token}`);
+      delivered = true;
+    }
+    return 0;
+  } catch (error) {
+    if (delivered) throw error;
+    // A pending runner credential nobody holds is inert: it expires unused in 24 hours and issuing
+    // or rotating again supersedes it. It is deliberately not revoked: a revoke also closes the
+    // runner socket, which after a failed `issue` for a legacy runner without a credential (or a
+    // failed `rotate` with a still-active credential) would disconnect a working runner. A failure
+    // after output began is different: the plaintext may have reached the terminal or file, so the
+    // operator is told the credential stays usable and how to supersede or revoke it.
+    const detail = (error as Error).message;
+    const exitCode = error instanceof CliError ? error.exitCode : 1;
+    if (deliveryAttempted) {
+      throw new CliError(
+        `${detail}; the token for runner ${runnerId} may have been partially delivered and the pending credential ${secret.credential.credentialId} stays usable until it expires in 24 hours: ` +
+          `run the ${verb} command again to supersede it, or revoke it with: wollipog admin runner-credential revoke --runner ${shellQuote(runnerId)} --yes`,
+        exitCode,
+      );
+    }
+    throw new CliError(`${detail}; the pending credential for runner ${runnerId} was not delivered, expires unused in 24 hours, and is replaced by running the ${verb} command again`, exitCode);
+  }
+}
+
 interface DeviceCreateReply {
   device: DeviceView;
   token: string;
@@ -467,7 +627,9 @@ export async function runHostAdminCli(
       return 0;
     }
 
-    if (command !== "status" && command !== "user" && command !== "device") throw new CliError(hostAdminUsage(), 2);
+    if (command !== "status" && command !== "user" && command !== "device" && command !== "runner-credential") {
+      throw new CliError(hostAdminUsage(), 2);
+    }
     const token = readProtectedLocalToken(tokenPath, host);
     const client = makeClient(fetchImpl, target.url, token);
     await ensureCompatible(client, target.url);
@@ -495,6 +657,9 @@ export async function runHostAdminCli(
         : "no users");
       return 0;
     }
+
+    // `await` keeps rejections inside this try so they reach the shared error formatting.
+    if (command === "runner-credential") return await runnerCredentialCommand(args, words, client, io, host, emit);
 
     const verb = words[2];
     if (verb === "list") {

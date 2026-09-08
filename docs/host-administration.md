@@ -42,6 +42,10 @@ wollipog admin user list [--json]
 wollipog admin device list [--json]
 wollipog admin device create --name <name> [--user <user-id>] [--origin <public-origin>] [--output <file>] [--json]
 wollipog admin device revoke <device-id> [--yes] [--json]
+wollipog admin runner-credential list [--json]
+wollipog admin runner-credential issue --runner <runner-id> [--label <label>] [--output <token-file>] [--json]
+wollipog admin runner-credential rotate --runner <runner-id> [--label <label>] [--output <token-file>] [--json]
+wollipog admin runner-credential revoke --runner <runner-id> [--yes] [--json]
 ```
 
 Common options: `--url <loopback origin>`, `--token-file <path>`, `--json` for stable output.
@@ -103,6 +107,37 @@ Deletes the device row, removes its push subscriptions, and immediately closes i
 sockets; later requests with that token fail. Interactive use asks for confirmation; non-interactive
 use must pass `--yes`.
 
+### `admin runner-credential`
+
+These commands drive the existing owner/admin runner-credential routes with their activation and
+cutover semantics (see [runner credentials and secrets](./runner-credentials-and-secrets.md)):
+
+- `list` shows every credential's runner, id, status (`pending`, `active`, `revoked`, with a
+  `legacy` marker), label, and timestamps. No secrets.
+- `issue --runner <id>` mints a pending credential for a runner id that has none. It activates on
+  the runner's first registration with that exact id and expires if unused for 24 hours. A runner
+  that already has an active credential is refused; rotate it instead.
+- `rotate --runner <id>` mints a pending replacement while the current credential stays active; the
+  runner cuts over when it registers with the new token, and the old credential is then revoked.
+  There is no planned disconnect.
+- `revoke --runner <id>` revokes active and pending credentials and closes the runner socket
+  immediately. Interactive use asks for confirmation; non-interactive use must pass `--yes`.
+
+`issue` and `rotate` return the token exactly once, under the same rules as device links: shown only
+on an interactive terminal, or written atomically to a new mode-0600 `--output` file that the runner
+can consume directly with `--token-file <file>` or `RUNNER_TOKEN_FILE`. The output path is checked
+before minting. If delivery fails before any output began, the pending credential is left alone:
+nobody holds its plaintext, it expires unused after 24 hours, and running `issue` or `rotate` again
+replaces it. It is deliberately not revoked, because a revoke also closes the runner socket and would
+disconnect a runner that still has a working credential. If the failure happened after output began
+(a broken terminal pipe, for example), the CLI says the token may have been partially delivered and
+that the pending credential stays usable until it expires, and prints both ways to resolve it: run
+the command again to supersede it, or revoke it. `--runner` must be the exact id; padded, dot-segment,
+or malformed ids are refused rather than normalized. Any option written without a value
+(`--runner --yes`, `--output --json`, or `--output=` from an unset shell variable) is a usage error
+rather than a silent fallback. Tokens never
+appear in argv, unit files, or logs.
+
 ## Public Dashboard Origin
 
 Set `CONTROL_PLANE_PUBLIC_ORIGIN` on the control plane to the origin remote clients actually reach,
@@ -125,8 +160,10 @@ wollipog admin device create --name "Laptop browser" --output ~/laptop.pair
 # Move ~/laptop.pair to the laptop over an encrypted channel, open the link, then delete the file.
 wollipog admin device list
 wollipog admin device revoke dev_1a2b3c4d
+# Colocated or remote runner credentials, written straight into the runner's token file.
+wollipog admin runner-credential issue --runner rack-2 --output /srv/wollipog/runner/token
+wollipog admin runner-credential list
 ```
 
-Service installation, `admin doctor`, runner-credential commands, and upgrade or rollback tooling are
-tracked separately; until they ship, supervise the control plane and runner with the operating
+Service installation, `admin doctor`, and upgrade or rollback tooling are tracked separately; until they ship, supervise the control plane and runner with the operating
 system's service manager as described in [automations](./automations.md#always-on-deployment-and-laptop-off-limits).
