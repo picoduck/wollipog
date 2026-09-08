@@ -56,9 +56,15 @@ export function runContextCommand(
 ): Promise<ContextCommandResult> {
   const timeout = options.timeoutMs ?? 30_000;
   const maxBuffer = options.maxBuffer ?? 64 * 1024 * 1024;
-  const spec = contextCommandSpec(context, command, args, options);
 
   return new Promise((resolve, reject) => {
+    let spec;
+    try {
+      spec = contextCommandSpec(context, command, args, options);
+    } catch (error) {
+      reject(error);
+      return;
+    }
     const child = execFile(
       spec.file,
       spec.args,

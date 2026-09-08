@@ -79,12 +79,12 @@ export function agentTuiLaunch(
     const comspec = host.comspec || "cmd.exe";
     return {
       command: comspec,
-      args: ["/d", "/s", "/c", commandLine],
+      args: ["/d", "/v:off", "/s", "/c", commandLine],
       env: meta.env,
       scrubInheritedEnv: scrub,
       // cmd.exe parses its /c tail itself. Wrapping the complete tail in one quote pair is the
       // canonical /s form; applying CommandLineToArgvW escaping to it again corrupts inner quotes.
-      verbatimCommandLine: `${windowsCommandLine(comspec, ["/d", "/s", "/c"])} "${commandLine}"`,
+      verbatimCommandLine: `${windowsCommandLine(comspec, ["/d", "/v:off", "/s", "/c"])} "${commandLine}"`,
     };
   }
   return { command: meta.command, args: [...meta.args], env: meta.env, scrubInheritedEnv: scrub };

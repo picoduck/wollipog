@@ -336,19 +336,19 @@ export function unavailableClaudeCode(): ClaudeCodeCapabilities {
 export function applyClaudeAgentEnvironment(
   agent: AgentDefinition,
   preserveAvailability = false,
-  host: { platform?: NodeJS.Platform; exists?: typeof existsSync } = {},
+  host: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exists?: typeof existsSync } = {},
 ): AgentDefinition {
   if (agent.driver !== "claude-code" || !agent.claudeCode) return agent;
   const platform = host.platform ?? process.platform;
-  const gitBashPath = platform === "win32"
-    ? verifiedNativeClaudeGitBashPath(agent.env ?? {}, { exists: host.exists })
+  const nativeWindows = platform === "win32" && (agent.context?.kind ?? "native") === "native";
+  const gitBashPath = nativeWindows
+    ? verifiedNativeClaudeGitBashPath(agent.env ?? {}, { env: host.env, exists: host.exists })
     : undefined;
-  const gitBashReady = platform !== "win32" || Boolean(gitBashPath);
-  const claudeCode = applyNativeClaudeGitBashReadiness(
-    applyClaudeConfiguredAuth(agent.claudeCode, agent.env ?? {}),
-    gitBashReady ? gitBashPath : undefined,
-    platform,
-  );
+  const gitBashReady = !nativeWindows || Boolean(gitBashPath);
+  const configured = applyClaudeConfiguredAuth(agent.claudeCode, agent.env ?? {});
+  const claudeCode = nativeWindows
+    ? applyNativeClaudeGitBashReadiness(configured, gitBashReady ? gitBashPath : undefined, platform)
+    : configured;
   return {
     ...agent,
     claudeCode,

@@ -325,12 +325,21 @@ const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHost
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
 const configuredAgentDefinitions = config.agents.filter((a) => a.id !== "conductor").map((a) => {
   const driver = a.driver ?? "acp";
+  // Git Bash is a non-secret native-provider prerequisite. Project only that one resolved value
+  // into runner-local metadata so Windows readiness can honor literal/fromEnv agent config while
+  // all credentials remain redacted from discovery and the control plane.
+  const configuredGitBash = a.env && "CLAUDE_CODE_GIT_BASH_PATH" in a.env
+    ? resolveAgentEnvironment(a).CLAUDE_CODE_GIT_BASH_PATH
+    : undefined;
+  const projectedEnv: Record<string, string> = configuredGitBash
+    ? { CLAUDE_CODE_GIT_BASH_PATH: configuredGitBash }
+    : {};
   return {
     id: a.id,
     name: a.name,
     command: a.command,
     args: a.args ?? [],
-    env: {},
+    env: projectedEnv,
     // env is redacted above, so the discovery merge cannot see a configured OPENAI_API_KEY.
     // Carry the non-secret fact that auth is configured (literal or fromEnv) as an auth
     // assertion, or the auth gate would disable a deliberately API-keyed Codex whose

@@ -503,7 +503,7 @@ export function winQuoteArg(arg: string): string {
     throw new Error("winQuoteArg: argument contains %, which cmd.exe would expand; deliver it via stdin instead");
   }
   if (arg === "") return '""';
-  if (!/[ \t"&|<>^()!]/.test(arg)) return arg;
+  if (!/[ \t",;&|<>^()!=]/.test(arg)) return arg;
   return '"' + arg.replace(/"/g, '""') + '"';
 }
 

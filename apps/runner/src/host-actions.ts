@@ -50,11 +50,6 @@ export async function discoverEditors(): Promise<EditorInfo[]> {
   }));
 }
 
-/**
- * Pick the Windows-executable hit out of a `where.exe` listing. Editor bin dirs ship a
- * POSIX shell script FIRST (`...\bin\code`) with the real `.cmd`/`.exe` beside it —
- * spawning the extension-less script fails on Windows, so prefer a real executable.
- */
 /** Resolve an editor CLI to a spawnable path (null = not installed). */
 async function resolveEditorBin(bin: string): Promise<string | null> {
   if (process.platform === "win32") {

@@ -357,6 +357,9 @@ test("winQuoteArg quotes cmd metacharacters", () => {
   assert.equal(winQuoteArg("a&b"), '"a&b"');
   assert.equal(winQuoteArg("a|b"), '"a|b"');
   assert.equal(winQuoteArg("a>b"), '"a>b"');
+  assert.equal(winQuoteArg("a,b"), '"a,b"');
+  assert.equal(winQuoteArg("a;b"), '"a;b"');
+  assert.equal(winQuoteArg("a=b"), '"a=b"');
 });
 
 test("winQuoteArg doubles embedded quotes", () => {
@@ -655,7 +658,10 @@ test("Windows Job launcher preserves cmd-shim argument boundaries", { skip: proc
   try {
     const child = spawnAgent({
       command: shim,
-      args: ["two words", "simple"],
+      args: [
+        "two words", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
+        "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+      ],
       cwd: dir,
       isolation: windowsJobIsolation,
     });
@@ -671,7 +677,10 @@ test("Windows Job launcher preserves cmd-shim argument boundaries", { skip: proc
       child.on("close", resolve);
     });
     assert.equal(code, 0, err);
-    assert.deepEqual(JSON.parse(out), ["two words", "simple"]);
+    assert.deepEqual(JSON.parse(out), [
+      "two words", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
+      "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+    ]);
   } finally {
     if (priorComSpec === undefined) delete process.env.ComSpec;
     else process.env.ComSpec = priorComSpec;

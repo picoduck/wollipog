@@ -18,8 +18,8 @@ test("Windows batch shims use an explicit non-expanding cmd.exe boundary", () =>
   assert.deepEqual(spec.args.slice(0, 4), ["/d", "/v:off", "/s", "/c"]);
   assert.equal(spec.windowsVerbatimArguments, true);
   assert.match(spec.args[4]!, /codex\.cmd/);
-  assert.match(spec.args[4]!, /\^"wollipog\^"/);
-  assert.match(spec.args[4]!, /a\^&b/);
+  assert.match(spec.args[4]!, /""wollipog""/);
+  assert.match(spec.args[4]!, /"a&b"/);
   assert.match(spec.args[4]!, /bang!kept/);
 });
 
@@ -43,7 +43,10 @@ test("Windows .cmd probes preserve argv and enforce Codex MCP isolation", { skip
     writeFileSync(shim, `@echo off\r\nnode "%~dp0capture.cjs" %*\r\n`, "utf8");
     writeFileSync(codex, "@echo off\r\necho [{\"name\":\"wollipog\",\"enabled\":true},{\"name\":\"ambient\",\"enabled\":true}]\r\n", "utf8");
 
-    const argv = ["space value", "amp&value", 'say "yes"', "paren(value)", "pipe|value"];
+    const argv = [
+      "space value", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
+      "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+    ];
     const probe = await run(shim, argv);
     assert.equal(probe.code, 0, probe.stderr);
     assert.deepEqual(JSON.parse(probe.stdout), argv);

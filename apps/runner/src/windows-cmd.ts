@@ -9,12 +9,12 @@ export interface WindowsCommandSpec {
   windowsVerbatimArguments?: boolean;
 }
 
-function quoteCmdToken(value: string, command = false): string {
+function quoteCmdToken(value: string): string {
   if (/[\r\n]/.test(value)) throw new Error("Windows command arguments cannot contain CR/LF");
   if (value.includes("%")) throw new Error("Windows command arguments cannot contain %, which cmd.exe would expand");
   if (value === "") return '""';
   if (!/[ \t"&|<>^()!]/.test(value)) return value;
-  return `"${value.replace(command ? /["^]/g : /["&|<>^()]/g, "^$&")}"`;
+  return `"${value.replace(/"/g, '""')}"`;
 }
 
 /**
@@ -28,7 +28,7 @@ export function windowsCommandSpec(
   host: WindowsCommandHost = { platform: process.platform, comspec: process.env.ComSpec },
 ): WindowsCommandSpec {
   if (host.platform !== "win32" || !/\.(?:cmd|bat)$/i.test(file)) return { file, args };
-  const commandLine = [quoteCmdToken(file, true), ...args.map((arg) => quoteCmdToken(arg))].join(" ");
+  const commandLine = [quoteCmdToken(file), ...args.map((arg) => quoteCmdToken(arg))].join(" ");
   return {
     file: host.comspec || "cmd.exe",
     args: ["/d", "/v:off", "/s", "/c", `"${commandLine}"`],

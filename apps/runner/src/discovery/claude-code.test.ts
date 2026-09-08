@@ -205,7 +205,14 @@ test("native Windows Claude readiness fails closed without Git-for-Windows Bash"
     id: "claude", name: "Claude", command: "claude.cmd", args: [], env: {}, driver: "claude-code" as const,
     context: { kind: "native" as const }, available: true, claudeCode: capability,
   };
-  const gatedAgent = applyClaudeAgentEnvironment(agent, true, { platform: "win32", exists: () => false });
+  const gatedAgent = applyClaudeAgentEnvironment(agent, true, { platform: "win32", env: {}, exists: () => false });
   assert.equal(gatedAgent.available, false, "an explicit config availability override cannot bypass the prerequisite");
   assert.equal(gatedAgent.claudeCode?.status, "unsupported");
+  const wslAgent = applyClaudeAgentEnvironment(
+    { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" } },
+    false,
+    { platform: "win32", env: {}, exists: () => false },
+  );
+  assert.equal(wslAgent.available, true, "WSL Claude does not require the host Git Bash runtime");
+  assert.equal(wslAgent.claudeCode?.status, "ready");
 });
