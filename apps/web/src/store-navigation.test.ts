@@ -31,6 +31,21 @@ test("store navigation pushes only real in-app transitions", () => {
   assert.deepEqual(pushed, [{ name: "run", id: "run_1" }]);
 });
 
+test("repeated identical attention activation updates an ephemeral nonce without duplicate history", () => {
+  const pushed: View[] = [];
+  const target: View = { name: "session", id: "s_1", attention: { eventEpoch: 4, requestId: "request-2" } };
+  const store = new Store(target, (view) => pushed.push(view));
+
+  store.navigate(target);
+  const first = store.getState().view;
+  assert.equal(first.name === "session" ? first.attention?.activationId : undefined, 1);
+  store.navigate(target);
+  const second = store.getState().view;
+  assert.equal(second.name === "session" ? second.attention?.activationId : undefined, 2,
+    "the same stable route can re-open and re-focus after an in-panel selection changes");
+  assert.deepEqual(pushed, [], "repeat activation must not add an identical browser history entry");
+});
+
 test("history traversal updates view state without writing a new entry", () => {
   const pushed: View[] = [];
   const store = new Store({ name: "board" }, (view) => pushed.push(view));

@@ -6,6 +6,7 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
+import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -27,6 +28,7 @@ import {
   columnForStatus,
   isPolicyApproval,
   isTerminal,
+  pendingRequests,
   runnerSupportsProtocol,
   scopeAudienceContained,
   validatePromptImageInputs,
@@ -55,6 +57,7 @@ import {
   type BackgroundNotificationReceiptView,
   type BackgroundWorkState,
   type BackgroundWorkTracking,
+  type ChildSessionAttentionOwner,
   type ManagedBackgroundJobSnapshot,
   type ManagedBackgroundJobView,
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
@@ -851,6 +854,24 @@ CREATE TABLE IF NOT EXISTS session_events (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
+-- Pending-attention projections resolve an exact structured owner on every session snapshot.
+-- Keep that compact join independent of transcript length.
+CREATE INDEX IF NOT EXISTS idx_session_events_tool_call_id
+  ON session_events(session_id, json_extract(payload,'$.toolCallId'), seq)
+  WHERE kind='tool_call';
+-- Durable child inventory discovers only structured agent spawns, then performs targeted lookups
+-- by exact spawn id and parent id. These partial expression indexes keep ordinary transcript rows
+-- out of the synchronous projection path.
+CREATE INDEX IF NOT EXISTS idx_session_events_agent_spawn_id
+  ON session_events(session_id, seq, json_extract(payload,'$.toolCallId'))
+  WHERE kind='tool_call' AND json_extract(payload,'$.toolKind')='agent'
+    AND json_type(payload,'$.toolCallId')='text';
+CREATE INDEX IF NOT EXISTS idx_session_events_tool_update_id
+  ON session_events(session_id, json_extract(payload,'$.toolCallId'), seq)
+  WHERE kind='tool_call_update';
+CREATE INDEX IF NOT EXISTS idx_session_events_parent_tool_use_id
+  ON session_events(session_id, json_extract(payload,'$.parentToolUseId'), seq)
+  WHERE json_type(payload,'$.parentToolUseId')='text';
 
 CREATE TABLE IF NOT EXISTS review_findings (
   finding_id  TEXT PRIMARY KEY,
@@ -13978,6 +13999,8 @@ export class ControlPlaneDb {
       }
     }
 
+    const attentionOwners = this.childAttentionOwners(row.id, pending);
+
     const durablePromptQueue = this.pendingSessionPromptQueue(row.id);
     const pendingPrompts = this.pendingSessionPrompts(row.id);
     return {
@@ -14048,6 +14071,7 @@ export class ControlPlaneDb {
       eventEpoch: row.event_epoch ?? 0,
       preview: row.preview,
       pendingApproval: pending,
+      ...(attentionOwners.length ? { attentionOwners } : {}),
       ...(durablePromptQueue.length ? { queued: durablePromptQueue } : {}),
       ...(pendingPrompts.length ? { pendingPrompts } : {}),
       ...(() => {
@@ -14080,6 +14104,47 @@ export class ControlPlaneDb {
       // Lazy: sessions without the guardrail never pay the COUNT (same class as messageCount).
       toolCallCount: row.max_tool_calls != null ? this.countToolCalls(row.id) : undefined,
     };
+  }
+
+  private childAttentionOwners(sessionId: string, pending: PendingApproval | null): ChildSessionAttentionOwner[] {
+    return pendingRequests(pending).flatMap((request): ChildSessionAttentionOwner[] => {
+      const toolCallId = request.ownerToolUseId;
+      if (!toolCallId) return [];
+      const rows = this.stmt(
+        `SELECT payload FROM session_events
+         WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId')=?
+         ORDER BY seq LIMIT 3`,
+      ).all(sessionId, toolCallId) as Array<{ payload: string }>;
+      try {
+        const observations = rows.map((row) => JSON.parse(row.payload) as SessionEventPayload)
+          .filter((payload): payload is Extract<SessionEventPayload, { kind: "tool_call" }> => payload.kind === "tool_call")
+          .map((payload): StructuredAgentSpawnObservation => ({
+            toolCallId: payload.toolCallId,
+            toolKind: payload.toolKind,
+            status: payload.status,
+            ...(payload.parentToolUseId ? { parentToolUseId: payload.parentToolUseId } : {}),
+            ...(payload.subagentLifecycle ? { subagentLifecycle: payload.subagentLifecycle } : {}),
+            ...(payload.subagentName ? { subagentName: payload.subagentName } : {}),
+            ...(payload.subagentRole ? { subagentRole: payload.subagentRole } : {}),
+          }));
+        const identity = observations.length === rows.length ? collapseAgentSpawnObservations(observations) : null;
+        if (!identity) {
+          return [{ requestId: request.requestId, toolCallId, resolved: false }];
+        }
+        const clean = (value: unknown, max: number): string | undefined => {
+          if (typeof value !== "string") return undefined;
+          const normalized = value.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/gu, " ")
+            .replace(/\s+/gu, " ").trim();
+          if (!normalized) return undefined;
+          return normalized.length > max ? `${normalized.slice(0, max)}…` : normalized;
+        };
+        const name = clean(identity.subagentName, 80) ?? "Subagent";
+        const role = clean(identity.subagentRole, 48);
+        return [{ requestId: request.requestId, toolCallId, resolved: true, name, ...(role ? { role } : {}) }];
+      } catch {
+        return [{ requestId: request.requestId, toolCallId, resolved: false }];
+      }
+    });
   }
 
   /** Commands not yet started remain visible across CP or runner restarts. A live runner queue
@@ -14492,6 +14557,73 @@ export class ControlPlaneDb {
       ts: r.ts,
       payload: JSON.parse(r.payload) as SessionEventPayload,
     }));
+  }
+
+  /** A bounded, SQL-filtered page for child projections. Unrelated root messages and tools remain
+   * inside SQLite and are never synchronously parsed on the request path. */
+  listChildSessionProjectionPage(
+    sessionId: string,
+    candidateAgentIds: readonly string[],
+    afterSeq: number,
+    throughSeq: number,
+    limit: number,
+  ): SessionEvent[] {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isSafeInteger(throughSeq) || throughSeq < afterSeq ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 2_000) {
+      throw new Error("invalid event scan page");
+    }
+    if (candidateAgentIds.length === 0) return [];
+    const rows = this.stmt(
+      `WITH candidate_ids(id) AS (SELECT value FROM json_each(?))
+       SELECT id, session_id, seq, ts, payload FROM (
+         SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_tool_call_id
+          WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call'
+            AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids)
+         UNION
+         SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_tool_update_id
+          WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call_update'
+            AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids)
+         UNION
+         SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_parent_tool_use_id
+          WHERE session_id=? AND seq>? AND seq<=?
+            AND json_type(payload,'$.parentToolUseId')='text'
+            AND json_extract(payload,'$.parentToolUseId') IN (SELECT id FROM candidate_ids)
+       ) ORDER BY seq LIMIT ?`,
+    ).all(JSON.stringify(candidateAgentIds),
+      sessionId, afterSeq, throughSeq,
+      sessionId, afterSeq, throughSeq,
+      sessionId, afterSeq, throughSeq,
+      limit) as unknown as {
+      id: number; session_id: string; seq: number; ts: number; payload: string;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      seq: r.seq,
+      ts: r.ts,
+      payload: JSON.parse(r.payload) as SessionEventPayload,
+    }));
+  }
+
+  /** Exact structured child candidates. No task text, command, path, message, or output crosses
+   * this query boundary. The small identity set drives a second, SQL-filtered history scan. */
+  listAgentToolCallIds(sessionId: string, afterSeq: number, throughSeq: number): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT json_extract(payload, '$.toolCallId') AS tool_call_id
+         FROM session_events
+        WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call'
+          AND json_extract(payload, '$.toolKind')='agent'
+          AND json_type(payload, '$.toolCallId')='text'
+        ORDER BY tool_call_id`,
+    ).all(sessionId, afterSeq, throughSeq) as unknown as { tool_call_id: string }[];
+    return rows.map((row) => row.tool_call_id);
+  }
+
+  sessionEventTailSeq(sessionId: string): number {
+    const row = this.stmt(
+      "SELECT COALESCE(MAX(seq),0) AS through_seq FROM session_events WHERE session_id=?",
+    ).get(sessionId) as { through_seq: number };
+    return Number(row.through_seq);
   }
 
   hasCompletedUserMessage(sessionId: string): boolean {

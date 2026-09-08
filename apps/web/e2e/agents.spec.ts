@@ -17,9 +17,9 @@ for (const viewport of [
     await page.screenshot({ path: `.agents/tmp/attention-navigation/${surface}-${viewport.name}-${theme}-collapsed.png`, fullPage: true });
     await summary.focus();
     await summary.press("Enter");
-    await expect(origin.getByRole("button", { name: "Request 2 · Child Approval Required", exact: true })).toBeVisible();
+    await expect(origin.getByRole("button", { name: "Request 2 · Child Owner Unavailable · Approval Required", exact: true })).toBeVisible();
     await page.screenshot({ path: `.agents/tmp/attention-navigation/${surface}-${viewport.name}-${theme}-picker.png`, fullPage: true });
-    await origin.getByRole("button", { name: "Request 2 · Child Approval Required", exact: true }).press("Enter");
+    await origin.getByRole("button", { name: "Request 2 · Child Owner Unavailable · Approval Required", exact: true }).press("Enter");
     await expect(page).toHaveURL(/\/attention\/.*epoch=0$/);
     const selected = page.getByRole("region", { name: "Selected Worker Request", exact: true });
     await expect(selected).toBeFocused();
@@ -32,7 +32,7 @@ for (const viewport of [
     await selected.getByRole("button", { name: "Allow", exact: true }).click();
     await expect(selected).toHaveCount(0);
     await expect(page.getByText("The linked request is no longer pending. No replacement request was selected.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Audit Storage · Child Approval Required", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Audit Storage · Approval Required", exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
 }
@@ -51,7 +51,7 @@ test("attention links cannot alias reused requests after reprocessing and primar
   await page.goto("/agents-e2e.html?navigation=1");
   const inbox = page.getByRole("grid", { name: "Fixture Inbox" });
   await inbox.getByText("2 Requests", { exact: true }).click();
-  await inbox.getByRole("button", { name: "Request 1 · Child Approval Required", exact: true }).click();
+  await inbox.getByRole("button", { name: "Request 1 · Child Owner Unavailable · Approval Required", exact: true }).click();
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toBeFocused();
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(1);
   await page.getByRole("button", { name: "Reprocess Session", exact: true }).click();
@@ -62,7 +62,7 @@ test("attention links cannot alias reused requests after reprocessing and primar
 test("the session and Agents panel never mount two response forms for the same question", async ({ page }) => {
   await page.goto("/agents-e2e.html?primary-question=1");
   await page.getByRole("radio", { name: /Parser/ }).click();
-  await page.getByRole("button", { name: "Audit Storage · Child Answer Required", exact: true }).click();
+  await page.getByRole("button", { name: "Audit Storage · Answer Required", exact: true }).click();
   await expect(page.getByRole("button", { name: "Submit", exact: true })).toHaveCount(1);
   await expect(page.getByRole("radio", { name: /Parser/ })).toBeChecked();
   await page.getByRole("button", { name: "Open Request in Session", exact: true }).click();
@@ -71,12 +71,38 @@ test("the session and Agents panel never mount two response forms for the same q
 
 test("a selected child request promoted to primary moves focus to its canonical response form", async ({ page }) => {
   await page.goto("/agents-e2e.html?primary-question=1");
-  await page.getByRole("button", { name: "Inspect Parser · Child Approval Required", exact: true }).click();
+  await page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true }).click();
   await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
   await page.getByRole("button", { name: "Resolve Primary Request", exact: true }).click();
   await expect(page.locator('[data-session-request-id="permission-b"]')).toBeFocused();
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(1);
+});
+
+test("an active-tail conflict on initial registry load retries against the current generation", async ({ page }) => {
+  await page.goto("/agents-e2e.html?registry-retry=initial");
+  await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __registryCalls?: number }).__registryCalls)).toBe(2);
+  await expect(page.getByRole("button", { name: "Retry Recorded Workers", exact: true })).toHaveCount(0);
+});
+
+test("a Load More generation conflict preserves verified pages and retries the cursor", async ({ page }) => {
+  await page.goto("/agents-e2e.html?registry-retry=load-more");
+  await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Load More Recorded Workers", exact: true }).click();
+  await expect(page.getByText("Recorded worker inventory changed while loading. Retrying…", { exact: true })).toBeVisible();
+  await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
+  await expect(page.getByText("Durable Second", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __registryCalls?: number }).__registryCalls)).toBe(3);
+});
+
+test("exhausted automatic registry retries retain a manual recovery action", async ({ page }) => {
+  await page.goto("/agents-e2e.html?registry-retry=exhaust");
+  const retry = page.getByRole("button", { name: "Retry Recorded Workers", exact: true });
+  await expect(retry).toBeVisible();
+  await retry.click();
+  await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __registryCalls?: number }).__registryCalls)).toBe(4);
 });
 
 for (const viewport of [
@@ -88,13 +114,13 @@ for (const viewport of [
     await page.goto(`/agents-e2e.html?theme=${theme}`);
     const roster = page.getByRole("list", { name: "Agents", exact: true });
     await expect(roster.getByRole("listitem")).toHaveCount(3);
-    await page.getByRole("button", { name: "Inspect Parser · Child Approval Required", exact: true }).click();
+    await page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true }).click();
     await expect(page.getByRole("region", { name: "Selected Worker Request" })).toBeFocused();
     await expect(page.getByText("The parser tests are ready to run.")).toBeVisible();
     await page.getByRole("button", { name: "Allow", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Inspect Parser · Child Approval Required", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true })).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Worker Attention", exact: true })).toBeFocused();
-    await expect(page.getByRole("button", { name: "Audit Storage · Child Approval Required", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Audit Storage · Approval Required", exact: true })).toBeVisible();
     await page.getByRole("radio", { name: "History (1)", exact: true }).click();
     await expect(roster.getByText("Review Documentation", { exact: true })).toBeVisible();
     await page.getByRole("radio", { name: "Active (3)", exact: true }).click();

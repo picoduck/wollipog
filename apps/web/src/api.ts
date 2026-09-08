@@ -14,6 +14,7 @@ import type {
   AutomationTriggerView,
   BoardColumn,
   BoxView,
+  ChildSessionRegistryPage,
   CreatePodRequest,
   CreateProjectRequest,
   CreateAutomationRequest,
@@ -826,6 +827,10 @@ export function createApiClient(transport: ApiTransport) {
   /** Exact authorized lookup used by direct links, including archived sessions omitted from the
    * live dashboard snapshot. */
   session: (id: string) => req<{ session: SessionView }>(sessionLookupPath(id)),
+  childSessions: (id: string, eventEpoch: number, after = 0, limit = 50) => {
+    const query = new URLSearchParams({ eventEpoch: String(eventEpoch), after: String(after), limit: String(limit) });
+    return req<ChildSessionRegistryPage>(`/api/sessions/${encodeURIComponent(id)}/child-sessions?${query}`);
+  },
   /** The session's usage split by producing model, from the control plane's per-session ledger. */
   sessionUsage: (id: string) => req<SessionUsageResponse>(`/api/sessions/${encodeURIComponent(id)}/usage`),
 

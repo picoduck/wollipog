@@ -3353,6 +3353,60 @@ test("parent_tool_use_id is carried onto subagent events; absent for top-level",
   assert.equal("parentToolUseId" in top2, false);
 });
 
+test("agent spawn carries only a bounded structured role and excludes task prose", () => {
+  const h = makeHarness();
+  h.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "task-safe", name: "Task", input: {
+    description: "  Audit\u0000   child  ", subagent_type: "reviewer", prompt: "private prompt must not become identity",
+  } }] } });
+  const tool = h.events.find((event) => event.kind === "tool_call" && event.toolCallId === "task-safe") as
+    Extract<SessionEventPayload, { kind: "tool_call" }>;
+  assert.equal(tool.subagentName, undefined);
+  assert.equal(tool.subagentRole, "reviewer");
+
+  const generic = makeHarness();
+  generic.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "task-generic", name: "Task", input: {
+    prompt: "still private",
+  } }] } });
+  const genericTool = generic.events.find((event) => event.kind === "tool_call" && event.toolCallId === "task-generic") as
+    Extract<SessionEventPayload, { kind: "tool_call" }>;
+  assert.equal(genericTool.subagentName, undefined);
+  assert.equal(genericTool.subagentRole, undefined);
+});
+
+test("partial and full Task records emit compatible observations for the same spawn", () => {
+  const h = makeHarness();
+  h.feed({
+    type: "stream_event",
+    event: {
+      type: "content_block_start",
+      content_block: { type: "tool_use", id: "task-combined", name: "Task" },
+    },
+  });
+  h.feed({ type: "assistant", message: { content: [{
+    type: "tool_use",
+    id: "task-combined",
+    name: "Task",
+    input: {
+      description: "private task prose",
+      prompt: "private prompt",
+      subagent_type: "reviewer",
+    },
+  }] } });
+
+  const observations = h.events.filter((event) =>
+    event.kind === "tool_call" && event.toolCallId === "task-combined",
+  ) as Extract<SessionEventPayload, { kind: "tool_call" }>[];
+  assert.equal(observations.length, 2);
+  assert.deepEqual(observations.map((event) => ({
+    status: event.status,
+    name: event.subagentName,
+    role: event.subagentRole,
+  })), [
+    { status: "pending", name: undefined, role: undefined },
+    { status: "in_progress", name: undefined, role: "reviewer" },
+  ]);
+});
+
 test("parented assistant message usage emits a subagent token rollup without duplicating top-level usage", () => {
   const h = makeHarness();
   h.feed({

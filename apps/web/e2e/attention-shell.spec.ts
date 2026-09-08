@@ -68,7 +68,7 @@ for (const width of [390, 1280]) test(`real shell threads an exact attention rou
   await row.locator("summary").click();
   // Focusing a nonselected picker must select it without expanding the mobile session.
   await expect(row).toHaveAttribute("aria-selected", "true");
-  await row.getByRole("button", { name: "Request 2 · Child Approval Required", exact: true }).click();
+  await row.getByRole("button", { name: "Request 2 · Child Owner Unavailable · Approval Required", exact: true }).click();
   const panel = page.getByRole("complementary", { name: "Agents", exact: true });
   await expect(panel).toBeVisible();
   const request = panel.getByRole("region", { name: "Selected Worker Request", exact: true });

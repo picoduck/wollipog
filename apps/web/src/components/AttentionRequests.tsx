@@ -1,4 +1,5 @@
 import { pendingRequests, sessionAttentionStatus, type SessionView } from "@wollipog/protocol";
+import { titleCaseLabel } from "../format.js";
 import type { View } from "../navigation.js";
 import { useEffect, useRef } from "react";
 
@@ -31,10 +32,20 @@ export function AttentionRequests({ session, onNavigate, keyboardActive = true, 
     }}>
     <summary tabIndex={keyboardActive ? 0 : -1}>{requests.length} {requests.length === 1 ? "Request" : "Requests"}</summary>
     <div className="attention-requests-picker" role="group" aria-label="Pending Requests">
-      {requests.slice(0, 10).map((request, index) => <button type="button" className="btn sm"
-        tabIndex={keyboardActive ? 0 : -1} key={request.requestId} onClick={() => open(request.requestId)}>
-        Request {index + 1} · {sessionAttentionStatus({ status: session.status, pendingApproval: request })?.label ?? "Input Required"}
-      </button>)}
+      {requests.slice(0, 10).map((request, index) => {
+        const owner = session.attentionOwners?.find((value) => value.requestId === request.requestId);
+        const role = owner?.role ? titleCaseLabel(owner.role) : undefined;
+        const ownerLabel = request.ownerToolUseId
+          ? owner?.resolved ? `${owner.name ?? "Subagent"}${role ? ` · ${role}` : ""}`
+            : `Request ${index + 1} · Child Owner Unavailable`
+          : null;
+        const action = sessionAttentionStatus({ status: session.status,
+          pendingApproval: { ...request, ownerToolUseId: undefined } });
+        return <button type="button" className="btn sm"
+          tabIndex={keyboardActive ? 0 : -1} key={request.requestId} onClick={() => open(request.requestId)}>
+          {owner?.resolved ? `Request ${index + 1} · ` : ""}{ownerLabel ?? `Request ${index + 1}`} · {action?.label ?? "Input Required"}
+        </button>;
+      })}
       <button type="button" className="btn sm" tabIndex={keyboardActive ? 0 : -1} onClick={() => open()}>View All Requests</button>
     </div>
   </details>;

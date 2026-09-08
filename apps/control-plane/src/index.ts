@@ -27,6 +27,7 @@ import {
 } from "./runner-channel.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
+import { KeyedSerialTaskQueue } from "./keyed-serial-task-queue.js";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
   registerAutomationTriggerContentTypeParser,
@@ -142,6 +143,7 @@ import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
 import { childSessionDefaultsError } from "./child-session-guardrails.js";
+import { ChildSessionRegistryProjector } from "./child-session-registry.js";
 import {
   decideScopedBoxLifecycle,
   parseBoxLifecycleForce,
@@ -345,6 +347,16 @@ const app = Fastify({
     },
   },
 });
+
+const CHILD_SESSION_REGISTRY_CACHE_LIMIT = 128;
+const CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE = 1_000;
+const childSessionRegistries = new Map<string, {
+  eventEpoch: number;
+  lastSeq: number;
+  candidateAgentIds: Set<string>;
+  projector: ChildSessionRegistryProjector;
+}>();
+const childSessionRegistryTasks = new KeyedSerialTaskQueue();
 const markStartupReady = installStartupReadinessGate(app);
 const warnedLegacyRunnerCredentialIds = new Set<string>();
 
@@ -2978,6 +2990,81 @@ app.get("/api/sessions/:id", async (req, reply) => {
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
   return { session };
+});
+
+app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
+  const after = query.after === undefined ? 0 : Number(query.after);
+  const limit = query.limit === undefined ? 50 : Number(query.limit);
+  const requestedEpoch = query.eventEpoch === undefined ? undefined : Number(query.eventEpoch);
+  if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+      (requestedEpoch !== undefined && (!Number.isSafeInteger(requestedEpoch) || requestedEpoch < 0))) {
+    return reply.code(400).send({ error: "invalid child-session page" });
+  }
+  const session = db.getSession(id);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  const eventEpoch = session.eventEpoch ?? 0;
+  if (requestedEpoch !== undefined && requestedEpoch !== eventEpoch) {
+    return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+  }
+  // Hydration reads the runner's complete durable SessionStore. The browser receives only this
+  // allowlisted projection, never raw history or a client-selected ownership join.
+  await svc.hydrateHistory(id);
+  const current = db.getSession(id);
+  if (!current) return reply.code(404).send({ error: "session not found" });
+  if ((current.eventEpoch ?? 0) !== eventEpoch) {
+    return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+  }
+  return childSessionRegistryTasks.run(id, async () => {
+    const lockedSession = db.getSession(id);
+    if (!lockedSession) return reply.code(404).send({ error: "session not found" });
+    if ((lockedSession.eventEpoch ?? 0) !== eventEpoch) {
+      return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+    }
+    const throughSeq = db.sessionEventTailSeq(id);
+    let registry = childSessionRegistries.get(id);
+    if (!registry || registry.eventEpoch !== eventEpoch) {
+      registry = { eventEpoch, lastSeq: 0, candidateAgentIds: new Set(), projector: new ChildSessionRegistryProjector() };
+    }
+    const previousTail = registry.lastSeq;
+    const newAgentIds = db.listAgentToolCallIds(id, previousTail, throughSeq)
+      .filter((candidate) => !registry!.candidateAgentIds.has(candidate));
+    for (const candidate of newAgentIds) registry.candidateAgentIds.add(candidate);
+    const scan = async (candidateIds: readonly string[], scanAfter: number, scanThrough: number) => {
+      let cursor = scanAfter;
+      while (candidateIds.length && cursor < scanThrough) {
+        const appended = db.listChildSessionProjectionPage(
+          id, candidateIds, cursor, scanThrough, CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE,
+        );
+        registry!.projector.append(appended, registry!.candidateAgentIds);
+        if (appended.length) cursor = appended.at(-1)!.seq;
+        if (appended.length < CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE) break;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    };
+    // A newly observed spawn can own imported/pre-spawn evidence. Recover only that ID's indexed
+    // evidence before the old tail, then scan the append-only suffix once for every known child.
+    await scan(newAgentIds, 0, previousTail);
+    await scan([...registry.candidateAgentIds], previousTail, throughSeq);
+    const finalSession = db.getSession(id);
+    const finalTail = db.sessionEventTailSeq(id);
+    if (!finalSession || (finalSession.eventEpoch ?? 0) !== eventEpoch || finalTail !== throughSeq) {
+      childSessionRegistries.delete(id);
+      return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+    }
+    registry.lastSeq = throughSeq;
+    // Refresh insertion order for a small LRU. Cached state contains only structured child facts,
+    // never raw prose/output; old sessions rebuild once if revisited after eviction.
+    childSessionRegistries.delete(id);
+    childSessionRegistries.set(id, registry);
+    while (childSessionRegistries.size > CHILD_SESSION_REGISTRY_CACHE_LIMIT) {
+      const oldest = childSessionRegistries.keys().next().value;
+      if (oldest === undefined) break;
+      childSessionRegistries.delete(oldest);
+    }
+    return registry.projector.page(finalSession.pendingApproval, eventEpoch, after, limit);
+  });
 });
 
 app.get("/api/sessions/:id/side-chat", async (req, reply) => {

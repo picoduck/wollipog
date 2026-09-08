@@ -332,7 +332,10 @@
 // 115: explicitly confirmed, runner-revalidated machine skill adoption.
 // 116: bounded machine skill adoption recovery inspection and explicit restore.
 // 117: loopback host-administration doctor route (`wollipog admin doctor`).
-export const PROTOCOL_VERSION = 117;
+// 118: agent-spawn events may carry bounded, structured display identity. The control plane uses
+//      the complete runner history to expose a bounded child-session registry without making the
+//      dashboard's currently loaded transcript window an identity or liveness source.
+export const PROTOCOL_VERSION = 118;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -1850,12 +1853,57 @@ export interface SessionAttentionStatus {
   description: string;
 }
 
+/** One exact child identity projected from the runner-owned session history. `toolCallId` is the
+ * spawning agent tool; `parentToolUseId` is copied only from that structured spawn event. */
+export interface ChildSessionRegistryEntry {
+  toolCallId: string;
+  parentToolUseId?: string;
+  name: string;
+  role?: string;
+  status: string;
+  lifecycle?: AuthoritativeSubagentLifecycle;
+  sourceSeq: number;
+  startedAt: number;
+  lastActivityAt: number;
+  completedAt?: number;
+  toolCount: number;
+  latestTool?: { title: string; active: boolean };
+}
+
+/** Pending ownership is returned separately and on every page so pagination can never hide or
+ * silently retarget an unresolved request. A false `resolved` value remains session-actionable. */
+export interface ChildSessionAttentionOwner {
+  requestId: string;
+  toolCallId: string;
+  resolved: boolean;
+  name?: string;
+  role?: string;
+}
+
+export interface ChildSessionRegistryPage {
+  children: ChildSessionRegistryEntry[];
+  attentionOwners: ChildSessionAttentionOwner[];
+  /** Exact agent ids that could not safely become rows because the provider reused an id. */
+  unidentifiedChildren: number;
+  eventEpoch: number;
+  nextAfter: number | null;
+  truncated: boolean;
+}
+
 /** Canonical, compatibility-safe projection of the concrete action a person must take. */
 export function sessionAttentionStatus(
-  session: Pick<SessionView, "status" | "pendingApproval">,
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
 ): SessionAttentionStatus | null {
   const result = singleSessionAttentionStatus(session);
   if (!result || !session.pendingApproval?.ownerToolUseId || session.pendingApproval.additionalRequests?.length) return result;
+  const owner = session.attentionOwners?.find((value) =>
+    value.requestId === session.pendingApproval?.requestId && value.toolCallId === session.pendingApproval.ownerToolUseId);
+  if (owner?.resolved) {
+    const role = owner.role?.replace(/\b\p{L}/gu, (letter) => letter.toUpperCase());
+    const identity = `${owner.name ?? "Subagent"}${role ? ` · ${role}` : ""}`;
+    return { ...result, label: `${identity} · ${result.label}`,
+      description: `${identity} owns this request. ${result.description} Open Agents to inspect the exact worker and request.` };
+  }
   return { ...result, label: `Child ${result.label}`,
     description: `A child agent owns this request. ${result.description} Open Agents to inspect the owner and exact request.` };
 }
@@ -2740,6 +2788,10 @@ export type SessionEventPayload =
       parentToolUseId?: string;
       /** Provider-observed lifecycle for an agent-spawning tool (v92+). */
       subagentLifecycle?: AuthoritativeSubagentLifecycle;
+      /** Bounded provider-structured display identity for an agent spawn. Never parsed from
+       * transcript prose or provider-private thread/process identifiers. */
+      subagentName?: string;
+      subagentRole?: string;
     }
   | {
       kind: "tool_call_update";
@@ -3602,6 +3654,9 @@ export interface SessionView {
   /** Short snippet of the latest agent message, for the card preview. */
   preview: string | null;
   pendingApproval: PendingApproval | null;
+  /** Compact exact-owner joins for current pending requests. The full child registry remains
+   * paginated; unresolved ids stay present with `resolved: false`. */
+  attentionOwners?: ChildSessionAttentionOwner[];
   driver: AgentDriverKind;
   model: string | null;
   /** Provider-resolved model used by the live session; the selected alias remains in `model`. */

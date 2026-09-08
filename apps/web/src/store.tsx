@@ -1547,6 +1547,7 @@ export class Store {
   private state: State;
   private readonly listeners = new Set<() => void>();
   private inboxPersistenceEnabled = true;
+  private attentionActivation = 0;
 
   constructor(
     initialView: View = { name: "inbox" },
@@ -1584,12 +1585,23 @@ export class Store {
   };
 
   navigate = (view: View): void => {
-    if (sameView(this.state.view, view)) return;
-    this.dispatch({ type: "navigate", view });
-    this.onNavigate?.(view);
+    const activated = view.name === "session" && view.attention
+      ? { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }
+      : view;
+    if (sameView(this.state.view, activated)) {
+      if (activated.name === "session" && activated.attention) this.dispatch({ type: "navigate", view: activated });
+      return;
+    }
+    this.dispatch({ type: "navigate", view: activated });
+    this.onNavigate?.(activated);
   };
   navigateFromHistory = (view: View): void => {
-    if (!sameView(this.state.view, view)) this.dispatch({ type: "navigate", view });
+    const activated = view.name === "session" && view.attention
+      ? { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }
+      : view;
+    if (!sameView(this.state.view, activated) || (activated.name === "session" && activated.attention)) {
+      this.dispatch({ type: "navigate", view: activated });
+    }
   };
   setInboxPersistenceEnabled = (enabled: boolean): void => {
     if (enabled === this.inboxPersistenceEnabled) return;
