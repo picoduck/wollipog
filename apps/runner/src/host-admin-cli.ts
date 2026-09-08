@@ -396,6 +396,25 @@ export function formatStatus(status: HostAdminStatusView): string {
   return lines.join("\n");
 }
 
+/**
+ * A minted device whose one-time secret could not be delivered must not stay active. Returns the
+ * error to throw: the original failure plus what happened to the device.
+ */
+async function abandonMintedDevice(client: Client, deviceId: string | undefined, failure: Error): Promise<CliError> {
+  const detail = failure.message;
+  const exitCode = failure instanceof CliError ? failure.exitCode : 1;
+  if (!deviceId) return new CliError(`${detail}; the control plane response named no device to revoke`, exitCode);
+  try {
+    await client.del(`/api/devices/${encodeURIComponent(deviceId)}`);
+    return new CliError(`${detail}; the newly minted device ${deviceId} was revoked`, exitCode);
+  } catch (revokeError) {
+    return new CliError(
+      `${detail}; the newly minted device ${deviceId} could not be revoked (${(revokeError as Error).message}); run: wollipog admin device revoke ${deviceId} --yes`,
+      exitCode,
+    );
+  }
+}
+
 interface DeviceCreateReply {
   device: DeviceView;
   token: string;
@@ -481,53 +500,59 @@ export async function runHostAdminCli(
       const outputPath = output ? resolve(host.cwd(), output) : null;
       if (outputPath && pathOccupied(outputPath)) throw new CliError(`refusing to overwrite existing output file ${outputPath}`);
       const reply = await client.post<DeviceCreateReply>("/api/devices", { name, ...(userId ? { userId } : {}) });
-      if (!PAIR_TOKEN_RE.test(reply.token)) throw new CliError("control plane returned an unusable device token");
-      let origin: string;
-      let originSource: "flag" | "public-origin" | "bind-host" | "loopback";
-      if (explicitOrigin) {
-        origin = explicitOrigin.origin;
-        originSource = "flag";
-        if (explicitOrigin.warning) warn(explicitOrigin.warning);
-      } else if (reply.pairing.publicOrigin) {
-        origin = reply.pairing.publicOrigin;
-        originSource = "public-origin";
-      } else if (reply.pairing.hosts.length > 0) {
-        const bindHost = reply.pairing.hosts[0]!;
-        origin = `http://${bindHost.includes(":") ? `[${bindHost}]` : bindHost}:${reply.pairing.port}`;
-        originSource = "bind-host";
-        warn(`no CONTROL_PLANE_PUBLIC_ORIGIN is configured; the link uses plain HTTP to bind address ${reply.pairing.hosts[0]} and is not encrypted. Set CONTROL_PLANE_PUBLIC_ORIGIN or pass --origin.`);
-      } else {
-        origin = `http://127.0.0.1:${reply.pairing.port}`;
-        originSource = "loopback";
-        warn("control plane is bound to loopback only and no CONTROL_PLANE_PUBLIC_ORIGIN is configured; this link only works on this machine. Set CONTROL_PLANE_PUBLIC_ORIGIN or pass --origin for a remote client.");
-      }
-      if (!reply.pairing.webServed) warn("this control plane serves no web dashboard bundle; the desktop app can still use the link via Connections → Instances → Add Remote Instance.");
-      const pairingUrl = `${origin}/#pair=${reply.token}`;
-      const summary = { device: reply.device, origin, originSource };
-      if (outputPath) {
-        try {
-          writeProtectedSecretFile(outputPath, `${pairingUrl}\n`);
-        } catch (error) {
-          // The only plaintext is now undeliverable; do not leave an active credential behind.
-          const detail = (error as Error).message;
-          try {
-            await client.del(`/api/devices/${encodeURIComponent(reply.device.deviceId)}`);
-            throw new CliError(`${detail}; the newly minted device ${reply.device.deviceId} was revoked`);
-          } catch (revokeError) {
-            if (revokeError instanceof CliError && revokeError.message.startsWith(detail)) throw revokeError;
-            throw new CliError(`${detail}; the newly minted device ${reply.device.deviceId} could not be revoked (${(revokeError as Error).message}); run: wollipog admin device revoke ${reply.device.deviceId} --yes`);
-          }
+      // From here until the secret is delivered, any failure revokes the device: its only
+      // plaintext would otherwise be lost while the credential stayed active.
+      let delivered = false;
+      try {
+        if (typeof reply.token !== "string" || !PAIR_TOKEN_RE.test(reply.token)) {
+          throw new CliError("control plane returned an unusable device token");
         }
-        emit({ ...summary, outputPath },
-          `Paired device ${reply.device.deviceId} (${reply.device.name}) for ${reply.device.userName}.\n` +
-            `Pairing link written once to ${outputPath} (mode 0600). Open it in a browser or paste it into Connections → Instances → Add Remote Instance.`);
-      } else {
-        emit({ ...summary, pairingUrl },
-          `Paired device ${reply.device.deviceId} (${reply.device.name}) for ${reply.device.userName}.\n` +
-            "This link is shown once; open it in a browser or paste it into Connections → Instances → Add Remote Instance:\n" +
-            pairingUrl);
+        let origin: string;
+        let originSource: "flag" | "public-origin" | "bind-host" | "loopback";
+        if (explicitOrigin) {
+          origin = explicitOrigin.origin;
+          originSource = "flag";
+          if (explicitOrigin.warning) warn(explicitOrigin.warning);
+        } else if (reply.pairing.publicOrigin) {
+          origin = reply.pairing.publicOrigin;
+          originSource = "public-origin";
+        } else if (reply.pairing.hosts.length > 0) {
+          const bindHost = reply.pairing.hosts[0]!;
+          origin = `http://${bindHost.includes(":") ? `[${bindHost}]` : bindHost}:${reply.pairing.port}`;
+          originSource = "bind-host";
+          warn(`no CONTROL_PLANE_PUBLIC_ORIGIN is configured; the link uses plain HTTP to bind address ${bindHost} and is not encrypted. Set CONTROL_PLANE_PUBLIC_ORIGIN or pass --origin.`);
+        } else {
+          origin = `http://127.0.0.1:${reply.pairing.port}`;
+          originSource = "loopback";
+          warn("control plane is bound to loopback only and no CONTROL_PLANE_PUBLIC_ORIGIN is configured; this link only works on this machine. Set CONTROL_PLANE_PUBLIC_ORIGIN or pass --origin for a remote client.");
+        }
+        if (!reply.pairing.webServed) warn("this control plane serves no web dashboard bundle; the desktop app can still use the link via Connections → Instances → Add Remote Instance.");
+        const pairingUrl = `${origin}/#pair=${reply.token}`;
+        try {
+          new URL(pairingUrl);
+        } catch {
+          // A scoped or otherwise unlinkable bind address (fe80::1%eth0) cannot become a link.
+          throw new CliError(`${origin} cannot form a valid pairing link; set CONTROL_PLANE_PUBLIC_ORIGIN or pass --origin <public-origin>`);
+        }
+        const summary = { device: reply.device, origin, originSource };
+        if (outputPath) {
+          writeProtectedSecretFile(outputPath, `${pairingUrl}\n`);
+          delivered = true;
+          emit({ ...summary, outputPath },
+            `Paired device ${reply.device.deviceId} (${reply.device.name}) for ${reply.device.userName}.\n` +
+              `Pairing link written once to ${outputPath} (mode 0600). Open it in a browser or paste it into Connections → Instances → Add Remote Instance.`);
+        } else {
+          delivered = true;
+          emit({ ...summary, pairingUrl },
+            `Paired device ${reply.device.deviceId} (${reply.device.name}) for ${reply.device.userName}.\n` +
+              "This link is shown once; open it in a browser or paste it into Connections → Instances → Add Remote Instance:\n" +
+              pairingUrl);
+        }
+        return 0;
+      } catch (error) {
+        if (delivered) throw error;
+        throw await abandonMintedDevice(client, reply.device?.deviceId, error as Error);
       }
-      return 0;
     }
 
     if (verb === "revoke") {

@@ -70,6 +70,7 @@ function server(options: {
   boundBeyondLoopback?: boolean;
   webServed?: boolean;
   revokeNewDeviceStatus?: number;
+  mintedToken?: string;
 } = {}) {
   const calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: string }> = [];
   const fetch: McpFetch = async (url, init) => {
@@ -97,7 +98,7 @@ function server(options: {
       const body = JSON.parse(init.body ?? "{}") as { name: string; userId?: string };
       return respond(201, {
         device: { deviceId: "dev_new", name: body.name, createdAt: 1, lastSeenAt: null, userId: body.userId ?? "usr_local", userName: "Local Owner", organizationId: "org_personal", organizationName: "Personal", role: "owner" },
-        token: DEVICE_TOKEN,
+        token: options.mintedToken ?? DEVICE_TOKEN,
         pairing: {
           hosts: options.hosts ?? [],
           port: 4317,
@@ -422,4 +423,28 @@ test("writeProtectedSecretFile stays no-replace without hard links and removes a
   assert.throws(() => writeProtectedSecretFile(partial, "secret\n", failingSecondWrite), /could not write .*disk full/u);
   assert.ok(!existsSync(partial), "a failed fallback write leaves no partial file");
   assert.deepEqual(readdirSync(root).filter((name) => name.includes(".pending-")), []);
+});
+
+test("admin device create revokes a minted device when the token or composed link is unusable", async (t) => {
+  const { tokenFile } = fixture(t);
+  const tty = { stdoutIsTTY: true };
+
+  const badToken = server({ publicOrigin: "https://wollipog.example.ts.net", mintedToken: "not a token!" });
+  const bad = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--json"], env(tokenFile), bad.io, badToken.fetch, host), 1);
+  assert.match(JSON.parse(bad.stdout()).error, /unusable device token; the newly minted device dev_new was revoked/u);
+  assert.ok(badToken.calls.some((call) => call.method === "DELETE" && call.url.endsWith("/api/devices/dev_new")));
+
+  const scoped = server({ hosts: ["fe80::1%eth0"], boundBeyondLoopback: true });
+  const link = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--json"], env(tokenFile), link.io, scoped.fetch, host), 1);
+  const error = JSON.parse(link.stdout()).error as string;
+  assert.match(error, /cannot form a valid pairing link; set CONTROL_PLANE_PUBLIC_ORIGIN or pass --origin/u);
+  assert.match(error, /device dev_new was revoked/u);
+  assert.ok(!error.includes(DEVICE_TOKEN));
+  assert.ok(scoped.calls.some((call) => call.method === "DELETE" && call.url.endsWith("/api/devices/dev_new")));
+
+  const rescued = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--origin", "https://box.example.ts.net", "--json"], env(tokenFile), rescued.io, server({ hosts: ["fe80::1%eth0"], boundBeyondLoopback: true }).fetch, host), 0);
+  assert.equal(JSON.parse(rescued.stdout()).pairingUrl, `https://box.example.ts.net/#pair=${DEVICE_TOKEN}`);
 });
