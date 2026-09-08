@@ -395,6 +395,7 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   const webDist = option(args, "--web-dist");
   let runnerId = validateRunnerId(option(args, "--runner-id"), host.hostname);
   const warnings: string[] = [];
+  if (layout.relocatedPrefix) warnings.push(`system layout relocated under ${layout.relocatedPrefix} by WOLLIPOG_SYSTEM_PREFIX; this is not a real system install`);
   if (publicOrigin.warning) warnings.push(publicOrigin.warning);
   // Existing settings win over flags and defaults: the env file and runner config are never
   // rewritten, so health checks and registration waits must use what the services actually run
@@ -442,8 +443,10 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   if (mode === "system") {
     const exists = await host.exec("id", ["-u", layout.account], { timeoutMs: 10_000 });
     if (exists.code !== 0) {
-      const created = await host.exec("useradd", ["--system", "--home-dir", layout.dataDir, "--create-home", "--shell", "/usr/sbin/nologin", layout.account], { timeoutMs: 30_000 });
-      if (created.code !== 0) throw new CliError(`could not create service account ${layout.account}: ${created.stderr.trim()}`);
+      // No skeleton home: install creates and owns the data directory itself, a nologin service
+      // account has no use for dotfiles, and copying /etc/skel can take minutes on some images.
+      const created = await host.exec("useradd", ["--system", "--home-dir", layout.dataDir, "--no-create-home", "--shell", "/usr/sbin/nologin", layout.account], { timeoutMs: 120_000 });
+      if (created.code !== 0) throw new CliError(`could not create service account ${layout.account}: ${created.code === null ? "useradd timed out or could not start" : created.stderr.trim() || `exit ${created.code}`}`);
     }
   }
   const serviceUid = await accountUid(host, layout);
@@ -597,7 +600,7 @@ async function status(args: string[], host: ServiceHost, emit: (data: unknown, t
     const admin = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string; version: string }> } }>(host, effective, ["status"]);
     runners = admin.data?.runners?.items ?? null;
   }
-  const data = { mode, cliVersion: VERSION, envFile: installed?.file ?? null, port, units, health, runners, layout: { dataDir: layout.dataDir, configDir: layout.configDir, unitDir: layout.unitDir } };
+  const data = { mode, cliVersion: VERSION, envFile: installed?.file ?? null, port, units, health, runners, layout: { dataDir: layout.dataDir, configDir: layout.configDir, unitDir: layout.unitDir, relocatedPrefix: layout.relocatedPrefix } };
   const row = (u: UnitState) => `${u.unit.padEnd(32)} ${u.loadState.padEnd(10)} ${`${u.activeState}/${u.subState}`.padEnd(18)} ${u.unitFileState.padEnd(9)} ${u.mainPid !== null ? `pid ${u.mainPid}` : "-"}${u.restarts ? `  restarts ${u.restarts}` : ""}`;
   const lines = [
     `Mode:          ${mode}${installed ? ` (settings from ${installed.file})` : " (no installed control-plane.env found)"}`,
@@ -606,6 +609,7 @@ async function status(args: string[], host: ServiceHost, emit: (data: unknown, t
     `Health:        ${health ? (health.ok ? `ok (${health.detail})` : `NOT healthy (${health.detail})`) : "not installed"} on http://127.0.0.1:${port}/healthz`,
     ...(runners ? [`Runners:       ${runners.length ? runners.map((r) => `${r.runnerId} ${r.status} ${r.version}`).join(", ") : "none registered"}`] : []),
     `Data / Config: ${layout.dataDir} / ${layout.configDir}`,
+    ...(layout.relocatedPrefix ? [`Relocated:     under ${layout.relocatedPrefix} by WOLLIPOG_SYSTEM_PREFIX (not a real system install)`] : []),
   ];
   emit(data, lines.join("\n"));
   const loaded = units.filter((u) => u.loadState === "loaded");

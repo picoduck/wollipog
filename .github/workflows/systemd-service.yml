@@ -1,0 +1,58 @@
+name: Systemd Service
+
+# Runs `wollipog service` against the real systemd of a disposable Ubuntu VM in system mode:
+# install, SIGKILL recovery, boot-style ordering, graceful stop, credential hygiene, uninstall.
+# Only runs when the service code or this check changes, or on demand from the Actions page.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "apps/runner/src/service-cli.ts"
+      - "apps/runner/src/systemd-service.ts"
+      - "apps/runner/src/host-admin-cli.ts"
+      - "apps/runner/src/wollipog-cli.ts"
+      - "scripts/systemd-service-e2e.sh"
+      - ".github/workflows/systemd-service.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'ready_for_review' && 'draft' || 'active' }}
+  cancel-in-progress: true
+
+jobs:
+  systemd-service:
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    name: Systemd Service (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Open the checkout to the service account
+        # The control plane and runner run as the `wollipog` system account from this checkout.
+        run: chmod o+rx "$HOME"
+
+      - name: Run the systemd end-to-end check
+        env:
+          WOLLIPOG_E2E_CONFIRM: "1"
+        run: sudo --preserve-env=WOLLIPOG_E2E_CONFIRM env NODE_BIN="$(command -v node)" bash scripts/systemd-service-e2e.sh
+
+      - name: Service logs on failure
+        if: failure()
+        run: sudo journalctl -u wollipog-control-plane.service -u wollipog-runner.service --no-pager -n 200 || true

@@ -59,6 +59,25 @@ export interface PairingReach {
   webServed: boolean;
   /** The control plane is bound past loopback (else the phone can't reach it). */
   boundBeyondLoopback: boolean;
+  /**
+   * Operator-configured dashboard origin (`CONTROL_PLANE_PUBLIC_ORIGIN`, protocol v114+): the
+   * address remote clients actually reach, typically an HTTPS reverse proxy or Tailscale Serve in
+   * front of a loopback-bound control plane. When set it is the pairing link.
+   */
+  publicOrigin?: string | null;
+}
+
+/** A usable http(s) origin from the operator's public-origin setting, or null. */
+function publicOriginLink(publicOrigin: string | null | undefined, token: string): string | null {
+  if (!publicOrigin) return null;
+  try {
+    const url = new URL(publicOrigin);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password || url.search || url.hash) return null;
+    const path = url.pathname.replace(/\/+$/u, "");
+    return `${url.origin}${path}/#pair=${token}`;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -70,8 +89,12 @@ export function pairingLinks(token: string, reach: PairingReach): { links: strin
   if (!reach.webServed) {
     return { links: [], blocked: "this control plane isn't serving the dashboard (run `pnpm --filter @wollipog/web build`)" };
   }
+  // The operator said where remote clients reach the dashboard; that beats guessing from the bind
+  // address, and it is the only link that works for a loopback bind behind a reverse proxy.
+  const configured = publicOriginLink(reach.publicOrigin, token);
+  if (configured) return { links: [configured], blocked: null };
   if (!reach.boundBeyondLoopback) {
-    return { links: [], blocked: "this control plane is bound to loopback — set CONTROL_PLANE_HOST=0.0.0.0 to reach it from another device" };
+    return { links: [], blocked: "this control plane is bound to loopback — set CONTROL_PLANE_PUBLIC_ORIGIN to the address you reach it at (HTTPS proxy or Tailscale Serve), or CONTROL_PLANE_HOST=0.0.0.0 to reach it directly from another device" };
   }
   if (reach.hosts.length === 0) return { links: [], blocked: "no reachable network address was found on this machine" };
   const host = (h: string) => (h.includes(":") && !h.startsWith("[") ? `[${h}]` : h);
