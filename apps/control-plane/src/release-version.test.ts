@@ -45,7 +45,7 @@ test("release notes disclose the control-plane service compatibility boundary", 
     releaseNotes.match(/draft holds exactly ([0-9]+) assets/u)?.[1],
   );
   assert.equal(documentedAssetCount, EXPECTED_RELEASE_ASSET_COUNT);
-  assert.match(releaseNotes, /14 desktop bundles, 12 runner names, and\s+`SHA256SUMS`/u);
+  assert.match(releaseNotes, /14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the\s+`wollipog-web\.tar\.gz` dashboard bundle, and\s+`SHA256SUMS`/u);
   assert.match(releaseNotes, /Publishing the verified draft remains a\s+manual operator step\./u);
 });
 

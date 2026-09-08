@@ -31,11 +31,21 @@ finished bytes to the compatible `agent-manager-runner-<triple>[.exe]` alias. In
 signing happen only once, before the copy, so each pair is byte-identical. Both names run `--version`
 natively before upload.
 
-After all six native jobs finish, a verification job downloads the 12 published runner assets,
-requires all six pairs to have identical SHA-256 digests, and uploads a lexically sorted
-`SHA256SUMS` covering both names. It then compares that manifest with GitHub's recorded asset
-digests and requires exactly 27 release assets: 14 desktop bundles, 12 runner names, and the
-manifest. A missing, extra, empty, malformed, or mismatched runner asset fails the release workflow.
+Each matrix job also publishes the **headless control plane**: the exact injected and signed
+sidecar bytes are copied to `apps/control-plane/dist-bin/wollipog-control-plane-<triple>[.exe]`,
+run natively with `--version` against `APP_RELEASE_VERSION`, compared byte for byte with the
+desktop sidecar, uploaded, and digest-checked like the runner. This is the executable
+`wollipog service install` runs on a server (see [headless deployment](./headless-deployment.md)).
+
+After all six native jobs finish, a verification job builds the browser web bundle once
+(`pnpm --filter @wollipog/web build`, PWA assets included) and uploads it as `wollipog-web.tar.gz`,
+a tarball whose single top-level `web/` directory the control plane serves from beside its
+executable or through `WOLLIPOG_WEB_DIST`. The job then downloads the 12 published runner assets,
+the 6 control-plane executables, and the web bundle, requires all six runner pairs to have identical
+SHA-256 digests, and uploads a lexically sorted `SHA256SUMS` covering all 19 names. It then compares
+that manifest with GitHub's recorded asset digests and requires exactly 34 release assets: 14 desktop
+bundles, 12 runner names, 6 control-plane executables, the web bundle, and the manifest. A missing,
+extra, empty, malformed, or mismatched asset fails the release workflow.
 Because GitHub's release-by-tag endpoint does not expose drafts, this final gate resolves exactly one
 draft from the paginated release collection, fetches every page of its asset endpoint by immutable
 numeric release ID, and retries both transient API errors and not-yet-converged verification
@@ -118,7 +128,7 @@ git push origin vX.Y.Z
 
 The push triggers the workflow. When all six matrix jobs and the final runner-release verification are green, open the draft release on
 GitHub, replace the generic draft body with release notes, review upgrade behavior and known
-limitations, sanity-check the exact 27-asset inventory and `SHA256SUMS`, and **Publish**. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
+limitations, sanity-check the exact 34-asset inventory and `SHA256SUMS`, and **Publish**. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
 as a GitHub pre-release automatically.
 
 ## Test build without tagging

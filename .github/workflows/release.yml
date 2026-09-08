@@ -225,8 +225,42 @@ jobs:
             echo "Verified publisher digest for $asset_name"
           done
 
+      # build-sidecar.mjs also published the injected, signed control-plane sidecar bytes as the
+      # standalone headless asset. Verify its version natively and upload the exact same bytes.
+      - name: Verify & upload control-plane binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          case "$TARGET_TRIPLE" in
+            *-pc-windows-msvc) executable=.exe ;;
+            *) executable= ;;
+          esac
+          control_plane="apps/control-plane/dist-bin/wollipog-control-plane-${TARGET_TRIPLE}${executable}"
+          sh scripts/verify-control-plane-release-version.sh \
+            apps/control-plane/src/release-version.ts \
+            "$control_plane"
+          cmp -s "$control_plane" "apps/desktop/src-tauri/binaries/control-plane-${TARGET_TRIPLE}${executable}"
+          echo "uploading $control_plane -> $RELEASE_TAG"
+          gh release upload "$RELEASE_TAG" "$control_plane" --repo "$GITHUB_REPOSITORY" --clobber
+          asset_name=$(basename "$control_plane")
+          local_sha=$(node -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");console.log(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"))' "$control_plane")
+          remote_digest=$(sh scripts/resolve-draft-release-asset-digest.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$asset_name")
+          if ! printf '%s' "$remote_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::$asset_name has no valid GitHub publisher digest"
+            exit 1
+          fi
+          if [ "${remote_digest#sha256:}" != "$local_sha" ]; then
+            echo "::error::$asset_name publisher digest does not match uploaded bytes"
+            exit 1
+          fi
+          echo "Verified publisher digest for $asset_name"
+
   # The six native jobs must finish before checksums are generated. Downloading the published
   # bytes also detects upload corruption or a stale asset that a local-only digest would miss.
+  # This job also builds and publishes the platform-neutral web bundle for headless deployments.
   verify-runner-release:
     name: Verify runner release assets
     needs: [preflight, build]
@@ -235,12 +269,34 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: pnpm
 
-      - name: Verify runner pairs & publish checksums
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The headless web bundle is the browser build (PWA assets included), not the desktop-trimmed
+      # variant the matrix jobs produce, packaged as a `web/` directory the control plane serves
+      # from beside its executable or via WOLLIPOG_WEB_DIST.
+      - name: Build & publish the web bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          pnpm --filter @wollipog/web build
+          rm -rf web-bundle && mkdir web-bundle
+          cp -R apps/web/dist web-bundle/web
+          test -f web-bundle/web/index.html
+          tar -C web-bundle -czf wollipog-web.tar.gz web
+          gh release upload "$RELEASE_TAG" wollipog-web.tar.gz --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Verify release assets & publish checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
@@ -250,7 +306,10 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --pattern 'wollipog-runner-*' \
             --pattern 'agent-manager-runner-*' \
+            --pattern 'wollipog-control-plane-*' \
+            --pattern 'wollipog-web.tar.gz' \
             --dir runner-assets
+          cmp -s wollipog-web.tar.gz runner-assets/wollipog-web.tar.gz
           node scripts/verify-runner-release-assets.mjs local \
             --assets-dir runner-assets \
             --manifest SHA256SUMS

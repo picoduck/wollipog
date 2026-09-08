@@ -15,7 +15,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSyn
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readCompatibleEnv } from "../../../scripts/env-compat.mjs";
-import { assertRunnerTargetHost } from "../../runner/scripts/runner-artifacts.mjs";
+import { assertRunnerTargetHost, controlPlaneArtifactName, publishLegacyRunnerAlias } from "../../runner/scripts/runner-artifacts.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..", "..", ".."); // repo root
@@ -85,6 +85,16 @@ await inject(out, "NODE_SEA_BLOB", readFileSync(blob), {
 if (process.platform === "darwin") execFileSync("codesign", ["--sign", "-", out], { stdio: "inherit" });
 
 console.log("sidecar built ->", out);
+
+// 4b) Publish the same finished bytes as the standalone headless control-plane release asset.
+// Injection and macOS signing happened once above, so the release asset and the desktop sidecar
+// are byte-identical; `wollipog service install` runs this executable directly on a server.
+const controlPlaneDistDir = join(root, "apps", "control-plane", "dist-bin");
+mkdirSync(controlPlaneDistDir, { recursive: true });
+const headlessControlPlane = join(controlPlaneDistDir, controlPlaneArtifactName(triple));
+rmSync(headlessControlPlane, { force: true });
+publishLegacyRunnerAlias(out, headlessControlPlane);
+console.log("headless control plane ->", headlessControlPlane);
 
 // 5) Build the runner for the same native target and copy it into Tauri's sidecar directory.
 // The desktop owns this copy so "Set Up This Machine" can start a config-free local runner

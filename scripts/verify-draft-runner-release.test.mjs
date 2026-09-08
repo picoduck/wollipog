@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  headlessArtifactNames,
   runnerArtifactNames,
   RUNNER_TARGET_TRIPLES,
 } from "../apps/runner/scripts/runner-artifacts.mjs";
@@ -52,6 +53,11 @@ test(
         manifestLines.push(`${digest}  ${name}`);
       }
     }
+    for (const name of headlessArtifactNames()) {
+      const digest = createHash("sha256").update(`headless asset ${name}`).digest("hex");
+      runnerAssets.push({ name, size: 100, digest: `sha256:${digest}` });
+      manifestLines.push(`${digest}  ${name}`);
+    }
     const manifestText = `${manifestLines.sort().join("\n")}\n`;
     writeFileSync(manifest, manifestText);
     const assets = [
@@ -67,7 +73,7 @@ test(
         digest: `sha256:${String(index).padStart(64, "0")}`,
       })),
     ];
-    assert.equal(assets.length, 27);
+    assert.equal(assets.length, 34);
     const assetPagesJson = JSON.stringify([assets.slice(0, 13), assets.slice(13)]);
     const incompleteAssetPagesJson = JSON.stringify([assets.slice(0, -1)]);
 

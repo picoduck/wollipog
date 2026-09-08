@@ -147,7 +147,7 @@ import {
   parseBoxLifecycleForce,
 } from "./box-lifecycle.js";
 import { registerBoxLegacyAdoptionRoute } from "./box-legacy-adoption-route.js";
-import { RUNNER_RELEASE_TAG } from "./release-version.js";
+import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
@@ -271,6 +271,13 @@ const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE
 const RUNNER_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
 const LOCAL_DEVICE_TOKEN_PATH = localDeviceTokenPath(DB_PATH);
 const STARTED_AT = Date.now();
+
+// Release verification runs the packaged executable with --version before uploading it; answer
+// before any database, credential, or network work happens.
+if (process.argv.includes("--version")) {
+  writeSync(1, `${APP_RELEASE_VERSION}\n`);
+  process.exit(0);
+}
 
 // Recovery is read-only: wrong coordinates must fail loudly instead of minting a plausible but
 // unusable owner credential. Synchronous fd writes make the one-line contract flush-safe on Windows.
