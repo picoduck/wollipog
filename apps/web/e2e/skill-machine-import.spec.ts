@@ -65,12 +65,12 @@ test("a snapshot-capable runner explains the newer recovery protocol requirement
   await expect(page.getByText("Recovery inspection requires protocol 116 or newer.")).toBeVisible();
 });
 
-test("a macOS runner remains unavailable without a native no-follow snapshot reader", async ({ page }) => {
+test("a macOS runner offers snapshots through its native no-follow reader", async ({ page }) => {
   await page.goto("/skills-removals-e2e.html?macos=1");
   await page.getByRole("button", { name: "Import from Machine" }).click();
-  await expect(page.getByRole("button", { name: "Discover Skills" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Discover Skills" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
-  await expect(page.getByText("No compatible connected machines.")).toBeVisible();
+  await expect(page.getByText("Recovery inspection and source adoption require a Linux runner.")).toBeVisible();
 });
 
 test("a Windows runner offers snapshots while explaining that adoption remains Linux-only", async ({ page }) => {

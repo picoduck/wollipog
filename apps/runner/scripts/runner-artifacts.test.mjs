@@ -79,4 +79,6 @@ test("the binary producer injects and signs only the canonical artifact before c
   assert.ok(source.indexOf("const out = join(outDir, names.canonical)") < source.indexOf("await inject(out"));
   assert.ok(source.indexOf("await inject(out") < source.indexOf("publishLegacyRunnerAlias(out, legacyOut)"));
   assert.match(source, /assertRunnerTargetHost\(triple, process\.platform, process\.arch\)/u);
+  assert.match(source, /assets\["wollipog\/macos-skill-snapshots"\] = helper/u);
+  assert.match(source, /process\.platform === "darwin"[\s\S]*\/usr\/bin\/clang/u);
 });
