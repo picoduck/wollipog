@@ -91,9 +91,16 @@ class CliError extends Error {
   }
 }
 
+/**
+ * `--name value` or `--name=value`. A following token that is itself an option (`--runner --yes`)
+ * means the value was omitted; only the `=` form can supply a value that starts with `--`.
+ */
 function option(args: string[], name: string): string | undefined {
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === name) return args[i + 1];
+    if (args[i] === name) {
+      const value = args[i + 1];
+      return value !== undefined && !value.startsWith("--") ? value : undefined;
+    }
     if (args[i]?.startsWith(`${name}=`)) return args[i]!.slice(name.length + 1);
   }
   return undefined;
@@ -276,6 +283,8 @@ export function pathOccupied(path: string): boolean {
  * hard link publishes the complete contents atomically; an existing path is never overwritten. On
  * filesystems without hard links the fallback is an exclusive create that still never replaces an
  * existing file, and a failed write removes the partial file instead of leaving it behind.
+ * Contract: if this throws, nothing was published at `path`; once the live file exists the call
+ * returns normally even if removing the staged hard link fails (both are the same 0600 inode).
  */
 export function writeProtectedSecretFile(
   path: string,
@@ -322,7 +331,11 @@ export function writeProtectedSecretFile(
     }
   } finally {
     if (fd !== null) closeSync(fd);
-    rmSync(staged, { force: true });
+    try {
+      rmSync(staged, { force: true });
+    } catch {
+      /* The live file is already published; a leftover staged link is the same protected inode. */
+    }
   }
 }
 
@@ -490,8 +503,10 @@ async function runnerCredentialCommand(
   const runnerId = option(args, "--runner");
   if (verb !== "issue" && verb !== "rotate" && verb !== "revoke") throw new CliError(hostAdminUsage(), 2);
   if (runnerId === undefined || runnerId === "") throw new CliError(`admin runner-credential ${verb} requires --runner <runner-id>`, 2);
-  if (/[\u0000-\u0020\u007f/\\?#]/u.test(runnerId) || runnerId.length > 128) {
-    throw new CliError("--runner must be an exact runner id without whitespace, control characters, or / \\ ? #", 2);
+  // Mirrors the runner's own attestation rules: dot segments would also be rewritten by URL
+  // canonicalization (`/api/runner-credentials/../rotate`), so they must never reach a request.
+  if (/[\u0000-\u0020\u007f/\\?#]/u.test(runnerId) || runnerId.length > 128 || runnerId === "." || runnerId === "..") {
+    throw new CliError("--runner must be an exact runner id without whitespace, control characters, dot segments, or / \\ ? #", 2);
   }
   const encodedRunner = encodeURIComponent(runnerId);
 
@@ -520,6 +535,7 @@ async function runnerCredentialCommand(
     ? await client.post<RunnerCredentialSecret>("/api/runner-credentials", { runnerId, ...body })
     : await client.post<RunnerCredentialSecret>(`/api/runner-credentials/${encodedRunner}/rotate`, body);
   let delivered = false;
+  let deliveryAttempted = false;
   try {
     if (typeof secret.credential?.credentialId !== "string") throw new CliError("control plane returned no credential record");
     if (typeof secret.token !== "string" || !RUNNER_TOKEN_RE.test(secret.token)) throw new CliError("control plane returned an unusable runner token");
@@ -529,23 +545,33 @@ async function runnerCredentialCommand(
       : `Rotated runner ${runnerId}: pending credential ${secret.credential.credentialId} replaces the current one when the runner registers with it; the current credential stays active until then.\n`;
     const usage = "Start the runner with --token-file <file> or RUNNER_TOKEN_FILE; the token never belongs in argv, unit files, or logs.";
     if (outputPath) {
+      // The helper either publishes the complete file or throws having published nothing.
       writeProtectedSecretFile(outputPath, `${secret.token}\n`);
       delivered = true;
       emit({ ...summary, outputPath }, `${heading}Token written once to ${outputPath} (mode 0600). ${usage}`);
     } else {
+      deliveryAttempted = true;
       emit({ ...summary, token: secret.token }, `${heading}This token is shown once. ${usage}\n${secret.token}`);
       delivered = true;
     }
     return 0;
   } catch (error) {
     if (delivered) throw error;
-    // Unlike a device token, an undelivered pending runner credential is inert: nobody holds its
-    // plaintext, it expires unused in 24 hours, and issuing or rotating again supersedes it.
-    // Revoking here would be worse: a revoke also closes the runner socket, which after a failed
-    // `issue` for a legacy runner without a credential (or a failed `rotate` with a still-active
-    // credential) would disconnect a working runner.
+    // A pending runner credential nobody holds is inert: it expires unused in 24 hours and issuing
+    // or rotating again supersedes it. It is deliberately not revoked: a revoke also closes the
+    // runner socket, which after a failed `issue` for a legacy runner without a credential (or a
+    // failed `rotate` with a still-active credential) would disconnect a working runner. A failure
+    // after output began is different: the plaintext may have reached the terminal or file, so the
+    // operator is told the credential stays usable and how to supersede or revoke it.
     const detail = (error as Error).message;
     const exitCode = error instanceof CliError ? error.exitCode : 1;
+    if (deliveryAttempted) {
+      throw new CliError(
+        `${detail}; the token for runner ${runnerId} may have been partially delivered and the pending credential ${secret.credential.credentialId} stays usable until it expires in 24 hours: ` +
+          `run the ${verb} command again to supersede it, or revoke it with: wollipog admin runner-credential revoke --runner ${runnerId} --yes`,
+        exitCode,
+      );
+    }
     throw new CliError(`${detail}; the pending credential for runner ${runnerId} was not delivered, expires unused in 24 hours, and is replaced by running the ${verb} command again`, exitCode);
   }
 }

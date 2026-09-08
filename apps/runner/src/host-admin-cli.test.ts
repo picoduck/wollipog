@@ -657,4 +657,29 @@ test("admin runner-credential revoke requires confirmation or --yes and reports 
     assert.match(padded.stderr(), raw === "" ? /requires --runner/u : /exact runner id/u);
   }
   assert.equal(calls.filter((call) => call.method === "DELETE").length, before, "a padded id must never retarget a revoke");
+
+  const swallowed = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", "--yes"], env(tokenFile), swallowed.io, fetch, host), 2);
+  assert.match(swallowed.stderr(), /requires --runner/u);
+  for (const dot of [".", ".."]) {
+    const traversal = makeIo();
+    assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", dot, "--yes"], env(tokenFile), traversal.io, fetch, host), 2, dot);
+    assert.match(traversal.stderr(), /dot segments/u);
+  }
+  assert.equal(calls.filter((call) => call.method === "DELETE").length, before, "an omitted or dot-segment id must never reach a request");
+  const equalsForm = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner=--yes", "--yes", "--json"], env(tokenFile), equalsForm.io, fetch, host), 0);
+  assert.deepEqual(JSON.parse(equalsForm.stdout()), { revoked: true, runnerId: "--yes" });
+  assert.equal(calls.at(-1)?.url, "http://127.0.0.1:4317/api/runner-credentials/--yes", "the explicit = form still targets a literal id");
+});
+
+test("admin runner-credential reports a possibly delivered token when output fails midway", async (t) => {
+  const { tokenFile } = fixture(t);
+  const seen: string[] = [];
+  const broken = makeIo({ stdoutIsTTY: true, stdout: (text) => { seen.push(text); if (text.includes("wollipogr_")) throw new Error("EPIPE"); } });
+  const srv = server();
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-9"], env(tokenFile), broken.io, srv.fetch, host), 1);
+  assert.match(broken.stderr(), /EPIPE; the token for runner rack-9 may have been partially delivered and the pending credential rc_rack-9 stays usable until it expires in 24 hours: run the issue command again to supersede it, or revoke it with: wollipog admin runner-credential revoke --runner rack-9 --yes/u);
+  assert.ok(!broken.stderr().includes(RUNNER_TOKEN));
+  assert.ok(!srv.calls.some((call) => call.method === "DELETE"), "the CLI does not guess; the operator chooses supersede or revoke");
 });
