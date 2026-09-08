@@ -235,6 +235,9 @@ test("adoption requires a fresh explicit approval, prepares desired state, and c
     role: "owner", deviceId: null, localBootstrap: true };
   const candidate = { id: "adopt-candidate", name: "alpha", sourceDirectory: ".codex/skills", generation: "generation-1" };
   let content = "Original";
+  let principal = owner;
+  let revokeDuringSync = false;
+  let failSync = false;
   let adoptionRequests = 0;
   let syncRequests = 0;
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [
@@ -244,9 +247,11 @@ test("adoption requires a fresh explicit approval, prepares desired state, and c
   push.handleNeed = async () => {};
   push.request = async (runnerId, requestId) => {
     syncRequests++;
+    if (failSync) throw new Error("private preparation failure");
+    if (revokeDuringSync) principal = { ...owner, role: "member" };
     return { type: "skills_state", runnerId, requestId, deployed: [], unmanaged: [], removals: [] };
   };
-  registerMachineSkillRoutes(app, { db, requestHuman: () => owner, requestPrincipal: () => owner, pushSkillsSync: push,
+  registerMachineSkillRoutes(app, { db, requestHuman: () => principal, requestPrincipal: () => principal, pushSkillsSync: push,
     hub: { isRunnerOnline: () => true, sendToRunner: () => true,
       requestFromRunner: async (runnerId, requestId, request) => {
         if (request.type === "skill_adoption") {
@@ -300,10 +305,28 @@ test("adoption requires a fresh explicit approval, prepares desired state, and c
   approvedPreview = (await preview(id)).json();
   approval = (await app.inject({ method: "POST", url: `/api/skill-machine/${id}/adoption-preflight`,
     payload: { previewId: approvedPreview.previewId } })).json();
+  failSync = true;
+  const unsent = await adopt();
+  assert.equal(unsent.statusCode, 502);
+  assert.match(unsent.json().error, /was not sent/i);
+  assert.doesNotMatch(unsent.json().error, /recovery journal/i);
+  assert.equal(adoptionRequests, 0);
+  failSync = false;
+  approvedPreview = (await preview(id)).json();
+  approval = (await app.inject({ method: "POST", url: `/api/skill-machine/${id}/adoption-preflight`,
+    payload: { previewId: approvedPreview.previewId } })).json();
+  revokeDuringSync = true;
+  assert.equal((await adopt()).statusCode, 403, "authority is rechecked after preparing the stored version");
+  assert.equal(adoptionRequests, 0);
+  principal = owner;
+  revokeDuringSync = false;
+  approvedPreview = (await preview(id)).json();
+  approval = (await app.inject({ method: "POST", url: `/api/skill-machine/${id}/adoption-preflight`,
+    payload: { previewId: approvedPreview.previewId } })).json();
   const adopted = await adopt();
   assert.equal(adopted.statusCode, 200, adopted.body);
   assert.equal(adopted.json().status, "adopted");
-  assert.equal(syncRequests, 1);
+  assert.equal(syncRequests, 3);
   assert.equal(adoptionRequests, 1);
   assert.equal((await adopt()).statusCode, 404, "approval is one-shot after a runner command");
 });

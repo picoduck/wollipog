@@ -179,6 +179,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     }
     if (pending) return reply.code(429).send({ error: "Another machine skill operation is in progress." });
     pending = true;
+    let adoptionDispatched = false;
     try {
       const sourceRequestId = randomUUID();
       const source = await deps.hub.requestFromRunner(discovery.runnerId, sourceRequestId, {
@@ -215,11 +216,22 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       if (synced.type !== "skills_state" || synced.requestId !== syncRequestId || synced.runnerId !== discovery.runnerId || synced.error) {
         return reply.code(409).send({ error: "The approved version could not be prepared on the machine." });
       }
-      if (discoveries.get(id) !== discovery || discovery.adoption !== approval || !available(discovery.runnerId, reply) ||
-          skillAdoptionPreflight(deps.db, discovery.runnerId, preview.candidate, payload.digest, executable).status !== "prerequisites_met") {
+      const afterSyncPrincipal = authorize(req, reply, discovery.runnerId);
+      if (!afterSyncPrincipal) return;
+      if (discoveries.get(id) !== discovery || discovery.adoption !== approval ||
+          ownerKey(afterSyncPrincipal) !== discovery.owner) {
+        return reply.code(409).send({ error: "Assignments or connectivity changed while preparing adoption. Run preflight again." });
+      }
+      if (!available(discovery.runnerId, reply)) return;
+      const afterSyncRunner = deps.db.getRunner(discovery.runnerId);
+      if (!runnerSupportsProtocol(afterSyncRunner?.protocolVersion, "machineSkillAdoption")) {
+        return reply.code(409).send({ error: runnerCapabilityRequirement(afterSyncRunner?.protocolVersion, "machineSkillAdoption", "Machine skill adoption") });
+      }
+      if (skillAdoptionPreflight(deps.db, discovery.runnerId, preview.candidate, payload.digest, executable).status !== "prerequisites_met") {
         return reply.code(409).send({ error: "Assignments or connectivity changed while preparing adoption. Run preflight again." });
       }
       const requestId = randomUUID();
+      adoptionDispatched = true;
       const result = await deps.hub.requestFromRunner(discovery.runnerId, requestId, {
         type: "skill_adoption", runnerId: discovery.runnerId, requestId, candidate: preview.candidate,
         digest: payload.digest, confirmation: "explicit", acceptSharedImpact: body.acceptSharedImpact === true,
@@ -231,7 +243,9 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       return result;
     } catch {
       delete discovery.adoption;
-      return reply.code(502).send({ error: "Adoption did not return a verified result. Inspect the machine for a recovery journal before retrying." });
+      return reply.code(502).send({ error: adoptionDispatched
+        ? "Adoption did not return a verified result. Inspect the machine for a recovery journal before retrying."
+        : "Adoption was not sent. Preview the source and run preflight again." });
     } finally { pending = false; }
   });
 
