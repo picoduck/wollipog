@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { hostname as osHostname, homedir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { execCapture } from "./exec-capture.js";
 import type { McpFetch } from "./session-management-mcp.js";
 import { runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { VERSION } from "./version.js";
@@ -87,16 +88,7 @@ export function defaultServiceHost(fetchImpl: McpFetch = globalThis.fetch): Serv
     isSea: detectSea(),
     env: process.env,
     cwd: () => process.cwd(),
-    exec: (command, args, options) => new Promise((resolvePromise) => {
-      const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-      let stdout = "";
-      let stderr = "";
-      const timer = options?.timeoutMs ? setTimeout(() => child.kill("SIGKILL"), options.timeoutMs) : null;
-      child.stdout.on("data", (chunk) => { stdout += String(chunk); });
-      child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-      child.on("error", (error) => { if (timer) clearTimeout(timer); resolvePromise({ code: null, stdout, stderr: `${stderr}${error.message}` }); });
-      child.on("close", (code) => { if (timer) clearTimeout(timer); resolvePromise({ code, stdout, stderr }); });
-    }),
+    exec: (command, args, options) => execCapture(command, args, options),
     spawnInherit: (command, args) => new Promise((resolvePromise) => {
       const child = spawn(command, args, { stdio: "inherit" });
       child.on("error", () => resolvePromise(1));

@@ -137,7 +137,7 @@ import {
   localDeviceTokenPath,
   localPairingUrl,
 } from "./local-device-credential.js";
-import { registerHostAdminRoute } from "./host-admin-route.js";
+import { probePublicOriginWithFetch, registerHostAdminRoute } from "./host-admin-route.js";
 import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
@@ -1980,6 +1980,13 @@ registerHostAdminRoute(app, {
     protocolVersion: runner.protocolVersion ?? null,
   })),
   pairedDeviceCount: () => db.listDevices().length,
+  doctor: {
+    probePublicOrigin: (origin) => probePublicOriginWithFetch(origin),
+    legacyRunnerCredentials: () => db.listRunnerCredentials(PERSONAL_ORGANIZATION_ID)
+      .filter((credential) => credential.legacy && credential.status !== "revoked").length,
+    defaultLegacyToken: TOKEN === "dev-local-token",
+    tailnetAddresses: () => tailnetIpv4(lanIpv4()),
+  },
 });
 registerRunnerAttestationRoute(app, db);
 

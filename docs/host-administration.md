@@ -40,6 +40,7 @@ owns the control-plane data directory.
 ```text
 wollipog admin pairing-url [--json]
 wollipog admin status [--json]
+wollipog admin doctor [--json]
 wollipog admin user list [--json]
 wollipog admin device list [--json]
 wollipog admin device create --name <name> [--user <user-id>] [--origin <public-origin>] [--output <file>] [--json]
@@ -70,6 +71,24 @@ owner), registered and online runners with their protocol versions, the paired-d
 `warnings` list covering plain-HTTP origins, missing public origin beyond loopback, unsafe credential
 files, offline runners, and protocol mismatches. `--json` returns the `HostAdminStatusView` shape
 from `@wollipog/protocol`.
+
+### `admin doctor`
+
+Turns the same facts into pass / warn / fail checks with a remedy for everything that is not a
+pass, and exits 1 when any check fails (warnings alone exit 0). Local checks run first and need no
+running control plane: on a host deployed with `wollipog service`, the two units' states, lingering
+in user mode, and the modes of `control-plane.env` and `runner.token`; everywhere, the local
+credential file's type, symlink state, mode, and owner. Then the control plane's own doctor route
+(protocol v117+) adds: database and artifact-store readiness, the credential-file audit as the
+service sees it, dashboard bundle availability, exposure (plain HTTP beyond loopback, a tailnet-only
+bind on a host without a Tailscale address), a probe of the configured public origin from the host
+(a different service answering there is a failure; not answering is a warning, because a host may not
+reach its own tailnet name), runner registration and online state, per-runner protocol and version
+skew, legacy runner credentials still derived from the default development token (a failure when
+the control plane is reachable beyond loopback), paired-device count, and CLI-versus-control-plane
+version skew. Output is content-free: paths and versions, never credentials. `--json` returns
+`{ ok, generatedAt, checks, controlPlane }` where `checks` follow the `HostAdminCheck` shape from
+`@wollipog/protocol`.
 
 ### `admin user list` and `admin device list`
 
@@ -170,4 +189,4 @@ wollipog admin runner-credential list
 For durable services, see [headless deployment](./headless-deployment.md): `wollipog service`
 installs the control plane and a colocated runner as Linux systemd units, and after an install
 `wollipog admin` finds the database and port from the installed `control-plane.env` automatically.
-`admin doctor` and `service upgrade` with rollback are tracked separately.
+`service upgrade` with rollback and the standalone control-plane release artifact are tracked separately.
