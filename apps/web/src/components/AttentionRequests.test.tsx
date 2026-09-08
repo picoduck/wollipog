@@ -35,7 +35,7 @@ test("request picker joins only the server-projected safe owner name and explici
     ],
   } as unknown as SessionView;
   const html = renderToStaticMarkup(<AttentionRequests session={session} onNavigate={() => {}} />);
-  assert.match(html, /Audit Child · Reviewer · Approval Required/);
+  assert.match(html, /Request 1 · Audit Child · Reviewer · Approval Required/);
   assert.match(html, /Request 2 · Child Owner Unavailable · Approval Required/);
   assert.doesNotMatch(html, /opaque-owner|missing-owner|Private Missing/);
 });

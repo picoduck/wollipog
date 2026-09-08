@@ -83,3 +83,27 @@ test("incremental projection appends only new history while retaining exact aggr
   assert.equal(child?.completedAt, 40);
   assert.equal(child?.lifecycle, "completed");
 });
+
+test("incremental projection never retains raw tool input or output previews", () => {
+  const projector = new ChildSessionRegistryProjector();
+  projector.append([
+    event(1, { kind: "tool_call", toolCallId: "shell", toolKind: "shell", title: "Shell", status: "running",
+      text: "secret-input-preview" }),
+    event(2, { kind: "tool_call", toolCallId: "child", toolKind: "agent", title: "Task", status: "running",
+      subagentName: "Safe Name", text: "secret-agent-prompt" }),
+    event(3, { kind: "tool_call_update", toolCallId: "child", status: "completed",
+      subagentLifecycle: "completed", text: "secret-agent-output" }),
+  ]);
+  const retained = projector as unknown as {
+    spawns: Map<string, unknown>;
+    updates: Map<string, unknown>;
+    directTools: Map<string, unknown>;
+  };
+  const serialized = JSON.stringify([
+    ...retained.spawns.values(),
+    ...retained.updates.values(),
+    ...retained.directTools.values(),
+  ]);
+  assert.doesNotMatch(serialized, /secret-(?:input|agent)/);
+  assert.match(serialized, /Safe Name/);
+});

@@ -24,9 +24,22 @@ export function mergeDurableAgents(
 ): SubagentDescriptor[] {
   const loaded = new Map(loadedAgents.map((agent) => [agent.id, agent]));
   const durableIds = new Set(durableAgents.map((agent) => agent.id));
-  return [...durableAgents.map((durable) => ({ ...loaded.get(durable.id), ...durable,
-    directUsage: loaded.get(durable.id)?.directUsage,
-    inclusiveUsage: loaded.get(durable.id)?.inclusiveUsage })),
+  return [...durableAgents.map((durable) => {
+    const live = loaded.get(durable.id);
+    if (!live) return durable;
+    return { ...live, ...durable,
+      title: durable.title === "Subagent" ? live.title : durable.title,
+      role: durable.role ?? live.role,
+      lifecycle: live.lifecycle,
+      toolStatus: live.toolStatus,
+      availability: live.availability,
+      lastActivityAt: Math.max(durable.lastActivityAt ?? 0, live.lastActivityAt ?? 0),
+      completedAt: live.completedAt ?? durable.completedAt,
+      toolCount: Math.max(durable.toolCount ?? 0, live.toolCount ?? 0),
+      latestTool: live.latestTool ?? durable.latestTool,
+      directUsage: live.directUsage,
+      inclusiveUsage: live.inclusiveUsage };
+  }),
   ...loadedAgents.filter((agent) => !durableIds.has(agent.id))];
 }
 type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof BackgroundWorkPanel>,
@@ -282,7 +295,7 @@ export function AgentsPanel(props: Props) {
       {props.earlierActivityUnloaded && registryUnavailable && <p className="hint" role="status">Earlier transcript activity is not loaded. Workers recorded only in those turns may be missing.</p>}
       {registryAfter !== null && registry !== null && <p className="hint" role="status">More recorded workers are available.</p>}
       {unidentifiedChildren > 0 && <p className="hint" role="status">{unidentifiedChildren} {unidentifiedChildren === 1 ? "worker has" : "workers have"} an ambiguous provider identity and cannot be listed safely.</p>}
-      {registryLoading && registry === null && <p className="hint" role="status">Loading Recorded Workers…</p>}
+      {registryLoading && registry === null && <p className="hint" role="status">Loading recorded workers…</p>}
       {workflowError && <p className="hint" role="status">Workflow phase details are unavailable. Session status remains visible.</p>}
       {session.backgroundJobsAvailable && !session.backgroundJobs && <p className="hint" role="status">
         {props.inventoryError || "Loading background work…"}

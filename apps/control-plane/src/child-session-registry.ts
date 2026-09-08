@@ -7,8 +7,11 @@ import {
 } from "@wollipog/protocol";
 
 const ACTIVE_TOOL_STATUSES = new Set(["pending", "starting", "in_progress", "running", "waiting"]);
-type ToolCall = Extract<SessionEvent["payload"], { kind: "tool_call" }> & { seq: number; ts: number };
-type ToolUpdate = Extract<SessionEvent["payload"], { kind: "tool_call_update" }> & { seq: number; ts: number };
+type ToolCall = Pick<Extract<SessionEvent["payload"], { kind: "tool_call" }>,
+  "toolCallId" | "parentToolUseId" | "toolKind" | "status" | "subagentLifecycle" | "subagentName" | "subagentRole"> &
+  { seq: number; ts: number };
+type ToolUpdate = Pick<Extract<SessionEvent["payload"], { kind: "tool_call_update" }>,
+  "status" | "subagentLifecycle"> & { seq: number; ts: number };
 
 function displayText(value: unknown, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -22,7 +25,7 @@ function displayText(value: unknown, max: number): string | undefined {
  * recently viewed session and append only newly hydrated events instead of re-reading full history
  * for every page. Memory scales with exact child identities, not transcript message/output size. */
 export class ChildSessionRegistryProjector {
-  private readonly spawns = new Map<string, { count: number; sawAgent: boolean; first: ToolCall }>();
+  private readonly spawns = new Map<string, { count: number; sawAgent: boolean; firstAgent?: ToolCall }>();
   private readonly updates = new Map<string, ToolUpdate>();
   private readonly activity = new Map<string, number>();
   private readonly directTools = new Map<string, { count: number; latest: { seq: number; title: string; status: string } }>();
@@ -34,13 +37,25 @@ export class ChildSessionRegistryProjector {
         ? payload.parentToolUseId : undefined;
       if (parentId) this.activity.set(parentId, Math.max(this.activity.get(parentId) ?? 0, event.ts));
       if (payload.kind === "tool_call") {
-        const call = { ...payload, seq: event.seq, ts: event.ts };
+        const call: ToolCall | undefined = payload.toolKind === "agent" ? {
+          toolCallId: payload.toolCallId,
+          ...(payload.parentToolUseId ? { parentToolUseId: payload.parentToolUseId } : {}),
+          toolKind: payload.toolKind,
+          status: payload.status,
+          ...(payload.subagentLifecycle ? { subagentLifecycle: payload.subagentLifecycle } : {}),
+          ...(payload.subagentName ? { subagentName: payload.subagentName } : {}),
+          ...(payload.subagentRole ? { subagentRole: payload.subagentRole } : {}),
+          seq: event.seq,
+          ts: event.ts,
+        } : undefined;
         const existing = this.spawns.get(payload.toolCallId);
         if (existing) {
           existing.count += 1;
           existing.sawAgent ||= payload.toolKind === "agent";
+          existing.firstAgent ??= call;
         } else {
-          this.spawns.set(payload.toolCallId, { count: 1, sawAgent: payload.toolKind === "agent", first: call });
+          this.spawns.set(payload.toolCallId, { count: 1, sawAgent: payload.toolKind === "agent",
+            ...(call ? { firstAgent: call } : {}) });
         }
         if (parentId) {
           const latest = { seq: event.seq, title: displayText(payload.title, 120) ?? "Tool", status: payload.status };
@@ -53,7 +68,9 @@ export class ChildSessionRegistryProjector {
           }
         }
       } else if (payload.kind === "tool_call_update") {
-        const update = { ...payload, seq: event.seq, ts: event.ts };
+        const update: ToolUpdate = { status: payload.status,
+          ...(payload.subagentLifecycle ? { subagentLifecycle: payload.subagentLifecycle } : {}),
+          seq: event.seq, ts: event.ts };
         if ((this.updates.get(payload.toolCallId)?.seq ?? -1) < event.seq) this.updates.set(payload.toolCallId, update);
       }
     }
@@ -67,8 +84,8 @@ export class ChildSessionRegistryProjector {
         if (occurrence.sawAgent) unidentifiedChildren += 1;
         continue;
       }
-      const spawn = occurrence.first;
-      if (spawn.toolKind !== "agent") continue;
+      const spawn = occurrence.firstAgent;
+      if (!spawn) continue;
       const latest = this.updates.get(toolCallId);
       const status = latest?.status ?? spawn.status;
       const lifecycle = latest?.subagentLifecycle ?? spawn.subagentLifecycle;

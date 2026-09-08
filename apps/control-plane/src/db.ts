@@ -856,7 +856,8 @@ CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_
 -- Pending-attention projections resolve an exact structured owner on every session snapshot.
 -- Keep that compact join independent of transcript length.
 CREATE INDEX IF NOT EXISTS idx_session_events_tool_call_id
-  ON session_events(session_id, kind, json_extract(payload,'$.toolCallId'), seq);
+  ON session_events(session_id, json_extract(payload,'$.toolCallId'), seq)
+  WHERE kind='tool_call';
 
 CREATE TABLE IF NOT EXISTS review_findings (
   finding_id  TEXT PRIMARY KEY,

@@ -43,7 +43,7 @@ export function AttentionRequests({ session, onNavigate, keyboardActive = true, 
           pendingApproval: { ...request, ownerToolUseId: undefined } });
         return <button type="button" className="btn sm"
           tabIndex={keyboardActive ? 0 : -1} key={request.requestId} onClick={() => open(request.requestId)}>
-          {ownerLabel ?? `Request ${index + 1}`} · {action?.label ?? "Input Required"}
+          {owner?.resolved ? `Request ${index + 1} · ` : ""}{ownerLabel ?? `Request ${index + 1}`} · {action?.label ?? "Input Required"}
         </button>;
       })}
       <button type="button" className="btn sm" tabIndex={keyboardActive ? 0 : -1} onClick={() => open()}>View All Requests</button>
