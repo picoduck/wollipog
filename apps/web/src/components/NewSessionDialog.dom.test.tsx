@@ -10,6 +10,7 @@ import type {
   ProjectView,
   RunnerView,
   UiSnapshotMessage,
+  AgentHarnessDefaultsView,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -35,6 +36,8 @@ for (const [name, value] of Object.entries({
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -130,6 +133,7 @@ async function mountFixture(
   snapshotOverrides: Partial<UiSnapshotMessage> = {},
   preset?: NewSessionPreset,
   createError?: string | Error,
+  defaults: () => Promise<AgentHarnessDefaultsView> = async () => ({ defaults: [] }),
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -146,6 +150,7 @@ async function mountFixture(
   };
   const client = {
     ...api,
+    agentHarnessDefaults: defaults,
     createSession: async (request: CreateSessionRequest) => {
       requests.push(structuredClone(request));
       if (createError) throw typeof createError === "string" ? new Error(createError) : createError;
@@ -190,6 +195,15 @@ function createButton(container: HTMLDivElement): HTMLButtonElement {
     candidate.textContent?.trim() === "Create Session");
   assert.ok(button, "Create Session button is rendered");
   return button;
+}
+
+async function choosePermissionPreset(container: HTMLDivElement, label: string) {
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label^="Permission Preset:"]')!;
+  await act(async () => { trigger.click(); });
+  const option = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((button) => button.textContent?.trim() === label)!;
+  assert.ok(option);
+  await act(async () => { option.click(); });
 }
 
 function submitWithEnter(container: HTMLDivElement): void {
@@ -283,9 +297,7 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
     assert.equal(fixture.container.textContent?.includes("Conductor-Led Work"), false);
-    const preset = fixture.container.querySelector<HTMLInputElement>("#new-session-orchestrator");
-    assert.ok(preset);
-    await act(async () => { preset.click(); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
   } finally { await unmountFixture(fixture); }
@@ -305,8 +317,7 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
     } });
     try {
       await act(async () => { selectProject(fixture.container, project.id); });
-      const preset = fixture.container.querySelector<HTMLInputElement>("#new-session-orchestrator")!;
-      await act(async () => { preset.click(); });
+      await choosePermissionPreset(fixture.container, "Orchestrator");
       const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
         .find((button) => button.textContent?.includes("Native TUI"))!;
       assert.ok(tui);
@@ -319,6 +330,95 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
       }
     } finally { await unmountFixture(fixture); }
   }
+});
+
+test("saved Orchestrator default is visible and gates Native TUI without requiring an override", async () => {
+  for (const protocolVersion of [111, 112]) {
+    const enabledRunner: RunnerView = { ...runner, protocolVersion,
+      agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"],
+      } })),
+    };
+    const fixture = await mountFixture({ runners: [enabledRunner], capabilities: {
+      sessionSubscriptions: false, nativeTuiLaunch: true,
+    } }, undefined, undefined, async () => ({ defaults: [{
+      agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
+      installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+    }] }));
+    try {
+      await act(async () => { selectProject(fixture.container, project.id); });
+      assert.ok(fixture.container.querySelector('button[aria-label="Permission Preset: Saved Default — Orchestrator"]'));
+      const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+        .find((button) => button.textContent?.includes("Native TUI"))!;
+      assert.equal(tui.disabled, protocolVersion < 112);
+      if (protocolVersion === 112) {
+        await act(async () => { tui.click(); });
+        assert.match(fixture.container.textContent!, /spending and tool calls are not included/);
+      }
+      await act(async () => { createButton(fixture.container).click(); });
+      assert.equal(fixture.requests.length, 1);
+      assert.equal(fixture.requests[0]?.config?.permissionMode, undefined, "Default still delegates to the server");
+      assert.equal(fixture.requests[0]?.launchSurface, protocolVersion === 112 ? "native_tui" : undefined);
+    } finally { await unmountFixture(fixture); }
+  }
+});
+
+test("default loading fails closed, retries, and allows old control planes without the endpoint", async () => {
+  let calls = 0;
+  const fixture = await mountFixture({}, undefined, undefined, async () => {
+    if (++calls === 1) throw new ApiError("Unavailable", 503);
+    return { defaults: [] };
+  });
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    assert.equal(createButton(fixture.container).disabled, true);
+    await act(async () => { submitWithEnter(fixture.container); });
+    assert.equal(fixture.requests.length, 0);
+    const retry = [...fixture.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Retry Defaults")!;
+    await act(async () => { retry.click(); });
+    assert.equal(calls, 2);
+    assert.equal(createButton(fixture.container).disabled, false);
+  } finally { await unmountFixture(fixture); }
+  const legacy = await mountFixture({}, undefined, undefined, async () => { throw new ApiError("Not found", 404); });
+  try {
+    await act(async () => { selectProject(legacy.container, project.id); });
+    assert.equal(createButton(legacy.container).disabled, false);
+    assert.match(legacy.container.textContent!, /Harness Default/);
+  } finally { await unmountFixture(legacy); }
+});
+
+test("late saved-default response completes before enabling creation", async () => {
+  let resolve!: (value: AgentHarnessDefaultsView) => void;
+  const pending = new Promise<AgentHarnessDefaultsView>((done) => { resolve = done; });
+  const fixture = await mountFixture({}, undefined, undefined, () => pending);
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    assert.equal(createButton(fixture.container).disabled, true);
+    assert.match(fixture.container.textContent!, /Loading saved permission defaults/);
+    await act(async () => { resolve({ defaults: [] }); });
+    assert.equal(createButton(fixture.container).disabled, false);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("saved Orchestrator cannot launch on an incompatible runner even through Direct", async () => {
+  const fixture = await mountFixture({ runners: [{ ...runner, protocolVersion: 108,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  }] }, undefined, undefined, async () => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+  }] }));
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    assert.match(fixture.container.textContent!, /saved Orchestrator preset requires/);
+    assert.equal(createButton(fixture.container).disabled, true);
+    await act(async () => { submitWithEnter(fixture.container); });
+    assert.equal(fixture.requests.length, 0);
+  } finally { await unmountFixture(fixture); }
 });
 
 test("Projects mode requires an explicit Project choice and No Project sends exact null identities", async () => {

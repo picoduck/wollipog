@@ -82,6 +82,17 @@ credential remains usable only while its online owning runner has a running Agen
 idle credentials, exited/reconnecting TUIs, and terminal sessions do not gain authority. Stop also
 closes an orchestrator's TUI. Existing descendant authorization and child admission remain shared
 with structured sessions. The TUI transcript and usage are not imported into structured events.
+Native TUI spending and tool calls therefore do not contribute to persisted session usage or the
+parent's remaining-budget calculation. The creation dialog discloses this limitation and directs
+users to Direct for tracked usage and guardrails; it does not promise aggregate TUI budget enforcement.
+
+The creation dialog distinguishes a saved permission default from an explicit Orchestrator override.
+It matches the exact harness identity and uses the server's whole-preference capability check, so a
+stale model/effort combination does not misleadingly appear to apply its permission mode. Effective
+saved Orchestrator defaults also participate in target and TUI compatibility checks. Default creation
+waits for preference loading (with a retry on failure); control planes without the defaults endpoint
+retain harness-default behavior. The server remains authoritative at creation time, including changes
+to saved preferences made in another tab after the dialog loaded.
 
 ACP and non-native execution contexts (including WSL, container, and cloud targets) remain deferred
 until their launch boundaries can enforce the same restrictions and provision target-local control

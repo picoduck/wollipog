@@ -126,7 +126,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/BrowserPanel.tsx", "raw-radiogroup", 2],
   ["components/FilesPanel.tsx", "raw-radiogroup", 3],
   ["components/NewRunDialog.tsx", "raw-radiogroup", 5],
-  ["components/NewSessionDialog.tsx", "raw-radiogroup", 11],
+  ["components/NewSessionDialog.tsx", "raw-radiogroup", 10],
   ["components/OnboardRunnerDialog.tsx", "raw-radiogroup", 2],
   ["components/PeopleDevicesPanel.tsx", "raw-radiogroup", 3],
   ["components/ReviewPanel.tsx", "raw-radiogroup", 9],

@@ -794,6 +794,11 @@ const client = {
     return { summary: structuredClone(fixture.summary) };
   },
   workflowInstances: async () => [],
+  agentHarnessDefaults: async () => ({ defaults: FIXTURE_QUERY.get("orchestratorDefault") === "1" ? [{
+    agentId: "codex", driver: "codex-app-server" as const, context: { kind: "native" as const },
+    name: "Codex", installations: [], compatibleInstallations: 1,
+    preference: { permissionMode: "orchestrator" },
+  }] : [] }),
   runWorkflowArtifacts: async () => ({ artifacts: [], nextCursor: undefined }),
   createSession: async (request: CreateSessionRequest) => {
     lastCreateSessionRequest = structuredClone(request);
