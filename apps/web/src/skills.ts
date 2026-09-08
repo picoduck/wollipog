@@ -66,6 +66,15 @@ export interface MachineSkillAdoptionResult {
   backupDirectory?: string;
   error?: string;
 }
+export interface MachineSkillRecovery {
+  operations: import("@wollipog/protocol").SkillAdoptionRecoveryOperation[];
+  truncated: boolean;
+}
+export interface MachineSkillRecoveryResult {
+  status: "restored" | "not_needed" | "blocked" | "recovery_required";
+  operation?: import("@wollipog/protocol").SkillAdoptionRecoveryOperation;
+  error?: string;
+}
 export interface SkillGitPreview {
   previewId: string;
   candidates: Array<{

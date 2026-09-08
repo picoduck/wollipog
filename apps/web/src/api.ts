@@ -475,6 +475,15 @@ export function createApiClient(transport: ApiTransport) {
     req<import("./skills.js").MachineSkillAdoptionResult>(`/api/skill-machine/${encodeURIComponent(id)}/adopt`, {
       method: "POST", body: JSON.stringify({ ...body, confirmation: "explicit" }),
     }),
+  inspectMachineSkillRecovery: (runnerId: string) =>
+    req<import("./skills.js").MachineSkillRecovery>(
+      `/api/runners/${encodeURIComponent(runnerId)}/skill-adoption-recovery`, { method: "POST" },
+    ),
+  restoreMachineSkillRecovery: (runnerId: string, operationId: string) =>
+    req<import("./skills.js").MachineSkillRecoveryResult>(
+      `/api/runners/${encodeURIComponent(runnerId)}/skill-adoption-recovery/${encodeURIComponent(operationId)}/restore`,
+      { method: "POST", body: JSON.stringify({ confirmation: "explicit" }) },
+    ),
   importMachineSkill: (id: string, previewId: string, acceptUpdate: boolean) => req<SkillDetailPayload>(`/api/skill-machine/${encodeURIComponent(id)}/import`, { method: "POST", body: JSON.stringify({ previewId, acceptUpdate }) }),
   discardMachineSkillDiscovery: (id: string) => req<void>(`/api/skill-machine/${encodeURIComponent(id)}`, { method: "DELETE" }),
 

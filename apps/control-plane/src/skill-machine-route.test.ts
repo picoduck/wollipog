@@ -330,3 +330,70 @@ test("adoption requires a fresh explicit approval, prepares desired state, and c
   assert.equal(adoptionRequests, 1);
   assert.equal((await adopt()).statusCode, 404, "approval is one-shot after a runner command");
 });
+
+test("recovery inspection and explicit restore are authorized, capability-gated, bounded, and correlated", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  const app = Fastify();
+  t.after(async () => { await app.close(); db.close(); });
+  const owner: HumanPrincipal = { kind: "human", actorId: LOCAL_OWNER_USER_ID, userId: LOCAL_OWNER_USER_ID,
+    userName: "Owner", organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Personal",
+    role: "owner", deviceId: null, localBootstrap: true };
+  let principal = owner;
+  let malformed = false;
+  let requests = 0;
+  const pushed: string[] = [];
+  const operation = {
+    operationId: "123e4567-e89b-42d3-a456-426614174000",
+    backupDirectory: ".codex/skills/.wollipog-adoption-123e4567-e89b-42d3-a456-426614174000",
+    sourceDirectory: ".codex/skills",
+    name: "alpha",
+    digest: "a".repeat(64),
+    state: "managed_linked" as const,
+    detail: "The managed link is active and the original is preserved.",
+  };
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1",
+    agents: [], workspaces: [] }, 1, 115);
+  const push = ((runnerId: string) => { pushed.push(runnerId); }) as SkillsSyncPusher;
+  registerMachineSkillRoutes(app, { db, requestHuman: () => principal, requestPrincipal: () => principal,
+    pushSkillsSync: push,
+    hub: { isRunnerOnline: () => true, sendToRunner: () => true,
+      requestFromRunner: async (runnerId, requestId, request) => {
+        assert.equal(request.type, "skill_adoption_recovery");
+        if (request.type !== "skill_adoption_recovery") throw new Error();
+        requests++;
+        if (request.operation === "list") return { type: "skill_adoption_recovery_result" as const,
+          runnerId, requestId, status: "listed" as const,
+          operations: [malformed ? { ...operation, backupDirectory: "/private/path" } : operation], truncated: false };
+        assert.equal(request.operationId, operation.operationId);
+        assert.equal(request.confirmation, "explicit");
+        return { type: "skill_adoption_recovery_result" as const, runnerId, requestId,
+          status: "restored" as const, operation: { ...operation, state: "restored" as const } };
+      } },
+  });
+  const inspect = () => app.inject({ method: "POST", url: "/api/runners/runner-1/skill-adoption-recovery" });
+  const restore = (confirmation = "explicit") => app.inject({ method: "POST",
+    url: `/api/runners/runner-1/skill-adoption-recovery/${operation.operationId}/restore`,
+    payload: { confirmation } });
+  assert.equal((await inspect()).statusCode, 409, "protocol 115 cannot receive recovery commands");
+  assert.equal(requests, 0);
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "darwin", version: "1",
+    agents: [], workspaces: [] }, 2, 116);
+  assert.equal((await inspect()).statusCode, 409, "unsupported platforms do not receive commands");
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1",
+    agents: [], workspaces: [] }, 3, 116);
+  principal = { ...owner, role: "operator" };
+  assert.equal((await inspect()).statusCode, 403);
+  assert.equal(requests, 0);
+  principal = owner;
+  const listed = await inspect();
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.deepEqual(listed.json(), { operations: [operation], truncated: false });
+  malformed = true;
+  assert.equal((await inspect()).statusCode, 502, "runner paths and operation fields are projected only after validation");
+  malformed = false;
+  assert.equal((await restore("missing")).statusCode, 400);
+  const restored = await restore();
+  assert.equal(restored.statusCode, 200, restored.body);
+  assert.equal(restored.json().status, "restored");
+  assert.deepEqual(pushed, ["runner-1"]);
+});

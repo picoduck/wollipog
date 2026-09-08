@@ -523,5 +523,37 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   assert.equal(importedSkill.assignmentCount, 0);
   const detail = await (await api(httpBase, ownerToken, `/api/skills/${importedSkill.id}`)).json() as { latestVersion: { machineSource: { digest: string } } };
   assert.equal(detail.latestVersion.machineSource.digest, payload.digest);
+
+  // Recovery commands cross the real authenticated HTTP/WebSocket correlation boundary.
+  const recoveryPath = `/api/runners/${RUNNER_ID}/skill-adoption-recovery`;
+  assert.equal((await api(httpBase, MEMBER_TOKEN, recoveryPath, { method: "POST" })).status, 403);
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, recoveryPath, { method: "POST" })).status, 403);
+  const recoveryRequest = api(httpBase, ownerToken, recoveryPath, { method: "POST" });
+  const recoveryFrame = await runnerInbox.take((message) => message.type === "skill_adoption_recovery");
+  assert.equal(recoveryFrame.operation, "list");
+  const operation = {
+    operationId: "123e4567-e89b-42d3-a456-426614174000",
+    backupDirectory: ".codex/skills/.wollipog-adoption-123e4567-e89b-42d3-a456-426614174000",
+    sourceDirectory: ".codex/skills",
+    name: "machine-skill",
+    digest: payload.digest,
+    state: "managed_linked",
+    detail: "The managed link is active and the original is preserved.",
+  };
+  runner.send(JSON.stringify({ type: "skill_adoption_recovery_result", runnerId: RUNNER_ID,
+    requestId: recoveryFrame.requestId, status: "listed", operations: [operation], truncated: false }));
+  const recoveryResponse = await recoveryRequest;
+  assert.equal(recoveryResponse.status, 200);
+  assert.deepEqual((await recoveryResponse.json() as { operations: unknown[] }).operations, [operation]);
+  const restoreRequest = api(httpBase, ownerToken,
+    `${recoveryPath}/${operation.operationId}/restore`, {
+      method: "POST", body: JSON.stringify({ confirmation: "explicit" }),
+    });
+  const restoreFrame = await runnerInbox.take((message) => message.type === "skill_adoption_recovery");
+  assert.equal(restoreFrame.operation, "restore");
+  assert.equal(restoreFrame.operationId, operation.operationId);
+  runner.send(JSON.stringify({ type: "skill_adoption_recovery_result", runnerId: RUNNER_ID,
+    requestId: restoreFrame.requestId, status: "restored", operation: { ...operation, state: "restored" } }));
+  assert.equal((await restoreRequest).status, 200);
   assert.equal(child.exitCode, null, `control plane exited during the skills scenario\n${output}`);
 });

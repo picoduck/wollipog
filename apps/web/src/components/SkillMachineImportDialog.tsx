@@ -2,7 +2,12 @@ import { useState } from "react";
 import type { RunnerView, SkillFile } from "@wollipog/protocol";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import type { MachineSkillAdoptionPreflight, MachineSkillDiscovery, MachineSkillPreview } from "../skills.js";
+import type {
+  MachineSkillAdoptionPreflight,
+  MachineSkillDiscovery,
+  MachineSkillPreview,
+  MachineSkillRecovery,
+} from "../skills.js";
 import { Modal } from "./common.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
 
@@ -35,6 +40,8 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   const [adoptionConfirmed, setAdoptionConfirmed] = useState(false);
   const [sharedAccepted, setSharedAccepted] = useState(false);
   const [adoptionStatus, setAdoptionStatus] = useState<string | null>(null);
+  const [recovery, setRecovery] = useState<MachineSkillRecovery | null>(null);
+  const [restoreConfirmed, setRestoreConfirmed] = useState<string | null>(null);
   const close = () => {
     if (busy) return;
     if (discovery) void api.discardMachineSkillDiscovery(discovery.discoveryId).catch(() => {});
@@ -48,6 +55,34 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
       setDiscovery(await api.discoverMachineSkills(runnerId));
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
+  };
+  const inspectRecovery = async () => {
+    setBusy(true); setError(null); setRecovery(null); setRestoreConfirmed(null);
+    try { setRecovery(await api.inspectMachineSkillRecovery(runnerId)); }
+    catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  };
+  const restore = async (operationId: string) => {
+    setBusy(true); setError(null); setAdoptionStatus(null);
+    try {
+      const result = await api.restoreMachineSkillRecovery(runnerId, operationId);
+      setAdoptionStatus(result.status === "restored"
+        ? `Published a recovery link to the preserved original for ${result.operation?.name ?? "the selected skill"}. The managed link remains preserved in its recovery journal.`
+        : result.status === "not_needed"
+          ? "The original source was already in place; no restore was needed."
+          : result.error ?? "Restore stopped safely and still needs recovery inspection.");
+      setRecovery(await api.inspectMachineSkillRecovery(runnerId));
+      setRestoreConfirmed(null);
+      if (result.status === "restored") await onImported();
+    } catch (cause) { setRecovery(null); setError((cause as Error).message); }
+    finally { setRestoreConfirmed(null); setBusy(false); }
+  };
+  const selectRunner = (selectedRunnerId: string) => {
+    setRunnerId(selectedRunnerId);
+    setRecovery(null);
+    setRestoreConfirmed(null);
+    setAdoptionStatus(null);
+    setError(null);
   };
   const read = async (id: string) => {
     if (!discovery) return;
@@ -101,12 +136,39 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
       <p>Import a read-only snapshot. After an identical library version is assigned, a separate confirmed action can preserve the original and replace it with a managed link. New skills stay unassigned; accepted updates deploy to current assignments on unpinned machines.</p>
       <p className="skills-hint">Snapshot import requires protocol 111. Adoption requires a connected Linux runner on protocol 115 or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
       <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy || discovery !== null}
-        options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={setRunnerId} /></label>
+        options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={selectRunner} /></label>
       {compatible.length === 0 && <p>No compatible connected machines. Update a Linux runner to enable snapshot imports.</p>}
       <button className="btn" type="button" disabled={busy || !compatible.some((runner) => runner.runnerId === runnerId)} onClick={() => void discover()}>{busy ? "Working…" : "Discover Skills"}</button>
+      <button className="btn" type="button" disabled={busy || !runnerSupportsProtocol(
+        compatible.find((runner) => runner.runnerId === runnerId)?.protocolVersion,
+        "machineSkillAdoptionRecovery",
+      )} onClick={() => void inspectRecovery()}>Inspect Recovery</button>
       {error && <p className="form-error" role="alert">{error}</p>}
       {imported && <p role="status">Imported: {imported}. The source directory was not adopted.</p>}
       {adoptionStatus && <p role="status">{adoptionStatus}</p>}
+      {recovery && <section className="skills-section">
+        <h3>Adoption Recovery</h3>
+        <p>Recovery journals retain source content after adoption and interrupted operations. Restore never overwrites an occupied source path.</p>
+        {recovery.truncated && <p className="form-error">The bounded recovery list was truncated. Resolve visible operations, then inspect again.</p>}
+        {!recovery.operations.length && <p>No adoption recovery journals were found.</p>}
+        {recovery.operations.map((operation) => {
+          const restorable = operation.state === "source_preserved" || operation.state === "managed_linked";
+          return <section className="skills-section" key={operation.operationId}>
+            <strong>{operation.name}</strong>
+            <p className="skills-hint">{operation.sourceDirectory}/{operation.name} · {operation.state.replaceAll("_", " ")} · {operation.operationId}</p>
+            <p>{operation.detail}</p>
+            {restorable && <>
+              <label className="field"><span>
+                <Checkbox label={`Confirm Restore for ${operation.name}`} checked={restoreConfirmed === operation.operationId}
+                  disabled={busy} onChange={(checked) => setRestoreConfirmed(checked ? operation.operationId : null)} />
+                {" "}Confirm Restore of Original Source
+              </span><small>The current managed link is preserved inside {operation.backupDirectory} before an exclusive recovery link exposes the original.</small></label>
+              <button className="btn danger" type="button" disabled={busy || restoreConfirmed !== operation.operationId}
+                onClick={() => void restore(operation.operationId)}>Restore Original Source</button>
+            </>}
+          </section>;
+        })}
+      </section>}
       {discovery && <>
         <p className="skills-hint">Up to 64 real skill directories are listed from native harness and shared skill locations. Same-name variants are shown separately; identical imports reuse the existing version.</p>
         {!discovery.candidates.length && <p>No importable skill directories were found.</p>}

@@ -330,7 +330,8 @@
 // 113: progress-aware session worktree creation with bounded phase heartbeats.
 // 114: loopback host-administration status route and public dashboard origin for pairing links.
 // 115: explicitly confirmed, runner-revalidated machine skill adoption.
-export const PROTOCOL_VERSION = 115;
+// 116: bounded machine skill adoption recovery inspection and explicit restore.
+export const PROTOCOL_VERSION = 116;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -478,6 +479,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   agentSkills: 90,
   machineSkillSnapshots: 111,
   machineSkillAdoption: 115,
+  machineSkillAdoptionRecovery: 116,
   chunkedAgentSkills: 96,
   /** v96 runners emit the additive `skills_state.removals` event projection. */
   skillLinkRemovalReporting: 96,
@@ -846,6 +848,36 @@ export interface SkillAdoptionResultMessage {
   status: "adopted" | "rejected" | "recovery_required";
   operationId?: string;
   backupDirectory?: string;
+  error?: string;
+}
+
+export interface SkillAdoptionRecoveryOperation {
+  operationId: string;
+  backupDirectory: string;
+  sourceDirectory: string;
+  name: string;
+  digest: string;
+  state: "intent_only" | "source_preserved" | "managed_linked" | "restored" | "blocked";
+  detail: string;
+}
+
+export interface SkillAdoptionRecoveryMessage {
+  type: "skill_adoption_recovery";
+  runnerId: string;
+  requestId: string;
+  operation: "list" | "restore";
+  operationId?: string;
+  confirmation?: "explicit";
+}
+
+export interface SkillAdoptionRecoveryResultMessage {
+  type: "skill_adoption_recovery_result";
+  runnerId: string;
+  requestId: string;
+  status: "listed" | "restored" | "not_needed" | "blocked" | "recovery_required";
+  operations?: SkillAdoptionRecoveryOperation[];
+  operation?: SkillAdoptionRecoveryOperation;
+  truncated?: boolean;
   error?: string;
 }
 
@@ -4819,6 +4851,7 @@ export type RunnerToControlPlane =
   | SkillsStateMessage
   | SkillSnapshotResultMessage
   | SkillAdoptionResultMessage
+  | SkillAdoptionRecoveryResultMessage
   | SkillsSyncNeedMessage
   | DurableSessionCommandResultMessage
   | DurableSessionCommandUpdateMessage
@@ -6202,6 +6235,7 @@ export type ControlPlaneToRunner =
   | SkillsSyncMessage
   | SkillSnapshotMessage
   | SkillAdoptionMessage
+  | SkillAdoptionRecoveryMessage
   | SkillsSyncManifestMessage
   | SkillsSyncContentMessage
   | SkillsSyncCompleteMessage

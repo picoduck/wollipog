@@ -83,3 +83,24 @@ test("unsupported platforms never attempt filesystem discovery", () => {
   const snapshots = new MachineSkillSnapshots({ home: "/does-not-exist", agents: () => agents, platform: "darwin" });
   assert.match(snapshots.handle(message).error!, /Linux/);
 });
+
+test("machine discovery keeps separate hard raw and useful-entry bounds", { skip: process.platform !== "linux" }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "skill-snapshot-bounds-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const skills = join(home, ".codex/skills");
+  mkdirSync(skills, { recursive: true });
+  for (let index = 0; index < 256; index++) {
+    mkdirSync(join(skills, `.wollipog-adoption-${String(index).padStart(3, "0")}`));
+  }
+  for (let index = 0; index < 64; index++) {
+    const root = join(skills, `skill-${String(index).padStart(3, "0")}`);
+    mkdirSync(root);
+    writeFileSync(join(root, "SKILL.md"), `---\nname: skill-${index}\n---\nBody`);
+  }
+  const snapshots = new MachineSkillSnapshots({ home, agents: () => agents });
+  assert.equal(snapshots.handle(message).candidates?.length, 64,
+    "private journals do not consume the 256 useful-entry or 64 candidate budget");
+
+  const hardBound = new MachineSkillSnapshots({ home, agents: () => agents, maxRawEntriesPerDirectory: 0 });
+  assert.deepEqual(hardBound.handle(message).candidates, [], "raw directory iteration remains independently bounded");
+});

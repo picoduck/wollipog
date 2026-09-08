@@ -1,6 +1,8 @@
 # Agent Skills Management and Deployment
 
-Status: managed deployment, Git import, Linux machine snapshot import, version history with library rollback, and machine-wide version pins implemented; remaining design below is phased.
+Status: managed deployment, Git import, Linux machine snapshot import and guarded adoption/recovery,
+version history with library rollback, machine-wide version pins, and assignable groups implemented;
+remaining platform design below is phased.
 
 ## Assignable Group API
 
@@ -25,8 +27,7 @@ group preserves its library skills and their direct assignments. Registration pr
 while deleting a machine clears its machine-specific rules. Offline and older runners retain the
 existing reconciliation/capability behavior. Import previews count group rules in assignment impact.
 
-The group-management UI is a separate follow-up slice; this section documents the backend API,
-not a claim that group deployment controls are already exposed in the dashboard.
+The Skills dashboard exposes group creation, conversion, membership, and inherited assignment rules.
 
 ## Machine-Wide Version Pins
 
@@ -66,7 +67,9 @@ administrator must have access to the source machine. The control plane requests
 IDs from an on-demand inventory, never arbitrary host paths, and never adds file contents to the
 periodic `skills_state` report. Discovery lists at most 64 candidates, examines at most 256 entries
 per harness directory, and retains at most 256 expiring candidate IDs on the runner. Shared harness
-locations are scanned once; divergent same-name directories remain separate candidates.
+locations are scanned once; divergent same-name directories remain separate candidates. A separate
+4,096-entry raw iteration ceiling keeps skipped private journals from removing the hard discovery
+bound while preserving the 256-entry useful-work budget.
 
 The runner opens every untrusted path component with `O_NOFOLLOW` relative to pinned Linux
 directory descriptors. Symlinks, hard links, special files, excessive depth/entry counts, and trees
@@ -150,14 +153,35 @@ not been tested, and durability depends on filesystem support for `fsync`.
 The returned backup directory is home-relative to the original parent and is displayed after
 completion or a recovery-required result. If that parent was moved,
 locate the operation UUID in the moved directory and compare its recorded identity; do not follow a
-replacement parent symlink or blindly restore `original`. A last-instant source-name swap may preserve
-the substituted tree, which is detected as an identity mismatch rather than deleted. Future restore
-tooling must inspect these identities and source occupancy before acting. The command is serialized
+replacement parent symlink or blindly move `original`. A last-instant source-name swap may preserve
+the substituted tree, which is detected as an identity mismatch rather than deleted. The command is serialized
 with reconciliation/GC, rechecks the latest desired digest and targets, and runs a solicited sync
 first so the target is materialized. Lost or uncorrelated results instruct the operator to inspect
 for a journal before retrying. Backups are intentionally retained without automatic cleanup.
 Non-Linux snapshot imports and native Windows deployment remain under #251; WSL reports Linux and
 uses this path.
+
+### Adoption recovery inspection and restore
+
+Protocol 116 adds a bounded recovery command. **Inspect Recovery** asks an online Linux runner to
+scan at most 4,096 raw entries in each known native harness directory and return at most 64 validated
+journals. The control plane accepts only fixed harness-relative journal paths and projected operation
+fields; arbitrary client paths and malformed runner results are rejected. Inspection and restore are
+owner/admin-only, correlated, re-authorized after the runner response, and serialized with adoption,
+reconciliation, and store GC.
+
+Operations report `intent_only`, `source_preserved`, `managed_linked`, `restored`, or `blocked`.
+Intent-only and already-restored states need no mutation. A restore requires an explicit per-operation
+confirmation. It reopens the journal and parent through pinned no-follow descriptors, verifies the
+preserved inode and full digest, and writes durable, retry-safe checkpoints. An active managed link is
+moved into the journal first. An exclusive recovery link then exposes the journal's verified `original`
+at the vacated source name. Link creation fails on any last-instant file, link, or directory occupant;
+nothing at the source name is unlinked, recursively deleted, or overwritten. A changed parent,
+malformed record, target mismatch, or race stops safely. Every checkpoint is retryable, including a
+process interruption after the managed-link move or recovery-link publication. The original retains
+its inode, bytes, and source metadata inside the private journal, and both it and the prior managed link
+remain available for manual inspection. Journals are intentionally retained; the recovery link is
+reported as unmanaged until the operator deliberately adopts or relocates that source again.
 
 ## Implemented Git import
 

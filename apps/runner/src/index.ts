@@ -47,6 +47,7 @@ import {
   type SessionWorktreeView,
   type SkillsSyncManifestMessage,
   type SkillAdoptionMessage,
+  type SkillAdoptionRecoveryMessage,
   type StartSessionMessage,
 } from "@wollipog/protocol";
 import {
@@ -155,6 +156,11 @@ import {
 } from "./skills.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { handleSkillAdoption } from "./skill-adoption-command.js";
+import {
+  listSkillAdoptionRecovery,
+  recoveryResult,
+  restoreSkillAdoptionRecovery,
+} from "./skill-adoption-recovery.js";
 import { ChunkedSkillsSyncAssembler, type ChunkedSyncStep } from "./skills-sync.js";
 import { VERSION } from "./version.js";
 import { overlayAcpAuthStatus, type AcpAuthRuntime } from "./acp-auth-status.js";
@@ -916,6 +922,43 @@ function queueSkillAdoption(msg: SkillAdoptionMessage): void {
     // A completed or interrupted transaction may have changed the source path. Reconcile and
     // inventory run next in the same queue so no link/GC pass can interleave with adoption.
     if (result.status !== "rejected") queueSkillsReconcile();
+  };
+  skillsReconcileQueue = skillsReconcileQueue.then(run, run);
+}
+
+function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
+  const run = async () => {
+    if (msg.runnerId !== config.runnerId) {
+      sendUp(recoveryResult(config.runnerId, msg.requestId, {
+        status: "blocked",
+        error: "Recovery targeted a different runner.",
+      }));
+      return;
+    }
+    if (msg.operation === "list") {
+      const listed = listSkillAdoptionRecovery(homedir(), config.dataDir, metadata.agents);
+      sendUp(recoveryResult(config.runnerId, msg.requestId, { status: "listed", ...listed }));
+      return;
+    }
+    if (msg.operation !== "restore" || msg.confirmation !== "explicit" || !msg.operationId) {
+      sendUp(recoveryResult(config.runnerId, msg.requestId, {
+        status: "blocked",
+        error: "Restore requires one explicitly confirmed recovery operation.",
+      }));
+      return;
+    }
+    const result = restoreSkillAdoptionRecovery({
+      home: homedir(),
+      dataDir: config.dataDir,
+      agents: metadata.agents,
+      operationId: msg.operationId,
+      acquireProviderHomeLease: () => sessions.acquireSkillReconciliationProviderHome(homedir()),
+    });
+    sendUp(recoveryResult(config.runnerId, msg.requestId, result));
+    // A restore attempt can move a managed link or source directory. Publish converged inventory
+    // next in this same queue and keep reconcile/store GC out of every recovery transaction.
+    if (result.status === "restored" || result.status === "not_needed" ||
+        result.status === "recovery_required") queueSkillsReconcile();
   };
   skillsReconcileQueue = skillsReconcileQueue.then(run, run);
 }
@@ -1687,6 +1730,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "skill_adoption":
       queueSkillAdoption(msg);
+      break;
+    case "skill_adoption_recovery":
+      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "machineSkillAdoptionRecovery")) {
+        queueSkillAdoptionRecovery(msg);
+      }
       break;
     case "skills_sync_manifest":
       beginChunkedSkillsSync(msg);

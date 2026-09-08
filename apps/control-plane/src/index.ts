@@ -1346,6 +1346,11 @@ app.register(async (instance) => {
           hub.resolveRunnerRequest(msg, runnerId);
         }
         break;
+      case "skill_adoption_recovery_result":
+        if (runnerId === msg.runnerId && runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "machineSkillAdoptionRecovery")) {
+          hub.resolveRunnerRequest(msg, runnerId);
+        }
+        break;
       case "skills_sync_need": {
         if (runnerId !== msg.runnerId) {
           app.log.warn(`runner ${runnerId} sent a mismatched skills content request`);

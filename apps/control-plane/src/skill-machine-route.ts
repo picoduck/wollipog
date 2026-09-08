@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { runnerSupportsProtocol, runnerCapabilityRequirement, validSkillName, type MachineSkillCandidate } from "@wollipog/protocol";
+import {
+  runnerSupportsProtocol,
+  runnerCapabilityRequirement,
+  validSkillName,
+  type MachineSkillCandidate,
+  type SkillAdoptionRecoveryOperation,
+} from "@wollipog/protocol";
 import { SkillImportConflictError } from "./db.js";
 import { validateSkillPayload, type ValidatedSkillPayload } from "./skills.js";
 import type { SkillsRouteDeps } from "./skills-route.js";
@@ -39,6 +45,44 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     }
     if (runner.os !== "linux") { reply.code(409).send({ error: "Machine skill snapshots currently require a Linux runner." }); return false; }
     return true;
+  };
+  const recoveryAvailable = (runnerId: string, reply: FastifyReply) => {
+    const runner = deps.db.getRunner(runnerId);
+    if (!runner || !deps.hub.isRunnerOnline(runnerId)) {
+      reply.code(409).send({ error: "Machine is offline." });
+      return false;
+    }
+    if (!runnerSupportsProtocol(runner.protocolVersion, "machineSkillAdoptionRecovery")) {
+      reply.code(409).send({ error: runnerCapabilityRequirement(
+        runner.protocolVersion, "machineSkillAdoptionRecovery", "Machine skill adoption recovery",
+      ) });
+      return false;
+    }
+    if (runner.os !== "linux") {
+      reply.code(409).send({ error: "Machine skill adoption recovery currently requires a Linux runner." });
+      return false;
+    }
+    return true;
+  };
+  const recoveryOperation = (value: unknown): SkillAdoptionRecoveryOperation | null => {
+    if (!value || typeof value !== "object") return null;
+    const operation = value as SkillAdoptionRecoveryOperation;
+    const allowedStates = new Set(["intent_only", "source_preserved", "managed_linked", "restored", "blocked"]);
+    const allowedDirectories = new Set([".agents/skills", ".claude/skills", ".codex/skills"]);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operation.operationId) ||
+        !allowedDirectories.has(operation.sourceDirectory) || !validSkillName(operation.name) ||
+        !/^[0-9a-f]{64}$/.test(operation.digest) || !allowedStates.has(operation.state) ||
+        typeof operation.detail !== "string" || operation.detail.length > 300 ||
+        operation.backupDirectory !== `${operation.sourceDirectory}/.wollipog-adoption-${operation.operationId}`) return null;
+    return {
+      operationId: operation.operationId,
+      backupDirectory: operation.backupDirectory,
+      sourceDirectory: operation.sourceDirectory,
+      name: operation.name,
+      digest: operation.digest,
+      state: operation.state,
+      detail: operation.detail,
+    };
   };
 
   app.post("/api/runners/:id/skill-snapshots", async (req, reply) => {
@@ -190,9 +234,10 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       const currentPrincipal = authorize(req, reply, discovery.runnerId);
       if (!currentPrincipal) return;
       if (discoveries.get(id) !== discovery || discovery.preview !== preview || discovery.adoption !== approval ||
-          ownerKey(currentPrincipal) !== discovery.owner || !available(discovery.runnerId, reply)) {
+          ownerKey(currentPrincipal) !== discovery.owner) {
         return reply.code(409).send({ error: "The adoption approval changed or expired. Preview the source again." });
       }
+      if (!available(discovery.runnerId, reply)) return;
       if (source.type !== "skill_snapshot_result" || source.requestId !== sourceRequestId ||
           source.runnerId !== discovery.runnerId || source.error || !source.snapshot) throw new Error();
       const snapshot = source.snapshot;
@@ -246,6 +291,66 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       return reply.code(502).send({ error: adoptionDispatched
         ? "Adoption did not return a verified result. Inspect the machine for a recovery journal before retrying."
         : "Adoption was not sent. Preview the source and run preflight again." });
+    } finally { pending = false; }
+  });
+
+  app.post("/api/runners/:id/skill-adoption-recovery", async (req, reply) => {
+    const runnerId = (req.params as { id: string }).id;
+    const principal = authorize(req, reply, runnerId);
+    if (!principal || !recoveryAvailable(runnerId, reply)) return;
+    if (pending) return reply.code(429).send({ error: "Another machine skill operation is in progress." });
+    pending = true;
+    try {
+      const requestId = randomUUID();
+      const result = await deps.hub.requestFromRunner(runnerId, requestId, {
+        type: "skill_adoption_recovery", runnerId, requestId, operation: "list",
+      });
+      const current = authorize(req, reply, runnerId);
+      if (!current) return;
+      if (ownerKey(current) !== ownerKey(principal)) return reply.code(404).send({ error: "Machine not found." });
+      if (!recoveryAvailable(runnerId, reply)) return;
+      if (result.type !== "skill_adoption_recovery_result" || result.runnerId !== runnerId ||
+          result.requestId !== requestId || result.status !== "listed" || !Array.isArray(result.operations) ||
+          result.operations.length > 64 || typeof result.truncated !== "boolean") throw new Error();
+      const operations = result.operations.map(recoveryOperation);
+      if (operations.some((operation) => !operation) ||
+          new Set(operations.map((operation) => operation!.operationId)).size !== operations.length) throw new Error();
+      return { operations: operations as SkillAdoptionRecoveryOperation[], truncated: result.truncated };
+    } catch {
+      return reply.code(502).send({ error: "Recovery inspection failed. Check the connection and try again." });
+    } finally { pending = false; }
+  });
+
+  app.post("/api/runners/:id/skill-adoption-recovery/:operationId/restore", async (req, reply) => {
+    const { id: runnerId, operationId } = req.params as { id: string; operationId: string };
+    const principal = authorize(req, reply, runnerId);
+    if (!principal || !recoveryAvailable(runnerId, reply)) return;
+    if ((req.body as { confirmation?: unknown } | null)?.confirmation !== "explicit" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)) {
+      return reply.code(400).send({ error: "Select and explicitly confirm one recovery operation." });
+    }
+    if (pending) return reply.code(429).send({ error: "Another machine skill operation is in progress." });
+    pending = true;
+    try {
+      const requestId = randomUUID();
+      const result = await deps.hub.requestFromRunner(runnerId, requestId, {
+        type: "skill_adoption_recovery", runnerId, requestId, operation: "restore",
+        operationId, confirmation: "explicit",
+      });
+      const current = authorize(req, reply, runnerId);
+      if (!current) return;
+      if (ownerKey(current) !== ownerKey(principal)) return reply.code(404).send({ error: "Machine not found." });
+      if (!recoveryAvailable(runnerId, reply)) return;
+      if (result.type !== "skill_adoption_recovery_result" || result.runnerId !== runnerId ||
+          result.requestId !== requestId || !["restored", "not_needed", "blocked", "recovery_required"].includes(result.status) ||
+          (result.error !== undefined && (typeof result.error !== "string" || result.error.length > 300))) throw new Error();
+      const operation = result.operation === undefined ? undefined : recoveryOperation(result.operation);
+      if (result.operation !== undefined && (!operation || operation.operationId !== operationId)) throw new Error();
+      if ((result.status === "restored" || result.status === "not_needed") && !operation) throw new Error();
+      if (result.status === "restored" || result.status === "not_needed") deps.pushSkillsSync(runnerId);
+      return { status: result.status, ...(operation ? { operation } : {}), ...(result.error ? { error: result.error } : {}) };
+    } catch {
+      return reply.code(502).send({ error: "Restore did not return a verified result. Inspect the recovery journal before retrying." });
     } finally { pending = false; }
   });
 

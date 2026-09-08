@@ -37,7 +37,7 @@ const runner: RunnerView = {
   lastSeen: 1,
   protocolVersion: new URLSearchParams(location.search).has("legacySkills")
     ? 1
-    : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoption,
+    : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery,
 };
 
 const snapshot: ControlPlaneToUi = {
@@ -48,7 +48,8 @@ const snapshot: ControlPlaneToUi = {
     paginatedSessionHistory: false,
     projects: false,
   },
-  runners: [runner, ...(new URLSearchParams(location.search).has("matrix") ? [{ ...runner, runnerId: "runner-2", displayName: "Other Machine", status: "offline" as const }] : [])],
+  runners: [runner, ...(new URLSearchParams(location.search).has("matrix") ? [{ ...runner, runnerId: "runner-2", displayName: "Other Machine",
+    status: new URLSearchParams(location.search).has("onlineMatrix") ? "online" as const : "offline" as const }] : [])],
   boxes: [],
   sessions: [],
   runs: [],

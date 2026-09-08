@@ -58,6 +58,23 @@ test("machine snapshot read errors block import", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Import Snapshot" })).toBeDisabled();
 });
 
+test("switching machines clears inspected adoption recovery", async ({ page }) => {
+  const operationId = "123e4567-e89b-42d3-a456-426614174000";
+  await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) => route.fulfill({ json: {
+    operations: [{ operationId, backupDirectory: `.codex/skills/.wollipog-adoption-${operationId}`,
+      sourceDirectory: ".codex/skills", name: "code-review", digest: "a".repeat(64), state: "managed_linked",
+      detail: "The managed link is active and the original is preserved." }], truncated: false,
+  } }));
+  await page.goto("/skills-removals-e2e.html?matrix=1&onlineMatrix=1");
+  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await page.getByRole("button", { name: "Inspect Recovery" }).click();
+  await expect(page.getByRole("heading", { name: "Adoption Recovery" })).toBeVisible();
+  await page.getByRole("button", { name: /^Machine:/ }).click();
+  await page.getByRole("option", { name: "Other Machine", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Adoption Recovery" })).toBeHidden();
+  await expect(page.getByRole("status")).toBeHidden();
+});
+
 for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
   `identical assigned source requires confirmed adoption at ${width} in ${theme}`,
   async ({ page }, info) => {
@@ -102,3 +119,43 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
   await expect(page.getByRole("status")).toContainText("Original preserved at .codex/skills/.wollipog-adoption-operation");
   await page.screenshot({ path: info.outputPath(`adoption-result-${width}-${theme}.png`), fullPage: true });
 });
+
+for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
+  `adoption recovery requires an inspected operation and explicit restore at ${width} in ${theme}`,
+  async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const operationId = "123e4567-e89b-42d3-a456-426614174000";
+    let restored = false;
+    const operation = () => ({
+      operationId,
+      backupDirectory: `.codex/skills/.wollipog-adoption-${operationId}`,
+      sourceDirectory: ".codex/skills",
+      name: "code-review",
+      digest: "a".repeat(64),
+      state: restored ? "restored" : "managed_linked",
+      detail: restored ? "A recovery link exposes the preserved original at its source path." : "The managed link is active and the original is preserved.",
+    });
+    await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) =>
+      route.fulfill({ json: { operations: [operation()], truncated: false } }));
+    await page.route(`**/api/runners/runner-1/skill-adoption-recovery/${operationId}/restore`, async (route) => {
+      expect(route.request().postDataJSON()).toEqual({ confirmation: "explicit" });
+      restored = true;
+      await route.fulfill({ json: { status: "restored", operation: operation() } });
+    });
+    await page.goto("/skills-removals-e2e.html");
+    await page.evaluate((selected) => { document.documentElement.dataset.theme = selected; }, theme);
+    await page.getByRole("button", { name: "Import from Machine" }).click();
+    await page.getByRole("button", { name: "Inspect Recovery" }).click();
+    await expect(page.getByRole("heading", { name: "Adoption Recovery" })).toBeVisible();
+    const restore = page.getByRole("button", { name: "Restore Original Source" });
+    await expect(restore).toBeDisabled();
+    await page.screenshot({ path: info.outputPath(`recovery-inspect-${width}-${theme}.png`), fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await page.getByRole("checkbox", { name: "Confirm Restore for code-review" }).check();
+    await expect(restore).toBeEnabled();
+    await restore.click();
+    await expect(page.getByRole("status")).toContainText("Published a recovery link to the preserved original for code-review");
+    await expect(page.getByText("A recovery link exposes the preserved original at its source path.")).toBeVisible();
+    await page.screenshot({ path: info.outputPath(`recovery-restored-${width}-${theme}.png`), fullPage: true });
+  },
+);
