@@ -21,6 +21,7 @@ function clamp(s: string, max: number): string {
 }
 const TITLE_MAX = 120;
 const BODY_MAX = 400;
+const ATTENTION_REQUEST_ID_MAX = 256;
 
 export type PushDecisionPrev = Pick<SessionView, "status" | "pendingApproval" | "backgroundDeliveries">;
 
@@ -50,7 +51,8 @@ export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMes
       body: clamp(`${label}${what}`, BODY_MAX),
       sessionId: next.id,
       eventEpoch: next.eventEpoch ?? 0,
-      ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
+      ...(requests.length === 1 && requests[0]!.requestId.length <= ATTENTION_REQUEST_ID_MAX
+        ? { requestId: requests[0]!.requestId } : {}),
       urgency: "high",
     };
   }

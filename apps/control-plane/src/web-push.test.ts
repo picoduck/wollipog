@@ -634,6 +634,12 @@ test("pushDecision fires on the attention transitions and stays quiet otherwise"
   } as Partial<SessionView>))!;
   assert.equal(aggregate.eventEpoch, 7);
   assert.equal(aggregate.requestId, undefined);
+  const oversized = pushDecision(prev("running"), view("input_required", {
+    eventEpoch: 8,
+    pendingApproval: { requestId: "r".repeat(257), title: "Bounded", options: [] },
+  } as Partial<SessionView>))!;
+  assert.equal(oversized.eventEpoch, 8);
+  assert.equal(oversized.requestId, undefined, "an oversized exact id degrades to an aggregate push");
   const recovery = pushDecision(prev("running"), view("input_required", {
     pendingApproval: {
       requestId: "recovered",

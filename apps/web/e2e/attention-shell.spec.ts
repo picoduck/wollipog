@@ -72,6 +72,16 @@ for (const width of [390, 1280]) test(`real shell threads an exact attention rou
   await expect(panel).toBeVisible();
   await expect(request).toBeFocused();
   await expect(request.getByText("Exact Child Request 3", { exact: true })).toBeVisible();
+  if (width === 1280) {
+    const closePanel = page.getByRole("button", { name: "Close Panel", exact: true });
+    const headerAttention = page.getByRole("button", { name: "Attention: 2 Actions Required", exact: true });
+    await closePanel.click();
+    await headerAttention.click();
+    await expect(panel).toBeVisible();
+    await closePanel.click();
+    await headerAttention.click();
+    await expect(panel).toBeVisible();
+  }
   await page.screenshot({ path: `.agents/tmp/attention-followup/shell-route-${width}.png`, fullPage: true });
 });
 

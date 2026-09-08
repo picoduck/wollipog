@@ -3827,6 +3827,9 @@ function SessionDetailLoaded({
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
             const requests = pendingRequests(session.pendingApproval);
+            // Navigation makes the target reload-safe; the direct state transition also makes a
+            // repeat press reopen a panel that was closed while the route stayed unchanged.
+            rightPanel.show("subagents");
             navigate({ name: "session", id: session.id, attention: {
               eventEpoch: session.eventEpoch ?? 0,
               ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),

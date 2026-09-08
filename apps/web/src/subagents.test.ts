@@ -68,6 +68,43 @@ test("descriptor projection derives nested identity, activity, direct usage, and
   assert.equal(descriptors[1]!.toolCount, undefined, "no tool count is fabricated without direct tool evidence");
 });
 
+test("direct tool summaries stay incremental and retain untimed source ordering", () => {
+  const projector = new IncrementalSubagentProjector();
+  const initial: TimelineItem[] = [
+    { kind: "tool_call", id: 1, toolCallId: "agent", title: "Agent", text: "", toolKind: "agent", status: "in_progress", startedAt: 100 },
+    { kind: "tool_call", id: 2, toolCallId: "older", title: "Timed Tool", text: "", toolKind: "read", status: "completed", parentToolUseId: "agent", completedAt: 200 },
+  ];
+  const first = projector.project(initial, context);
+  assert.deepEqual(first.descriptors[0]!.latestTool, { title: "Timed Tool", active: false });
+  const appended = [...initial,
+    { kind: "tool_call", id: 3, toolCallId: "newer", title: "Untimed Tool", text: "", toolKind: "write", status: "in_progress", parentToolUseId: "agent" } as TimelineItem,
+  ];
+  publishTimelineSnapshotDelta(appended, {
+    previous: initial,
+    dirtyFrom: 2,
+    dirtyIndexes: [2],
+    dirtyHasParentItems: true,
+  });
+  const second = projector.project(appended, context);
+  assert.equal(second.incremental, true);
+  assert.equal(second.processedItems, 1);
+  assert.equal(second.descriptors[0]!.toolCount, 2);
+  assert.deepEqual(second.descriptors[0]!.latestTool, { title: "Untimed Tool", active: true });
+
+  const removed = [...initial];
+  publishTimelineSnapshotDelta(removed, {
+    previous: appended,
+    dirtyFrom: 2,
+    dirtyIndexes: [2],
+    dirtyHasParentItems: true,
+  });
+  const third = projector.project(removed, context);
+  assert.equal(third.incremental, true);
+  assert.equal(third.processedItems, 1);
+  assert.equal(third.descriptors[0]!.toolCount, 1);
+  assert.deepEqual(third.descriptors[0]!.latestTool, { title: "Timed Tool", active: false });
+});
+
 test("replayed App Server events retain selectable durable subagent output", () => {
   const builder = new TimelineBuilder();
   const events: SessionEventPayload[] = [

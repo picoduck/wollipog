@@ -45,6 +45,9 @@ interface SubagentIndex {
   descriptorCandidateIds: Set<string>;
   parentActivityMax: Map<string, number | undefined>;
   dirtyParentActivity: Set<string>;
+  /** Direct-tool summaries retain source order so untimed structured events remain comparable. */
+  parentToolSummary: Map<string, { count: number; latestSourceIndex: number; latest: ToolItem }>;
+  dirtyParentTools: Set<string>;
 }
 
 function parentIdOf(item: TimelineItem | undefined): string | undefined {
@@ -90,6 +93,16 @@ function addIndexedItem(index: SubagentIndex, sourceIndex: number, item: Timelin
       index.parentActivityMax.set(parentId, itemActivity);
       index.dirtyParentActivity.delete(parentId);
     }
+    if (item.kind === "tool_call") {
+      const summary = index.parentToolSummary.get(parentId);
+      index.parentToolSummary.set(parentId, {
+        count: (summary?.count ?? 0) + 1,
+        latestSourceIndex: summary && summary.latestSourceIndex > sourceIndex
+          ? summary.latestSourceIndex : sourceIndex,
+        latest: summary && summary.latestSourceIndex > sourceIndex ? summary.latest : item,
+      });
+      if (!summary || sourceIndex >= summary.latestSourceIndex) index.dirtyParentTools.delete(parentId);
+    }
   }
   refreshDescriptorCandidate(index, item.kind === "tool_call" ? item.toolCallId : undefined);
   refreshDescriptorCandidate(index, parentId);
@@ -109,8 +122,20 @@ function removeIndexedItem(index: SubagentIndex, sourceIndex: number, item: Time
       index.parentItems.delete(parentId);
       index.parentActivityMax.delete(parentId);
       index.dirtyParentActivity.delete(parentId);
+      index.parentToolSummary.delete(parentId);
+      index.dirtyParentTools.delete(parentId);
     } else if (recordedTimes(item).includes(index.parentActivityMax.get(parentId)!)) {
       index.dirtyParentActivity.add(parentId);
+    }
+    if (item.kind === "tool_call" && children?.size) {
+      const summary = index.parentToolSummary.get(parentId);
+      if (summary && summary.count > 1) {
+        index.parentToolSummary.set(parentId, { ...summary, count: summary.count - 1 });
+        if (summary.latestSourceIndex === sourceIndex) index.dirtyParentTools.add(parentId);
+      } else {
+        index.parentToolSummary.delete(parentId);
+        index.dirtyParentTools.delete(parentId);
+      }
     }
   }
   refreshDescriptorCandidate(index, item.kind === "tool_call" ? item.toolCallId : undefined);
@@ -125,6 +150,27 @@ function refreshDirtyParentActivity(index: SubagentIndex): void {
     index.parentActivityMax.set(parentId, activity);
   }
   index.dirtyParentActivity.clear();
+}
+
+function refreshDirtyParentTools(index: SubagentIndex): void {
+  for (const parentId of index.dirtyParentTools) {
+    const tools = [...(index.parentItems.get(parentId)?.entries() ?? [])]
+      .filter((entry): entry is [number, ToolItem] => entry[1].kind === "tool_call");
+    const latest = tools.reduce<[number, ToolItem] | undefined>(
+      (current, entry) => !current || entry[0] > current[0] ? entry : current,
+      undefined,
+    );
+    if (latest) {
+      index.parentToolSummary.set(parentId, {
+        count: tools.length,
+        latestSourceIndex: latest[0],
+        latest: latest[1],
+      });
+    } else {
+      index.parentToolSummary.delete(parentId);
+    }
+  }
+  index.dirtyParentTools.clear();
 }
 
 function maxDefined(values: Array<number | undefined>): number | undefined {
@@ -203,6 +249,7 @@ function deriveIndexedSubagentDescriptors(
   context: SubagentProjectionContext,
 ): SubagentDescriptor[] {
   refreshDirtyParentActivity(index);
+  refreshDirtyParentTools(index);
   const nodes = new Map<string, { tool: ToolItem; sourceIndex: number; parentId?: string }>();
   for (const toolCallId of index.descriptorCandidateIds) {
     const tools = index.toolsById.get(toolCallId);
@@ -277,14 +324,8 @@ function deriveIndexedSubagentDescriptors(
     );
     const authoritativelyLive = context.runnerOnline &&
       (lifecycle === "starting" || lifecycle === "running" || lifecycle === "waiting");
-    const directTools = [...(index.parentItems.get(id)?.values() ?? [])]
-      .filter((item): item is ToolItem => item.kind === "tool_call")
-      .sort((left, right) => {
-        const leftAt = maxDefined(recordedTimes(left)) ?? left.id;
-        const rightAt = maxDefined(recordedTimes(right)) ?? right.id;
-        return leftAt - rightAt || left.id - right.id;
-      });
-    const latestTool = directTools.at(-1);
+    const directTools = index.parentToolSummary.get(id);
+    const latestTool = directTools?.latest;
     descriptors.push({
       id,
       ...(effectiveParent.get(id) ? { parentId: effectiveParent.get(id) } : {}),
@@ -300,7 +341,7 @@ function deriveIndexedSubagentDescriptors(
       ...(node.tool.completedAt == null ? {} : { completedAt: node.tool.completedAt }),
       ...(node.tool.subagentRollup == null ? {} : { directUsage: node.tool.subagentRollup }),
       ...(inclusiveUsageById.get(id) == null ? {} : { inclusiveUsage: inclusiveUsageById.get(id) }),
-      ...(directTools.length === 0 ? {} : { toolCount: directTools.length }),
+      ...(directTools == null ? {} : { toolCount: directTools.count }),
       ...(latestTool == null ? {} : { latestTool: {
         title: latestTool.title,
         active: !["completed", "success", "succeeded", "failed", "error", "rejected", "cancelled", "canceled"]
@@ -326,6 +367,8 @@ function emptySubagentIndex(): SubagentIndex {
     descriptorCandidateIds: new Set(),
     parentActivityMax: new Map(),
     dirtyParentActivity: new Set(),
+    parentToolSummary: new Map(),
+    dirtyParentTools: new Set(),
   };
 }
 
