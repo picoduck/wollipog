@@ -9,7 +9,7 @@ import {
   type SkillFile,
 } from "@wollipog/protocol";
 
-interface WindowsSnapshotFile { path: unknown; content: unknown }
+interface WindowsSnapshotFile { Path: unknown; Content: unknown }
 interface WindowsSnapshotOutput {
   candidates?: unknown;
   generation?: unknown;
@@ -389,19 +389,25 @@ export function readWindowsSkillCandidate(home: string, candidate: MachineSkillC
     name: candidate.name, generation: candidate.generation });
   if (output.generation !== candidate.generation || !Array.isArray(output.files) ||
       output.files.length === 0 || output.files.length > SKILL_MAX_FILES) throw new Error("invalid helper result");
+  return normalizeWindowsSnapshotFiles(output.files);
+}
+
+/** Validate and project PowerShell's property-preserving JSON before it reaches the protocol. */
+export function normalizeWindowsSnapshotFiles(values: unknown[]): SkillFile[] {
+  if (values.length === 0 || values.length > SKILL_MAX_FILES) throw new Error("invalid helper result");
   let total = 0;
   const seen = new Set<string>();
-  const files = (output.files as WindowsSnapshotFile[]).map((value) => {
-    if (typeof value.path !== "string" || !validSkillFilePath(value.path) || seen.has(value.path) ||
-        typeof value.content !== "string") throw new Error("invalid helper result");
-    seen.add(value.path);
-    const bytes = Buffer.from(value.content, "base64");
-    if (bytes.toString("base64") !== value.content || bytes.length > SKILL_MAX_FILE_BYTES ||
+  const files = (values as WindowsSnapshotFile[]).map((value) => {
+    if (typeof value.Path !== "string" || !validSkillFilePath(value.Path) || seen.has(value.Path) ||
+        typeof value.Content !== "string") throw new Error("invalid helper result");
+    seen.add(value.Path);
+    const bytes = Buffer.from(value.Content, "base64");
+    if (bytes.toString("base64") !== value.Content || bytes.length > SKILL_MAX_FILE_BYTES ||
         (total += bytes.length) > SKILL_MAX_TOTAL_BYTES) throw new Error("invalid helper result");
     const utf8 = bytes.toString("utf8");
     return Buffer.from(utf8).equals(bytes)
-      ? { path: value.path, encoding: "utf8" as const, content: utf8 }
-      : { path: value.path, encoding: "base64" as const, content: value.content };
+      ? { path: value.Path, encoding: "utf8" as const, content: utf8 }
+      : { path: value.Path, encoding: "base64" as const, content: value.Content };
   }).sort((left, right) => left.path.localeCompare(right.path));
   if (!seen.has("SKILL.md")) throw new Error("invalid helper result");
   return files;
