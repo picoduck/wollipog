@@ -28,7 +28,11 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   runners: RunnerView[]; onClose: () => void; onImported: () => Promise<void>;
 }) {
   const api = useApi();
-  const compatible = runners.filter((runner) => runner.status === "online" && runner.os === "linux" && runnerSupportsProtocol(runner.protocolVersion, "machineSkillSnapshots"));
+  const compatible = runners.filter((runner) => runner.status === "online" && (
+    runner.os === "linux"
+      ? runnerSupportsProtocol(runner.protocolVersion, "machineSkillSnapshots")
+      : runner.os === "macos" && runnerSupportsProtocol(runner.protocolVersion, "portableMachineSkillSnapshots")
+  ));
   const [runnerId, setRunnerId] = useState(compatible[0]?.runnerId ?? "");
   const [discovery, setDiscovery] = useState<MachineSkillDiscovery | null>(null);
   const [preview, setPreview] = useState<MachineSkillPreview | null>(null);
@@ -42,6 +46,11 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   const [adoptionStatus, setAdoptionStatus] = useState<string | null>(null);
   const [recovery, setRecovery] = useState<MachineSkillRecovery | null>(null);
   const [restoreConfirmed, setRestoreConfirmed] = useState<string | null>(null);
+  const selectedRunner = compatible.find((runner) => runner.runnerId === runnerId);
+  const recoverySupported = selectedRunner?.os === "linux" && runnerSupportsProtocol(
+    selectedRunner?.protocolVersion,
+    "machineSkillAdoptionRecovery",
+  );
   const close = () => {
     if (busy) return;
     if (discovery) void api.discardMachineSkillDiscovery(discovery.discoveryId).catch(() => {});
@@ -137,12 +146,15 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
       <p className="skills-hint">Snapshot import requires protocol 111. Adoption requires a connected Linux runner on protocol 115 or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
       <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy || discovery !== null}
         options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={selectRunner} /></label>
-      {compatible.length === 0 && <p>No compatible connected machines. Update a Linux runner to enable snapshot imports.</p>}
+      {compatible.length === 0 && <p>No compatible connected machines. Update a Linux or macOS runner to enable snapshot imports.</p>}
       <button className="btn" type="button" disabled={busy || !compatible.some((runner) => runner.runnerId === runnerId)} onClick={() => void discover()}>{busy ? "Working…" : "Discover Skills"}</button>
-      <button className="btn" type="button" disabled={busy || !runnerSupportsProtocol(
-        compatible.find((runner) => runner.runnerId === runnerId)?.protocolVersion,
-        "machineSkillAdoptionRecovery",
-      )} onClick={() => void inspectRecovery()}>Inspect Recovery</button>
+      <button className="btn" type="button" disabled={busy || !recoverySupported}
+        onClick={() => void inspectRecovery()}>Inspect Recovery</button>
+      {selectedRunner && !recoverySupported && <p className="skills-hint">
+        {selectedRunner.os === "linux"
+          ? "Recovery inspection requires protocol 116 or newer. Update this runner to inspect or restore adoption journals."
+          : "Recovery inspection and source adoption require a Linux runner. Read-only snapshot import remains available."}
+      </p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {imported && <p role="status">Imported: {imported}. The source directory was not adopted.</p>}
       {adoptionStatus && <p role="status">{adoptionStatus}</p>}
@@ -159,7 +171,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
             <p>{operation.detail}</p>
             {restorable && <>
               <label className="field"><span>
-                <Checkbox label={`Confirm Restore for ${operation.name}`} checked={restoreConfirmed === operation.operationId}
+                <Checkbox label="Confirm Restore of Original Source" checked={restoreConfirmed === operation.operationId}
                   disabled={busy} onChange={(checked) => setRestoreConfirmed(checked ? operation.operationId : null)} />
                 {" "}Confirm Restore of Original Source
               </span><small>The current managed link is preserved inside {operation.backupDirectory} before an exclusive recovery link exposes the original.</small></label>
@@ -194,8 +206,8 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
         })}
         {preview.disposition === "update" && <label className="field"><span><Checkbox label="Accept Version Diff and Update Existing Assignments" checked={accepted} disabled={busy} onChange={setAccepted} /> Accept Version Diff and Update Existing Assignments</span></label>}
         {preview.disposition === "identical" && <>
-          <button className="btn" type="button" disabled={busy ||
-            !runnerSupportsProtocol(compatible.find((runner) => runner.runnerId === runnerId)?.protocolVersion, "machineSkillAdoption")}
+          <button className="btn" type="button" disabled={busy || selectedRunner?.os !== "linux" ||
+            !runnerSupportsProtocol(selectedRunner.protocolVersion, "machineSkillAdoption")}
             onClick={() => void checkAdoption()}>Check Adoption</button>
           {preflight && <section className="skills-section">
             <h4>Adoption Safety Check</h4>

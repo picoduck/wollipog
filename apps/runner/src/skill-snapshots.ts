@@ -8,13 +8,14 @@ import { SKILL_DIRS } from "./skills.js";
 
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fingerprint = (stat: Stats) => `${stat.dev}:${stat.ino}:${stat.ctimeMs}:${stat.mtimeMs}`;
-const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
+const fdPath = (fd: number, platform: NodeJS.Platform) =>
+  platform === "darwin" ? `/dev/fd/${fd}` : `/proc/self/fd/${fd}`;
 
 /** Directory times can be coarse enough that a newly added entry has the same timestamp.
  * Include the bounded entry names/types, without reading any file contents during discovery. */
-export function directoryGeneration(fd: number): string {
+export function directoryGeneration(fd: number, platform: NodeJS.Platform = process.platform): string {
   const entries: string[] = [];
-  const dir = opendirSync(fdPath(fd));
+  const dir = opendirSync(fdPath(fd, platform));
   try {
     for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
       if (entries.length >= 256) throw new Error();
@@ -25,13 +26,14 @@ export function directoryGeneration(fd: number): string {
 }
 
 /** Internal Linux primitive: resolve a fixed relative directory through pinned no-follow parents. */
-export function openSkillDirectory(home: string, relative: string, durable = false): number {
+export function openSkillDirectory(home: string, relative: string, durable = false,
+  platform: NodeJS.Platform = process.platform): number {
   const segments = relative.split("/");
   if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("\\"))) throw new Error();
   let fd = openSync(realpathSync(home), directoryFlags);
   try {
     for (const segment of segments) {
-      const next = openSync(`${fdPath(fd)}/${segment}`, directoryFlags);
+      const next = openSync(`${fdPath(fd, platform)}/${segment}`, directoryFlags);
       if (durable) {
         try { fsyncSync(fd); } catch (error) { closeSync(next); throw error; }
       }
@@ -49,6 +51,7 @@ export class MachineSkillSnapshots {
   constructor(private readonly options: { home: string; agents: () => AgentDefinition[]; platform?: NodeJS.Platform;
     now?: () => number; maxRawEntriesPerDirectory?: number }) {}
   private now() { return this.options.now?.() ?? Date.now(); }
+  private platform() { return this.options.platform ?? process.platform; }
   private directories(): string[] {
     const dirs = new Set<string>([".agents/skills"]);
     for (const agent of this.options.agents()) {
@@ -59,7 +62,7 @@ export class MachineSkillSnapshots {
     return [...dirs];
   }
   private openDirectory(relative: string): number {
-    return openSkillDirectory(this.options.home, relative);
+    return openSkillDirectory(this.options.home, relative, false, this.platform());
   }
   /** Resolve only an exact, still-live candidate minted by this runner process. */
   resolveCandidate(expected: MachineSkillCandidate): MachineSkillCandidate | null {
@@ -71,7 +74,9 @@ export class MachineSkillSnapshots {
   }
   handle(message: SkillSnapshotMessage): SkillSnapshotResultMessage {
     const result: SkillSnapshotResultMessage = { type: "skill_snapshot_result", runnerId: message.runnerId, requestId: message.requestId };
-    if ((this.options.platform ?? process.platform) !== "linux") return { ...result, error: "Machine skill snapshots currently require a Linux runner." };
+    if (!new Set<NodeJS.Platform>(["linux", "darwin"]).has(this.platform())) {
+      return { ...result, error: "Machine skill snapshots currently require a Linux or macOS runner." };
+    }
     for (const [id, entry] of this.candidates) if (entry.expires <= this.now()) this.candidates.delete(id);
     try {
       if (message.operation === "list") return { ...result, candidates: this.list() };
@@ -81,15 +86,15 @@ export class MachineSkillSnapshots {
       const candidate = entry.candidate;
       const fd = this.openDirectory(`${candidate.sourceDirectory}/${candidate.name}`);
       try {
-        if (directoryGeneration(fd) !== candidate.generation) throw new Error();
-        const first = inspectSkillTree(fd);
+        if (directoryGeneration(fd, this.platform()) !== candidate.generation) throw new Error();
+        const first = inspectSkillTree(fd, false, this.platform());
         const digest = skillVersionDigest(first.files);
         // A second bounded pass rejects concurrent edits to content or the manifest. The returned
         // bytes are an immutable snapshot, not a promise that the source remains unchanged later.
-        const second = inspectSkillTree(fd);
+        const second = inspectSkillTree(fd, false, this.platform());
         if (skillVersionDigest(second.files) !== digest ||
             JSON.stringify(second.executablePaths) !== JSON.stringify(first.executablePaths) ||
-            directoryGeneration(fd) !== candidate.generation) throw new Error();
+            directoryGeneration(fd, this.platform()) !== candidate.generation) throw new Error();
         return { ...result, snapshot: { candidate, files: first.files, digest, executablePaths: first.executablePaths } };
       } finally { closeSync(fd); }
     } catch {
@@ -102,7 +107,7 @@ export class MachineSkillSnapshots {
       let fd: number;
       try { fd = this.openDirectory(relative); } catch { continue; }
       try {
-        const dir = opendirSync(fdPath(fd));
+        const dir = opendirSync(fdPath(fd, this.platform()));
         try {
           for (let count = 0, raw = 0; count < 256 && found.length < 64;) {
             const entry = dir.readSync();
@@ -116,10 +121,11 @@ export class MachineSkillSnapshots {
             let child: number | undefined;
             let manifest: number | undefined;
             try {
-              child = openSync(`${fdPath(fd)}/${entry.name}`, directoryFlags);
-              manifest = openSync(`${fdPath(child)}/SKILL.md`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+              child = openSync(`${fdPath(fd, this.platform())}/${entry.name}`, directoryFlags);
+              manifest = openSync(`${fdPath(child, this.platform())}/SKILL.md`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
               if (!fstatSync(manifest).isFile()) continue;
-              const candidate = { id: randomUUID(), name: entry.name, sourceDirectory: relative, generation: directoryGeneration(child) };
+              const candidate = { id: randomUUID(), name: entry.name, sourceDirectory: relative,
+                generation: directoryGeneration(child, this.platform()) };
               found.push(candidate);
               this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000 });
             } catch { /* Unsupported or concurrently removed candidates are not offered. */ }
@@ -135,25 +141,26 @@ export class MachineSkillSnapshots {
 
 /** Bounded no-follow content validation; adoption may additionally flush files/directories before
  * preserving them. Snapshot discovery/read never opts into these durability operations. */
-export function inspectSkillTree(root: number, durable = false): { files: SkillFile[]; executablePaths: string[] } {
+export function inspectSkillTree(root: number, durable = false,
+  platform: NodeJS.Platform = process.platform): { files: SkillFile[]; executablePaths: string[] } {
     const files: SkillFile[] = [];
     const executablePaths: string[] = [];
     let total = 0;
     let entries = 0;
     const visit = (fd: number, prefix: string, depth: number) => {
       if (depth > 16) throw new Error();
-      const dir = opendirSync(fdPath(fd));
+      const dir = opendirSync(fdPath(fd, platform));
       try {
         for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
           const path = prefix + entry.name;
           if (++entries > 256 || !validSkillFilePath(path)) throw new Error();
           if (entry.isDirectory()) {
-            const child = openSync(`${fdPath(fd)}/${entry.name}`, directoryFlags);
+            const child = openSync(`${fdPath(fd, platform)}/${entry.name}`, directoryFlags);
             try { visit(child, `${path}/`, depth + 1); } finally { closeSync(child); }
             continue;
           }
           if (!entry.isFile() || files.length >= SKILL_MAX_FILES) throw new Error();
-          const child = openSync(`${fdPath(fd)}/${entry.name}`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          const child = openSync(`${fdPath(fd, platform)}/${entry.name}`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
           try {
             const before = fstatSync(child);
             if (!before.isFile() || before.nlink !== 1 || before.size > SKILL_MAX_FILE_BYTES || total + before.size > SKILL_MAX_TOTAL_BYTES) throw new Error();

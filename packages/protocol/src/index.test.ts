@@ -145,14 +145,20 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 118", () => {
-  assert.equal(PROTOCOL_VERSION, 118);
+test("PROTOCOL_VERSION is 119", () => {
+  assert.equal(PROTOCOL_VERSION, 119);
   assert.equal(runnerSupportsProtocol(112, "progressAwareSessionWorktrees"), false);
   assert.equal(runnerSupportsProtocol(113, "progressAwareSessionWorktrees"), true);
+  assert.equal(runnerSupportsProtocol(113, "hostAdministration"), false);
+  assert.equal(runnerSupportsProtocol(114, "hostAdministration"), true);
   assert.equal(runnerSupportsProtocol(111, "orchestratorNativeTui"), false);
   assert.equal(runnerSupportsProtocol(112, "orchestratorNativeTui"), true);
   assert.equal(runnerSupportsProtocol(110, "machineSkillSnapshots"), false);
   assert.equal(runnerSupportsProtocol(111, "machineSkillSnapshots"), true);
+  assert.equal(runnerSupportsProtocol(118, "portableMachineSkillSnapshots"), false);
+  assert.equal(runnerSupportsProtocol(119, "portableMachineSkillSnapshots"), true);
+  assert.equal(runnerSupportsProtocol(118, "nativeWindowsSkillDeployment"), false);
+  assert.equal(runnerSupportsProtocol(119, "nativeWindowsSkillDeployment"), true);
   assert.equal(runnerSupportsProtocol(114, "machineSkillAdoption"), false);
   assert.equal(runnerSupportsProtocol(115, "machineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(115, "machineSkillAdoptionRecovery"), false);

@@ -80,8 +80,22 @@ for (const unsafe of ["file-link", "directory-link", "hard-link", "oversized", "
   });
 }
 test("unsupported platforms never attempt filesystem discovery", () => {
-  const snapshots = new MachineSkillSnapshots({ home: "/does-not-exist", agents: () => agents, platform: "darwin" });
-  assert.match(snapshots.handle(message).error!, /Linux/);
+  const snapshots = new MachineSkillSnapshots({ home: "/does-not-exist", agents: () => agents, platform: "win32" });
+  assert.match(snapshots.handle(message).error!, /Linux or macOS/);
+});
+
+test("the macOS descriptor adapter discovers and reads through /dev/fd", { skip: process.platform === "win32" }, (t) => {
+  const home = mkdtempSync(join(tmpdir(), "skill-snapshot-darwin-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const root = join(home, ".codex/skills/alpha");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "SKILL.md"), "---\nname: alpha\n---\nmacOS snapshot");
+  const snapshots = new MachineSkillSnapshots({ home, agents: () => agents, platform: "darwin" });
+  const candidate = snapshots.handle(message).candidates?.[0];
+  assert.ok(candidate);
+  const read = snapshots.handle({ ...message, operation: "read", candidateId: candidate.id });
+  assert.equal(read.error, undefined);
+  assert.match(read.snapshot?.files[0]?.content ?? "", /macOS snapshot/);
 });
 
 test("machine discovery keeps separate hard raw and useful-entry bounds", { skip: process.platform !== "linux" }, (t) => {

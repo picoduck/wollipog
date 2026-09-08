@@ -1,8 +1,8 @@
 # Agent Skills Management and Deployment
 
-Status: managed deployment, Git import, Linux machine snapshot import and guarded adoption/recovery,
-version history with library rollback, machine-wide version pins, and assignable groups implemented;
-remaining platform design below is phased.
+Status: managed Linux/macOS/Windows deployment, Git import, Linux/macOS machine snapshot import,
+guarded Linux adoption/recovery, version history with library rollback, machine-wide version pins,
+and assignable groups implemented; remaining Windows snapshot and mixed-context WSL work is phased.
 
 ## Assignable Group API
 
@@ -42,8 +42,8 @@ stale previews, including changes away from and back to the same policy.
 This follows the explicitly selected single-canonical-copy design: versions are machine-wide,
 not independently pinnable per agent. Conflicting per-agent version requests are not supported.
 Policies persist across runner registration, require access to both skill and machine, and enforce
-the same audience-containment and capability rules as deployment. Groups and actual adoption remain
-separate follow-ups.
+the same audience-containment and capability rules as deployment. Group assignments and guarded
+source adoption are described below.
 
 ## Version History and Library Rollback
 
@@ -57,13 +57,14 @@ the source revision. A concurrent library update rejects the restore; preview ag
 
 This is library-wide rollback; pinned machines keep their selected revision. Offline machines
 reconcile when they reconnect; unsupported platforms retain their existing no-write behavior.
-Group assignment remains a follow-up under #251.
+Group assignments retain the selected machine-wide version policy when they expand dynamically.
 
 ## Implemented machine snapshot import
 
 **Import from Machine** discovers real skill directories in `.agents/skills` and configured native
-Claude/Codex harness locations on an online Linux runner using protocol 111 or newer. An owner or
-administrator must have access to the source machine. The control plane requests opaque candidate
+Claude/Codex harness locations on an online Linux runner using protocol 111 or newer, or a macOS
+runner using protocol 117 or newer. An owner or administrator must have access to the source
+machine. The control plane requests opaque candidate
 IDs from an on-demand inventory, never arbitrary host paths, and never adds file contents to the
 periodic `skills_state` report. Discovery lists at most 64 candidates, examines at most 256 entries
 per harness directory, and retains at most 256 expiring candidate IDs on the runner. Shared harness
@@ -71,11 +72,11 @@ locations are scanned once; divergent same-name directories remain separate cand
 4,096-entry raw iteration ceiling keeps skipped private journals from removing the hard discovery
 bound while preserving the 256-entry useful-work budget.
 
-The runner opens every untrusted path component with `O_NOFOLLOW` relative to pinned Linux
-directory descriptors. Symlinks, hard links, special files, excessive depth/entry counts, and trees
+The runner opens every untrusted path component with `O_NOFOLLOW` relative to pinned directory
+descriptors through `/proc/self/fd` on Linux and `/dev/fd` on macOS. Symlinks, hard links, special files, excessive depth/entry counts, and trees
 exceeding the existing 64-file / 512 KiB-per-file / 2 MiB-total limits fail closed. Two bounded reads
 must agree before content is returned. The configured HOME itself may resolve through a symlink;
-its untrusted descendants may not. macOS, Windows, and WSL-context imports are not implemented.
+its untrusted descendants may not. Native Windows and mixed-context WSL imports are not implemented.
 
 The preview shows the complete proposed files, digest, script-path indicators, and any existing
 version's files. An import commits exactly those previewed bytes with machine/directory/name,
@@ -90,7 +91,7 @@ Explicitly accepted updates to existing skills retain their assignments and trig
 managed deployment reconciler, which refuses to overwrite unmanaged directories. Git upstream
 metadata remains intact when a machine snapshot updates a Git-backed skill. The separate adoption
 flow (durable snapshot + explicit assignment + source-digest check before replacing a directory)
-remains future work under #251.
+is documented below.
 
 ### Read-only adoption preflight
 
@@ -158,8 +159,8 @@ the substituted tree, which is detected as an identity mismatch rather than dele
 with reconciliation/GC, rechecks the latest desired digest and targets, and runs a solicited sync
 first so the target is materialized. Lost or uncorrelated results instruct the operator to inspect
 for a journal before retrying. Backups are intentionally retained without automatic cleanup.
-Non-Linux snapshot imports and native Windows deployment remain under #251; WSL reports Linux and
-uses this path.
+Native Windows snapshots and mixed-context WSL deployment remain under #251. Standalone WSL
+runners report Linux and use this path.
 
 ### Adoption recovery inspection and restore
 
@@ -182,6 +183,11 @@ process interruption after the managed-link move or recovery-link publication. T
 its inode, bytes, and source metadata inside the private journal, and both it and the prior managed link
 remain available for manual inspection. Journals are intentionally retained; the recovery link is
 reported as unmanaged until the operator deliberately adopts or relocates that source again.
+The solicited reconciliation after restore can remove verified managed harness links that routed
+through the former canonical link, because the restored canonical source is now unmanaged. A
+managed link archived inside the journal can also outlive its referenced store version after
+ordinary retention GC. The journal preserves both artifacts for inspection; it does not promise
+that reconciliation will keep serving the former managed deployment.
 
 ## Implemented Git import
 
@@ -212,9 +218,10 @@ rolling-compatible metadata format.
 Git-imported versions retain URL, requested ref, repository path, and resolved commit separately
 from skill content. **Check for Updates** repeats the preview flow; there is no automatic polling
 or update. Import does not rename collisions: use a new source name or cancel. Non-Linux machine
-snapshot import, assignable groups, and native Windows deployment remain separate work under #251.
-WSL runners report Linux and use the Linux deployment path. Later sections describe that broader
-target design.
+snapshot import now includes native macOS; native Windows snapshot import and mixed-context WSL
+deployment remain under #251. Native Windows deployment uses directory junctions. Standalone WSL
+runners report Linux and use the Linux path. Later
+sections describe that broader target design.
 
 This document describes a planned feature that lets users manage a library of agent skills in
 Wollipog and deploy them to the Machines they have connected. A skill is a directory tree containing

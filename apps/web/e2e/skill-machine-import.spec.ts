@@ -58,6 +58,21 @@ test("machine snapshot read errors block import", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Import Snapshot" })).toBeDisabled();
 });
 
+test("a snapshot-capable runner explains the newer recovery protocol requirement", async ({ page }) => {
+  await page.goto("/skills-removals-e2e.html?legacyRecovery=1");
+  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
+  await expect(page.getByText("Recovery inspection requires protocol 116 or newer.")).toBeVisible();
+});
+
+test("a macOS runner offers snapshots while explaining that adoption remains Linux-only", async ({ page }) => {
+  await page.goto("/skills-removals-e2e.html?macos=1");
+  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await expect(page.getByRole("button", { name: "Discover Skills" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
+  await expect(page.getByText("Recovery inspection and source adoption require a Linux runner.")).toBeVisible();
+});
+
 test("switching machines clears inspected adoption recovery", async ({ page }) => {
   const operationId = "123e4567-e89b-42d3-a456-426614174000";
   await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) => route.fulfill({ json: {
@@ -151,7 +166,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
     await expect(restore).toBeDisabled();
     await page.screenshot({ path: info.outputPath(`recovery-inspect-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.getByRole("checkbox", { name: "Confirm Restore for code-review" }).check();
+    await page.getByRole("checkbox", { name: "Confirm Restore of Original Source" }).check();
     await expect(restore).toBeEnabled();
     await restore.click();
     await expect(page.getByRole("status")).toContainText("Published a recovery link to the preserved original for code-review");
