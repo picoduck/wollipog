@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { pendingRequests, sessionAttentionStatus, type ChildSessionAttentionOwner,
   type ChildSessionRegistryEntry, type SessionView, type WorkflowInstanceView } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { formatDuration, formatRecordedRelativeTime, titleCaseLabel } from "../format.js";
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
@@ -17,6 +18,8 @@ const STATE_LABELS: Record<WorkerState, string> = {
   completed: "Completed", failed: "Failed", stopped: "Stopped", unverified: "Status Unverified",
 };
 const PAGE_SIZE = 50;
+const REGISTRY_AUTO_RETRY_LIMIT = 2;
+type RegistryRetry = { generation: string; after: number; attempt: number };
 
 export function mergeDurableAgents(
   durableAgents: readonly SubagentDescriptor[],
@@ -29,16 +32,23 @@ export function mergeDurableAgents(
   return safeDurable.map((durable) => {
     const live = loaded.get(durable.id);
     if (!live) return durable;
+    const durableAt = durable.lastActivityAt ?? durable.completedAt ?? durable.startedAt ?? 0;
+    const liveAt = live.lastActivityAt ?? live.completedAt ?? live.startedAt ?? 0;
+    const terminal = (value: SubagentDescriptor["lifecycle"]) =>
+      value === "completed" || value === "failed" || value === "interrupted";
+    const liveIsNewer = liveAt > durableAt ||
+      (liveAt === durableAt && terminal(live.lifecycle) && !terminal(durable.lifecycle));
+    const state = liveIsNewer ? live : durable;
     return { ...live, ...durable,
       title: durable.title === "Subagent" ? live.title : durable.title,
       role: durable.role ?? live.role,
-      lifecycle: live.lifecycle,
-      toolStatus: live.toolStatus,
-      availability: live.availability,
+      lifecycle: state.lifecycle,
+      toolStatus: state.toolStatus,
+      availability: state.availability,
       lastActivityAt: Math.max(durable.lastActivityAt ?? 0, live.lastActivityAt ?? 0),
-      completedAt: live.completedAt ?? durable.completedAt,
+      completedAt: state.completedAt,
       toolCount: Math.max(durable.toolCount ?? 0, live.toolCount ?? 0),
-      latestTool: live.latestTool ?? durable.latestTool,
+      latestTool: state.latestTool,
       directUsage: live.directUsage,
       inclusiveUsage: live.inclusiveUsage };
   });
@@ -124,12 +134,16 @@ export function AgentsPanel(props: Props) {
   const [unidentifiedChildren, setUnidentifiedChildren] = useState(0);
   const [registryLoading, setRegistryLoading] = useState(false);
   const [registryUnavailable, setRegistryUnavailable] = useState(false);
+  const [registryRetry, setRegistryRetry] = useState<RegistryRetry | null>(null);
+  const [registryRetryAfter, setRegistryRetryAfter] = useState<number | null>(null);
+  const [registryRetryExhausted, setRegistryRetryExhausted] = useState(false);
   const registryRequest = useRef<string | null>(null);
   const registryRef = useRef<ChildSessionRegistryEntry[] | null>(null);
   const lastRegistryRefresh = useRef(0);
+  const registryGeneration = `${session.id}:${session.eventEpoch ?? 0}`;
   useEffect(() => { registryRef.current = registry; }, [registry]);
-  const loadRegistry = (after: number) => {
-    const key = `${session.id}:${session.eventEpoch ?? 0}:${after}`;
+  const loadRegistry = (after: number, attempt = 0) => {
+    const key = `${registryGeneration}:${after}:attempt:${attempt}`;
     if (registryRequest.current === key) return;
     registryRequest.current = key;
     setRegistryLoading(true);
@@ -144,12 +158,31 @@ export function AgentsPanel(props: Props) {
       setUnidentifiedChildren(page.unidentifiedChildren);
       setRegistryAfter(page.nextAfter);
       setRegistryUnavailable(false);
-    }).catch(() => {
+      setRegistryRetry(null);
+      setRegistryRetryAfter(null);
+      setRegistryRetryExhausted(false);
+    }).catch((cause: unknown) => {
       if (registryRequest.current !== key) return;
+      if (cause instanceof ApiError && cause.status === 409 && cause.code === "inventory_changed") {
+        // A live append can invalidate a fixed-boundary scan. Keep every already verified page and
+        // cursor, retry only a bounded number of times, and leave a manual recovery action.
+        setRegistryUnavailable(true);
+        setRegistryRetryAfter(after);
+        if (attempt < REGISTRY_AUTO_RETRY_LIMIT) {
+          setRegistryRetry({ generation: registryGeneration, after, attempt: attempt + 1 });
+        } else {
+          setRegistryRetry(null);
+          setRegistryRetryExhausted(true);
+        }
+        return;
+      }
       // Rolling compatibility: older control planes keep the existing honest partial-history view.
       setRegistryUnavailable(true);
       setRegistry(null);
       setRegistryAfter(null);
+      setRegistryRetry(null);
+      setRegistryRetryAfter(null);
+      setRegistryRetryExhausted(false);
     }).finally(() => {
       if (registryRequest.current === key) {
         registryRequest.current = null;
@@ -183,6 +216,9 @@ export function AgentsPanel(props: Props) {
       setUnidentifiedChildren(latestUnidentified);
       setRegistryAfter(nextAfter);
       setRegistryUnavailable(false);
+      setRegistryRetry(null);
+      setRegistryRetryAfter(null);
+      setRegistryRetryExhausted(false);
     })().catch(() => {
       if (registryRequest.current !== key) return;
       setRegistryUnavailable(true);
@@ -199,11 +235,28 @@ export function AgentsPanel(props: Props) {
     setRegistryAfter(0);
     setUnidentifiedChildren(0);
     setRegistryUnavailable(false);
+    setRegistryRetry(null);
+    setRegistryRetryAfter(null);
+    setRegistryRetryExhausted(false);
     registryRequest.current = null;
     loadRegistry(0);
     // Registry generations are scoped by exact session + event epoch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id, session.eventEpoch]);
+  useEffect(() => {
+    if (!registryRetry) return;
+    if (registryRetry.generation !== registryGeneration) {
+      setRegistryRetry(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setRegistryRetry(null);
+      loadRegistry(registryRetry.after, registryRetry.attempt);
+    }, Math.min(1_000, 200 * (2 ** (registryRetry.attempt - 1))));
+    return () => clearTimeout(timer);
+    // Retry with the latest render's eventEpoch/messageCount after the prior request's finally.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registryRetry, registryGeneration, session.messageCount]);
   useEffect(() => {
     if (registryRef.current === null) return;
     const progress = childRegistryProgressKey(session);
@@ -392,6 +445,13 @@ export function AgentsPanel(props: Props) {
       {registryAfter !== null && registry !== null && <p className="hint" role="status">More recorded workers are available.</p>}
       {unidentifiedChildren > 0 && <p className="hint" role="status">{unidentifiedChildren} {unidentifiedChildren === 1 ? "worker has" : "workers have"} an ambiguous provider identity and cannot be listed safely.</p>}
       {registryLoading && registry === null && <p className="hint" role="status">Loading recorded workers…</p>}
+      {registryRetry && !registryRetryExhausted && <p className="hint" role="status">Recorded worker inventory changed while loading. Retrying…</p>}
+      {registryRetryExhausted && <p className="hint" role="status">Recorded worker inventory kept changing.
+        <button type="button" onClick={() => {
+          setRegistryRetryExhausted(false);
+          loadRegistry(registryRetryAfter ?? 0);
+        }}>Retry Recorded Workers</button>
+      </p>}
       {workflowError && <p className="hint" role="status">Workflow phase details are unavailable. Session status remains visible.</p>}
       {session.backgroundJobsAvailable && !session.backgroundJobs && <p className="hint" role="status">
         {props.inventoryError || "Loading background work…"}

@@ -79,6 +79,32 @@ test("a selected child request promoted to primary moves focus to its canonical 
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(1);
 });
 
+test("an active-tail conflict on initial registry load retries against the current generation", async ({ page }) => {
+  await page.goto("/agents-e2e.html?registry-retry=initial");
+  await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __registryCalls?: number }).__registryCalls)).toBe(2);
+  await expect(page.getByRole("button", { name: "Retry Recorded Workers", exact: true })).toHaveCount(0);
+});
+
+test("a Load More generation conflict preserves verified pages and retries the cursor", async ({ page }) => {
+  await page.goto("/agents-e2e.html?registry-retry=load-more");
+  await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Load More Recorded Workers", exact: true }).click();
+  await expect(page.getByText("Recorded worker inventory changed while loading. Retrying…", { exact: true })).toBeVisible();
+  await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
+  await expect(page.getByText("Durable Second", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __registryCalls?: number }).__registryCalls)).toBe(3);
+});
+
+test("exhausted automatic registry retries retain a manual recovery action", async ({ page }) => {
+  await page.goto("/agents-e2e.html?registry-retry=exhaust");
+  const retry = page.getByRole("button", { name: "Retry Recorded Workers", exact: true });
+  await expect(retry).toBeVisible();
+  await retry.click();
+  await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __registryCalls?: number }).__registryCalls)).toBe(4);
+});
+
 for (const viewport of [
   { name: "desktop", width: 1280, height: 900 },
   { name: "mobile", width: 390, height: 844 },

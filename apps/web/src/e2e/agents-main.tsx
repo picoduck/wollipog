@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { PROTOCOL_VERSION, removePendingRequest, type SessionView } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { PROTOCOL_VERSION, removePendingRequest, type ChildSessionRegistryPage, type SessionView } from "@wollipog/protocol";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { InboxRow } from "../components/InboxRow.js";
@@ -19,6 +19,7 @@ if (params.has("theme")) sessionStorage.setItem("agents-fixture-theme", params.g
 document.documentElement.dataset.theme = (params.get("theme") ?? sessionStorage.getItem("agents-fixture-theme")) === "light" ? "light" : "dark";
 const now = Date.now();
 const navigationMode = params.has("navigation") || location.pathname.includes("/attention");
+const registryRetryMode = params.get("registry-retry");
 const initial: SessionView = {
   id: "agents-fixture", runnerId: "runner", workspaceId: null, workspaceName: null,
   agentId: null, agentName: null, title: "Unified Supervision", status: "input_required",
@@ -63,11 +64,36 @@ function Fixture() {
   const [selected, setSelected] = useState<string | null>(null);
   const [online, setOnline] = useState(true);
   const primaryRef = useRef<HTMLHeadingElement>(null);
+  const registryCalls = useRef(0);
+  const inventoryConflictCount = useRef(0);
+  const childPage = (after: number): ChildSessionRegistryPage => ({
+    children: [{
+      toolCallId: after === 0 ? "durable-first" : "durable-second",
+      name: after === 0 ? "Durable First" : "Durable Second",
+      status: "running", lifecycle: "running", sourceSeq: after === 0 ? 1 : 2,
+      startedAt: now - 60_000, lastActivityAt: now, toolCount: 0,
+    }],
+    attentionOwners: [], unidentifiedChildren: 0, eventEpoch: session.eventEpoch ?? 0,
+    nextAfter: after === 0 && registryRetryMode === "load-more" ? 1 : null,
+    truncated: after === 0 && registryRetryMode === "load-more",
+  });
+  const childSessions = async (_id: string, _eventEpoch: number, after = 0) => {
+    registryCalls.current += 1;
+    (window as unknown as { __registryCalls: number }).__registryCalls = registryCalls.current;
+    const conflict = registryRetryMode === "initial" && inventoryConflictCount.current < 1
+      || registryRetryMode === "load-more" && after === 1 && inventoryConflictCount.current < 1
+      || registryRetryMode === "exhaust" && inventoryConflictCount.current < 3;
+    if (conflict) {
+      inventoryConflictCount.current += 1;
+      throw new ApiError("child-session inventory changed", 409, "inventory_changed");
+    }
+    return childPage(after);
+  };
   const client: ApiClient = { ...api, approve: async (_sessionId, { requestId }) => {
     const next = { ...session, pendingApproval: removePendingRequest(session.pendingApproval, requestId) };
     setSession(next);
     return next;
-  } };
+  }, ...(registryRetryMode ? { childSessions } : {}) };
   return <ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
     {navigationMode ? <NavigationFixture session={session} onSession={setSession} online={online} /> :
     <main style={{ maxWidth: 780, padding: 16, margin: "0 auto" }}>

@@ -36,6 +36,35 @@ test("a durable page uses its safe identity set and merges only exact loaded mat
   assert.equal(merged.some((entry) => entry.id === recent.id), false);
 });
 
+test("newer durable terminal evidence cannot be reopened by an older loaded window", () => {
+  const durable = { ...child("child", "completed", 1), lastActivityAt: 200, completedAt: 200,
+    toolStatus: "completed", availability: "recorded" as const,
+    latestTool: { title: "Command", active: false } };
+  const loaded = { ...child("child", "working", 2), lastActivityAt: 100,
+    toolStatus: "running", availability: "live" as const,
+    latestTool: { title: "Read", active: true } };
+  const merged = mergeDurableAgents([durable], [loaded])[0]!;
+  assert.equal(merged.lifecycle, "completed");
+  assert.equal(merged.toolStatus, "completed");
+  assert.equal(merged.availability, "recorded");
+  assert.equal(merged.completedAt, 200);
+  assert.deepEqual(merged.latestTool, { title: "Command", active: false });
+});
+
+test("newer loaded terminal evidence settles older durable active evidence", () => {
+  const durable = { ...child("child", "working", 1), lastActivityAt: 100,
+    toolStatus: "running", latestTool: { title: "Read", active: true } };
+  const loaded = { ...child("child", "completed", 2), lastActivityAt: 200, completedAt: 200,
+    toolStatus: "completed", availability: "live" as const,
+    latestTool: { title: "Command", active: false } };
+  const merged = mergeDurableAgents([durable], [loaded])[0]!;
+  assert.equal(merged.lifecycle, "completed");
+  assert.equal(merged.toolStatus, "completed");
+  assert.equal(merged.availability, "live");
+  assert.equal(merged.completedAt, 200);
+  assert.deepEqual(merged.latestTool, { title: "Command", active: false });
+});
+
 test("an authoritative unresolved compact owner suppresses a misleading loaded descriptor", () => {
   const loaded = child("conflicted-owner", "working", 7);
   assert.deepEqual(mergeDurableAgents([], [loaded], new Set(["conflicted-owner"])), []);
