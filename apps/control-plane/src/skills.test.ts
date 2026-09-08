@@ -170,7 +170,7 @@ function assign(
   });
 }
 
-test("resolveDesiredSkills targets only native claude-code and codex agents", () => {
+test("resolveDesiredSkills capability-gates WSL while targeting supported native agents", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta("runner-1"), 10, 90);
   const skill = createSkill(db, "alpha-skill");
@@ -183,7 +183,13 @@ test("resolveDesiredSkills targets only native claude-code and codex agents", ()
   assert.deepEqual(
     entries[0]!.targets.map((target) => target.agentId).sort(),
     ["claude", "codex", "codex-app"],
-    "the WSL-context agent and the acp-driver agent never become targets",
+    "a pre-protocol-125 WSL agent and the acp-driver agent never become targets",
+  );
+  db.registerRunner(runnerMeta("runner-1"), 11, 125);
+  assert.deepEqual(
+    resolveDesiredSkills(db, "runner-1")[0]!.targets.map((target) => target.agentId).sort(),
+    ["claude", "codex", "codex-app", "wsl-claude"],
+    "protocol 125 admits supported WSL agent contexts",
   );
   assert.deepEqual(resolveDesiredSkills(db, "missing-runner"), []);
 });

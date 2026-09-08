@@ -21,7 +21,7 @@ import type {
   WorkflowArtifactView,
   type UsageAmount,
 } from "@wollipog/protocol";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 import { archiveSessionPage } from "./archive-session-page.js";
 import { parseRateTable } from "./usage-pricing.js";
 import {
@@ -1418,11 +1418,11 @@ test("Direct WSL safe-launcher attestation round-trips only from a v124 runner",
       bwrapRuntime: "/usr/bin/bwrap",
     },
   };
-  db.registerRunner(meta({ agents: [safe] }), 500, PROTOCOL_VERSION);
+  db.registerRunner(meta({ agents: [safe] }), 500, RUNNER_CAPABILITY_MIN_PROTOCOL.wslSafeLauncher);
   assert.deepEqual(db.getAgentLaunch("runner-1", safe.id)?.wslAgentControl, safe.wslAgentControl);
   assert.deepEqual(db.getRunner("runner-1")?.agents[0]?.wslAgentControl, safe.wslAgentControl);
 
-  db.registerRunner(meta({ agents: [safe] }), 600, PROTOCOL_VERSION - 1);
+  db.registerRunner(meta({ agents: [safe] }), 600, RUNNER_CAPABILITY_MIN_PROTOCOL.wslSafeLauncher - 1);
   assert.equal(db.getAgentLaunch("runner-1", safe.id)?.wslAgentControl, undefined);
   assert.equal(db.getRunner("runner-1")?.agents[0]?.wslAgentControl, undefined,
     "an older runner cannot persist the newer authority-bearing attestation shape");

@@ -235,6 +235,49 @@ test("machine discovery, preview and import are authorized, immutable, deduplica
   assert.equal((await preview(id)).statusCode, 404);
 });
 
+test("WSL snapshot candidates require protocol 125 and retain distro provenance", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  const app = Fastify();
+  t.after(async () => { await app.close(); db.close(); });
+  const owner: HumanPrincipal = { kind: "human", actorId: LOCAL_OWNER_USER_ID, userId: LOCAL_OWNER_USER_ID,
+    userName: "Owner", organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Personal",
+    role: "owner", deviceId: null, localBootstrap: true };
+  const candidate = { id: "wsl-opaque", name: "review", sourceDirectory: ".codex/skills",
+    generation: "a".repeat(64), context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  const payload = validateSkillPayload({ name: "review", files: [
+    { path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\nWSL\n" },
+  ] });
+  if (!payload.ok) throw new Error();
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "windows", version: "1", agents: [
+    { id: "codex-wsl-Ubuntu", name: "Codex WSL", command: "codex", args: [], env: {}, driver: "codex",
+      context: { kind: "wsl", distro: "Ubuntu" } },
+  ], workspaces: [] }, 1, 120);
+  registerMachineSkillRoutes(app, { db, requestHuman: () => owner, requestPrincipal: () => owner,
+    pushSkillsSync: (() => {}) as SkillsSyncPusher,
+    hub: { isRunnerOnline: () => true, sendToRunner: () => true,
+      requestFromRunner: async (runnerId, requestId, request) => request.type === "skill_snapshot" && request.operation === "list"
+        ? { type: "skill_snapshot_result", runnerId, requestId, candidates: [candidate] }
+        : { type: "skill_snapshot_result", runnerId, requestId,
+            snapshot: { candidate, files: payload.files, digest: payload.digest } } },
+  });
+  const discover = () => app.inject({ method: "POST", url: "/api/runners/runner-1/skill-snapshots" });
+  assert.equal((await discover()).statusCode, 502, "an older runner cannot project a WSL candidate");
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "windows", version: "1", agents: [],
+    workspaces: [] }, 2, 125);
+  const listed = await discover();
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.deepEqual(listed.json().candidates[0].context, { kind: "wsl", distro: "Ubuntu" });
+  const discoveryId = listed.json().discoveryId;
+  const preview = await app.inject({ method: "POST", url: `/api/skill-machine/${discoveryId}/preview`,
+    payload: { candidateId: candidate.id } });
+  assert.equal(preview.statusCode, 200, preview.body);
+  const imported = await app.inject({ method: "POST", url: `/api/skill-machine/${discoveryId}/import`,
+    payload: { previewId: preview.json().previewId } });
+  assert.equal(imported.statusCode, 200, imported.body);
+  const version = db.getSkillVersion(imported.json().skill.latestVersion.id)!;
+  assert.deepEqual(version.machineSource?.context, { kind: "wsl", distro: "Ubuntu" });
+});
+
 test("adoption requires a fresh explicit approval, prepares desired state, and correlates the runner result", async (t) => {
   const db = ControlPlaneDb.open(":memory:");
   const app = Fastify();

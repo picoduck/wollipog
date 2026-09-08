@@ -145,8 +145,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 124", () => {
-  assert.equal(PROTOCOL_VERSION, 124);
+test("PROTOCOL_VERSION is 125", () => {
+  assert.equal(PROTOCOL_VERSION, 125);
   assert.equal(runnerSupportsProtocol(121, "contextWindowVariants"), false);
   assert.equal(runnerSupportsProtocol(122, "contextWindowVariants"), true);
   assert.equal(runnerSupportsProtocol(122, "wslAgentControlBridge"), false);
@@ -169,6 +169,8 @@ test("PROTOCOL_VERSION is 124", () => {
   assert.equal(runnerSupportsProtocol(120, "nativeMacosMachineSkillSnapshots"), true);
   assert.equal(runnerSupportsProtocol(120, "nativeTuiAccountingDiagnostics"), false);
   assert.equal(runnerSupportsProtocol(121, "nativeTuiAccountingDiagnostics"), true);
+  assert.equal(runnerSupportsProtocol(124, "wslMachineSkills"), false);
+  assert.equal(runnerSupportsProtocol(125, "wslMachineSkills"), true);
   assert.equal(runnerSupportsProtocol(116, "hostAdminDoctor"), false);
   assert.equal(runnerSupportsProtocol(117, "hostAdminDoctor"), true);
   assert.equal(runnerSupportsProtocol(114, "machineSkillAdoption"), false);

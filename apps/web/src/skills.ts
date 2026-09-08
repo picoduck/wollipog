@@ -9,6 +9,7 @@ import {
   validSkillFilePath,
   validSkillName,
   type AgentDefinition,
+  type AgentContext,
   type ResourceScope,
   type DeployedSkillState,
   type SkillFile,
@@ -31,7 +32,8 @@ export interface SkillVersionSummary {
   manifest?: unknown;
   files?: SkillFile[];
   gitSource?: SkillGitSource & { path: string; commit: string };
-  machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number };
+  machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
+    context?: AgentContext };
 }
 
 export interface SkillGitSource { url: string; ref: string; subdirectory: string }

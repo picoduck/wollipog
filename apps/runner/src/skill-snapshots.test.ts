@@ -132,6 +132,30 @@ test("the Windows native adapter validates helper candidates and snapshot files"
   assert.equal(reads, 1);
 });
 
+test("the Windows adapter discovers and reads WSL candidates without exposing UNC paths", () => {
+  const wslAgent: AgentDefinition = { id: "codex-wsl-Ubuntu", name: "Codex WSL", command: "codex",
+    args: [], env: {}, driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } };
+  const homes: string[] = [];
+  const snapshots = new MachineSkillSnapshots({
+    home: "C:\\Users\\runner", agents: () => [agents[0]!, wslAgent], platform: "win32",
+    wslHome: () => "\\\\wsl.localhost\\Ubuntu\\home\\runner",
+    windowsList: (home) => {
+      homes.push(home);
+      return [{ name: home.startsWith("\\\\wsl") ? "wsl-review" : "native-review",
+        sourceDirectory: ".codex/skills", generation: "a".repeat(64) }];
+    },
+    windowsRead: (home) => [{ path: "SKILL.md", encoding: "utf8", content:
+      `---\nname: wsl-review\n---\n${home}` }],
+  });
+  const listed = snapshots.handle(message).candidates!;
+  assert.deepEqual(homes, ["C:\\Users\\runner", "\\\\wsl.localhost\\Ubuntu\\home\\runner"]);
+  const candidate = listed.find((entry) => entry.context?.kind === "wsl")!;
+  assert.deepEqual(candidate.context, { kind: "wsl", distro: "Ubuntu" });
+  assert.doesNotMatch(JSON.stringify(candidate), /wsl\.localhost/u);
+  const read = snapshots.handle({ ...message, operation: "read", candidateId: candidate.id });
+  assert.match(read.snapshot?.files[0]?.content ?? "", /wsl\.localhost/u);
+});
+
 test("machine discovery keeps separate hard raw and useful-entry bounds", { skip: process.platform !== "linux" }, (t) => {
   const home = mkdtempSync(join(tmpdir(), "skill-snapshot-bounds-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
