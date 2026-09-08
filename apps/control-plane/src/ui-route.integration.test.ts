@@ -646,6 +646,27 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     session: { costBudgetUsd: number | null };
   }).session.costBudgetUsd, null, "failed live-TUI guardrail mutation is atomic");
 
+  const guardedPrompt = await ownerFetch(`/api/sessions/${createdSessionId}/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "must stay unguarded", config: { maxToolCalls: 5 } }),
+  });
+  assert.equal(guardedPrompt.status, 409);
+  assert.match((await guardedPrompt.json() as { error: string }).error, /not reported to Wollipog/);
+  const malformedGuardrail = await ownerFetch(`/api/sessions/${createdSessionId}/config`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ costBudgetUsd: "5" }),
+  });
+  assert.equal(malformedGuardrail.status, 400);
+  assert.match((await malformedGuardrail.json() as { error: string }).error, /finite number/);
+  assert.equal((await (await ownerFetch(`/api/sessions/${createdSessionId}`)).json() as {
+    session: { costBudgetUsd: number | null; maxToolCalls: number | null };
+  }).session.costBudgetUsd, null);
+  assert.equal((await (await ownerFetch(`/api/sessions/${createdSessionId}`)).json() as {
+    session: { maxToolCalls: number | null };
+  }).session.maxToolCalls, null, "prompt and malformed config bypasses are both atomic");
+
   assert.deepEqual(await rejectedSocket(`${wsBase}/ui`), {
     code: 1008,
     reason: "unauthorized — open the startup pairing URL or pair this device",

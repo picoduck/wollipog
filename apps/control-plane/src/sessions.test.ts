@@ -16,6 +16,7 @@ import type {
   SessionEvent,
   SessionNamingRunnerErrorCode,
   SessionReminderView,
+  SessionConfig,
   SetSessionReminderRequest,
   SessionSnapshot,
   SessionView,
@@ -598,6 +599,16 @@ test("tracked guardrails and Native TUI cannot coexist across creation, inherita
       assert.equal(updated.status, 409);
       assert.match(updated.error!, /Use Direct/);
     }
+    const promptWithGuardrail = svc.prompt(unguarded.id, "must stay unguarded", [], undefined, {
+      costBudgetUsd: 6,
+    });
+    assert.equal(promptWithGuardrail.status, 409);
+    assert.match(promptWithGuardrail.error!, /Use Direct/);
+    const malformed = svc.setConfig(unguarded.id, {
+      costBudgetUsd: "7",
+    } as unknown as SessionConfig);
+    assert.equal(malformed.status, 400);
+    assert.match(malformed.error!, /finite number/);
     const unchanged = db.getSession(unguarded.id)!;
     assert.equal(unchanged.costBudgetUsd, null);
     assert.equal(unchanged.maxToolCalls, null);
