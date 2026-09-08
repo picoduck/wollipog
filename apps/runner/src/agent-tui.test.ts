@@ -157,7 +157,7 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
         assert.equal(probes, 1);
         const launchText = launch.args.join(" ");
         assert.ok(launchText.includes("mcp_servers.ambient.enabled=false"));
-        assert.ok(launchText.includes('sandbox_mode="read-only"'));
+        assert.match(launchText, /sandbox_mode=.*read-only/);
       }
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
