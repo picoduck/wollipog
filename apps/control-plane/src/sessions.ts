@@ -2751,9 +2751,10 @@ export class SessionsService {
       }
       const unsupported = this.capabilityFailure(req.runnerId, "sessionOrchestration", "Orchestrator preset");
       if (unsupported) return unsupported;
-      if (!["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
+      if (!(["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
+          (launch.driver === "acp" && req.launchSurface !== "native_tui")) ||
           (launch.context?.kind ?? "native") !== "native" || executionTarget.adapter !== "host") {
-        return fail("the orchestrator preset requires a native Codex or Claude harness on the host", 409);
+        return fail("the orchestrator preset requires a supported native host harness", 409);
       }
     }
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);

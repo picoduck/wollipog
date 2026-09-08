@@ -1,4 +1,5 @@
-import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
+import type { AcpImplementationDiagnostics } from "./acp-contract.js";
+import type { AgentDefinition, AgentCapabilities, SessionLaunchSpec } from "@wollipog/protocol";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -6,13 +7,83 @@ const execFileAsync = promisify(execFile);
 
 export const ORCHESTRATOR_PRESET = "orchestrator";
 export const ORCHESTRATOR_ENV_KEY = "WOLLIPOG_PERMISSION_PRESET";
+export const CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION = "0.75.1";
+const CLAUDE_AGENT_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp";
+const CLAUDE_AGENT_ACP_REPOSITORY = "https://github.com/agentclientprotocol/claude-agent-acp";
+
+const ACP_ORCHESTRATOR_CAPABILITIES: AgentCapabilities = {
+  models: [],
+  effortLevels: [],
+  slashCommands: [],
+  supportsImages: false,
+  supportsApprovals: false,
+  permissionModes: [ORCHESTRATOR_PRESET],
+  elicitation: { [ORCHESTRATOR_PRESET]: ["none"] },
+};
+
+/** Only an exact audited adapter release may receive the provider-specific restriction metadata.
+ * Registry identity is runner-verified; configured launches must pin the official package exactly
+ * and are independently checked again against the live ACP initialize response before session/new. */
+export function supportsClaudeAgentAcpOrchestrator(agent: AgentDefinition): boolean {
+  if ((agent.driver ?? "acp") !== "acp" || (agent.context?.kind ?? "native") !== "native") return false;
+  if (agent.registry) {
+    return agent.registry.id === "claude-acp" &&
+      agent.registry.repository === CLAUDE_AGENT_ACP_REPOSITORY &&
+      agent.registry.adapterVersion === CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION;
+  }
+  const command = agent.command.replace(/\\/g, "/").split("/").at(-1)?.toLowerCase();
+  if (command !== "npx" && command !== "npx.cmd") return false;
+  const pinned = `${CLAUDE_AGENT_ACP_PACKAGE}@${CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION}`;
+  return (agent.args.length === 1 && agent.args[0] === pinned) ||
+    (agent.args.length === 2 && (agent.args[0] === "-y" || agent.args[0] === "--yes") &&
+      agent.args[1] === pinned);
+}
+
+export function assertClaudeAgentAcpOrchestratorIdentity(
+  implementation: AcpImplementationDiagnostics | null,
+): void {
+  if (implementation?.name !== CLAUDE_AGENT_ACP_PACKAGE ||
+      implementation.version !== CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION) {
+    throw new Error(
+      `Orchestrator ACP launch refused: expected ${CLAUDE_AGENT_ACP_PACKAGE} ${CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION}.`,
+    );
+  }
+}
+
+/** Runner-owned metadata interpreted by the exact adapter release above. Empty built-in tools plus
+ * a sole allowlisted Wollipog MCP server are the enforcement boundary; client-service refusal in
+ * AcpClient is defense in depth. User/project settings and hooks are excluded at query creation. */
+export function orchestratorAcpSessionMeta(): Record<string, unknown> {
+  return {
+    claudeCode: {
+      options: {
+        tools: [],
+        allowedTools: ["mcp__wollipog__*"],
+        disallowedTools: [
+          "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Agent", "Task",
+          "WebFetch", "WebSearch",
+        ],
+        settingSources: [],
+        settings: { disableAllHooks: true },
+        hooks: {},
+        mcpServers: {},
+        additionalDirectories: [],
+      },
+    },
+  };
+}
 
 /** A runner-owned capability, distinct from provider permission modes. ACP adapters may execute
  * their own internal tools, so client-side fs/terminal refusal cannot establish this boundary. */
 export function withOrchestratorPreset(agents: AgentDefinition[]): AgentDefinition[] {
   return agents.filter((agent) => agent.id !== "conductor").map((agent) => {
-    if (!agent.capabilities || (agent.context?.kind ?? "native") !== "native" ||
-        !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp")) return agent;
+    const acpSupported = supportsClaudeAgentAcpOrchestrator(agent);
+    if ((agent.context?.kind ?? "native") !== "native" ||
+        (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
+    if (acpSupported && !agent.capabilities) {
+      return { ...agent, capabilities: { ...ACP_ORCHESTRATOR_CAPABILITIES } };
+    }
+    if (!agent.capabilities) return agent;
     if (agent.driver === "claude-code" && !agent.capabilities.permissionModes?.includes("default")) return agent;
     return { ...agent, capabilities: {
       ...agent.capabilities,

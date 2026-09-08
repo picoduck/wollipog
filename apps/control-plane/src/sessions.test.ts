@@ -551,7 +551,15 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409);
     agent.driver = "acp";
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).ok, true,
+      "an ACP adapter may advertise a runner-verified structured boundary");
+    assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
+      config: { permissionMode: "orchestrator" } }).status, 409,
+    "ACP has no standalone TUI enforcement path");
+    agent.context = { kind: "wsl", distro: "Ubuntu" };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
+      "WSL remains unavailable until it can provision a target-local management bridge");
   } finally { db.close(); }
 });
 

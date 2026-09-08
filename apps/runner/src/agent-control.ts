@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { runnerSupportsProtocol, type SessionLaunchSpec } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type AcpMcpStdioServer, type SessionLaunchSpec } from "@wollipog/protocol";
 import { deriveControlPlaneHttpUrl } from "./control-plane-transport.js";
 import {
   defaultRunnerReentryHost,
@@ -134,7 +134,8 @@ function removeAgentControlLaunchState(
 /** Mutates only ephemeral runner-side launch state. The credential bytes never cross the runner
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
-  spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "args" | "env"> & Partial<Pick<SessionLaunchSpec, "config">>,
+  spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "args" | "env"> &
+    Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext">>,
   config: {
     controlPlaneUrl: string;
     controlPlaneProtocolVersion: number | null;
@@ -149,8 +150,8 @@ export function provisionAgentControl(
     (!spec.executionTarget || spec.executionTarget.adapter === "host");
   const orchestrator = spec.config?.permissionMode === "orchestrator";
   if (orchestrator && (!hostExecution || !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionOrchestration") ||
-      !["codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp"))) {
-    throw new Error("the orchestrator preset requires a current native Codex or Claude harness on the host");
+      !["acp", "codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp"))) {
+    throw new Error("the orchestrator preset requires a current supported native harness on the host");
   }
   if (!supported || !hostExecution) {
     removeAgentControlLaunchState(spec, host);
@@ -183,7 +184,6 @@ export function provisionAgentControl(
   delete spec.env[ORCHESTRATOR_ENV_KEY];
   if (orchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
-    spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
     const mcp = {
       ...runnerReentryCommand(host, "--agent-control-mcp"),
       env: {
@@ -192,7 +192,21 @@ export function provisionAgentControl(
         [ORCHESTRATOR_ENV_KEY]: "orchestrator",
       },
     };
-    spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp));
+    if ((spec.driver ?? "acp") === "acp") {
+      const server: AcpMcpStdioServer = {
+        type: "stdio",
+        name: "wollipog",
+        command: mcp.command,
+        args: [...mcp.args],
+        env: Object.fromEntries(Object.keys(mcp.env).map((name) => [name, { fromEnv: name }])),
+      };
+      // Ambient/user ACP context is not part of the audited boundary. The sole MCP definition is
+      // materialized from runner-owned environment references immediately before session/new.
+      spec.acpSessionContext = { mcpServers: [server] };
+    } else {
+      spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
+      spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp));
+    }
   }
 
   if (spec.driver === "claude-code") {
@@ -204,7 +218,7 @@ export function provisionAgentControl(
     }
     if (!already) spec.args.push("--mcp-config", file);
   }
-  log(`agent control ${spec.sessionId}: CLI${spec.driver === "claude-code" ? " and MCP" : ""} provisioned`);
+  log(`agent control ${spec.sessionId}: CLI${spec.driver === "claude-code" || (orchestrator && spec.driver === "acp") ? " and MCP" : ""} provisioned`);
 }
 
 export function removeAgentControlFiles(sessionId: string, configDir: string): void {

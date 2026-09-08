@@ -3299,6 +3299,9 @@ export class SessionManager {
           if (!current) return;
           const capabilities = {
             ...state.capabilities,
+            ...(current.config.permissionMode === "orchestrator"
+              ? { permissionModes: ["orchestrator"], elicitation: { orchestrator: ["none" as const] } }
+              : {}),
             slashCommands: state.capabilities.slashCommands.map((command) => ({
               name: command.name,
               source: command.source,
@@ -3322,7 +3325,9 @@ export class SessionManager {
               ...current.config,
               model: state.config.model,
               effort: state.config.effort,
-              permissionMode: state.config.permissionMode,
+              permissionMode: current.config.permissionMode === "orchestrator"
+                ? "orchestrator"
+                : state.config.permissionMode,
             },
           });
           const updated = this.store.readMeta(sessionId);

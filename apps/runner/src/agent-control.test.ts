@@ -66,12 +66,45 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
       assert.deepEqual(launch.args, args, "resume is idempotent");
       assert.ok(launch.args.includes(driver === "codex" ? "--strict-config" : "--strict-mcp-config"));
     }
-    for (const driver of ["acp", "codex"] as const) {
-      const launch = spec(driver);
-      launch.config = { permissionMode: "orchestrator" };
-      assert.throws(() => provisionAgentControl(launch, { ...control,
-        controlPlaneProtocolVersion: driver === "codex" ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionOrchestration - 1 : PROTOCOL_VERSION,
-      }, () => {}, host), /current native/);
+    const acp = spec("acp");
+    acp.config = { permissionMode: "orchestrator" };
+    acp.acpSessionContext = {
+      additionalDirectories: ["/ambient"],
+      mcpServers: [{ type: "stdio", name: "ambient", command: "ambient", args: [] }],
+    };
+    provisionAgentControl(acp, control, () => {}, host);
+    assert.deepEqual(acp.args, []);
+    assert.equal(acp.acpSessionContext?.additionalDirectories, undefined);
+    assert.deepEqual(acp.acpSessionContext?.mcpServers?.map((server) => server.name), ["wollipog"]);
+    const acpMcp = acp.acpSessionContext?.mcpServers?.[0];
+    assert.equal(acpMcp?.type, "stdio");
+    if (acpMcp?.type === "stdio") {
+      assert.equal(acpMcp.command, "/opt/runner");
+      assert.deepEqual(acpMcp.args, ["--agent-control-mcp"]);
+      assert.deepEqual(acpMcp.env?.WOLLIPOG_SESSION_TOKEN_FILE, { fromEnv: "WOLLIPOG_SESSION_TOKEN_FILE" });
+    }
+
+    const old = spec("codex");
+    old.config = { permissionMode: "orchestrator" };
+    assert.throws(() => provisionAgentControl(old, { ...control,
+      controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionOrchestration - 1,
+    }, () => {}, host), /supported native/);
+
+    const wsl = spec("acp");
+    wsl.sessionId = "s_wsl";
+    wsl.config = { permissionMode: "orchestrator" };
+    wsl.context = { kind: "wsl", distro: "Ubuntu" };
+    const container = spec("acp");
+    container.sessionId = "s_container";
+    container.config = { permissionMode: "orchestrator" };
+    container.executionTarget = { ...container.executionTarget!, adapter: "container", kind: "container" };
+    const cloud = spec("acp");
+    cloud.sessionId = "s_cloud";
+    cloud.config = { permissionMode: "orchestrator" };
+    cloud.executionTarget = { ...cloud.executionTarget!, adapter: "cloud", kind: "cloud" };
+    for (const launch of [wsl, container, cloud]) {
+      assert.throws(() => provisionAgentControl(launch, control, () => {}, host), /supported native/);
+      assert.equal(existsSync(agentControlTokenPath(root, launch.sessionId)), false);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

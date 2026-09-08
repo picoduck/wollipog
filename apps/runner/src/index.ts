@@ -79,7 +79,7 @@ import {
   removeAgentControlFiles,
   sweepAgentControlFiles,
 } from "./agent-control.js";
-import { withOrchestratorPreset } from "./orchestrator-preset.js";
+import { supportsClaudeAgentAcpOrchestrator, withOrchestratorPreset } from "./orchestrator-preset.js";
 import {
   GitOpError,
   gitDiff,
@@ -496,6 +496,14 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   async (meta) => {
     meta.env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
     if (meta.agentId === "conductor") throw new Error("The Conductor agent is retired; create an ordinary session to orchestrate children.");
+    if (meta.driver === "acp" && meta.config.permissionMode === "orchestrator") {
+      const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
+      if (!localAgent || !supportsClaudeAgentAcpOrchestrator(localAgent)) {
+        // Refuse before minting the session credential or spawning the adapter. The ACP
+        // initialize identity check remains a second, provider-edge attestation.
+        throw new Error("the Orchestrator preset requires the exact audited Claude Agent ACP adapter");
+      }
+    }
     provisionClaudeHooks(
       meta,
       {
