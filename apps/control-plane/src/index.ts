@@ -137,6 +137,9 @@ import {
   localDeviceTokenPath,
   localPairingUrl,
 } from "./local-device-credential.js";
+import { registerHostAdminRoute } from "./host-admin-route.js";
+import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
+import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
 import { childSessionDefaultsError } from "./child-session-guardrails.js";
 import {
@@ -267,6 +270,15 @@ const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE
 // runs, instead of keeping the runner "online" with lost prompts until the OS TCP timeout fires.
 const RUNNER_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
 const LOCAL_DEVICE_TOKEN_PATH = localDeviceTokenPath(DB_PATH);
+const STARTED_AT = Date.now();
+// The dashboard origin remote clients actually reach (Tailscale, HTTPS reverse proxy). Pairing
+// links created by `wollipog admin device create` embed it; an invalid value fails startup
+// rather than silently producing links that point tokens at the wrong host.
+const PUBLIC_ORIGIN = resolvePublicOrigin(process.env[PUBLIC_ORIGIN_ENV]);
+if (PUBLIC_ORIGIN.error) {
+  writeSync(2, `[control-plane] ${PUBLIC_ORIGIN.error}\n`);
+  process.exit(1);
+}
 
 // Recovery is read-only: wrong coordinates must fail loudly instead of minting a plausible but
 // unusable owner credential. Synchronous fd writes make the one-line contract flush-safe on Windows.
@@ -1938,6 +1950,25 @@ registerInstanceRoute(app, {
   instanceId: () => db.instanceId(),
   displayName: () => db.localIdentityContext().organizationName,
 });
+registerHostAdminRoute(app, {
+  localBootstrapPrincipal: (req) => authedLocalBootstrap(req),
+  startedAt: STARTED_AT,
+  bind: { host: HOST, port: PORT, tailnetOnly: TAILNET_ONLY },
+  publicOrigin: PUBLIC_ORIGIN.origin,
+  publicOriginWarning: PUBLIC_ORIGIN.warning,
+  webServed: () => webDist !== null,
+  pairingHosts: () => pairingHosts(HOST, TAILNET_ONLY ? tailnetIpv4(lanIpv4()) : lanIpv4()),
+  databasePath: DB_PATH,
+  artifactStorePath: ARTIFACT_BLOB_DIR ?? defaultArtifactBlobRoot(DB_PATH),
+  localCredentialPath: LOCAL_DEVICE_TOKEN_PATH,
+  runners: () => db.listRunners().map((runner) => ({
+    runnerId: runner.runnerId,
+    status: runner.status,
+    version: runner.version,
+    protocolVersion: runner.protocolVersion ?? null,
+  })),
+  pairedDeviceCount: () => db.listDevices().length,
+});
 registerRunnerAttestationRoute(app, db);
 
 // Connection coordinates are reusable; runner-specific credentials are issued separately and
@@ -1998,6 +2029,9 @@ app.post("/api/devices", async (req, reply) => {
       port: PORT,
       webServed: webDist !== null,
       boundBeyondLoopback: !isLoopbackBindHost(HOST),
+      // Protocol v114+: the operator-configured dashboard origin, so a host CLI can print a
+      // complete link even when the bind host is not what remote clients reach.
+      publicOrigin: PUBLIC_ORIGIN.origin,
     },
   });
 });
@@ -4608,6 +4642,8 @@ void (async () => {
     shellRegistry.reconcileStartup(Date.now());
     markStartupReady();
     app.log.info(`control plane listening on http://${HOST}:${PORT}`);
+    if (PUBLIC_ORIGIN.origin) app.log.info(`public dashboard origin for pairing links: ${PUBLIC_ORIGIN.origin}`);
+    if (PUBLIC_ORIGIN.warning) app.log.warn(PUBLIC_ORIGIN.warning);
     // Normal service stdout is commonly captured as a log. Reveal the credential automatically
     // only to an interactive terminal; `--print-pair-url` is the explicit non-interactive path.
     if (process.stdout.isTTY) process.stdout.write(`[control-plane] Pair This Device: ${LOCAL_PAIRING_URL}\n`);

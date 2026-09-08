@@ -1,0 +1,354 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type HostAdminStatusView } from "@wollipog/protocol";
+import type { McpFetch } from "./session-management-mcp.js";
+import {
+  formatStatus,
+  readProtectedLocalToken,
+  resolveLocalTokenPath,
+  runHostAdminCli,
+  writeProtectedSecretFile,
+  type HostAdminIo,
+} from "./host-admin-cli.js";
+import { runWollipogCli } from "./wollipog-cli.js";
+
+const TOKEN = "A".repeat(43);
+const DEVICE_TOKEN = "device-secret-token-0123456789";
+
+function fixture(t: { after(fn: () => void): void }) {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admin-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir, { mode: 0o700 });
+  const tokenFile = join(dataDir, "control-plane.db.local-device-token");
+  writeFileSync(tokenFile, `${TOKEN}\n`, { mode: 0o600 });
+  return { root, dataDir, tokenFile };
+}
+
+function makeIo(overrides: Partial<HostAdminIo> = {}) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const io: HostAdminIo = {
+    stdout: (text) => { out.push(text); },
+    stderr: (text) => { err.push(text); },
+    stdoutIsTTY: false,
+    stdinIsTTY: false,
+    confirm: async () => false,
+    ...overrides,
+  };
+  return { io, stdout: () => out.join(""), stderr: () => err.join("") };
+}
+
+function status(overrides: Partial<HostAdminStatusView> = {}): HostAdminStatusView {
+  return {
+    service: "wollipog-control-plane",
+    appVersion: "0.22.0",
+    protocolVersion: PROTOCOL_VERSION,
+    apiVersion: 1,
+    health: { ok: true, startedAt: 0, uptimeMs: 3_720_000 },
+    bind: { host: "127.0.0.1", port: 4317, mode: "loopback", tailnetOnly: false, boundBeyondLoopback: false },
+    publicOrigin: "https://wollipog.example.ts.net",
+    dashboard: { webServed: true, pairingHosts: [] },
+    database: { path: "/srv/wollipog/control-plane.db", ready: true },
+    artifactStore: { path: "/srv/wollipog/control-plane.db.artifacts", ready: true },
+    localCredential: { path: "/srv/wollipog/control-plane.db.local-device-token", safe: true, issues: [] },
+    runners: { registered: 1, online: 1, items: [{ runnerId: "dev-box", status: "online", version: "0.22.0", protocolVersion: PROTOCOL_VERSION }] },
+    devices: { paired: 2 },
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function server(options: {
+  protocolVersion?: number;
+  publicOrigin?: string | null;
+  hosts?: string[];
+  boundBeyondLoopback?: boolean;
+  webServed?: boolean;
+} = {}) {
+  const calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, method: init?.method ?? "GET", headers: init?.headers ?? {}, body: init?.body });
+    const respond = (statusCode: number, body: unknown) => ({
+      ok: statusCode >= 200 && statusCode < 300,
+      status: statusCode,
+      text: async () => (body === undefined ? "" : JSON.stringify(body)),
+    });
+    if (init?.headers?.authorization !== `Bearer ${TOKEN}`) return respond(401, { error: "unauthorized" });
+    const path = url.replace(/^https?:\/\/[^/]+/u, "");
+    if (path === "/api/compatibility") return respond(200, { protocolVersion: options.protocolVersion ?? PROTOCOL_VERSION });
+    if (path === "/api/admin/status") return respond(200, status());
+    if (path === "/api/identity") {
+      return respond(200, { memberships: [
+        { organizationId: "org_personal", organizationName: "Personal", userId: "usr_local", userName: "Local Owner", userStatus: "active", role: "owner", createdAt: 1_700_000_000_000 },
+      ] });
+    }
+    if (path === "/api/devices" && init?.method === "GET") {
+      return respond(200, { devices: [
+        { deviceId: "dev_1", name: "Pixel 9", createdAt: 1_700_000_000_000, lastSeenAt: null, userId: "usr_local", userName: "Local Owner", organizationId: "org_personal", organizationName: "Personal", role: "owner" },
+      ] });
+    }
+    if (path === "/api/devices" && init?.method === "POST") {
+      const body = JSON.parse(init.body ?? "{}") as { name: string; userId?: string };
+      return respond(201, {
+        device: { deviceId: "dev_new", name: body.name, createdAt: 1, lastSeenAt: null, userId: body.userId ?? "usr_local", userName: "Local Owner", organizationId: "org_personal", organizationName: "Personal", role: "owner" },
+        token: DEVICE_TOKEN,
+        pairing: {
+          hosts: options.hosts ?? [],
+          port: 4317,
+          webServed: options.webServed ?? true,
+          boundBeyondLoopback: options.boundBeyondLoopback ?? false,
+          publicOrigin: options.publicOrigin ?? null,
+        },
+      });
+    }
+    if (path === "/api/devices/dev_1" && init?.method === "DELETE") return respond(204, undefined);
+    if (path.startsWith("/api/devices/") && init?.method === "DELETE") return respond(404, { error: "device not found" });
+    return respond(404, { error: `unexpected ${path}` });
+  };
+  return { fetch, calls };
+}
+
+function env(tokenFile: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { CONTROL_PLANE_LOCAL_TOKEN_FILE: tokenFile, ...extra };
+}
+
+const host = { platform: process.platform, uid: process.getuid?.() ?? null, cwd: () => "/nonexistent-cwd" };
+
+test("admin pairing-url reprints the loopback recovery link offline from the protected credential", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch, calls } = server();
+  const { io, stdout } = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "pairing-url"], env(tokenFile), io, fetch, host), 0);
+  assert.equal(stdout(), `http://127.0.0.1:4317/#pair=${TOKEN}\n`);
+  assert.equal(calls.length, 0, "recovery must not need a running control plane");
+
+  const jsonIo = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "pairing-url", "--json"], env(tokenFile, { CONTROL_PLANE_PORT: "5000" }), jsonIo.io, fetch, host), 0);
+  assert.deepEqual(JSON.parse(jsonIo.stdout()), { pairingUrl: `http://127.0.0.1:5000/#pair=${TOKEN}`, tokenFile });
+});
+
+test("credential path resolution mirrors the control plane's own defaults", () => {
+  assert.equal(resolveLocalTokenPath(["admin", "status", "--token-file", "/x/tok"], { CONTROL_PLANE_LOCAL_TOKEN_FILE: "/env/tok" }, "/cwd"), "/x/tok");
+  assert.equal(resolveLocalTokenPath(["admin", "status"], { CONTROL_PLANE_LOCAL_TOKEN_FILE: "rel/tok" }, "/cwd"), "/cwd/rel/tok");
+  assert.equal(resolveLocalTokenPath(["admin", "status"], { CONTROL_PLANE_DB: "/srv/wollipog/cp.db" }, "/cwd"), "/srv/wollipog/cp.db.local-device-token");
+  assert.equal(resolveLocalTokenPath(["admin", "status"], {}, "/cwd"), "/cwd/data/control-plane.db.local-device-token");
+});
+
+test("admin commands fail closed for non-loopback targets before touching the credential", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch, calls } = server();
+  for (const url of ["http://100.64.0.10:4317", "https://wollipog.example.ts.net", "http://dev-box.local:4317"]) {
+    const { io, stderr } = makeIo();
+    assert.equal(await runHostAdminCli(["admin", "status", "--url", url], env(tokenFile), io, fetch, host), 2, url);
+    assert.match(stderr(), /only on the control-plane host over loopback/u);
+  }
+  assert.equal(calls.length, 0);
+  const { io, stdout } = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "status", "--url", "ws://127.0.0.1:4317", "--json"], env(tokenFile), io, fetch, host), 2);
+  assert.match(JSON.parse(stdout()).error, /must use http or https/u);
+});
+
+test("credential reads refuse symlinks, permissive modes, foreign owners, and malformed contents", async (t) => {
+  const { dataDir, tokenFile } = fixture(t);
+  assert.equal(readProtectedLocalToken(tokenFile, host), TOKEN);
+
+  const link = join(dataDir, "link-token");
+  symlinkSync(tokenFile, link);
+  assert.throws(() => readProtectedLocalToken(link, host), /symbolic link/u);
+
+  const missing = join(dataDir, "missing");
+  assert.throws(() => readProtectedLocalToken(missing, host), /not found .* --token-file/u);
+
+  const malformed = join(dataDir, "malformed");
+  writeFileSync(malformed, "not-a-token\n", { mode: 0o600 });
+  assert.throws(() => readProtectedLocalToken(malformed, host), /invalid contents/u);
+
+  if (process.platform !== "win32") {
+    chmodSync(tokenFile, 0o640);
+    assert.throws(() => readProtectedLocalToken(tokenFile, host), /mode 0640 grants group or other access/u);
+    const { io, stderr } = makeIo();
+    assert.equal(await runHostAdminCli(["admin", "status"], env(tokenFile), io, server().fetch, host), 1);
+    assert.match(stderr(), /mode 0640/u);
+    chmodSync(tokenFile, 0o600);
+    assert.throws(() => readProtectedLocalToken(tokenFile, { ...host, uid: (host.uid ?? 0) + 1 }), /owned by uid/u);
+    assert.equal(readProtectedLocalToken(tokenFile, { ...host, platform: "win32", uid: 999_999 }), TOKEN);
+  }
+});
+
+test("admin status rejects control planes older than the host-administration protocol", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch, calls } = server({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdministration - 1 });
+  const { io, stdout } = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "status", "--json"], env(tokenFile), io, fetch, host), 1);
+  assert.match(JSON.parse(stdout()).error, new RegExp(`requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.hostAdministration}`, "u"));
+  assert.deepEqual(calls.map((call) => call.url), ["http://127.0.0.1:4317/api/compatibility"]);
+});
+
+test("admin status emits stable JSON and a readable summary authenticated with the local credential", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch, calls } = server();
+  const { io, stdout } = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "status", "--json"], env(tokenFile), io, fetch, host), 0);
+  assert.deepEqual(JSON.parse(stdout()), status());
+  assert.ok(calls.every((call) => call.headers.authorization === `Bearer ${TOKEN}`));
+  assert.equal(calls.at(-1)?.url, "http://127.0.0.1:4317/api/admin/status");
+
+  const readable = formatStatus(status({ warnings: ["no registered runner is online"], localCredential: { path: "/p", safe: false, issues: ["credential file mode 0644 grants group or other access; expected 0600"] } }));
+  assert.match(readable, /Control Plane {5}wollipog-control-plane 0\.22\.0 \(protocol v\d+, api v1\)/u);
+  assert.match(readable, /Health {12}ok, up 1h 2m/u);
+  assert.match(readable, /Public Origin {5}https:\/\/wollipog\.example\.ts\.net/u);
+  assert.match(readable, /Local Credential {2}UNSAFE {2}\/p\n {2}! credential file mode 0644/u);
+  assert.match(readable, /Warnings\n {2}- no registered runner is online/u);
+  assert.ok(!readable.includes(TOKEN));
+});
+
+test("admin user list and device list render tables and JSON", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch } = server();
+  const users = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "user", "list"], env(tokenFile), users.io, fetch, host), 0);
+  assert.match(users.stdout(), /^USER ID\s+NAME\s+ROLE\s+STATUS\s+CREATED\nusr_local\s+Local Owner\s+owner\s+active\s+2023-11-14T22:13:20\.000Z\n$/u);
+  const usersJson = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "user", "list", "--json"], env(tokenFile), usersJson.io, fetch, host), 0);
+  assert.deepEqual(JSON.parse(usersJson.stdout()), { users: [
+    { userId: "usr_local", userName: "Local Owner", role: "owner", status: "active", organizationId: "org_personal", createdAt: 1_700_000_000_000 },
+  ] });
+
+  const devices = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "device", "list"], env(tokenFile), devices.io, fetch, host), 0);
+  assert.match(devices.stdout(), /^DEVICE ID\s+NAME\s+USER\s+ROLE\s+CREATED\s+LAST SEEN\ndev_1\s+Pixel 9\s+Local Owner\s+owner\s+2023-11-14T22:13:20\.000Z\s+never\n$/u);
+  const devicesJson = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "device", "list", "--json"], env(tokenFile), devicesJson.io, fetch, host), 0);
+  assert.equal(JSON.parse(devicesJson.stdout()).devices[0].deviceId, "dev_1");
+});
+
+test("admin device create prints the one-time link only on a terminal and prefers the configured public origin", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch, calls } = server({ publicOrigin: "https://wollipog.example.ts.net" });
+
+  const piped = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "Phone"], env(tokenFile), piped.io, fetch, host), 2);
+  assert.match(piped.stderr(), /refusing to print a one-time pairing secret/u);
+  assert.ok(!calls.some((call) => call.method === "POST"), "no device is minted when the secret cannot be delivered");
+
+  const terminal = makeIo({ stdoutIsTTY: true });
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "Phone", "--user", "usr_other"], env(tokenFile), terminal.io, fetch, host), 0);
+  assert.match(terminal.stdout(), /Paired device dev_new \(Phone\) for Local Owner\./u);
+  assert.match(terminal.stdout(), /Add Remote Instance:\nhttps:\/\/wollipog\.example\.ts\.net\/#pair=device-secret-token-0123456789\n$/u);
+  assert.equal(terminal.stderr(), "");
+  const created = calls.find((call) => call.method === "POST")!;
+  assert.deepEqual(JSON.parse(created.body!), { name: "Phone", userId: "usr_other" });
+  assert.ok(!created.url.includes(DEVICE_TOKEN) && !created.body!.includes(TOKEN));
+
+  const terminalJson = makeIo({ stdoutIsTTY: true });
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "Tablet", "--json"], env(tokenFile), terminalJson.io, fetch, host), 0);
+  const parsed = JSON.parse(terminalJson.stdout());
+  assert.equal(parsed.originSource, "public-origin");
+  assert.equal(parsed.pairingUrl, `https://wollipog.example.ts.net/#pair=${DEVICE_TOKEN}`);
+  assert.equal(parsed.device.deviceId, "dev_new");
+});
+
+test("admin device create --output writes the link once to a new 0600 file and never echoes it", async (t) => {
+  const { root, tokenFile } = fixture(t);
+  const { fetch } = server({ publicOrigin: "https://wollipog.example.ts.net" });
+  const output = join(root, "phone.pair");
+  const { io, stdout, stderr } = makeIo();
+  const cwdHost = { ...host, cwd: () => root };
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "Phone", "--output", "phone.pair", "--json"], env(tokenFile), io, fetch, cwdHost), 0);
+  const parsed = JSON.parse(stdout());
+  assert.equal(parsed.outputPath, output);
+  assert.equal(parsed.pairingUrl, undefined);
+  assert.ok(!stdout().includes(DEVICE_TOKEN) && !stderr().includes(DEVICE_TOKEN));
+  assert.equal(readFileSync(output, "utf8"), `https://wollipog.example.ts.net/#pair=${DEVICE_TOKEN}\n`);
+  if (process.platform !== "win32") assert.equal(statSync(output).mode & 0o777, 0o600);
+  assert.ok(!existsSync(`${output}.pending`), "no staged file remains");
+
+  const again = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "Phone", "--output", output], env(tokenFile), again.io, fetch, host), 1);
+  assert.match(again.stderr(), /refusing to overwrite existing output file/u);
+  assert.equal(readFileSync(output, "utf8"), `https://wollipog.example.ts.net/#pair=${DEVICE_TOKEN}\n`);
+
+  assert.throws(() => writeProtectedSecretFile(output, "x"), /refusing to overwrite/u);
+});
+
+test("admin device create validates --origin, warns on plain HTTP, and falls back to bind hosts or loopback", async (t) => {
+  const { tokenFile } = fixture(t);
+  const tty = { stdoutIsTTY: true };
+
+  const bad = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--origin", "https://host.example/dash"], env(tokenFile), bad.io, server().fetch, host), 2);
+  assert.match(bad.stderr(), /bare origin/u);
+
+  const explicit = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--origin", "http://100.64.0.10:4317/", "--json"], env(tokenFile), explicit.io, server({ publicOrigin: "https://configured.example" }).fetch, host), 0);
+  assert.equal(JSON.parse(explicit.stdout()).pairingUrl, `http://100.64.0.10:4317/#pair=${DEVICE_TOKEN}`);
+  assert.equal(JSON.parse(explicit.stdout()).originSource, "flag");
+  assert.match(explicit.stderr(), /plain HTTP beyond loopback/u);
+
+  const bindHost = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--json"], env(tokenFile), bindHost.io, server({ hosts: ["192.168.1.20"], boundBeyondLoopback: true }).fetch, host), 0);
+  assert.equal(JSON.parse(bindHost.stdout()).pairingUrl, `http://192.168.1.20:4317/#pair=${DEVICE_TOKEN}`);
+  assert.equal(JSON.parse(bindHost.stdout()).originSource, "bind-host");
+  assert.match(bindHost.stderr(), /no CONTROL_PLANE_PUBLIC_ORIGIN is configured; the link uses plain HTTP/u);
+
+  const loopback = makeIo(tty);
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--json"], env(tokenFile), loopback.io, server({ webServed: false }).fetch, host), 0);
+  assert.equal(JSON.parse(loopback.stdout()).pairingUrl, `http://127.0.0.1:4317/#pair=${DEVICE_TOKEN}`);
+  assert.equal(JSON.parse(loopback.stdout()).originSource, "loopback");
+  assert.match(loopback.stderr(), /only works on this machine/u);
+  assert.match(loopback.stderr(), /serves no web dashboard bundle/u);
+});
+
+test("admin device revoke requires confirmation or --yes and reports control-plane errors", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch, calls } = server();
+
+  const piped = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "device", "revoke", "dev_1"], env(tokenFile), piped.io, fetch, host), 2);
+  assert.match(piped.stderr(), /pass --yes in non-interactive use/u);
+  assert.ok(!calls.some((call) => call.method === "DELETE"));
+
+  const declined = makeIo({ stdinIsTTY: true, confirm: async () => false });
+  assert.equal(await runHostAdminCli(["admin", "device", "revoke", "dev_1"], env(tokenFile), declined.io, fetch, host), 1);
+  assert.match(declined.stdout(), /was not revoked/u);
+  assert.ok(!calls.some((call) => call.method === "DELETE"));
+
+  const questions: string[] = [];
+  const confirmed = makeIo({ stdinIsTTY: true, confirm: async (question) => { questions.push(question); return true; } });
+  assert.equal(await runHostAdminCli(["admin", "device", "revoke", "dev_1", "--json"], env(tokenFile), confirmed.io, fetch, host), 0);
+  assert.deepEqual(JSON.parse(confirmed.stdout()), { revoked: true, deviceId: "dev_1" });
+  assert.match(questions[0] ?? "", /Revoke device dev_1\?/u);
+  assert.equal(calls.filter((call) => call.method === "DELETE").length, 1);
+  assert.equal(calls.find((call) => call.method === "DELETE")?.url, "http://127.0.0.1:4317/api/devices/dev_1");
+
+  const missing = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "device", "revoke", "dev_missing", "--yes", "--json"], env(tokenFile), missing.io, fetch, host), 1);
+  assert.match(JSON.parse(missing.stdout()).error, /device not found/u);
+});
+
+test("wollipog admin dispatches from the main CLI without session credentials and prints usage when incomplete", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { fetch } = server();
+  const { io, stdout, stderr } = makeIo();
+  const code = await runWollipogCli(
+    ["/usr/local/bin/wollipog", "admin", "status", "--json", "--token-file", tokenFile],
+    {},
+    { stdout: io.stdout, stderr: io.stderr },
+    fetch,
+    io,
+  );
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(stdout()).protocolVersion, PROTOCOL_VERSION);
+  assert.equal(stderr(), "");
+
+  const usage = makeIo();
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "admin"], {}, { stdout: usage.io.stdout, stderr: usage.io.stderr }, fetch, usage.io), 2);
+  assert.match(usage.stderr(), /Usage: wollipog admin <command>/u);
+  const unknown = makeIo();
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "admin", "bogus"], {}, { stdout: unknown.io.stdout, stderr: unknown.io.stderr }, fetch, unknown.io), 2);
+  assert.match(unknown.stderr(), /Usage: wollipog admin <command>/u);
+});
