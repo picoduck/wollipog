@@ -92,18 +92,26 @@ class CliError extends Error {
 }
 
 /**
- * `--name value` or `--name=value`. A following token that is itself an option (`--runner --yes`)
- * means the value was omitted; only the `=` form can supply a value that starts with `--`.
+ * `--name value` or `--name=value`. An option that is present but followed by another option
+ * (`--runner --yes`, `--output --json`) or by nothing has an omitted value: that is a usage error,
+ * never "absent", so an optional option can never silently fall back to its default. Only the `=`
+ * form can supply a value that starts with `--`.
  */
 function option(args: string[], name: string): string | undefined {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === name) {
       const value = args[i + 1];
-      return value !== undefined && !value.startsWith("--") ? value : undefined;
+      if (value === undefined || value.startsWith("--")) throw new CliError(`${name} requires a value`, 2);
+      return value;
     }
     if (args[i]?.startsWith(`${name}=`)) return args[i]!.slice(name.length + 1);
   }
   return undefined;
+}
+
+/** Single-quote a value for copy-paste into a POSIX shell; runner ids may contain metacharacters. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/gu, "'\\''")}'`;
 }
 
 function flag(args: string[], name: string): boolean {
@@ -318,6 +326,11 @@ export function writeProtectedSecretFile(
         createdLive = true;
         fsHost.write(liveFd, contents);
         fsyncSync(liveFd);
+        const closing = liveFd;
+        liveFd = null;
+        closeSync(closing);
+        // Only a fully written, synced, and closed file counts as published; a close failure above
+        // still removes the file so a throw from this helper never leaves a delivered secret behind.
         published = true;
       } catch (fallbackError) {
         if ((fallbackError as NodeJS.ErrnoException).code === "EEXIST") {
@@ -325,12 +338,13 @@ export function writeProtectedSecretFile(
         }
         throw new CliError(`could not write ${live}: ${(fallbackError as Error).message}`);
       } finally {
-        if (liveFd !== null) closeSync(liveFd);
+        // Cleanup must never replace the real error with a second one from an already-failed fd.
+        if (liveFd !== null) try { closeSync(liveFd); } catch { /* already closed or failed */ }
         if (createdLive && !published) rmSync(live, { force: true });
       }
     }
   } finally {
-    if (fd !== null) closeSync(fd);
+    if (fd !== null) try { closeSync(fd); } catch { /* already closed or failed */ }
     try {
       rmSync(staged, { force: true });
     } catch {
@@ -568,7 +582,7 @@ async function runnerCredentialCommand(
     if (deliveryAttempted) {
       throw new CliError(
         `${detail}; the token for runner ${runnerId} may have been partially delivered and the pending credential ${secret.credential.credentialId} stays usable until it expires in 24 hours: ` +
-          `run the ${verb} command again to supersede it, or revoke it with: wollipog admin runner-credential revoke --runner ${runnerId} --yes`,
+          `run the ${verb} command again to supersede it, or revoke it with: wollipog admin runner-credential revoke --runner ${shellQuote(runnerId)} --yes`,
         exitCode,
       );
     }

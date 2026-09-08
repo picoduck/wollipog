@@ -133,8 +133,9 @@ disconnect a runner that still has a working credential. If the failure happened
 (a broken terminal pipe, for example), the CLI says the token may have been partially delivered and
 that the pending credential stays usable until it expires, and prints both ways to resolve it: run
 the command again to supersede it, or revoke it. `--runner` must be the exact id; padded, dot-segment,
-or malformed ids are refused rather than normalized, and an omitted value (`--runner --yes`) is an
-error rather than a flag-named runner. Tokens never appear in argv, unit files, or logs.
+or malformed ids are refused rather than normalized. Any option written without a value
+(`--runner --yes`, `--output --json`) is a usage error rather than a silent fallback. Tokens never
+appear in argv, unit files, or logs.
 
 ## Public Dashboard Origin
 

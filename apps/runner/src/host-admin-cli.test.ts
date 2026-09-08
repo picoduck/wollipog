@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type HostAdminStatusView } from "@wollipog/protocol";
@@ -660,7 +660,7 @@ test("admin runner-credential revoke requires confirmation or --yes and reports 
 
   const swallowed = makeIo();
   assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", "--yes"], env(tokenFile), swallowed.io, fetch, host), 2);
-  assert.match(swallowed.stderr(), /requires --runner/u);
+  assert.match(swallowed.stderr(), /--runner requires a value/u);
   for (const dot of [".", ".."]) {
     const traversal = makeIo();
     assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", dot, "--yes"], env(tokenFile), traversal.io, fetch, host), 2, dot);
@@ -679,7 +679,53 @@ test("admin runner-credential reports a possibly delivered token when output fai
   const broken = makeIo({ stdoutIsTTY: true, stdout: (text) => { seen.push(text); if (text.includes("wollipogr_")) throw new Error("EPIPE"); } });
   const srv = server();
   assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-9"], env(tokenFile), broken.io, srv.fetch, host), 1);
-  assert.match(broken.stderr(), /EPIPE; the token for runner rack-9 may have been partially delivered and the pending credential rc_rack-9 stays usable until it expires in 24 hours: run the issue command again to supersede it, or revoke it with: wollipog admin runner-credential revoke --runner rack-9 --yes/u);
+  assert.match(broken.stderr(), /EPIPE; the token for runner rack-9 may have been partially delivered and the pending credential rc_rack-9 stays usable until it expires in 24 hours: run the issue command again to supersede it, or revoke it with: wollipog admin runner-credential revoke --runner 'rack-9' --yes/u);
   assert.ok(!broken.stderr().includes(RUNNER_TOKEN));
   assert.ok(!srv.calls.some((call) => call.method === "DELETE"), "the CLI does not guess; the operator chooses supersede or revoke");
+});
+
+test("an option with an omitted value is a usage error, never a silent fallback to the default", async (t) => {
+  const { tokenFile } = fixture(t);
+  const tty = { stdoutIsTTY: true };
+  const srv = server();
+  const cases: Array<[string[], RegExp]> = [
+    [["admin", "runner-credential", "issue", "--runner", "rack-1", "--output", "--json"], /--output requires a value/u],
+    [["admin", "runner-credential", "issue", "--runner", "rack-1", "--label"], /--label requires a value/u],
+    [["admin", "device", "create", "--name", "P", "--origin", "--json"], /--origin requires a value/u],
+    [["admin", "device", "create", "--name", "P", "--user", "--json"], /--user requires a value/u],
+    [["admin", "status", "--url", "--json"], /--url requires a value/u],
+    [["admin", "status", "--token-file"], /--token-file requires a value/u],
+  ];
+  for (const [args, expected] of cases) {
+    const { io, stdout, stderr } = makeIo(tty);
+    assert.equal(await runHostAdminCli(args, env(tokenFile), io, srv.fetch, host), 2, args.join(" "));
+    // With --json present the usage error is emitted as JSON on stdout; otherwise on stderr.
+    assert.match(stdout() + stderr(), expected, args.join(" "));
+    assert.ok(!stdout().includes(RUNNER_TOKEN) && !stdout().includes(DEVICE_TOKEN), args.join(" "));
+  }
+  assert.ok(!srv.calls.some((call) => call.method === "POST"), "nothing is minted when an option value is missing");
+});
+
+test("the recovery command shell-quotes runner ids that contain metacharacters", async (t) => {
+  const { tokenFile } = fixture(t);
+  const hostile = "rack;touch${IFS}pwned;true";
+  const broken = makeIo({ stdoutIsTTY: true, stdout: (text) => { if (text.includes("wollipogr_")) throw new Error("EPIPE"); } });
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", hostile], env(tokenFile), broken.io, server().fetch, host), 1);
+  assert.ok(broken.stderr().includes(`revoke --runner 'rack;touch\${IFS}pwned;true' --yes`), broken.stderr());
+  const quoted = makeIo({ stdoutIsTTY: true, stdout: (text) => { if (text.includes("wollipogr_")) throw new Error("EPIPE"); } });
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "it's"], env(tokenFile), quoted.io, server().fetch, host), 1);
+  assert.ok(quoted.stderr().includes(`--runner 'it'\\''s' --yes`), quoted.stderr());
+});
+
+test("writeProtectedSecretFile removes the fallback file when the final close fails", async (t) => {
+  const { root } = fixture(t);
+  const noLink = { link: () => { const e = new Error("EPERM") as NodeJS.ErrnoException; e.code = "EPERM"; throw e; }, write: (fd: number, contents: string) => { writeFileSync(fd, contents, "utf8"); } };
+  const target = join(root, "close-fails.pair");
+  let closes = 0;
+  const failingClose = { ...noLink, write: (fd: number, contents: string) => { writeFileSync(fd, contents, "utf8"); closes += 1; if (closes === 2) { closeSync(fd); } } };
+  // Closing the descriptor inside write() makes the helper's own fsync/close fail with EBADF after
+  // the live file was fully written: the helper must throw the wrapped error (not a second EBADF from
+  // cleanup) and remove the file.
+  assert.throws(() => writeProtectedSecretFile(target, "secret\n", failingClose), /^Error: could not write .*EBADF/u);
+  assert.ok(!existsSync(target), "a file whose close failed is not published");
 });
