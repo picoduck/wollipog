@@ -63,7 +63,7 @@ Group assignments retain the selected machine-wide version policy when they expa
 
 **Import from Machine** discovers real skill directories in `.agents/skills` and configured native
 Claude/Codex harness locations on an online Linux runner using protocol 111 or newer, or a Windows
-runner using protocol 117 or newer. An owner or administrator must have access to the source
+runner using protocol 119 or newer. An owner or administrator must have access to the source
 machine. The control plane requests opaque candidate
 IDs from an on-demand inventory, never arbitrary host paths, and never adds file contents to the
 periodic `skills_state` report. Discovery lists at most 64 candidates, examines at most 256 entries

@@ -159,6 +159,8 @@ test("PROTOCOL_VERSION is 119", () => {
   assert.equal(runnerSupportsProtocol(119, "nativeWindowsMachineSkillSnapshots"), true);
   assert.equal(runnerSupportsProtocol(118, "nativeWindowsSkillDeployment"), false);
   assert.equal(runnerSupportsProtocol(119, "nativeWindowsSkillDeployment"), true);
+  assert.equal(runnerSupportsProtocol(116, "hostAdminDoctor"), false);
+  assert.equal(runnerSupportsProtocol(117, "hostAdminDoctor"), true);
   assert.equal(runnerSupportsProtocol(114, "machineSkillAdoption"), false);
   assert.equal(runnerSupportsProtocol(115, "machineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(115, "machineSkillAdoptionRecovery"), false);
