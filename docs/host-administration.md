@@ -29,9 +29,11 @@ in every situation where that boundary would weaken:
   trusted loopback; a paired device with the owner role is refused even on loopback.
 
 The credential file is located, in order, from `--token-file`, `CONTROL_PLANE_LOCAL_TOKEN_FILE`,
-`$CONTROL_PLANE_DB.local-device-token`, and finally `data/control-plane.db.local-device-token`
-relative to the current directory, mirroring the control plane's own defaults. Run the CLI as the
-account that owns the control-plane data directory.
+`$CONTROL_PLANE_DB.local-device-token`, the coordinates recorded by `wollipog service install` in
+`control-plane.env` (user mode first, then system mode), and finally
+`data/control-plane.db.local-device-token` relative to the current directory, mirroring the control
+plane's own defaults. The same env file supplies the default port. Run the CLI as the account that
+owns the control-plane data directory.
 
 ## Commands
 
@@ -165,5 +167,7 @@ wollipog admin runner-credential issue --runner rack-2 --output /srv/wollipog/ru
 wollipog admin runner-credential list
 ```
 
-Service installation, `admin doctor`, and upgrade or rollback tooling are tracked separately; until they ship, supervise the control plane and runner with the operating
-system's service manager as described in [automations](./automations.md#always-on-deployment-and-laptop-off-limits).
+For durable services, see [headless deployment](./headless-deployment.md): `wollipog service`
+installs the control plane and a colocated runner as Linux systemd units, and after an install
+`wollipog admin` finds the database and port from the installed `control-plane.env` automatically.
+`admin doctor` and `service upgrade` with rollback are tracked separately.

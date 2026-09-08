@@ -107,7 +107,10 @@ The future UI should offer service installation only after a reachability probe 
 preflight pass. Until those prerequisites and platform integration tests exist, supervised tunnel
 mode remains the only dashboard-managed SSH mode. Operators may independently run a standalone
 native runner as a service against a reachable control plane, but that process is externally managed
-and does not become an SSH-managed box automatically.
+and does not become an SSH-managed box automatically. `wollipog service install` (see
+[headless deployment](./headless-deployment.md)) is the supported way to create such an externally
+managed Linux systemd runner, colocated with the control plane over loopback, with the containment
+settings below applied.
 
 ### Required descendant containment for standalone services
 

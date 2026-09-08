@@ -32,7 +32,9 @@ import {
   type RunnerCredentialSecret,
   type RunnerCredentialView,
 } from "@wollipog/protocol";
+import { homedir } from "node:os";
 import type { McpFetch } from "./session-management-mcp.js";
+import { readInstalledControlPlaneEnv } from "./systemd-service.js";
 import { VERSION } from "./version.js";
 
 export const LOCAL_TOKEN_FILE_ENV = "CONTROL_PLANE_LOCAL_TOKEN_FILE";
@@ -58,12 +60,15 @@ export interface HostAdminHost {
   platform: NodeJS.Platform;
   uid: number | null;
   cwd(): string;
+  /** Coordinates recorded by `wollipog service install`, when such a deployment exists. */
+  installedControlPlaneEnv?(): { db?: string; port?: number; localTokenFile?: string } | null;
 }
 
 export const DEFAULT_HOST: HostAdminHost = {
   platform: process.platform,
   uid: typeof process.getuid === "function" ? process.getuid() : null,
   cwd: () => process.cwd(),
+  installedControlPlaneEnv: () => readInstalledControlPlaneEnv({ home: homedir(), env: process.env, platform: process.platform }),
 };
 
 export function defaultHostAdminIo(): HostAdminIo {
@@ -155,11 +160,21 @@ export function hostAdminUsage(): string {
 }
 
 /** Where the control plane keeps its protected bootstrap credential, mirroring its own defaults. */
-export function resolveLocalTokenPath(args: string[], env: NodeJS.ProcessEnv, cwd: string): string {
+export function resolveLocalTokenPath(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  installed: { db?: string; localTokenFile?: string } | null = null,
+): string {
   const explicit = option(args, "--token-file") ?? env[LOCAL_TOKEN_FILE_ENV]?.trim();
   if (explicit) return resolve(cwd, explicit);
-  const database = env.CONTROL_PLANE_DB?.trim() || DEFAULT_DB_PATH;
-  return `${resolve(cwd, database)}${LOCAL_TOKEN_SUFFIX}`;
+  const fromEnv = env.CONTROL_PLANE_DB?.trim();
+  if (fromEnv) return `${resolve(cwd, fromEnv)}${LOCAL_TOKEN_SUFFIX}`;
+  // A `wollipog service install` deployment records its coordinates in control-plane.env, so the
+  // operator does not have to export anything after an SSH login.
+  if (installed?.localTokenFile) return resolve(installed.localTokenFile);
+  if (installed?.db) return `${resolve(installed.db)}${LOCAL_TOKEN_SUFFIX}`;
+  return `${resolve(cwd, DEFAULT_DB_PATH)}${LOCAL_TOKEN_SUFFIX}`;
 }
 
 /**
@@ -206,8 +221,12 @@ export function isDesktopCleartextHost(hostname: string): boolean {
 }
 
 /** The loopback control-plane origin; anything else fails closed because the bootstrap credential is loopback-only. */
-export function resolveLoopbackUrl(args: string[], env: NodeJS.ProcessEnv): { url: string; port: number } {
-  const raw = option(args, "--url") ?? `http://127.0.0.1:${env.CONTROL_PLANE_PORT?.trim() || DEFAULT_PORT}`;
+export function resolveLoopbackUrl(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  installed: { port?: number } | null = null,
+): { url: string; port: number } {
+  const raw = option(args, "--url") ?? `http://127.0.0.1:${env.CONTROL_PLANE_PORT?.trim() || installed?.port || DEFAULT_PORT}`;
   let url: URL;
   try {
     url = new URL(raw);
@@ -610,12 +629,16 @@ export async function runHostAdminCli(
 ): Promise<number> {
   const json = flag(args, "--json");
   const words = positional(args);
-  const emit = (data: unknown, text: string) => io.stdout(json ? `${JSON.stringify(data)}\n` : `${text}\n`);
+  // Text rendering is lazy so `--json` never depends on the readable formatter (a control plane of
+  // another version may omit fields the formatter expects; the JSON caller still gets the data).
+  const emit = (data: unknown, text: string | (() => string)) =>
+    io.stdout(json ? `${JSON.stringify(data)}\n` : `${typeof text === "function" ? text() : text}\n`);
   const warn = (message: string) => io.stderr(`warning: ${message}\n`);
   try {
     const command = words[1];
-    const target = resolveLoopbackUrl(args, env);
-    const tokenPath = resolveLocalTokenPath(args, env, host.cwd());
+    const installed = host.installedControlPlaneEnv?.() ?? null;
+    const target = resolveLoopbackUrl(args, env, installed);
+    const tokenPath = resolveLocalTokenPath(args, env, host.cwd(), installed);
 
     if (command === "pairing-url") {
       // Read-only recovery of the persistent loopback credential, the supported equivalent of
@@ -636,7 +659,7 @@ export async function runHostAdminCli(
 
     if (command === "status") {
       const status = await client.get<HostAdminStatusView>("/api/admin/status");
-      emit(status, formatStatus(status));
+      emit(status, () => formatStatus(status));
       return 0;
     }
 
