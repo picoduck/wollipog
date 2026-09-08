@@ -13,6 +13,7 @@ import {
   splitShellInput,
   supportsAgentTui,
   supportsInitialNativeTui,
+  supportsSessionAgentTui,
   sessionHasHookGovernance,
   type ShellScrollback,
 } from "./shells-panel.js";
@@ -25,6 +26,14 @@ test("splitShellInput: small inputs pass through; big pastes chunk in order unde
   assert.equal(chunks.length, 3);
   assert.ok(chunks.every((c) => c.length <= SHELL_INPUT_CHUNK_UNITS));
   assert.equal(chunks.join(""), big, "reassembles exactly, in order");
+});
+
+test("existing Orchestrator Agent TUI requires a provably native catalog context", () => {
+  assert.equal(supportsSessionAgentTui("codex", 118, "windows", "orchestrator", "native"), true);
+  assert.equal(supportsSessionAgentTui("codex", 118, "windows", "orchestrator", "wsl"), false);
+  assert.equal(supportsSessionAgentTui("codex", 118, "windows", "orchestrator", undefined), false);
+  assert.equal(supportsSessionAgentTui("codex", 118, "windows", "default", "wsl"), true,
+    "ordinary WSL TUI remains supported");
 });
 
 test("agent TUI affordance requires a supported provider and v58 runner", () => {

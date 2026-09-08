@@ -14,7 +14,7 @@ import {
   shellsRemovedAfterReconnect,
   shellsVisibleAfterClose,
   splitShellInput,
-  supportsAgentTui,
+  supportsSessionAgentTui,
   sessionHasHookGovernance,
 } from "../shells-panel.js";
 import { ShellTerminal } from "./ShellTerminal.js";
@@ -63,7 +63,17 @@ export function ShellDock({
   const session = sessions.get(sessionId);
   const runner = session ? runners.get(session.runnerId) : undefined;
   const runnerOnline = runner?.status === "online";
-  const tuiSupported = supportsAgentTui(session?.driver, runner?.protocolVersion, runner?.os);
+  const sessionAgent = runner?.agents.find((agent) => agent.id === session?.agentId);
+  const sessionAgentContextKind = sessionAgent
+    ? (sessionAgent.context?.kind ?? "native")
+    : undefined;
+  const tuiSupported = supportsSessionAgentTui(
+    session?.driver,
+    runner?.protocolVersion,
+    runner?.os,
+    session?.permissionMode,
+    sessionAgentContextKind,
+  );
   const tuiGuardrailBlocked = nativeTuiHasTrackedGuardrails(session ?? {});
 
   // `height` is the user's PREFERENCE — only explicit gestures (drag, keyboard, double-click)

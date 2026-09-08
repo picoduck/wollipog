@@ -204,6 +204,34 @@ test("workflow actions use immutable commit pins", () => {
   }
 });
 
+test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provider boundary", () => {
+  const platform = readFileSync(resolve(process.cwd(), WORKFLOWS[2]), "utf8");
+
+  assert.match(platform, /os: \[windows-latest, windows-2025, macos-latest\]/u);
+  assert.match(platform, /Verify WSL Orchestrator Stays Fail-Closed/u);
+  assert.match(platform, /wsl\.exe -d Ubuntu-24\.04 -- cmd\.exe \/d \/c exit 0/u,
+    "the capability-sensitive outside probe must use WSL's ordinary binfmt command path");
+  assert.match(platform, /WSLInterop registration outside bwrap:/u);
+  assert.match(platform, /WSLInterop registration inside bwrap: absent/u);
+  assert.match(platform, /\$registrationExit = \$LASTEXITCODE/u);
+  assert.match(platform, /cmd\.exe executable outside bwrap: \$outsideInterop/u);
+  assert.match(platform, /Hosted WSL baseline lacks PE interop; verifying bwrap does not add it/u);
+  assert.match(platform, /-not \$outsideInterop -and \$outsideOutput -notmatch 'Exec format error'/u,
+    "unexpected host-side failures must not be accepted as a fail-closed baseline");
+  assert.doesNotMatch(platform, /WSL Windows interop baseline failed outside bwrap/u,
+    "host PE interop availability is diagnostic, not a prerequisite");
+  assert.match(platform, /--chdir \/ -- \/bin\/true/u,
+    "a production-shaped bwrap smoke test must prove the sandbox itself works");
+  assert.match(platform, /test ! -e \/proc\/sys\/fs\/binfmt_misc\/WSLInterop/u,
+    "the fresh provider proc must explicitly prove the automatic WSL binfmt registration is absent");
+  assert.match(platform, /--proc \/proc --tmpfs \/tmp --chdir \/ -- \$cmdPath/u);
+  assert.match(platform, /bwrap unexpectedly preserved automatic PE\/binfmt interop/u);
+  assert.doesNotMatch(platform, /\$blockedOutput -notmatch/u,
+    "libc execvp may fall back to a shell after ENOEXEC, so denial is behavioral rather than stderr-textual");
+  assert.doesNotMatch(platform, /--bind[^\n]*\/init|--ro-bind[^\n]*\/init/u,
+    "CI must never add a dedicated WSL /init bind inside bwrap");
+});
+
 test("desktop Rust verification enforces the lockfile and runs one pinned audit", () => {
   const desktop = readFileSync(resolve(process.cwd(), WORKFLOWS[1]), "utf8");
 

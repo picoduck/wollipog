@@ -221,6 +221,7 @@ export function NewSessionDialog({
   const orchestrator = presetOverride === "orchestrator" || savedPermissionMode === "orchestrator";
   const orchestratorSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration") &&
     agent?.capabilities?.permissionModes?.includes("orchestrator") &&
+    (agent?.context?.kind ?? "native") === "native" &&
     (!executionTarget || executionTarget.adapter === "host");
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
   const nativeTuiStartFenceSupported = runnerSupportsProtocol(
@@ -234,9 +235,10 @@ export function NewSessionDialog({
   );
   const nativeTuiHostTarget = !executionTarget || executionTarget.adapter === "host";
   const orchestratorTuiSupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorNativeTui");
+  const orchestratorTuiHostContext = !orchestrator || (agent?.context?.kind ?? "native") === "native";
   const nativeTuiSupported = nativeTuiLaunchSupported && (!orchestrator || orchestratorTuiSupported) &&
     nativeTuiRunnerSupported && nativeTuiStartFenceSupported &&
-    nativeTuiHostTarget && !selectedAgentOption?.disabled;
+    nativeTuiHostTarget && orchestratorTuiHostContext && !selectedAgentOption?.disabled;
   const workspace = runner?.workspaces.find((item) => item.id === workspaceId);
   const directoryGrants = !browsedPath && (agent?.driver ?? "acp") === "acp"
     ? (workspace?.additionalDirectoryGrants ?? [])
@@ -837,6 +839,9 @@ export function NewSessionDialog({
               <span className="muted">{runnerCapabilityRequirement(
                 runner?.protocolVersion, "orchestratorNativeTui", "Orchestrator Native TUI",
               )}</span>
+            )}
+            {orchestrator && orchestratorTuiSupported && !orchestratorTuiHostContext && (
+              <span className="muted">Orchestrator Native TUI is unavailable for WSL agents. Use a native host.</span>
             )}
             {nativeTuiLaunchSupported && !nativeTuiRunnerSupported && (
               <span className="muted">Native TUI requires a supported Claude Code or Codex agent on a Windows or Linux runner.</span>

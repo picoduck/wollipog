@@ -332,6 +332,52 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
   }
 });
 
+test("WSL keeps ordinary Native TUI but fails closed for a saved Orchestrator preset", async () => {
+  const wslRunner: RunnerView = {
+    ...runner,
+    os: "windows",
+    protocolVersion: 118,
+    agents: runner.agents.map((agent) => ({
+      ...agent,
+      context: { kind: "wsl" as const, distro: "Ubuntu-24.04" },
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"],
+      },
+    })),
+  };
+  const ordinary = await mountFixture({
+    runners: [wslRunner],
+    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+  });
+  try {
+    await act(async () => { selectProject(ordinary.container, project.id); });
+    const tui = [...ordinary.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((button) => button.textContent?.includes("Native TUI"))!;
+    assert.ok(tui);
+    assert.equal(tui.disabled, false, "ordinary WSL Native TUI remains available");
+  } finally {
+    await unmountFixture(ordinary);
+  }
+
+  const orchestrator = await mountFixture({
+    runners: [wslRunner],
+    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+  }, undefined, undefined, async () => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+  }] }));
+  try {
+    await act(async () => { selectProject(orchestrator.container, project.id); });
+    assert.match(orchestrator.container.textContent ?? "", /saved Orchestrator preset requires a supported native host/u);
+    assert.equal(createButton(orchestrator.container).disabled, true);
+    await act(async () => { submitWithEnter(orchestrator.container); });
+    assert.equal(orchestrator.requests.length, 0);
+  } finally {
+    await unmountFixture(orchestrator);
+  }
+});
+
 test("saved Orchestrator default is visible and gates Native TUI without requiring an override", async () => {
   for (const protocolVersion of [111, 112]) {
     const enabledRunner: RunnerView = { ...runner, protocolVersion,

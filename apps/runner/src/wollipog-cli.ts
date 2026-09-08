@@ -92,10 +92,12 @@ function usage(): string {
 }
 
 function invocationArgs(argv: string[]): string[] {
-  const marker = argv.findIndex((arg) => arg === "--wollipog-cli");
-  if (marker >= 0) return argv.slice(marker + 1);
   const invokedAsAlias = /(?:^|[\\/])wollipog(?:\.exe)?$/iu.test(argv[0] ?? "");
-  return argv.slice(invokedAsAlias ? 1 : 2);
+  // The dispatcher recognizes an internal marker only in the first application-argument
+  // position. Mirror that boundary here: a marker later in user data must never cause this
+  // parser to discard the real command that preceded it. SEA starts at index 1; Node/tsx at 2.
+  const appIndex = invokedAsAlias || argv[1] === "--wollipog-cli" ? 1 : 2;
+  return argv.slice(argv[appIndex] === "--wollipog-cli" ? appIndex + 1 : appIndex);
 }
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {

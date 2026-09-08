@@ -59,6 +59,14 @@ Claude Code launches also receive an additive `wollipog` stdio MCP configuration
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.
 
+Orchestrator remains unavailable in WSL. Rebinding WSL's Windows-executable binfmt entry inside the
+bwrap namespace, or invoking its interpreter directly, would expose a general Windows process
+launcher rather than a purpose-specific Wollipog channel; those Windows processes are outside the
+Linux filesystem boundary. A future WSL implementation therefore needs a dedicated target-local
+Linux bridge that authenticates the session and exposes only the closed CLI/MCP contract. Generic
+ACP, container, and cloud targets likewise stay fail-closed until they can prove equivalent
+target-local credential and tool-isolation contracts.
+
 ## Authorization and compatibility
 
 The general surface has the same closed method-and-canonical-route allowlist as the conductor

@@ -45,6 +45,20 @@ export function supportsInitialNativeTui(
     runnerSupportsProtocol(protocolVersion, "sessionStartFencedShells");
 }
 
+/** Current catalog context is the narrowest available truth for an existing session. Ordinary WSL
+ * TUI remains supported, but Orchestrator TUI must be hidden unless its agent is provably native;
+ * the runner remains authoritative if catalog state changes between render and open. */
+export function supportsSessionAgentTui(
+  driver: AgentDriverKind | undefined,
+  protocolVersion: number | null | undefined,
+  os: OS | undefined,
+  permissionMode: string | null | undefined,
+  agentContextKind: "native" | "wsl" | undefined,
+): boolean {
+  return supportsAgentTui(driver, protocolVersion, os) &&
+    (permissionMode !== "orchestrator" || agentContextKind === "native");
+}
+
 /** Session-scoped post-create truth; never infer policy interception from the catalog agent. */
 export function sessionHasHookGovernance(capabilities: SessionCapabilities | undefined): boolean {
   return Object.values(capabilities?.elicitation ?? {}).some(
