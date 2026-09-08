@@ -4,6 +4,7 @@ import { runnerSupportsProtocol, runnerCapabilityRequirement, validSkillName, ty
 import { SkillImportConflictError } from "./db.js";
 import { validateSkillPayload, type ValidatedSkillPayload } from "./skills.js";
 import type { SkillsRouteDeps } from "./skills-route.js";
+import { skillAdoptionPreflight } from "./skill-adoption-preflight.js";
 
 export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps): void {
   type Preview = { id: string; candidate: MachineSkillCandidate; payload: ValidatedSkillPayload; expectedVersionId: string | null };
@@ -88,6 +89,53 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
         disposition: prior?.digest === payload.digest ? "identical" : prior ? "update" : "new", assignmentCount: existing?.assignmentCount ?? 0 };
     } catch { return reply.code(502).send({ error: "Snapshot failed validation or the source changed. Discover it again. Symlinks, hard links, special files, and oversized trees are not supported." }); }
     finally { pending = false; }
+  });
+
+  app.post("/api/skill-machine/:id/adoption-preflight", async (req, reply) => {
+    purge();
+    const id = (req.params as { id: string }).id;
+    const discovery = discoveries.get(id);
+    if (!discovery) return reply.code(404).send({ error: "Discovery expired. Discover the machine again." });
+    const principal = authorize(req, reply, discovery.runnerId);
+    if (!principal) return;
+    if (discovery.owner !== ownerKey(principal) || !discovery.preview) return reply.code(404).send({ error: "Preview not found." });
+    const preview = discovery.preview;
+    if ((req.body as { previewId?: unknown } | null)?.previewId !== preview.id) return reply.code(409).send({ error: "Review the current snapshot first." });
+    if (!available(discovery.runnerId, reply)) return;
+    const accessible = (human: NonNullable<ReturnType<typeof authorize>>) => {
+      const skill = deps.db.getSkillByName(preview.candidate.name);
+      return !skill || deps.db.canAccessSkill(human, skill.id);
+    };
+    if (!accessible(principal)) return reply.code(409).send({ error: "This skill name is unavailable in the library." });
+    if (pending) return reply.code(429).send({ error: "Another machine read is in progress." });
+    pending = true;
+    try {
+      const requestId = randomUUID();
+      const result = await deps.hub.requestFromRunner(discovery.runnerId, requestId, {
+        type: "skill_snapshot", runnerId: discovery.runnerId, requestId, operation: "read", candidateId: preview.candidate.id,
+      });
+      // Closing, importing, replacing, or expiring the preview while the read is in flight
+      // invalidates this report. Recheck access and current DB targeting after the async boundary.
+      purge();
+      if (discoveries.get(id) !== discovery || discovery.preview !== preview) return reply.code(409).send({ error: "The preview changed or expired. Preview the source again." });
+      const currentPrincipal = authorize(req, reply, discovery.runnerId);
+      if (!currentPrincipal) return;
+      if (ownerKey(currentPrincipal) !== discovery.owner || !accessible(currentPrincipal)) return reply.code(404).send({ error: "Preview not found." });
+      if (!available(discovery.runnerId, reply)) return;
+      if (result.type !== "skill_snapshot_result" || result.runnerId !== discovery.runnerId || result.requestId !== requestId || result.error || !result.snapshot) throw new Error();
+      const { snapshot } = result;
+      const candidate = preview.candidate;
+      if (snapshot.candidate?.id !== candidate.id || snapshot.candidate.name !== candidate.name ||
+        snapshot.candidate.sourceDirectory !== candidate.sourceDirectory || snapshot.candidate.generation !== candidate.generation) throw new Error();
+      const payload = validateSkillPayload({ name: candidate.name, files: snapshot.files });
+      if (!payload.ok || payload.digest !== snapshot.digest || payload.digest !== preview.payload.digest) throw new Error();
+      return { ...skillAdoptionPreflight(deps.db, discovery.runnerId, candidate, payload.digest),
+        source: { candidate, digest: payload.digest, checkedAt: Date.now() },
+        notice: "Read-only prerequisite report. No directory was changed. Reader fields describe configured deployment exposure, not observed reads. A future adoption must revalidate the source and assignments under the provider-home lease before any replacement.",
+      };
+    } catch {
+      return reply.code(502).send({ error: "The source changed or could not be validated. Preview it again before checking adoption prerequisites." });
+    } finally { pending = false; }
   });
 
   app.post("/api/skill-machine/:id/import", async (req, reply) => {

@@ -501,6 +501,22 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   const previewResponse = await previewRequest;
   assert.equal(previewResponse.status, 200);
   const previewId = (await previewResponse.json() as { previewId: string }).previewId;
+  const preflightPath = `/api/skill-machine/${discoveryId}/adoption-preflight`;
+  const preflightBody = { method: "POST", body: JSON.stringify({ previewId }) };
+  assert.equal((await api(httpBase, MEMBER_TOKEN, preflightPath, preflightBody)).status, 403);
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, preflightPath, preflightBody)).status, 404);
+  const preflightRequest = api(httpBase, ownerToken, preflightPath, preflightBody);
+  const preflightFrame = await runnerInbox.take((message) => message.type === "skill_snapshot");
+  assert.equal(preflightFrame.operation, "read");
+  assert.equal(preflightFrame.candidateId, "opaque");
+  runner.send(JSON.stringify({ type: "skill_snapshot_result", runnerId: RUNNER_ID, requestId: preflightFrame.requestId,
+    snapshot: { candidate, files: payload.files, digest: payload.digest } }));
+  const preflightResponse = await preflightRequest;
+  assert.equal(preflightResponse.status, 200);
+  const preflight = await preflightResponse.json() as { status: string; mutationSupported: boolean; blockers: string[] };
+  assert.equal(preflight.status, "blocked");
+  assert.equal(preflight.mutationSupported, false);
+  assert.ok(preflight.blockers.includes("library_skill_missing"));
   const imported = await api(httpBase, ownerToken, `/api/skill-machine/${discoveryId}/import`, { method: "POST", body: JSON.stringify({ previewId }) });
   assert.equal(imported.status, 200);
   const importedSkill = (await imported.json() as { skill: { id: string; assignmentCount: number } }).skill;
