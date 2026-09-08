@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { pendingRequests, sessionAttentionStatus, type ChildSessionAttentionOwner,
-  type ChildSessionRegistryEntry, type WorkflowInstanceView } from "@wollipog/protocol";
+  type ChildSessionRegistryEntry, type SessionView, type WorkflowInstanceView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatDuration, formatRecordedRelativeTime, titleCaseLabel } from "../format.js";
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
@@ -26,8 +26,7 @@ export function mergeDurableAgents(
   const safeDurable = durableAgents.filter((agent) => !unresolvedOwnerIds.has(agent.id));
   const safeLoaded = loadedAgents.filter((agent) => !unresolvedOwnerIds.has(agent.id));
   const loaded = new Map(safeLoaded.map((agent) => [agent.id, agent]));
-  const durableIds = new Set(safeDurable.map((agent) => agent.id));
-  return [...safeDurable.map((durable) => {
+  return safeDurable.map((durable) => {
     const live = loaded.get(durable.id);
     if (!live) return durable;
     return { ...live, ...durable,
@@ -42,8 +41,7 @@ export function mergeDurableAgents(
       latestTool: live.latestTool ?? durable.latestTool,
       directUsage: live.directUsage,
       inclusiveUsage: live.inclusiveUsage };
-  }),
-  ...safeLoaded.filter((agent) => !durableIds.has(agent.id))];
+  });
 }
 
 export function mergeRegistrySnapshotPages(
@@ -69,6 +67,13 @@ export function mergeCompactAttentionOwners(
     }
   }
   return [...byRequest.values()];
+}
+
+export function childRegistryProgressKey(
+  session: Pick<SessionView, "messageCount" | "lastEventAt" | "status" | "pendingApproval">,
+): string {
+  return JSON.stringify([session.messageCount, session.lastEventAt, session.status,
+    pendingRequests(session.pendingApproval).map((request) => request.requestId)]);
 }
 type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof BackgroundWorkPanel>,
   "runnerProtocolVersion" | "parentTurnEventIds" | "onOpenParentTurn" | "inventoryError" | "onRetryInventory"> & {
@@ -201,8 +206,7 @@ export function AgentsPanel(props: Props) {
   }, [session.id, session.eventEpoch]);
   useEffect(() => {
     if (registryRef.current === null) return;
-    const progress = JSON.stringify([session.lastEventAt, session.status,
-      pendingRequests(session.pendingApproval).map((request) => request.requestId)]);
+    const progress = childRegistryProgressKey(session);
     const delay = Math.max(0, 1_000 - (Date.now() - lastRegistryRefresh.current));
     const timer = setTimeout(() => {
       lastRegistryRefresh.current = Date.now();
@@ -211,7 +215,7 @@ export function AgentsPanel(props: Props) {
     return () => clearTimeout(timer);
     // Event progress invalidates the durable lifecycle even when its transcript row is not loaded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id, session.eventEpoch, session.lastEventAt, session.status, session.pendingApproval]);
+  }, [session.id, session.eventEpoch, session.messageCount, session.lastEventAt, session.status, session.pendingApproval]);
   const compactAttentionOwners = useMemo(() => mergeCompactAttentionOwners(
     attentionOwners, session.attentionOwners ?? [],
   ), [attentionOwners, session.attentionOwners]);

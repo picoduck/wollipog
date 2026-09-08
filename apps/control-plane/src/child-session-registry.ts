@@ -112,10 +112,9 @@ export class ChildSessionRegistryProjector {
           const latest = { seq: event.seq, label: contentFreeToolLabel(payload.toolKind), status: payload.status };
           if (!this.directToolParents.has(payload.toolCallId)) {
             this.directToolParents.set(payload.toolCallId, parentId);
-            this.directTools.set(parentId, new Map([
-              ...(this.directTools.get(parentId) ?? new Map()),
-              [payload.toolCallId, latest],
-            ]));
+            const tools = this.directTools.get(parentId) ?? new Map();
+            tools.set(payload.toolCallId, latest);
+            this.directTools.set(parentId, tools);
           } else {
             const knownParent = this.directToolParents.get(payload.toolCallId);
             if (knownParent === parentId) {

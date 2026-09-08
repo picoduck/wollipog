@@ -859,6 +859,19 @@ CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_
 CREATE INDEX IF NOT EXISTS idx_session_events_tool_call_id
   ON session_events(session_id, json_extract(payload,'$.toolCallId'), seq)
   WHERE kind='tool_call';
+-- Durable child inventory discovers only structured agent spawns, then performs targeted lookups
+-- by exact spawn id and parent id. These partial expression indexes keep ordinary transcript rows
+-- out of the synchronous projection path.
+CREATE INDEX IF NOT EXISTS idx_session_events_agent_spawn_id
+  ON session_events(session_id, seq, json_extract(payload,'$.toolCallId'))
+  WHERE kind='tool_call' AND json_extract(payload,'$.toolKind')='agent'
+    AND json_type(payload,'$.toolCallId')='text';
+CREATE INDEX IF NOT EXISTS idx_session_events_tool_update_id
+  ON session_events(session_id, json_extract(payload,'$.toolCallId'), seq)
+  WHERE kind='tool_call_update';
+CREATE INDEX IF NOT EXISTS idx_session_events_parent_tool_use_id
+  ON session_events(session_id, json_extract(payload,'$.parentToolUseId'), seq)
+  WHERE json_type(payload,'$.parentToolUseId')='text';
 
 CREATE TABLE IF NOT EXISTS review_findings (
   finding_id  TEXT PRIMARY KEY,
@@ -14562,14 +14575,25 @@ export class ControlPlaneDb {
     if (candidateAgentIds.length === 0) return [];
     const rows = this.stmt(
       `WITH candidate_ids(id) AS (SELECT value FROM json_each(?))
-       SELECT id, session_id, seq, ts, payload FROM session_events
-        WHERE session_id=? AND seq>? AND seq<=? AND (
-          (kind IN ('tool_call','tool_call_update')
-            AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids))
-          OR (json_type(payload,'$.parentToolUseId')='text'
-            AND json_extract(payload,'$.parentToolUseId') IN (SELECT id FROM candidate_ids))
-        ) ORDER BY seq LIMIT ?`,
-    ).all(JSON.stringify(candidateAgentIds), sessionId, afterSeq, throughSeq, limit) as unknown as {
+       SELECT id, session_id, seq, ts, payload FROM (
+         SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_tool_call_id
+          WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call'
+            AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids)
+         UNION
+         SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_tool_update_id
+          WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call_update'
+            AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids)
+         UNION
+         SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_parent_tool_use_id
+          WHERE session_id=? AND seq>? AND seq<=?
+            AND json_type(payload,'$.parentToolUseId')='text'
+            AND json_extract(payload,'$.parentToolUseId') IN (SELECT id FROM candidate_ids)
+       ) ORDER BY seq LIMIT ?`,
+    ).all(JSON.stringify(candidateAgentIds),
+      sessionId, afterSeq, throughSeq,
+      sessionId, afterSeq, throughSeq,
+      sessionId, afterSeq, throughSeq,
+      limit) as unknown as {
       id: number; session_id: string; seq: number; ts: number; payload: string;
     }[];
     return rows.map((r) => ({
@@ -14583,15 +14607,15 @@ export class ControlPlaneDb {
 
   /** Exact structured child candidates. No task text, command, path, message, or output crosses
    * this query boundary. The small identity set drives a second, SQL-filtered history scan. */
-  listAgentToolCallIds(sessionId: string, throughSeq: number): string[] {
+  listAgentToolCallIds(sessionId: string, afterSeq: number, throughSeq: number): string[] {
     const rows = this.stmt(
       `SELECT DISTINCT json_extract(payload, '$.toolCallId') AS tool_call_id
          FROM session_events
-        WHERE session_id=? AND seq<=? AND kind='tool_call'
+        WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call'
           AND json_extract(payload, '$.toolKind')='agent'
           AND json_type(payload, '$.toolCallId')='text'
         ORDER BY tool_call_id`,
-    ).all(sessionId, throughSeq) as unknown as { tool_call_id: string }[];
+    ).all(sessionId, afterSeq, throughSeq) as unknown as { tool_call_id: string }[];
     return rows.map((row) => row.tool_call_id);
   }
 

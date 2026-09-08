@@ -2278,7 +2278,7 @@ test("child registry history scans SQL-filter ordinary tools and page child evid
 
   const throughSeq = db.sessionEventTailSeq("sess-1");
   assert.equal(throughSeq, 208);
-  assert.deepEqual(db.listAgentToolCallIds("sess-1", throughSeq), ["child"]);
+  assert.deepEqual(db.listAgentToolCallIds("sess-1", 0, throughSeq), ["child"]);
   const pages = [];
   let after = 0;
   while (true) {
@@ -2293,6 +2293,52 @@ test("child registry history scans SQL-filter ordinary tools and page child evid
   assert.equal(JSON.stringify(pages).includes("root-"), false);
   assert.deepEqual(db.listChildSessionProjectionPage("sess-1", [], 0, throughSeq, 10), []);
   assert.throws(() => db.listChildSessionProjectionPage("sess-1", ["child"], 0, throughSeq, 2_001), /invalid event scan page/);
+
+  const agentPlan = db.raw().prepare(
+    `EXPLAIN QUERY PLAN SELECT DISTINCT json_extract(payload,'$.toolCallId') AS tool_call_id
+       FROM session_events WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call'
+        AND json_extract(payload,'$.toolKind')='agent'
+        AND json_type(payload,'$.toolCallId')='text' ORDER BY tool_call_id`,
+  ).all("sess-1", 0, throughSeq) as unknown as Array<{ detail: string }>;
+  assert.ok(agentPlan.some((row) => /idx_session_events_agent_spawn_id/.test(row.detail)), agentPlan.map((row) => row.detail).join("\n"));
+
+  const lanes = [
+    ["kind='tool_call' AND json_extract(payload,'$.toolCallId')=?", "idx_session_events_tool_call_id"],
+    ["kind='tool_call_update' AND json_extract(payload,'$.toolCallId')=?", "idx_session_events_tool_update_id"],
+    ["json_type(payload,'$.parentToolUseId')='text' AND json_extract(payload,'$.parentToolUseId')=?",
+      "idx_session_events_parent_tool_use_id"],
+  ] as const;
+  for (const [predicate, expectedIndex] of lanes) {
+    const plan = db.raw().prepare(
+      `EXPLAIN QUERY PLAN SELECT id FROM session_events WHERE session_id=? AND seq>? AND seq<=? AND ${predicate} ORDER BY seq`,
+    ).all("sess-1", 0, throughSeq, "child") as unknown as Array<{ detail: string }>;
+    assert.ok(plan.some((row) => row.detail.includes(expectedIndex)), plan.map((row) => row.detail).join("\n"));
+  }
+  const productionPlan = db.raw().prepare(
+    `EXPLAIN QUERY PLAN WITH candidate_ids(id) AS (SELECT value FROM json_each(?))
+     SELECT id, session_id, seq, ts, payload FROM (
+       SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_tool_call_id
+        WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call'
+          AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids)
+       UNION
+       SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_tool_update_id
+        WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call_update'
+          AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids)
+       UNION
+       SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_parent_tool_use_id
+        WHERE session_id=? AND seq>? AND seq<=?
+          AND json_type(payload,'$.parentToolUseId')='text'
+          AND json_extract(payload,'$.parentToolUseId') IN (SELECT id FROM candidate_ids)
+     ) ORDER BY seq LIMIT ?`,
+  ).all(JSON.stringify(["child"]),
+    "sess-1", 0, throughSeq,
+    "sess-1", 0, throughSeq,
+    "sess-1", 0, throughSeq,
+    10) as unknown as Array<{ detail: string }>;
+  for (const [, expectedIndex] of lanes) {
+    assert.ok(productionPlan.some((row) => row.detail.includes(expectedIndex)),
+      productionPlan.map((row) => row.detail).join("\n"));
+  }
 });
 
 test("event export snapshots retain an immutable sequence boundary", () => {

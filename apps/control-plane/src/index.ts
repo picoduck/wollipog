@@ -27,6 +27,7 @@ import {
 } from "./runner-channel.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
+import { KeyedSerialTaskQueue } from "./keyed-serial-task-queue.js";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
   registerAutomationTriggerContentTypeParser,
@@ -352,9 +353,10 @@ const CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE = 1_000;
 const childSessionRegistries = new Map<string, {
   eventEpoch: number;
   lastSeq: number;
-  agentIdSignature: string;
+  candidateAgentIds: Set<string>;
   projector: ChildSessionRegistryProjector;
 }>();
+const childSessionRegistryTasks = new KeyedSerialTaskQueue();
 const markStartupReady = installStartupReadinessGate(app);
 const warnedLegacyRunnerCredentialIds = new Set<string>();
 
@@ -3014,38 +3016,55 @@ app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
   if ((current.eventEpoch ?? 0) !== eventEpoch) {
     return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
   }
-  let registry = childSessionRegistries.get(id);
-  const throughSeq = db.sessionEventTailSeq(id);
-  const candidateAgentIdList = db.listAgentToolCallIds(id, throughSeq);
-  const candidateAgentIds = new Set(candidateAgentIdList);
-  const agentIdSignature = JSON.stringify(candidateAgentIdList);
-  // A newly discovered spawn may own earlier events, so rebuild from bounded pages whenever the
-  // exact identity set changes. Otherwise only scan the append-only suffix.
-  if (!registry || registry.eventEpoch !== eventEpoch || registry.agentIdSignature !== agentIdSignature) {
-    registry = { eventEpoch, lastSeq: 0, agentIdSignature, projector: new ChildSessionRegistryProjector() };
-  }
-  while (true) {
-    const appended = db.listChildSessionProjectionPage(
-      id, candidateAgentIdList, registry.lastSeq, throughSeq, CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE,
-    );
-    registry.projector.append(appended, candidateAgentIds);
-    if (appended.length) registry.lastSeq = appended.at(-1)!.seq;
-    if (appended.length < CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE) break;
-    // SQLite work is bounded to child-related pages; yield between them so a very large child
-    // hierarchy cannot monopolize the control-plane event loop.
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-  registry.lastSeq = throughSeq;
-  // Refresh insertion order for a small LRU. Cached state contains only structured child facts,
-  // never raw prose/output; old sessions rebuild once if revisited after eviction.
-  childSessionRegistries.delete(id);
-  childSessionRegistries.set(id, registry);
-  while (childSessionRegistries.size > CHILD_SESSION_REGISTRY_CACHE_LIMIT) {
-    const oldest = childSessionRegistries.keys().next().value;
-    if (oldest === undefined) break;
-    childSessionRegistries.delete(oldest);
-  }
-  return registry.projector.page(current.pendingApproval, eventEpoch, after, limit);
+  return childSessionRegistryTasks.run(id, async () => {
+    const lockedSession = db.getSession(id);
+    if (!lockedSession) return reply.code(404).send({ error: "session not found" });
+    if ((lockedSession.eventEpoch ?? 0) !== eventEpoch) {
+      return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+    }
+    const throughSeq = db.sessionEventTailSeq(id);
+    let registry = childSessionRegistries.get(id);
+    if (!registry || registry.eventEpoch !== eventEpoch) {
+      registry = { eventEpoch, lastSeq: 0, candidateAgentIds: new Set(), projector: new ChildSessionRegistryProjector() };
+    }
+    const previousTail = registry.lastSeq;
+    const newAgentIds = db.listAgentToolCallIds(id, previousTail, throughSeq)
+      .filter((candidate) => !registry!.candidateAgentIds.has(candidate));
+    for (const candidate of newAgentIds) registry.candidateAgentIds.add(candidate);
+    const scan = async (candidateIds: readonly string[], scanAfter: number, scanThrough: number) => {
+      let cursor = scanAfter;
+      while (candidateIds.length && cursor < scanThrough) {
+        const appended = db.listChildSessionProjectionPage(
+          id, candidateIds, cursor, scanThrough, CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE,
+        );
+        registry!.projector.append(appended, registry!.candidateAgentIds);
+        if (appended.length) cursor = appended.at(-1)!.seq;
+        if (appended.length < CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE) break;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    };
+    // A newly observed spawn can own imported/pre-spawn evidence. Recover only that ID's indexed
+    // evidence before the old tail, then scan the append-only suffix once for every known child.
+    await scan(newAgentIds, 0, previousTail);
+    await scan([...registry.candidateAgentIds], previousTail, throughSeq);
+    const finalSession = db.getSession(id);
+    const finalTail = db.sessionEventTailSeq(id);
+    if (!finalSession || (finalSession.eventEpoch ?? 0) !== eventEpoch || finalTail !== throughSeq) {
+      childSessionRegistries.delete(id);
+      return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+    }
+    registry.lastSeq = throughSeq;
+    // Refresh insertion order for a small LRU. Cached state contains only structured child facts,
+    // never raw prose/output; old sessions rebuild once if revisited after eviction.
+    childSessionRegistries.delete(id);
+    childSessionRegistries.set(id, registry);
+    while (childSessionRegistries.size > CHILD_SESSION_REGISTRY_CACHE_LIMIT) {
+      const oldest = childSessionRegistries.keys().next().value;
+      if (oldest === undefined) break;
+      childSessionRegistries.delete(oldest);
+    }
+    return registry.projector.page(finalSession.pendingApproval, eventEpoch, after, limit);
+  });
 });
 
 app.get("/api/sessions/:id/side-chat", async (req, reply) => {
