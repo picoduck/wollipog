@@ -640,6 +640,18 @@ interface SweepContext {
   platform?: NodeJS.Platform;
 }
 
+function ownedLink(owned: ReadonlySet<string>, path: string,
+  platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform !== "win32") return owned.has(path) ? path : undefined;
+  return [...owned].find((entry) => samePath(entry, path, platform));
+}
+
+function forgetOwnedLink(owned: Set<string>, path: string,
+  platform: NodeJS.Platform = process.platform): void {
+  const recorded = ownedLink(owned, path, platform);
+  if (recorded !== undefined) owned.delete(recorded);
+}
+
 /** Remove this runner's own symlinks whose name is no longer desired: store-target links (only
  * this runner links into its store) and canonical-target links the manifest records this runner
  * creating. Foreign symlinks, real files, real directories, and canonical-shaped links absent
@@ -662,7 +674,7 @@ function sweepManagedLinks(
     const linkPath = join(dir, name);
     const probe = probeLink(linkPath, realStoreRoot, canonicalDir, sweep.platform);
     if (probe.kind !== "ours") continue;
-    if (probe.via === "canonical" && !sweep.owned.has(linkPath)) {
+    if (probe.via === "canonical" && !ownedLink(sweep.owned, linkPath, sweep.platform)) {
       // Shaped like ours, but this runner has no record of creating it — a hand-made link to the
       // canonical location. Leave it; the unmanaged scan reports it.
       continue;
@@ -670,7 +682,7 @@ function sweepManagedLinks(
     const shownPath = `${sweep.shownDir}/${name}`;
     try {
       unlinkSync(linkPath);
-      sweep.owned.delete(linkPath);
+      forgetOwnedLink(sweep.owned, linkPath, sweep.platform);
       const reason = "No longer in the desired skill list.";
       sweep.removedLinks.push({ path: shownPath, reason });
       sweep.log?.(`skill link removed: ${shownPath} (${reason})`);
@@ -1152,7 +1164,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const allowRemovals = options.allowRemovals === true;
   const platform = options.platform ?? process.platform;
   const replaceJunction = options.replaceWindowsJunction ?? ((path: string, expectedTarget: string, target: string) =>
-    replaceWindowsSkillJunction(dataDir, path, expectedTarget, target));
+    replaceWindowsSkillJunction(path, expectedTarget, target));
 
   let realStoreRoot: string;
   try {
@@ -1335,6 +1347,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
    * reported) a link it did not create, but only for a name the control plane actively deploys
    * to this harness. */
   const ownLink = (linkPath: string): void => {
+    forgetOwnedLink(owned, linkPath, platform);
     owned.add(linkPath);
   };
   const deployed: DeployedSkillState[] = [];
@@ -1453,11 +1466,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         const linkPath = join(home, relDir, entry.name);
         const shownPath = `~/${relDir}/${entry.name}`;
         const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
-        const removable = probe.kind === "ours" && (probe.via === "store" || owned.has(linkPath));
+        const removable = probe.kind === "ours" && (probe.via === "store" || !!ownedLink(owned, linkPath, platform));
         if (removable) {
           try {
             unlinkSync(linkPath);
-            owned.delete(linkPath);
+            forgetOwnedLink(owned, linkPath, platform);
             const reason = "The canonical location it routes through is conflicted.";
             removedLinks.push({ path: shownPath, reason });
             options.log?.(`skill link removed: ${shownPath} (${reason})`);
@@ -1599,7 +1612,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       // canonical-shaped link this runner has no record of creating.
       const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
       if (probe.kind !== "ours") return true;
-      return probe.via === "canonical" && !owned.has(linkPath);
+      return probe.via === "canonical" && !ownedLink(owned, linkPath, platform);
     }),
     removedLinks,
   };

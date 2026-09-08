@@ -1720,17 +1720,21 @@ test("Windows uses junction-shaped managed links and atomically retargets only a
     const second = entry("alpha", targets, skillFiles("alpha", "Updated.\n"));
     const updated = await reconcile(roots, [second], {
       platform: "win32",
-      replaceWindowsJunction: (path, expectedTarget, target) => {
+      ...(process.platform === "win32" ? {} : { replaceWindowsJunction: (path: string, expectedTarget: string, target: string) => {
         replacements.push([path, expectedTarget, target]);
         assert.equal(readlinkSync(path), oldTarget);
         unlinkSync(path);
         symlinkSync(target, path, "dir");
-      },
+      } }),
     });
     assert.equal(updated.deployed[0]?.links.find((link) => link.agentId === claudeAgent.id)?.status, "linked");
-    assert.equal(replacements.length, 1, "only the canonical version switch needs a junction retarget");
-    assert.equal(replacements[0]?.[0], canonical);
+    assert.equal(replacements.length, process.platform === "win32" ? 0 : 1,
+      "only the seam-based run records the canonical version switch");
+    if (process.platform !== "win32") assert.equal(replacements[0]?.[0], canonical);
     assert.equal(linkTarget(canonical), join(skillsStoreRoot(roots.dataDir), "alpha", second.versionDigest));
+    const removed = await reconcile(roots, [], { platform: "win32" });
+    assert.ok(removed.removedLinks.some((entry) => entry.path === "~/.agents/skills/alpha"));
+    assert.equal(existsSync(canonical), false);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }

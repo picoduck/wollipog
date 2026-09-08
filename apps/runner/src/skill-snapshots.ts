@@ -13,7 +13,7 @@ const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
 
 /** Directory times can be coarse enough that a newly added entry has the same timestamp.
  * Include the bounded entry names/types, without reading any file contents during discovery. */
-export function directoryGeneration(fd: number, _platform: NodeJS.Platform = process.platform): string {
+export function directoryGeneration(fd: number): string {
   const entries: string[] = [];
   const dir = opendirSync(fdPath(fd));
   try {
@@ -26,8 +26,7 @@ export function directoryGeneration(fd: number, _platform: NodeJS.Platform = pro
 }
 
 /** Internal Linux primitive: resolve a fixed relative directory through pinned no-follow parents. */
-export function openSkillDirectory(home: string, relative: string, durable = false,
-  platform: NodeJS.Platform = process.platform): number {
+export function openSkillDirectory(home: string, relative: string, durable = false): number {
   const segments = relative.split("/");
   if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("\\"))) throw new Error();
   let fd = openSync(realpathSync(home), directoryFlags);
@@ -63,7 +62,7 @@ export class MachineSkillSnapshots {
     return [...dirs];
   }
   private openDirectory(relative: string): number {
-    return openSkillDirectory(this.options.home, relative, false, this.platform());
+    return openSkillDirectory(this.options.home, relative);
   }
   /** Resolve only an exact, still-live candidate minted by this runner process. */
   resolveCandidate(expected: MachineSkillCandidate): MachineSkillCandidate | null {
@@ -91,15 +90,15 @@ export class MachineSkillSnapshots {
       }
       const fd = this.openDirectory(`${candidate.sourceDirectory}/${candidate.name}`);
       try {
-        if (directoryGeneration(fd, this.platform()) !== candidate.generation) throw new Error();
-        const first = inspectSkillTree(fd, false, this.platform());
+        if (directoryGeneration(fd) !== candidate.generation) throw new Error();
+        const first = inspectSkillTree(fd);
         const digest = skillVersionDigest(first.files);
         // A second bounded pass rejects concurrent edits to content or the manifest. The returned
         // bytes are an immutable snapshot, not a promise that the source remains unchanged later.
-        const second = inspectSkillTree(fd, false, this.platform());
+        const second = inspectSkillTree(fd);
         if (skillVersionDigest(second.files) !== digest ||
             JSON.stringify(second.executablePaths) !== JSON.stringify(first.executablePaths) ||
-            directoryGeneration(fd, this.platform()) !== candidate.generation) throw new Error();
+            directoryGeneration(fd) !== candidate.generation) throw new Error();
         return { ...result, snapshot: { candidate, files: first.files, digest, executablePaths: first.executablePaths } };
       } finally { closeSync(fd); }
     } catch {
@@ -139,7 +138,7 @@ export class MachineSkillSnapshots {
               manifest = openSync(`${fdPath(child)}/SKILL.md`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
               if (!fstatSync(manifest).isFile()) continue;
               const candidate = { id: randomUUID(), name: entry.name, sourceDirectory: relative,
-                generation: directoryGeneration(child, this.platform()) };
+                generation: directoryGeneration(child) };
               found.push(candidate);
               this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000 });
             } catch { /* Unsupported or concurrently removed candidates are not offered. */ }
@@ -155,8 +154,7 @@ export class MachineSkillSnapshots {
 
 /** Bounded no-follow content validation; adoption may additionally flush files/directories before
  * preserving them. Snapshot discovery/read never opts into these durability operations. */
-export function inspectSkillTree(root: number, durable = false,
-  platform: NodeJS.Platform = process.platform): { files: SkillFile[]; executablePaths: string[] } {
+export function inspectSkillTree(root: number, durable = false): { files: SkillFile[]; executablePaths: string[] } {
     const files: SkillFile[] = [];
     const executablePaths: string[] = [];
     let total = 0;

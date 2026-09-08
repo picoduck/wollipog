@@ -172,9 +172,9 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
             <p>{operation.detail}</p>
             {restorable && <>
               <label className="field"><span>
-                <Checkbox label="Confirm Restore of Original Source" checked={restoreConfirmed === operation.operationId}
+                <Checkbox label={`Confirm Restore of ${operation.name}`} checked={restoreConfirmed === operation.operationId}
                   disabled={busy} onChange={(checked) => setRestoreConfirmed(checked ? operation.operationId : null)} />
-                {" "}Confirm Restore of Original Source
+                {" "}Confirm Restore of {operation.name}
               </span><small>The current managed link is preserved inside {operation.backupDirectory} before an exclusive recovery link exposes the original.</small></label>
               <button className="btn danger" type="button" disabled={busy || restoreConfirmed !== operation.operationId}
                 onClick={() => void restore(operation.operationId)}>Restore Original Source</button>

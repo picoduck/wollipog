@@ -174,7 +174,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
     await expect(restore).toBeDisabled();
     await page.screenshot({ path: info.outputPath(`recovery-inspect-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.getByRole("checkbox", { name: "Confirm Restore of Original Source" }).check();
+    await page.getByRole("checkbox", { name: "Confirm Restore of code-review" }).check();
     await expect(restore).toBeEnabled();
     await restore.click();
     await expect(page.getByRole("status")).toContainText("Published a recovery link to the preserved original for code-review");

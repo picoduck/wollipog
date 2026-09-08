@@ -55,3 +55,7 @@ jobs:
       - name: Verify Native Windows Skill Filesystem Adapters
         if: matrix.os == 'windows-latest'
         run: node --import tsx --test apps/runner/src/windows-skill-junction.test.ts apps/runner/src/windows-skill-snapshots.test.ts apps/runner/src/skill-snapshots.test.ts
+
+      - name: Verify Native Windows Skill Reconciliation
+        if: matrix.os == 'windows-latest'
+        run: node --import tsx --test --test-name-pattern="Windows uses junction-shaped" apps/runner/src/skills.test.ts

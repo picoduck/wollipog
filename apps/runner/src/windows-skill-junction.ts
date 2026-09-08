@@ -61,6 +61,13 @@ public static class WollipogSkillJunction {
     return value.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
   }
 
+  static string OpenPath(string value) {
+    var normalized = NormalizeTarget(value);
+    return normalized.StartsWith(@"\\", StringComparison.Ordinal)
+      ? @"\\?\UNC\" + normalized.Substring(2)
+      : @"\\?\" + normalized;
+  }
+
   static string CurrentTarget(SafeFileHandle handle) {
     var buffer = new byte[16 * 1024];
     int returned;
@@ -101,7 +108,7 @@ public static class WollipogSkillJunction {
   }
 
   public static void Replace(string path, string expectedTarget, string target) {
-    using (var handle = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+    using (var handle = CreateFileW(OpenPath(path), GENERIC_READ | GENERIC_WRITE,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, IntPtr.Zero, OPEN_EXISTING,
       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero)) {
       if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "could not open the junction");
@@ -124,7 +131,6 @@ public static class WollipogSkillJunction {
 `;
 
 export function replaceWindowsSkillJunction(
-  _dataDir: string,
   path: string,
   expectedTarget: string,
   target: string,

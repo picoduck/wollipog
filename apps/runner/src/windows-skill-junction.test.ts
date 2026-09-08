@@ -10,6 +10,7 @@ test("the Windows junction helper opens the reparse point and verifies its old t
   assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /FSCTL_GET_REPARSE_POINT/u);
   assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /FSCTL_SET_REPARSE_POINT/u);
   assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /GetFullPathNameW/u);
+  assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /OpenPath\(path\)/u);
   assert.doesNotMatch(WINDOWS_SKILL_JUNCTION_HELPER, /Path\.GetFullPath/u);
   assert.match(WINDOWS_SKILL_JUNCTION_HELPER, /OrdinalIgnoreCase/u);
   assert.doesNotMatch(WINDOWS_SKILL_JUNCTION_HELPER, /Remove-Item|Directory\.Delete/u);
@@ -20,16 +21,14 @@ test("native Windows atomically retargets a verified directory junction", {
 }, (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-junction-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const dataDir = join(root, "data");
   const first = join(root, "first");
   const second = join(root, "second");
   const link = join(root, "managed");
-  mkdirSync(dataDir, { recursive: true });
   mkdirSync(first);
   mkdirSync(second);
   symlinkSync(first, link, "junction");
-  replaceWindowsSkillJunction(dataDir, link, first, second);
+  replaceWindowsSkillJunction(link, first, second);
   assert.equal(resolve(readlinkSync(link)), resolve(second));
-  assert.throws(() => replaceWindowsSkillJunction(dataDir, link, first, first));
+  assert.throws(() => replaceWindowsSkillJunction(link, first, first));
   assert.equal(resolve(readlinkSync(link)), resolve(second));
 });
