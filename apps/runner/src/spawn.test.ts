@@ -28,6 +28,26 @@ const windowsJobIsolation = {
   network: "inherit" as const,
 };
 
+/**
+ * A killed process stays visible to `kill(pid, 0)` as a zombie until its parent reaps it. When the
+ * parent has already exited the reaper is init (or a subreaper), whose reaping is asynchronous and
+ * slow under load, so an immediate ESRCH assertion right after the kill promise settles is racy.
+ * Poll briefly instead; a live process still fails the deadline.
+ */
+async function waitForProcessGone(pid: number, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+      throw error;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 test("Windows Job launcher is materialized, caches its bridge, and clears both specs", () => {
   assert.equal(materializeWindowsJobLauncher(windowsJobTestCacheRoot), windowsJobLauncherPath);
   assert.equal(readFileSync(windowsJobLauncherPath, "utf8"), WINDOWS_JOB_LAUNCHER);
@@ -808,7 +828,7 @@ test("normal provider exit preserves owned background work until session disposa
   );
   finishGracefulStop();
   assert.equal(await waitForPendingKills(8_000), true);
-  assert.throws(() => process.kill(escapedPid!, 0), /ESRCH/, "session disposal reaps retained work");
+  assert.equal(await waitForProcessGone(escapedPid!), true, "session disposal reaps retained work");
 });
 
 test("session disposal reaps a grandchild that creates a new POSIX session and its descendant", {
@@ -846,7 +866,7 @@ test("session disposal reaps a grandchild that creates a new POSIX session and i
   killTree(child);
   assert.equal(await waitForPendingKills(8_000), true);
   for (const pid of [pids.escaped, pids.leaf]) {
-    assert.throws(() => process.kill(pid, 0), /ESRCH/, `owned pid ${pid} was reaped`);
+    assert.equal(await waitForProcessGone(pid), true, `owned pid ${pid} was reaped`);
   }
 });
 
@@ -925,7 +945,7 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
   assert.ok(Number.isSafeInteger(helperPid) && helperPid! > 0,
     `SIGTERM handler did not report a successful detached spawn; provider=${child.pid}; stderr=${providerOutput}`);
   assert.equal(await waitForPendingKills(8_000), true);
-  assert.throws(() => process.kill(helperPid!, 0), /ESRCH/, "final marker rescan reaps the helper");
+  assert.equal(await waitForProcessGone(helperPid!), true, "final marker rescan reaps the helper");
   await assert.rejects(fs.access(helperReady), /ENOENT/, "helper reaped without executing readiness code");
 });
 
