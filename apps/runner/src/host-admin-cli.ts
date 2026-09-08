@@ -42,7 +42,8 @@ const DEFAULT_PORT = 4317;
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/u;
 const PAIR_TOKEN_RE = /^[A-Za-z0-9_-]{16,256}$/u;
 const VALUE_OPTIONS = new Set(["--url", "--token-file", "--name", "--user", "--origin", "--output", "--runner", "--label"]);
-const RUNNER_TOKEN_RE = /^[A-Za-z0-9_-]{16,256}$/u;
+// Current `wollipogr_` and legacy `mamr_` producers both emit exactly 43 base64url characters.
+const RUNNER_TOKEN_RE = /^(?:wollipogr_|mamr_)[A-Za-z0-9_-]{43}$/u;
 
 export interface HostAdminIo {
   stdout(text: string): void;
@@ -484,11 +485,13 @@ async function runnerCredentialCommand(
       : "no runner credentials");
     return 0;
   }
-  const runnerId = option(args, "--runner")?.trim();
+  // The raw value is validated, never normalized: trimming "prod " into "prod" would silently
+  // retarget a destructive command at a different runner (server-side normalization also rejects it).
+  const runnerId = option(args, "--runner");
   if (verb !== "issue" && verb !== "rotate" && verb !== "revoke") throw new CliError(hostAdminUsage(), 2);
-  if (!runnerId) throw new CliError(`admin runner-credential ${verb} requires --runner <runner-id>`, 2);
+  if (runnerId === undefined || runnerId === "") throw new CliError(`admin runner-credential ${verb} requires --runner <runner-id>`, 2);
   if (/[\u0000-\u0020\u007f/\\?#]/u.test(runnerId) || runnerId.length > 128) {
-    throw new CliError("--runner must be a runner id without whitespace, control characters, or / \\ ? #", 2);
+    throw new CliError("--runner must be an exact runner id without whitespace, control characters, or / \\ ? #", 2);
   }
   const encodedRunner = encodeURIComponent(runnerId);
 
@@ -536,20 +539,14 @@ async function runnerCredentialCommand(
     return 0;
   } catch (error) {
     if (delivered) throw error;
+    // Unlike a device token, an undelivered pending runner credential is inert: nobody holds its
+    // plaintext, it expires unused in 24 hours, and issuing or rotating again supersedes it.
+    // Revoking here would be worse: a revoke also closes the runner socket, which after a failed
+    // `issue` for a legacy runner without a credential (or a failed `rotate` with a still-active
+    // credential) would disconnect a working runner.
     const detail = (error as Error).message;
     const exitCode = error instanceof CliError ? error.exitCode : 1;
-    if (verb === "rotate") {
-      // The previous credential is still active; revoking would disconnect the runner. The
-      // undelivered replacement simply expires, and rotating again supersedes it.
-      throw new CliError(`${detail}; the pending replacement for runner ${runnerId} was not delivered and expires unused; run the rotate command again`, exitCode);
-    }
-    try {
-      await client.del(`/api/runner-credentials/${encodedRunner}`);
-      throw new CliError(`${detail}; the undelivered pending credential for runner ${runnerId} was revoked`, exitCode);
-    } catch (revokeError) {
-      if (revokeError instanceof CliError && revokeError.message.startsWith(detail)) throw revokeError;
-      throw new CliError(`${detail}; the undelivered pending credential for runner ${runnerId} could not be revoked (${(revokeError as Error).message}); run: wollipog admin runner-credential revoke --runner ${runnerId} --yes`, exitCode);
-    }
+    throw new CliError(`${detail}; the pending credential for runner ${runnerId} was not delivered, expires unused in 24 hours, and is replaced by running the ${verb} command again`, exitCode);
   }
 }
 

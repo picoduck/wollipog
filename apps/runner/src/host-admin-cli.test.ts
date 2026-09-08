@@ -556,7 +556,7 @@ test("admin runner-credential list renders credentials and JSON", async (t) => {
   assert.ok(!json.stdout().includes(RUNNER_TOKEN));
 });
 
-test("admin runner-credential issue writes the token once to a 0600 file and revokes an undeliverable pending credential", async (t) => {
+test("admin runner-credential issue writes the token once to a 0600 file and leaves an undeliverable pending credential to expire", async (t) => {
   const { root, tokenFile } = fixture(t);
   const issued = server();
   const output = join(root, "rack2.token");
@@ -590,17 +590,23 @@ test("admin runner-credential issue writes the token once to a 0600 file and rev
   const lost = makeIo();
   assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-4", "--output", join(root, "missing", "t"), "--json"], env(tokenFile), lost.io, undeliverable.fetch, host), 1);
   const lostError = JSON.parse(lost.stdout()).error as string;
-  assert.match(lostError, /could not create .*; the undelivered pending credential for runner rack-4 was revoked/u);
+  assert.match(lostError, /could not create .*; the pending credential for runner rack-4 was not delivered, expires unused in 24 hours, and is replaced by running the issue command again/u);
   assert.ok(!lostError.includes(RUNNER_TOKEN));
-  assert.ok(undeliverable.calls.some((call) => call.method === "DELETE" && call.url.endsWith("/api/runner-credentials/rack-4")));
+  assert.ok(!undeliverable.calls.some((call) => call.method === "DELETE"), "an inert pending credential is never revoked: a revoke would also close a legacy runner's socket");
 
-  const badToken = makeIo({ stdoutIsTTY: true });
-  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-5", "--json"], env(tokenFile), badToken.io, server({ runnerToken: "bad token" }).fetch, host), 1);
-  assert.match(JSON.parse(badToken.stdout()).error, /unusable runner token; the undelivered pending credential for runner rack-5 was revoked/u);
+  for (const token of ["bad token", "A".repeat(43), "wollipogr_" + "A".repeat(42), "other_" + "A".repeat(43)]) {
+    const badToken = makeIo({ stdoutIsTTY: true });
+    assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-5", "--json"], env(tokenFile), badToken.io, server({ runnerToken: token }).fetch, host), 1, token);
+    assert.match(JSON.parse(badToken.stdout()).error, /unusable runner token; the pending credential for runner rack-5 was not delivered/u);
+    assert.ok(!badToken.stdout().includes(token.replace(/ /gu, "")) || token === "bad token", token);
+  }
+  const legacy = makeIo({ stdoutIsTTY: true });
+  assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "rack-6", "--json"], env(tokenFile), legacy.io, server({ runnerToken: "mamr_" + "L".repeat(43) }).fetch, host), 0);
+  assert.equal(JSON.parse(legacy.stdout()).token, "mamr_" + "L".repeat(43));
 
   const bad = makeIo();
   assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--runner", "bad/id", "--output", join(root, "x")], env(tokenFile), bad.io, server().fetch, host), 2);
-  assert.match(bad.stderr(), /--runner must be a runner id/u);
+  assert.match(bad.stderr(), /--runner must be an exact runner id/u);
   assert.equal(await runHostAdminCli(["admin", "runner-credential", "issue", "--output", join(root, "y")], env(tokenFile), makeIo().io, server().fetch, host), 2);
 });
 
@@ -617,7 +623,7 @@ test("admin runner-credential rotate keeps the active credential and never revok
   const lost = server();
   const failed = makeIo();
   assert.equal(await runHostAdminCli(["admin", "runner-credential", "rotate", "--runner", "dev-box", "--output", join(root, "missing", "t"), "--json"], env(tokenFile), failed.io, lost.fetch, host), 1);
-  assert.match(JSON.parse(failed.stdout()).error, /pending replacement for runner dev-box was not delivered and expires unused; run the rotate command again/u);
+  assert.match(JSON.parse(failed.stdout()).error, /pending credential for runner dev-box was not delivered, expires unused in 24 hours, and is replaced by running the rotate command again/u);
   assert.ok(!lost.calls.some((call) => call.method === "DELETE"), "rotation failure must not revoke the still-active credential");
 });
 
@@ -643,4 +649,12 @@ test("admin runner-credential revoke requires confirmation or --yes and reports 
   const missing = makeIo();
   assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", "ghost", "--yes", "--json"], env(tokenFile), missing.io, fetch, host), 1);
   assert.match(JSON.parse(missing.stdout()).error, /runner not found/u);
+
+  const before = calls.filter((call) => call.method === "DELETE").length;
+  for (const raw of ["dev-box ", " dev-box", "dev-box\t", ""]) {
+    const padded = makeIo();
+    assert.equal(await runHostAdminCli(["admin", "runner-credential", "revoke", "--runner", raw, "--yes"], env(tokenFile), padded.io, fetch, host), 2, JSON.stringify(raw));
+    assert.match(padded.stderr(), raw === "" ? /requires --runner/u : /exact runner id/u);
+  }
+  assert.equal(calls.filter((call) => call.method === "DELETE").length, before, "a padded id must never retarget a revoke");
 });

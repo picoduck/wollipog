@@ -126,9 +126,11 @@ cutover semantics (see [runner credentials and secrets](./runner-credentials-and
 `issue` and `rotate` return the token exactly once, under the same rules as device links: shown only
 on an interactive terminal, or written atomically to a new mode-0600 `--output` file that the runner
 can consume directly with `--token-file <file>` or `RUNNER_TOKEN_FILE`. The output path is checked
-before minting. If delivery fails after an `issue`, the undelivered pending credential is revoked;
-after a `rotate` it is left to expire, because revoking would also kill the still-active credential,
-and the message tells you to rotate again. Tokens never appear in argv, unit files, or logs.
+before minting. If delivery fails after minting, the pending credential is left alone: nobody holds
+its plaintext, it expires unused after 24 hours, and running `issue` or `rotate` again replaces it.
+It is deliberately not revoked, because a revoke also closes the runner socket and would disconnect
+a runner that still has a working credential. `--runner` must be the exact id; padded or malformed
+ids are refused rather than normalized. Tokens never appear in argv, unit files, or logs.
 
 ## Public Dashboard Origin
 
