@@ -827,7 +827,7 @@ export function NewSessionDialog({
                 onClick={() => setLaunchSurface("native_tui")}
               >
                 <strong>Native TUI</strong>
-                <span>Open a separate provider conversation in Terminal. Its activity does not appear in the structured transcript.</span>
+                <span>Open a separate provider conversation in Terminal. Usage accounting is unavailable.</span>
               </button>
             </div>
             {!nativeTuiLaunchSupported && (
@@ -848,7 +848,7 @@ export function NewSessionDialog({
               <span className="muted">Native TUI currently runs only on the host execution target.</span>
             )}
             {launchSurface === "native_tui" && (
-              <span className="muted">No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Use Direct for tracked usage and guardrails. Manager policy hook status appears after launch.</span>
+              <span className="muted">Usage Accounting: Unavailable. No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Sessions with cost budgets, cost checkpoints, or tool-call limits must use Direct. Manager policy hook status appears after launch.</span>
             )}
           </div>
 

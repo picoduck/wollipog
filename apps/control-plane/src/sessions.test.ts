@@ -555,6 +555,81 @@ test("orchestrator is creation-only and requires the negotiated native harness b
   } finally { db.close(); }
 });
 
+test("tracked guardrails and Native TUI cannot coexist across creation, inheritance, or later config", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    for (const config of [
+      { costBudgetUsd: 5 },
+      { maxToolCalls: 12 },
+      { costCheckpointsUsd: [1, 2] },
+    ]) {
+      const before = db.listSessions().length;
+      const created = svc.createSession({ ...request, launchSurface: "native_tui", config });
+      assert.equal(created.status, 409);
+      assert.match(created.error!, /Use Direct/);
+      assert.equal(db.listSessions().length, before, "refusal precedes session materialization");
+    }
+
+    const parent = svc.createSession({ ...request, config: { costBudgetUsd: 20, maxToolCalls: 40 } }).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const inherited = svc.createSession({ ...request, launchSurface: "native_tui" },
+      undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(inherited.status, 409);
+    assert.match(inherited.error!, /not reported to Wollipog/);
+    assert.equal(db.childSessionAllocations(parent.id).count, 0,
+      "a refused inherited Native TUI does not reserve child allowance");
+
+    const owner = db.localIdentityContext();
+    const userScope = {
+      organizationId: owner.organizationId,
+      owner: { kind: "user" as const, userId: owner.userId },
+    };
+    const unguarded = svc.createSession(request, undefined, userScope).data!;
+    db.createShell({ shellId: "live-tui", sessionId: unguarded.id, runnerId: RUNNER_ID,
+      name: "Agent TUI", createdAt: Date.now(), kind: "agent_tui" });
+    assert.equal(db.hasUserOwnedActiveAgentTui(db.localIdentityContext().organizationId), true);
+    for (const config of [
+      { costBudgetUsd: 5 },
+      { maxToolCalls: 12 },
+      { costCheckpointsUsd: [1, 2] },
+    ]) {
+      const updated = svc.setConfig(unguarded.id, config);
+      assert.equal(updated.status, 409);
+      assert.match(updated.error!, /Use Direct/);
+    }
+    const unchanged = db.getSession(unguarded.id)!;
+    assert.equal(unchanged.costBudgetUsd, null);
+    assert.equal(unchanged.maxToolCalls, null);
+    assert.equal(unchanged.costCheckpointsUsd, null);
+    assert.ok(svc.setConfig(unguarded.id, { model: "opus" }).ok,
+      "unrelated config remains available while an unguarded TUI runs");
+    assert.equal(hub.sentToRunner.some((message) => message.type === "rearm_governance"), false);
+  } finally { db.close(); }
+});
+
+test("a user daily cost budget rejects Native TUI creation before materialization", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const owner = db.localIdentityContext();
+    const userScope = {
+      organizationId: owner.organizationId,
+      owner: { kind: "user" as const, userId: owner.userId },
+    };
+    db.setUsageDailyBudget(owner.organizationId, 10, Date.now());
+    const before = db.listSessions().length;
+    const created = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      agentId: AGENT_ID,
+      launchSurface: "native_tui",
+    }, undefined, userScope);
+    assert.equal(created.status, 409);
+    assert.match(created.error!, /daily cost budget/);
+    assert.equal(db.listSessions().length, before);
+  } finally { db.close(); }
+});
+
 test("session spawn policy parks the exact child request and creates only after its human approval", () => {
   const { db, svc } = makeHarness();
   try {

@@ -1012,6 +1012,23 @@ export interface SessionConfig {
   costCheckpointsUsd?: number[];
 }
 
+/** Native provider TUIs do not expose their turns through Wollipog's structured event stream.
+ * A positive tracked guardrail therefore cannot coexist with a Native TUI without presenting a
+ * limit that the provider process can silently bypass. Keep this check shared by API and UI. */
+export function nativeTuiHasTrackedGuardrails(
+  config: {
+    costBudgetUsd?: number | null;
+    maxToolCalls?: number | null;
+    costCheckpointsUsd?: number[] | null;
+  },
+): boolean {
+  return (typeof config.costBudgetUsd === "number" && Number.isFinite(config.costBudgetUsd) && config.costBudgetUsd > 0) ||
+    (typeof config.maxToolCalls === "number" && Number.isFinite(config.maxToolCalls) && Math.floor(config.maxToolCalls) > 0) ||
+    (Array.isArray(config.costCheckpointsUsd) && config.costCheckpointsUsd.some(
+      (checkpoint) => Number.isFinite(checkpoint) && checkpoint > 0,
+    ));
+}
+
 /** A runner-local environment lookup. The referenced value is resolved only on the runner and is
  * never persisted by the control plane or included in diagnostics. */
 export interface AcpEnvironmentReference {

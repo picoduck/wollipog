@@ -38,6 +38,7 @@ import {
   validatePromptImageInputs,
   providerSupportsConversationFork,
   mergeSessionCapabilities,
+  nativeTuiHasTrackedGuardrails,
   type SessionStatus,
   type AgentCapabilities,
   type AgentDefinition,
@@ -73,6 +74,14 @@ import {
   type ReadQueuedPromptMessage,
   type ReadQueuedPromptResultMessage,
 } from "./index.js";
+
+test("Native TUI guardrail detection follows persisted positive-limit semantics", () => {
+  assert.equal(nativeTuiHasTrackedGuardrails({}), false);
+  assert.equal(nativeTuiHasTrackedGuardrails({ costBudgetUsd: 0, maxToolCalls: 0.9, costCheckpointsUsd: [] }), false);
+  assert.equal(nativeTuiHasTrackedGuardrails({ costBudgetUsd: 1 }), true);
+  assert.equal(nativeTuiHasTrackedGuardrails({ maxToolCalls: 1 }), true);
+  assert.equal(nativeTuiHasTrackedGuardrails({ costCheckpointsUsd: [0.5] }), true);
+});
 
 const DURABLE_SESSION_COMMAND_ERROR_CODES = [
   "COMMAND_ID_CONFLICT",

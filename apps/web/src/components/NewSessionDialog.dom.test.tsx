@@ -566,13 +566,17 @@ test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal 
     const harness = fixture.container.querySelector('[role="radiogroup"][aria-label="Harness"]');
     assert.ok(harness);
     assert.match(harness.textContent ?? "", /Use structured chat, tool events, approval cards, and manager controls\./);
-    assert.match(harness.textContent ?? "", /Its activity does not appear in the structured transcript\./);
+    assert.match(harness.textContent ?? "", /Usage accounting is unavailable\./);
     const native = [...harness.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
     assert.equal(native.disabled, false);
 
     await act(async () => { native.click(); });
+    assert.match(
+      fixture.container.textContent ?? "",
+      /Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations\./,
+    );
     await act(async () => { createButton(fixture.container).click(); });
 
     assert.equal(fixture.requests[0]?.launchSurface, "native_tui");

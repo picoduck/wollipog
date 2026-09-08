@@ -643,7 +643,7 @@ test("Project launch actions submit stable Project and Location identity", async
     });
 });
 
-test("Native TUI launch sends the harness intent and opens Terminal only after creation", async ({ page }) => {
+test("Native TUI launch sends the harness intent and opens Terminal only after creation", async ({ page }, testInfo) => {
   await page.getByRole("tab", { name: /Alpha/ }).click();
   await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
@@ -661,8 +661,21 @@ test("Native TUI launch sends the harness intent and opens Terminal only after c
     .toBe(1);
   await expect(page.getByRole("tab", { name: "Agent TUI" })).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: "Manager policy hooks remain active" })).toHaveText(
-    "No structured events or approval cards. Manager policy hooks remain active.",
+    "Usage Accounting: Unavailable. No structured events or approval cards. Manager policy hooks remain active.",
   );
+
+  await page.evaluate(() => {
+    const created = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions.at(-1);
+    if (!created) throw new Error("created session missing");
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot(created.id, { costBudgetUsd: 5 });
+  });
+  await expect(page.getByRole("button", { name: "+ Agent TUI" })).toBeDisabled();
+  await expect(page.getByRole("status").filter({ hasText: "Agent TUI is unavailable" })).toContainText(
+    "Clear those guardrails or use Direct",
+  );
+  await page.locator(".shell-dock").screenshot({
+    path: testInfo.outputPath("native-tui-guardrail-blocked.png"),
+  });
 });
 
 test("unified Inbox creation opens both existing workflows with the active Project context", async ({ page }) => {

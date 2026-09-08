@@ -19,6 +19,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   isPolicyApproval,
   isTerminal,
   mergeSessionCapabilities,
+  nativeTuiHasTrackedGuardrails,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   validatePromptImageInputs,
@@ -124,6 +125,7 @@ import type { SessionEvent } from "@wollipog/protocol";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
+import { NATIVE_TUI_DAILY_BUDGET_ERROR, NATIVE_TUI_TRACKED_GUARDRAILS_ERROR } from "./native-tui-launch.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
 import { type GuardrailFields, normalizeCostCheckpoints,
   approvalForDecision,
@@ -2777,6 +2779,9 @@ export class SessionsService {
       if (checkpoints) config.costCheckpointsUsd = checkpoints;
       else delete config.costCheckpointsUsd;
     }
+    if (req.launchSurface === "native_tui" && nativeTuiHasTrackedGuardrails(config)) {
+      return fail(NATIVE_TUI_TRACKED_GUARDRAILS_ERROR, 409);
+    }
     if (executionTarget.adapter === "cloud") {
       const policy = executionTarget.policy?.cost;
       const budget = config.costBudgetUsd;
@@ -2814,10 +2819,13 @@ export class SessionsService {
     // The owner's daily allowance is checked against the scope the session will ACTUALLY carry:
     // the explicit one, the Project's, or what the workspace/runner confers — resolved above, so
     // a user-owned Project on an organization workspace cannot slip past its owner's budget.
-    const admissionDenied = this.dailyBudgetAdmissionError(
-      this.db.effectiveSessionScope(req.runnerId, workspaceId, sessionScope),
-    );
+    const effectiveSessionScope = this.db.effectiveSessionScope(req.runnerId, workspaceId, sessionScope);
+    const admissionDenied = this.dailyBudgetAdmissionError(effectiveSessionScope);
     if (admissionDenied) return fail(admissionDenied, 409);
+    if (req.launchSurface === "native_tui" && effectiveSessionScope?.owner.kind === "user" &&
+        this.db.getUsageDailyBudget(effectiveSessionScope.organizationId).perUserUsd !== null) {
+      return fail(NATIVE_TUI_DAILY_BUDGET_ERROR, 409);
+    }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
       workspaceId,
@@ -3257,6 +3265,22 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const effectiveTuiGuardrails = {
+      costBudgetUsd: config.costBudgetUsd !== undefined
+        ? (config.costBudgetUsd > 0 ? config.costBudgetUsd : undefined)
+        : session.costBudgetUsd ?? undefined,
+      maxToolCalls: config.maxToolCalls !== undefined
+        ? (Math.floor(config.maxToolCalls) > 0 ? Math.floor(config.maxToolCalls) : undefined)
+        : session.maxToolCalls ?? undefined,
+      costCheckpointsUsd: config.costCheckpointsUsd !== undefined
+        ? normalizeCostCheckpoints(config.costCheckpointsUsd) ?? undefined
+        : session.costCheckpointsUsd ?? undefined,
+    };
+    if (nativeTuiHasTrackedGuardrails(effectiveTuiGuardrails) && this.db.listShells(sessionId).some(
+      (shell) => shell.kind === "agent_tui" && shell.status !== "exited",
+    )) {
+      return fail(NATIVE_TUI_TRACKED_GUARDRAILS_ERROR, 409);
+    }
     if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
       return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
     }

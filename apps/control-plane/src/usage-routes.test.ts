@@ -238,3 +238,21 @@ test("the daily budget is readable by members, writable by admins, and per-user 
   const everyone = (await app.inject({ method: "GET", url: "/api/usage/users", headers: auth("admin") })).json().users;
   assert.deepEqual(everyone.map((row: { userId: string }) => row.userId).sort(), ["admin-user", "viewer-user"]);
 });
+
+test("daily budgets cannot be armed over an active user-owned Agent TUI", async () => {
+  let persisted = false;
+  const db = {
+    hasUserOwnedActiveAgentTui: () => true,
+    setUsageDailyBudget: () => { persisted = true; },
+  } as unknown as ControlPlaneDb;
+  const app = Fastify();
+  registerUsageRoutes(app, db, () => human("admin"));
+  const response = await app.inject({
+    method: "PUT",
+    url: "/api/usage/daily-budget",
+    payload: { perUserUsd: 20 },
+  });
+  assert.equal(response.statusCode, 409);
+  assert.match(response.json().error, /Close every Agent TUI/);
+  assert.equal(persisted, false);
+});

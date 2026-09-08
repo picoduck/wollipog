@@ -105,6 +105,11 @@ export function registerUsageRoutes(
     if (value !== null && (!Number.isFinite(rounded) || rounded < 0.01 || rounded > 1_000_000)) {
       return reply.code(400).send({ error: "perUserUsd must be at least one cent, or null to clear" });
     }
+    if (value !== null && db.hasUserOwnedActiveAgentTui(principal.organizationId)) {
+      return reply.code(409).send({
+        error: "Daily cost budgets cannot be enabled while a user-owned Agent TUI is running because provider TUI activity is not reported to Wollipog. Close every Agent TUI or leave the daily budget disabled.",
+      });
+    }
     return { dailyBudget: db.setUsageDailyBudget(principal.organizationId, value === null ? null : rounded, Date.now()) };
   });
 

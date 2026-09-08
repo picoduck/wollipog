@@ -562,6 +562,23 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal(invalidSurface.status, 400);
   assert.match((await invalidSurface.json() as { error: string }).error, /launchSurface/);
 
+  const guardedNativeCreate = await ownerFetch("/api/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      runnerId: "runner-ui-route",
+      workspaceId: "workspace-1",
+      projectId: null,
+      projectLocationId: null,
+      agentId: "agent-1",
+      useWorktree: false,
+      launchSurface: "native_tui",
+      config: { maxToolCalls: 10 },
+    }),
+  });
+  assert.equal(guardedNativeCreate.status, 409);
+  assert.match((await guardedNativeCreate.json() as { error: string }).error, /Use Direct/);
+
   const nativeCreate = ownerFetch("/api/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -617,6 +634,17 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     pty: true,
   }));
   assert.equal((await manualOpen).status, 200);
+
+  const guardedWhileTuiRuns = await ownerFetch(`/api/sessions/${createdSessionId}/config`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ costBudgetUsd: 5 }),
+  });
+  assert.equal(guardedWhileTuiRuns.status, 409);
+  assert.match((await guardedWhileTuiRuns.json() as { error: string }).error, /not reported to Wollipog/);
+  assert.equal((await (await ownerFetch(`/api/sessions/${createdSessionId}`)).json() as {
+    session: { costBudgetUsd: number | null };
+  }).session.costBudgetUsd, null, "failed live-TUI guardrail mutation is atomic");
 
   assert.deepEqual(await rejectedSocket(`${wsBase}/ui`), {
     code: 1008,
