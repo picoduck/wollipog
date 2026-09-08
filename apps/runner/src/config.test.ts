@@ -10,6 +10,7 @@ import {
   parseEnv,
   parseWorkspaceArg,
   resolveAgentEnvironment,
+  resolveRunnerLocalAgentEnvironment,
   resolveConfig,
   resolveWorkspacePath,
 } from "./config.js";
@@ -208,6 +209,22 @@ test("agent env supports runner-local literals and fromEnv references resolved o
     controlPlaneUrl: "ws://localhost/runner",
     agents: [{ id: "agent", name: "Agent", command: "agent", env: { TOKEN: { fromEnv: "bad-name" } } }],
   }), /must be a string/u);
+});
+
+test("configured launches retain discovered non-secret prerequisites with config precedence", () => {
+  const agent = {
+    id: "claude",
+    env: { CONFIGURED: { fromEnv: "HOST_CONFIGURED" }, OVERRIDE: "configured" },
+  };
+  assert.deepEqual(resolveRunnerLocalAgentEnvironment(
+    agent,
+    { CLAUDE_CODE_GIT_BASH_PATH: "D:\\Portable Git\\bin\\bash.exe", OVERRIDE: "discovered" },
+    { HOST_CONFIGURED: "resolved" },
+  ), {
+    CLAUDE_CODE_GIT_BASH_PATH: "D:\\Portable Git\\bin\\bash.exe",
+    OVERRIDE: "configured",
+    CONFIGURED: "resolved",
+  });
 });
 
 test("resolveConfig: config-less from overrides only, agents default to []", () => {

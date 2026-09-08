@@ -63,7 +63,7 @@ test("agent TUI launch is provider-gated and never attaches structured session i
 test("Windows agent TUI launch supports cmd shims inside ConPTY", () => {
   assert.deepEqual(agentTuiLaunch(meta(), { platform: "win32", comspec: "C:\\Windows\\cmd.exe" }), {
     command: "C:\\Windows\\cmd.exe",
-    args: ["/d", "/v:off", "/s", "/c", 'claude --profile "team profile"'],
+    args: ["/d", "/v:off", "/s", "/c", '"claude --profile "team profile""'],
     env: { PROVIDER_TOKEN: "runner-local" },
     scrubInheritedEnv: CLAUDE_RUNNER_ENV,
     verbatimCommandLine: 'C:\\Windows\\cmd.exe /d /v:off /s /c "claude --profile "team profile""',
@@ -72,11 +72,17 @@ test("Windows agent TUI launch supports cmd shims inside ConPTY", () => {
 
 test("Windows cmd shim receives spaced and metacharacter TUI args intact through ConPTY", { skip: process.platform !== "win32" }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-argv (x86) & Tools "));
+  const capture = join(dir, "capture.cjs");
   const shim = join(dir, "echo args.cmd");
-  writeFileSync(shim, "@echo off\r\necho TUI_ARGV=[%~1][%~2][%~3][%~4][%~5][%~6][%~7][%~8]\r\n", "utf8");
+  writeFileSync(capture, 'process.stdout.write("TUI_ARGV=" + JSON.stringify(process.argv.slice(2)) + "\\n")\n', "utf8");
+  writeFileSync(shim, '@echo off\r\nnode "%~dp0capture.cjs" %*\r\n', "utf8");
+  const argv = [
+    "team profile", "amp&value", 'say "yes"', "paren(value)", "pipe|value", "less<value",
+    "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+  ];
   const launch = agentTuiLaunch(meta({
     command: shim,
-    args: ["team profile", "amp&value", 'say "yes"', "paren(value)", "pipe|value", "less<value", "more>value", "caret^value"],
+    args: argv,
   }), {
     platform: "win32",
     comspec: process.env.ComSpec,
@@ -99,7 +105,9 @@ test("Windows cmd shim receives spaced and metacharacter TUI args intact through
     while (!output.includes("TUI_ARGV=") && Date.now() - started < 10_000) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    assert.match(output, /TUI_ARGV=\[team profile\]\[amp&value\]\[say "yes"\]\[paren\(value\)\]\[pipe\|value\]\[less<value\]\[more>value\]\[caret\^value\]/);
+    const encoded = output.match(/TUI_ARGV=(\[[^\r\n]*\])/u)?.[1];
+    assert.ok(encoded, output);
+    assert.deepEqual(JSON.parse(encoded), argv);
   } finally {
     child.kill();
     rmSync(dir, { recursive: true, force: true });
@@ -109,7 +117,7 @@ test("Windows cmd shim receives spaced and metacharacter TUI args intact through
 test("Windows cmd shim launch rejects percent expansion", () => {
   assert.throws(
     () => agentTuiLaunch(meta({ args: ["%USERPROFILE%"] }), { platform: "win32", comspec: "cmd.exe" }),
-    /contains %/,
+    /contain %/,
   );
 });
 

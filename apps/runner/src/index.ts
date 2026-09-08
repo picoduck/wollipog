@@ -53,6 +53,7 @@ import {
   parseArgs,
   parseEnv,
   resolveAgentEnvironment,
+  resolveRunnerLocalAgentEnvironment,
   type RunnerConfig,
 } from "./config.js";
 import {
@@ -397,9 +398,9 @@ function agentsForControlPlane() {
 
 /** Resolve exact configured/discovered agent env at the last responsible moment. */
 function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, context: AgentContext): Record<string, string> {
-  const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
-  if (configured) return resolveAgentEnvironment(configured);
   const exact = agentId ? metadata.agents.find((agent) => agent.id === agentId) : undefined;
+  const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
+  if (configured) return resolveRunnerLocalAgentEnvironment(configured, exact?.env);
   return { ...(exact?.env ?? resolveLaunchForDriver(metadata.agents, driver, context)?.env ?? {}) };
 }
 

@@ -17,6 +17,21 @@ function quoteCmdToken(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
 }
 
+/** Build a forced cmd.exe invocation for a caller, such as ConPTY, that needs cmd lookup. */
+export function windowsCmdInvocationSpec(
+  file: string,
+  args: string[],
+  host: WindowsCommandHost = { platform: process.platform, comspec: process.env.ComSpec },
+): WindowsCommandSpec {
+  if (host.platform !== "win32") return { file, args };
+  const commandLine = [quoteCmdToken(file), ...args.map((arg) => quoteCmdToken(arg))].join(" ");
+  return {
+    file: host.comspec || "cmd.exe",
+    args: ["/d", "/v:off", "/s", "/c", `"${commandLine}"`],
+    windowsVerbatimArguments: true,
+  };
+}
+
 /**
  * Build an injection-resistant execFile/spawn spec for Windows batch shims. Node cannot execute
  * .cmd/.bat files directly, while shell:true concatenates unescaped argv. Route only those shims
@@ -28,10 +43,5 @@ export function windowsCommandSpec(
   host: WindowsCommandHost = { platform: process.platform, comspec: process.env.ComSpec },
 ): WindowsCommandSpec {
   if (host.platform !== "win32" || !/\.(?:cmd|bat)$/i.test(file)) return { file, args };
-  const commandLine = [quoteCmdToken(file), ...args.map((arg) => quoteCmdToken(arg))].join(" ");
-  return {
-    file: host.comspec || "cmd.exe",
-    args: ["/d", "/v:off", "/s", "/c", `"${commandLine}"`],
-    windowsVerbatimArguments: true,
-  };
+  return windowsCmdInvocationSpec(file, args, host);
 }

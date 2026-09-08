@@ -597,6 +597,15 @@ export function resolveAgentEnvironment(
   return resolved;
 }
 
+/** Merge non-secret discovery prerequisites into the configured launch environment. */
+export function resolveRunnerLocalAgentEnvironment(
+  agent: Pick<RunnerConfigAgent, "id" | "env">,
+  discoveredEnv: Record<string, string> | undefined,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  return { ...(discoveredEnv ?? {}), ...resolveAgentEnvironment(agent, hostEnv) };
+}
+
 function validateAdmissionMap(name: string, value: Record<string, number> | undefined, maximum: number): Record<string, number> {
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
