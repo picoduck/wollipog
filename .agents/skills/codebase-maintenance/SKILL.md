@@ -45,6 +45,20 @@ Hard rules:
    the report naming the memory and the correction. A stale memory left standing is how a
    reconciled issue gets filed a third time; an undisclosed edit is how a shared memory drifts.
 
+6. Follow-up work in this session. A human may reply to the report with "publish", then "claim
+   and fix" — that is their call, and it converts this session into a fixing session for the
+   rest of its life. Two things must happen before any fix work starts:
+   - State the remaining budget first, on its own line: this session's `costBudgetUsd` caps the
+     WHOLE session, sweep and follow-up alike, and a sweep budget is not sized for a fix. "$6.33
+     of $8.00 remaining" at the top of the turn is what lets the human raise it before the
+     guardrail pauses a half-finished fix (which is how a session was stranded once).
+   - Attach a control-plane-tracked worktree with `wollipog worktree create` before touching any
+     file — never a raw `git worktree add`. The control plane must know the worktree: that is
+     what makes "Hand Off to Another Agent" available for the rest of the session, what the
+     hygiene job's `wollipog worktree discard` retirement assumes, and what the worktree-per-issue
+     rule requires. (One session used raw git for its fix; its hand-off control stayed disabled
+     and its worktree was invisible to the control plane.)
+
 Promotion to Phase 2 (opening pull requests) is a deliberate change, not a judgment call a job may
 make on its own. See "Promotion Criteria" below.
 
