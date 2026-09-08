@@ -205,13 +205,10 @@ export function AgentsPanel(props: Props) {
     const ownerId = request?.ownerToolUseId;
     props.onSelect(ownerId && !projection.ambiguousIds.has(ownerId) ? ownerId : "");
     if (!request) (attentionRef.current ?? panelRef.current)?.focus();
-    else if (request.requestId === session.pendingApproval?.requestId && props.onOpenPrimaryRequest) {
-      props.onOpenPrimaryRequest(request.requestId);
-    } else {
-      window.requestAnimationFrame(() => requestDetailRef.current?.focus());
-    }
+    else window.requestAnimationFrame(() =>
+      (request.requestId === session.pendingApproval?.requestId ? primaryRequestRef.current : requestDetailRef.current)?.focus());
   }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds,
-    props.onSelect, props.onOpenPrimaryRequest, session.pendingApproval?.requestId]);
+    props.onSelect, session.pendingApproval?.requestId]);
   const primaryInSession = Boolean(props.onOpenPrimaryRequest && selectedRequest?.requestId === session.pendingApproval?.requestId);
   useLayoutEffect(() => {
     if ((!selectedRequest || primaryInSession) && requestOwnsFocus.current) {

@@ -36,7 +36,8 @@ export function AttentionRequests({ session, onNavigate, keyboardActive = true, 
         const owner = session.attentionOwners?.find((value) => value.requestId === request.requestId);
         const role = owner?.role ? titleCaseLabel(owner.role) : undefined;
         const ownerLabel = request.ownerToolUseId
-          ? owner?.resolved ? `${owner.name ?? "Subagent"}${role ? ` · ${role}` : ""}` : "Child Owner Unavailable"
+          ? owner?.resolved ? `${owner.name ?? "Subagent"}${role ? ` · ${role}` : ""}`
+            : `Request ${index + 1} · Child Owner Unavailable`
           : null;
         const action = sessionAttentionStatus({ status: session.status,
           pendingApproval: { ...request, ownerToolUseId: undefined } });
