@@ -33,9 +33,13 @@ step() { echo; echo "== $*"; }
 [ -d /run/systemd/system ] || fail "systemd is not running as PID 1 here"
 [ "${WOLLIPOG_E2E_CONFIRM:-}" = 1 ] || fail "set WOLLIPOG_E2E_CONFIRM=1 to acknowledge this installs and removes system units on THIS host"
 for unit in "$cp_unit" "$runner_unit"; do
-  # LoadState covers every systemd load path (/etc, /run, /usr/lib, drop-ins), not just /etc.
+  # The manager's view (every load path, drop-ins) and the files on disk (a unit written since the
+  # last daemon-reload is invisible to the manager) must both say the unit does not exist.
   state=$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)
   [ "$state" = not-found ] || fail "$unit is already known to systemd (LoadState=$state); this script only runs on a host without Wollipog installed"
+  for dir in /etc/systemd/system /run/systemd/system /usr/local/lib/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
+    [ ! -e "$dir/$unit" ] && [ ! -e "$dir/$unit.d" ] || fail "$dir/$unit exists; this script only runs on a host without Wollipog installed"
+  done
 done
 [ ! -e /var/lib/wollipog ] && [ ! -e /etc/wollipog ] || fail "/var/lib/wollipog or /etc/wollipog already exists"
 command -v jq >/dev/null || fail "jq is required"
@@ -72,15 +76,19 @@ trap cleanup EXIT
 wrapper_dir=$(mktemp -d /usr/local/lib/wollipog-e2e.XXXXXX)
 chmod 0755 "$wrapper_dir"
 step "Wrapper executables in $wrapper_dir"
+# `--import tsx` would resolve tsx from the unit's WorkingDirectory (/var/lib/wollipog/...), so the
+# loader is named by its absolute path inside the checkout.
+tsx_loader="$repo/node_modules/tsx/dist/loader.mjs"
+[ -f "$tsx_loader" ] || fail "tsx loader not found at $tsx_loader (run pnpm install first)"
 cat > "$wrapper_dir/wollipog-control-plane" <<EOF
 #!/bin/sh
 export TSX_DISABLE_CACHE=1
-exec "$node_bin" --import tsx "$repo/apps/control-plane/src/index.ts" "\$@"
+exec "$node_bin" --import "$tsx_loader" "$repo/apps/control-plane/src/index.ts" "\$@"
 EOF
 cat > "$wrapper_dir/wollipog-runner" <<EOF
 #!/bin/sh
 export TSX_DISABLE_CACHE=1
-exec "$node_bin" --import tsx "$repo/apps/runner/src/cli.ts" "\$@"
+exec "$node_bin" --import "$tsx_loader" "$repo/apps/runner/src/cli.ts" "\$@"
 EOF
 chmod 0755 "$wrapper_dir"/wollipog-control-plane "$wrapper_dir"/wollipog-runner
 
