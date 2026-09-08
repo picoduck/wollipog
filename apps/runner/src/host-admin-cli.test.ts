@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type HostAdminStatusView } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
 import {
   formatStatus,
+  isLoopbackHostname,
   readProtectedLocalToken,
   resolveLocalTokenPath,
   runHostAdminCli,
@@ -68,6 +69,7 @@ function server(options: {
   hosts?: string[];
   boundBeyondLoopback?: boolean;
   webServed?: boolean;
+  revokeNewDeviceStatus?: number;
 } = {}) {
   const calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: string }> = [];
   const fetch: McpFetch = async (url, init) => {
@@ -106,6 +108,10 @@ function server(options: {
       });
     }
     if (path === "/api/devices/dev_1" && init?.method === "DELETE") return respond(204, undefined);
+    if (path === "/api/devices/dev_new" && init?.method === "DELETE") {
+      const statusCode = options.revokeNewDeviceStatus ?? 204;
+      return respond(statusCode, statusCode === 204 ? undefined : { error: "control plane restarting" });
+    }
     if (path.startsWith("/api/devices/") && init?.method === "DELETE") return respond(404, { error: "device not found" });
     return respond(404, { error: `unexpected ${path}` });
   };
@@ -351,4 +357,69 @@ test("wollipog admin dispatches from the main CLI without session credentials an
   const unknown = makeIo();
   assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "admin", "bogus"], {}, { stdout: unknown.io.stdout, stderr: unknown.io.stderr }, fetch, unknown.io), 2);
   assert.match(unknown.stderr(), /Usage: wollipog admin <command>/u);
+});
+
+test("loopback detection accepts only literal loopback hosts, never look-alike DNS names", () => {
+  for (const ok of ["localhost", "LOCALHOST", "127.0.0.1", "127.5.5.5", "::1", "[::1]"]) assert.equal(isLoopbackHostname(ok), true, ok);
+  for (const bad of ["127.evil.example", "127.0.0.1.nip.io", "foo.localhost", "localhost.", "0.0.0.0", "127.0.0.256", "128.0.0.1", "::2", "2001:db8::1"]) {
+    assert.equal(isLoopbackHostname(bad), false, bad);
+  }
+});
+
+test("admin device create brackets IPv6 bind hosts in fallback links", async (t) => {
+  const { tokenFile } = fixture(t);
+  const { io, stdout } = makeIo({ stdoutIsTTY: true });
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--json"], env(tokenFile), io, server({ hosts: ["2001:db8::1"], boundBeyondLoopback: true }).fetch, host), 0);
+  const url = JSON.parse(stdout()).pairingUrl as string;
+  assert.equal(url, `http://[2001:db8::1]:4317/#pair=${DEVICE_TOKEN}`);
+  assert.equal(new URL(url).hostname, "[2001:db8::1]");
+});
+
+test("admin device create never mints a device it cannot deliver, and revokes one whose delivery fails", async (t) => {
+  const { root, tokenFile } = fixture(t);
+  const existing = join(root, "existing.pair");
+  writeFileSync(existing, "old\n", { mode: 0o600 });
+  const reserved = server({ publicOrigin: "https://wollipog.example.ts.net" });
+  const { io, stderr } = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--output", existing], env(tokenFile), io, reserved.fetch, host), 1);
+  assert.match(stderr(), /refusing to overwrite existing output file/u);
+  assert.ok(!reserved.calls.some((call) => call.method === "POST"), "no device is minted when the output path is already occupied");
+  assert.equal(readFileSync(existing, "utf8"), "old\n");
+
+  const undeliverable = server({ publicOrigin: "https://wollipog.example.ts.net" });
+  const late = makeIo();
+  const missingParent = join(root, "missing-dir", "phone.pair");
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--output", missingParent, "--json"], env(tokenFile), late.io, undeliverable.fetch, host), 1);
+  const error = JSON.parse(late.stdout()).error as string;
+  assert.match(error, /could not create .*phone\.pair/u);
+  assert.match(error, /device dev_new was revoked/u);
+  assert.ok(!error.includes(DEVICE_TOKEN));
+  const methods = undeliverable.calls.map((call) => `${call.method} ${call.url.replace(/^http:\/\/[^/]+/u, "")}`);
+  assert.deepEqual(methods.filter((entry) => !entry.endsWith("/api/compatibility")), ["POST /api/devices", "DELETE /api/devices/dev_new"]);
+  assert.ok(!existsSync(missingParent));
+
+  const unrevocable = server({ publicOrigin: "https://wollipog.example.ts.net", revokeNewDeviceStatus: 503 });
+  const stuck = makeIo();
+  assert.equal(await runHostAdminCli(["admin", "device", "create", "--name", "P", "--output", missingParent, "--json"], env(tokenFile), stuck.io, unrevocable.fetch, host), 1);
+  const stuckError = JSON.parse(stuck.stdout()).error as string;
+  assert.match(stuckError, /device dev_new could not be revoked \(DELETE \/api\/devices\/dev_new failed: control plane restarting\); run: wollipog admin device revoke dev_new --yes/u);
+  assert.ok(!stuckError.includes(DEVICE_TOKEN));
+});
+
+test("writeProtectedSecretFile stays no-replace without hard links and removes a partial fallback file", async (t) => {
+  const { root } = fixture(t);
+  const noLink = { link: () => { const e = new Error("EPERM") as NodeJS.ErrnoException; e.code = "EPERM"; throw e; }, write: (fd: number, contents: string) => writeFileSync(fd, contents, "utf8") };
+  const target = join(root, "fallback.pair");
+  writeProtectedSecretFile(target, "secret\n", noLink);
+  assert.equal(readFileSync(target, "utf8"), "secret\n");
+  if (process.platform !== "win32") assert.equal(statSync(target).mode & 0o777, 0o600);
+  assert.throws(() => writeProtectedSecretFile(target, "again\n", noLink), /refusing to overwrite/u);
+  assert.equal(readFileSync(target, "utf8"), "secret\n");
+
+  let writes = 0;
+  const failingSecondWrite = { ...noLink, write: (fd: number, contents: string) => { writes += 1; if (writes === 2) throw new Error("disk full"); writeFileSync(fd, contents, "utf8"); } };
+  const partial = join(root, "partial.pair");
+  assert.throws(() => writeProtectedSecretFile(partial, "secret\n", failingSecondWrite), /could not write .*disk full/u);
+  assert.ok(!existsSync(partial), "a failed fallback write leaves no partial file");
+  assert.deepEqual(readdirSync(root).filter((name) => name.includes(".pending-")), []);
 });

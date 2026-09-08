@@ -18,7 +18,9 @@ trusted-loopback administration routes to ordinary paired-device tokens, and the
 in every situation where that boundary would weaken:
 
 - **Remote targets.** `--url` (default `http://127.0.0.1:$CONTROL_PLANE_PORT`, port 4317) must be a
-  loopback address. Any other host exits with code 2 before the credential file is read.
+  literal loopback address: `localhost`, `127.x.x.x`, or `[::1]`. DNS names are refused even when
+  they look local (`127.evil.example`, `foo.localhost`), because the credential would be sent to
+  whatever they resolve to. Any other target exits with code 2 before the credential file is read.
 - **Unsafe credential files.** The credential is opened without following symlinks and refused when
   it is a symlink, not a regular file, group- or other-accessible, owned by another account, or
   malformed. Repair the file (`chmod 0600`, correct owner) or run the CLI as the service account.
@@ -84,7 +86,10 @@ The token is returned exactly once and only its hash persists. By default the li
 when stdout is an interactive terminal; a piped stdout is refused before any device is minted.
 `--output <file>` instead creates a new mode-0600 file atomically (an existing path is never
 overwritten) and prints only the path, which is the right choice for automation and for handing the
-link to another channel. The secret never appears in process arguments, request URLs, or stderr.
+link to another channel. The output path is checked before the device is minted, and if delivery
+still fails afterwards the CLI revokes the new device (or tells you the exact revoke command when it
+cannot), so a token whose only plaintext was lost never stays active. The secret never appears in
+process arguments, request URLs, or stderr.
 
 ### `admin device revoke`
 

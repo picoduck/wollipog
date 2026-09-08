@@ -134,9 +134,15 @@ export function resolveLocalTokenPath(args: string[], env: NodeJS.ProcessEnv, cw
   return `${resolve(cwd, database)}${LOCAL_TOKEN_SUFFIX}`;
 }
 
-function isLoopbackHostname(hostname: string): boolean {
-  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/gu, "").replace(/%.*$/u, "").replace(/\.$/u, "");
-  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || h === "127.0.0.1" || h.startsWith("127.");
+/**
+ * Only literal loopback targets. DNS names are refused even when they look local (`127.evil.example`,
+ * `foo.localhost`) because the bootstrap credential would be sent to whatever they resolve to.
+ */
+export function isLoopbackHostname(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/gu, "").replace(/%.*$/u, "");
+  if (h === "localhost" || h === "::1") return true;
+  const v4 = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(h);
+  return v4 !== null && v4.slice(1).every((octet) => Number(octet) <= 255);
 }
 
 /** The loopback control-plane origin; anything else fails closed because the bootstrap credential is loopback-only. */
@@ -204,11 +210,38 @@ export function readProtectedLocalToken(path: string, host: HostAdminHost = DEFA
   }
 }
 
+export interface SecretFileHost {
+  link(staged: string, live: string): void;
+  write(fd: number, contents: string): void;
+}
+
+const DEFAULT_SECRET_FILE_HOST: SecretFileHost = {
+  link: linkSync,
+  write: (fd, contents) => writeFileSync(fd, contents, "utf8"),
+};
+
+/** True when something already occupies the path (a file, directory, or dangling symlink). */
+export function pathOccupied(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 /**
  * Create a new 0600 file holding a one-time secret. A same-directory staged file plus a no-replace
- * hard link publishes the complete contents atomically; an existing path is never overwritten.
+ * hard link publishes the complete contents atomically; an existing path is never overwritten. On
+ * filesystems without hard links the fallback is an exclusive create that still never replaces an
+ * existing file, and a failed write removes the partial file instead of leaving it behind.
  */
-export function writeProtectedSecretFile(path: string, contents: string): void {
+export function writeProtectedSecretFile(
+  path: string,
+  contents: string,
+  fsHost: SecretFileHost = DEFAULT_SECRET_FILE_HOST,
+): void {
   const live = resolve(path);
   const staged = `${live}.pending-${process.pid}-${randomUUID()}`;
   let fd: number | null = null;
@@ -218,21 +251,25 @@ export function writeProtectedSecretFile(path: string, contents: string): void {
     } catch (error) {
       throw new CliError(`could not create ${live} in ${dirname(live)}: ${(error as Error).message}`);
     }
-    writeFileSync(fd, contents, "utf8");
+    fsHost.write(fd, contents);
     fsyncSync(fd);
     closeSync(fd);
     fd = null;
     try {
-      linkSync(staged, live);
+      fsHost.link(staged, live);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "EEXIST") throw new CliError(`refusing to overwrite existing output file ${live}`);
       // Filesystems without hard links: an exclusive create still never replaces an existing file.
       let liveFd: number | null = null;
+      let createdLive = false;
+      let published = false;
       try {
         liveFd = openSync(live, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-        writeFileSync(liveFd, contents, "utf8");
+        createdLive = true;
+        fsHost.write(liveFd, contents);
         fsyncSync(liveFd);
+        published = true;
       } catch (fallbackError) {
         if ((fallbackError as NodeJS.ErrnoException).code === "EEXIST") {
           throw new CliError(`refusing to overwrite existing output file ${live}`);
@@ -240,6 +277,7 @@ export function writeProtectedSecretFile(path: string, contents: string): void {
         throw new CliError(`could not write ${live}: ${(fallbackError as Error).message}`);
       } finally {
         if (liveFd !== null) closeSync(liveFd);
+        if (createdLive && !published) rmSync(live, { force: true });
       }
     }
   } finally {
@@ -438,6 +476,10 @@ export async function runHostAdminCli(
       }
       const explicitOrigin = option(args, "--origin") ? validateOrigin(option(args, "--origin")!) : null;
       const userId = option(args, "--user")?.trim();
+      // Reserve the delivery path before minting: a token that cannot be delivered would otherwise
+      // leave an active device whose only plaintext was lost.
+      const outputPath = output ? resolve(host.cwd(), output) : null;
+      if (outputPath && pathOccupied(outputPath)) throw new CliError(`refusing to overwrite existing output file ${outputPath}`);
       const reply = await client.post<DeviceCreateReply>("/api/devices", { name, ...(userId ? { userId } : {}) });
       if (!PAIR_TOKEN_RE.test(reply.token)) throw new CliError("control plane returned an unusable device token");
       let origin: string;
@@ -450,7 +492,8 @@ export async function runHostAdminCli(
         origin = reply.pairing.publicOrigin;
         originSource = "public-origin";
       } else if (reply.pairing.hosts.length > 0) {
-        origin = `http://${reply.pairing.hosts[0]!}:${reply.pairing.port}`;
+        const bindHost = reply.pairing.hosts[0]!;
+        origin = `http://${bindHost.includes(":") ? `[${bindHost}]` : bindHost}:${reply.pairing.port}`;
         originSource = "bind-host";
         warn(`no CONTROL_PLANE_PUBLIC_ORIGIN is configured; the link uses plain HTTP to bind address ${reply.pairing.hosts[0]} and is not encrypted. Set CONTROL_PLANE_PUBLIC_ORIGIN or pass --origin.`);
       } else {
@@ -461,9 +504,20 @@ export async function runHostAdminCli(
       if (!reply.pairing.webServed) warn("this control plane serves no web dashboard bundle; the desktop app can still use the link via Connections → Instances → Add Remote Instance.");
       const pairingUrl = `${origin}/#pair=${reply.token}`;
       const summary = { device: reply.device, origin, originSource };
-      if (output) {
-        const outputPath = resolve(host.cwd(), output);
-        writeProtectedSecretFile(outputPath, `${pairingUrl}\n`);
+      if (outputPath) {
+        try {
+          writeProtectedSecretFile(outputPath, `${pairingUrl}\n`);
+        } catch (error) {
+          // The only plaintext is now undeliverable; do not leave an active credential behind.
+          const detail = (error as Error).message;
+          try {
+            await client.del(`/api/devices/${encodeURIComponent(reply.device.deviceId)}`);
+            throw new CliError(`${detail}; the newly minted device ${reply.device.deviceId} was revoked`);
+          } catch (revokeError) {
+            if (revokeError instanceof CliError && revokeError.message.startsWith(detail)) throw revokeError;
+            throw new CliError(`${detail}; the newly minted device ${reply.device.deviceId} could not be revoked (${(revokeError as Error).message}); run: wollipog admin device revoke ${reply.device.deviceId} --yes`);
+          }
+        }
         emit({ ...summary, outputPath },
           `Paired device ${reply.device.deviceId} (${reply.device.name}) for ${reply.device.userName}.\n` +
             `Pairing link written once to ${outputPath} (mode 0600). Open it in a browser or paste it into Connections → Instances → Add Remote Instance.`);

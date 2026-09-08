@@ -271,14 +271,6 @@ const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE
 const RUNNER_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
 const LOCAL_DEVICE_TOKEN_PATH = localDeviceTokenPath(DB_PATH);
 const STARTED_AT = Date.now();
-// The dashboard origin remote clients actually reach (Tailscale, HTTPS reverse proxy). Pairing
-// links created by `wollipog admin device create` embed it; an invalid value fails startup
-// rather than silently producing links that point tokens at the wrong host.
-const PUBLIC_ORIGIN = resolvePublicOrigin(process.env[PUBLIC_ORIGIN_ENV]);
-if (PUBLIC_ORIGIN.error) {
-  writeSync(2, `[control-plane] ${PUBLIC_ORIGIN.error}\n`);
-  process.exit(1);
-}
 
 // Recovery is read-only: wrong coordinates must fail loudly instead of minting a plausible but
 // unusable owner credential. Synchronous fd writes make the one-line contract flush-safe on Windows.
@@ -296,6 +288,16 @@ if (process.argv.includes("--print-pair-url")) {
     );
     process.exit(1);
   }
+}
+
+// The dashboard origin remote clients actually reach (Tailscale, HTTPS reverse proxy). Pairing
+// links created by `wollipog admin device create` embed it; an invalid value fails startup
+// rather than silently producing links that point tokens at the wrong host. Validated after the
+// read-only recovery branch above, which must keep working under any unrelated misconfiguration.
+const PUBLIC_ORIGIN = resolvePublicOrigin(process.env[PUBLIC_ORIGIN_ENV]);
+if (PUBLIC_ORIGIN.error) {
+  writeSync(2, `[control-plane] ${PUBLIC_ORIGIN.error}\n`);
+  process.exit(1);
 }
 
 const LOCAL_DEVICE_TOKEN = (() => {
