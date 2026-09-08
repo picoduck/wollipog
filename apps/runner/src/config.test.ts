@@ -9,6 +9,7 @@ import {
   parseArgs,
   parseEnv,
   parseWorkspaceArg,
+  projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
   resolveAgentEnvironmentValue,
   resolveRunnerLocalAgentEnvironment,
@@ -241,6 +242,13 @@ test("one readiness prerequisite resolves without eagerly validating unrelated l
     "C:\\Program Files\\Git\\bin\\bash.exe",
   );
   assert.throws(() => resolveAgentEnvironment(agent, {}), /ANTHROPIC_API_KEY/u);
+  assert.deepEqual(projectAgentDiscoveryEnvironment(agent, {}), {
+    CLAUDE_CODE_GIT_BASH_PATH: "C:\\Program Files\\Git\\bin\\bash.exe",
+  });
+  assert.deepEqual(projectAgentDiscoveryEnvironment({
+    id: "claude",
+    env: { CLAUDE_CODE_GIT_BASH_PATH: { fromEnv: "MISSING_BASH" } },
+  }, {}), { CLAUDE_CODE_GIT_BASH_PATH: "" });
 });
 
 test("resolveConfig: config-less from overrides only, agents default to []", () => {

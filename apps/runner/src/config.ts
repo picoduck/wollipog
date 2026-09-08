@@ -605,6 +605,21 @@ export function resolveAgentEnvironmentValue(
   return value;
 }
 
+/** Project only the non-secret native Claude prerequisite used by discovery/readiness. */
+export function projectAgentDiscoveryEnvironment(
+  agent: Pick<RunnerConfigAgent, "id" | "env">,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const name = "CLAUDE_CODE_GIT_BASH_PATH";
+  if (!Object.prototype.hasOwnProperty.call(agent.env ?? {}, name)) return {};
+  try {
+    return { [name]: resolveAgentEnvironmentValue(agent, name, hostEnv) ?? "" };
+  } catch {
+    // Retain an explicit invalid marker so readiness fails closed without aborting other agents.
+    return { [name]: "" };
+  }
+}
+
 /** Merge non-secret discovery prerequisites into the configured launch environment. */
 export function resolveRunnerLocalAgentEnvironment(
   agent: Pick<RunnerConfigAgent, "id" | "env">,
