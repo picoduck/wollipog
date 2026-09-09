@@ -10,6 +10,7 @@ import { runContextCommand } from "./context-command.js";
 import { resolveNative, type ResolvedBinary } from "./discovery/resolve.js";
 import type { SpawnIsolation } from "./spawn.js";
 import { materializeWindowsJobLauncher } from "./windows-job.js";
+import { wslAgentControlLaunch } from "./agent-control.js";
 
 interface IsolationDeps {
   platform: NodeJS.Platform;

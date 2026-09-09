@@ -297,6 +297,15 @@ export function parseVersion(s: string): string | undefined {
 
 type AuthStatus = "authenticated" | "unauthenticated" | "unknown";
 
+export function supportedWslAgentControlNodeRuntime(
+  launch: ResolvedLaunch | null,
+  versionOutput: string,
+): string | undefined {
+  if (!launch?.command.startsWith("/") || launch.args.length !== 0) return undefined;
+  const major = Number(versionOutput.trim().match(/^v(\d+)\./u)?.[1]);
+  return Number.isInteger(major) && major >= 22 ? launch.command : undefined;
+}
+
 async function nativeProbe(k: KnownAgent, launch: ResolvedLaunch): Promise<{ version?: string; authStatus: AuthStatus }> {
   const v = await run(launch.command, [...launch.args, "--version"], { timeoutMs: 5000 });
   const version = v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined;
@@ -401,7 +410,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
   await Promise.all(
     distros.flatMap((distro) =>
       KNOWN.map(async (k) => {
-        const bin = await resolveInWsl(distro, k.bin);
+        const [bin, node] = await Promise.all([resolveInWsl(distro, k.bin), resolveInWsl(distro, "node")]);
         if (!bin) {
           if (k.bin === "codex") {
             found.push(unavailableCodexAgentDefinition(
@@ -419,10 +428,15 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           }
           return;
         }
-        const [baseProbe, slash] = await Promise.all([
+        const [baseProbe, slash, nodeVersion] = await Promise.all([
           k.bin === "claude" ? probeWslClaudeCode(distro, bin.launch, bin.via) : wslProbe(distro, k, bin.launch),
           wslSlashCommands(distro, k.driver),
+          node ? run("wsl.exe", ["-d", distro, "--exec", node.launch.command, ...node.launch.args, "--version"], { timeoutMs: 5_000 }) : null,
         ]);
+        const agentControlRuntime = supportedWslAgentControlNodeRuntime(
+          node?.launch ?? null,
+          nodeVersion?.code === 0 ? nodeVersion.stdout || nodeVersion.stderr : "",
+        );
         const claudeCode = k.bin === "claude" ? baseProbe as NonNullable<AgentDefinition["claudeCode"]> : undefined;
         const { version, authStatus } = claudeCode
           ? { version: claudeCode.installedVersion, authStatus: claudeCode.auth.status }
@@ -445,6 +459,9 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
             ? claudeCapabilitiesFromProbe(catalogCapabilities, claudeCode)
             : catalogCapabilities,
           source: "discovered",
+          ...(agentControlRuntime
+            ? { wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: agentControlRuntime } }
+            : {}),
           ...(codexAppServer ? { codexAppServer } : {}),
           ...(claudeCode ? { claudeCode } : {}),
           nativeTuiAccounting: unavailableNativeTuiAccounting(
@@ -544,6 +561,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
       nativeTuiAccounting: d.nativeTuiAccounting,
       registry: d.registry ?? c.registry,
       acp: d.acp ?? c.acp,
+      wslAgentControl: d.wslAgentControl,
       capabilities: c.capabilities
         ? c.driver === "claude-code" && d.capabilities
           ? {

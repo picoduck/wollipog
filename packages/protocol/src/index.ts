@@ -343,7 +343,8 @@
 // 122: AgentModel.baseModelId separates base model identity from context-window variants;
 //      `contextWindow` is provider evidence only, and native drivers publish the effective
 //      post-launch context window and occupancy through the session gauge.
-export const PROTOCOL_VERSION = 122;
+// 123: authenticated, target-local Agent Control bridge for structured Direct WSL harnesses.
+export const PROTOCOL_VERSION = 123;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -510,6 +511,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionAgentControl: 100,
   sessionOrchestration: 109,
   orchestratorNativeTui: 112,
+  /** Target-local Linux helper plus runner-side authenticated broker for Direct WSL only. */
+  wslAgentControlBridge: 123,
   /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
   usageTokenBuckets: 103,
   /** v104 runners stamp the producing model on token_usage. */
@@ -1245,6 +1248,12 @@ export interface AgentDefinition {
    * entry file may be generically named (cli.js/index.js), so neither command nor args identify
    * the agent — this does. Absent on config entries and pre-v18 runners. */
   bin?: string;
+  /** Discovery-verified target-local runtime for the narrow Direct WSL Agent Control helper.
+   * Secret-free; absence means WSL orchestration must fail closed. */
+  wslAgentControl?: {
+    protocolVersion: 1;
+    nodeRuntime: string;
+  };
 }
 
 /** Stable ACP capabilities observed from a live initialize handshake. Content-free and safe to

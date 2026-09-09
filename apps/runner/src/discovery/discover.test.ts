@@ -8,6 +8,7 @@ import {
   mergeAgents,
   localAuthFileStatus,
   probedAuthFileStatus,
+  supportedWslAgentControlNodeRuntime,
   parseVersion,
   unavailableCodexAgentDefinition,
   unavailableClaudeAgentDefinition,
@@ -17,6 +18,15 @@ test("Codex prompts and skills are not advertised as slash commands", () => {
   assert.deepEqual(commandDirectoriesForDriver("codex"), []);
   assert.deepEqual(commandDirectoriesForDriver("codex-app-server"), []);
   assert.deepEqual(commandDirectoriesForDriver("claude-code"), [{ dir: ".claude/commands", source: "user" }]);
+});
+
+test("Direct WSL Agent Control requires an exact absolute Node 22+ runtime", () => {
+  const launch = { command: "/usr/bin/node", args: [] };
+  assert.equal(supportedWslAgentControlNodeRuntime(launch, "v22.13.1\n"), "/usr/bin/node");
+  assert.equal(supportedWslAgentControlNodeRuntime(launch, "v24.1.0"), "/usr/bin/node");
+  assert.equal(supportedWslAgentControlNodeRuntime(launch, "v20.19.0"), undefined);
+  assert.equal(supportedWslAgentControlNodeRuntime({ command: "node", args: [] }, "v24.1.0"), undefined);
+  assert.equal(supportedWslAgentControlNodeRuntime({ command: "/usr/bin/node", args: ["wrapper.js"] }, "v24.1.0"), undefined);
 });
 
 test("parseVersion extracts a semver token from --version noise", () => {

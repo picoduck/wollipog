@@ -123,12 +123,14 @@ The management credential and MCP definition are materialized runner-locally fro
 references and never persisted as token bytes.
 
 Other ACP adapters and releases remain unavailable until their exact tool-isolation contract is
-audited; ACP transport support or a self-reported display name is not sufficient. WSL, container,
-and cloud targets also remain unavailable for the preset. WSL has no narrow verified in-distro
-credential/reentry bridge. Its native interop route is a general Windows executable launcher whose
-processes are not constrained by the Linux bwrap filesystem boundary, so Wollipog does not restore
-WSL binfmt or invoke that route for Agent Control. A future WSL design requires a dedicated,
-authenticated Linux-side bridge with a closed CLI/MCP surface. Container targets deliberately
+audited; ACP transport support or a self-reported display name is not sufficient. Protocol v123
+permits structured Direct WSL only when discovery proves an exact Linux Node 22+ runtime and the
+runner installs the fixed, root-owned, hash-verified target helper. A per-launch Unix socket and
+inherited pipe pair carry only authenticated, bounded Agent Control frames to the runner-side
+closed CLI/MCP implementation. The provider never receives a Windows executable path or a general
+execution route; its bwrap namespace still has no WSL PE/binfmt registration. Credential
+acknowledgement precedes launch, restart rotates the token, and terminal lifecycle removes it.
+WSL Native TUI and generic ACP remain unavailable. Container and cloud targets deliberately
 advertise `secrets: none` and mount only
 the worktree. Cloud targets accept adapter-owned secret references but define no portable remote
 Wollipog MCP runtime. None can yet provision and clean up the same target-local management

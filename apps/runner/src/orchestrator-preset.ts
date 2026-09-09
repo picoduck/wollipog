@@ -89,7 +89,14 @@ export function withOrchestratorPreset(
 ): AgentDefinition[] {
   return agents.filter((agent) => agent.id !== "conductor").map((agent) => {
     const acpSupported = supportsClaudeAgentAcpOrchestrator(agent);
-    if ((agent.context?.kind ?? "native") !== "native" ||
+    const contextKind = agent.context?.kind ?? "native";
+    const wslSupported = contextKind === "wsl" && agent.wslAgentControl?.protocolVersion === 1 &&
+      ["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp");
+    if (contextKind === "wsl" && !wslSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
+      return { ...agent, capabilities: { ...agent.capabilities,
+        permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
+    }
+    if ((contextKind !== "native" && !wslSupported) ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
     if ((agent.driver === "claude-code" || acpSupported) && (host.platform ?? process.platform) === "win32") {
       if (!verifiedNativeClaudeGitBashPath(agent.env ?? {}, { env: host.env, exists: host.exists })) return agent;

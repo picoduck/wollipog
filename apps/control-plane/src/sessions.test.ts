@@ -579,7 +579,17 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     agent.context = { kind: "wsl", distro: "Ubuntu" };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
-      "WSL remains unavailable until it can provision a target-local management bridge");
+      "generic ACP stays unavailable through the target-local management bridge");
+    agent.driver = "codex-app-server";
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.wslAgentControlBridge - 1);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
+      "structured WSL fails closed before the bridge capability");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).ok, true,
+      "current structured Direct WSL may use the authenticated target-local bridge");
+    assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
+      config: { permissionMode: "orchestrator" } }).status, 409,
+    "WSL Orchestrator Native TUI remains unavailable");
   } finally { db.close(); }
 });
 

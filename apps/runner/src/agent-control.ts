@@ -1,6 +1,7 @@
 /** Runner-local provisioning for the provider-neutral Wollipog CLI and MCP surface. */
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -21,6 +22,15 @@ import {
   type RunnerReentryHost,
 } from "./runner-reentry.js";
 import { assertSafeSessionFileId } from "./session-file-id.js";
+import {
+  WSL_AGENT_CONTROL_HELPER_PATH,
+  WSL_AGENT_CONTROL_HELPER_SHA256,
+  WSL_AGENT_CONTROL_HELPER_SOURCE,
+  WSL_AGENT_CONTROL_PRIVATE_MCP,
+  WSL_AGENT_CONTROL_PRIVATE_TOKEN,
+  WSL_AGENT_CONTROL_PROTOCOL,
+  type WslAgentControlLaunch,
+} from "./wsl-agent-control.js";
 import {
   ORCHESTRATOR_ENV_KEY,
   orchestratorLaunchArgs,
@@ -44,10 +54,51 @@ const STAGED_AGENT_CONTROL_FILE_PATTERN =
 
 export interface AgentControlHost extends RunnerReentryHost {
   configDir: string;
+  installWslHelper?: (distro: string) => Promise<void>;
 }
 
 export function defaultAgentControlHost(dataDir: string): AgentControlHost {
-  return { ...defaultRunnerReentryHost(), configDir: resolve(dataDir, "agent-control") };
+  return { ...defaultRunnerReentryHost(), configDir: resolve(dataDir, "agent-control"), installWslHelper };
+}
+
+const wslLaunches = new Map<string, WslAgentControlLaunch>();
+
+/** Ephemeral only: SessionStore never receives the credential or helper launch contract. */
+export function wslAgentControlLaunch(sessionId: string): WslAgentControlLaunch | undefined {
+  return wslLaunches.get(sessionId);
+}
+
+async function installWslHelper(distro: string): Promise<void> {
+  const staged = `${WSL_AGENT_CONTROL_HELPER_PATH}.pending-${process.pid}-${randomUUID()}`;
+  const script = [
+    "set -eu",
+    "target=$1; staged=$2; expected=$3",
+    "install -d -o root -g root -m 0755 \"$(dirname \"$target\")\"",
+    "trap 'rm -f -- \"$staged\"' EXIT",
+    "cat > \"$staged\"",
+    "chown root:root \"$staged\"",
+    "chmod 0555 \"$staged\"",
+    "actual=$(sha256sum \"$staged\" | cut -d ' ' -f 1)",
+    "test \"$actual\" = \"$expected\"",
+    "mv -T -- \"$staged\" \"$target\"",
+    "test \"$(stat -c '%u:%g:%a' \"$target\")\" = '0:0:555'",
+    "test \"$(sha256sum \"$target\" | cut -d ' ' -f 1)\" = \"$expected\"",
+  ].join("\n");
+  await new Promise<void>((resolvePromise, reject) => {
+    const child = spawn("wsl.exe", [
+      "-d", distro, "-u", "root", "--exec", "sh", "-c", script, "sh",
+      WSL_AGENT_CONTROL_HELPER_PATH, staged, WSL_AGENT_CONTROL_HELPER_SHA256,
+    ], { stdio: ["pipe", "ignore", "pipe"], windowsHide: true });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { if (stderr.length < 8_192) stderr += chunk; });
+    child.stdin.on("error", () => {});
+    child.once("error", reject);
+    child.once("close", (code) => code === 0
+      ? resolvePromise()
+      : reject(new Error(`target-local Agent Control helper install failed${stderr.trim() ? `: ${stderr.trim()}` : ` (exit ${String(code)})`}`)));
+    child.stdin.end(WSL_AGENT_CONTROL_HELPER_SOURCE);
+  });
 }
 
 export function agentControlTokenPath(configDir: string, sessionId: string): string {
@@ -92,6 +143,12 @@ function sessionToken(file: string): string {
   return token;
 }
 
+function rotateSessionToken(file: string): string {
+  const token = `${TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
+  protectedWrite(file, token);
+  return token;
+}
+
 function writeMcpConfig(
   file: string,
   launch: { command: string; args: string[] },
@@ -126,6 +183,7 @@ function removeAgentControlLaunchState(
   spec: Pick<SessionLaunchSpec, "sessionId" | "args" | "env">,
   host: AgentControlHost,
 ): void {
+  wslLaunches.delete(spec.sessionId);
   const mcpConfig = agentControlMcpConfigPath(host.configDir, spec.sessionId);
   for (let i = spec.args.length - 2; i >= 0; i--) {
     if (spec.args[i] === "--mcp-config" && spec.args[i + 1] === mcpConfig) {
@@ -146,19 +204,36 @@ export function provisionAgentControl(
     controlPlaneProtocolVersion: number | null;
     allowInsecureTransport?: boolean;
     registerCredential?: (sessionId: string, tokenHash: string) => void;
+    /** WSL only: registration acknowledgement is a launch fence because its private tmpfs is
+     * created with the provider and cannot receive a later native ready-file update. */
+    registerCredentialAndWait?: (sessionId: string, tokenHash: string) => Promise<void>;
     /** Exact runner-local catalog row used to authorize an ACP Orchestrator launch. */
     orchestratorAgent?: AgentDefinition;
   },
   log: (message: string) => void,
   host: AgentControlHost,
-): void {
+): Promise<void> | void {
   const supported = runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionAgentControl");
-  const hostExecution = (spec.context?.kind ?? "native") === "native" &&
-    (!spec.executionTarget || spec.executionTarget.adapter === "host");
+  const context = spec.context ?? { kind: "native" as const };
+  const targetIsHost = !spec.executionTarget || spec.executionTarget.adapter === "host";
+  const nativeHostExecution = context.kind === "native" && targetIsHost;
+  const wslOrchestrator = context.kind === "wsl" && targetIsHost && spec.config?.permissionMode === "orchestrator";
   const orchestrator = spec.config?.permissionMode === "orchestrator";
-  if (orchestrator && (!hostExecution || !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionOrchestration") ||
-      !["acp", "codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp"))) {
-    throw new Error("the orchestrator preset requires a current supported native harness on the host");
+  const structuredDriver = ["codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp");
+  const orchestratorAgent = config.orchestratorAgent;
+  const wslAgentControl = orchestratorAgent?.wslAgentControl;
+  const wslBaseArgs = stripOrchestratorLaunchArgs(spec.args, spec.driver);
+  const wslLaunchMatches = context.kind === "wsl" && orchestratorAgent &&
+    orchestratorAgent.command === spec.command && orchestratorAgent.args.length === wslBaseArgs.length &&
+    orchestratorAgent.args.every((arg, index) => arg === wslBaseArgs[index]) &&
+    orchestratorAgent.driver === spec.driver && orchestratorAgent.context?.kind === "wsl" &&
+    orchestratorAgent.context.distro === context.distro;
+  if (orchestrator && (!targetIsHost || !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionOrchestration") ||
+      !(nativeHostExecution ? ["acp", "codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp")
+        : wslOrchestrator && structuredDriver &&
+          runnerSupportsProtocol(config.controlPlaneProtocolVersion, "wslAgentControlBridge") &&
+          wslAgentControl?.protocolVersion === WSL_AGENT_CONTROL_PROTOCOL && wslLaunchMatches))) {
+    throw new Error("the orchestrator preset requires a current supported native harness or verified Direct WSL bridge on the host");
   }
   if (orchestrator && (spec.driver ?? "acp") === "acp") {
     const agent = config.orchestratorAgent;
@@ -168,9 +243,9 @@ export function provisionAgentControl(
       throw new Error("the Orchestrator preset requires the exact audited Claude Agent ACP adapter");
     }
   }
-  if (!supported || !hostExecution) {
+  if (!supported || (!nativeHostExecution && !wslOrchestrator)) {
     removeAgentControlLaunchState(spec, host);
-    if (!hostExecution) {
+    if (!nativeHostExecution && !wslOrchestrator) {
       log(`agent control ${spec.sessionId}: non-host path injection is not supported`);
     }
     return;
@@ -178,13 +253,59 @@ export function provisionAgentControl(
 
   const cpUrl = deriveControlPlaneHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport);
   const tokenFile = agentControlTokenPath(host.configDir, spec.sessionId);
-  const token = sessionToken(tokenFile);
+  const token = wslOrchestrator ? rotateSessionToken(tokenFile) : sessionToken(tokenFile);
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const readyFile = agentControlReadyPath(host.configDir, spec.sessionId);
   // Every registration gets a fresh positive-ack fence, including reconnect/resume with the same
   // token. A stale marker must never let the first request race a rejected re-binding.
   rmSync(readyFile, { force: true });
-  config.registerCredential?.(spec.sessionId, tokenHash);
+  const credentialRegistration = wslOrchestrator && config.registerCredentialAndWait
+    ? config.registerCredentialAndWait(spec.sessionId, tokenHash)
+    : (config.registerCredential?.(spec.sessionId, tokenHash), undefined);
+
+  if (wslOrchestrator && context.kind === "wsl" && wslAgentControl) {
+    const provisionWsl = async (): Promise<void> => {
+      await Promise.all([
+        (host.installWslHelper ?? installWslHelper)(context.distro),
+        credentialRegistration ?? Promise.reject(new Error("Direct WSL Agent Control requires credential acknowledgement before launch")),
+      ]);
+      const runtime = wslAgentControl.nodeRuntime;
+      if (!runtime.startsWith("/") || /[\0\r\n]/u.test(runtime)) {
+        throw new Error("Direct WSL Agent Control requires an absolute discovery-verified Linux Node runtime");
+      }
+      const helperLaunch = { command: runtime, args: [WSL_AGENT_CONTROL_HELPER_PATH, "mcp"], env: {
+        WOLLIPOG_SESSION_ID: spec.sessionId,
+        WOLLIPOG_SESSION_TOKEN_FILE: WSL_AGENT_CONTROL_PRIVATE_TOKEN,
+      } };
+      spec.env = {
+        ...spec.env,
+        WOLLIPOG_SESSION_ID: spec.sessionId,
+        WOLLIPOG_SESSION_TOKEN_FILE: WSL_AGENT_CONTROL_PRIVATE_TOKEN,
+        WOLLIPOG_CLI: runtime,
+        WOLLIPOG_CLI_ARGS: JSON.stringify([WSL_AGENT_CONTROL_HELPER_PATH, "cli"]),
+      };
+      spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
+      spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
+      spec.args.push(...orchestratorLaunchArgs(spec.driver, helperLaunch));
+      if (spec.driver === "claude-code") spec.args.push("--mcp-config", WSL_AGENT_CONTROL_PRIVATE_MCP);
+      wslLaunches.set(spec.sessionId, {
+        protocolVersion: WSL_AGENT_CONTROL_PROTOCOL,
+        distro: context.distro,
+        nodeRuntime: runtime,
+        helperPath: WSL_AGENT_CONTROL_HELPER_PATH,
+        sessionId: spec.sessionId,
+        token,
+        tokenFile,
+        readyFile,
+        cpUrl,
+      });
+      log(`agent control ${spec.sessionId}: target-local WSL CLI and MCP bridge provisioned`);
+    };
+    return provisionWsl().catch((error) => {
+      removeAgentControlLaunchState(spec, host);
+      throw error;
+    });
+  }
 
   const cli = runnerReentryCommand(host, "--wollipog-cli");
   spec.env = {
@@ -237,6 +358,7 @@ export function provisionAgentControl(
 }
 
 export function removeAgentControlFiles(sessionId: string, configDir: string): void {
+  wslLaunches.delete(sessionId);
   for (const file of [
     agentControlTokenPath(configDir, sessionId),
     agentControlMcpConfigPath(configDir, sessionId),

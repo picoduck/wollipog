@@ -25,6 +25,7 @@ import {
   provisionAgentControl,
   removeAgentControlFiles,
   sweepAgentControlFiles,
+  wslAgentControlLaunch,
   type AgentControlHost,
 } from "./agent-control.js";
 import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION } from "./orchestrator-preset.js";
@@ -128,6 +129,47 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
       assert.throws(() => provisionAgentControl(launch, control, () => {}, host), /supported native/);
       assert.equal(existsSync(agentControlTokenPath(root, launch.sessionId)), false);
     }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("verified Direct WSL rotates credentials and provisions only the target-local helper launch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-agent-control-"));
+  try {
+    const installs: string[] = [];
+    const host: AgentControlHost = { isSea: true, execPath: "C:\\runner.exe", execArgv: [], configDir: root,
+      installWslHelper: async (distro) => { installs.push(distro); } };
+    const launch = spec("codex-app-server");
+    launch.context = { kind: "wsl", distro: "Ubuntu-24.04" };
+    launch.config = { permissionMode: "orchestrator" };
+    const agent: AgentDefinition = { id: launch.agentId, name: "Codex WSL", command: launch.command,
+      args: [], env: {}, driver: "codex-app-server", context: launch.context,
+      wslAgentControl: { protocolVersion: 1, nodeRuntime: "/usr/bin/node" } };
+    const hashes: string[] = [];
+    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      orchestratorAgent: agent, registerCredentialAndWait: async (_id: string, hash: string) => {
+        hashes.push(hash);
+        markAgentControlCredentialReady(root, launch.sessionId, hash);
+      } };
+    await provisionAgentControl(launch, control, () => {}, host);
+    const first = wslAgentControlLaunch(launch.sessionId)!;
+    assert.equal(first.distro, "Ubuntu-24.04");
+    assert.equal(first.nodeRuntime, "/usr/bin/node");
+    assert.equal(first.tokenFile, agentControlTokenPath(root, launch.sessionId));
+    assert.equal(JSON.stringify(launch).includes(first.token), false, "credential stays out of launch metadata");
+    assert.equal(launch.env.WOLLIPOG_CLI, "/usr/bin/node");
+    assert.match(launch.env.WOLLIPOG_CLI_ARGS, /wsl-agent-control-v1\.mjs/u);
+    assert.ok(launch.args.includes("--strict-config"));
+
+    await provisionAgentControl(launch, control, () => {}, host);
+    const second = wslAgentControlLaunch(launch.sessionId)!;
+    assert.notEqual(second.token, first.token, "every WSL provider restart rotates the credential");
+    assert.notEqual(hashes[1], hashes[0]);
+    assert.deepEqual(installs, ["Ubuntu-24.04", "Ubuntu-24.04"]);
+    removeAgentControlFiles(launch.sessionId, root);
+    assert.equal(wslAgentControlLaunch(launch.sessionId), undefined);
+
+    const generic = { ...spec("acp"), context: launch.context, config: { permissionMode: "orchestrator" as const } };
+    await assert.rejects(async () => provisionAgentControl(generic, { ...control, orchestratorAgent: { ...agent, driver: "acp" } }, () => {}, host), /supported native harness or verified Direct WSL/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

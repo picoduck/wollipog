@@ -1061,3 +1061,32 @@ test("spawnAgent rejects a synthetic WSL bwrap boundary before process construct
     isolation: { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny" },
   }), /cannot hold target-local no-follow path handles/);
 });
+
+test("Direct WSL bridge binds broker-provisioned private files and launches only the target-local helper sibling", () => {
+  const bridge = {
+    protocolVersion: 1 as const, distro: "Ubuntu", nodeRuntime: "/usr/bin/node",
+    helperPath: "/usr/local/lib/wollipog/wsl-agent-control-v1.mjs" as const,
+    sessionId: "session-a", token: "never-in-argv", tokenFile: "C:\\state\\session-a.token",
+    readyFile: "C:\\state\\session-a.ready", cpUrl: "http://127.0.0.1:4317",
+    socketPath: "/tmp/wlp-test/control.sock",
+  };
+  const isolation = { backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "deny" as const,
+    wslAgentControl: bridge };
+  const isolated = buildBwrapArgs(
+    { command: "/usr/bin/codex", args: ["app-server"], cwd: "/home/me/repo" }, isolation,
+  );
+  assert.equal(isolated[isolated.indexOf("--") + 1], "/usr/bin/codex");
+  assert.doesNotMatch(isolated.join(" "), /TOKEN_B64|MCP_B64|base64 -d/u);
+  assert.ok(isolated.join(" ").includes("--ro-bind /tmp/wlp-test /tmp/wollipog-agent-control"));
+  const args = buildWslArgs("Ubuntu", "/home/me/repo", "/tmp/x.pgid", {
+    command: "/usr/bin/bwrap", args: isolated, cwd: "/home/me/repo",
+    context: { kind: "wsl", distro: "Ubuntu" }, isolation,
+    env: { WOLLIPOG_AGENT_CONTROL_SOCKET: "/tmp/wollipog-agent-control/control.sock" },
+  });
+  assert.ok(args.includes("/usr/bin/node"));
+  assert.ok(args.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"));
+  assert.ok(args.includes("/tmp/wlp-test/control.sock"));
+  assert.ok(args.includes("/usr/bin/bwrap"));
+  assert.equal(args.join(" ").includes(bridge.token), false);
+  assert.equal(args.join(" ").includes("wsl.exe"), false, "provider argv never receives a Windows launcher");
+});

@@ -394,7 +394,9 @@ const acpAuthStatus = new Map<string, AcpAuthRuntime>();
 function agentsForControlPlane() {
   return metadata.agents.filter((agent) => agent.id !== "conductor")
     .map((agent) => ({ ...agent, env: {},
-      ...(!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") && agent.capabilities
+      ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
+          ((agent.context?.kind ?? "native") === "wsl" &&
+            !runnerSupportsProtocol(controlPlaneProtocolVersion, "wslAgentControlBridge"))) && agent.capabilities
         ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
         : {}),
     }));
@@ -462,6 +464,32 @@ const registerPolicyHookCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "policy_hook_credential", sessionId, tokenHash });
 const registerAgentControlCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "agent_control_credential", sessionId, tokenHash });
+const pendingAgentControlRegistrations = new Map<string, {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+const agentControlRegistrationKey = (sessionId: string, tokenHash: string) => `${sessionId}\0${tokenHash}`;
+const registerAgentControlCredentialAndWait = (sessionId: string, tokenHash: string): Promise<void> => {
+  const key = agentControlRegistrationKey(sessionId, tokenHash);
+  if (pendingAgentControlRegistrations.has(key)) {
+    return Promise.reject(new Error("duplicate Agent Control credential registration"));
+  }
+  return new Promise<void>((resolvePromise, reject) => {
+    const timer = setTimeout(() => {
+      pendingAgentControlRegistrations.delete(key);
+      reject(new Error("Agent Control credential was not acknowledged within 10 seconds"));
+    }, 10_000);
+    timer.unref?.();
+    pendingAgentControlRegistrations.set(key, { resolve: resolvePromise, reject, timer });
+    try { registerAgentControlCredential(sessionId, tokenHash); }
+    catch (error) {
+      clearTimeout(timer);
+      pendingAgentControlRegistrations.delete(key);
+      reject(error as Error);
+    }
+  });
+};
 // The box's on-disk session store (source of truth, shared across runner instances on this box).
 const store = new SessionStore(resolve(config.dataDir, "sessions"));
 store.scrubLegacyAgentEnv();
@@ -524,13 +552,14 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       log,
       claudeHookHost,
     );
-    provisionAgentControl(
+    await provisionAgentControl(
       meta,
       {
         controlPlaneUrl: config.controlPlaneUrl,
         controlPlaneProtocolVersion,
         allowInsecureTransport,
         registerCredential: registerAgentControlCredential,
+        registerCredentialAndWait: registerAgentControlCredentialAndWait,
         orchestratorAgent: localAgent,
       },
       log,
@@ -666,6 +695,15 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 }
 
 function sendUp(msg: RunnerToControlPlane): void {
+  if (msg.type === "session_status" && ["completed", "failed", "stopped"].includes(msg.status)) {
+    removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
+    for (const [key, pending] of pendingAgentControlRegistrations) {
+      if (!key.startsWith(`${msg.sessionId}\0`)) continue;
+      clearTimeout(pending.timer);
+      pendingAgentControlRegistrations.delete(key);
+      pending.reject(new Error(`Agent Control registration ended with session status ${msg.status}`));
+    }
+  }
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
     let projected: RunnerToControlPlane | null;
     try {
@@ -1201,12 +1239,33 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "agent_control_credential_registered":
       try {
-        if (msg.accepted) markAgentControlCredentialReady(agentControlHost.configDir, msg.sessionId, msg.tokenHash);
+        const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
+        const pending = pendingAgentControlRegistrations.get(pendingKey);
+        if (msg.accepted) {
+          markAgentControlCredentialReady(agentControlHost.configDir, msg.sessionId, msg.tokenHash);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingAgentControlRegistrations.delete(pendingKey);
+            pending.resolve();
+          }
+        }
         else {
           markAgentControlCredentialRejected(agentControlHost.configDir, msg.sessionId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingAgentControlRegistrations.delete(pendingKey);
+            pending.reject(new Error(msg.error ?? "Agent Control credential registration was rejected"));
+          }
           log(`agent control ${msg.sessionId}: credential registration rejected (${msg.error ?? "unknown session binding"})`);
         }
       } catch (error) {
+        const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
+        const pending = pendingAgentControlRegistrations.get(pendingKey);
+        if (pending) {
+          clearTimeout(pending.timer);
+          pendingAgentControlRegistrations.delete(pendingKey);
+          pending.reject(error as Error);
+        }
         markAgentControlCredentialRejected(agentControlHost.configDir, msg.sessionId);
         log(`agent control ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
@@ -1821,9 +1880,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
         resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
-          provision: (prepared) => {
+          provision: async (prepared) => {
             prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
-            provisionAgentControl(prepared, {
+            await provisionAgentControl(prepared, {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
             }, log, agentControlHost);

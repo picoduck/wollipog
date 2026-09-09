@@ -332,11 +332,11 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
   }
 });
 
-test("WSL keeps ordinary Native TUI but fails closed for a saved Orchestrator preset", async () => {
+test("WSL keeps ordinary Native TUI while Direct Orchestrator requires the v123 bridge", async () => {
   const wslRunner: RunnerView = {
     ...runner,
     os: "windows",
-    protocolVersion: 118,
+    protocolVersion: 122,
     agents: runner.agents.map((agent) => ({
       ...agent,
       context: { kind: "wsl" as const, distro: "Ubuntu-24.04" },
@@ -376,6 +376,25 @@ test("WSL keeps ordinary Native TUI but fails closed for a saved Orchestrator pr
   } finally {
     await unmountFixture(orchestrator);
   }
+
+  const bridged = await mountFixture({
+    runners: [{ ...wslRunner, protocolVersion: 123 }],
+    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+  }, undefined, undefined, async () => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+  }] }));
+  try {
+    await act(async () => { selectProject(bridged.container, project.id); });
+    assert.equal(createButton(bridged.container).disabled, false, "verified bridge enables Direct creation");
+    const tui = [...bridged.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((button) => button.textContent?.includes("Native TUI"))!;
+    assert.equal(tui.disabled, true, "WSL Orchestrator Native TUI stays fail-closed");
+    await choosePermissionPreset(bridged.container, "Orchestrator");
+    await act(async () => { createButton(bridged.container).click(); });
+    assert.equal(bridged.requests[0]?.launchSurface, undefined, "the omitted field is the Direct launch default");
+    assert.equal(bridged.requests[0]?.config?.permissionMode, "orchestrator");
+  } finally { await unmountFixture(bridged); }
 });
 
 test("saved Orchestrator default is visible and gates Native TUI without requiring an override", async () => {

@@ -221,9 +221,13 @@ export function NewSessionDialog({
   const nativeTuiAccountingExplanation = nativeTuiAccountingDetail(agent);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const orchestrator = presetOverride === "orchestrator" || savedPermissionMode === "orchestrator";
+  const orchestratorContext = agent?.context?.kind ?? "native";
+  const directWslOrchestrator = orchestratorContext === "wsl" &&
+    ["claude-code", "codex", "codex-app-server"].includes(agent?.driver ?? "acp") &&
+    runnerSupportsProtocol(runner?.protocolVersion, "wslAgentControlBridge");
   const orchestratorSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration") &&
     agent?.capabilities?.permissionModes?.includes("orchestrator") &&
-    (agent?.context?.kind ?? "native") === "native" &&
+    (orchestratorContext === "native" || directWslOrchestrator) &&
     (!executionTarget || executionTarget.adapter === "host");
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
   const nativeTuiStartFenceSupported = runnerSupportsProtocol(
@@ -774,7 +778,7 @@ export function NewSessionDialog({
             {orchestrator && <>
               <span className="muted">Manage child sessions without shell or file-write tools. This permission preset cannot change after creation.</span>
               {presetOverride === "default" && <span className="muted">Orchestrator is your saved Agent Harness default. Change it in Settings to use another default.</span>}
-              {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset requires a supported native host harness and runner. Choose a compatible target or change the saved default in Settings.</span>}
+              {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset requires a supported native host harness or verified Direct WSL bridge and runner. Choose a compatible target or change the saved default in Settings.</span>}
             </>}
           </div>
 

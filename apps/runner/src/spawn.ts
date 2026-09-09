@@ -21,6 +21,12 @@ import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-job.js";
 import { DESCENDANT_MARKER_ENV, PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { quoteWindowsCmdToken } from "./windows-cmd.js";
+import {
+  attachWslAgentControlBroker,
+  WSL_AGENT_CONTROL_PRIVATE_DIR,
+  WSL_AGENT_CONTROL_PRIVATE_SOCKET,
+  type WslAgentControlLaunch,
+} from "./wsl-agent-control.js";
 
 const isWindows = process.platform === "win32";
 /** Runner policy switches are daemon input and must never become agent input. */
@@ -76,6 +82,8 @@ export type AgentProcess = ChildProcessByStdio<Writable, Readable, Readable> & {
   closeObserved?: boolean;
   /** Kernel-identity ownership for descendants that escape the provider's POSIX process group. */
   posixBoundary?: PosixProcessBoundary;
+  /** Dedicated inherited pipes for the target-local WSL Agent Control relay. */
+  wslAgentControl?: { input: Writable; output: Readable; dispose: () => void };
 };
 
 export interface SpawnAgentOptions {
@@ -116,6 +124,8 @@ export interface BwrapSpawnIsolation {
   network: "inherit" | "deny";
   /** Narrow durable state exceptions; source lives under runner data, target is the CLI's home path. */
   writableBinds?: Array<{ source: string; target: string }>;
+  /** Ephemeral authenticated bridge state; never persisted or advertised. WSL only. */
+  wslAgentControl?: WslAgentControlLaunch;
 }
 
 export interface SeatbeltSpawnIsolation {
@@ -242,6 +252,8 @@ export function buildCloudArgs(
 }
 
 export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" | "cwd">, isolation: BwrapSpawnIsolation): string[] {
+  const bridge = isolation.wslAgentControl;
+  const socketDir = bridge?.socketPath ? posix.dirname(bridge.socketPath) : undefined;
   return [
     ...isolation.args,
     "--die-with-parent",
@@ -255,6 +267,8 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
     "--dir", "/dev/shm",
     "--proc", "/proc",
     "--tmpfs", "/tmp",
+    ...(socketDir ? ["--dir", WSL_AGENT_CONTROL_PRIVATE_DIR,
+      "--ro-bind", socketDir, WSL_AGENT_CONTROL_PRIVATE_DIR] : []),
     ...(isolation.writableBinds ?? []).flatMap((bind) => ["--bind", bind.source, bind.target]),
     "--bind", opts.cwd, opts.cwd,
     "--chdir", opts.cwd,
@@ -281,12 +295,23 @@ export function buildWslArgs(distro: string, cwd: string, pidfile: string, opts:
     .flatMap((k) => ["-u", k]);
   const inner =
     unsets.length ? ["env", ...unsets, opts.command, ...opts.args] : [opts.command, ...opts.args];
-  const wrapper =
-    "if command -v setsid >/dev/null 2>&1; then " +
-    "setsid sh -c 'echo $$ > \"$0\"; exec \"$@\"' \"$@\"; " +
-    "else shift; exec \"$@\"; fi";
+  const bridge = opts.isolation?.backend === "bwrap" ? opts.isolation.wslAgentControl : undefined;
+  const socket = bridge?.socketPath;
+  const wrapper = bridge && socket
+    ? "pidfile=$1; runtime=$2; helper=$3; socket=$4; shift 4; " +
+      "socket_dir=${socket%/*}; umask 077; mkdir -- \"$socket_dir\"; " +
+      "relay=; provider=; watcher=; cleanup(){ test -n \"$watcher\" && kill \"$watcher\" 2>/dev/null || true; test -n \"$provider\" && kill \"$provider\" 2>/dev/null || true; test -n \"$relay\" && kill \"$relay\" 2>/dev/null || true; rm -f -- \"$socket\" \"$socket_dir/token\" \"$socket_dir/mcp.json\"; rmdir -- \"$socket_dir\" 2>/dev/null || true; }; trap cleanup EXIT HUP INT TERM; " +
+      "\"$runtime\" \"$helper\" serve \"$socket\" <&3 >&4 2>/dev/null & relay=$!; " +
+      "ready=0; i=0; while test $i -lt 200; do if test -S \"$socket\" && test -f \"$socket_dir/token\" && test -f \"$socket_dir/mcp.json\"; then ready=1; break; fi; kill -0 \"$relay\" 2>/dev/null || break; i=$((i+1)); sleep .05; done; test $ready -eq 1 || exit 125; " +
+      "if command -v setsid >/dev/null 2>&1; then setsid sh -c 'echo $$ > \"$0\"; exec \"$@\"' \"$pidfile\" \"$@\" & provider=$!; else \"$@\" & provider=$!; fi; " +
+      "(while kill -0 \"$provider\" 2>/dev/null && kill -0 \"$relay\" 2>/dev/null; do sleep .1; done; kill -0 \"$relay\" 2>/dev/null || kill \"$provider\" 2>/dev/null || true) & watcher=$!; " +
+      "wait \"$provider\"; status=$?; provider=; kill \"$watcher\" 2>/dev/null || true; wait \"$watcher\" 2>/dev/null || true; watcher=; exit $status"
+    : "if command -v setsid >/dev/null 2>&1; then " +
+      "setsid sh -c 'echo $$ > \"$0\"; exec \"$@\"' \"$@\"; " +
+      "else shift; exec \"$@\"; fi";
   // Positionals to the outer sh: $0=sh (dummy), $1=pidfile, $2..=env-prefix+command+args.
-  return ["-d", distro, "--cd", cwd, "--exec", "sh", "-c", wrapper, "sh", pidfile, ...inner];
+  return ["-d", distro, "--cd", cwd, "--exec", "sh", "-c", wrapper, "sh", pidfile,
+    ...(bridge && socket ? [bridge.nodeRuntime, bridge.helperPath, socket] : []), ...inner];
 }
 
 export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
@@ -302,6 +327,19 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   let wslReap: WslReapInfo | undefined;
   let isolationEnv: Record<string, string> = {};
   let explicitEnv = withoutRunnerOnlyEnv(opts.env);
+  let bridge = opts.isolation?.backend === "bwrap" ? opts.isolation.wslAgentControl : undefined;
+  if (bridge) {
+    if (opts.context?.kind !== "wsl" || opts.context.distro !== bridge.distro) {
+      throw new Error("target-local Agent Control bridge does not match the WSL launch context");
+    }
+    const socket = `/tmp/wlp-${process.pid}-${++pgidSeq}-${randomUUID().replace(/-/g, "").slice(0, 12)}/control.sock`;
+    bridge = { ...bridge, socketPath: socket };
+    opts = { ...opts, isolation: { ...opts.isolation as BwrapSpawnIsolation, wslAgentControl: bridge } };
+    explicitEnv = {
+      ...explicitEnv,
+      WOLLIPOG_AGENT_CONTROL_SOCKET: WSL_AGENT_CONTROL_PRIVATE_SOCKET,
+    };
+  }
 
   // A Windows Job is a lifetime boundary, not a filesystem/network sandbox. Apply it by default
   // to native provider-mode launches so a child cannot outlive either session disposal or a runner
@@ -470,13 +508,20 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     },
     // Resolve .cmd/.bat shims on Windows; harmless on POSIX for our commands.
     shell,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: bridge ? ["pipe", "pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
     windowsHide: true,
     // POSIX: make the agent a process-group leader so killTree can signal the whole
     // group — claude/codex spawn bash/tool children that a single-pid SIGTERM would
     // orphan. Windows uses taskkill /T; the WSL bridge has its own setsid+PGID reap.
     detached: !isWindows,
   }) as AgentProcess;
+  if (bridge) {
+    const bridgeInput = child.stdio[3] as Writable;
+    const bridgeOutput = child.stdio[4] as Readable;
+    const dispose = attachWslAgentControlBroker(bridgeOutput, bridgeInput, bridge);
+    child.wslAgentControl = { input: bridgeInput, output: bridgeOutput, dispose };
+    child.once("close", dispose);
+  }
   child.once("close", () => {
     child.closeObserved = true;
     if (child.posixBoundary) {

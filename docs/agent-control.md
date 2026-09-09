@@ -59,13 +59,20 @@ Claude Code launches also receive an additive `wollipog` stdio MCP configuration
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.
 
-Orchestrator remains unavailable in WSL. Rebinding WSL's Windows-executable binfmt entry inside the
-bwrap namespace, or invoking its interpreter directly, would expose a general Windows process
-launcher rather than a purpose-specific Wollipog channel; those Windows processes are outside the
-Linux filesystem boundary. A future WSL implementation therefore needs a dedicated target-local
-Linux bridge that authenticates the session and exposes only the closed CLI/MCP contract. Generic
-ACP, container, and cloud targets likewise stay fail-closed until they can prove equivalent
-target-local credential and tool-isolation contracts.
+Protocol v123 adds that contract for structured Direct WSL sessions. Discovery must resolve an
+absolute Linux Node 22+ runtime in the selected distro. Before each provider launch, the Windows
+runner rotates and registers the exact-session credential, waits for the control plane's positive
+hash acknowledgement, and atomically installs a root-owned, mode-0555, hash-verified helper at a
+fixed path in that distro. The provider receives only a mode-0600 token and MCP configuration in
+its private bwrap `/tmp`.
+
+The helper connects to a per-launch mode-0600 Unix socket. A sibling relay outside bwrap carries
+versioned bounded frames over two inherited `wsl.exe` pipes to the Windows runner, which checks the
+session, token, readiness marker, and CLI command family before reusing the existing Orchestrator
+tool table. The bwrap process sees only the one socket directory; it never sees `wsl.exe`, `/init`,
+a TCP listener, or a general process-execution RPC. Relay exit removes the socket, provider stop
+reaps both processes, restart rotates the token, and terminal/delete/startup cleanup removes
+credential files. WSL Native TUI, generic ACP, container, and cloud targets remain fail-closed.
 
 ## Authorization and compatibility
 
@@ -80,7 +87,9 @@ only service-readiness metadata and does not expose the protocol version. During
 protocol-v100–v102 compatibility window, a 404 from the authenticated endpoint falls back to the
 legacy health version; authentication failures remain fail-closed, including API-only peers that
 answer 401 before routing the missing endpoint.
-Runners connected to older control planes do not inject the general surface. Conductor discovery,
+Runners connected to older control planes do not inject the general surface. WSL runners also
+withhold the Orchestrator capability unless both peers negotiate v123 and discovery proves the
+target-local runtime. Conductor discovery,
 launch gating, default permission-mode clamp, and legacy manager credential remain unchanged.
 
 See [Using Wollipog](../.agents/skills/using-wollipog/SKILL.md) for the compact agent-facing skill.
