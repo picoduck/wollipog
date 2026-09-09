@@ -127,8 +127,13 @@ export function pageInboxPreview(
   const canMove = direction === "next"
     ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 0.5
     : scroll.scrollTop > 0.5;
-  if (!canMove) return;
-  dispatchVirtualViewportIntent(scroll);
+  if (!canMove) {
+    // Paging backward at the head moves nothing and must not claim preview ownership, but the
+    // transcript still needs to hear the upward claim: it is how a bounded window fetches history.
+    if (direction === "previous") dispatchVirtualViewportIntent(scroll, "up");
+    return;
+  }
+  dispatchVirtualViewportIntent(scroll, direction === "next" ? "down" : "up");
   beginProgrammaticScroll?.(direction);
   const target = scroll.scrollTop + (direction === "next" ? 1 : -1) * scroll.clientHeight;
   // Following live output can leave a browser-native smooth scroll in flight after its scheduled

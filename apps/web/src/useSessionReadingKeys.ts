@@ -66,13 +66,15 @@ function nativeControlOwnsFocus(targetDocument: Document): boolean {
 
 function scrollBy(scroll: HTMLElement | null, top: number): void {
   if (!scroll) return;
-  dispatchVirtualViewportIntent(scroll);
+  dispatchVirtualViewportIntent(scroll, top < 0 ? "up" : "down");
   scroll.scrollBy({ top });
 }
 
 function scrollTo(scroll: HTMLElement | null, top: number): void {
   if (!scroll) return;
-  dispatchVirtualViewportIntent(scroll);
+  // Session Start at the head and Latest at the tail move nothing, but the claim still reads as
+  // that direction: at the head, an upward claim is how the transcript learns to fetch history.
+  dispatchVirtualViewportIntent(scroll, top <= scroll.scrollTop ? "up" : "down");
   scroll.scrollTo({ top });
 }
 
