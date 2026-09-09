@@ -4,7 +4,8 @@ import type { GovernancePolicy } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { QuestionPoliciesPanel } from "../components/QuestionPoliciesPanel.js";
-import { GovernanceAuditOutcomes } from "../components/GovernanceAuditTrail.js";
+import { GovernanceHistoryPanel } from "../components/GovernanceHistoryPanel.js";
+import { governanceDecisions } from "../governance.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import "../styles.css";
 
@@ -22,17 +23,22 @@ const client: ApiClient = {
     return saved;
   },
 };
+const hookDecisions = governanceDecisions([{
+  auditId: "hook-audit", requestId: "policy-hook-transport:1", approvalKind: "policy_hook",
+  stage: "policy_decision", outcome: "denied", actor: { kind: "policy", id: "deny-shell" },
+  governancePolicyId: "deny-shell",
+  scope: { organizationId: "org", sessionId: "example", runnerId: "runner" }, timestamp: 1,
+}]);
 createRoot(document.getElementById("root")!).render(<ApiProvider client={client}>
   <main className="settings-panel" style={{ maxWidth: 760, margin: "24px auto", padding: 20 }}>
     <h2>Behavior</h2><QuestionPoliciesPanel />
     <EventTimeline items={[{ kind: "question", id: 1, requestId: "review", answered: true,
       answeredByPolicies: ["Review Sharing and Retries"],
       questions: [{ id: "q", question: "May I send this diff for review?", options: [{ label: "Proceed" }] }],
+    }, {
+      kind: "governance_decision", id: -1, decision: hookDecisions[0]!,
     }]} />
-    <GovernanceAuditOutcomes entries={[{
-      auditId: "policy-audit", requestId: "review", approvalKind: "question", stage: "policy_decision", outcome: "answered",
-      actor: { kind: "policy", id: "questions:review:alice" }, governancePolicyId: "questions:review:alice",
-      scope: { organizationId: "org", sessionId: "example", runnerId: "runner" }, timestamp: 1,
-    }]} />
+    <h2>Governance History</h2>
+    <GovernanceHistoryPanel decisions={hookDecisions} />
   </main>
 </ApiProvider>);

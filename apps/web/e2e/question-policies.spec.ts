@@ -33,7 +33,13 @@ test("starter categories start off, persist independently, and retain their valu
 test("question policy controls fit mobile and expose policy attribution", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/question-policies-e2e.html?theme=dark");
-  await expect(page.getByText("Answered by Policy", { exact: true })).toBeVisible();
+  const governanceRow = page.locator("[data-audit-id=\"hook-audit\"]").first();
+  await expect(governanceRow.getByText("Blocked by Policy", { exact: true })).toBeVisible();
+  // Compact by default: the audit facts stay behind a disclosure that is keyboard operable.
+  await expect(governanceRow.getByText("Decided By", { exact: true })).toBeHidden();
+  await governanceRow.getByRole("group").locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await expect(governanceRow.getByText("Decided By", { exact: true })).toBeVisible();
   await expect(page.getByText("→ Answered by Policy: Review Sharing and Retries", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole("switch").nth(1).click();

@@ -2791,38 +2791,87 @@ textarea {
 .approval-bar.cost-budget .approval-text {
   color: var(--red);
 }
-.governance-audit-trail {
+/* Governance decisions as transcript context (issue #808): a compact single row at the
+   chronological position of the decision, with the audit facts behind a disclosure. The same row
+   is reused by the consolidated Governance History in the side panel. */
+.tl-governance {
+  margin: 2px 0;
+}
+.tl-governance-head {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 8px 14px 0;
   align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--text-sm);
 }
-.governance-audit-heading {
-  /* Was var(--muted), which is not a defined token, so the declaration was dropped and these
-     inherited body colour. --text-dim is the tier that clears AA here: --text-faint on --bg is
-     ~4.4:1 dark and ~4.3:1 light, at 11px. (This said --text-muted until that alias was retired —
-     it resolved to --text-dim in the default palette and to --text-faint in every generated
-     scheme, so the same name meant two different tiers depending on what the user had selected.) */
+.tl-governance-head::-webkit-details-marker { display: none; }
+.tl-governance-head::before {
+  content: "\25b8";
+  /* --text-faint is below AA at this size; --text-dim is the tier that clears it. */
   color: var(--text-dim);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .04em;
-  text-transform: uppercase;
+  font-size: var(--text-2xs);
+  transition: transform var(--dur-fast) var(--ease-out);
 }
-.governance-audit-outcome {
-  display: inline-flex;
-  gap: 5px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 4px 8px;
-  font-size: 11px;
+.governance-decision[open] > .tl-governance-head::before { transform: rotate(90deg); }
+.governance-icon { font-size: var(--text-xs); }
+.governance-label {
+  font-weight: 600;
+  border-inline-start: 2px solid var(--border);
+  padding-inline-start: 6px;
 }
-.governance-audit-outcome.allowed { border-color: var(--green); }
-.governance-audit-outcome.denied,
-.governance-audit-outcome.policy { border-color: var(--red); }
-.governance-audit-outcome.timed-out { border-color: var(--yellow); }
-.governance-audit-outcome span { color: var(--text-dim); }
+.tl-governance.allowed .governance-label,
+.governance-history-row.allowed .governance-label { border-inline-start-color: var(--green); }
+.tl-governance.denied .governance-label,
+.tl-governance.policy .governance-label,
+.governance-history-row.denied .governance-label,
+.governance-history-row.policy .governance-label { border-inline-start-color: var(--red); }
+.tl-governance.timed-out .governance-label,
+.governance-history-row.timed-out .governance-label { border-inline-start-color: var(--yellow); }
+.governance-decision-body {
+  margin: 2px 0 4px 18px;
+  font-size: var(--text-xs);
+}
+.governance-decision-detail {
+  margin: 0 0 4px;
+  color: var(--text-dim);
+}
+.governance-decision-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  margin: 0;
+}
+.governance-decision-facts dt {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.governance-decision-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.governance-decision-request { font-family: var(--font-mono); }
+.governance-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.governance-history-row {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.governance-history-row:last-child { border-bottom: none; }
+.governance-history-time {
+  margin-inline-start: auto;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
 /* Phase 7: cost-budget ceiling input in the session-controls row */
 
 .composer {
