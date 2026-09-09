@@ -8,14 +8,25 @@ import { expect, test } from "@playwright/test";
  */
 const WIDTHS = [390, 1000, 1400] as const;
 
+/**
+ * The Inbox list is virtualized, so a card only has a box to measure while it is mounted, and these
+ * tests measure the whole fixture at once. Eleven 86px cards need roughly 950px of list viewport;
+ * at the 900px this file used while the fixture held seven rows, only nine of the eleven mount and
+ * every whole-list assertion fails on the count rather than on the geometry it meant to check.
+ * 1400px clears all eleven at every width with room to spare, and the count assertion below is the
+ * guard: grow the fixture again and it fails here, naming the real cause.
+ */
+const VIEWPORT_HEIGHT = 1400;
+
 test.beforeEach(async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
   await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-row-layout");
   await expect(page.locator(".inbox-row")).toHaveCount(11);
 });
 
 for (const width of WIDTHS) {
   test(`every active row shows its whole activity strip at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: 900 });
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
     const strips = await page.locator(".inbox-row").evaluateAll((rows) => rows.map((row) => {
       const strip = row.querySelector<HTMLElement>(".inbox-row-activity")!;
       const stripBox = strip.getBoundingClientRect();
@@ -42,7 +53,7 @@ for (const width of WIDTHS) {
   });
 
   test(`a long title fades instead of displacing the strip at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: 900 });
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
     const titles = await page.locator(".inbox-row").evaluateAll((rows) => rows.map((row) => {
       const node = row.querySelector<HTMLElement>(".inbox-row-title")!;
       const strip = row.querySelector<HTMLElement>(".inbox-row-activity")!;
@@ -114,7 +125,7 @@ const measureRows = (nodes: Element[]) => nodes.map((node) => {
 
 for (const width of WIDTHS) {
   test(`every card is exactly three rows with an explicit Git state at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: 900 });
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
     const rows = await page.locator(".inbox-row").evaluateAll(measureRows);
 
     expect(rows).toHaveLength(11);
@@ -145,7 +156,7 @@ for (const width of WIDTHS) {
 }
 
 test("a card's height does not move with selection, unread, or stalled state", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
   const baseline = (await page.locator(".inbox-row").evaluateAll(measureRows)).map((row) => row.height);
   // The state classes, not a click: this asserts the CSS itself never spends layout on a state
   // that is supposed to be paint only, on every card at once rather than on whichever one is easy
@@ -164,7 +175,7 @@ test("a card's height does not move with selection, unread, or stalled state", a
 });
 
 test("the Git line names a branch, admits to none, or admits to not knowing", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
   const lines = page.locator(".inbox-row-git");
   await expect(lines).toHaveCount(11);
   // Rows five and six hold no worktree and never asked for one: an authoritative absence.
@@ -184,7 +195,7 @@ test("the Git line names a branch, admits to none, or admits to not knowing", as
 });
 
 test("every background-work state reaches the right of the Git line with its accessible name", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
   for (const [index, label] of [
     [7, "Waiting on External Job"],
     [8, "Waiting on External Job"],
@@ -200,7 +211,7 @@ test("every background-work state reaches the right of the Git line with its acc
 // is the item that must survive; the base ref is the one that yields first.
 for (const width of [390, 770, 1400]) {
   test(`a long branch yields to the PR pill and the background badge at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: 900 });
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
     const geometry = await page.locator(".inbox-row-meta").nth(8).evaluate((node) => {
       const row = node.closest<HTMLElement>(".inbox-row")!;
       const style = getComputedStyle(row);
@@ -229,7 +240,7 @@ for (const width of [390, 770, 1400]) {
 }
 
 test("the worktree line hides a default base ref and keeps a stacked one", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
   const worktreeLines = page.locator(".inbox-row-git");
   await expect(worktreeLines.nth(0)).toContainText("fix/issue-664-restructure-inbox-rows");
   await expect(worktreeLines.nth(0).locator(".inbox-row-base")).toHaveCount(0);
@@ -243,7 +254,7 @@ test("the worktree line hides a default base ref and keeps a stacked one", async
 // line's clip — line three reproducing the very failure line two was restructured to remove.
 for (const width of [770, 800, 1000, 1400]) {
   test(`a long base ref truncates instead of evicting the branch or the PR pill at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: 900 });
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
     const line = page.locator(".inbox-row-git").nth(2);
     const geometry = await line.evaluate((node) => {
       const row = node.closest<HTMLElement>(".inbox-row")!;
@@ -270,7 +281,7 @@ for (const width of [770, 800, 1000, 1400]) {
 }
 
 test("a phone drops the base ref from the worktree line but keeps branch and PR state", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 900 });
+  await page.setViewportSize({ width: 390, height: VIEWPORT_HEIGHT });
   const stacked = page.locator(".inbox-row-git").nth(1);
   await expect(stacked.locator(".inbox-row-branch")).toBeVisible();
   await expect(stacked.locator(".inbox-row-pr-pill")).toBeVisible();
@@ -279,7 +290,7 @@ test("a phone drops the base ref from the worktree line but keeps branch and PR 
 
 test("the message preview no longer renders in Inbox rows", async ({ page }) => {
   for (const width of WIDTHS) {
-    await page.setViewportSize({ width, height: 900 });
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
     await expect(page.locator(".inbox-row-snippet")).toHaveCount(0);
     await expect(page.locator(".inbox-row").first()).not.toContainText("preview");
   }
@@ -288,7 +299,7 @@ test("the message preview no longer renders in Inbox rows", async ({ page }) => 
 // #679: the row compares against the repository's reported default branch instead of guessing from
 // the branch's name, so a `develop`-default repository keeps an explicit `origin/main` base.
 test("a reported default branch decides whether the base ref is worth showing", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
   const nonDefault = page.locator(".inbox-row-git").nth(3);
   await expect(nonDefault.locator(".inbox-row-branch")).toHaveText("fix/issue-679-default-branch");
   await expect(nonDefault.locator(".inbox-row-base")).toContainText("← origin/main");

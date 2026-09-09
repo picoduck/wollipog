@@ -8989,8 +8989,11 @@ body.shell-dock-dragging * {
 .inbox-row-activity { margin-left: 3px; }
 .inbox-row-signals { grid-area: 1 / 2; justify-content: end; gap: 7px; color: var(--text-faint); font-size: 11px; }
 /* Pinned to the right of line three, under the activity strip. `flex: none` because the badge is
-   the item on the line that must survive: the branch and base ref shrink around it. */
-.inbox-row-background-work { flex: none; margin-left: auto; }
+   the item on the line that must survive: the branch and base ref shrink around it. `display: flex`
+   because this wrapper holds an INLINE-flex badge: as a block container it would open a line box and
+   add the font's leading around it, making the wrapper 21.5px tall around a 20px badge and every
+   card carrying background work 1.5px taller than one that does not. */
+.inbox-row-background-work { display: flex; flex: none; align-items: center; margin-left: auto; }
 /* Sized to the PR pill and the lifecycle pills it shares the card with, so it fits line three
    instead of growing the card. #784 tracks the same alignment for the Session header. */
 .inbox-row-background-work .background-work-badge {
