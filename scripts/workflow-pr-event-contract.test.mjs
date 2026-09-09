@@ -27,7 +27,9 @@ function workflowContract(path) {
 
   assert.ok(pullRequestTypes, `${path}: missing pull_request types`);
   assert.ok(concurrencyGroup, `${path}: missing concurrency group`);
-  assert.ok(jobGuards.length >= 1, `${path}: expected at least one job-level if guard`);
+  const jobIds = (text.split(/^jobs:\r?\n/m)[1] ?? "").match(/^  [a-z][a-z0-9_-]*:$/gm) ?? [];
+  assert.ok(jobIds.length >= 1, `${path}: expected at least one job`);
+  assert.equal(jobGuards.length, jobIds.length, `${path}: every job needs a job-level if guard (${jobGuards.length} of ${jobIds.length} jobs have one)`);
   assert.match(text, /^  cancel-in-progress: true$/m, `${path}: concurrency must cancel in progress`);
   // Every job carries the same draft guard. An aggregating job may wrap it in
   // `always() && (...)` so it still reports when the jobs it needs fail or are cancelled.
