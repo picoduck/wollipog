@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
+  AutomationExecution,
   AutomationSchedule,
   AutomationSpec,
   RunnerView,
@@ -158,7 +159,10 @@ async function settle(): Promise<void> {
   await Promise.resolve();
 }
 
-async function mountFixture(items: AutomationSchedule[] = []): Promise<Fixture> {
+async function mountFixture(
+  items: AutomationSchedule[] = [],
+  executions: Record<string, AutomationExecution[]> = {},
+): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -173,10 +177,13 @@ async function mountFixture(items: AutomationSchedule[] = []): Promise<Fixture> 
   };
   const client = {
     ...api,
-    automations: async () => ({ automations: items }),
+    // A NEW array on every poll, exactly like the control plane's response. Returning the same
+    // reference would let expansion state survive for the wrong reason and pass a test the real
+    // app fails; the caller mutates `items` in place to simulate creations and deletions.
+    automations: async () => ({ automations: [...items] }),
     automation: async (id: string) => ({
       automation: items.find((item) => item.automationId === id)!,
-      executions: [],
+      executions: executions[id] ?? [],
       events: [],
     }),
     automationTriggers: async () => ({ triggers: [] }),
@@ -250,6 +257,71 @@ async function choose(container: HTMLDivElement, label: string, optionLabel: str
 
 async function openNew(fixture: Fixture): Promise<void> {
   await act(async () => { button(fixture.container, "New Automation").click(); });
+  await act(settle);
+}
+
+function cardToggle(container: HTMLDivElement, name: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]
+    .find((candidate) => candidate.querySelector(".automation-card-name")?.textContent === name);
+  assert.ok(found, `${name} automation card is rendered`);
+  return found;
+}
+
+async function expandCard(fixture: Fixture, name: string): Promise<void> {
+  await act(async () => { cardToggle(fixture.container, name).click(); });
+  await act(settle);
+}
+
+function maybeCardToggle(container: HTMLDivElement, name: string): HTMLButtonElement | undefined {
+  return [...container.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]
+    .find((candidate) => candidate.querySelector(".automation-card-name")?.textContent === name);
+}
+
+function expansionOf(container: HTMLDivElement, name: string): string | null {
+  return cardToggle(container, name).getAttribute("aria-expanded");
+}
+
+/** Anything a keyboard or screen reader can land on inside the rendered cards. */
+function focusableInCards(container: HTMLDivElement): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>(
+    ".automation-card button, .automation-card a, .automation-card input, .automation-card select,"
+    + " .automation-card textarea, .automation-card summary, .automation-card [tabindex]",
+  )];
+}
+
+function schedule(automationId: string, name: string, enabled = true): AutomationSchedule {
+  return {
+    automationId,
+    revision: 1,
+    name,
+    cron: "0 2 * * *",
+    timezone: "America/Chicago",
+    enabled,
+    action: {
+      kind: "create_session",
+      request: {
+        runnerId: "runner-1", workspaceId: "runner-1-workspace", agentId: "rich-agent",
+        prompt: "Sweep.", useWorktree: false,
+      },
+    },
+    misfirePolicy: { kind: "skip" },
+    runnerPolicy: { kind: "wait" },
+    concurrencyPolicy: "wait",
+    limits: { maxCostUsd: 5, maxToolCalls: 50 },
+    notifications: { pushEvents: [] },
+    createdBy: { kind: "human", id: "test" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
+
+/**
+ * Waits for one real five-second poll of the automation list to commit. The interval is the
+ * behaviour under test — expansion has to survive the refresh the running app actually performs,
+ * not a hand-called refresh helper — so the wait is real rather than faked.
+ */
+async function awaitPoll(): Promise<void> {
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5_400)); });
   await act(settle);
 }
 
@@ -341,6 +413,7 @@ test("editing and saving without changes sends the exact stored multi-alternate 
   };
   const fixture = await mountFixture([stored]);
   try {
+    await expandCard(fixture, "Nightly Sweep");
     await act(async () => { button(fixture.container, "Edit").click(); });
     const nameInput = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
       .find((candidate) => candidate.childNodes[0]?.textContent?.trim() === "Name")
@@ -374,6 +447,145 @@ test("editing and saving without changes sends the exact stored multi-alternate 
     const { automationId: _id, revision: _revision, createdBy: _createdBy,
       createdAt: _createdAt, updatedAt: _updatedAt, ...storedSpec } = stored;
     assert.deepEqual(fixture.updates[0], { id: stored.automationId, spec: storedSpec });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("automation cards are collapsed by default and render only their headers", async () => {
+  const fixture = await mountFixture([
+    schedule("automation-a", "Alpha"),
+    schedule("automation-b", "Beta", false),
+  ]);
+  try {
+    const alpha = cardToggle(fixture.container, "Alpha");
+    const beta = cardToggle(fixture.container, "Beta");
+
+    // A native button is what makes pointer, touch, Enter, and Space activation work without any
+    // key handling of our own; the e2e spec drives the real keys in a real browser.
+    assert.equal(alpha.tagName, "BUTTON");
+    assert.equal(alpha.getAttribute("type"), "button");
+    assert.equal(expansionOf(fixture.container, "Alpha"), "false");
+    assert.equal(expansionOf(fixture.container, "Beta"), "false");
+    assert.equal(alpha.getAttribute("aria-controls"), "automation-body-automation-a");
+    assert.equal(beta.getAttribute("aria-controls"), "automation-body-automation-b");
+
+    // Name, action summary, and state — and nothing beyond them.
+    assert.equal(
+      alpha.querySelector(".automation-card-action")?.textContent,
+      "Create rich-agent session on runner-1",
+    );
+    assert.equal(alpha.querySelector(".automation-state")?.textContent, "Enabled");
+    assert.equal(beta.querySelector(".automation-state")?.textContent, "Paused");
+    assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 0);
+    assert.equal(fixture.container.querySelectorAll(".automation-facts").length, 0);
+    assert.equal(fixture.container.querySelectorAll(".automation-card-actions").length, 0);
+    assert.equal(fixture.container.querySelectorAll(".automation-history").length, 0);
+
+    // Collapsed cards hold no reachable hidden controls: the two toggles are the only focus targets.
+    const focusable = focusableInCards(fixture.container);
+    assert.equal(focusable.length, 2);
+    assert.equal(focusable[0], alpha);
+    assert.equal(focusable[1], beta);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("cards expand independently and collapse back to header-only", async () => {
+  const fixture = await mountFixture([
+    schedule("automation-a", "Alpha"),
+    schedule("automation-b", "Beta"),
+  ]);
+  try {
+    await expandCard(fixture, "Alpha");
+    await expandCard(fixture, "Beta");
+    assert.equal(expansionOf(fixture.container, "Alpha"), "true");
+    assert.equal(expansionOf(fixture.container, "Beta"), "true");
+    assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 2);
+
+    // The expanded body carries the details and the management actions.
+    const body = fixture.container.querySelector("#automation-body-automation-a");
+    assert.ok(body);
+    assert.equal(body.getAttribute("aria-labelledby"), "automation-toggle-automation-a");
+    assert.match(body.textContent ?? "", /Schedule/);
+    assert.match(body.textContent ?? "", /Next Fire/);
+    assert.ok([...body.querySelectorAll("button")].some((item) => item.textContent?.trim() === "Edit"));
+    assert.ok([...body.querySelectorAll("button")].some((item) => item.textContent?.trim() === "Pause"));
+
+    // Collapsing one leaves the other open.
+    await expandCard(fixture, "Alpha");
+    assert.equal(expansionOf(fixture.container, "Alpha"), "false");
+    assert.equal(expansionOf(fixture.container, "Beta"), "true");
+    assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 1);
+    assert.equal(fixture.container.querySelector("#automation-body-automation-a"), null);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a routine poll preserves expansion and leaves newly loaded cards collapsed", async () => {
+  const items = [schedule("automation-a", "Alpha"), schedule("automation-b", "Beta")];
+  const fixture = await mountFixture(items);
+  try {
+    await expandCard(fixture, "Alpha");
+    items.push(schedule("automation-c", "Gamma"));
+    await awaitPoll();
+
+    assert.ok(maybeCardToggle(fixture.container, "Gamma"), "the poll loaded the new automation");
+    assert.equal(expansionOf(fixture.container, "Alpha"), "true");
+    assert.equal(expansionOf(fixture.container, "Beta"), "false");
+    assert.equal(expansionOf(fixture.container, "Gamma"), "false");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("deleting an automation does not move expansion onto another card", async () => {
+  const items = [
+    schedule("automation-a", "Alpha"),
+    schedule("automation-b", "Beta"),
+    schedule("automation-c", "Gamma"),
+  ];
+  const fixture = await mountFixture(items);
+  try {
+    // Expand the last card, then remove the first: position-keyed state would slide the open body
+    // onto a different automation, identity-keyed state stays on Gamma.
+    await expandCard(fixture, "Gamma");
+    items.splice(0, 1);
+    await awaitPoll();
+
+    assert.equal(maybeCardToggle(fixture.container, "Alpha"), undefined);
+    assert.equal(expansionOf(fixture.container, "Beta"), "false");
+    assert.equal(expansionOf(fixture.container, "Gamma"), "true");
+    assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 1);
+    assert.ok(fixture.container.querySelector("#automation-body-automation-c"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Execution History defaults to collapsed inside an expanded card", async () => {
+  const execution: AutomationExecution = {
+    executionId: "execution-1",
+    automationId: "automation-a",
+    idempotencyKey: "automation-a:1",
+    scheduledFor: 1,
+    automationRevision: 1,
+    actionKind: "create_session",
+    status: "succeeded",
+    actor: { kind: "human", id: "test" },
+    createdAt: 1,
+    startedAt: 1,
+    completedAt: 2,
+  };
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], { "automation-a": [execution] });
+  try {
+    await expandCard(fixture, "Alpha");
+    const history = fixture.container.querySelector<HTMLDetailsElement>("details.automation-history");
+    assert.ok(history, "execution history is rendered inside the expanded card");
+    assert.equal(history.open, false);
+    assert.match(history.querySelector("summary")?.textContent ?? "", /Execution History \(1\)/);
   } finally {
     await unmountFixture(fixture);
   }
