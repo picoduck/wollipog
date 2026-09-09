@@ -15,6 +15,9 @@ export interface ContextWindowOption {
   contextWindow: number;
   /** "200K", "1M" — the label users see and read in the composer and the meter. */
   label: string;
+  /** The variant's own advertised reasoning efforts, when it advertises any. Empty or absent means
+   * it inherits the agent's effort levels, which the currently selected variant also uses. */
+  efforts?: string[];
 }
 
 export interface ContextWindowChoice {
@@ -57,7 +60,12 @@ function optionsFor(members: AgentModel[]): ContextWindowOption[] {
   }
   return [...byWindow.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([contextWindow, member]) => ({ id: member.id, contextWindow, label: formatContextWindow(contextWindow) }));
+    .map(([contextWindow, member]) => ({
+      id: member.id,
+      contextWindow,
+      label: formatContextWindow(contextWindow),
+      ...(member.efforts?.length ? { efforts: member.efforts } : {}),
+    }));
 }
 
 /** The Context Window choice for the selected model, or null when the catalog offers no real one:
@@ -77,6 +85,16 @@ export function contextWindowChoice(
     options,
     selectedId: options.some((option) => option.id === selectedModelId) ? selectedModelId : null,
   };
+}
+
+/** Whether a window variant accepts the effort the session currently has explicitly selected.
+ * A variant that advertises its own efforts and does not list this one would be rejected by the
+ * control plane's capability check (409), so the switch must let that variant fall back to its own
+ * default instead. A variant advertising no efforts inherits the agent's levels — the same set the
+ * current selection came from — so it always accepts it. */
+export function contextWindowOptionAcceptsEffort(option: ContextWindowOption, effort: string): boolean {
+  if (!effort) return false;
+  return option.efforts?.length ? option.efforts.includes(effort) : true;
 }
 
 /** "Opus 5 (1M Context)" → "Opus 5": the window moves to the Context Window control. */

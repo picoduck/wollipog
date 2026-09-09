@@ -24,6 +24,7 @@ import {
 import {
   collapseContextWindowVariants,
   contextWindowChoice,
+  contextWindowOptionAcceptsEffort,
   type ContextWindowChoice,
 } from "../context-window-options.js";
 import { useStoreSelector } from "../store.js";
@@ -182,8 +183,12 @@ export function ModelEffortMenuChoices({
               title={`${option.contextWindow.toLocaleString()} tokens; applies to the next turn`}
               // A window switch keeps the effort: variants of one base share their effort levels.
               // The effort has to ride along explicitly — the control plane reads a model-only
-              // patch as "no effort chosen" and resolves back to the model's default effort.
-              onSelect={() => apply(effortVal ? { model: option.id, effort: effortVal } : { model: option.id })}
+              // patch as "no effort chosen" and resolves back to the model's default effort. A
+              // variant that does not advertise the current effort is the exception: sending it
+              // would be rejected as unsupported, so let that one fall back to its own default.
+              onSelect={() => apply(contextWindowOptionAcceptsEffort(option, effortVal)
+                ? { model: option.id, effort: effortVal }
+                : { model: option.id })}
             >
               {option.label}
             </MenuRadioOption>

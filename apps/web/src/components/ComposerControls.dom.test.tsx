@@ -158,6 +158,22 @@ test("the Context Window group offers provider-stated variants and switches only
       "a window switch changes the model id and carries the explicit effort along");
 
     applied.length = 0;
+    // A variant that advertises a narrower effort set must not be sent an effort it would reject.
+    await render({
+      ...choice,
+      options: [
+        { ...choice.options[0]!, efforts: ["low", "high"] },
+        { ...choice.options[1]!, efforts: ["high"] },
+      ],
+      selectedId: "opus",
+    }, "low");
+    const asymmetric = [...container
+      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+    await act(async () => { asymmetric[1]!.click(); });
+    assert.deepEqual(applied, [{ model: "opus[1m]" }],
+      "the 1M variant does not advertise low, so the switch lets its own default effort apply");
+
+    applied.length = 0;
     await render(choice, "");
     const defaultEffortRadios = [...container
       .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];

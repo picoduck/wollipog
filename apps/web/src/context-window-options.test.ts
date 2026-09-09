@@ -7,6 +7,7 @@ import {
   collapseContextWindowVariants,
   contextWindowChoice,
   contextWindowDiscrepancy,
+  contextWindowOptionAcceptsEffort,
   formatContextWindow,
 } from "./context-window-options.js";
 
@@ -102,3 +103,28 @@ test("contextWindowDiscrepancy names a served window that differs from the adver
 function modelBase(model: AgentModel): string {
   return model.baseModelId ?? model.id;
 }
+
+test("a window option carries the variant's own efforts, and only those accept the current effort", () => {
+  // Variants of one base normally share their effort levels, but the catalog may advertise
+  // different sets. Sending an effort the target variant does not list is a 409 from the control
+  // plane's capability check, so the switch has to drop it and let the target default apply.
+  const asymmetric: AgentModel[] = [
+    { id: "opus", displayName: "Opus 5", contextWindow: 200_000, efforts: ["low", "high"] },
+    { id: "opus[1m]", displayName: "Opus 5 (1M Context)", baseModelId: "opus", contextWindow: 1_000_000, efforts: ["high"] },
+  ];
+  const choice = contextWindowChoice(asymmetric, "opus");
+  assert.ok(choice);
+  assert.deepEqual(choice!.options.map((option) => option.efforts), [["low", "high"], ["high"]]);
+  const [narrow, wide] = choice!.options;
+  assert.equal(contextWindowOptionAcceptsEffort(wide!, "low"), false, "the 1M variant does not list low");
+  assert.equal(contextWindowOptionAcceptsEffort(wide!, "high"), true);
+  assert.equal(contextWindowOptionAcceptsEffort(narrow!, "low"), true);
+  assert.equal(contextWindowOptionAcceptsEffort(wide!, ""), false, "an unset effort is never sent");
+
+  // A variant advertising no efforts inherits the agent's levels, the same set the current
+  // selection came from, so it accepts whatever is selected.
+  const inherited = contextWindowChoice(catalog, "opus[1m]");
+  assert.ok(inherited);
+  assert.deepEqual(inherited!.options.map((option) => option.efforts), [undefined, undefined]);
+  assert.equal(contextWindowOptionAcceptsEffort(inherited!.options[0]!, "low"), true);
+});
