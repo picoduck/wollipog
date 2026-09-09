@@ -1,8 +1,9 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Session-level usage (#602): per-turn tokens and cost on the user message, the context ring with
- * its popover, and the per-model breakdown inside it. Screenshots land in
+ * Session-level usage (#602, #781): per-turn tokens and cost on the user message, the context ring
+ * with its occupancy-only popover, and the separate session-cost control whose Session Usage
+ * popover owns cumulative tokens and the per-model breakdown. Screenshots land in
  * `test-results/session-usage/` as the PR's visual evidence.
  */
 
@@ -24,14 +25,102 @@ test("desktop: per-turn usage, the ring popover with totals and the per-model sp
   await ring.click();
   const popover = page.locator(".context-popover").first();
   await expect(popover).toBeVisible();
-  await expect(popover).toContainText("Total Processed");
-  await expect(popover).toContainText("205k");
+  // Occupancy and capacity only: cumulative usage and billing moved to the cost control (#781).
+  await expect(popover).toContainText("Used");
+  await expect(popover).toContainText("72k");
+  // #806's capacity provenance survives the split — which window is being measured against is an
+  // occupancy fact, not billing.
+  await expect(popover).toContainText("Capacity");
+  await expect(popover).toContainText("200K · Provider Reported");
+  await expect(popover).toContainText("Remaining");
+  await expect(popover).toContainText("128k");
   await expect(popover).toContainText("compacts automatically");
-  await expect(popover).toContainText("By Model");
-  await expect(popover).toContainText("gpt-5.5-codex-mini");
+  await expect(popover).not.toContainText("By Model");
+  await expect(popover).not.toContainText("Total Processed");
+  await expect(popover).not.toContainText("Session Cost");
   await page.screenshot({ path: `${SHOT}/desktop-popover.png` });
   await page.keyboard.press("Escape");
   await expect(popover).toHaveCount(0);
+});
+
+test("desktop: the cost control opens Session Usage with cumulative tokens and the model split", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780");
+
+  const cost = page.getByRole("button", { name: "Session Usage: $1.37" });
+  await expect(cost).toBeVisible();
+  await expect(cost).toHaveText("$1.37");
+  // The always-visible figure is the cost alone — never the context summary it replaced (#781).
+  await expect(cost).not.toContainText("context");
+
+  await cost.click();
+  const usage = page.locator(".session-usage-popover").first();
+  await expect(usage).toBeVisible();
+  await expect(usage).toContainText("Session Usage");
+  await expect(usage).toContainText("Input");
+  await expect(usage).toContainText("Output");
+  await expect(usage).toContainText("Cache Read");
+  await expect(usage).toContainText("Total Processed");
+  await expect(usage).toContainText("205k");
+  await expect(usage).toContainText("By Model");
+  await expect(usage).toContainText("gpt-5.5-codex-mini");
+  await expect(usage).toContainText("Not Priced");
+  // The usage panel never repeats the context meter's occupancy or capacity.
+  await expect(usage).not.toContainText("Capacity");
+  await expect(usage).not.toContainText("Remaining");
+  await page.screenshot({ path: `${SHOT}/desktop-session-usage.png` });
+
+  await page.keyboard.press("Escape");
+  await expect(usage).toHaveCount(0);
+  await expect(cost).toHaveAttribute("aria-expanded", "false");
+});
+
+test("desktop: the two controls have distinct accessible names and open independently", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780");
+
+  const ring = page.getByRole("button", { name: /^Context Window .* Used$/ });
+  const cost = page.getByRole("button", { name: "Session Usage: $1.37" });
+  await expect(ring).toHaveCount(1);
+  await expect(cost).toHaveCount(1);
+
+  // Keyboard activation works for both, and opening one leaves the other closed.
+  await cost.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".session-usage-popover")).toHaveCount(1);
+  await expect(page.locator(".context-popover")).toHaveCount(0);
+  await ring.click();
+  await expect(page.locator(".context-popover")).toHaveCount(1);
+  await expect(page.locator(".session-usage-popover")).toHaveCount(0);
+});
+
+test("desktop: an unpriced session says so instead of showing $0.00", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=none");
+
+  const cost = page.getByRole("button", { name: "Session Usage: Cost Unavailable" });
+  await expect(cost).toBeVisible();
+  await expect(cost).toHaveText("$—");
+  await expect(page.locator(".session-detail").first()).not.toContainText("$0.00");
+
+  await cost.click();
+  const usage = page.locator(".session-usage-popover").first();
+  await expect(usage).toContainText("Not Priced");
+  await expect(usage).toContainText("could not be priced");
+  await expect(usage).not.toContainText("$0.00");
+  await page.screenshot({ path: `${SHOT}/desktop-unpriced.png` });
+});
+
+test("desktop: an unknown context window hides the ring and keeps the cost control", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780&window=none");
+
+  await expect(page.locator(".context-ring-button")).toHaveCount(0);
+  const cost = page.getByRole("button", { name: "Session Usage: $1.37" });
+  await expect(cost).toBeVisible();
+  await cost.click();
+  await expect(page.locator(".session-usage-popover").first()).toContainText("Total Processed");
+  await page.screenshot({ path: `${SHOT}/desktop-unknown-context.png` });
 });
 
 test("the warning state above the threshold", async ({ page }) => {
@@ -41,8 +130,11 @@ test("the warning state above the threshold", async ({ page }) => {
   await expect(meter).toHaveClass(/is-full/);
   await expect(page.locator(".context-ring-button").first()).toHaveAttribute("aria-label", /93% Used/);
   await page.locator(".context-ring-button").first().click();
-  await expect(page.locator(".context-popover").first()).toContainText("claude-fable-5-1");
+  await expect(page.locator(".context-popover").first()).toContainText("compacts automatically");
   await page.screenshot({ path: `${SHOT}/desktop-warning.png` });
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Session Usage: $1.37" }).click();
+  await expect(page.locator(".session-usage-popover").first()).toContainText("claude-fable-5-1");
 });
 
 test("a cost checkpoint parks the session with a Continue/Stop card", async ({ page }) => {
@@ -85,4 +177,37 @@ test("mobile: the ring and per-turn usage stay reachable", async ({ page }) => {
   await page.goto("/session-usage-e2e.html?width=390&height=800");
   await expect(page.locator(".tl-turn-usage").first()).toBeVisible();
   await page.screenshot({ path: `${SHOT}/mobile-turn-usage.png` });
+});
+
+test("mobile: the strip trails the cost alone, and it opens Session Usage", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/session-usage-e2e.html?width=390&height=800");
+
+  const strip = page.locator(".transcript-status-strip").first();
+  const trailing = strip.locator(".transcript-status-usage");
+  await expect(trailing).toBeVisible();
+  await expect(trailing).toHaveText("$1.37");
+  // The reported regression: the trailing slot no longer repeats the context meter (#781).
+  await expect(trailing).not.toContainText("context");
+  await expect(strip.locator(".context-ring-button")).toBeVisible();
+  await page.screenshot({ path: `${SHOT}/mobile-status-strip.png` });
+
+  // The cost, the ring, and the follow-output control share the strip without overlapping.
+  const follow = strip.locator(".follow-tail-chip");
+  const followBox = (await follow.boundingBox())!;
+  const costBox = (await trailing.boundingBox())!;
+  const ringBox = (await strip.locator(".context-ring-button").boundingBox())!;
+  expect(ringBox.x + ringBox.width).toBeLessThanOrEqual(followBox.x + 1);
+  expect(followBox.x + followBox.width).toBeLessThanOrEqual(costBox.x + 1);
+  expect(costBox.x + costBox.width).toBeLessThanOrEqual(390);
+
+  await trailing.locator("button").click();
+  const usage = page.locator(".session-usage-popover").first();
+  await expect(usage).toBeVisible();
+  await expect(usage).toContainText("Input");
+  await expect(usage).toContainText("Output");
+  const usageBox = (await usage.boundingBox())!;
+  expect(usageBox.x).toBeGreaterThanOrEqual(0);
+  expect(usageBox.x + usageBox.width).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: `${SHOT}/mobile-session-usage.png` });
 });

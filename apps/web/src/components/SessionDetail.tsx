@@ -118,7 +118,7 @@ import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
-import { sessionPreviewUsage } from "../session-preview.js";
+import { SessionUsageControl } from "./SessionUsageControl.js";
 import {
   followTailControlLabel,
   followTailControlTooltip,
@@ -3879,7 +3879,6 @@ function SessionDetailLoaded({
     }
   };
 
-  const usage = sessionPreviewUsage(session);
   const currentProjectName = projectsSupported
     ? (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName ?? "No Project"
     : session.workspaceName ?? "No Workspace";
@@ -3973,7 +3972,7 @@ function SessionDetailLoaded({
               )}
               {session.workspaceName && <span className="tag tag-workspace">{session.workspaceName}</span>}
               <ContextWindowMeter session={session} />
-              {usage && <span className="tag tag-usage" aria-label={`Usage: ${usage}`}>{usage}</span>}
+              <SessionUsageControl session={session} />
               {isHeartbeatBusy(session.status) && (
                 <ActivityStrip activity={activity} now={activityNow} />
               )}
@@ -4258,14 +4257,11 @@ function SessionDetailLoaded({
                 )}
               </div>
               <div className="transcript-status-trailing">
-                {mode === "expanded" && isMobile && usage && (
-                  <span
-                    className="transcript-status-usage"
-                    title={`Session usage: ${usage}`}
-                    aria-label={`Usage: ${usage}`}
-                  >
-                    {usage}
-                  </span>
+                {/* Cost only (#781): the context meter one cell over already owns occupancy, and
+                    repeating "25k of 258k context" here made the trailing figure read as a second
+                    context indicator instead of what the session has spent. */}
+                {mode === "expanded" && isMobile && (
+                  <SessionUsageControl session={session} className="transcript-status-usage" />
                 )}
                 <div className="transcript-status-actions">
                   {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
@@ -4663,11 +4659,7 @@ function SessionDetailLoaded({
                 </div>
                 {/* Session-level usage lives with the session-level controls, not in the
                     transcript status strip — the otherwise-empty center of the composer bar. */}
-                {usage && !isMobile && (
-                  <span className="cbar-usage" title={`Session usage: ${usage}`} aria-label={`Usage: ${usage}`}>
-                    {usage}
-                  </span>
-                )}
+                {!isMobile && <SessionUsageControl session={session} className="cbar-usage" />}
                 <div className="cbar-right">
                   <ModelEffortControl
                     session={session}
