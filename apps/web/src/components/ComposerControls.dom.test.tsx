@@ -117,6 +117,7 @@ test("the Context Window group offers provider-stated variants and switches only
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
+  let staged: string | undefined;
   const render = (
     contextChoice: Parameters<typeof ModelEffortMenuChoices>[0]["contextChoice"],
     effortVal = "low",
@@ -132,6 +133,7 @@ test("the Context Window group offers provider-stated variants and switches only
           modelEfforts={["low", "high"]}
           agentEffortLevels={agentEffortLevels}
           effortVal={effortVal}
+          pendingEffort={() => staged}
           apply={(patch) => applied.push(patch)}
         />
       </div>,
@@ -176,6 +178,19 @@ test("the Context Window group offers provider-stated variants and switches only
     // pending config, which then rides along with the next prompt and is rejected as unsupported.
     assert.deepEqual(applied, [{ model: "opus[1m]", effort: "" }],
       "the 1M variant does not advertise low, so the switch clears it and its own default applies");
+
+    applied.length = 0;
+    // An effort chosen moments ago is staged for the next prompt but not yet in `effortVal`, which
+    // only catches up after setConfig round-trips. The switch must carry the newer choice, not
+    // reset it: read it at click time.
+    staged = "high";
+    await render(choice, "low");
+    const racing = [...container
+      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+    await act(async () => { racing[0]!.click(); });
+    assert.deepEqual(applied, [{ model: "opus", effort: "high" }],
+      "a just-staged effort survives a window switch made before the session view catches up");
+    staged = undefined;
 
     applied.length = 0;
     // Neither variant advertises its own efforts, so both inherit the agent's levels. The session

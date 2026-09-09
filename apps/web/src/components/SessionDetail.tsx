@@ -4573,7 +4573,11 @@ function SessionDetailLoaded({
                   </span>
                 )}
                 <div className="cbar-right">
-                  <ModelEffortControl session={session} apply={applyConfig} />
+                  <ModelEffortControl
+                    session={session}
+                    apply={applyConfig}
+                    pendingEffort={() => pendingConfig.current.effort}
+                  />
                   {dictation.supported && (
                     <button
                       type="button"

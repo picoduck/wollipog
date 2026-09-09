@@ -145,6 +145,7 @@ export function ModelEffortMenuChoices({
   modelEfforts,
   agentEffortLevels,
   effortVal,
+  pendingEffort,
   apply,
 }: {
   models: MenuModelChoice[];
@@ -157,6 +158,10 @@ export function ModelEffortMenuChoices({
   /** The agent's own effort levels, which a variant advertising none of its own inherits. */
   agentEffortLevels?: readonly string[];
   effortVal: string;
+  /** Reads the effort staged for the next prompt, at click time. `effortVal` comes from the session
+   * and only catches up after `setConfig` round-trips, so a selection made moments ago is not in it
+   * yet; undefined means nothing is staged. */
+  pendingEffort?: () => string | undefined;
   apply: Apply;
 }) {
   return (
@@ -191,10 +196,16 @@ export function ModelEffortMenuChoices({
               // would then ride along with the next prompt. `""` is the established reset (the
               // Model group above uses it), so an effort the target variant would reject as
               // unsupported becomes that variant's own default instead of a 409.
-              onSelect={() => apply({
-                model: option.id,
-                effort: contextWindowOptionAcceptsEffort(option, effortVal, agentEffortLevels) ? effortVal : "",
-              })}
+              // Read the staged effort at click time: an effort chosen moments ago is not in
+              // `effortVal` until `setConfig` round-trips, and it must not be reset by this switch.
+              onSelect={() => {
+                const staged = pendingEffort?.();
+                const effort = staged ?? effortVal;
+                apply({
+                  model: option.id,
+                  effort: contextWindowOptionAcceptsEffort(option, effort, agentEffortLevels) ? effort : "",
+                });
+              }}
             >
               {option.label}
             </MenuRadioOption>
@@ -223,7 +234,9 @@ export function modelEffortControlLabel(selectedModel: MenuModelChoice | undefin
   return selectedModel?.displayName || modelVal || "Model";
 }
 
-export function ModelEffortControl({ session, apply }: { session: SessionView; apply: Apply }) {
+export function ModelEffortControl(
+  { session, apply, pendingEffort }: { session: SessionView; apply: Apply; pendingEffort?: () => string | undefined },
+) {
   const { caps, models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal } = useSessionConfig(session);
   if (models.length === 0 && modelEfforts.length === 0) return null;
   const pickerModel = models.find((model) => model.id === modelVal) ?? selectedModel;
@@ -254,6 +267,7 @@ export function ModelEffortControl({ session, apply }: { session: SessionView; a
         modelEfforts={modelEfforts}
         agentEffortLevels={caps?.effortLevels}
         effortVal={effortVal}
+        pendingEffort={pendingEffort}
         apply={apply}
       />}
     </BarMenu>
