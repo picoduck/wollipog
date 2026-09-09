@@ -115,16 +115,23 @@ test("a window option carries the variant's own efforts, and only those accept t
   const choice = contextWindowChoice(asymmetric, "opus");
   assert.ok(choice);
   assert.deepEqual(choice!.options.map((option) => option.efforts), [["low", "high"], ["high"]]);
+  const agentLevels = ["low", "medium", "high"];
   const [narrow, wide] = choice!.options;
-  assert.equal(contextWindowOptionAcceptsEffort(wide!, "low"), false, "the 1M variant does not list low");
-  assert.equal(contextWindowOptionAcceptsEffort(wide!, "high"), true);
-  assert.equal(contextWindowOptionAcceptsEffort(narrow!, "low"), true);
-  assert.equal(contextWindowOptionAcceptsEffort(wide!, ""), false, "an unset effort is never sent");
+  assert.equal(contextWindowOptionAcceptsEffort(wide!, "low", agentLevels), false, "the 1M variant does not list low");
+  assert.equal(contextWindowOptionAcceptsEffort(wide!, "high", agentLevels), true);
+  assert.equal(contextWindowOptionAcceptsEffort(narrow!, "low", agentLevels), true);
+  assert.equal(contextWindowOptionAcceptsEffort(wide!, "", agentLevels), false, "an unset effort is never sent");
+  assert.equal(contextWindowOptionAcceptsEffort(narrow!, "medium", agentLevels), false,
+    "a variant advertising its own efforts is checked against those, not the agent's wider set");
 
-  // A variant advertising no efforts inherits the agent's levels, the same set the current
-  // selection came from, so it accepts whatever is selected.
+  // A variant advertising no efforts inherits the agent's levels, so those are what it is checked
+  // against: a persisted effort that discovery has since dropped must not be carried over.
   const inherited = contextWindowChoice(catalog, "opus[1m]");
   assert.ok(inherited);
   assert.deepEqual(inherited!.options.map((option) => option.efforts), [undefined, undefined]);
-  assert.equal(contextWindowOptionAcceptsEffort(inherited!.options[0]!, "low"), true);
+  assert.equal(contextWindowOptionAcceptsEffort(inherited!.options[0]!, "low", agentLevels), true);
+  assert.equal(contextWindowOptionAcceptsEffort(inherited!.options[0]!, "low", ["high"]), false,
+    "the agent no longer advertises low, so an inherited-effort variant rejects it too");
+  assert.equal(contextWindowOptionAcceptsEffort(inherited!.options[0]!, "low", []), false);
+  assert.equal(contextWindowOptionAcceptsEffort(inherited!.options[0]!, "low", undefined), false);
 });

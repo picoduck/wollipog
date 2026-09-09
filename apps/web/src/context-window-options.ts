@@ -87,14 +87,21 @@ export function contextWindowChoice(
   };
 }
 
-/** Whether a window variant accepts the effort the session currently has explicitly selected.
- * A variant that advertises its own efforts and does not list this one would be rejected by the
- * control plane's capability check (409), so the switch must let that variant fall back to its own
- * default instead. A variant advertising no efforts inherits the agent's levels — the same set the
- * current selection came from — so it always accepts it. */
-export function contextWindowOptionAcceptsEffort(option: ContextWindowOption, effort: string): boolean {
+/** Whether a window variant accepts the effort the session currently has selected. Mirrors the
+ * control plane's own rule exactly (`capabilityConfigError` in apps/control-plane/src/sessions.ts:
+ * `selectedModel?.efforts?.length ? selectedModel.efforts : capabilities.effortLevels`), because an
+ * effort this returns false for is a 409 rather than a config change. A variant advertising no
+ * efforts of its own inherits the agent's levels, so those are what it must be checked against —
+ * the currently displayed effort can be stale after discovery narrows them. When the effort cannot
+ * carry over the caller clears it and the target variant's own default applies. */
+export function contextWindowOptionAcceptsEffort(
+  option: ContextWindowOption,
+  effort: string,
+  agentEffortLevels: readonly string[] | undefined,
+): boolean {
   if (!effort) return false;
-  return option.efforts?.length ? option.efforts.includes(effort) : true;
+  const supported = option.efforts?.length ? option.efforts : agentEffortLevels ?? [];
+  return supported.includes(effort);
 }
 
 /** "Opus 5 (1M Context)" → "Opus 5": the window moves to the Context Window control. */

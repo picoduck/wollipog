@@ -143,6 +143,7 @@ export function ModelEffortMenuChoices({
   selectedModel,
   contextChoice,
   modelEfforts,
+  agentEffortLevels,
   effortVal,
   apply,
 }: {
@@ -153,6 +154,8 @@ export function ModelEffortMenuChoices({
   /** Present only when the provider lists two windows for the selected model's base. */
   contextChoice?: ContextWindowChoice | null;
   modelEfforts: string[];
+  /** The agent's own effort levels, which a variant advertising none of its own inherits. */
+  agentEffortLevels?: readonly string[];
   effortVal: string;
   apply: Apply;
 }) {
@@ -182,13 +185,16 @@ export function ModelEffortMenuChoices({
               checked={option.id === contextChoice.selectedId}
               title={`${option.contextWindow.toLocaleString()} tokens; applies to the next turn`}
               // A window switch keeps the effort: variants of one base share their effort levels.
-              // The effort has to ride along explicitly — the control plane reads a model-only
-              // patch as "no effort chosen" and resolves back to the model's default effort. A
-              // variant that does not advertise the current effort is the exception: sending it
-              // would be rejected as unsupported, so let that one fall back to its own default.
-              onSelect={() => apply(contextWindowOptionAcceptsEffort(option, effortVal)
-                ? { model: option.id, effort: effortVal }
-                : { model: option.id })}
+              // Always send the key. The control plane reads an omitted effort on a model patch as
+              // "no effort chosen" and resolves back to the model's default, and an omitted key
+              // also cannot clear an effort already staged in the composer's pending config, which
+              // would then ride along with the next prompt. `""` is the established reset (the
+              // Model group above uses it), so an effort the target variant would reject as
+              // unsupported becomes that variant's own default instead of a 409.
+              onSelect={() => apply({
+                model: option.id,
+                effort: contextWindowOptionAcceptsEffort(option, effortVal, agentEffortLevels) ? effortVal : "",
+              })}
             >
               {option.label}
             </MenuRadioOption>
@@ -218,7 +224,7 @@ export function modelEffortControlLabel(selectedModel: MenuModelChoice | undefin
 }
 
 export function ModelEffortControl({ session, apply }: { session: SessionView; apply: Apply }) {
-  const { models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal } = useSessionConfig(session);
+  const { caps, models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal } = useSessionConfig(session);
   if (models.length === 0 && modelEfforts.length === 0) return null;
   const pickerModel = models.find((model) => model.id === modelVal) ?? selectedModel;
   const selectedWindow = contextChoice?.options.find((option) => option.id === contextChoice.selectedId);
@@ -246,6 +252,7 @@ export function ModelEffortControl({ session, apply }: { session: SessionView; a
         selectedModel={selectedModel}
         contextChoice={contextChoice}
         modelEfforts={modelEfforts}
+        agentEffortLevels={caps?.effortLevels}
         effortVal={effortVal}
         apply={apply}
       />}

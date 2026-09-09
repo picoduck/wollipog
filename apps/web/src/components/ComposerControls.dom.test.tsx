@@ -120,6 +120,7 @@ test("the Context Window group offers provider-stated variants and switches only
   const render = (
     contextChoice: Parameters<typeof ModelEffortMenuChoices>[0]["contextChoice"],
     effortVal = "low",
+    agentEffortLevels: readonly string[] = ["low", "high"],
   ) => act(async () => {
     root.render(
       <div role="menu" onKeyDown={(event) => handleMenuKeyDown(event, () => undefined)}>
@@ -129,6 +130,7 @@ test("the Context Window group offers provider-stated variants and switches only
           selectedModel={{ id: "opus[1m]", displayName: "Opus 5" }}
           contextChoice={contextChoice}
           modelEfforts={["low", "high"]}
+          agentEffortLevels={agentEffortLevels}
           effortVal={effortVal}
           apply={(patch) => applied.push(patch)}
         />
@@ -170,15 +172,27 @@ test("the Context Window group offers provider-stated variants and switches only
     const asymmetric = [...container
       .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
     await act(async () => { asymmetric[1]!.click(); });
-    assert.deepEqual(applied, [{ model: "opus[1m]" }],
-      "the 1M variant does not advertise low, so the switch lets its own default effort apply");
+    // An explicit reset, not an omitted key: omitting it would leave `low` staged in the composer's
+    // pending config, which then rides along with the next prompt and is rejected as unsupported.
+    assert.deepEqual(applied, [{ model: "opus[1m]", effort: "" }],
+      "the 1M variant does not advertise low, so the switch clears it and its own default applies");
+
+    applied.length = 0;
+    // Neither variant advertises its own efforts, so both inherit the agent's levels. The session
+    // still shows a persisted `low` that discovery has since dropped; it must not be carried over.
+    await render(choice, "low", ["high"]);
+    const stale = [...container
+      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+    await act(async () => { stale[0]!.click(); });
+    assert.deepEqual(applied, [{ model: "opus", effort: "" }],
+      "an effort the agent no longer advertises is cleared rather than sent");
 
     applied.length = 0;
     await render(choice, "");
     const defaultEffortRadios = [...container
       .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
     await act(async () => { defaultEffortRadios[0]!.click(); });
-    assert.deepEqual(applied, [{ model: "opus" }],
+    assert.deepEqual(applied, [{ model: "opus", effort: "" }],
       "an unset effort stays unset so the new model's own default applies");
 
     await render(null);
