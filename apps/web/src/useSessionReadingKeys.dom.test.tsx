@@ -113,8 +113,10 @@ async function renderHarness(onTranscriptKeyDown?: React.KeyboardEventHandler<HT
 test("Session Reading scroll keys use fixed line, page, start, and latest semantics", async () => {
   const fixture = await renderHarness();
   const scrollCountAtIntent: number[] = [];
-  fixture.scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, () => {
+  const intentDirections: Array<string | undefined> = [];
+  fixture.scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, (event) => {
     scrollCountAtIntent.push(fixture.scrollCalls.length);
+    intentDirections.push((event as CustomEvent<{ direction?: string }>).detail?.direction);
   });
 
   dispatchKey("j");
@@ -138,6 +140,9 @@ test("Session Reading scroll keys use fixed line, page, start, and latest semant
   ]);
   assert.deepEqual(scrollCountAtIntent, [0, 1, 2, 3, 4, 5, 6],
     "every Session Reading scroll publishes viewport ownership first");
+  // The harness reader sits at scrollTop 0, so Session Start claims upward from the head itself.
+  assert.deepEqual(intentDirections, ["down", "up", "down", "up", "up", "down", "down"],
+    "each claim names the direction of the scroll it precedes, with start at the head still upward");
   assert.deepEqual(fixture.calls, ["pauseFollow", "pauseFollow", "pauseFollow", "resumeFollow", "resumeFollow"]);
 
   await act(async () => { fixture.root.unmount(); });

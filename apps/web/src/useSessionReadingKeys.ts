@@ -72,7 +72,9 @@ function scrollBy(scroll: HTMLElement | null, top: number): void {
 
 function scrollTo(scroll: HTMLElement | null, top: number): void {
   if (!scroll) return;
-  dispatchVirtualViewportIntent(scroll, top < scroll.scrollTop ? "up" : "down");
+  // Session Start at the head and Latest at the tail move nothing, but the claim still reads as
+  // that direction: at the head, an upward claim is how the transcript learns to fetch history.
+  dispatchVirtualViewportIntent(scroll, top <= scroll.scrollTop ? "up" : "down");
   scroll.scrollTo({ top });
 }
 
