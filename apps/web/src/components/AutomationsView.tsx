@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   AgentDefinition,
   AutomationAction,
@@ -41,6 +41,60 @@ function actionSummary(action: AutomationAction): string {
   if (action.kind === "prompt_session") return `Prompt session ${action.sessionId}`;
   if (action.kind === "workflow_run") return `Workflow ${action.request.workflowId} on ${action.request.runnerId}`;
   return `Create ${action.request.agentId} session on ${action.request.runnerId}`;
+}
+
+/**
+ * A single automation, collapsed by default. Its own `expanded` state — not a lookup keyed by id in
+ * the parent — is what survives the 5s poll: React preserves a component instance's hooks across
+ * re-renders as long as its `key` (the automation id) matches, regardless of `items` being a fresh
+ * array each refresh. The body is unmounted rather than hidden while collapsed, so a collapsed card
+ * has no reachable focus targets and no displayed signing secret — the secret itself stays in the
+ * parent's `credential` state, untouched by mount/unmount, so re-expanding shows it again.
+ */
+function AutomationCard({
+  id,
+  name,
+  action,
+  enabled,
+  children,
+}: {
+  id: string;
+  name: string;
+  action: string;
+  enabled: boolean;
+  children: ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const toggleId = `automation-toggle-${id}`;
+  const bodyId = `automation-body-${id}`;
+  return (
+    <article className="automation-card">
+      <h3 className="automation-card-heading">
+        <button
+          type="button"
+          id={toggleId}
+          className="automation-card-toggle"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <span className="automation-card-summary">
+            <span className="automation-card-name">{name}</span>
+            <span className="automation-card-action">{action}</span>
+          </span>
+          <span className="automation-card-meta">
+            <span className={`automation-state ${enabled ? "enabled" : "paused"}`}>{enabled ? "Enabled" : "Paused"}</span>
+            <span className="automation-card-chevron" aria-hidden="true">▸</span>
+          </span>
+        </button>
+      </h3>
+      {expanded && (
+        <div id={bodyId} role="region" aria-labelledby={toggleId} className="automation-card-body">
+          {children}
+        </div>
+      )}
+    </article>
+  );
 }
 
 export function AutomationsView() {
@@ -451,8 +505,7 @@ export function AutomationsView() {
           const executions = details[item.automationId] ?? [];
           const triggerItems = triggers[item.automationId] ?? [];
           const latest = executions[0];
-          return <article className="automation-card" key={item.automationId}>
-            <div className="automation-card-head"><div><h3>{item.name}</h3><p>{actionSummary(item.action)}</p></div><span className={`automation-state ${item.enabled ? "enabled" : "paused"}`}>{item.enabled ? "Enabled" : "Paused"}</span></div>
+          return <AutomationCard key={item.automationId} id={item.automationId} name={item.name} action={actionSummary(item.action)} enabled={item.enabled}>
             <dl className="automation-facts"><div><dt>Schedule</dt><dd><code>{item.cron}</code> · {item.timezone}</dd></div><div><dt>Next Fire</dt><dd>{formatTime(item.nextFireAt)}</dd></div><div><dt>Last Result</dt><dd>{latest ? `${titleCaseLabel(latest.status)} · ${formatTime(latest.completedAt ?? latest.startedAt ?? latest.createdAt)}` : "Never"}</dd></div><div><dt>Policies</dt><dd>{titleCaseLabel(item.misfirePolicy.kind)} · {titleCaseLabel(item.runnerPolicy.kind)} · {titleCaseLabel(item.concurrencyPolicy)}</dd></div><div><dt>Ceilings</dt><dd>${item.limits.maxCostUsd} · {item.limits.maxToolCalls} Tools</dd></div></dl>
             {latest?.error && <p className="automation-execution-error">{latest.error}</p>}
             <div className="automation-card-actions automation-trigger-create"><button className="btn ghost sm" disabled={busy} onClick={() => void createTrigger(item, "webhook")}>Add Webhook</button><button className="btn ghost sm" disabled={busy} onClick={() => void createTrigger(item, "chatops")}>Add Chat-Ops</button><small>Pausing blocks cron and signed triggers, but credentials can be configured while paused.</small></div>
@@ -465,7 +518,7 @@ export function AutomationsView() {
             })}<p className="automation-hint">Send <code>application/vnd.wollipog.automation-trigger+json</code> with X-Wollipog-Timestamp, X-Wollipog-Nonce, and X-Wollipog-Signature. Signed deliveries only select this fixed automation; they cannot override prompts, runners, paths, or ceilings.</p></div>}
             <div className="automation-card-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void mutate(() => api.updateAutomation(item.automationId, { ...specOf(item), enabled: !item.enabled }))}>{item.enabled ? "Pause" : "Enable"}</button><button className="btn ghost sm" onClick={() => { setEditingId(item.automationId); setEditingSpec(specOf(item)); setForm(formFrom(specOf(item))); setShowForm(true); }}>Edit</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: `Delete “${item.name}”?`, message: "The automation is removed permanently. Execution history remains in the audit database.", confirmLabel: "Delete Automation", tone: "danger" })) { if (editingId === item.automationId) closeEditor(); await mutate(() => api.deleteAutomation(item.automationId)); } })()}>Delete</button></div>
             {executions.length > 0 && <details className="automation-history"><summary>Execution History ({executions.length})</summary><div className="automation-history-list">{executions.map((execution) => <div className="automation-execution" key={execution.executionId}><div><strong>{titleCaseLabel(execution.status)}</strong><span>{formatTime(execution.scheduledFor)}</span></div><code>{execution.idempotencyKey}</code>{execution.commands?.length ? <ul className="automation-command-list" aria-label="Durable Runner Command Receipts">{execution.commands.map((command) => <li key={command.commandId}><span>{titleCaseLabel(command.kind.replace("_", " "))} · {titleCaseLabel(command.state)}</span><small>{command.attemptCount} delivery attempt{command.attemptCount === 1 ? "" : "s"}</small>{command.lastError && <em>{command.lastError}</em>}</li>)}</ul> : execution.deliveryMode === "legacy_at_most_once" ? <small className="automation-legacy-delivery">Legacy At-Most-Once Delivery</small> : null}{execution.error && <p>{execution.error}</p>}{execution.sessionId && <button className="link-button" type="button" onClick={() => navigate({ name: "session", id: execution.sessionId! })}>Open Session</button>}</div>)}</div></details>}
-          </article>;
+          </AutomationCard>;
         })}
       </div>
     </section>
