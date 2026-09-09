@@ -346,7 +346,8 @@ export function claudeContextWindowRejection(result: unknown, resolvedModel: str
   if (!/long[- ]context/iu.test(detail)) return null;
   const model = resolvedModel ?? "the selected model";
   return `The provider rejected the 1M context window for ${model}; the turn did not run. ` +
-    `Provider response: ${detail} Choose a different Context Window in the composer's model menu before the next turn.`;
+    `Provider response: ${detail} Choose a different Context Window for this model in the composer's ` +
+    `model menu, or select another model, before the next turn.`;
 }
 
 export class ClaudeCodeDriver implements Driver {

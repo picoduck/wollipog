@@ -3558,6 +3558,9 @@ test("Claude explains a provider rejection of the 1M context window instead of a
   assert.match((errors[0] as { message: string }).message, /rejected the 1M context window for claude-haiku-4-5-20251001\[1m\]/);
   assert.match((errors[0] as { message: string }).message, /long context beta is not yet available/);
   assert.match((errors[0] as { message: string }).message, /Context Window/);
+  // The runner cannot know whether the composer renders a Context Window group for this base, so
+  // the way out also names the always-available fallback.
+  assert.match((errors[0] as { message: string }).message, /or select another model/);
   assert.deepEqual(h.contextUsage, [], "a rejected turn served no window");
 
   // Other failures stay as they were: no context-window story is invented for them.

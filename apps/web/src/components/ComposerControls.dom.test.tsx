@@ -117,7 +117,10 @@ test("the Context Window group offers provider-stated variants and switches only
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const render = (contextChoice: Parameters<typeof ModelEffortMenuChoices>[0]["contextChoice"]) => act(async () => {
+  const render = (
+    contextChoice: Parameters<typeof ModelEffortMenuChoices>[0]["contextChoice"],
+    effortVal = "low",
+  ) => act(async () => {
     root.render(
       <div role="menu" onKeyDown={(event) => handleMenuKeyDown(event, () => undefined)}>
         <ModelEffortMenuChoices
@@ -126,21 +129,22 @@ test("the Context Window group offers provider-stated variants and switches only
           selectedModel={{ id: "opus[1m]", displayName: "Opus 5" }}
           contextChoice={contextChoice}
           modelEfforts={["low", "high"]}
-          effortVal="high"
+          effortVal={effortVal}
           apply={(patch) => applied.push(patch)}
         />
       </div>,
     );
   });
+  const choice = {
+    baseModelId: "opus",
+    options: [
+      { id: "opus", contextWindow: 200_000, label: "200K" },
+      { id: "opus[1m]", contextWindow: 1_000_000, label: "1M" },
+    ],
+    selectedId: "opus[1m]",
+  };
   try {
-    await render({
-      baseModelId: "opus",
-      options: [
-        { id: "opus", contextWindow: 200_000, label: "200K" },
-        { id: "opus[1m]", contextWindow: 1_000_000, label: "1M" },
-      ],
-      selectedId: "opus[1m]",
-    });
+    await render(choice);
     const group = container.querySelector('[role="group"][aria-label="Context Window"]');
     assert.ok(group, "a real choice renders a Context Window group");
     const radios = [...group!.querySelectorAll('[role="menuitemradio"]')] as HTMLButtonElement[];
@@ -148,7 +152,18 @@ test("the Context Window group offers provider-stated variants and switches only
     assert.deepEqual(radios.map((radio) => radio.getAttribute("aria-checked")), ["false", "true"]);
     assert.equal(radios[0]!.title, "200,000 tokens; applies to the next turn");
     await act(async () => { radios[0]!.click(); });
-    assert.deepEqual(applied, [{ model: "opus" }], "a window switch changes the model id and keeps the effort");
+    // The effort has to be sent explicitly: the control plane reads a model-only patch as "no
+    // effort chosen" and resolves an explicit `low` back to the model's default effort.
+    assert.deepEqual(applied, [{ model: "opus", effort: "low" }],
+      "a window switch changes the model id and carries the explicit effort along");
+
+    applied.length = 0;
+    await render(choice, "");
+    const defaultEffortRadios = [...container
+      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+    await act(async () => { defaultEffortRadios[0]!.click(); });
+    assert.deepEqual(applied, [{ model: "opus" }],
+      "an unset effort stays unset so the new model's own default applies");
 
     await render(null);
     assert.equal(container.querySelector('[role="group"][aria-label="Context Window"]'), null,

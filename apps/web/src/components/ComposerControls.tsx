@@ -181,7 +181,9 @@ export function ModelEffortMenuChoices({
               checked={option.id === contextChoice.selectedId}
               title={`${option.contextWindow.toLocaleString()} tokens; applies to the next turn`}
               // A window switch keeps the effort: variants of one base share their effort levels.
-              onSelect={() => apply({ model: option.id })}
+              // The effort has to ride along explicitly — the control plane reads a model-only
+              // patch as "no effort chosen" and resolves back to the model's default effort.
+              onSelect={() => apply(effortVal ? { model: option.id, effort: effortVal } : { model: option.id })}
             >
               {option.label}
             </MenuRadioOption>
