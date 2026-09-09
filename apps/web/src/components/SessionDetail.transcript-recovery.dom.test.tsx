@@ -1570,3 +1570,31 @@ test("a scrollbar press stays armed until the button is released", async () => {
     await unmountFixture(fixture);
   }
 });
+
+test("an upward Session Reading claim at the head loads the next page, a downward one never arms", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 0 });
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(
+        new domWindow.CustomEvent(VIRTUAL_VIEWPORT_INTENT_EVENT, { detail: { direction: "down" } }) as never,
+      );
+    });
+    await streamReaderScroll(fixture.scroller, [40]);
+    assert.equal(pages.tailCalls.length, 1, "a downward programmatic claim cannot arm pagination");
+
+    await act(async () => {
+      fixture.scroller.scrollTop = 0;
+      fixture.scroller.dispatchEvent(
+        new domWindow.CustomEvent(VIRTUAL_VIEWPORT_INTENT_EVENT, { detail: { direction: "up" } }) as never,
+      );
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "an upward claim at the head requests the earlier page directly");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

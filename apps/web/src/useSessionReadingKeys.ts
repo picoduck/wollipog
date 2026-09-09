@@ -66,13 +66,13 @@ function nativeControlOwnsFocus(targetDocument: Document): boolean {
 
 function scrollBy(scroll: HTMLElement | null, top: number): void {
   if (!scroll) return;
-  dispatchVirtualViewportIntent(scroll);
+  dispatchVirtualViewportIntent(scroll, top < 0 ? "up" : "down");
   scroll.scrollBy({ top });
 }
 
 function scrollTo(scroll: HTMLElement | null, top: number): void {
   if (!scroll) return;
-  dispatchVirtualViewportIntent(scroll);
+  dispatchVirtualViewportIntent(scroll, top < scroll.scrollTop ? "up" : "down");
   scroll.scrollTo({ top });
 }
 

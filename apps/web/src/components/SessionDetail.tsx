@@ -130,7 +130,7 @@ import {
   useFollowTail,
 } from "../useFollowTail.js";
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
-import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
+import { VIRTUAL_VIEWPORT_INTENT_EVENT, virtualViewportIntentDirection } from "../viewport-intent.js";
 import { inTypingContext, matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
 import { useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
 import {
@@ -2077,9 +2077,18 @@ function SessionDetailLoaded({
   useEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
-    scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markSingleEarlierActivityIntent);
-    return () => scroll.removeEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markSingleEarlierActivityIntent);
-  }, [markSingleEarlierActivityIntent]);
+    // Session Reading keys and Inbox paging claim the viewport right before a programmatic
+    // scroll. A downward claim is never a request for history; an upward one at the head has no
+    // scroll event to ride on, exactly like an upward reading key on the region itself.
+    const markProgrammaticIntent = (event: Event) => {
+      const direction = virtualViewportIntentDirection(event);
+      if (direction === "down") return;
+      markSingleEarlierActivityIntent();
+      if (direction === "up") requestEarlierFromInputAtHead();
+    };
+    scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markProgrammaticIntent);
+    return () => scroll.removeEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markProgrammaticIntent);
+  }, [markSingleEarlierActivityIntent, requestEarlierFromInputAtHead]);
 
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).

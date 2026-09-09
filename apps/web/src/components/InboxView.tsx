@@ -128,7 +128,7 @@ export function pageInboxPreview(
     ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 0.5
     : scroll.scrollTop > 0.5;
   if (!canMove) return;
-  dispatchVirtualViewportIntent(scroll);
+  dispatchVirtualViewportIntent(scroll, direction === "next" ? "down" : "up");
   beginProgrammaticScroll?.(direction);
   const target = scroll.scrollTop + (direction === "next" ? 1 : -1) * scroll.clientHeight;
   // Following live output can leave a browser-native smooth scroll in flight after its scheduled
