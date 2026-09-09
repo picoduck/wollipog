@@ -43,6 +43,34 @@ import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./
 import { useIsMobile } from "./useIsMobile.js";
 
 /**
+ * The order badges are offered a place in the measured status row when it cannot hold them all
+ * (#784).
+ *
+ * Background work is claimed first. It is authoritative and it has no other home on a phone — a
+ * session waiting on an external job is invisible everywhere else on that screen — so the lifecycle
+ * group and then the passive change statuses yield to it, rather than it taking a line of its own.
+ * Within a tier the leftmost badge is claimed first, so what survives still reads left to right.
+ *
+ * Offering rather than reserving is the point: a row too narrow for the background badge at all
+ * (320px cannot hold "Waiting on External Job") keeps the statuses that DO fit instead of emptying
+ * itself for one that never will. Clipping is never an option, so that case belongs to the `+N`
+ * disclosure — which lists every status either way — and to the badge's own live region.
+ */
+export function statusKeepOrder(items: HTMLElement[]): HTMLElement[] {
+  // The active-subagents badge shares the background-work badge's CLASS but not its rank: workers
+  // are foreground work, and they rank with the lifecycle group they run inside.
+  const tier = (item: HTMLElement) =>
+    item.classList.contains("background-work-badge") &&
+      !item.classList.contains("active-subagents-badge")
+      ? 0
+      : item.parentElement?.classList.contains("change-status-indicators") ? 2 : 1;
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => tier(left.item) - tier(right.item) || left.index - right.index)
+    .map(({ item }) => item);
+}
+
+/**
  * The responsive Session header. Desktop keeps one compact row for identity, status, Share / More
  * Actions, and shell controls. Mobile identity moves into the app topbar, leaving this component
  * as the single status/action line above the transcript.
@@ -124,6 +152,9 @@ export function SessionHeader({
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [statusPopoverOpen, setStatusPopoverOpen] = useState(false);
   const [hiddenStatusCount, setHiddenStatusCount] = useState(0);
+  // Set when a focused badge is measured out of the row before its `+N` trigger exists to take the
+  // focus; the effect below hands it over once that trigger has rendered.
+  const focusDisclosureRef = useRef(false);
   const [moveProjectOpen, setMoveProjectOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -171,13 +202,13 @@ export function SessionHeader({
         onOpenBackgroundWork();
       } : undefined} />
   );
-  const renderNoninteractiveStatuses = (includeBackground = true) => (
+  const renderNoninteractiveStatuses = () => (
     <>
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} onOpenAttention={onOpenAttention ? () => {
         closeStatusPopover(false);
         onOpenAttention();
       } : undefined} />
-      {includeBackground && renderBackgroundWork()}
+      {renderBackgroundWork()}
       <ChangeStatusBadge change={changeStatus ?? null} />
       {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
@@ -210,6 +241,15 @@ export function SessionHeader({
     ));
     const measure = () => {
       const items = statusItems();
+      // Measuring applies candidate sets, so every badge is briefly `display: none` — including the
+      // one the row keeps — and a `display: none` element cannot hold focus. Chromium runs its focus
+      // fixup at the next rendering update, by which time the winner is visible again, but that is
+      // an implementation detail to lean on rather than a guarantee. Remember what was focused and
+      // put focus back where it belongs once the row has settled.
+      const focusedBadge = items.find((item) => item === document.activeElement) ?? null;
+      // Each measurement decides the handover afresh, so a pending one from a previous measurement
+      // can never outlive the layout that asked for it.
+      focusDisclosureRef.current = false;
       for (const item of items) item.hidden = false;
       if (!isMobile || items.length === 0) {
         setHiddenStatusCount(0);
@@ -228,25 +268,54 @@ export function SessionHeader({
       const occupiedOverflowWidth = overflowTrigger ? overflowWidth + gap : 0;
       const availableWithoutTrigger = containerBox.width + occupiedOverflowWidth;
       const availableWithTrigger = Math.max(0, availableWithoutTrigger - overflowWidth - gap);
-      const ordered = items
-        .map((item) => ({ item, box: item.getBoundingClientRect() }))
-        .sort((left, right) => left.box.left - right.box.left);
-      const totalWidth = Math.max(...ordered.map(({ box }) => box.right - containerBox.left));
-      let visibleCount = ordered.length;
-
-      if (totalWidth > availableWithoutTrigger + 0.5) {
-        visibleCount = 0;
-        for (const { box } of ordered) {
-          if (box.right - containerBox.left > availableWithTrigger + 0.5) break;
-          visibleCount += 1;
+      // The row's right edge, measured from the container's own left. An item past the container's
+      // clip still has real geometry, and the container's left never moves: only its width changes
+      // with the disclosure trigger, which the two budgets above already account for.
+      const usedWidth = () => {
+        let right = 0;
+        for (const item of items) {
+          if (item.hidden) continue;
+          right = Math.max(right, item.getBoundingClientRect().right - containerBox.left);
         }
+        return right;
+      };
+
+      if (usedWidth() <= availableWithoutTrigger + 0.5) {
+        setHiddenStatusCount(0);
+        restoreRowFocus(focusedBadge);
+        return;
       }
 
-      ordered.forEach(({ item }, index) => {
-        item.hidden = index >= visibleCount;
-      });
-      setHiddenStatusCount(ordered.length - visibleCount);
+      // Claim the row in priority order and keep a badge only if the row still fits with it in.
+      // Re-measured every time rather than cut as a suffix of one initial layout: a badge's
+      // position depends on which badges BEFORE it are in the row, so what fits is only knowable
+      // with the candidate set actually applied.
+      for (const item of items) item.hidden = true;
+      let hiddenCount = items.length;
+      for (const item of statusKeepOrder(items)) {
+        item.hidden = false;
+        if (usedWidth() > availableWithTrigger + 0.5) item.hidden = true;
+        else hiddenCount -= 1;
+      }
+      setHiddenStatusCount(hiddenCount);
+      restoreRowFocus(focusedBadge);
     };
+
+    /**
+     * Keyboard focus follows the badge: back onto it when the row keeps it, and onto the disclosure
+     * that now holds it when the row does not. Without this, a resize or a live status change drops
+     * the user at <body>, where the next Tab restarts from the top of the document.
+     */
+    function restoreRowFocus(focusedBadge: HTMLElement | null) {
+      if (!focusedBadge || document.activeElement === focusedBadge) return;
+      if (!focusedBadge.hidden) {
+        focusedBadge.focus();
+        return;
+      }
+      const trigger = statusPopover.triggerRef.current;
+      if (trigger) trigger.focus();
+      else focusDisclosureRef.current = true;
+    }
 
     measure();
     if (typeof ResizeObserver === "undefined") return;
@@ -270,6 +339,23 @@ export function SessionHeader({
       if (measurementFrame !== null) window.cancelAnimationFrame(measurementFrame);
     };
   }, [isMobile, statusLayoutKey, shareMenu.triggerRef, statusPopover.triggerRef]);
+
+  useEffect(() => {
+    if (!focusDisclosureRef.current) return;
+    // The measurement that set the flag ran in a layout effect, so the commit that renders the
+    // trigger has not happened yet and this effect first sees the old state. Hold the flag rather
+    // than spending it on a null ref; the next measurement clears it if the row changes its mind.
+    const trigger = statusPopover.triggerRef.current;
+    if (!trigger) return;
+    focusDisclosureRef.current = false;
+    // Only claim focus nobody else has taken. This effect runs a commit after the measurement, and
+    // in that window the user may have focused something else — a menu, a dialog, the composer —
+    // which a bare focus() would yank them out of. Same rule as the async action path below:
+    // reclaim a dropped focus, never move a live one.
+    if (document.activeElement === document.body || document.activeElement === null) {
+      trigger.focus();
+    }
+  });
 
   useEffect(() => {
     if (hiddenStatusCount === 0 && statusPopoverOpen) {
@@ -357,11 +443,8 @@ export function SessionHeader({
           </div>
         </>
       )}
-      {isMobile && visibleBackgroundWorkState && (
-        <div className="session-header-background-work">{renderBackgroundWork()}</div>
-      )}
       <div className="session-header-statuses" ref={statusesRef}>
-        {renderNoninteractiveStatuses(!isMobile)}
+        {renderNoninteractiveStatuses()}
         {activeSubagents && (
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} workers={activeSubagents.workers} />
         )}
