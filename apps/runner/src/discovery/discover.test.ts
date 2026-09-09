@@ -31,7 +31,8 @@ test("Direct WSL Agent Control requires an exact absolute Node 22+ runtime", () 
 
 test("config-only agents cannot self-attest a Direct WSL Agent Control runtime", () => {
   const configured = cfg({ context: { kind: "wsl", distro: "Ubuntu" },
-    wslAgentControl: { protocolVersion: 1, nodeRuntime: "/unverified/node" } });
+    wslAgentControl: { protocolVersion: 1, nodeRuntime: "/unverified/node",
+      safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" } });
   assert.equal(mergeAgents([configured], [])[0]!.wslAgentControl, undefined);
 });
 

@@ -71,6 +71,34 @@ async function wslSlashCommands(distro: string, driver: AgentDriverKind): Promis
   return out;
 }
 
+/** Discovery is only a UI/admission precondition. The root-installed launcher repeats every
+ * executable and kernel check immediately before preparing a launch, so this cannot become an
+ * authority-bearing pathname check. Keep the probe fixed to distro-owned system paths. */
+async function probeWslSafeLauncher(distro: string, nodeRuntime: string | undefined): Promise<{ bwrapRuntime: string } | null> {
+  if (!nodeRuntime?.startsWith("/") || /[\0\r\n]/u.test(nodeRuntime)) return null;
+  const script = [
+    "set -eu",
+    "node=$1",
+    "test \"$(id -u)\" != 0",
+    "compiler=$(readlink -f /usr/bin/cc); case \"$compiler\" in /usr/bin/*) ;; *) exit 125;; esac",
+    "for file in \"$compiler\" /usr/bin/bwrap \"$node\"; do",
+    "  test -f \"$file\" && test ! -L \"$file\"",
+    "  while test \"$file\" != /; do",
+    "    test ! -L \"$file\"; test \"$(stat -c %u \"$file\")\" = 0",
+    "    mode=$(stat -c %a \"$file\"); test $((0$mode & 022)) = 0",
+    "    file=${file%/*}; test -n \"$file\" || file=/",
+    "  done",
+    "done",
+    "/usr/bin/bwrap --help",
+  ].join("\n");
+  const result = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", script, "wollipog-probe", nodeRuntime], { timeoutMs: 5_000 });
+  if (result.code !== 0) return null;
+  const help = `${result.stdout}\n${result.stderr}`;
+  return ["--bind-fd", "--ro-bind-fd", "--sync-fd"].every((flag) => help.includes(flag))
+    ? { bwrapRuntime: "/usr/bin/bwrap" }
+    : null;
+}
+
 /** Curated capabilities + the agent's discovered slash commands. Dynamic model discovery is applied
  * to the merged agent list afterward (enrichAgentModels), so config + discovered agents share it. */
 function withSlashCommands(driver: AgentDriverKind, slashCommands: AgentSlashCommand[]): AgentCapabilities | undefined {
@@ -428,10 +456,11 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           }
           return;
         }
-        const [baseProbe, slash, nodeVersion] = await Promise.all([
+        const [baseProbe, slash, nodeVersion, safeLauncher] = await Promise.all([
           k.bin === "claude" ? probeWslClaudeCode(distro, bin.launch, bin.via) : wslProbe(distro, k, bin.launch),
           wslSlashCommands(distro, k.driver),
           node ? run("wsl.exe", ["-d", distro, "--exec", node.launch.command, ...node.launch.args, "--version"], { timeoutMs: 5_000 }) : null,
+          probeWslSafeLauncher(distro, node?.launch.command),
         ]);
         const agentControlRuntime = supportedWslAgentControlNodeRuntime(
           node?.launch ?? null,
@@ -460,7 +489,9 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
             : catalogCapabilities,
           source: "discovered",
           ...(agentControlRuntime
-            ? { wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: agentControlRuntime } }
+            ? { wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: agentControlRuntime,
+                ...(safeLauncher ? { safeLauncherProtocolVersion: 1 as const,
+                  bwrapRuntime: safeLauncher.bwrapRuntime } : {}) } }
             : {}),
           ...(codexAppServer ? { codexAppServer } : {}),
           ...(claudeCode ? { claudeCode } : {}),

@@ -268,19 +268,17 @@ test("isolated provider state clone and cleanup stay inside hashed session parti
   }]);
 
   const wslRemovals: unknown[] = [];
+  const ownerHash = "a".repeat(64);
   await removeExecutionIsolationState(
     bwrap, { kind: "wsl", distro: "Ubuntu" }, "claude-code", "C:/ignored", "target", {
       resolveWsl: async () => { throw new Error("bwrap was uninstalled"); },
-      resolveWslHome: async () => "/home/me",
-      removeWsl: async (context, location) => { wslRemovals.push({ context, location }); },
-    },
+      cleanupWslSessionState: async (distro, owner, sessionKey) => { wslRemovals.push({ distro, owner, sessionKey }); },
+    }, ownerHash,
   );
   assert.deepEqual(wslRemovals, [{
-    context: { kind: "wsl", distro: "Ubuntu" },
-    location: {
-      root: `/home/me/.agent-manager/provider-state/claude/${providerStateKey("target")}`,
-      leaf: `/home/me/.agent-manager/provider-state/claude/${providerStateKey("target")}/projects`,
-    },
+    distro: "Ubuntu",
+    owner: ownerHash,
+    sessionKey: providerStateKey("target"),
   }]);
 });
 

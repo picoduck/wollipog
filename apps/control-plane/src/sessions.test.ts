@@ -581,12 +581,17 @@ test("orchestrator is creation-only and requires the negotiated native harness b
     assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
       "generic ACP stays unavailable through the target-local management bridge");
     agent.driver = "codex-app-server";
-    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.wslAgentControlBridge - 1);
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.wslSafeLauncher - 1);
     assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
-      "structured WSL fails closed before the bridge capability");
+      "structured WSL fails closed before the safe-launcher capability");
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
+      "protocol support alone cannot replace fresh target-local launcher attestation");
+    agent.wslAgentControl = { protocolVersion: 1, nodeRuntime: "/usr/bin/node",
+      safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).ok, true,
-      "current structured Direct WSL may use the authenticated target-local bridge");
+      "current structured Direct WSL may use the authenticated target-local safe launcher");
     assert.equal(svc.createSession({ ...request, launchSurface: "native_tui",
       config: { permissionMode: "orchestrator" } }).status, 409,
     "WSL Orchestrator Native TUI remains unavailable");

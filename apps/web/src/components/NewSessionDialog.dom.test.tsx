@@ -332,7 +332,7 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
   }
 });
 
-test("WSL keeps ordinary Native TUI while Direct Orchestrator requires the v123 bridge", async () => {
+test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and fresh launcher attestation", async () => {
   const wslRunner: RunnerView = {
     ...runner,
     os: "windows",
@@ -377,8 +377,32 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires the v123 
     await unmountFixture(orchestrator);
   }
 
+  const protocolOnly = await mountFixture({
+    runners: [{ ...wslRunner, protocolVersion: 124 }],
+    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+  }, undefined, undefined, async () => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+  }] }));
+  try {
+    await act(async () => { selectProject(protocolOnly.container, project.id); });
+    assert.equal(createButton(protocolOnly.container).disabled, true,
+      "a v124 runner cannot replace fresh launcher attestation");
+  } finally {
+    await unmountFixture(protocolOnly);
+  }
+
+  const safeRunner: RunnerView = {
+    ...wslRunner,
+    protocolVersion: 124,
+    agents: wslRunner.agents.map((agent) => ({
+      ...agent,
+      wslAgentControl: { protocolVersion: 1, nodeRuntime: "/usr/bin/node",
+        safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" },
+    })),
+  };
   const bridged = await mountFixture({
-    runners: [{ ...wslRunner, protocolVersion: 123 }],
+    runners: [safeRunner],
     capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
   }, undefined, undefined, async () => ({ defaults: [{
     agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",

@@ -1407,6 +1407,28 @@ test("getAgentLaunch returns command/args/env/driver/context/version", () => {
   assert.equal(db.getAgentLaunch("nope", "acp-agent"), null);
 });
 
+test("Direct WSL safe-launcher attestation round-trips only from a v124 runner", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const safe = {
+    ...claudeAgent(),
+    wslAgentControl: {
+      protocolVersion: 1 as const,
+      nodeRuntime: "/usr/bin/node",
+      safeLauncherProtocolVersion: 1 as const,
+      bwrapRuntime: "/usr/bin/bwrap",
+    },
+  };
+  db.registerRunner(meta({ agents: [safe] }), 500, PROTOCOL_VERSION);
+  assert.deepEqual(db.getAgentLaunch("runner-1", safe.id)?.wslAgentControl, safe.wslAgentControl);
+  assert.deepEqual(db.getRunner("runner-1")?.agents[0]?.wslAgentControl, safe.wslAgentControl);
+
+  db.registerRunner(meta({ agents: [safe] }), 600, PROTOCOL_VERSION - 1);
+  assert.equal(db.getAgentLaunch("runner-1", safe.id)?.wslAgentControl, undefined);
+  assert.equal(db.getRunner("runner-1")?.agents[0]?.wslAgentControl, undefined,
+    "an older runner cannot persist the newer authority-bearing attestation shape");
+  db.close();
+});
+
 test("protocol-v54 runner agent environment is never persisted by the control plane", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(meta(), 500, 54);

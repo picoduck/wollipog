@@ -132,18 +132,20 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("verified Direct WSL rotates credentials and provisions only the target-local helper launch", async () => {
+test("verified Direct WSL rotates credentials and provisions only the target-local helper and launcher", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-agent-control-"));
   try {
     const installs: string[] = [];
     const host: AgentControlHost = { isSea: true, execPath: "C:\\runner.exe", execArgv: [], configDir: root,
-      installWslHelper: async (distro) => { installs.push(distro); } };
+      installWslHelper: async (distro) => { installs.push(`helper:${distro}`); },
+      installWslLauncher: async (distro) => { installs.push(`launcher:${distro}`); } };
     const launch = spec("codex-app-server");
     launch.context = { kind: "wsl", distro: "Ubuntu-24.04" };
     launch.config = { permissionMode: "orchestrator" };
     const agent: AgentDefinition = { id: launch.agentId, name: "Codex WSL", command: launch.command,
       args: [], env: {}, driver: "codex-app-server", context: launch.context,
-      wslAgentControl: { protocolVersion: 1, nodeRuntime: "/usr/bin/node" } };
+      wslAgentControl: { protocolVersion: 1, nodeRuntime: "/usr/bin/node",
+        safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" } };
     const hashes: string[] = [];
     const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
       orchestratorAgent: agent, registerCredentialAndWait: async (_id: string, hash: string) => {
@@ -166,7 +168,8 @@ test("verified Direct WSL rotates credentials and provisions only the target-loc
     const second = wslAgentControlLaunch(launch.sessionId)!;
     assert.notEqual(second.token, first.token, "every WSL provider restart rotates the credential");
     assert.notEqual(hashes[1], hashes[0]);
-    assert.deepEqual(installs, ["Ubuntu-24.04", "Ubuntu-24.04"]);
+    assert.deepEqual(installs, ["helper:Ubuntu-24.04", "launcher:Ubuntu-24.04",
+      "helper:Ubuntu-24.04", "launcher:Ubuntu-24.04"]);
     removeAgentControlFiles(launch.sessionId, root);
     assert.equal(wslAgentControlLaunch(launch.sessionId), undefined);
 

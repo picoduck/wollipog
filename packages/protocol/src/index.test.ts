@@ -145,12 +145,14 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 123", () => {
-  assert.equal(PROTOCOL_VERSION, 123);
+test("PROTOCOL_VERSION is 124", () => {
+  assert.equal(PROTOCOL_VERSION, 124);
   assert.equal(runnerSupportsProtocol(121, "contextWindowVariants"), false);
   assert.equal(runnerSupportsProtocol(122, "contextWindowVariants"), true);
   assert.equal(runnerSupportsProtocol(122, "wslAgentControlBridge"), false);
   assert.equal(runnerSupportsProtocol(123, "wslAgentControlBridge"), true);
+  assert.equal(runnerSupportsProtocol(123, "wslSafeLauncher"), false);
+  assert.equal(runnerSupportsProtocol(124, "wslSafeLauncher"), true);
   assert.equal(runnerSupportsProtocol(112, "progressAwareSessionWorktrees"), false);
   assert.equal(runnerSupportsProtocol(113, "progressAwareSessionWorktrees"), true);
   assert.equal(runnerSupportsProtocol(113, "hostAdministration"), false);

@@ -255,6 +255,13 @@ test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provide
   assert.match(platform,
     /\$savedBoundaryPreference = \$ErrorActionPreference[\s\S]*\$ErrorActionPreference = "Continue"[\s\S]*\$wslBoundaryExit = \$LASTEXITCODE[\s\S]*\$ErrorActionPreference = \$savedBoundaryPreference/u,
     "native stderr capture must not terminate PowerShell before the explicit exit and TAP checks");
+  assert.match(platform, /apt-get install -y bubblewrap build-essential curl xz-utils/u,
+    "the real target must compile the checked-in native launcher source");
+  assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-agent-control\.wsl\.test\.ts/u,
+    "the real WSL job must exercise the safe launcher and authenticated broker end to end");
+  assert.match(platform, /\$safeWslOutput -notmatch '\(\?m\)\^# pass 1\\r\?\$'/u);
+  assert.match(platform, /\$safeWslOutput -notmatch '\(\?m\)\^# skipped 0\\r\?\$'/u,
+    "the safe-launcher integration must fail if it silently skips");
   assert.match(platform, /wsl\.exe -d Ubuntu-24\.04 -- cmd\.exe \/d \/c exit 0/u,
     "the capability-sensitive outside probe must use WSL's ordinary binfmt command path");
   assert.match(platform, /WSLInterop registration outside bwrap:/u);

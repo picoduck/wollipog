@@ -1069,36 +1069,16 @@ test("Direct WSL bridge binds broker-provisioned private files and launches only
     sessionId: "session-a", token: "never-in-argv", tokenFile: "C:\\state\\session-a.token",
     readyFile: "C:\\state\\session-a.ready", cpUrl: "http://127.0.0.1:4317",
     socketPath: "/tmp/wlp-test/control.sock",
+    safeLauncherProtocolVersion: 1 as const, bwrapRuntime: "/usr/bin/bwrap",
+    socketDirectory: { path: "/var/lib/wollipog-wsl-launcher/session/relay", identity: "1:2:3" },
   };
-  const isolation = { backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "deny" as const,
-    wslAgentControl: bridge };
-  const isolated = buildBwrapArgs(
-    { command: "/usr/bin/codex", args: ["app-server"], cwd: "/home/me/repo" }, isolation,
-  );
-  assert.equal(isolated[isolated.indexOf("--") + 1], "/usr/bin/codex");
-  assert.doesNotMatch(isolated.join(" "), /TOKEN_B64|MCP_B64|base64 -d/u);
-  assert.ok(isolated.join(" ").includes("--ro-bind /tmp/wlp-test /tmp/wollipog-agent-control"));
-  const args = buildWslArgs("Ubuntu", "/home/me/repo", "/tmp/x.pgid", {
-    command: "/usr/bin/bwrap", args: isolated, cwd: "/home/me/repo",
-    context: { kind: "wsl", distro: "Ubuntu" }, isolation,
-    env: { WOLLIPOG_AGENT_CONTROL_SOCKET: "/tmp/wollipog-agent-control/control.sock" },
-  });
-  assert.ok(args.includes("/tmp/wlp-test/control.sock"));
-  assert.ok(args.includes("/usr/bin/bwrap"));
-  assert.equal(args.includes("/usr/bin/node"), false, "provider launcher does not receive the relay runtime");
-  assert.equal(args.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"), false,
-    "provider launcher does not receive the relay helper");
-  assert.ok(args.some((arg) => arg.includes("exec 3<&0; if command -v setsid")),
-    "the Linux wrapper preserves translated stdin before backgrounding the provider");
-  assert.ok(args.some((arg) => arg.includes("<&3 3<&-")));
-  assert.ok(args.some((arg) => arg.includes("exec 3<&-;")),
-    "the Linux wrapper closes its temporary stdin duplicate");
-  assert.equal(args.join(" ").includes(bridge.token), false);
-  assert.equal(args.join(" ").includes("wsl.exe"), false, "provider argv never receives a Windows launcher");
   const relayArgs = buildWslAgentControlRelayArgs(bridge);
-  assert.deepEqual(relayArgs.slice(0, 4), ["-d", "Ubuntu", "--exec", "sh"]);
+  assert.deepEqual(relayArgs.slice(0, 7), ["-d", "Ubuntu", "--cd", "/", "--exec",
+    "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1", "relay"]);
+  assert.ok(relayArgs.includes("/var/lib/wollipog-wsl-launcher/session/relay"));
+  assert.ok(relayArgs.includes("1:2:3"));
   assert.ok(relayArgs.includes("/usr/bin/node"));
   assert.ok(relayArgs.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"));
-  assert.ok(relayArgs.includes("/tmp/wlp-test/control.sock"));
+  assert.ok(relayArgs.includes("control.sock"));
   assert.equal(relayArgs.join(" ").includes(bridge.token), false, "relay argv never receives the credential");
 });

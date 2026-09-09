@@ -2784,7 +2784,10 @@ export class SessionsService {
       const contextKind = launch.context?.kind ?? "native";
       const wslDirect = contextKind === "wsl" && req.launchSurface !== "native_tui" &&
         ["codex", "codex-app-server", "claude-code"].includes(launch.driver) &&
-        this.capabilityFailure(req.runnerId, "wslAgentControlBridge", "Direct WSL Agent Control") === null;
+        this.capabilityFailure(req.runnerId, "wslAgentControlBridge", "Direct WSL Agent Control") === null &&
+        this.capabilityFailure(req.runnerId, "wslSafeLauncher", "Direct WSL safe launcher") === null &&
+        launch.wslAgentControl?.safeLauncherProtocolVersion === 1 &&
+        launch.wslAgentControl.bwrapRuntime === "/usr/bin/bwrap";
       if (!(["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
           (launch.driver === "acp" && req.launchSurface !== "native_tui")) ||
           (contextKind !== "native" && !wslDirect) || executionTarget.adapter !== "host") {

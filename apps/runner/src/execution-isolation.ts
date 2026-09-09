@@ -5,12 +5,21 @@ import { cp, mkdir, opendir, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import type { RunnerExecutionIsolation } from "./config.js";
-import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
+import { assertExecutionIsolationContextSupported, WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import { runContextCommand } from "./context-command.js";
 import { resolveNative, type ResolvedBinary } from "./discovery/resolve.js";
 import type { SpawnIsolation } from "./spawn.js";
 import { materializeWindowsJobLauncher } from "./windows-job.js";
 import { wslAgentControlLaunch } from "./agent-control.js";
+import {
+  cleanupWslBwrapSessionState,
+  prepareWslBwrapIsolation,
+  provisionWslBwrapSessionState,
+  WSL_BWRAP_LAUNCHER_PATH,
+  type WslBwrapPreparation,
+  type WslBwrapPrepareRequest,
+} from "./wsl-bwrap-launcher.js";
+import { WSL_AGENT_CONTROL_PRIVATE_DIR } from "./wsl-agent-control.js";
 
 interface IsolationDeps {
   platform: NodeJS.Platform;
@@ -27,6 +36,10 @@ interface IsolationDeps {
   copyWsl: (context: Extract<AgentContext, { kind: "wsl" }>, source: ProviderStateLocation, target: ProviderStateLocation) => Promise<void>;
   removeNative: (location: ProviderStateLocation) => Promise<void>;
   removeWsl: (context: Extract<AgentContext, { kind: "wsl" }>, location: ProviderStateLocation) => Promise<void>;
+  cleanupWslSessionState: (distro: string, ownerHash: string, sessionKey: string) => Promise<void>;
+  provisionWslSessionState: (distro: string, ownerHash: string, sessionKey: string, uid: number) =>
+    Promise<{ root: string; provider: string; relay: string }>;
+  prepareWslIsolation: (context: AgentContext, request: WslBwrapPrepareRequest) => Promise<WslBwrapPreparation>;
   existsNative: (path: string) => Promise<boolean>;
   existsWsl: (context: Extract<AgentContext, { kind: "wsl" }>, path: string) => Promise<boolean>;
   forkSizeNative: (location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
@@ -81,6 +94,9 @@ const defaultDeps: IsolationDeps = {
   removeWsl: async (context, location) => {
     await runContextCommand(context, "rm", ["-rf", "--", location.root], { cwd: "/", timeoutMs: 5_000 });
   },
+  cleanupWslSessionState: cleanupWslBwrapSessionState,
+  provisionWslSessionState: provisionWslBwrapSessionState,
+  prepareWslIsolation: prepareWslBwrapIsolation,
   existsNative: async (path) => stat(path).then((value) => value.isDirectory(), () => false),
   existsWsl: async (context, path) => runContextCommand(
     context, "test", ["-d", path], { cwd: "/", timeoutMs: 5_000 },
@@ -256,6 +272,65 @@ export async function resolveExecutionIsolation(
 ): Promise<SpawnIsolation | undefined> {
   const runtime = { ...defaultDeps, ...deps };
   if (policy.mode === "provider") return undefined;
+  if (policy.mode === "bwrap" && context.kind === "wsl" && state) {
+    const bridge = wslAgentControlLaunch(state.sessionId);
+    if (!bridge || bridge.safeLauncherProtocolVersion !== 1 || !state.ownerHash) {
+      throw new Error(WSL_BWRAP_UNAVAILABLE_ERROR);
+    }
+    const resolved = await runtime.resolveWsl(context);
+    if (!resolved || resolved.uid === 0 || resolved.command !== bridge.bwrapRuntime) {
+      throw new Error("target-local WSL launcher prerequisites changed after discovery");
+    }
+    const mapping = statePath(state.driver);
+    const targetHome = absoluteHome(state.env.HOME ?? resolved.home, "HOME inside WSL");
+    const binds: Array<{ mode: "ro" | "rw"; source: string; target: string }> = [];
+    const ensure: string[] = [];
+    const sessionState = await runtime.provisionWslSessionState(
+      context.distro, state.ownerHash, providerStateKey(state.sessionId), resolved.uid,
+    );
+    if (mapping) {
+      const target = posix.join(targetHome, ...mapping.relative.split("/"));
+      ensure.push(target);
+      binds.push({ mode: "rw", source: sessionState.provider, target });
+    }
+    for (const root of state.additionalWritableRoots ?? []) {
+      ensure.push(root);
+      binds.push({ mode: "rw", source: root, target: root });
+    }
+    if (!bridge.socketPath) throw new Error("target-local Agent Control socket was not provisioned");
+    const socketDirectory = sessionState.relay;
+    bridge.socketPath = posix.join(socketDirectory, posix.basename(bridge.socketPath));
+    ensure.push(WSL_AGENT_CONTROL_PRIVATE_DIR);
+    binds.push({ mode: "ro", source: socketDirectory, target: WSL_AGENT_CONTROL_PRIVATE_DIR });
+    const preparation = await runtime.prepareWslIsolation(context, {
+      bwrap: bridge.bwrapRuntime,
+      home: targetHome,
+      cwd: state.cwd,
+      ensure,
+      binds,
+    });
+    const preparedSocket = preparation.binds.find((bind) => bind.mode === "ro" &&
+      bind.source.path === socketDirectory && bind.target.path === WSL_AGENT_CONTROL_PRIVATE_DIR)?.source;
+    if (!preparedSocket) throw new Error("target-local Agent Control socket directory was not attested");
+    bridge.socketDirectory = preparedSocket;
+    return {
+      backend: "wsl-bwrap",
+      distro: context.distro,
+      command: WSL_BWRAP_LAUNCHER_PATH,
+      args: [
+        "launch", "--bwrap", bridge.bwrapRuntime,
+        "--home", preparation.home.path, preparation.home.identity,
+        "--cwd", preparation.cwd.path, preparation.cwd.identity,
+        "--network", policy.network,
+        ...preparation.binds.flatMap((bind) => [
+          `--${bind.mode}`, bind.source.path, bind.source.identity, bind.target.path, bind.target.identity,
+        ]),
+      ],
+      cwd: preparation.cwd.path,
+      network: policy.network,
+      wslAgentControl: bridge,
+    };
+  }
   assertExecutionIsolationContextSupported(policy, context);
   if (context.kind === "wsl") {
     throw new Error(`${policy.mode} isolation is native-host only; WSL Direct execution is unavailable`);
@@ -485,10 +560,8 @@ export async function removeExecutionIsolationState(
   if (policy.mode !== "bwrap" || !statePath(driver)) return;
   const runtime = { ...defaultDeps, ...deps };
   if (context.kind === "wsl") {
-    const home = await runtime.resolveWslHome(context);
-    if (!home) throw new Error(`cannot clean isolated provider state inside WSL distro ${context.distro}`);
-    const base = wslRunnerStateBase(home, ownerHash);
-    await runtime.removeWsl(context, providerStateLocation(base, driver, sessionId)!);
+    if (!ownerHash) throw new Error("cannot clean Direct WSL provider state without an attested runner owner");
+    await runtime.cleanupWslSessionState(context.distro, ownerHash, providerStateKey(sessionId));
     return;
   }
   await runtime.removeNative(providerStateLocation(dataDir, driver, sessionId)!);

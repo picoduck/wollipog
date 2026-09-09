@@ -154,6 +154,9 @@ type Send = (msg: RunnerToControlPlane) => void;
 type Logger = (msg: string) => void;
 export type AcpContextResolver = (spec: SessionLaunchSpec) => SessionLaunchSpec["acpSessionContext"];
 export type PromptImageResolver = (sessionId: string, references: PromptImageReference[]) => Promise<PromptImage[]>;
+export type SafeWslLaunchAuthorizer = (meta: Pick<SessionMeta,
+  "agentId" | "command" | "args" | "driver" | "context" | "config" | "executionTarget"
+>) => boolean;
 
 /** ACP provider modes/config remain authoritative for ordinary sessions. An Orchestrator session
  * keeps its runner-owned preset while still accepting live model and effort updates. */
@@ -868,6 +871,8 @@ export class SessionManager {
     ) => void,
     /** Exact operator-configured Project Location roots eligible for existing-worktree attach. */
     private readonly configuredProjectPaths: string[] = [],
+    /** Fresh runner-local catalog authorization for the one target-local WSL launcher path. */
+    private readonly authorizeSafeWslLaunch?: SafeWslLaunchAuthorizer,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
@@ -2381,7 +2386,12 @@ export class SessionManager {
     const context = spec.context ?? { kind: "native" as const };
     try {
       this.assertHostIsolationContextSupported({
+        agentId: spec.agentId,
+        command: spec.command,
+        args: spec.args,
+        driver: spec.driver ?? "acp",
         context,
+        config: spec.config ?? {},
         executionTarget: spec.executionTarget ?? this.store.readMeta(spec.sessionId)?.executionTarget,
       });
     } catch (error) {
@@ -3209,6 +3219,9 @@ export class SessionManager {
     this.assertHostIsolationContextSupported(meta);
     const expectedVersion = meta.context.kind === "wsl" ? 3 : 2;
     if (meta.providerStateVersion === expectedVersion) return;
+    if (meta.context.kind === "wsl") {
+      throw new Error("legacy Direct WSL provider state requires an explicit offline fd-safe migration before launch");
+    }
     // Native v2 already uses the session-owned provider HOME layout. Never stamp it with the WSL
     // v3 marker: an origin/main rollback treats every non-v2 row as legacy and would copy retained
     // shared bytes back over the session partition. A native v3 row may exist from an interrupted
@@ -3272,7 +3285,7 @@ export class SessionManager {
     this.revokeSessionCommandAuthority(sessionId);
     const hadCloudHandoffBeforeLaunch = !!meta.cloudAdapterHandoffKey;
     this.emitStatus(sessionId, "starting");
-    const cwd = meta.worktreePath ?? meta.repoPath;
+    let cwd = meta.worktreePath ?? meta.repoPath;
     const worktree: WorktreeHandle | null = meta.worktreePath
       ? { path: meta.worktreePath, branch: meta.worktreeBranch ?? `agent/${sessionId}` }
       : null;
@@ -3311,6 +3324,7 @@ export class SessionManager {
         await this.ensureProviderStateLayout(meta, launchGeneration);
       }
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
+      if (isolation?.backend === "wsl-bwrap") cwd = isolation.cwd;
       if (!this.launchIsCurrent(sessionId, launchGeneration)) {
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during isolation setup", launchGeneration);
         return false;
@@ -3689,14 +3703,20 @@ export class SessionManager {
   }
 
   private assertHostIsolationContextSupported(
-    meta: Pick<SessionMeta, "context" | "executionTarget">,
+    meta: Pick<SessionMeta, "agentId" | "command" | "args" | "driver" | "context" | "config" | "executionTarget">,
   ): void {
     if (meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return;
+    if (this.executionIsolation.mode === "bwrap" && meta.context.kind === "wsl" &&
+        this.authorizeSafeWslLaunch?.(meta) === true) return;
     assertExecutionIsolationContextSupported(this.executionIsolation, meta.context);
   }
 
   private async requestedWorktreeIsolation(meta: SessionMeta): Promise<string[]> {
     if (this.executionIsolation.mode !== "bwrap" && this.executionIsolation.mode !== "seatbelt") return [];
+    // Direct WSL orchestration creates child worktrees through the runner; the provider never
+    // needs the future requested-worktree boundary writable. Computing that legacy boundary would
+    // itself reopen a mutable WSL HOME pathname before the target-local launcher can hold it.
+    if (meta.context.kind === "wsl") return [];
     return [await requestedWorktreeBoundary(meta.repoPath, meta.sessionId, {
       context: meta.context,
       dataDir: this.dataDir,
@@ -6957,6 +6977,9 @@ export class SessionManager {
     } catch (error) {
       return { ok: false, error: `execution isolation unavailable: ${errText(error)}` };
     }
+    if (this.executionIsolation.mode === "bwrap" && source.context.kind === "wsl") {
+      return { ok: false, error: "Direct WSL conversation fork remains unavailable until target-local fd-safe state copy is supported" };
+    }
     const supportsFork = providerSupportsConversationFork(source.driver, source.capabilities);
     if (!supportsFork && !handoff) return { ok: false, error: "this provider session does not support conversation fork" };
     if (handoff) {
@@ -9363,6 +9386,10 @@ export class SessionManager {
   }
 
   private async preflightProviderAuthentication(meta: SessionMeta, launchGeneration: number): Promise<boolean> {
+    // Provider-native status commands are themselves general provider executions. Direct WSL's
+    // narrow launcher path must not run one outside the prepared boundary before isolation exists.
+    if (this.executionIsolation.mode === "bwrap" && meta.context.kind === "wsl" &&
+        this.authorizeSafeWslLaunch?.(meta) === true) return true;
     const controller = this.providerAuthRecovery;
     const scope = controller?.describe(meta);
     if (!controller || !scope) return true;
@@ -9600,7 +9627,10 @@ export class SessionManager {
     const meta = this.store.readMeta(sessionId);
     if (!entry || !meta || entry.authenticationBlocked || entry.historyIntegrityFailure) return;
     entry.authenticationBlocked = true;
-    const scope = this.providerAuthRecovery?.describe(launchMeta);
+    const scope = this.executionIsolation.mode === "bwrap" && launchMeta.context.kind === "wsl" &&
+      this.authorizeSafeWslLaunch?.(launchMeta) === true
+      ? null
+      : this.providerAuthRecovery?.describe(launchMeta);
     if (scope) {
       this.parkProviderAuthentication(
         meta,

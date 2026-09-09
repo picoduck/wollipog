@@ -4,6 +4,7 @@ import type { AgentDefinition } from "@wollipog/protocol";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
   CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
+  codexOrchestratorMcpArgs,
   codexOrchestratorMcpProbe,
   isolateCodexMcpServers,
   orchestratorAcpSessionMeta,
@@ -24,7 +25,8 @@ test("orchestrator capability requires a native harness or discovery-verified WS
     assert.equal(withOrchestratorPreset([unsupported])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
   }
   const wsl = { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" },
-    wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: "/usr/bin/node" } };
+    wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: "/usr/bin/node",
+      safeLauncherProtocolVersion: 1 as const, bwrapRuntime: "/usr/bin/bwrap" } };
   assert.equal(withOrchestratorPreset([wsl])[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
   const wslClaude = { ...wsl, driver: "claude-code" as const,
     capabilities: { ...wsl.capabilities, permissionModes: ["default"] } };
@@ -186,6 +188,39 @@ test("Codex MCP isolation disables every ambient server and fails closed on unve
     '[{"name":"wollipog","enabled":true},{"name":"unsafe.key"}]']) {
     assert.throws(() => isolateCodexMcpServers(invalid), /cannot verify/);
   }
+});
+
+test("Direct WSL Codex MCP inventory runs only through the prepared target-local launcher", async () => {
+  const isolation = {
+    backend: "wsl-bwrap" as const,
+    distro: "Ubuntu",
+    command: "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1",
+    args: [],
+    cwd: "/srv/canonical",
+    network: "deny" as const,
+    wslAgentControl: {} as never,
+  };
+  let observed: { cwd: string; args: string[] } | undefined;
+  const result = await codexOrchestratorMcpArgs({
+    command: "/usr/bin/codex",
+    args: ["--strict-config", "-c", "mcp_servers={}"],
+    env: {},
+    context: { kind: "wsl", distro: "Ubuntu" },
+    isolation,
+  }, isolation.cwd, {
+    runIsolated: async (_opts, cwd, args) => {
+      observed = { cwd, args };
+      return JSON.stringify([
+        { name: "wollipog", enabled: true },
+        { name: "ambient", enabled: true },
+      ]);
+    },
+  });
+  assert.deepEqual(observed, {
+    cwd: "/srv/canonical",
+    args: ["-c", "mcp_servers={}", "mcp", "list", "--json"],
+  });
+  assert.deepEqual(result, ["-c", "mcp_servers.ambient.enabled=false"]);
 });
 
 test("Claude resume removes both current and historical setting-source overrides", () => {

@@ -199,6 +199,83 @@ test("WSL bwrap rejection precedes preparation, state migration, root resolution
   }
 });
 
+test("safe Direct WSL uses one target-resolved cwd for isolation, driver construction, and session creation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-authoritative-cwd-"));
+  try {
+    const store = new SessionStore(root);
+    store.create({
+      ...meta(),
+      agentId: "codex-wsl",
+      driver: "codex-app-server",
+      command: "/usr/bin/codex",
+      args: ["app-server"],
+      context: { kind: "wsl", distro: "Ubuntu" },
+      config: { permissionMode: "orchestrator" },
+      repoPath: "/work/requested",
+      providerStateVersion: 3,
+    });
+    let captured: DriverOptions | undefined;
+    let newSessionCwd: string | undefined;
+    let isolationInput: unknown;
+    const safeIsolation = {
+      backend: "wsl-bwrap" as const,
+      distro: "Ubuntu",
+      command: "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1",
+      args: [],
+      cwd: "/work/canonical",
+      network: "deny" as const,
+      wslAgentControl: {
+        protocolVersion: 1 as const,
+        distro: "Ubuntu",
+        nodeRuntime: "/usr/bin/node",
+        helperPath: "/usr/local/lib/wollipog/wsl-agent-control-v1.mjs" as const,
+        sessionId: "s1",
+        token: "secret",
+        tokenFile: "C:\\state\\s1.token",
+        readyFile: "C:\\state\\s1.ready",
+        cpUrl: "http://127.0.0.1:4317",
+        safeLauncherProtocolVersion: 1 as const,
+        bwrapRuntime: "/usr/bin/bwrap",
+      },
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined,
+      ((_driver: unknown, opts: DriverOptions) => {
+        captured = opts;
+        return {
+          pid: 1, initialize: async () => {},
+          newSession: async (cwd: string) => { newSessionCwd = cwd; return "provider-1"; },
+          prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+          setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+        };
+      }) as never,
+      join(root, ".runner-data"), 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "deny" }, async (_policy, _context, _deps, options) => {
+        isolationInput = options;
+        return safeIsolation;
+      },
+    );
+    // Production supplies this from the fresh discovery set. The seam proves that once the exact
+    // launch is authorized, no pre-launch or provider path retains the untrusted requested alias.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (manager as any).authorizeSafeWslLaunch = () => true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    assert.deepEqual(isolationInput, {
+      driver: "codex-app-server", dataDir: join(root, ".runner-data"), env: {},
+      sessionId: "s1", cwd: "/work/requested",
+    });
+    assert.equal(captured?.cwd, "/work/canonical");
+    assert.equal(newSessionCwd, "/work/canonical");
+    assert.equal(internals.active.get("s1")?.cwd, "/work/canonical");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a new WSL bwrap session fails before its durable row or worktree is materialized", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-isolation-create-fail-"));
   try {

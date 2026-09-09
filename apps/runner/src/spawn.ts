@@ -27,6 +27,7 @@ import {
   WSL_AGENT_CONTROL_PRIVATE_SOCKET,
   type WslAgentControlLaunch,
 } from "./wsl-agent-control.js";
+import { buildWslBwrapRelayArgs } from "./wsl-bwrap-launcher.js";
 
 const isWindows = process.platform === "win32";
 /** Runner policy switches are daemon input and must never become agent input. */
@@ -119,6 +120,10 @@ export interface SpawnAgentOptions {
   descendantOwner?: object;
   /** False for user-owned interactive shells whose daemonized children are not provider-owned. */
   trackDescendants?: boolean;
+  /** Internal no-relay mode for a provider metadata probe that already runs through the exact
+   * target-local WSL isolation. The probe must not race the subsequent provider relay for the
+   * session's one socket directory. */
+  bridgeAgentControl?: boolean;
 }
 
 export interface BwrapSpawnIsolation {
@@ -131,6 +136,18 @@ export interface BwrapSpawnIsolation {
   writableBinds?: Array<{ source: string; target: string }>;
   /** Ephemeral authenticated bridge state; never persisted or advertised. WSL only. */
   wslAgentControl?: WslAgentControlLaunch;
+}
+
+/** Exact target-local launcher authorization. This is deliberately not `bwrap`: generic WSL
+ * bwrap remains rejected before any target mutation. */
+export interface WslBwrapSpawnIsolation {
+  backend: "wsl-bwrap";
+  distro: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  network: "inherit" | "deny";
+  wslAgentControl: WslAgentControlLaunch;
 }
 
 export interface SeatbeltSpawnIsolation {
@@ -184,7 +201,7 @@ export interface CloudSpawnIsolation {
   agentArgs: string[];
 }
 
-export type SpawnIsolation = BwrapSpawnIsolation | SeatbeltSpawnIsolation | WindowsJobSpawnIsolation | ContainerSpawnIsolation | CloudSpawnIsolation;
+export type SpawnIsolation = BwrapSpawnIsolation | WslBwrapSpawnIsolation | SeatbeltSpawnIsolation | WindowsJobSpawnIsolation | ContainerSpawnIsolation | CloudSpawnIsolation;
 
 export function buildContainerArgs(
   opts: Pick<SpawnAgentOptions, "command" | "args" | "cwd" | "containerAgentLaunch">,
@@ -300,7 +317,8 @@ export function buildWslArgs(distro: string, cwd: string, pidfile: string, opts:
     .flatMap((k) => ["-u", k]);
   const inner =
     unsets.length ? ["env", ...unsets, opts.command, ...opts.args] : [opts.command, ...opts.args];
-  const bridge = opts.isolation?.backend === "bwrap" ? opts.isolation.wslAgentControl : undefined;
+  const bridge = opts.isolation?.backend === "bwrap" || opts.isolation?.backend === "wsl-bwrap"
+    ? opts.isolation.wslAgentControl : undefined;
   const socket = bridge?.socketPath;
   const wrapper = bridge && socket
     ? "pidfile=$1; socket=$2; shift 2; " +
@@ -325,10 +343,14 @@ export function buildWslArgs(distro: string, cwd: string, pidfile: string, opts:
  * those handles nor this argv and can reach only the relay's closed AF_UNIX socket surface. */
 export function buildWslAgentControlRelayArgs(bridge: WslAgentControlLaunch): string[] {
   if (!bridge.socketPath) throw new Error("target-local Agent Control relay requires a socket path");
-  const wrapper = "socket=$1; runtime=$2; helper=$3; socket_dir=${socket%/*}; " +
-    "umask 077; mkdir -- \"$socket_dir\"; exec \"$runtime\" \"$helper\" serve \"$socket\"";
-  return ["-d", bridge.distro, "--exec", "sh", "-c", wrapper, "sh",
-    bridge.socketPath, bridge.nodeRuntime, bridge.helperPath];
+  if (!bridge.socketDirectory) throw new Error("target-local Agent Control relay directory is not attested");
+  return buildWslBwrapRelayArgs({
+    distro: bridge.distro,
+    directory: bridge.socketDirectory,
+    node: bridge.nodeRuntime,
+    helper: bridge.helperPath,
+    socket: posix.basename(bridge.socketPath),
+  });
 }
 
 export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
@@ -344,14 +366,16 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   let wslReap: WslReapInfo | undefined;
   let isolationEnv: Record<string, string> = {};
   let explicitEnv = withoutRunnerOnlyEnv(opts.env);
-  let bridge = opts.isolation?.backend === "bwrap" ? opts.isolation.wslAgentControl : undefined;
+  let bridge = opts.bridgeAgentControl !== false &&
+    (opts.isolation?.backend === "bwrap" || opts.isolation?.backend === "wsl-bwrap")
+    ? opts.isolation.wslAgentControl : undefined;
   if (bridge) {
     if (opts.context?.kind !== "wsl" || opts.context.distro !== bridge.distro) {
       throw new Error("target-local Agent Control bridge does not match the WSL launch context");
     }
-    const socket = `/tmp/wlp-${process.pid}-${++pgidSeq}-${randomUUID().replace(/-/g, "").slice(0, 12)}/control.sock`;
+    const socket = bridge.socketPath ?? `/tmp/wlp-${process.pid}-${++pgidSeq}-${randomUUID().replace(/-/g, "").slice(0, 12)}/control.sock`;
     bridge = { ...bridge, socketPath: socket };
-    opts = { ...opts, isolation: { ...opts.isolation as BwrapSpawnIsolation, wslAgentControl: bridge } };
+    opts = { ...opts, isolation: { ...opts.isolation, wslAgentControl: bridge } as SpawnIsolation };
     explicitEnv = {
       ...explicitEnv,
       WOLLIPOG_AGENT_CONTROL_SOCKET: WSL_AGENT_CONTROL_PRIVATE_SOCKET,
@@ -388,6 +412,25 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       args = buildBwrapArgs({ command: file, args, cwd: opts.cwd }, opts.isolation);
       file = opts.isolation.command;
       shell = false;
+    } else if (opts.isolation.backend === "wsl-bwrap") {
+      if (opts.context?.kind !== "wsl" || opts.context.distro !== opts.isolation.distro ||
+          opts.cwd !== opts.isolation.cwd) {
+        throw new Error("target-local WSL launcher does not match the authorized context and cwd");
+      }
+      const configured = new Set(Object.keys(explicitEnv).map((key) => key.toLowerCase()));
+      const unsets = scrubInheritedEnv.filter((key) => !configured.has(key.toLowerCase()))
+        .flatMap((key) => ["-u", key]);
+      const target = unsets.length ? ["/usr/bin/env", ...unsets, file, ...args] : [file, ...args];
+      const isolation = opts.isolation;
+      const relayDirectory = isolation.wslAgentControl.socketDirectory?.path;
+      if (!relayDirectory) throw new Error("target-local WSL launcher is missing its pinned session directory");
+      const pidfile = posix.join(relayDirectory, "provider.pgid");
+      file = "wsl.exe";
+      args = ["-d", isolation.distro, "--cd", isolation.cwd, "--exec", isolation.command,
+        ...isolation.args, "--pidfile", pidfile, "--", ...target];
+      cwd = undefined;
+      shell = false;
+      wslReap = { distro: isolation.distro, pidfile };
     } else if (opts.isolation.backend === "seatbelt") {
       args = [...opts.isolation.args, "-p", opts.isolation.profile, file, ...args];
       file = opts.isolation.command;
@@ -433,7 +476,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   // Re-apply the daemon-only boundary after that projection too.
   explicitEnv = withoutRunnerOnlyEnv(explicitEnv);
 
-  if (opts.context?.kind === "wsl") {
+  if (opts.context?.kind === "wsl" && opts.isolation?.backend !== "wsl-bwrap") {
     // Bridge into a WSL distro. `--cd` needs an absolute Linux path; a relative/Windows
     // path silently lands the agent in $HOME and it edits the wrong tree, so fail loudly.
     if (!opts.cwd.startsWith("/")) {

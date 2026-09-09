@@ -32,6 +32,7 @@ import {
   WSL_AGENT_CONTROL_PROTOCOL,
   type WslAgentControlLaunch,
 } from "./wsl-agent-control.js";
+import { installWslBwrapLauncher } from "./wsl-bwrap-launcher.js";
 import {
   ORCHESTRATOR_ENV_KEY,
   orchestratorLaunchArgs,
@@ -56,10 +57,12 @@ const STAGED_AGENT_CONTROL_FILE_PATTERN =
 export interface AgentControlHost extends RunnerReentryHost {
   configDir: string;
   installWslHelper?: (distro: string) => Promise<void>;
+  installWslLauncher?: (distro: string) => Promise<void>;
 }
 
 export function defaultAgentControlHost(dataDir: string): AgentControlHost {
-  return { ...defaultRunnerReentryHost(), configDir: resolve(dataDir, "agent-control"), installWslHelper };
+  return { ...defaultRunnerReentryHost(), configDir: resolve(dataDir, "agent-control"),
+    installWslHelper, installWslLauncher: installWslBwrapLauncher };
 }
 
 const wslLaunches = new Map<string, WslAgentControlLaunch>();
@@ -74,20 +77,22 @@ async function installWslHelper(distro: string): Promise<void> {
   const script = [
     "set -eu",
     "target=$1; staged=$2; expected=$3",
-    "install -d -o root -g root -m 0755 \"$(dirname \"$target\")\"",
-    "trap 'rm -f -- \"$staged\"' EXIT",
-    "cat > \"$staged\"",
-    "chown root:root \"$staged\"",
-    "chmod 0555 \"$staged\"",
-    "actual=$(sha256sum \"$staged\" | cut -d ' ' -f 1)",
-    "test \"$actual\" = \"$expected\"",
-    "mv -T -- \"$staged\" \"$target\"",
-    "test \"$(stat -c '%u:%g:%a' \"$target\")\" = '0:0:555'",
-    "test \"$(sha256sum \"$target\" | cut -d ' ' -f 1)\" = \"$expected\"",
+    "for fixed in /usr /usr/local /usr/local/lib; do test -d \"$fixed\"; test ! -L \"$fixed\"; test \"$(/usr/bin/stat -c %u \"$fixed\")\" = 0; mode=$(/usr/bin/stat -c %a \"$fixed\"); test $((0$mode & 022)) = 0; done",
+    "dir=/usr/local/lib/wollipog",
+    "if test -e \"$dir\" || test -L \"$dir\"; then test -d \"$dir\"; test ! -L \"$dir\"; test \"$(/usr/bin/stat -c %u \"$dir\")\" = 0; mode=$(/usr/bin/stat -c %a \"$dir\"); test $((0$mode & 022)) = 0; else /usr/bin/mkdir -m 0755 -- \"$dir\"; /usr/bin/chown root:root \"$dir\"; fi",
+    "/usr/bin/chmod 0755 \"$dir\"",
+    "trap '/usr/bin/rm -f -- \"$staged\"' EXIT",
+    "/usr/bin/cat > \"$staged\"",
+    "/usr/bin/chown root:root \"$staged\"",
+    "/usr/bin/chmod 0555 \"$staged\"",
+    "printf '%s  %s\\n' \"$expected\" \"$staged\" | /usr/bin/sha256sum -c - >/dev/null",
+    "/usr/bin/mv -T -- \"$staged\" \"$target\"",
+    "test \"$(/usr/bin/stat -c '%u:%g:%a' \"$target\")\" = '0:0:555'",
+    "printf '%s  %s\\n' \"$expected\" \"$target\" | /usr/bin/sha256sum -c - >/dev/null",
   ].join("\n");
   await new Promise<void>((resolvePromise, reject) => {
     const child = spawn("wsl.exe", [
-      "-d", distro, "-u", "root", "--exec", "sh", "-c", script, "sh",
+      "-d", distro, "-u", "root", "--exec", "/bin/sh", "-c", script, "wollipog-install-wsl-helper",
       WSL_AGENT_CONTROL_HELPER_PATH, staged, WSL_AGENT_CONTROL_HELPER_SHA256,
     ], { stdio: ["pipe", "ignore", "pipe"], windowsHide: true });
     let stderr = "";
@@ -233,7 +238,9 @@ export function provisionAgentControl(
       !(nativeHostExecution ? ["acp", "codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp")
         : wslOrchestrator && structuredDriver &&
           runnerSupportsProtocol(config.controlPlaneProtocolVersion, "wslAgentControlBridge") &&
-          wslAgentControl?.protocolVersion === WSL_AGENT_CONTROL_PROTOCOL && wslLaunchMatches))) {
+          runnerSupportsProtocol(config.controlPlaneProtocolVersion, "wslSafeLauncher") &&
+          wslAgentControl?.protocolVersion === WSL_AGENT_CONTROL_PROTOCOL &&
+          wslAgentControl.safeLauncherProtocolVersion === 1 && wslLaunchMatches))) {
     throw new Error("the orchestrator preset requires a current supported native harness or verified Direct WSL bridge on the host");
   }
   if (orchestrator && (spec.driver ?? "acp") === "acp") {
@@ -268,6 +275,7 @@ export function provisionAgentControl(
     const provisionWsl = async (): Promise<void> => {
       await Promise.all([
         (host.installWslHelper ?? installWslHelper)(context.distro),
+        (host.installWslLauncher ?? installWslBwrapLauncher)(context.distro),
         credentialRegistration ?? Promise.reject(new Error("Direct WSL Agent Control requires credential acknowledgement before launch")),
       ]);
       const runtime = wslAgentControl.nodeRuntime;
@@ -300,6 +308,9 @@ export function provisionAgentControl(
         tokenFile,
         readyFile,
         cpUrl,
+        safeLauncherProtocolVersion: 1,
+        bwrapRuntime: wslAgentControl.bwrapRuntime!,
+        socketPath: `/tmp/wlp-${process.pid}-${randomUUID()}/control.sock`,
       });
       log(`agent control ${spec.sessionId}: target-local WSL CLI and MCP bridge provisioned`);
     };

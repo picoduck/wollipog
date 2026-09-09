@@ -81,4 +81,8 @@ test("the binary producer injects and signs only the canonical artifact before c
   assert.match(source, /assertRunnerTargetHost\(triple, process\.platform, process\.arch\)/u);
   assert.match(source, /assets\["wollipog\/macos-skill-snapshots"\] = helper/u);
   assert.match(source, /process\.platform === "darwin"[\s\S]*\/usr\/bin\/clang/u);
+  assert.match(source,
+    /process\.platform === "win32"[\s\S]*assets\["wollipog\/wsl-bwrap-launcher\.c"\]/u,
+    "Windows SEA runners must carry the checked-in target-local launcher source used by provisioning",
+  );
 });

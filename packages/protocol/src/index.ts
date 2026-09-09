@@ -344,7 +344,8 @@
 //      `contextWindow` is provider evidence only, and native drivers publish the effective
 //      post-launch context window and occupancy through the session gauge.
 // 123: authenticated, target-local Agent Control bridge for structured Direct WSL harnesses.
-export const PROTOCOL_VERSION = 123;
+// 124: Direct WSL is launchable only through the attested no-follow target-local launcher.
+export const PROTOCOL_VERSION = 124;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -513,6 +514,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorNativeTui: 112,
   /** Target-local Linux helper plus runner-side authenticated broker for Direct WSL only. */
   wslAgentControlBridge: 123,
+  /** Fresh discovery attests the no-follow target-local launcher required for Direct WSL. */
+  wslSafeLauncher: 124,
   /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
   usageTokenBuckets: 103,
   /** v104 runners stamp the producing model on token_usage. */
@@ -1253,6 +1256,10 @@ export interface AgentDefinition {
   wslAgentControl?: {
     protocolVersion: 1;
     nodeRuntime: string;
+    /** Present only after fresh target-local prerequisite attestation. A relay alone is not a
+     * filesystem isolation boundary and must never enable Direct WSL orchestration. */
+    safeLauncherProtocolVersion?: 1;
+    bwrapRuntime?: string;
   };
 }
 

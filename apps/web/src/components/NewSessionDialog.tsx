@@ -224,10 +224,14 @@ export function NewSessionDialog({
   const orchestratorContext = agent?.context?.kind ?? "native";
   const directWslOrchestrator = orchestratorContext === "wsl" &&
     ["claude-code", "codex", "codex-app-server"].includes(agent?.driver ?? "acp") &&
-    runnerSupportsProtocol(runner?.protocolVersion, "wslAgentControlBridge");
+    agent?.wslAgentControl?.safeLauncherProtocolVersion === 1 &&
+    runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher");
   const orchestratorSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration") &&
     agent?.capabilities?.permissionModes?.includes("orchestrator") &&
     (orchestratorContext === "native" || directWslOrchestrator) &&
+    (!executionTarget || executionTarget.adapter === "host");
+  const directWslRequiresSafeOrchestrator = orchestratorContext === "wsl" &&
+    runner?.runtime?.executionIsolation?.mode === "bwrap" &&
     (!executionTarget || executionTarget.adapter === "host");
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
   const nativeTuiStartFenceSupported = runnerSupportsProtocol(
@@ -425,7 +429,8 @@ export function NewSessionDialog({
     (!executionTarget || executionTarget.available) && cloudBudgetValid &&
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
     (defaultsReady || presetOverride === "orchestrator") &&
-    (!orchestrator || orchestratorSupported) && !retainedSessionId;
+    (!orchestrator || orchestratorSupported) &&
+    (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
 
   // Enter submits from any plain field. Exemptions: the directory browser's path input
   // preventDefaults its own Enter (navigate, not submit); buttons keep Enter as click; selects
@@ -780,6 +785,8 @@ export function NewSessionDialog({
               {presetOverride === "default" && <span className="muted">Orchestrator is your saved Agent Harness default. Change it in Settings to use another default.</span>}
               {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset requires a supported native host harness or verified Direct WSL bridge and runner. Choose a compatible target or change the saved default in Settings.</span>}
             </>}
+            {directWslRequiresSafeOrchestrator && !orchestrator &&
+              <span className="form-error">Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.</span>}
           </div>
 
           {advancedOpts.length > 0 && (

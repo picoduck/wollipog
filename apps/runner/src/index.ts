@@ -83,7 +83,7 @@ import {
   removeAgentControlFiles,
   sweepAgentControlFiles,
 } from "./agent-control.js";
-import { withOrchestratorPreset } from "./orchestrator-preset.js";
+import { stripOrchestratorLaunchArgs, withOrchestratorPreset } from "./orchestrator-preset.js";
 import {
   GitOpError,
   gitDiff,
@@ -388,6 +388,12 @@ const metadata: RunnerMetadata = {
 // Configured agents are the baseline; discovery augments them (config wins on conflict).
 const configAgents = metadata.agents;
 const acpAuthStatus = new Map<string, AcpAuthRuntime>();
+const freshSafeWslLaunches = new Set<string>();
+
+function safeWslLaunchKey(value: Pick<AgentDefinition, "command" | "args" | "driver" | "context">): string | null {
+  if (value.context?.kind !== "wsl") return null;
+  return JSON.stringify([value.context.distro, value.driver ?? "acp", value.command, ...(value.args ?? [])]);
+}
 
 /** Never advertise secret environment data, retired identities, or an orchestration preset
  * to a control plane that cannot enforce its credential boundary. */
@@ -396,7 +402,8 @@ function agentsForControlPlane() {
     .map((agent) => ({ ...agent, env: {},
       ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
           ((agent.context?.kind ?? "native") === "wsl" &&
-            !runnerSupportsProtocol(controlPlaneProtocolVersion, "wslAgentControlBridge"))) && agent.capabilities
+            (!runnerSupportsProtocol(controlPlaneProtocolVersion, "wslSafeLauncher") ||
+              agent.wslAgentControl?.safeLauncherProtocolVersion !== 1))) && agent.capabilities
         ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
         : {}),
     }));
@@ -595,6 +602,18 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     subscriptionUsage.observe(agentId, driver, context, update);
   },
   config.workspaces.map((workspace) => workspace.path),
+  (meta) => {
+    if (meta.config.permissionMode !== "orchestrator" || meta.context.kind !== "wsl" ||
+        meta.executionTarget && meta.executionTarget.adapter !== "host") return false;
+    const agent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
+    if (!agent || agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
+        agent.context?.kind !== "wsl" || agent.context.distro !== meta.context.distro ||
+        agent.driver !== meta.driver || agent.command !== meta.command) return false;
+    const args = stripOrchestratorLaunchArgs(meta.args, meta.driver);
+    const key = safeWslLaunchKey({ ...meta, args });
+    return !!key && freshSafeWslLaunches.has(key) && args.length === agent.args.length &&
+      agent.args.every((arg, index) => arg === args[index]);
+  },
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
@@ -1059,6 +1078,12 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       discoverEditors(),
     ]);
     const discovered = [...nativeAgents, ...registryAgents];
+    freshSafeWslLaunches.clear();
+    for (const agent of nativeAgents) {
+      if (agent.wslAgentControl?.safeLauncherProtocolVersion !== 1) continue;
+      const key = safeWslLaunchKey(agent);
+      if (key) freshSafeWslLaunches.add(key);
+    }
     // Enrich the merged list with dynamic per-version/context models (live app-server model/list,
     // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
     metadata.agents = applyClaudeHookCapability(
