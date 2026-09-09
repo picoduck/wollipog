@@ -124,8 +124,12 @@ references and never persisted as token bytes.
 
 Other ACP adapters and releases remain unavailable until their exact tool-isolation contract is
 audited; ACP transport support or a self-reported display name is not sufficient. WSL, container,
-and cloud targets also remain unavailable for the preset. WSL has no verified in-distro
-credential/reentry bridge. Container targets deliberately advertise `secrets: none` and mount only
+and cloud targets also remain unavailable for the preset. WSL has no narrow verified in-distro
+credential/reentry bridge. Its native interop route is a general Windows executable launcher whose
+processes are not constrained by the Linux bwrap filesystem boundary, so Wollipog does not restore
+WSL binfmt or invoke that route for Agent Control. A future WSL design requires a dedicated,
+authenticated Linux-side bridge with a closed CLI/MCP surface. Container targets deliberately
+advertise `secrets: none` and mount only
 the worktree. Cloud targets accept adapter-owned secret references but define no portable remote
 Wollipog MCP runtime. None can yet provision and clean up the same target-local management
 credential while proving that internal tools stay disabled. These combinations continue to fail

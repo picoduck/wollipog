@@ -27,9 +27,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, windows-2025, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -53,7 +53,7 @@ jobs:
         run: node --import tsx --test apps/runner/src/macos-skill-snapshots.test.ts apps/runner/src/skill-snapshots.test.ts
 
       - name: Verify Windows Orchestrator Harness
-        if: matrix.os == 'windows-latest'
+        if: startsWith(matrix.os, 'windows-')
         run: node --import tsx --test apps/runner/src/windows-cmd.test.ts apps/runner/src/context-command.test.ts apps/runner/src/discovery/resolve.test.ts apps/runner/src/discovery/claude-code.test.ts apps/runner/src/discovery/discover.test.ts apps/runner/src/orchestrator-preset.test.ts apps/runner/src/agent-control.test.ts apps/runner/src/agent-tui.test.ts
 
       - name: Verify Native Windows Skill Filesystem Adapters
@@ -63,3 +63,61 @@ jobs:
       - name: Verify Native Windows Skill Reconciliation
         if: matrix.os == 'windows-latest'
         run: node --import tsx --test --test-name-pattern="Windows uses junction-shaped" apps/runner/src/skills.test.ts
+
+      - name: Verify WSL Orchestrator Stays Fail-Closed
+        if: matrix.os == 'windows-2025'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          try {
+            wsl.exe --install Ubuntu-24.04 --web-download --no-launch
+            if ($LASTEXITCODE -ne 0) { throw "Ubuntu-24.04 WSL install failed" }
+            wsl.exe -d Ubuntu-24.04 -u root --exec sh -c 'set -eu; apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap; id -u wollipog >/dev/null 2>&1 || useradd -m -s /bin/bash wollipog; printf ''[user]\ndefault=wollipog\n'' > /etc/wsl.conf'
+            if ($LASTEXITCODE -ne 0) { throw "WSL boundary setup failed" }
+            wsl.exe --terminate Ubuntu-24.04
+            if ($LASTEXITCODE -ne 0) { throw "WSL termination failed" }
+
+            $listing = (wsl.exe --list --verbose | Out-String) -replace "`0", ""
+            if ($LASTEXITCODE -ne 0) { throw "WSL inventory query failed" }
+            if ($listing -notmatch 'Ubuntu-24\.04\s+Stopped\s+2') { throw "Ubuntu-24.04 is not a stopped WSL2 distro: $listing" }
+            $uid = ((wsl.exe -d Ubuntu-24.04 --exec id -u | Out-String) -replace "`0", "").Trim()
+            if ($LASTEXITCODE -ne 0 -or $uid -eq "0" -or $uid -notmatch '^[0-9]+$') { throw "WSL default user is not non-root: $uid" }
+
+            $cmdPath = ((wsl.exe -d Ubuntu-24.04 --exec sh -c 'command -v cmd.exe' | Out-String) -replace "`0", "").Trim()
+            if ($LASTEXITCODE -ne 0 -or -not $cmdPath.StartsWith('/')) { throw "WSL Windows interop probe could not resolve cmd.exe: $cmdPath" }
+            $savedPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            # Hosted Windows images differ: some expose WSL's PE binfmt handler and some resolve
+            # cmd.exe but reject it even outside bwrap. Record that host capability without making
+            # it a prerequisite. The security invariant below is that the fresh provider /proc
+            # never gains automatic PE/binfmt interop in either case. The read-only distro root
+            # still contains /init, so this check deliberately makes no broader interop claim.
+            $interopRegistration = ((wsl.exe -d Ubuntu-24.04 --exec sh -c 'if test -r /proc/sys/fs/binfmt_misc/WSLInterop; then printf present; else printf absent; fi' | Out-String) -replace "`0", "").Trim()
+            $registrationExit = $LASTEXITCODE
+            if ($registrationExit -ne 0) { throw "WSLInterop registration probe failed outside bwrap" }
+            $outsideOutput = (wsl.exe -d Ubuntu-24.04 -- cmd.exe /d /c exit 0 2>&1 | Out-String) -replace "`0", ""
+            $outsideExit = $LASTEXITCODE
+            $outsideInterop = $outsideExit -eq 0
+            if (-not $outsideInterop -and $outsideOutput -notmatch 'Exec format error') {
+              throw "WSL Windows interop probe failed unexpectedly outside bwrap: $outsideOutput"
+            }
+            if (-not $outsideInterop) {
+              Write-Host "::notice::Hosted WSL baseline lacks PE interop; verifying bwrap does not add it."
+            }
+            Write-Host "WSLInterop registration outside bwrap: $interopRegistration; cmd.exe executable outside bwrap: $outsideInterop"
+
+            wsl.exe -d Ubuntu-24.04 --exec bwrap --die-with-parent --new-session --unshare-pid --unshare-ipc --unshare-uts --ro-bind / / --dev /dev --dir /dev/shm --proc /proc --tmpfs /tmp --chdir / -- /bin/true
+            if ($LASTEXITCODE -ne 0) { throw "production-shaped bwrap smoke test failed" }
+            wsl.exe -d Ubuntu-24.04 --exec bwrap --die-with-parent --new-session --unshare-pid --unshare-ipc --unshare-uts --ro-bind / / --dev /dev --dir /dev/shm --proc /proc --tmpfs /tmp --chdir / -- sh -c 'test ! -e /proc/sys/fs/binfmt_misc/WSLInterop'
+            if ($LASTEXITCODE -ne 0) { throw "fresh bwrap /proc unexpectedly exposed the WSLInterop binfmt registration" }
+            Write-Host "WSLInterop registration inside bwrap: absent"
+
+            $blockedOutput = (wsl.exe -d Ubuntu-24.04 --exec bwrap --die-with-parent --new-session --unshare-pid --unshare-ipc --unshare-uts --ro-bind / / --dev /dev --dir /dev/shm --proc /proc --tmpfs /tmp --chdir / -- $cmdPath /d /c exit 0 2>&1 | Out-String) -replace "`0", ""
+            $blockedExit = $LASTEXITCODE
+            $ErrorActionPreference = $savedPreference
+            if ($blockedExit -eq 0) { throw "bwrap unexpectedly preserved automatic PE/binfmt interop: $blockedOutput" }
+            Write-Host "PE launch remained fail-closed inside bwrap (exit $blockedExit)."
+          }
+          finally {
+            wsl.exe --unregister Ubuntu-24.04
+          }

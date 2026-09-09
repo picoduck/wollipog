@@ -12,6 +12,33 @@ import {
 import type { McpFetch } from "./session-management-mcp.js";
 import { runWollipogCli } from "./wollipog-cli.js";
 
+test("CLI alias never reparses a later internal marker as its entry mode", async () => {
+  for (const argv of [
+    ["wollipog", "session", "prompt", "s_child", "--wollipog-cli"],
+    ["node", "cli.js", "session", "prompt", "s_child", "--wollipog-cli"],
+  ]) {
+    let stderr = "";
+    const code = await runWollipogCli(
+      argv,
+      {},
+      { stdout: () => assert.fail("unexpected CLI output"), stderr: (text) => { stderr += text; } },
+      async () => assert.fail("malformed prompt must not issue a request"),
+    );
+    assert.equal(code, 2);
+    assert.match(stderr, /session prompt requires an id and text/u);
+  }
+});
+
+test("CLI consumes an internal marker only at the SEA application boundary", async () => {
+  let stdout = "";
+  assert.equal(await runWollipogCli(
+    ["wollipog-runner.exe", "--wollipog-cli", "--version"],
+    {},
+    { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("unexpected CLI error") },
+  ), 0);
+  assert.match(stdout, /protocol v\d+/u);
+});
+
 test("CLI archive posts archived true and rejects self without issuing a mutation", async () => {
   const calls: Array<{ url: string; body?: string }> = [];
   const fetch: McpFetch = async (url, init) => {
