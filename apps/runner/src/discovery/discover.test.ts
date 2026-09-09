@@ -145,6 +145,8 @@ test("missing Codex produces one explicit unavailable primary and no fake exec f
   assert.equal(unavailable.capabilities?.supportsSteering, undefined);
   assert.equal(unavailable.codexAppServer?.status, "unavailable");
   assert.equal(unavailable.codexAppServer?.failure?.code, "codex_unavailable");
+  assert.equal(unavailable.nativeTuiAccounting?.status, "unavailable");
+  assert.equal(unavailable.nativeTuiAccounting?.nearestStructuredSurface, "none");
 });
 
 test("missing Claude produces an explicit unavailable row with safe remediation", () => {
@@ -152,6 +154,59 @@ test("missing Claude produces an explicit unavailable row with safe remediation"
   assert.equal(unavailable.available, false);
   assert.equal(unavailable.claudeCode?.status, "unavailable");
   assert.equal(unavailable.claudeCode?.failure?.code, "claude_unavailable");
+  assert.equal(unavailable.nativeTuiAccounting?.status, "unavailable");
+  assert.equal(unavailable.nativeTuiAccounting?.nearestStructuredSurface, "none");
+});
+
+test("configured agents cannot self-attest Native TUI accounting", () => {
+  const claimed = cfg({
+    id: "claimed",
+    driver: "claude-code",
+    command: "/opt/custom/claude",
+    nativeTuiAccounting: {
+      status: "unavailable",
+      provider: "claude-code",
+      installedVersion: "forged",
+      verification: "live-cli-contract",
+      nearestStructuredSurface: "print-mode-only",
+      missingRequirements: [],
+    },
+  });
+  assert.equal(mergeAgents([claimed], [])[0]!.nativeTuiAccounting, undefined);
+});
+
+test("fresh discovery replaces a configured Native TUI accounting diagnostic", () => {
+  const configured = cfg({
+    id: "configured-codex",
+    driver: "codex",
+    command: "codex",
+    nativeTuiAccounting: {
+      status: "unavailable",
+      provider: "codex",
+      installedVersion: "forged",
+      verification: "live-cli-contract",
+      nearestStructuredSurface: "none",
+      missingRequirements: [],
+    },
+  });
+  const live = cfg({
+    id: "codex",
+    driver: "codex",
+    command: "/usr/bin/codex",
+    bin: "codex",
+    source: "discovered",
+    nativeTuiAccounting: {
+      status: "unavailable",
+      provider: "codex",
+      installedVersion: "0.153.4",
+      verification: "live-cli-contract",
+      nearestStructuredSurface: "separate-app-server",
+      missingRequirements: ["replay_watermark", "gap_detection"],
+    },
+  });
+  const result = mergeAgents([configured], [live])[0]!.nativeTuiAccounting;
+  assert.equal(result?.installedVersion, "0.153.4");
+  assert.deepEqual(result?.missingRequirements, ["replay_watermark", "gap_detection"]);
 });
 
 test("merge applies explicit API billing and preserves an explicit config disable", () => {

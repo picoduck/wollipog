@@ -431,6 +431,7 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   source       TEXT,
   codex_app_server TEXT,
   claude_code TEXT,
+  native_tui_accounting TEXT,
   acp TEXT,
   registry TEXT,
   acp_transport TEXT,
@@ -3943,7 +3944,7 @@ export class ControlPlaneDb {
     );
     db.prepare("DELETE FROM driver_telemetry_hourly WHERE bucket_ts < ?").run(Date.now() - 180 * 86_400_000);
     // Additive migrations for DBs created before discovery columns existed.
-    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "source TEXT", "codex_app_server TEXT", "claude_code TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
+    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "source TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
       try {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
@@ -4426,6 +4427,7 @@ export class ControlPlaneDb {
         meta.agents,
         now,
         !runnerSupportsProtocol(protocolVersion, "runnerLocalAgentEnv"),
+        runnerSupportsProtocol(protocolVersion, "nativeTuiAccountingDiagnostics"),
       );
       if (manageTransaction) this.db.exec("COMMIT");
     } catch (err) {
@@ -4435,7 +4437,13 @@ export class ControlPlaneDb {
   }
 
   /** Replace a runner's agent rows (used by registerRunner + discovery updates). */
-  private replaceAgents(runnerId: string, agents: AgentDefinition[], now: number, persistEnvironment: boolean): void {
+  private replaceAgents(
+    runnerId: string,
+    agents: AgentDefinition[],
+    now: number,
+    persistEnvironment: boolean,
+    persistNativeTuiAccounting: boolean,
+  ): void {
     agents = agents.filter((agent) => agent.id !== "conductor");
     this.stmt("DELETE FROM runner_agents WHERE runner_id = ?").run(runnerId);
     const upAgent = this.stmt(
@@ -4444,8 +4452,8 @@ export class ControlPlaneDb {
     );
     const insRa = this.stmt(
       `INSERT INTO runner_agents
-         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, source, codex_app_server, claude_code, acp, registry, acp_transport)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, source, codex_app_server, claude_code, native_tui_accounting, acp, registry, acp_transport)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const a of agents) {
       upAgent.run(a.id, a.name, now);
@@ -4464,6 +4472,7 @@ export class ControlPlaneDb {
         a.source ?? null,
         a.codexAppServer ? JSON.stringify(a.codexAppServer) : null,
         a.claudeCode ? JSON.stringify(a.claudeCode) : null,
+        persistNativeTuiAccounting && a.nativeTuiAccounting ? JSON.stringify(a.nativeTuiAccounting) : null,
         a.acp ? JSON.stringify(a.acp) : null,
         a.registry ? JSON.stringify(a.registry) : null,
         a.acpTransport ?? null,
@@ -4484,6 +4493,7 @@ export class ControlPlaneDb {
         agents,
         now,
         !runnerSupportsProtocol(protocol?.protocol_version, "runnerLocalAgentEnv"),
+        runnerSupportsProtocol(protocol?.protocol_version, "nativeTuiAccountingDiagnostics"),
       );
       this.stmt(
           "UPDATE runners SET agents_refreshed_at=?, updated_at=?, editors=COALESCE(?, editors) WHERE runner_id=?",
@@ -8582,6 +8592,7 @@ export class ControlPlaneDb {
                   ra.driver AS driver, ra.context AS context, ra.capabilities AS capabilities,
                   ra.version AS version, ra.auth_status AS auth_status, ra.available AS available, ra.source AS source,
                   ra.codex_app_server AS codex_app_server, ra.claude_code AS claude_code,
+                  ra.native_tui_accounting AS native_tui_accounting,
                   ra.acp AS acp, ra.registry AS registry, ra.acp_transport AS acp_transport
              FROM runner_agents ra JOIN agent_definitions ad ON ad.id = ra.agent_id
             WHERE ra.runner_id=? ORDER BY ra.agent_id`,
@@ -8601,6 +8612,7 @@ export class ControlPlaneDb {
         source: string | null;
         codex_app_server: string | null;
         claude_code: string | null;
+        native_tui_accounting: string | null;
         acp: string | null;
         registry: string | null;
         acp_transport: string | null;
@@ -8622,6 +8634,7 @@ export class ControlPlaneDb {
       source: (a.source as AgentDefinition["source"] | null) ?? "config",
       codexAppServer: parseJson<AgentDefinition["codexAppServer"]>(a.codex_app_server) ?? undefined,
       claudeCode: parseJson<AgentDefinition["claudeCode"]>(a.claude_code) ?? undefined,
+      nativeTuiAccounting: parseJson<AgentDefinition["nativeTuiAccounting"]>(a.native_tui_accounting) ?? undefined,
       acp: parseJson<AgentDefinition["acp"]>(a.acp) ?? undefined,
       registry: parseJson<AgentDefinition["registry"]>(a.registry) ?? undefined,
       acpTransport: a.acp_transport === "stdio" ? "stdio" : undefined,

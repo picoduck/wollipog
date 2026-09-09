@@ -27,6 +27,7 @@ import {
 } from "./claude-code.js";
 import { probeNativeCodexAppServer, probeWslCodexAppServer, unavailableCodexAppServer } from "./codex-app-server.js";
 import { discoverAgentModels, type AgentModelDiscovery } from "./models.js";
+import { unavailableNativeTuiAccounting } from "./native-tui-accounting.js";
 import { listWslDistros, resolveInWsl, resolveNative, run, type ResolvedLaunch } from "./resolve.js";
 
 /** Where each driver keeps user-defined slash commands / prompts ($HOME-relative). */
@@ -86,10 +87,15 @@ function verifiedCodexAppServerCapabilities(
   return caps && compatibility.status === "supported" ? { ...caps, supportsSteering: true } : caps;
 }
 
-function withoutConfiguredProviderSteering(agent: AgentDefinition): AgentDefinition {
-  if ((agent.driver !== "codex-app-server" && agent.driver !== "claude-code") || !agent.capabilities?.supportsSteering) return agent;
+function withoutConfiguredProviderAttestations(agent: AgentDefinition): AgentDefinition {
+  // Native TUI accounting is a live provider-contract attestation, never configuration. A stale
+  // persisted value must not survive when a v121 runner cannot rediscover the same launch.
+  const { nativeTuiAccounting: _unverifiedAccounting, ...withoutAccounting } = agent;
+  if ((agent.driver !== "codex-app-server" && agent.driver !== "claude-code") || !agent.capabilities?.supportsSteering) {
+    return withoutAccounting;
+  }
   const { supportsSteering: _unverified, ...capabilities } = agent.capabilities;
-  return { ...agent, capabilities };
+  return { ...withoutAccounting, capabilities };
 }
 
 /** `driver|context` key so agents sharing an execution context read the same model source once. */
@@ -252,6 +258,7 @@ export function unavailableCodexAgentDefinition(
     capabilities: withSlashCommands("codex-app-server", []),
     source: "discovered",
     codexAppServer: unavailableCodexAppServer(),
+    nativeTuiAccounting: unavailableNativeTuiAccounting("codex", undefined, false),
   };
 }
 
@@ -276,6 +283,7 @@ export function unavailableClaudeAgentDefinition(
     capabilities: withSlashCommands("claude-code", []),
     source: "discovered",
     claudeCode,
+    nativeTuiAccounting: unavailableNativeTuiAccounting("claude-code", undefined, false),
   };
 }
 
@@ -378,6 +386,11 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         source: "discovered",
         ...(codexAppServer ? { codexAppServer } : {}),
         ...(claudeCode ? { claudeCode } : {}),
+        nativeTuiAccounting: unavailableNativeTuiAccounting(
+          k.bin === "claude" ? "claude-code" : "codex",
+          version,
+          k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
+        ),
       };
       found.push(...(codexAppServer ? codexAgentDefinitions(base, codexAppServer, slashCommands) : [base]));
     }),
@@ -434,6 +447,11 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           source: "discovered",
           ...(codexAppServer ? { codexAppServer } : {}),
           ...(claudeCode ? { claudeCode } : {}),
+          nativeTuiAccounting: unavailableNativeTuiAccounting(
+            k.bin === "claude" ? "claude-code" : "codex",
+            version,
+            k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
+          ),
         };
         found.push(...(codexAppServer ? codexAgentDefinitions(base, codexAppServer, slash) : [base]));
       }),
@@ -492,9 +510,9 @@ function launchKeys(a: AgentDefinition): string[] {
  * Discovered agents that don't match a config entry are appended as new entries.
  */
 export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDefinition[]): AgentDefinition[] {
-  // Config selects a driver but cannot attest to a live provider steering contract. Strip any
-  // stale steering flag first; only a matching discovery result below may restore it.
-  const safeConfigAgents = configAgents.map(withoutConfiguredProviderSteering);
+  // Config selects a driver but cannot attest to live provider contracts. Strip stale steering
+  // and Native TUI accounting claims first; only matching discovery may restore them.
+  const safeConfigAgents = configAgents.map(withoutConfiguredProviderAttestations);
   // Index every discovered agent under ALL of its identities (bin key + launch shape), so both
   // a bare config name and a config entry pinning the exact resolved launch find their match.
   const byKey = new Map<string, AgentDefinition>();
@@ -522,6 +540,8 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
       codexAppServer: d.codexAppServer ?? c.codexAppServer,
       codexBillingSource: c.codexBillingSource ?? d.codexBillingSource,
       claudeCode: d.claudeCode ?? c.claudeCode,
+      // Fresh discovery is the only authority. Config and old-runner values never attest support.
+      nativeTuiAccounting: d.nativeTuiAccounting,
       registry: d.registry ?? c.registry,
       acp: d.acp ?? c.acp,
       capabilities: c.capabilities

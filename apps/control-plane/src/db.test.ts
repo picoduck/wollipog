@@ -91,6 +91,14 @@ function claudeAgent(): AgentDefinition {
       replayUserMessages: true,
       auth: { status: "authenticated", method: "claude.ai", provider: "firstParty", billingSource: "subscription", subscriptionType: "max" },
     },
+    nativeTuiAccounting: {
+      status: "unavailable",
+      provider: "claude-code",
+      installedVersion: "2.1.205",
+      verification: "live-cli-contract",
+      nearestStructuredSurface: "print-mode-only",
+      missingRequirements: ["authoritative_usage_events", "stable_event_identity", "replay_watermark", "gap_detection"],
+    },
     // no capabilities -> should round-trip as undefined
   };
 }
@@ -1086,7 +1094,8 @@ test("startup settlement waits for explicit ownership and still settles a genuin
 /* ----------------------------- Runners --------------------------------- */
 
 test("registerRunner + getRunner round-trips driver/context/capabilities via JSON columns", () => {
-  const db = withRunner();
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(meta(), 500, 121);
   const view = db.getRunner("runner-1");
   assert.ok(view, "runner exists");
   assert.equal(view!.runnerId, "runner-1");
@@ -1132,6 +1141,17 @@ test("registerRunner + getRunner round-trips driver/context/capabilities via JSO
   assert.deepEqual(claude.env, {});
   assert.equal(claude.claudeCode?.status, "ready");
   assert.equal(claude.claudeCode?.auth.billingSource, "subscription");
+  assert.equal(claude.nativeTuiAccounting?.status, "unavailable");
+  assert.deepEqual(claude.nativeTuiAccounting?.missingRequirements, [
+    "authoritative_usage_events", "stable_event_identity", "replay_watermark", "gap_detection",
+  ]);
+
+  db.registerRunner(meta(), 600, 120);
+  assert.equal(
+    db.getRunner("runner-1")?.agents.find((candidate) => candidate.id === "claude-agent")?.nativeTuiAccounting,
+    undefined,
+    "pre-v121 runners cannot publish the diagnostic",
+  );
 });
 
 test("runner runtime storage/admission diagnostics round-trip only for v32+", () => {
