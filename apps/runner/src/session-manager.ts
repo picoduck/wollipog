@@ -1245,9 +1245,12 @@ export class SessionManager {
     // The lease is per session, not per worktree. While this session's own provider runs it holds
     // the lease for the worktree it is using; that must not stop the session from discarding a
     // finished sibling worktree, which liveWorktreeUsesPath() above already proved unused here.
-    // Only the exact owner recorded on this process's active entry is borrowed: a lease held by
+    // Only the exact owner recorded on this process's active entry qualifies: a lease held by
     // another process, or by a launch that has not published its active entry yet, still blocks.
-    let borrowedLease = false;
+    // The lease is transferred to the cleanup owner (never left unheld), so a provider that exits
+    // mid-cleanup cannot free it for a sibling runner to launch into the worktree being removed;
+    // it is handed back to the provider afterwards if the provider is still running.
+    let transferredFrom: string | null = null;
     if (!this.store.acquireWorktreeLease(sessionId, cleanupLeaseOwner)) {
       const holder = this.store.readWorktreeLease(sessionId);
       const ownProvider = this.active.get(sessionId)?.worktreeLeaseOwner;
@@ -1257,7 +1260,10 @@ export class SessionManager {
       if (!ownProvider || holder.owner !== ownProvider) {
         return { removed: false, reason: "the worktree is leased by a provider process of this session that is still starting" };
       }
-      borrowedLease = true;
+      if (!this.store.transferWorktreeLease(sessionId, ownProvider, cleanupLeaseOwner)) {
+        return { removed: false, reason: "the worktree lease changed hands while cleanup was starting" };
+      }
+      transferredFrom = ownProvider;
     }
     try {
       // Close the local race with a provider launch that acquired its durable lease while this
@@ -1311,7 +1317,15 @@ export class SessionManager {
       this.send({ type: "session_runtime_updated", snapshot });
       return { removed: true, snapshot };
     } finally {
-      if (!borrowedLease) this.store.releaseWorktreeLease(sessionId, cleanupLeaseOwner);
+      const provider = this.active.get(sessionId);
+      if (transferredFrom && provider?.worktreeLeaseOwner === transferredFrom &&
+        this.store.transferWorktreeLease(sessionId, cleanupLeaseOwner, transferredFrom)) {
+        // The provider is still running: give it back its lease.
+      } else {
+        // No transfer, or the provider went away during cleanup (its own release was a no-op
+        // because the lease was ours): free the lease so the session can launch again.
+        this.store.releaseWorktreeLease(sessionId, cleanupLeaseOwner);
+      }
     }
   }
 

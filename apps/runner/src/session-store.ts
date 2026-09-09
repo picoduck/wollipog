@@ -2646,6 +2646,30 @@ export class SessionStore {
     }
   }
 
+  /**
+   * Hand a lease held by this process from one owner to another without a gap: the file is
+   * rewritten in place, so a sibling process never observes it absent. Returns false unless the
+   * current record is exactly `{ fromOwner, pid: process.pid }`.
+   */
+  transferWorktreeLease(id: string, fromOwner: string, toOwner: string): boolean {
+    const path = this.worktreeLeasePath(id);
+    const current = this.readWorktreeLease(id);
+    if (!current || current.owner !== fromOwner || current.pid !== process.pid) return false;
+    const staged = `${path}.${process.pid}.${randomUUID()}`;
+    try {
+      writeFileSync(staged, JSON.stringify({ owner: toOwner, pid: process.pid }), { mode: 0o600 });
+      if (readFileSync(path, "utf8") !== JSON.stringify({ owner: fromOwner, pid: process.pid })) {
+        rmSync(staged, { force: true });
+        return false;
+      }
+      renameSync(staged, path);
+      return true;
+    } catch {
+      rmSync(staged, { force: true });
+      return false;
+    }
+  }
+
   releaseWorktreeLease(id: string, owner: string): void {
     const path = this.worktreeLeasePath(id);
     try {
