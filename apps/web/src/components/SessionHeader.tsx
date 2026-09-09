@@ -152,6 +152,9 @@ export function SessionHeader({
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [statusPopoverOpen, setStatusPopoverOpen] = useState(false);
   const [hiddenStatusCount, setHiddenStatusCount] = useState(0);
+  // Set when a focused badge is measured out of the row before its `+N` trigger exists to take the
+  // focus; the effect below hands it over once that trigger has rendered.
+  const focusDisclosureRef = useRef(false);
   const [moveProjectOpen, setMoveProjectOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -238,6 +241,12 @@ export function SessionHeader({
     ));
     const measure = () => {
       const items = statusItems();
+      // Measuring applies candidate sets, so every badge is briefly `display: none` — including the
+      // one the row keeps — and a `display: none` element cannot hold focus. Chromium runs its focus
+      // fixup at the next rendering update, by which time the winner is visible again, but that is
+      // an implementation detail to lean on rather than a guarantee. Remember what was focused and
+      // put focus back where it belongs once the row has settled.
+      const focusedBadge = items.find((item) => item === document.activeElement) ?? null;
       for (const item of items) item.hidden = false;
       if (!isMobile || items.length === 0) {
         setHiddenStatusCount(0);
@@ -270,6 +279,7 @@ export function SessionHeader({
 
       if (usedWidth() <= availableWithoutTrigger + 0.5) {
         setHiddenStatusCount(0);
+        restoreRowFocus(focusedBadge);
         return;
       }
 
@@ -285,7 +295,24 @@ export function SessionHeader({
         else hiddenCount -= 1;
       }
       setHiddenStatusCount(hiddenCount);
+      restoreRowFocus(focusedBadge);
     };
+
+    /**
+     * Keyboard focus follows the badge: back onto it when the row keeps it, and onto the disclosure
+     * that now holds it when the row does not. Without this, a resize or a live status change drops
+     * the user at <body>, where the next Tab restarts from the top of the document.
+     */
+    function restoreRowFocus(focusedBadge: HTMLElement | null) {
+      if (!focusedBadge || document.activeElement === focusedBadge) return;
+      if (!focusedBadge.hidden) {
+        focusedBadge.focus();
+        return;
+      }
+      const trigger = statusPopover.triggerRef.current;
+      if (trigger) trigger.focus();
+      else focusDisclosureRef.current = true;
+    }
 
     measure();
     if (typeof ResizeObserver === "undefined") return;
@@ -309,6 +336,12 @@ export function SessionHeader({
       if (measurementFrame !== null) window.cancelAnimationFrame(measurementFrame);
     };
   }, [isMobile, statusLayoutKey, shareMenu.triggerRef, statusPopover.triggerRef]);
+
+  useEffect(() => {
+    if (!focusDisclosureRef.current) return;
+    focusDisclosureRef.current = false;
+    statusPopover.triggerRef.current?.focus();
+  });
 
   useEffect(() => {
     if (hiddenStatusCount === 0 && statusPopoverOpen) {

@@ -262,3 +262,38 @@ for (const width of [390, 1280] as const) {
     expect(Math.abs(card.cardHeight - withoutBackgroundWork)).toBeLessThanOrEqual(0.5);
   });
 }
+
+/**
+ * The row is measured by applying a candidate set and reading geometry back, so every badge is
+ * briefly `display: none` — including the one the row is about to keep. A `display: none` element
+ * cannot hold focus, so without care a resize, a font load or a live status update silently drops
+ * keyboard focus to <body> mid-measurement.
+ */
+test("remeasuring the row keeps focus on the badge it keeps", async ({ page }) => {
+  await loadInbox(page, 390);
+  await openSession(page);
+  const badge = page.locator(".session-header-statuses > .background-work-badge");
+  await expect(badge).toBeVisible();
+  await badge.focus();
+  await expect(badge).toBeFocused();
+
+  // A resize re-measures the row. The badge survives this one, and so must its focus.
+  await page.setViewportSize({ width: 430, height: 900 });
+  await expect(badge).toBeVisible();
+  await expect(badge).toBeFocused();
+});
+
+test("a badge that loses the row hands focus to the disclosure that now holds it", async ({ page }) => {
+  await loadInbox(page, 390);
+  await openSession(page);
+  const badge = page.locator(".session-header-statuses > .background-work-badge");
+  await expect(badge).toBeVisible();
+  await badge.focus();
+  await expect(badge).toBeFocused();
+
+  // 320px cannot hold the badge, so it moves into the disclosure — and focus goes with it rather
+  // than falling to <body>, where the next Tab would restart from the top of the document.
+  await page.setViewportSize({ width: 320, height: 900 });
+  await expect(badge).toBeHidden();
+  await expect(page.locator(".session-status-overflow-trigger")).toBeFocused();
+});
