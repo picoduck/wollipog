@@ -1,0 +1,202 @@
+/**
+ * Governance decisions as transcript context.
+ *
+ * The control plane records an intentionally content-safe audit log: it carries actors, policy
+ * ids, stages, and outcomes, but never tool input, question answers, or credentials. Everything
+ * here reads only those safe fields, so both the transcript annotation and the consolidated
+ * side-panel history preserve that boundary.
+ *
+ * Placement contract: `requestId` is the only join key between an audit entry and a transcript
+ * row. Resolved permissions and questions already render their own outcome in place, so those
+ * entries are left alone (annotating them again would duplicate the outcome). Policy-hook
+ * decisions have no transcript event at all — the runner polls the hook and the approval lives
+ * only on the live approval card — so they are materialized as their own compact chronological
+ * row, anchored to the last loaded event at or before the decision's timestamp.
+ */
+import type { GovernanceAuditEntry } from "@wollipog/protocol";
+import type { TimelineItem } from "./timeline.js";
+
+export type GovernanceOutcomeTone = "allowed" | "denied" | "timed-out" | "policy";
+
+export interface GovernanceOutcome {
+  label: string;
+  detail: string;
+  tone: GovernanceOutcomeTone;
+}
+
+/** A single user-visible governance outcome, reduced to content-safe display fields. */
+export interface GovernanceDecision extends GovernanceOutcome {
+  auditId: string;
+  requestId: string;
+  /** Content-safe actor description, e.g. "You · device-1". */
+  decidedBy: string;
+  policyId?: string;
+  timestamp: number;
+}
+
+/** How many audit records the session view pulls. The endpoint is an unpaginated newest-N
+ * snapshot (max 500), so this is the whole governance history the client ever sees. */
+export const GOVERNANCE_AUDIT_LIMIT = 200;
+
+export function governanceAuditPresentation(entry: GovernanceAuditEntry): GovernanceOutcome | null {
+  if (entry.approvalKind === "question" && entry.actor.kind === "policy" && entry.outcome === "answered") {
+    return { label: "Answered by Policy", detail: `Question answered by policy ${entry.governancePolicyId ?? entry.actor.id}.`, tone: "allowed" };
+  }
+  if (entry.approvalKind !== "policy_hook") return null;
+  if (entry.stage === "policy_decision" && entry.outcome === "denied") {
+    return { label: "Blocked by Policy", detail: "The matched policy denied this tool.", tone: "policy" };
+  }
+  if (entry.stage !== "resolution") return null;
+  if (entry.outcome === "timed_out") {
+    return { label: "Approval Timed Out", detail: "The policy deadline expired, so the tool was denied.", tone: "timed-out" };
+  }
+  if (entry.actor.kind === "human" && entry.outcome === "allowed") {
+    return { label: "Approved by You", detail: "The suspended tool invocation resumed.", tone: "allowed" };
+  }
+  if (entry.actor.kind === "human" && entry.outcome === "denied") {
+    return { label: "Denied by You", detail: "The suspended tool invocation was blocked.", tone: "denied" };
+  }
+  return null;
+}
+
+const ACTOR_LABELS: Record<string, string> = {
+  human: "You",
+  policy: "Policy",
+  agent: "Agent",
+  system: "System",
+};
+
+function decidedByLabel(actor: GovernanceAuditEntry["actor"]): string {
+  const kind = ACTOR_LABELS[actor.kind] ?? actor.kind;
+  return actor.id ? `${kind} · ${actor.id}` : kind;
+}
+
+/**
+ * Project the audit snapshot into oldest-first display decisions.
+ *
+ * Deduplicated on `auditId` and totally ordered on (timestamp, auditId) so a refetch of the
+ * newest-N snapshot can never reorder or duplicate an outcome that is already on screen.
+ */
+export function governanceDecisions(entries: readonly GovernanceAuditEntry[]): GovernanceDecision[] {
+  const seen = new Set<string>();
+  const decisions: GovernanceDecision[] = [];
+  for (const entry of entries) {
+    const outcome = governanceAuditPresentation(entry);
+    if (!outcome || seen.has(entry.auditId)) continue;
+    seen.add(entry.auditId);
+    decisions.push({
+      ...outcome,
+      auditId: entry.auditId,
+      requestId: entry.requestId,
+      decidedBy: decidedByLabel(entry.actor),
+      ...(entry.governancePolicyId ? { policyId: entry.governancePolicyId } : {}),
+      timestamp: entry.timestamp,
+    });
+  }
+  return decisions.sort((a, b) => a.timestamp - b.timestamp || (a.auditId < b.auditId ? -1 : 1));
+}
+
+/** Audit ids are append-only records, so the id list identifies the snapshot's content. */
+export function sameGovernanceSnapshot(
+  a: readonly GovernanceAuditEntry[],
+  b: readonly GovernanceAuditEntry[],
+): boolean {
+  return a.length === b.length && a.every((entry, index) => entry.auditId === b[index]!.auditId);
+}
+
+/**
+ * Decisions that need their own transcript row: the ones whose request has no timeline row of
+ * its own. A resolved permission or question row already states its outcome in place.
+ */
+export function transcriptGovernanceDecisions(
+  decisions: readonly GovernanceDecision[],
+  items: readonly TimelineItem[],
+): GovernanceDecision[] {
+  const represented = new Set<string>();
+  for (const item of items) {
+    if (item.kind === "permission" || item.kind === "question") represented.add(item.requestId);
+  }
+  return decisions.filter((decision) => !represented.has(decision.requestId));
+}
+
+export interface GovernanceAnchorEvent {
+  seq: number;
+  ts: number;
+}
+
+/**
+ * Sequence of the last loaded event at or before `timestamp`.
+ *
+ * -Infinity means the decision predates the loaded window: it pins to the head of the window
+ * (directly under the "earlier activity" control) rather than being dropped, so paging older
+ * activity moves it into place without ever omitting it.
+ */
+export function governanceAnchorSeq(events: readonly GovernanceAnchorEvent[], timestamp: number): number {
+  let low = 0;
+  let high = events.length - 1;
+  let anchor = Number.NEGATIVE_INFINITY;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const event = events[mid]!;
+    if (event.ts <= timestamp) {
+      anchor = event.seq;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return anchor;
+}
+
+/**
+ * Synthetic ids for governance rows, kept negative so they can never collide with an event
+ * sequence in the reveal index, and stable per audit id so a row keeps its virtual-list identity
+ * (and its open disclosure) across refetches.
+ */
+const governanceItemIds = new Map<string, number>();
+let nextGovernanceItemId = -1;
+const MAX_TRACKED_GOVERNANCE_ITEM_IDS = 4096;
+
+export function governanceItemId(auditId: string): number {
+  const existing = governanceItemIds.get(auditId);
+  if (existing !== undefined) return existing;
+  if (governanceItemIds.size >= MAX_TRACKED_GOVERNANCE_ITEM_IDS) governanceItemIds.clear();
+  const id = nextGovernanceItemId--;
+  governanceItemIds.set(auditId, id);
+  return id;
+}
+
+/**
+ * Splice governance rows into a derived timeline at their chronological positions.
+ *
+ * Returns the input array unchanged (same identity) when there is nothing to add, so sessions
+ * without governance activity keep the incremental row projector's fast path.
+ */
+export function mergeGovernanceDecisions(
+  items: TimelineItem[],
+  decisions: readonly GovernanceDecision[],
+  events: readonly GovernanceAnchorEvent[],
+): TimelineItem[] {
+  if (!decisions.length) return items;
+  const anchored = decisions
+    .map((decision) => ({ decision, anchorSeq: governanceAnchorSeq(events, decision.timestamp) }))
+    .sort((a, b) =>
+      a.anchorSeq - b.anchorSeq ||
+      a.decision.timestamp - b.decision.timestamp ||
+      (a.decision.auditId < b.decision.auditId ? -1 : 1));
+
+  const merged: TimelineItem[] = [];
+  let next = 0;
+  const flushBefore = (id: number) => {
+    while (next < anchored.length && anchored[next]!.anchorSeq < id) {
+      const { decision } = anchored[next++]!;
+      merged.push({ kind: "governance_decision", id: governanceItemId(decision.auditId), decision });
+    }
+  };
+  for (const item of items) {
+    flushBefore(item.id);
+    merged.push(item);
+  }
+  flushBefore(Number.POSITIVE_INFINITY);
+  return merged;
+}

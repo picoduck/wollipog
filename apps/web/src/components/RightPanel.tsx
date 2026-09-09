@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ChevronLeftIcon, CommandLineIcon, FolderIcon, GlobeIcon, HelpIcon, TeamIcon, TerminalIcon } from "./Icons.js";
+import { ChevronLeftIcon, CommandLineIcon, FolderIcon, GlobeIcon, HelpIcon, LockIcon, TeamIcon, TerminalIcon } from "./Icons.js";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -26,6 +26,8 @@ import { ReviewPanel } from "./ReviewPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import type { TimelineItem } from "../timeline.js";
+import type { GovernanceDecision } from "../governance.js";
+import { GovernanceHistoryPanel } from "./GovernanceHistoryPanel.js";
 import { AgentsPanel } from "./AgentsPanel.js";
 import { focusSessionRequest } from "./SessionApproval.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
@@ -38,6 +40,7 @@ function viewportPanelMax(): number {
 }
 
 const EMPTY_PARENT_TURN_EVENTS: ReadonlyMap<string, number> = new Map();
+const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];
 
 /**
  * The right side panel's app-level state. Lives in App.tsx (NOT inside the per-session-keyed
@@ -159,6 +162,7 @@ const MODE_TITLES: Record<RightPanelMode, string> = {
   sidechat: "Side Chat",
   subagents: "Agents",
   background: "Background Work",
+  governance: "Governance History",
 };
 
 /**
@@ -182,6 +186,7 @@ export function RightPanel({
   onInsertSideChatDraft,
   onAttachWorkspaceReference,
   items,
+  governanceDecisions = EMPTY_GOVERNANCE_DECISIONS,
   earlierActivityUnloaded = false,
   parentTurnEventIds = EMPTY_PARENT_TURN_EVENTS,
   onOpenParentTurn = () => undefined,
@@ -204,6 +209,8 @@ export function RightPanel({
   onInsertSideChatDraft: (text: string) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   items: TimelineItem[];
+  /** Consolidated, content-safe governance outcomes for this session, oldest-first. */
+  governanceDecisions?: readonly GovernanceDecision[];
   /** The transcript is showing a bounded window with older turns still unloaded. */
   earlierActivityUnloaded?: boolean;
   /** Loaded parent turns that can be revealed directly in the virtual transcript. */
@@ -364,6 +371,7 @@ export function RightPanel({
             backgroundAvailable={(session.backgroundJobs?.length ?? 0) > 0 ||
               session.backgroundJobsAvailable === true ||
               session.backgroundWorkTracking != null || session.backgroundWorkState != null}
+            governanceAvailable={governanceDecisions.length > 0}
           />
         ) : (
           <div className="rp-body">
@@ -392,6 +400,7 @@ export function RightPanel({
                 onAttachWorkspaceReference={onAttachWorkspaceReference}
               />
             )}
+            {state.mode === "governance" && <GovernanceHistoryPanel decisions={governanceDecisions} />}
             {state.mode === "browser" && <BrowserPanel session={session} />}
             {state.mode === "sidechat" && (
               <SideChatPanel session={session} runnerOnline={runnerOnline} onInsertDraft={onInsertSideChatDraft} />
@@ -481,6 +490,7 @@ function Launcher({
   terminalSupported,
   terminalHint,
   backgroundAvailable,
+  governanceAvailable,
 }: {
   onPick: (mode: RightPanelMode) => void;
   onOpenTerminal: () => void;
@@ -489,6 +499,7 @@ function Launcher({
   terminalSupported: boolean;
   terminalHint: string;
   backgroundAvailable: boolean;
+  governanceAvailable: boolean;
 }) {
   return (
     <div className="rp-launcher">
@@ -546,6 +557,13 @@ function Launcher({
         icon={
           <TeamIcon size={14} />
         }
+      />
+      <LauncherRow
+        label="Governance History"
+        disabled={!governanceAvailable}
+        hint="No governance decisions have been recorded for this session."
+        onClick={() => onPick("governance")}
+        icon={<LockIcon size={14} />}
       />
       <LauncherRow
         label="Side Chat"

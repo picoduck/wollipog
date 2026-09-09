@@ -21,6 +21,7 @@ import {
   type VirtualScrollAnchor,
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
+import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
 import { EditIcon, ThreadForkIcon } from "./Icons.js";
 import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { PromptImageView } from "./PromptImageView.js";
@@ -1873,6 +1874,28 @@ const TimelineRow = memo(function TimelineRow({
           )}
         </div>
       );
+    case "governance_decision": {
+      const decision = item.decision;
+      return (
+        <div className={`tl-governance ${decision.tone}`} data-audit-id={decision.auditId}>
+          <details
+            className="governance-decision"
+            open={disclosureOpen}
+            onToggle={(event) => {
+              if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
+            }}
+          >
+            <summary className="tl-governance-head">
+              <span className="governance-icon" aria-hidden="true">⚖️</span>
+              <span className="sr-only">Governance Decision: </span>
+              <span className="governance-label">{decision.label}</span>
+              <ActivityTimestampMeta startedAt={decision.timestamp} pointWhenEqual />
+            </summary>
+            <GovernanceDecisionFacts decision={decision} />
+          </details>
+        </div>
+      );
+    }
     case "question": {
       const firstQuestion = item.questions[0];
       const summary = firstQuestion ? structuredQuestionSummary(firstQuestion.question) : "Question";

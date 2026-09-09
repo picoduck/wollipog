@@ -112,7 +112,7 @@ import {
 } from "../session-actions.js";
 import { SessionApprovalRegion } from "./SessionApproval.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
-import { GovernanceAuditTrail } from "./GovernanceAuditTrail.js";
+import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
@@ -2110,6 +2110,15 @@ function SessionDetailLoaded({
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
   const items = useTimeline(sessionId, evs);
+  // Governance outcomes are transcript context, not a persistent header: the decisions whose
+  // request has no transcript row of its own are spliced in at their chronological position, and
+  // the whole list stays reviewable in the side panel (a full-screen drawer on phones).
+  const governanceDecisions = useGovernanceAudit(
+    sessionId,
+    `${session.updatedAt}:${session.pendingApproval?.requestId ?? ""}`,
+    mode === "expanded",
+  );
+  const timelineItems = useGovernanceTimeline(items, governanceDecisions, evs);
   const observedLastEventAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || undefined;
   const activeTurnProgressProjector = useRef<IncrementalActiveTurnProgress | null>(null);
   activeTurnProgressProjector.current ??= new IncrementalActiveTurnProgress();
@@ -4010,12 +4019,6 @@ function SessionDetailLoaded({
             // virtual list can keep it reachable at its canonical transcript position.
             questionInTimeline={questionInTimeline}
           />
-          {mode === "expanded" && (
-            <GovernanceAuditTrail
-              sessionId={session.id}
-              revision={`${session.updatedAt}:${session.pendingApproval?.requestId ?? ""}`}
-            />
-          )}
           <div
             className="detail-main"
             data-active-pane={activePane}
@@ -4141,7 +4144,7 @@ function SessionDetailLoaded({
                   {items.length > 0 && (
                     <EventTimeline
                       driver={session.driver}
-                      items={items}
+                      items={timelineItems}
                       sessionActive={isTimelineSessionActive(session.status)}
                       onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                       onOpenSourceLocation={openSourceLocation}
@@ -4775,6 +4778,7 @@ function SessionDetailLoaded({
           onInsertSideChatDraft={insertSideChatDraft}
           onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTarget : undefined}
           items={items}
+          governanceDecisions={governanceDecisions}
           parentTurnEventIds={backgroundParentTurnEventIds}
           onOpenParentTurn={revealBackgroundParentTurn}
           backgroundInventoryError={backgroundInventoryError}

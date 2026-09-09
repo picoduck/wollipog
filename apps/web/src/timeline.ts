@@ -1,3 +1,4 @@
+import type { GovernanceDecision } from "./governance.js";
 import type {
   AgentQuestion,
   ApprovalContext,
@@ -178,6 +179,10 @@ export type TimelineItem =
       answeredByPolicies?: string[];
       resolutionReason?: StructuredRequestResolutionReason;
     }
+  /** A governance outcome whose request never produced a transcript event of its own (policy
+   * hooks). Synthesized client-side from the content-safe audit log and anchored chronologically;
+   * `id` is negative so it cannot collide with an event sequence. */
+  | { kind: "governance_decision"; id: number; decision: GovernanceDecision }
   | { kind: "checkpoint"; id: number; turn: number }
   | { kind: "checkpoint_restored"; id: number; turn: number }
   | { kind: "conversation_checkpoint"; id: number; turn: number }

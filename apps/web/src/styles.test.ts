@@ -520,8 +520,9 @@ test("small muted text clears WCAG AA against its surface in both themes", () =>
  */
 test("small-text consumers reference a token that clears AA on their surface", () => {
   const consumers: Array<[string, string]> = [
-    [".governance-audit-heading", "--bg"],
-    [".governance-audit-outcome span", "--bg"],
+    [".governance-decision-detail", "--bg"],
+    [".governance-decision-facts dt", "--bg"],
+    [".governance-history-time", "--bg"],
   ];
   for (const [selector, surface] of consumers) {
     const rule = new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`, "s").exec(css);
