@@ -2497,3 +2497,110 @@ test("an idempotent retry applies the default branch the remote just advertised"
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a running session discards its own finished worktrees despite the per-session provider lease", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-own-lease-discard-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_own_lease", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "own lease",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const finished = await manager.requestWorktree("s_own_lease", { baseRef: "HEAD", branch: "fix/finished" });
+    const current = await manager.requestWorktree("s_own_lease", { baseRef: "HEAD", branch: "fix/current" });
+    const third = await manager.requestWorktree("s_own_lease", { baseRef: "HEAD", branch: "fix/third" });
+    const fourth = await manager.requestWorktree("s_own_lease", { baseRef: "HEAD", branch: "fix/fourth" });
+    const fifth = await manager.requestWorktree("s_own_lease", { baseRef: "HEAD", branch: "fix/fifth" });
+    for (const worktree of [finished.worktree, current.worktree, third.worktree, fourth.worktree, fifth.worktree]) {
+      execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
+    }
+    // The session's provider is running in `current` and holds the per-session lease, exactly as
+    // launch records it on the active entry.
+    const providerOwner = "runner:provider:1:test";
+    assert.equal(store.acquireWorktreeLease("s_own_lease", providerOwner), true);
+    const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
+    activeEntries.set("s_own_lease", {
+      sessionId: "s_own_lease",
+      context: { kind: "native" },
+      cwd: current.worktree.path,
+      worktree: { path: current.worktree.path, branch: current.worktree.branch },
+      worktreeLeaseOwner: providerOwner,
+    });
+
+    // While cleanup runs, the lease belongs to cleanup (never unheld), and the provider gets it back.
+    const internals = manager as unknown as { discardSessionWorktreeIfSafe: (...args: unknown[]) => Promise<unknown> };
+    const originalDiscard = internals.discardSessionWorktreeIfSafe.bind(manager);
+    let leaseDuringCleanup: { owner: string; pid: number } | null = null;
+    internals.discardSessionWorktreeIfSafe = async (...args: unknown[]) => {
+      leaseDuringCleanup = store.readWorktreeLease("s_own_lease");
+      assert.equal(store.acquireWorktreeLease("s_own_lease", "sibling-runner:launch", process.ppid), false,
+        "a sibling runner cannot take the lease while cleanup is in flight");
+      return originalDiscard(...args);
+    };
+    await manager.discardWorktree("s_own_lease", finished.worktree.path);
+    assert.equal(existsSync(finished.worktree.path), false, "the finished sibling worktree is removed while the session runs");
+    assert.ok(leaseDuringCleanup && leaseDuringCleanup.owner !== providerOwner && leaseDuringCleanup.pid === process.pid,
+      "cleanup held the lease under its own owner while removing the worktree");
+    assert.deepEqual(store.readWorktreeLease("s_own_lease"), { owner: providerOwner, pid: process.pid },
+      "the provider's lease is handed back after cleanup");
+
+    // If handing the lease back fails (disk error), it stays held and tied to the running provider.
+    const originalTransfer = store.transferWorktreeLease.bind(store);
+    store.transferWorktreeLease = (id, fromOwner, toOwner) => toOwner === providerOwner ? false : originalTransfer(id, fromOwner, toOwner);
+    await manager.discardWorktree("s_own_lease", third.worktree.path);
+    store.transferWorktreeLease = originalTransfer;
+    assert.equal(existsSync(third.worktree.path), false);
+    const keptLease = store.readWorktreeLease("s_own_lease");
+    assert.ok(keptLease && keptLease.owner !== providerOwner && keptLease.pid === process.pid, "the lease is still held after a failed hand-back");
+    const entryAfter = activeEntries.get("s_own_lease") as { worktreeLeaseOwner?: string };
+    assert.equal(entryAfter.worktreeLeaseOwner, keptLease!.owner, "the running provider now owns the cleanup lease, so retirement releases it");
+    assert.equal(store.acquireWorktreeLease("s_own_lease", "sibling-runner:launch", process.ppid), false, "a sibling still cannot take the lease");
+    store.releaseWorktreeLease("s_own_lease", entryAfter.worktreeLeaseOwner!);
+    assert.equal(store.readWorktreeLease("s_own_lease"), null, "the provider's retirement release still frees it");
+    assert.equal(store.acquireWorktreeLease("s_own_lease", providerOwner), true);
+    entryAfter.worktreeLeaseOwner = providerOwner;
+
+    // If the provider exits during cleanup, its release is a no-op and cleanup frees the lease.
+    internals.discardSessionWorktreeIfSafe = async (...args: unknown[]) => {
+      store.releaseWorktreeLease("s_own_lease", providerOwner);
+      activeEntries.delete("s_own_lease");
+      return originalDiscard(...args);
+    };
+    await manager.discardWorktree("s_own_lease", fourth.worktree.path);
+    assert.equal(existsSync(fourth.worktree.path), false);
+    assert.equal(store.readWorktreeLease("s_own_lease"), null, "a lease whose provider left mid-cleanup is released, not leaked");
+    internals.discardSessionWorktreeIfSafe = originalDiscard;
+    assert.equal(store.acquireWorktreeLease("s_own_lease", providerOwner), true);
+    activeEntries.set("s_own_lease", {
+      sessionId: "s_own_lease",
+      context: { kind: "native" },
+      cwd: current.worktree.path,
+      worktree: { path: current.worktree.path, branch: current.worktree.branch },
+      worktreeLeaseOwner: providerOwner,
+    });
+    await assert.rejects(manager.discardWorktree("s_own_lease", current.worktree.path), /still active in a provider process/,
+      "the worktree the provider runs in is still protected");
+
+    // A launch that holds the lease but has not published its active entry yet still blocks.
+    store.releaseWorktreeLease("s_own_lease", providerOwner);
+    assert.equal(store.acquireWorktreeLease("s_own_lease", "runner:provider:2:launching"), true);
+    await assert.rejects(manager.discardWorktree("s_own_lease", fifth.worktree.path), /provider process of this session that is still starting/);
+    store.releaseWorktreeLease("s_own_lease", "runner:provider:2:launching");
+
+    // A lease held by another live process (a sibling runner) still blocks with the original reason.
+    assert.equal(store.acquireWorktreeLease("s_own_lease", "sibling-runner:provider", process.ppid), true);
+    await assert.rejects(manager.discardWorktree("s_own_lease", fifth.worktree.path), /leased by another runner process/);
+    store.releaseWorktreeLease("s_own_lease", "sibling-runner:provider");
+    assert.equal(existsSync(fifth.worktree.path), true);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

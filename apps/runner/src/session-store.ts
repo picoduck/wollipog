@@ -2635,6 +2635,41 @@ export class SessionStore {
     return false;
   }
 
+  /** The current worktree lease record for a session, or null when none is held or it is unreadable. */
+  readWorktreeLease(id: string): { owner: string; pid: number } | null {
+    try {
+      const record = JSON.parse(readFileSync(this.worktreeLeasePath(id), "utf8")) as { owner?: unknown; pid?: unknown };
+      if (typeof record.owner !== "string" || !Number.isSafeInteger(record.pid) || (record.pid as number) <= 0) return null;
+      return { owner: record.owner, pid: record.pid as number };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Hand a lease held by this process from one owner to another without a gap: the file is
+   * rewritten in place, so a sibling process never observes it absent. Returns false unless the
+   * current record is exactly `{ fromOwner, pid: process.pid }`.
+   */
+  transferWorktreeLease(id: string, fromOwner: string, toOwner: string): boolean {
+    const path = this.worktreeLeasePath(id);
+    const current = this.readWorktreeLease(id);
+    if (!current || current.owner !== fromOwner || current.pid !== process.pid) return false;
+    const staged = `${path}.${process.pid}.${randomUUID()}`;
+    try {
+      writeFileSync(staged, JSON.stringify({ owner: toOwner, pid: process.pid }), { mode: 0o600 });
+      if (readFileSync(path, "utf8") !== JSON.stringify({ owner: fromOwner, pid: process.pid })) {
+        rmSync(staged, { force: true });
+        return false;
+      }
+      renameSync(staged, path);
+      return true;
+    } catch {
+      rmSync(staged, { force: true });
+      return false;
+    }
+  }
+
   releaseWorktreeLease(id: string, owner: string): void {
     const path = this.worktreeLeasePath(id);
     try {
