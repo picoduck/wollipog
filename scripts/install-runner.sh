@@ -10,6 +10,9 @@
 #
 # Usage (headless host: control plane + runner + dashboard bundle, then `wollipog service install`):
 #   curl -fsSL .../install-runner.sh | sh -s -- --control-plane
+#
+# --release vX.Y.Z installs that release instead of the latest one. A draft release (for example the
+# release workflow's throwaway dry run) needs an authenticated `gh` with access to the repository.
 set -eu
 
 repo="picoduck/wollipog"
@@ -18,6 +21,7 @@ token="dev-local-token"
 runner_id="$(hostname)"
 workspace="$HOME"
 with_control_plane=0
+release=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -26,6 +30,7 @@ while [ $# -gt 0 ]; do
     --id) runner_id="$2"; shift 2 ;;
     --workspace) workspace="$2"; shift 2 ;;
     --control-plane) with_control_plane=1; shift ;;
+    --release) release="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -107,7 +112,26 @@ release_asset_record() {
   '
 }
 
-api="https://api.github.com/repos/$repo/releases/latest"
+if [ -n "$release" ]; then
+  printf '%s\n' "$release" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "--release must look like v1.2.3, got $release" >&2; exit 1; }
+  api="https://api.github.com/repos/$repo/releases/tags/$release"
+else
+  api="https://api.github.com/repos/$repo/releases/latest"
+fi
+gh_jq='.tag_name, (.assets[] | [.name, (.digest // ""), .browser_download_url] | @tsv)'
+# Raw `gh api` metadata keeps the publisher digests (`gh release view` drops them). The tags
+# endpoint only knows published releases; an authenticated gh can find a draft by filtering the
+# release list instead.
+gh_release_lookup() {
+  if [ -z "$release" ]; then
+    gh api "repos/$repo/releases/latest" --jq "$gh_jq" 2>/dev/null
+    return
+  fi
+  gh api "repos/$repo/releases/tags/$release" --jq "$gh_jq" 2>/dev/null && return 0
+  listed=$(gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$release\") | $gh_jq" 2>/dev/null) || return 1
+  [ -n "$listed" ] || return 1
+  printf '%s\n' "$listed"
+}
 use_gh=0
 legacy_selected=0
 if release_json=$(curl -fsSL "$api"); then
@@ -124,7 +148,7 @@ if release_json=$(curl -fsSL "$api"); then
   checksum_record=$(release_asset_record SHA256SUMS)
   checksum_dl=$(printf '%s\n' "$checksum_record" | cut -f3)
 else
-  if command -v gh >/dev/null 2>&1 && gh_release=$(gh api "repos/$repo/releases/latest" --jq '.tag_name, (.assets[] | [.name, (.digest // ""), .browser_download_url] | @tsv)' 2>/dev/null); then
+  if command -v gh >/dev/null 2>&1 && gh_release=$(gh_release_lookup); then
     use_gh=1
     gh_tag=$(printf '%s\n' "$gh_release" | sed -n '1p')
     release_tag=$gh_tag
@@ -140,7 +164,7 @@ else
     checksum_record=$(printf '%s\n' "$gh_assets" | awk -F '\t' '$1 == "SHA256SUMS" { print; exit }')
     checksum_dl=$(printf '%s\n' "$checksum_record" | cut -f1)
   else
-    echo "GitHub release lookup failed. For a private repository install/authenticate gh (gh auth login, or set GH_TOKEN with Contents: read), then run a local copy of this script." >&2
+    echo "GitHub release lookup failed${release:+ for $release}. For a private repository or a draft release install/authenticate gh (gh auth login, or set GH_TOKEN with Contents: read), then run a local copy of this script." >&2
     exit 1
   fi
 fi

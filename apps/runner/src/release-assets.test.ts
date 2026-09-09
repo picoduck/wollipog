@@ -68,6 +68,20 @@ test("resolveRelease reads latest or an exact tag and keeps only usable digests"
   await assert.rejects(resolveRelease(async () => ({ ok: false, status: 404, text: async () => "" }), {}), /no published release found/u);
   await assert.rejects(resolveRelease(async () => ({ ok: true, status: 200, text: async () => "<html>" }), {}), /not valid JSON/u);
   await assert.rejects(resolveRelease(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ tag_name: "nightly", assets: [] }) }), {}), /no usable tag name/u);
+  // A tag the tags endpoint does not know (a draft) is found through the release list when a
+  // token is present; without a token the 404 stands.
+  const draftFetch = async (url: string) => url.includes("/releases/tags/")
+    ? { ok: false, status: 404, text: async () => "" }
+    : { ok: true, status: 200, text: async () => JSON.stringify([
+        { tag_name: "v1.2.3", draft: false, assets: [] },
+        { tag_name: "v0.0.0-test.9", draft: true, assets: [{ name: "SHA256SUMS", digest: `sha256:${"b".repeat(64)}`, browser_download_url: "https://dl/s", size: 3 }] },
+      ]) };
+  const draft = await resolveRelease(draftFetch, { tag: "v0.0.0-test.9", token: "tok" });
+  assert.equal(draft.tag, "v0.0.0-test.9");
+  assert.equal(draft.version, "0.0.0-test.9");
+  assert.deepEqual(draft.assets.map((asset) => asset.name), ["SHA256SUMS"]);
+  await assert.rejects(resolveRelease(draftFetch, { tag: "v0.0.0-test.9" }), /no release v0\.0\.0-test\.9 found/u);
+  await assert.rejects(resolveRelease(draftFetch, { tag: "v9.9.9", token: "tok" }), /no release v9\.9\.9 found/u);
   // The tag names a staging directory, so a "latest" release with a path-like tag is refused too.
   await assert.rejects(resolveRelease(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ tag_name: "v1.2.3/../../etc", assets: [] }) }), {}), /no usable tag name/u);
   assert.throws(() => findAsset(latest, "missing"), /has no asset named missing/u);
