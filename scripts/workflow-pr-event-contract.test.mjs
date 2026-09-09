@@ -27,7 +27,7 @@ function workflowContract(path) {
 
   assert.ok(pullRequestTypes, `${path}: missing pull_request types`);
   assert.ok(concurrencyGroup, `${path}: missing concurrency group`);
-  const jobIds = (text.split(/^jobs:\r?\n/m)[1] ?? "").match(/^  [a-z][a-z0-9_-]*:$/gm) ?? [];
+  const jobIds = (text.split(/^jobs:\r?\n/m)[1] ?? "").match(/^  [A-Za-z_][A-Za-z0-9_-]*:$/gm) ?? [];
   assert.ok(jobIds.length >= 1, `${path}: expected at least one job`);
   assert.equal(jobGuards.length, jobIds.length, `${path}: every job needs a job-level if guard (${jobGuards.length} of ${jobIds.length} jobs have one)`);
   assert.match(text, /^  cancel-in-progress: true$/m, `${path}: concurrency must cancel in progress`);
@@ -200,7 +200,7 @@ test("PR workflows keep least-privilege permissions and an always-present requir
 test("the required CI check aggregates parallel jobs that each own a time budget", () => {
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
   const jobsText = ci.split(/^jobs:\r?\n/m)[1];
-  const starts = [...jobsText.matchAll(/^  ([a-z]+):$/gm)];
+  const starts = [...jobsText.matchAll(/^  ([A-Za-z_][A-Za-z0-9_-]*):$/gm)];
   const byId = Object.fromEntries(starts.map((match, index) => [
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
