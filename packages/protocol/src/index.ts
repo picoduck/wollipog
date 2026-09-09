@@ -337,7 +337,10 @@
 //      dashboard's currently loaded transcript window an identity or liveness source.
 // 119: portable machine skill snapshots and native Windows skill deployment.
 // 120: native macOS no-follow machine skill snapshots.
-export const PROTOCOL_VERSION = 120;
+// 121: content-free Native TUI accounting readiness diagnostics. Discovery reports only
+//      provider contracts it can prove from the live CLI; absent or incomplete proof remains
+//      unavailable and never enables usage attribution or budget enforcement.
+export const PROTOCOL_VERSION = 121;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -487,6 +490,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   nativeWindowsMachineSkillSnapshots: 119,
   nativeWindowsSkillDeployment: 119,
   nativeMacosMachineSkillSnapshots: 120,
+  /** v121 runners publish a content-free, live-discovered Native TUI accounting boundary. */
+  nativeTuiAccountingDiagnostics: 121,
   machineSkillAdoption: 115,
   machineSkillAdoptionRecovery: 116,
   chunkedAgentSkills: 96,
@@ -1078,6 +1083,29 @@ export interface ClaudeCodeCapabilities {
   failure?: ClaudeCodeFailure;
 }
 
+/** Proof obligations a provider-owned Native TUI must meet before Wollipog may attribute usage.
+ * These are deliberately fixed identifiers: discovery never forwards provider output, terminal
+ * text, local paths, prompts, or history into runner metadata. */
+export type NativeTuiAccountingRequirement =
+  | "authoritative_usage_events"
+  | "pre_first_turn_binding"
+  | "stable_event_identity"
+  | "replay_watermark"
+  | "gap_detection";
+
+/** Live-discovered boundary for provider-owned interactive terminals. This diagnostic is not an
+ * accounting capability: an incomplete provider contract always remains unavailable, and no
+ * caller may use it to relax Native TUI budget or usage guardrails. */
+export interface NativeTuiAccountingBoundary {
+  status: "unavailable";
+  provider: "claude-code" | "codex";
+  installedVersion?: string;
+  verification: "live-cli-contract" | "provider-not-installed";
+  /** Where the nearest structured usage signal exists; neither value is the launched Native TUI. */
+  nearestStructuredSurface: "print-mode-only" | "separate-app-server" | "none";
+  missingRequirements: NativeTuiAccountingRequirement[];
+}
+
 /** Resolved per-session knobs (model / reasoning effort / approval preset). */
 export interface SessionConfig {
   /** Control-plane-owned lifetime cap on directly created child sessions. Default: four. */
@@ -1198,6 +1226,8 @@ export interface AgentDefinition {
   codexAppServer?: CodexAppServerCapabilities;
   /** Claude-only launch-readiness result. Absent on pre-v30 runners and non-Claude agents. */
   claudeCode?: ClaudeCodeCapabilities;
+  /** Content-free Native TUI accounting boundary. Absent on pre-v121 runners and non-provider agents. */
+  nativeTuiAccounting?: NativeTuiAccountingBoundary;
   /** The logical binary name discovery resolved ("claude", "codex"). Launch-target identity for
    * config↔discovery merging: a version-manager install launches as `node <entry.js>` whose
    * entry file may be generically named (cli.js/index.js), so neither command nor args identify

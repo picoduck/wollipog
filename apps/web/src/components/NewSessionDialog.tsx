@@ -43,6 +43,7 @@ import { handleRovingChoiceKeyDown, rovingChoiceTabIndex } from "./interactions.
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
+import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
 import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
@@ -217,6 +218,7 @@ export function NewSessionDialog({
     executionTargets.find((target) => target.adapter === "host" &&
       target.workspaceStrategy === (useWorktree ? "worktree" : "in_place"));
   const agent = selectedAgentOption?.agent;
+  const nativeTuiAccountingExplanation = nativeTuiAccountingDetail(agent);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const orchestrator = presetOverride === "orchestrator" || savedPermissionMode === "orchestrator";
   const orchestratorSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration") &&
@@ -853,7 +855,7 @@ export function NewSessionDialog({
               <span className="muted">Native TUI currently runs only on the host execution target.</span>
             )}
             {launchSurface === "native_tui" && (
-              <span className="muted">Usage Accounting: Unavailable. No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Sessions with cost budgets, cost checkpoints, or tool-call limits must use Direct. Manager policy hook status appears after launch.</span>
+              <span className="muted">Usage Accounting: Unavailable. No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Sessions with cost budgets, cost checkpoints, or tool-call limits must use Direct. {nativeTuiAccountingExplanation && <>{nativeTuiAccountingExplanation} </>}Manager policy hook status appears after launch.</span>
             )}
           </div>
 

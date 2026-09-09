@@ -632,6 +632,52 @@ test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal 
   }
 });
 
+test("Native TUI shows the content-free live provider accounting boundary", async () => {
+  const fixture = await mountFixture({
+    capabilities: {
+      sessionSubscriptions: false,
+      boundedDelivery: false,
+      paginatedSessionHistory: false,
+      projects: true,
+      nativeTuiLaunch: true,
+    },
+    runners: [{
+      ...runner,
+      protocolVersion: 121,
+      agents: [{
+        ...runner.agents[0]!,
+        nativeTuiAccounting: {
+          status: "unavailable",
+          provider: "claude-code",
+          installedVersion: "2.1.261",
+          verification: "live-cli-contract",
+          nearestStructuredSurface: "print-mode-only",
+          missingRequirements: [
+            "authoritative_usage_events",
+            "stable_event_identity",
+            "replay_watermark",
+            "gap_detection",
+          ],
+        },
+      }],
+    }],
+  });
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
+      .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
+    assert.ok(native);
+    await act(async () => { native.click(); });
+    assert.match(
+      fixture.container.textContent ?? "",
+      /Provider Contract: Claude Code 2\.1\.261 exposes structured output only outside its interactive Native TUI/,
+    );
+    assert.match(fixture.container.textContent ?? "", /authoritative replay and gap detection are unavailable\./);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("Native TUI is disabled when the control plane does not advertise atomic launch", async () => {
   const fixture = await mountFixture();
   try {
