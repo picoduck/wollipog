@@ -1088,6 +1088,11 @@ test("Direct WSL bridge binds broker-provisioned private files and launches only
   assert.equal(args.includes("/usr/bin/node"), false, "provider launcher does not receive the relay runtime");
   assert.equal(args.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"), false,
     "provider launcher does not receive the relay helper");
+  assert.ok(args.some((arg) => arg.includes("exec 3<&0; if command -v setsid")),
+    "the Linux wrapper preserves translated stdin before backgrounding the provider");
+  assert.ok(args.some((arg) => arg.includes("<&3 3<&-")));
+  assert.ok(args.some((arg) => arg.includes("exec 3<&-;")),
+    "the Linux wrapper closes its temporary stdin duplicate");
   assert.equal(args.join(" ").includes(bridge.token), false);
   assert.equal(args.join(" ").includes("wsl.exe"), false, "provider argv never receives a Windows launcher");
   const relayArgs = buildWslAgentControlRelayArgs(bridge);

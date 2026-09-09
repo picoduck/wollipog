@@ -158,6 +158,8 @@ test("verified Direct WSL rotates credentials and provisions only the target-loc
     assert.equal(JSON.stringify(launch).includes(first.token), false, "credential stays out of launch metadata");
     assert.equal(launch.env.WOLLIPOG_CLI, "/usr/bin/node");
     assert.match(launch.env.WOLLIPOG_CLI_ARGS, /wsl-agent-control-v1\.mjs/u);
+    assert.ok(launch.args.some((arg) => arg.includes('"WOLLIPOG_AGENT_CONTROL_SOCKET" = "/tmp/wollipog-agent-control/control.sock"')),
+      "Codex MCP receives the private socket explicitly instead of relying on ambient inheritance");
     assert.ok(launch.args.includes("--strict-config"));
 
     await provisionAgentControl(launch, control, () => {}, host);

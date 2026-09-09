@@ -57,6 +57,14 @@ function waitClose(child: AgentProcess): Promise<void> {
     : new Promise((resolve) => child.once("close", () => resolve()));
 }
 
+async function waitBridgeClose(child: AgentProcess): Promise<void> {
+  const relay = child.wslAgentControl?.relay;
+  await waitClose(child);
+  if (relay && relay.exitCode === null) {
+    await new Promise<void>((resolve) => relay.once("close", () => resolve()));
+  }
+}
+
 test("real WSL2 bridge carries CLI and MCP while adversarial routes fail closed and clean up", { skip: !enabled }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-real-"));
   const host = defaultAgentControlHost(root);
@@ -91,7 +99,11 @@ test("real WSL2 bridge carries CLI and MCP while adversarial routes fail closed 
   const launch = (spec: SessionLaunchSpec, isolation: BwrapSpawnIsolation, mode: "cli" | "mcp", args: string[] = []) =>
     spawnAgent({ command: nodeRuntime!, args: [WSL_AGENT_CONTROL_HELPER_PATH, mode, ...args], cwd: "/home/wollipog",
       env: spec.env, context, isolation, windowsShell: false });
-  const stop = async (child: AgentProcess) => { killTree(child); await waitForPendingKills(8_000); };
+  const stop = async (child: AgentProcess) => {
+    killTree(child);
+    await waitForPendingKills(8_000);
+    await waitBridgeClose(child);
+  };
 
   try {
     assert.deepEqual(await codexOrchestratorMcpArgs({
@@ -107,34 +119,37 @@ test("real WSL2 bridge carries CLI and MCP while adversarial routes fail closed 
     const cli = launch(first, firstIsolation, "cli", ["session", "list", "--json"]);
     const cliOutput = await readUntil(cli, /"sessions":\[\]/u);
     assert.match(cliOutput, /"sessions":\[\]/u);
-    await waitClose(cli);
+    await waitBridgeClose(cli);
 
     const mcp = launch(first, firstIsolation, "mcp");
-    mcp.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
-    const mcpOutput = await readUntil(mcp, /create_session/u);
-    assert.doesNotMatch(mcpOutput, /set_guardrails/u);
-    await stop(mcp);
+    try {
+      mcp.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
+      const mcpOutput = await readUntil(mcp, /create_session/u);
+      assert.doesNotMatch(mcpOutput, /set_guardrails/u);
+    } finally {
+      await stop(mcp);
+    }
 
     const arbitrary = launch(first, firstIsolation, "cli", ["admin", "status"]);
     assert.match(await readUntil(arbitrary, /outside the Agent Control allowlist/u), /outside the Agent Control allowlist/u);
-    await waitClose(arbitrary);
+    await waitBridgeClose(arbitrary);
 
     const cross = { ...first, env: { ...first.env, WOLLIPOG_SESSION_ID: "another-session" } };
     const crossSession = launch(cross, firstIsolation, "mcp");
     assert.match(await readUntil(crossSession, /authentication failed/u), /authentication failed/u);
-    await waitClose(crossSession);
+    await waitBridgeClose(crossSession);
 
     const restarted = makeSpec();
     await provision(restarted);
     const stale = launch(first, firstIsolation, "mcp");
     assert.match(await readUntil(stale, /authentication failed/u), /authentication failed/u,
       "credential from the pre-restart launch is revoked");
-    await waitClose(stale);
+    await waitBridgeClose(stale);
 
     const currentIsolation = await isolate(restarted);
     const current = launch(restarted, currentIsolation, "cli", ["session", "list", "--json"]);
     assert.match(await readUntil(current, /"sessions":\[\]/u), /"sessions":\[\]/u);
-    await waitClose(current);
+    await waitBridgeClose(current);
     assert.ok(requests.length >= 4);
     assert.ok(requests.every((request) => request.authorization?.startsWith("Bearer wollipoga_") &&
       request.actor === first.sessionId));

@@ -306,7 +306,10 @@ export function buildWslArgs(distro: string, cwd: string, pidfile: string, opts:
     ? "pidfile=$1; socket=$2; shift 2; " +
       "socket_dir=${socket%/*}; provider=; watcher=; cleanup(){ test -n \"$watcher\" && kill \"$watcher\" 2>/dev/null || true; test -n \"$provider\" && kill \"$provider\" 2>/dev/null || true; }; trap cleanup EXIT HUP INT TERM; " +
       "ready=0; i=0; while test $i -lt 200; do if test -S \"$socket\" && test -f \"$socket_dir/token\" && test -f \"$socket_dir/mcp.json\"; then ready=1; break; fi; i=$((i+1)); sleep .05; done; test $ready -eq 1 || exit 125; " +
-      "if command -v setsid >/dev/null 2>&1; then setsid sh -c 'echo $$ > \"$0\"; exec \"$@\"' \"$pidfile\" \"$@\" & provider=$!; else \"$@\" & provider=$!; fi; " +
+      // POSIX shells replace stdin with /dev/null for an asynchronous command when job control is
+      // disabled. Duplicate the already-translated WSL stdin inside this Linux shell, restore it
+      // explicitly for the provider, and close the duplicate on both sides of the launch.
+      "exec 3<&0; if command -v setsid >/dev/null 2>&1; then setsid sh -c 'echo $$ > \"$0\"; exec \"$@\"' \"$pidfile\" \"$@\" <&3 3<&- & provider=$!; else \"$@\" <&3 3<&- & provider=$!; fi; exec 3<&-; " +
       "(while kill -0 \"$provider\" 2>/dev/null && test -S \"$socket\"; do sleep .1; done; test -S \"$socket\" || kill \"$provider\" 2>/dev/null || true) & watcher=$!; " +
       "wait \"$provider\"; status=$?; provider=; kill \"$watcher\" 2>/dev/null || true; wait \"$watcher\" 2>/dev/null || true; watcher=; exit $status"
     : "if command -v setsid >/dev/null 2>&1; then " +
@@ -526,6 +529,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     bridgeRelay.stderr.on("data", (chunk: string) => {
       if (bridgeStderr.length < 8_192) bridgeStderr += chunk;
     });
+    bridgeRelay.once("error", (error) => {
+      if (bridgeStderr.length < 8_192) bridgeStderr += `${(error as Error).message}\n`;
+    });
     disposeBridge = attachWslAgentControlBroker(bridgeRelay.stdout, bridgeRelay.stdin, bridge);
   }
 
@@ -556,9 +562,6 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     const relay = bridgeRelay;
     const dispose = disposeBridge;
     child.wslAgentControl = { input: relay.stdin, output: relay.stdout, relay, dispose };
-    relay.once("error", (error) => {
-      if (bridgeStderr.length < 8_192) bridgeStderr += `${(error as Error).message}\n`;
-    });
     relay.once("close", () => {
       dispose();
       if (!child.closeObserved && child.exitCode === null) {

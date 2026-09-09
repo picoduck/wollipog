@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,8 +32,10 @@ test("target-local helper has no process or network launcher surface", () => {
 });
 
 test("target-local relay materializes owner-only bootstrap files and owns frame identity", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "wlp-helper-source-"));
-  const helper = join(dir, "helper.mjs");
+  const root = mkdtempSync(join(tmpdir(), "wlp-helper-source-"));
+  const dir = join(root, "launch");
+  mkdirSync(dir);
+  const helper = join(root, "helper.mjs");
   const socketPath = join(dir, "control.sock");
   const token = "wollipoga_pipe_only";
   const mcp = JSON.stringify({ mcpServers: { wollipog: { command: "/usr/bin/node" } } });
@@ -41,7 +43,7 @@ test("target-local relay materializes owner-only bootstrap files and owns frame 
   const child = spawn(process.execPath, [helper, "serve", socketPath], { stdio: ["pipe", "pipe", "pipe"] });
   t.after(() => {
     if (child.exitCode === null) child.kill();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
   });
   child.stdin.write(`${JSON.stringify({ type: "bootstrap", token: Buffer.from(token).toString("base64"),
     mcp: Buffer.from(mcp).toString("base64") })}\n`);
@@ -72,6 +74,7 @@ test("target-local relay materializes owner-only bootstrap files and owns frame 
   assert.equal(existsSync(socketPath), false);
   assert.equal(existsSync(join(dir, "token")), false);
   assert.equal(existsSync(join(dir, "mcp.json")), false);
+  assert.equal(existsSync(dir), false, "relay removes its per-launch directory on exit");
 });
 
 function fixture(): { config: WslAgentControlLaunch; fromHelper: PassThrough; toHelper: PassThrough; lines: string[] } {

@@ -27,6 +27,7 @@ import {
   WSL_AGENT_CONTROL_HELPER_SHA256,
   WSL_AGENT_CONTROL_HELPER_SOURCE,
   WSL_AGENT_CONTROL_PRIVATE_MCP,
+  WSL_AGENT_CONTROL_PRIVATE_SOCKET,
   WSL_AGENT_CONTROL_PRIVATE_TOKEN,
   WSL_AGENT_CONTROL_PROTOCOL,
   type WslAgentControlLaunch,
@@ -276,6 +277,7 @@ export function provisionAgentControl(
       const helperLaunch = { command: runtime, args: [WSL_AGENT_CONTROL_HELPER_PATH, "mcp"], env: {
         WOLLIPOG_SESSION_ID: spec.sessionId,
         WOLLIPOG_SESSION_TOKEN_FILE: WSL_AGENT_CONTROL_PRIVATE_TOKEN,
+        WOLLIPOG_AGENT_CONTROL_SOCKET: WSL_AGENT_CONTROL_PRIVATE_SOCKET,
       } };
       spec.env = {
         ...spec.env,
