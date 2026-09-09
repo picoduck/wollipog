@@ -12,7 +12,7 @@ import {
   transcriptGovernanceDecisions,
 } from "./governance.js";
 import { GovernanceHistoryPanel } from "./components/GovernanceHistoryPanel.js";
-import type { TimelineItem } from "./timeline.js";
+import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
 
 function entry(overrides: Partial<GovernanceAuditEntry>): GovernanceAuditEntry {
   return {
@@ -36,6 +36,11 @@ const events = [
 
 function message(id: number): TimelineItem {
   return { kind: "agent_message", id, text: `m${id}` } as TimelineItem;
+}
+
+/** A collapsible "work" item — the kind groupTimeline folds into a "Worked" block. */
+function work(id: number): TimelineItem {
+  return { kind: "agent_thought", id, text: `t${id}` } as TimelineItem;
 }
 
 test("hook governance audit has four visibly distinct user-facing outcomes", () => {
@@ -158,4 +163,60 @@ test("governance history renders every outcome newest-first behind a closed disc
   );
   assert.doesNotMatch(html, /<details open/);
   assert.match(html, /Blocked by Policy/);
+});
+
+test("a governance row never splits a collapsible work run", () => {
+  // Splitting a run would fragment the "Worked" block; only the first fragment keeps the original
+  // disclosure key, so an open block would silently collapse its tail when the audit settled.
+  const decisions = governanceDecisions([entry({ auditId: "h", timestamp: 210 })]);
+  const items = [message(1), work(2), work(3), work(4), message(5)];
+  const merged = mergeGovernanceDecisions(items, decisions, [
+    { seq: 1, ts: 100 }, { seq: 2, ts: 200 }, { seq: 3, ts: 300 }, { seq: 4, ts: 400 }, { seq: 5, ts: 500 },
+  ]);
+  assert.deepEqual(merged.map((item) => item.kind), [
+    "agent_message", "agent_thought", "agent_thought", "agent_thought", "governance_decision", "agent_message",
+  ]);
+  for (let index = 1; index < merged.length - 1; index += 1) {
+    const splitsWork = merged[index]!.kind === "governance_decision" &&
+      isCollapsibleWorkItem(merged[index - 1]!) && isCollapsibleWorkItem(merged[index + 1]!);
+    assert.equal(splitsWork, false, "a governance row must not land inside a work run");
+  }
+});
+
+test("a governance row never becomes a work block's boundary", () => {
+  // Landing immediately before a run would make the row that block's boundary key instead of the
+  // preceding standalone item, which loses the block's disclosure state just as a split does.
+  const decisions = governanceDecisions([entry({ auditId: "h", timestamp: 110 })]);
+  const merged = mergeGovernanceDecisions(
+    [message(1), work(2), work(3), message(4)],
+    decisions,
+    [{ seq: 1, ts: 100 }, { seq: 2, ts: 200 }, { seq: 3, ts: 300 }, { seq: 4, ts: 400 }],
+  );
+  const governanceIndex = merged.findIndex((item) => item.kind === "governance_decision");
+  assert.equal(isCollapsibleWorkItem(merged[governanceIndex + 1]!), false);
+});
+
+test("unchanged decisions keep their item identity so the row projector stays incremental", () => {
+  // A fresh wrapper per merge would mark every governance slot dirty on every streamed chunk and
+  // force a full transcript re-projection for the rest of the session.
+  const decisions = governanceDecisions([entry({ auditId: "h", timestamp: 150 })]);
+  const first = mergeGovernanceDecisions([message(1), message(2)], decisions, events.slice(0, 2));
+  const second = mergeGovernanceDecisions([message(1), message(2), message(3)], decisions, events);
+  const governanceOf = (items: TimelineItem[]) => items.find((item) => item.kind === "governance_decision");
+  assert.equal(governanceOf(first), governanceOf(second));
+});
+
+test("anchoring stays well defined when a recovered history steps backwards in time", () => {
+  // Hydrated pages validate contiguous seq and a non-negative ts and nothing more, so timestamps
+  // are not guaranteed to be non-decreasing. Searching them raw is not merely inaccurate, it is
+  // undefined: the answer depends on which slots the search happens to probe. Anchoring on the
+  // running maximum is deterministic and conservative — a decision is never placed after an event
+  // that was recorded as happening later than it.
+  const jumbled = [{ seq: 1, ts: 100 }, { seq: 2, ts: 300 }, { seq: 3, ts: 200 }];
+  assert.equal(governanceAnchorSeq(jumbled, 250), 1);
+  assert.equal(governanceAnchorSeq(jumbled, 350), 3);
+  assert.equal(governanceAnchorSeq(jumbled, 100), 1);
+  assert.equal(governanceAnchorSeq(jumbled, 50), Number.NEGATIVE_INFINITY);
+  // Well-behaved histories are unaffected.
+  assert.equal(governanceAnchorSeq(events, 250), 2);
 });

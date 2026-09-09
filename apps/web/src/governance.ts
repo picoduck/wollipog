@@ -14,7 +14,7 @@
  * row, anchored to the last loaded event at or before the decision's timestamp.
  */
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
-import type { TimelineItem } from "./timeline.js";
+import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
 
 export type GovernanceOutcomeTone = "allowed" | "denied" | "timed-out" | "policy";
 
@@ -125,6 +125,47 @@ export interface GovernanceAnchorEvent {
 }
 
 /**
+ * Running maximum of event timestamps, in sequence order.
+ *
+ * Events are ordered by sequence, and their timestamps are NOT required to be non-decreasing:
+ * hydrated runner pages validate contiguous `seq` and a non-negative `ts` and nothing more, so a
+ * recovered history can legitimately step backwards in time. Binary-searching raw timestamps
+ * would then anchor a decision to the wrong event. The running maximum is non-decreasing by
+ * construction and equals the raw timestamps whenever the history is well behaved, so the same
+ * search stays correct: a decision is placed after the last event by which everything recorded so
+ * far had already happened.
+ */
+function runningMaxTimestamps(events: readonly GovernanceAnchorEvent[]): number[] {
+  const running: number[] = new Array(events.length);
+  let max = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < events.length; index += 1) {
+    max = Math.max(max, events[index]!.ts);
+    running[index] = max;
+  }
+  return running;
+}
+
+function anchorSeqFrom(
+  events: readonly GovernanceAnchorEvent[],
+  running: readonly number[],
+  timestamp: number,
+): number {
+  let low = 0;
+  let high = events.length - 1;
+  let anchor = Number.NEGATIVE_INFINITY;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (running[mid]! <= timestamp) {
+      anchor = events[mid]!.seq;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return anchor;
+}
+
+/**
  * Sequence of the last loaded event at or before `timestamp`.
  *
  * -Infinity means the decision predates the loaded window: it pins to the head of the window
@@ -132,20 +173,7 @@ export interface GovernanceAnchorEvent {
  * activity moves it into place without ever omitting it.
  */
 export function governanceAnchorSeq(events: readonly GovernanceAnchorEvent[], timestamp: number): number {
-  let low = 0;
-  let high = events.length - 1;
-  let anchor = Number.NEGATIVE_INFINITY;
-  while (low <= high) {
-    const mid = (low + high) >> 1;
-    const event = events[mid]!;
-    if (event.ts <= timestamp) {
-      anchor = event.seq;
-      low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
-  }
-  return anchor;
+  return anchorSeqFrom(events, runningMaxTimestamps(events), timestamp);
 }
 
 /**
@@ -167,6 +195,30 @@ export function governanceItemId(auditId: string): number {
 }
 
 /**
+ * One timeline item per decision object, reused across merges.
+ *
+ * The row projector's incremental paths compare item identity slot by slot. Allocating a fresh
+ * wrapper on every merge would mark every governance slot dirty on every streamed chunk, which
+ * pushes the projector off its append/settle fast paths and back to re-projecting the whole
+ * transcript — so a session would lose incremental rendering permanently after its first
+ * governance outcome. Decision objects are themselves stable while the audit snapshot is
+ * unchanged, so keying on them keeps unchanged rows identical.
+ */
+const governanceItems = new WeakMap<GovernanceDecision, TimelineItem>();
+
+function governanceItem(decision: GovernanceDecision): TimelineItem {
+  const cached = governanceItems.get(decision);
+  if (cached) return cached;
+  const item: TimelineItem = {
+    kind: "governance_decision",
+    id: governanceItemId(decision.auditId),
+    decision,
+  };
+  governanceItems.set(decision, item);
+  return item;
+}
+
+/**
  * Splice governance rows into a derived timeline at their chronological positions.
  *
  * Returns the input array unchanged (same identity) when there is nothing to add, so sessions
@@ -178,8 +230,9 @@ export function mergeGovernanceDecisions(
   events: readonly GovernanceAnchorEvent[],
 ): TimelineItem[] {
   if (!decisions.length) return items;
+  const running = runningMaxTimestamps(events);
   const anchored = decisions
-    .map((decision) => ({ decision, anchorSeq: governanceAnchorSeq(events, decision.timestamp) }))
+    .map((decision) => ({ decision, anchorSeq: anchorSeqFrom(events, running, decision.timestamp) }))
     .sort((a, b) =>
       a.anchorSeq - b.anchorSeq ||
       a.decision.timestamp - b.decision.timestamp ||
@@ -189,12 +242,18 @@ export function mergeGovernanceDecisions(
   let next = 0;
   const flushBefore = (id: number) => {
     while (next < anchored.length && anchored[next]!.anchorSeq < id) {
-      const { decision } = anchored[next++]!;
-      merged.push({ kind: "governance_decision", id: governanceItemId(decision.auditId), decision });
+      merged.push(governanceItem(anchored[next++]!.decision));
     }
   };
   for (const item of items) {
-    flushBefore(item.id);
+    // Only ever land immediately before a standalone row. A governance row placed inside a run of
+    // collapsible work items would split the "Worked" block in two, and only the first fragment
+    // keeps the original disclosure key — so an open block would silently collapse its tail when
+    // the audit fetch settled. Placed immediately before a run it would instead become that
+    // block's boundary and change its key. Deferring to the next standalone row leaves every work
+    // group's identity untouched, at the cost of resolving position to the enclosing block rather
+    // than to an individual tool call.
+    if (!isCollapsibleWorkItem(item)) flushBefore(item.id);
     merged.push(item);
   }
   flushBefore(Number.POSITIVE_INFINITY);
