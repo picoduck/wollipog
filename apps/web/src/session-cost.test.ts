@@ -93,13 +93,52 @@ test("a legacy ledger row without a cache split reports the provider's input ver
   assert.equal(totals.reasoningTokens, 0);
 });
 
-test("the runner's counters stay the floor when the ledger reports less", () => {
+test("a lagging ledger is ignored wholesale, so no row contradicts the total", () => {
   const totals = sessionUsageTotals(
     session({ tokensIn: 9_000, tokensOut: 1_000, costUsd: 2 }),
     response({ totals: amount({ inputTokens: 100, outputTokens: 10, processedTokens: 110, costUsd: 0.5 }) }),
   );
+  // Raising only the total to the live floor would render "Input 100, Output 10, Total 10,000".
+  assert.equal(totals.inputTokens, 9_000);
+  assert.equal(totals.outputTokens, 1_000);
   assert.equal(totals.processedTokens, 10_000);
+  assert.equal(totals.inputTokens + totals.outputTokens, totals.processedTokens);
+  assert.equal(totals.detailed, false);
+  // Cost still keeps its floor: understating spend is the error worth avoiding in both directions.
   assert.equal(totals.costUsd, 2);
+});
+
+test("a caught-up ledger reports its own total verbatim", () => {
+  const totals = sessionUsageTotals(
+    session({ tokensIn: 9_000, tokensOut: 1_000, costUsd: 0.5 }),
+    response({ totals: amount({ inputTokens: 9_000, outputTokens: 1_000, processedTokens: 10_000, costUsd: 0.5 }) }),
+  );
+  assert.equal(totals.detailed, true);
+  assert.equal(totals.processedTokens, 10_000);
+});
+
+test("a provider-reported zero is a real amount once the ledger says so", () => {
+  const free = session({ tokensIn: 25_000, tokensOut: 900, costUsd: 0 });
+  // Before the ledger answers, the strip cannot tell "free" from "nobody priced it".
+  assert.equal(sessionCostLabel(free)?.text, "$—");
+  const priced = sessionCostLabel(free, response({ totals: amount({ costSource: "providerReported" }) }));
+  assert.deepEqual(priced, { text: "$0.00", priced: true, ariaLabel: "Session Usage: $0.00" });
+  // An unpriced ledger still refuses to invent an amount.
+  assert.equal(
+    sessionCostLabel(free, response({ totals: amount({ costSource: "unpriced", unpricedRecords: 2 }) }))?.text,
+    "$—",
+  );
+  // A session that has processed nothing renders nothing, ledger or not.
+  assert.equal(sessionCostLabel(session(), response({ totals: amount({ costSource: "providerReported" }) })), null);
+});
+
+test("the ledger's cost is used when the session's running total lags behind it", () => {
+  const label = sessionCostLabel(
+    session({ tokensIn: 25_000, tokensOut: 900, costUsd: 0 }),
+    response({ totals: amount({ costUsd: 1.21, costSource: "modelPriced" }) }),
+  );
+  assert.equal(label?.text, "$1.21");
+  assert.equal(label?.priced, true);
 });
 
 test("cost provenance is stated honestly per source", () => {

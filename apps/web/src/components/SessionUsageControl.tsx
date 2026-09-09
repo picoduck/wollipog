@@ -41,14 +41,18 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
     if (open) void loadBreakdown();
   }, [open, loadBreakdown]);
 
-  const label = sessionCostLabel(session);
+  const loaded = breakdown && loadedFor.current === session.id ? breakdown : null;
+  const label = sessionCostLabel(session, loaded);
   if (!label) return null;
 
-  const loaded = breakdown && loadedFor.current === session.id ? breakdown : null;
   const totals = sessionUsageTotals(session, loaded);
   const provenance = costProvenanceNote(loaded);
   const byModel = loaded?.byModel ?? [];
-  const headCost = formatCost(totals.costUsd) || "Not Priced";
+  // A priced zero is an amount, not a gap: `priceUsage` keeps a provider-reported 0 as
+  // `providerReported`, so a free session reads `$0.00` and only a genuinely unpriced one is
+  // named as unpriced.
+  const headCost = formatCost(totals.costUsd)
+    || (loaded && loaded.totals.costSource !== "unpriced" ? "$0.00" : "Not Priced");
 
   return (
     <span className={`session-usage${popover.open ? " is-open" : ""}${className ? ` ${className}` : ""}`} ref={popover.rootRef}>
@@ -105,10 +109,12 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
                     {row.cacheCreationTokens > 0 && <div><dt>Cache Write</dt><dd>{formatTokens(row.cacheCreationTokens)}</dd></div>}
                     <div><dt>Total</dt><dd>{formatTokens(row.processedTokens)}</dd></div>
                     {/* Named as unpriced when the rate table could not price the model, rather than
-                        a misleading $0.00; a priced row that genuinely cost nothing stays silent. */}
-                    {row.costSource === "unpriced"
-                      ? <div><dt>Cost</dt><dd>Not Priced</dd></div>
-                      : row.costUsd > 0 && <div><dt>Cost</dt><dd>{formatCost(row.costUsd)}</dd></div>}
+                        a misleading $0.00. A row that WAS priced states its amount even when that
+                        amount is zero, because a free model costing nothing is a fact. */}
+                    <div>
+                      <dt>Cost</dt>
+                      <dd>{row.costSource === "unpriced" ? "Not Priced" : formatCost(row.costUsd) || "$0.00"}</dd>
+                    </div>
                   </dl>
                 </div>
               ))}

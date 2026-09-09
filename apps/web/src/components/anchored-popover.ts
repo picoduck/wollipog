@@ -12,6 +12,44 @@ export interface AnchoredPopover<Root extends HTMLElement, Anchor extends HTMLEl
   style: CSSProperties | undefined;
 }
 
+/** Gap between the trigger and the panel, and the panel's minimum clearance from a screen edge. */
+const GAP = 6;
+const MARGIN = 8;
+/** A panel is never squeezed below this; on a very short screen it scrolls internally instead. */
+const MIN_HEIGHT = 120;
+
+export interface Placement {
+  left: number;
+  top?: number;
+  bottom?: number;
+  maxHeight: number;
+}
+
+/**
+ * Where a viewport-anchored panel goes, given the trigger's rectangle.
+ *
+ * Below when the panel's design footprint fits there, otherwise whichever side has more room. The
+ * CHOSEN SIDE bounds the panel's height, not the viewport: a panel taller than its footprint — a
+ * session with many per-model rows — must scroll inside itself rather than run off the screen
+ * edge, where a `position: fixed` element leaves no way to reach its last rows. Growing upward is
+ * anchored by `bottom` because the real height is unknown until the panel has rendered.
+ *
+ * Pure so the geometry is testable without a layout engine.
+ */
+export function placePanel(
+  rect: { top: number; bottom: number; left: number },
+  viewport: { width: number; height: number },
+  size: { width: number; height: number },
+): Placement {
+  const left = Math.max(MARGIN, Math.min(rect.left, viewport.width - size.width - MARGIN));
+  const spaceBelow = viewport.height - rect.bottom - GAP - MARGIN;
+  const spaceAbove = rect.top - GAP - MARGIN;
+  const below = spaceBelow >= size.height || spaceBelow >= spaceAbove;
+  return below
+    ? { left, top: rect.bottom + GAP, maxHeight: Math.max(MIN_HEIGHT, spaceBelow) }
+    : { left, bottom: viewport.height - rect.top + GAP, maxHeight: Math.max(MIN_HEIGHT, spaceAbove) };
+}
+
 /**
  * Click-to-open popover anchored to a small control inside a clipped strip.
  *
@@ -32,7 +70,7 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
 ): AnchoredPopover<Root, Anchor> {
   const { width, height } = size;
   const [open, setOpen] = useState(false);
-  const [placement, setPlacement] = useState<{ top: number; left: number } | null>(null);
+  const [placement, setPlacement] = useState<Placement | null>(null);
   const rootRef = useRef<Root | null>(null);
   const anchorRef = useRef<Anchor | null>(null);
 
@@ -41,9 +79,11 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
     const place = () => {
       const rect = anchorRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
-      const below = rect.bottom + 6 + height <= window.innerHeight;
-      setPlacement({ top: below ? rect.bottom + 6 : Math.max(8, rect.top - 6 - height), left });
+      setPlacement(placePanel(
+        rect,
+        { width: window.innerWidth, height: window.innerHeight },
+        { width, height },
+      ));
     };
     place();
     window.addEventListener("resize", place);
@@ -74,6 +114,16 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
     close: useCallback(() => setOpen(false), []),
     rootRef,
     anchorRef,
-    style: placement ? { position: "fixed", top: placement.top, left: placement.left } : undefined,
+    // `top`/`bottom` are both stated so the un-placed CSS fallback (`top: calc(100% + 6px)`) cannot
+    // combine with an inline `bottom` and stretch the panel between the two edges.
+    style: placement
+      ? {
+          position: "fixed",
+          left: placement.left,
+          top: placement.top ?? "auto",
+          bottom: placement.bottom ?? "auto",
+          maxHeight: placement.maxHeight,
+        }
+      : undefined,
   };
 }

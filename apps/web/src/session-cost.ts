@@ -20,13 +20,22 @@ const UNKNOWN_COST = "$—";
  * A session that has processed nothing renders no control at all. A session whose tokens are
  * known but whose cost is not — an unpriced model, a runner that reports no cost, a rate table
  * that never loaded — says so rather than claiming it was free.
+ *
+ * Zero is not automatically "unknown". `priceUsage` keeps a provider-reported cost of exactly 0 as
+ * `providerReported`, so a genuinely free session has a real amount and must be allowed to say
+ * `$0.00`. Only the ledger carries that provenance, so the strip admits it does not know until
+ * `breakdown` has arrived, and never invents a `$0.00` for a session nobody managed to price.
  */
 export function sessionCostLabel(
   session: Pick<SessionView, "tokensIn" | "tokensOut" | "costUsd">,
+  breakdown: SessionUsageResponse | null = null,
 ): SessionCostLabel | null {
-  const cost = formatCost(session.costUsd);
+  const cost = formatCost(Math.max(session.costUsd, breakdown?.totals.costUsd ?? 0));
   if (cost) return { text: cost, priced: true, ariaLabel: `Session Usage: ${cost}` };
   if (session.tokensIn + session.tokensOut > 0) {
+    if (breakdown && breakdown.totals.costSource !== "unpriced") {
+      return { text: "$0.00", priced: true, ariaLabel: "Session Usage: $0.00" };
+    }
     return { text: UNKNOWN_COST, priced: false, ariaLabel: "Session Usage: Cost Unavailable" };
   }
   return null;
@@ -73,6 +82,14 @@ export function sessionUsageTotals(
   };
   if (!breakdown) return fallback;
   const totals = breakdown.totals;
+  // A ledger that has not caught up with the runner's running counters must not be mixed with
+  // them: raising only the total to the live floor renders rows that contradict their own sum
+  // (Input 100, Output 10, Total Processed 10,000). The runner's counters are self-consistent, so
+  // they stay authoritative until the ledger passes them; only the cost keeps its floor, because
+  // understating what a session has spent is the one error worth avoiding in both directions.
+  if (totals.processedTokens < session.tokensIn + session.tokensOut) {
+    return { ...fallback, costUsd: Math.max(totals.costUsd, session.costUsd) };
+  }
   const split = totals.cachedInputTokens + totals.cacheCreationTokens > 0;
   return {
     inputTokens: split ? totals.uncachedInputTokens : totals.inputTokens,
@@ -80,7 +97,7 @@ export function sessionUsageTotals(
     cachedInputTokens: totals.cachedInputTokens,
     cacheCreationTokens: totals.cacheCreationTokens,
     reasoningTokens: totals.reasoningTokens,
-    processedTokens: Math.max(totals.processedTokens, session.tokensIn + session.tokensOut),
+    processedTokens: totals.processedTokens,
     cacheSavingsUsd: totals.cacheSavingsUsd,
     costUsd: Math.max(totals.costUsd, session.costUsd),
     detailed: true,

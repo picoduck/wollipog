@@ -170,6 +170,49 @@ test("an unpriced session refuses to show $0.00 and says so in the panel", async
   await view.cleanup();
 });
 
+test("a free session reports $0.00 once the ledger proves the provider priced it", async () => {
+  const view = await mount(session({ costUsd: 0 }), {
+    sessionId: "s1",
+    totals: amount({
+      inputTokens: 25_000,
+      outputTokens: 900,
+      processedTokens: 25_900,
+      costUsd: 0,
+      costSource: "providerReported",
+    }),
+    byModel: [
+      { model: "local-llama", ...amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costSource: "providerReported" }) },
+    ],
+  });
+
+  // Before the ledger loads, the strip cannot tell "free" from "nobody priced it", so it says so.
+  assert.equal(view.button()!.textContent, "$—");
+  await view.open();
+  const popover = view.popover()!;
+  // Once provenance is known, zero is stated as the amount it is rather than as a missing price.
+  assert.equal(view.button()!.textContent, "$0.00");
+  assert.equal(view.button()!.getAttribute("aria-label"), "Session Usage: $0.00");
+  assert.equal(view.button()!.classList.contains("is-unpriced"), false);
+  assert.match(popover.querySelector(".session-usage-head")!.textContent ?? "", /\$0\.00/);
+  assert.doesNotMatch(popover.textContent ?? "", /Not Priced/);
+  assert.equal(facts(popover.querySelector(".session-usage-model dl"))["Cost"], "$0.00");
+  await view.cleanup();
+});
+
+test("a lagging ledger never renders rows that contradict their own total", async () => {
+  const view = await mount(session({ tokensIn: 9_000, tokensOut: 1_000, costUsd: 2 }), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 100, outputTokens: 10, processedTokens: 110, costUsd: 0.5, costSource: "providerReported" }),
+    byModel: [],
+  });
+  await view.open();
+  const rows = facts(view.popover()!.querySelector(".session-usage-facts"));
+  assert.equal(rows["Input"], "9.0k");
+  assert.equal(rows["Output"], "1.0k");
+  assert.equal(rows["Total Processed"], "10k");
+  await view.cleanup();
+});
+
 test("a session with an unknown context window still shows its cost", async () => {
   const view = await mount(
     session({ contextWindow: undefined, contextTokensUsed: undefined }),
