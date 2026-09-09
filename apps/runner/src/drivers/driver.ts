@@ -117,8 +117,10 @@ export interface DriverCallbacks {
   /** Session-scoped ACP controls/config; never merge these onto the agent row because two live
    * sessions may advertise different modes or commands. */
   onAcpSessionState?: (state: { capabilities: AgentCapabilities; config: SessionConfig }) => void;
-  /** Stable ACP context gauge plus optional cumulative USD cost. */
-  onAcpUsage?: (usage: { contextTokensUsed: number; contextWindow: number; costUsd?: number }) => void;
+  /** Authoritative context gauge: the effective context window the provider is serving plus its
+   * current occupancy when known (stable ACP usage; Claude's terminal `result.modelUsage` and last
+   * request size), with optional cumulative USD cost. Omitted occupancy leaves the prior gauge. */
+  onAcpUsage?: (usage: { contextTokensUsed?: number; contextWindow: number; costUsd?: number }) => void;
   /** Bounded stable provider metadata; null title is the protocol's explicit clear operation. */
   onAcpSessionInfo?: (info: { title?: string | null; providerUpdatedAt?: string }) => void;
   /** Exact provider model resolved from a selected alias for the active native session. */

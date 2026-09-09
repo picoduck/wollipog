@@ -190,5 +190,5 @@ test("Claude controls use live runner models and never substitute a browser-side
   );
   const adoptedLiveId = { ...session, model: "opus[1m]" };
   assert.equal(resolveCaps(undefined, adoptedLiveId)?.models[0]?.id, "opus[1m]");
-  assert.equal(resolveCaps(undefined, adoptedLiveId)?.models[0]?.contextWindow, 1_000_000);
+  assert.equal(resolveCaps(undefined, adoptedLiveId)?.models[0]?.contextWindow, undefined, "a [1m] name is not window evidence");
 });

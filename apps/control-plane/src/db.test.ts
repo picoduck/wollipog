@@ -2170,8 +2170,8 @@ test("updateSessionConfig persists changes and sessionView shows them", () => {
   db.createSession(
     newSession({ config: { model: "opus", effort: "low", permissionMode: "plan" } }),
   );
-  db.raw().prepare("UPDATE sessions SET resolved_model=? WHERE id=?")
-    .run("claude-opus-5[1m]", "sess-1");
+  db.raw().prepare("UPDATE sessions SET resolved_model=?, context_window=? WHERE id=?")
+    .run("claude-opus-5[1m]", 1_000_000, "sess-1");
 
   db.updateSessionConfig(
     "sess-1",
@@ -2181,18 +2181,20 @@ test("updateSessionConfig persists changes and sessionView shows them", () => {
   const v = db.getSession("sess-1")!;
   assert.equal(v.model, "sonnet");
   assert.equal(v.resolvedModel, null);
+  assert.equal(v.contextWindow, undefined, "the served window belonged to the previous model");
   assert.equal(v.effort, "high");
   assert.equal(v.permissionMode, "default");
   assert.equal(v.updatedAt, 5000);
 
-  db.raw().prepare("UPDATE sessions SET resolved_model=? WHERE id=?")
-    .run("claude-sonnet-5", "sess-1");
+  db.raw().prepare("UPDATE sessions SET resolved_model=?, context_window=? WHERE id=?")
+    .run("claude-sonnet-5", 1_000_000, "sess-1");
   db.updateSessionConfig(
     "sess-1",
     { model: "sonnet", effort: "low", permissionMode: "default" },
     5200,
   );
   assert.equal(db.getSession("sess-1")?.resolvedModel, "claude-sonnet-5");
+  assert.equal(db.getSession("sess-1")?.contextWindow, 1_000_000, "an effort-only change keeps the served window");
 
   // partial config nulls out the omitted fields (update writes ?? null)
   db.updateSessionConfig("sess-1", { model: "haiku" }, 5500);

@@ -286,6 +286,70 @@ export function claudeCapabilityError(
   return null;
 }
 
+/** Context occupancy Claude Code itself reports for a request: the prompt it just sent, counting
+ * uncached, cache-written, and cache-read input alike. A `<synthetic>` record (an API error
+ * rendered as an assistant turn) carries zeros and must not zero the gauge. */
+export function claudeContextOccupancy(message: unknown): number | null {
+  if (!message || typeof message !== "object") return null;
+  const record = message as { model?: unknown; usage?: unknown };
+  if (record.model === "<synthetic>") return null;
+  const usage = record.usage;
+  if (!usage || typeof usage !== "object") return null;
+  const u = usage as Record<string, unknown>;
+  const part = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+  const total = part(u.input_tokens) + part(u.cache_creation_input_tokens) + part(u.cache_read_input_tokens);
+  return total > 0 ? total : null;
+}
+
+/** Strip a bracketed launch option (`[1m]`) so `claude-opus-5[1m]` and `claude-opus-5` compare. */
+function withoutLaunchOption(modelId: string): string {
+  return modelId.replace(/\[[^\]]+\]$/u, "");
+}
+
+/** The context window Claude actually served for the turn's model, from `result.modelUsage`. The
+ * map is keyed by provider model id and also lists side models (the Haiku title generator), so
+ * the entry is matched to the session's resolved model first, then to the top-level assistant
+ * model ignoring its launch option. No match ⇒ unknown; nothing is inferred from a name. */
+export function claudeEffectiveContextWindow(
+  modelUsage: unknown,
+  resolvedModel: string | null,
+  turnModel: string | null,
+): number | null {
+  if (!modelUsage || typeof modelUsage !== "object") return null;
+  const entries = Object.entries(modelUsage as Record<string, unknown>);
+  const windowOf = (entry: unknown): number | null => {
+    const value = entry && typeof entry === "object" ? (entry as { contextWindow?: unknown }).contextWindow : undefined;
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+  };
+  const candidates = [resolvedModel, turnModel].filter((id): id is string => typeof id === "string" && id.length > 0);
+  for (const id of candidates) {
+    const exact = entries.find(([key]) => key === id);
+    if (exact) return windowOf(exact[1]);
+  }
+  for (const id of candidates) {
+    const base = withoutLaunchOption(id);
+    const related = entries.filter(([key]) => withoutLaunchOption(key) === base);
+    if (related.length === 1) return windowOf(related[0]![1]);
+  }
+  return null;
+}
+
+/** Claude Code accepts any `[1m]` launch option and only learns at the first request that the
+ * account cannot use it; the turn then fails with an API 400 whose text names the long-context
+ * beta. Only that provider text is evidence: a 400 for any other reason on a `[1m]` model must not
+ * be blamed on the window. Name the cause and the way out instead of leaving a bare error. */
+export function claudeContextWindowRejection(result: unknown, resolvedModel: string | null): string | null {
+  if (!result || typeof result !== "object") return null;
+  const record = result as { is_error?: unknown; api_error_status?: unknown; result?: unknown };
+  if (record.is_error !== true || record.api_error_status !== 400) return null;
+  const detail = typeof record.result === "string" ? record.result.trim() : "";
+  if (!/long[- ]context/iu.test(detail)) return null;
+  const model = resolvedModel ?? "the selected model";
+  return `The provider rejected the 1M context window for ${model}; the turn did not run. ` +
+    `Provider response: ${detail} Choose a different Context Window for this model in the composer's ` +
+    `model menu, or select another model, before the next turn.`;
+}
+
 export class ClaudeCodeDriver implements Driver {
   private readonly preparedCommands = new WeakSet<object>();
   private sessionId: string;
@@ -312,6 +376,10 @@ export class ClaudeCodeDriver implements Driver {
   /** The model on the most recent top-level assistant record; stamped on the turn's usage. Claude
    * records the model per message, and the terminal `result` carries none. */
   private turnModel: string | null = null;
+  /** Provider model from the latest `init` (`claude-opus-5[1m]`); keys `result.modelUsage`. */
+  private resolvedModel: string | null = null;
+  /** Context occupancy after the latest top-level assistant record of the active turn. */
+  private turnContextOccupancy: number | null = null;
   private persistentBuffer: BoundedNdjsonBuffer | null = null;
   /** Monotonic across persistent and one-shot transports so late lifecycle events cannot alias a
    * turn from the transport used before a circuit fallback. */
@@ -576,6 +644,7 @@ export class ClaudeCodeDriver implements Driver {
     // Each turn names its own model: a turn that settles before any assistant record must not
     // inherit the previous turn's, which after a model switch would misattribute it.
     this.turnModel = null;
+    this.turnContextOccupancy = null;
     const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
     if (capabilityError) {
       this.cb.onEvent({ kind: "error", message: capabilityError });
@@ -1849,6 +1918,7 @@ export class ClaudeCodeDriver implements Driver {
           this.markSessionEstablished();
         }
         if (msg.subtype === "init" && typeof msg.model === "string" && msg.model) {
+          this.resolvedModel = msg.model;
           this.cb.onModelResolved?.(msg.model);
         }
         if (msg.subtype === "api_retry") {
@@ -1996,6 +2066,10 @@ export class ClaudeCodeDriver implements Driver {
 
       case "assistant": {
         if (!parentId && typeof msg.message?.model === "string" && msg.message.model) this.turnModel = msg.message.model;
+        if (!parentId) {
+          const occupancy = claudeContextOccupancy(msg.message);
+          if (occupancy != null) this.turnContextOccupancy = occupancy;
+        }
         const blocks: Json[] = msg.message?.content ?? [];
         for (const b of blocks) {
           if (b?.type !== "tool_use") continue;
@@ -2094,6 +2168,18 @@ export class ClaudeCodeDriver implements Driver {
           ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}),
           ...pp,
         });
+        // The terminal result is the only place Claude states the context window it actually
+        // served this turn; together with the last top-level request size it is the authoritative
+        // gauge behind the context meter (never the catalog's expectation or a name-derived size).
+        if (!parentId) {
+          const effectiveWindow = claudeEffectiveContextWindow(msg.modelUsage, this.resolvedModel, this.turnModel);
+          if (effectiveWindow != null) {
+            this.cb.onAcpUsage?.({
+              ...(this.turnContextOccupancy != null ? { contextTokensUsed: this.turnContextOccupancy } : {}),
+              contextWindow: effectiveWindow,
+            });
+          }
+        }
         // In stream-json input mode the process stays open for more turns; close stdin
         // so it exits and this turn settles (multi-turn uses a fresh --resume process).
         if (this.interactive && !this.persistentTransport) {
@@ -2104,7 +2190,11 @@ export class ClaudeCodeDriver implements Driver {
           }
         }
         if (msg.is_error || msg.subtype === "error_during_execution") {
-          if (!parentId) this.streamedAgentResponse = false;
+          if (!parentId) {
+            this.streamedAgentResponse = false;
+            const rejection = claudeContextWindowRejection(msg, this.resolvedModel);
+            if (rejection) this.cb.onEvent({ kind: "error", message: rejection });
+          }
           return "refusal";
         }
         if (msg.subtype === "error_max_turns") {

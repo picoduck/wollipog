@@ -34,6 +34,10 @@ const eventHeavyOpening = params.get("event-heavy") === "1";
 const liveDuringPagination = params.get("live") === "1";
 const paginationDelay = Number(params.get("pagination-delay") ?? "80");
 const settled = params.get("settled") === "1";
+/** `?context=choice` swaps in a Claude catalog whose Opus base lists 200K and 1M windows, with the
+ * session on `opus[1m]`; `?served=<tokens>` is the window the provider reported after launch. */
+const contextChoice = params.get("context") === "choice";
+const servedWindow = Number(params.get("served") ?? "0");
 
 const SESSION_ID = "session-usage-e2e";
 
@@ -93,8 +97,39 @@ const session: SessionView = {
   // so the specs can prove the active recovery echo wins that cell in compact mode.
   contextWindow: 200_000,
 };
-const driverName = params.get("driver") === "claude-code" ? "claude-code" : "codex-app-server";
+const driverName = params.get("driver") === "claude-code" || contextChoice ? "claude-code" : "codex-app-server";
 session.driver = driverName as SessionView["driver"];
+if (contextChoice) {
+  runner.agents = [{
+    id: "claude",
+    name: "Claude Code",
+    command: "claude",
+    args: [],
+    env: {},
+    driver: "claude-code",
+    available: true,
+    capabilities: {
+      modelSource: "live",
+      models: [
+        { id: "default", displayName: "Default (Opus 5)", default: true, contextWindow: 1_000_000, description: "Opus 5 with 1M context · Best for everyday, complex tasks", efforts: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "opus", displayName: "Opus 5", contextWindow: 200_000, description: "Opus 5 with 200K context", efforts: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "opus[1m]", displayName: "Opus 5 (1M Context)", baseModelId: "opus", contextWindow: 1_000_000, description: "Opus 5 with 1M context", efforts: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "sonnet", displayName: "Sonnet 5", description: "Sonnet 5 · Efficient for routine tasks", efforts: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "haiku", displayName: "Haiku 4.5", contextWindow: 200_000, description: "Haiku 4.5 · Fastest for quick answers" },
+      ],
+      effortLevels: ["low", "medium", "high", "xhigh", "max"],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      permissionModes: ["default", "acceptEdits", "plan", "bypassPermissions"],
+    },
+  }] as RunnerView["agents"];
+  session.agentId = "claude";
+  session.agentName = "Claude Code";
+  session.model = params.get("model") ?? "opus[1m]";
+  session.effort = "high";
+  session.contextWindow = servedWindow > 0 ? servedWindow : undefined;
+}
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
   session.costCheckpointsUsd = [1, 2.5];

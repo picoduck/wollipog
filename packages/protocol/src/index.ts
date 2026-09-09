@@ -340,7 +340,10 @@
 // 121: content-free Native TUI accounting readiness diagnostics. Discovery reports only
 //      provider contracts it can prove from the live CLI; absent or incomplete proof remains
 //      unavailable and never enables usage attribution or budget enforcement.
-export const PROTOCOL_VERSION = 121;
+// 122: AgentModel.baseModelId separates base model identity from context-window variants;
+//      `contextWindow` is provider evidence only, and native drivers publish the effective
+//      post-launch context window and occupancy through the session gauge.
+export const PROTOCOL_VERSION = 122;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -492,6 +495,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   nativeMacosMachineSkillSnapshots: 120,
   /** v121 runners publish a content-free, live-discovered Native TUI accounting boundary. */
   nativeTuiAccountingDiagnostics: 121,
+  /** Runner separates base model identity from context-window variants and publishes the
+   * effective post-launch window for native drivers. */
+  contextWindowVariants: 122,
   machineSkillAdoption: 115,
   machineSkillAdoptionRecovery: 116,
   chunkedAgentSkills: 96,
@@ -746,9 +752,15 @@ export interface AgentModel {
   efforts?: string[];
   /** The model's own default reasoning effort, if any. */
   defaultEffort?: string;
-  /** Total context window (tokens) for this model, if known — powers the context-fill meter.
-   * Curated per (driver, model); absent ⇒ the UI shows no fill %. */
+  /** Total context window (tokens) for this model when the provider's own metadata states it —
+   * powers the context-fill meter and the Context Window selector. Never inferred from a model
+   * name or family; absent ⇒ unknown until the live session reports its effective window. */
   contextWindow?: number;
+  /** Protocol v120: the provider's base model identity when this entry is one context-window
+   * variant of it (Claude Code lists `opus` and `opus[1m]` as separate launchable ids). Entries
+   * sharing a base with distinct known `contextWindow` values form a real Context Window choice.
+   * Absent ⇒ the entry is its own base. */
+  baseModelId?: string;
 }
 
 export interface AgentSlashCommand {

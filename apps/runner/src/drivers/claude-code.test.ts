@@ -21,6 +21,9 @@ import {
   CLAUDE_PERSISTENT_IDLE_MS,
   ClaudeCodeDriver,
   claudeCapabilityError,
+  claudeContextOccupancy,
+  claudeContextWindowRejection,
+  claudeEffectiveContextWindow,
   claudePermissionArgs,
   claudePersistentSettings,
   claudePersistentSettingsForAgent,
@@ -49,6 +52,7 @@ interface Harness {
   establishedSessions: string[];
   authenticationFailures: number;
   subscriptionUsage: unknown[];
+  contextUsage: { contextTokensUsed?: number; contextWindow: number }[];
   /** Invoke the private mapper and return its StopReason | null. */
   feed: (msg: unknown) => unknown;
 }
@@ -60,10 +64,12 @@ function makeHarness(): Harness {
   const establishedSessions: string[] = [];
   let authenticationFailures = 0;
   const subscriptionUsage: unknown[] = [];
+  const contextUsage: { contextTokensUsed?: number; contextWindow: number }[] = [];
   const cb: DriverCallbacks = {
     onEvent: (payload) => events.push(payload),
     onStderr: (text) => stderr.push(text),
     onModelResolved: (model) => resolvedModels.push(model),
+    onAcpUsage: (usage) => contextUsage.push(usage),
     onSessionEstablished: (sessionId) => establishedSessions.push(sessionId),
     onAuthenticationFailure: () => { authenticationFailures += 1; },
     onSubscriptionUsage: (update) => subscriptionUsage.push(update),
@@ -89,6 +95,7 @@ function makeHarness(): Harness {
     establishedSessions,
     get authenticationFailures() { return authenticationFailures; },
     subscriptionUsage,
+    contextUsage,
     feed,
   };
 }
@@ -3481,4 +3488,86 @@ test("the turn's model rides on its usage: assistant records name it, the result
   assert.equal(usage[0]!.parentToolUseId, "task-1");
   assert.equal(usage[1]!.model, "claude-fable-5-1", "the top-level result carries the last top-level assistant model");
   assert.equal(usage[1]!.costUsd, 0.02);
+});
+
+test("Claude result.modelUsage publishes the effective context window and last request occupancy", () => {
+  const h = makeHarness();
+  const haiku = { inputTokens: 899, outputTokens: 8, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200_000 };
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5[1m]" });
+  h.feed({
+    type: "assistant",
+    message: { model: "claude-opus-5", usage: { input_tokens: 2, cache_creation_input_tokens: 10_009, cache_read_input_tokens: 10_126, output_tokens: 4 } },
+  });
+  // A subagent's record must not overwrite the top-level gauge.
+  h.feed({
+    type: "assistant",
+    parent_tool_use_id: "task-1",
+    message: { model: "claude-haiku-4-5-20251001", usage: { input_tokens: 50_000, cache_read_input_tokens: 0, output_tokens: 1 } },
+  });
+  h.feed({
+    type: "result",
+    subtype: "success",
+    usage: { input_tokens: 2, output_tokens: 4 },
+    modelUsage: {
+      "claude-haiku-4-5-20251001": haiku,
+      "claude-opus-5[1m]": { inputTokens: 2, outputTokens: 4, cacheReadInputTokens: 10_126, cacheCreationInputTokens: 10_009, contextWindow: 1_000_000 },
+    },
+  });
+  assert.deepEqual(h.contextUsage, [{ contextTokensUsed: 20_137, contextWindow: 1_000_000 }]);
+
+  // Without a resolved-model match the window comes from the sole entry sharing the turn model's
+  // base; an ambiguous or absent match publishes nothing rather than a guess.
+  assert.equal(claudeEffectiveContextWindow({ "claude-sonnet-5": { contextWindow: 1_000_000 } }, null, "claude-sonnet-5[1m]"), 1_000_000);
+  assert.equal(claudeEffectiveContextWindow({ "claude-haiku-4-5-20251001": haiku }, "claude-sonnet-5", "claude-sonnet-5"), null);
+  assert.equal(claudeEffectiveContextWindow({}, "claude-sonnet-5", null), null);
+  assert.equal(claudeEffectiveContextWindow(undefined, "claude-sonnet-5", null), null);
+  assert.equal(claudeEffectiveContextWindow({ "claude-opus-5[1m]": { contextWindow: "1m" } }, "claude-opus-5[1m]", null), null);
+
+  // Occupancy counts every input bucket of the request Claude just sent and ignores synthetic
+  // error records, which carry zeros.
+  assert.equal(claudeContextOccupancy({ model: "<synthetic>", usage: { input_tokens: 0, cache_read_input_tokens: 0 } }), null);
+  assert.equal(claudeContextOccupancy({ model: "claude-opus-5", usage: { input_tokens: 3, cache_read_input_tokens: 7, output_tokens: 900 } }), 10);
+  assert.equal(claudeContextOccupancy({ model: "claude-opus-5" }), null);
+});
+
+test("Claude result without a matching modelUsage entry leaves the context gauge untouched", () => {
+  const h = makeHarness();
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-sonnet-5" });
+  h.feed({ type: "assistant", message: { model: "claude-sonnet-5", usage: { input_tokens: 10, cache_read_input_tokens: 5 } } });
+  h.feed({ type: "result", subtype: "success", usage: {} });
+  h.feed({ type: "result", subtype: "success", usage: {}, modelUsage: { "claude-haiku-4-5-20251001": { contextWindow: 200_000 } } });
+  assert.deepEqual(h.contextUsage, []);
+});
+
+test("Claude explains a provider rejection of the 1M context window instead of a bare API error", () => {
+  const h = makeHarness();
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-haiku-4-5-20251001[1m]" });
+  h.feed({ type: "assistant", message: { model: "<synthetic>", usage: { input_tokens: 0, output_tokens: 0 } } });
+  const stop = h.feed({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    api_error_status: 400,
+    result: "API Error: 400 The long context beta is not yet available for this subscription.",
+    usage: {},
+    modelUsage: {},
+  });
+  assert.equal(stop, "refusal");
+  const errors = h.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.match((errors[0] as { message: string }).message, /rejected the 1M context window for claude-haiku-4-5-20251001\[1m\]/);
+  assert.match((errors[0] as { message: string }).message, /long context beta is not yet available/);
+  assert.match((errors[0] as { message: string }).message, /Context Window/);
+  // The runner cannot know whether the composer renders a Context Window group for this base, so
+  // the way out also names the always-available fallback.
+  assert.match((errors[0] as { message: string }).message, /or select another model/);
+  assert.deepEqual(h.contextUsage, [], "a rejected turn served no window");
+
+  // Other failures stay as they were: no context-window story is invented for them.
+  assert.equal(claudeContextWindowRejection({ is_error: true, api_error_status: 500, result: "overloaded" }, "claude-opus-5[1m]"), null);
+  assert.equal(claudeContextWindowRejection({ is_error: true, api_error_status: 400, result: "invalid request" }, "claude-opus-5"), null);
+  // A 400 for another reason on a [1m] model is not blamed on the window.
+  assert.equal(claudeContextWindowRejection({ is_error: true, api_error_status: 400, result: "prompt is too long" }, "claude-opus-5[1m]"), null);
+  assert.match(claudeContextWindowRejection({ is_error: true, api_error_status: 400, result: "Long context is unavailable" }, null) ?? "", /for the selected model/);
+  assert.equal(claudeContextWindowRejection({ is_error: false, api_error_status: 400 }, "claude-opus-5[1m]"), null);
 });
