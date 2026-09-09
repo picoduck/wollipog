@@ -123,11 +123,12 @@ removes access to cloud model APIs. New checkpoint refs use
 `refs/{wollipog,mam}/owners/<full-attested-owner>/<session>/<kind>-<turn>`; persisted legacy rows and
 cleanup journals retain their exact unscoped layout until explicit offline adoption. Native provider
 mode remains the broadest compatibility default but takes an exclusive whole-HOME lease shared by
-Claude, Codex, ACP, Seatbelt, Windows Job, and Agent TUI launches. Direct WSL provider mode fails
-closed, and WSL bwrap also fails closed because the Windows relay cannot hold target-local no-follow
-directory handles through bwrap exec. Use a supported native, container, or cloud execution target.
-Standalone Agent TUI processes are not bwrapped, so Agent TUI attachment from a WSL session requires
-a separately controlled provider-home boundary.
+Claude, Codex, ACP, Seatbelt, Windows Job, and Agent TUI launches. Protocol-v124 Direct WSL bwrap is
+available only for freshly discovered Codex/Claude structured drivers in the Orchestrator preset:
+the target-local launcher pins the authoritative cwd and writable sources through bwrap exec, and a
+root-owned per-session state anchor plus a target-local HOME lease bounds provider state and relay
+lifetime. Direct WSL provider mode, generic ACP, conversation fork/state adoption, and WSL Native TUI
+remain fail-closed. Use a supported native, container, or cloud execution target for those modes.
 
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
 owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never

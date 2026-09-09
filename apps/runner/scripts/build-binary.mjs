@@ -68,6 +68,7 @@ if (process.platform === "win32") {
   const require = createRequire(import.meta.url);
   const packageJson = require.resolve("node-pty/package.json");
   assets["node-pty/conpty.node"] = join(dirname(packageJson), "prebuilds", `win32-${process.arch}`, "conpty.node");
+  assets["wollipog/wsl-bwrap-launcher.c"] = join(runner, "native", "wsl-bwrap-launcher.c");
 }
 writeFileSync(seaConfig, JSON.stringify({
   main: bundle,

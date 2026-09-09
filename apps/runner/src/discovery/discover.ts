@@ -71,6 +71,34 @@ async function wslSlashCommands(distro: string, driver: AgentDriverKind): Promis
   return out;
 }
 
+/** Discovery is only a UI/admission precondition. The root-installed launcher repeats every
+ * executable and kernel check immediately before preparing a launch, so this cannot become an
+ * authority-bearing pathname check. Keep the probe fixed to distro-owned system paths. */
+async function probeWslSafeLauncher(distro: string, nodeRuntime: string | undefined): Promise<{ bwrapRuntime: string } | null> {
+  if (!nodeRuntime?.startsWith("/") || /[\0\r\n]/u.test(nodeRuntime)) return null;
+  const script = [
+    "set -eu",
+    "node=$1",
+    "test \"$(id -u)\" != 0",
+    "compiler=$(readlink -f /usr/bin/cc); case \"$compiler\" in /usr/bin/*) ;; *) exit 125;; esac",
+    "for file in \"$compiler\" /usr/bin/bwrap \"$node\"; do",
+    "  test -f \"$file\" && test ! -L \"$file\"",
+    "  while test \"$file\" != /; do",
+    "    test ! -L \"$file\"; test \"$(stat -c %u \"$file\")\" = 0",
+    "    mode=$(stat -c %a \"$file\"); test $((0$mode & 022)) = 0",
+    "    file=${file%/*}; test -n \"$file\" || file=/",
+    "  done",
+    "done",
+    "/usr/bin/bwrap --help",
+  ].join("\n");
+  const result = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", script, "wollipog-probe", nodeRuntime], { timeoutMs: 5_000 });
+  if (result.code !== 0) return null;
+  const help = `${result.stdout}\n${result.stderr}`;
+  return ["--bind-fd", "--ro-bind-fd"].every((flag) => help.includes(flag))
+    ? { bwrapRuntime: "/usr/bin/bwrap" }
+    : null;
+}
+
 /** Curated capabilities + the agent's discovered slash commands. Dynamic model discovery is applied
  * to the merged agent list afterward (enrichAgentModels), so config + discovered agents share it. */
 function withSlashCommands(driver: AgentDriverKind, slashCommands: AgentSlashCommand[]): AgentCapabilities | undefined {
@@ -297,6 +325,15 @@ export function parseVersion(s: string): string | undefined {
 
 type AuthStatus = "authenticated" | "unauthenticated" | "unknown";
 
+export function supportedWslAgentControlNodeRuntime(
+  launch: ResolvedLaunch | null,
+  versionOutput: string,
+): string | undefined {
+  if (!launch?.command.startsWith("/") || launch.args.length !== 0) return undefined;
+  const major = Number(versionOutput.trim().match(/^v(\d+)\./u)?.[1]);
+  return Number.isInteger(major) && major >= 22 ? launch.command : undefined;
+}
+
 async function nativeProbe(k: KnownAgent, launch: ResolvedLaunch): Promise<{ version?: string; authStatus: AuthStatus }> {
   const v = await run(launch.command, [...launch.args, "--version"], { timeoutMs: 5000 });
   const version = v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined;
@@ -401,7 +438,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
   await Promise.all(
     distros.flatMap((distro) =>
       KNOWN.map(async (k) => {
-        const bin = await resolveInWsl(distro, k.bin);
+        const [bin, node] = await Promise.all([resolveInWsl(distro, k.bin), resolveInWsl(distro, "node")]);
         if (!bin) {
           if (k.bin === "codex") {
             found.push(unavailableCodexAgentDefinition(
@@ -419,10 +456,16 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           }
           return;
         }
-        const [baseProbe, slash] = await Promise.all([
+        const [baseProbe, slash, nodeVersion, safeLauncher] = await Promise.all([
           k.bin === "claude" ? probeWslClaudeCode(distro, bin.launch, bin.via) : wslProbe(distro, k, bin.launch),
           wslSlashCommands(distro, k.driver),
+          node ? run("wsl.exe", ["-d", distro, "--exec", node.launch.command, ...node.launch.args, "--version"], { timeoutMs: 5_000 }) : null,
+          probeWslSafeLauncher(distro, node?.launch.command),
         ]);
+        const agentControlRuntime = supportedWslAgentControlNodeRuntime(
+          node?.launch ?? null,
+          nodeVersion?.code === 0 ? nodeVersion.stdout || nodeVersion.stderr : "",
+        );
         const claudeCode = k.bin === "claude" ? baseProbe as NonNullable<AgentDefinition["claudeCode"]> : undefined;
         const { version, authStatus } = claudeCode
           ? { version: claudeCode.installedVersion, authStatus: claudeCode.auth.status }
@@ -445,6 +488,11 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
             ? claudeCapabilitiesFromProbe(catalogCapabilities, claudeCode)
             : catalogCapabilities,
           source: "discovered",
+          ...(agentControlRuntime
+            ? { wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: agentControlRuntime,
+                ...(safeLauncher ? { safeLauncherProtocolVersion: 1 as const,
+                  bwrapRuntime: safeLauncher.bwrapRuntime } : {}) } }
+            : {}),
           ...(codexAppServer ? { codexAppServer } : {}),
           ...(claudeCode ? { claudeCode } : {}),
           nativeTuiAccounting: unavailableNativeTuiAccounting(
@@ -521,7 +569,10 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
   }
   const enriched = safeConfigAgents.map((c) => {
     const d = launchKeys(c).map((k) => byKey.get(k)).find(Boolean);
-    if (!d) return c;
+    if (!d) {
+      const { wslAgentControl: _unverifiedWslAgentControl, ...configured } = c;
+      return configured;
+    }
     // A bare path-less config command ("codex") is a pointer, not a launch override — and it
     // spawns via the daemon's non-login PATH, which is exactly where version-manager installs
     // are invisible. Adopt discovery's RESOLVED launch (absolute command + base args) so the
@@ -544,6 +595,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
       nativeTuiAccounting: d.nativeTuiAccounting,
       registry: d.registry ?? c.registry,
       acp: d.acp ?? c.acp,
+      wslAgentControl: d.wslAgentControl,
       capabilities: c.capabilities
         ? c.driver === "claude-code" && d.capabilities
           ? {

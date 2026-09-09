@@ -432,6 +432,7 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   codex_app_server TEXT,
   claude_code TEXT,
   native_tui_accounting TEXT,
+  wsl_agent_control TEXT,
   acp TEXT,
   registry TEXT,
   acp_transport TEXT,
@@ -2734,6 +2735,8 @@ export interface AgentLaunch {
   context: AgentContext;
   version?: string;
   capabilities?: AgentCapabilities;
+  /** Fresh protocol-gated target-local discovery attestation; never configuration authority. */
+  wslAgentControl?: AgentDefinition["wslAgentControl"];
 }
 
 /* --------------------------- Managed agent skills --------------------------- */
@@ -3944,7 +3947,7 @@ export class ControlPlaneDb {
     );
     db.prepare("DELETE FROM driver_telemetry_hourly WHERE bucket_ts < ?").run(Date.now() - 180 * 86_400_000);
     // Additive migrations for DBs created before discovery columns existed.
-    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "source TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
+    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "source TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
       try {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
@@ -4428,6 +4431,7 @@ export class ControlPlaneDb {
         now,
         !runnerSupportsProtocol(protocolVersion, "runnerLocalAgentEnv"),
         runnerSupportsProtocol(protocolVersion, "nativeTuiAccountingDiagnostics"),
+        runnerSupportsProtocol(protocolVersion, "wslSafeLauncher"),
       );
       if (manageTransaction) this.db.exec("COMMIT");
     } catch (err) {
@@ -4443,6 +4447,7 @@ export class ControlPlaneDb {
     now: number,
     persistEnvironment: boolean,
     persistNativeTuiAccounting: boolean,
+    persistWslSafeLauncher: boolean,
   ): void {
     agents = agents.filter((agent) => agent.id !== "conductor");
     this.stmt("DELETE FROM runner_agents WHERE runner_id = ?").run(runnerId);
@@ -4452,8 +4457,8 @@ export class ControlPlaneDb {
     );
     const insRa = this.stmt(
       `INSERT INTO runner_agents
-         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, source, codex_app_server, claude_code, native_tui_accounting, acp, registry, acp_transport)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, source, codex_app_server, claude_code, native_tui_accounting, wsl_agent_control, acp, registry, acp_transport)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const a of agents) {
       upAgent.run(a.id, a.name, now);
@@ -4473,6 +4478,9 @@ export class ControlPlaneDb {
         a.codexAppServer ? JSON.stringify(a.codexAppServer) : null,
         a.claudeCode ? JSON.stringify(a.claudeCode) : null,
         persistNativeTuiAccounting && a.nativeTuiAccounting ? JSON.stringify(a.nativeTuiAccounting) : null,
+        persistWslSafeLauncher && a.wslAgentControl?.safeLauncherProtocolVersion === 1
+          ? JSON.stringify(a.wslAgentControl)
+          : null,
         a.acp ? JSON.stringify(a.acp) : null,
         a.registry ? JSON.stringify(a.registry) : null,
         a.acpTransport ?? null,
@@ -4494,6 +4502,7 @@ export class ControlPlaneDb {
         now,
         !runnerSupportsProtocol(protocol?.protocol_version, "runnerLocalAgentEnv"),
         runnerSupportsProtocol(protocol?.protocol_version, "nativeTuiAccountingDiagnostics"),
+        runnerSupportsProtocol(protocol?.protocol_version, "wslSafeLauncher"),
       );
       this.stmt(
           "UPDATE runners SET agents_refreshed_at=?, updated_at=?, editors=COALESCE(?, editors) WHERE runner_id=?",
@@ -8593,6 +8602,7 @@ export class ControlPlaneDb {
                   ra.version AS version, ra.auth_status AS auth_status, ra.available AS available, ra.source AS source,
                   ra.codex_app_server AS codex_app_server, ra.claude_code AS claude_code,
                   ra.native_tui_accounting AS native_tui_accounting,
+                  ra.wsl_agent_control AS wsl_agent_control,
                   ra.acp AS acp, ra.registry AS registry, ra.acp_transport AS acp_transport
              FROM runner_agents ra JOIN agent_definitions ad ON ad.id = ra.agent_id
             WHERE ra.runner_id=? ORDER BY ra.agent_id`,
@@ -8613,6 +8623,7 @@ export class ControlPlaneDb {
         codex_app_server: string | null;
         claude_code: string | null;
         native_tui_accounting: string | null;
+        wsl_agent_control: string | null;
         acp: string | null;
         registry: string | null;
         acp_transport: string | null;
@@ -8635,6 +8646,7 @@ export class ControlPlaneDb {
       codexAppServer: parseJson<AgentDefinition["codexAppServer"]>(a.codex_app_server) ?? undefined,
       claudeCode: parseJson<AgentDefinition["claudeCode"]>(a.claude_code) ?? undefined,
       nativeTuiAccounting: parseJson<AgentDefinition["nativeTuiAccounting"]>(a.native_tui_accounting) ?? undefined,
+      wslAgentControl: parseJson<AgentDefinition["wslAgentControl"]>(a.wsl_agent_control) ?? undefined,
       acp: parseJson<AgentDefinition["acp"]>(a.acp) ?? undefined,
       registry: parseJson<AgentDefinition["registry"]>(a.registry) ?? undefined,
       acpTransport: a.acp_transport === "stdio" ? "stdio" : undefined,
@@ -8690,10 +8702,10 @@ export class ControlPlaneDb {
     // NULL is the backwards-compatible state advertised by older runners. Only an explicit
     // discovery result of `available: false` makes a definition non-launchable.
     const row = this.stmt(
-      "SELECT command, args, env, driver, context, version, capabilities FROM runner_agents WHERE runner_id=? AND agent_id=? AND available IS NOT 0",
+      "SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control FROM runner_agents WHERE runner_id=? AND agent_id=? AND available IS NOT 0",
     )
       .get(runnerId, agentId) as unknown as
-      | { command: string; args: string; env: string; driver: string; context: string | null; version: string | null; capabilities: string | null }
+      | { command: string; args: string; env: string; driver: string; context: string | null; version: string | null; capabilities: string | null; wsl_agent_control: string | null }
       | undefined;
     if (!row) return null;
     return {
@@ -8704,6 +8716,7 @@ export class ControlPlaneDb {
       context: parseJson<AgentContext>(row.context) ?? { kind: "native" },
       version: row.version ?? undefined,
       capabilities: parseJson<AgentCapabilities>(row.capabilities) ?? undefined,
+      wslAgentControl: parseJson<AgentDefinition["wslAgentControl"]>(row.wsl_agent_control) ?? undefined,
     };
   }
 

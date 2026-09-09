@@ -15,6 +15,7 @@ import {
   diagnosticValue,
   parseReviewDecision,
   reviewSummary,
+  waitForWslProviderAttemptTeardown,
 } from "./codex-app-server.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { StagedPromptImages } from "./prompt-images.js";
@@ -198,6 +199,52 @@ test("a late rejected-probe close cannot fail or tear down the healthy fallback"
   } finally {
     driver.dispose();
   }
+});
+
+test("Direct WSL fallback waits for both provider and signalled relay teardown", async () => {
+  const child = fakeAgentProcess();
+  const relay = Object.assign(fakeAgentProcess(), {
+    exitCode: null as number | null,
+    signalCode: null as NodeJS.Signals | null,
+  });
+  let disposed = 0;
+  let killed = 0;
+  let settled = false;
+  let finishReap!: (complete: boolean) => void;
+  child.wslAgentControl = {
+    input: relay.stdin,
+    output: relay.stdout,
+    relay: relay as unknown as NonNullable<AgentProcess["wslAgentControl"]>["relay"],
+    dispose: () => { disposed += 1; },
+  };
+  const waiting = waitForWslProviderAttemptTeardown(child, () => {
+    killed += 1;
+    child.wslReapCompletion = new Promise<boolean>((resolve) => { finishReap = resolve; });
+  }, 1_000)
+    .then(() => { settled = true; });
+  await nextTask();
+  assert.equal(disposed, 1);
+  assert.equal(killed, 1);
+  assert.equal(settled, false);
+  child.closeObserved = true;
+  child.emit("close", 1);
+  await nextTask();
+  assert.equal(settled, false, "provider close alone cannot release the shared relay directory");
+  relay.signalCode = "SIGTERM";
+  relay.emit("close", null, "SIGTERM");
+  await nextTask();
+  assert.equal(settled, false, "fallback also waits for its exact in-distro process-group reap");
+  finishReap(true);
+  await waiting;
+  assert.equal(settled, true, "signal-terminated relays count as closed after their close event");
+
+  const unproven = fakeAgentProcess();
+  unproven.closeObserved = true;
+  unproven.wslReapCompletion = Promise.resolve(false);
+  await assert.rejects(
+    waitForWslProviderAttemptTeardown(unproven, () => assert.fail("closed provider must not be killed")),
+    /process-group reap was not proven/,
+  );
 });
 
 test("app-server auth errors emit a secret-free auth signal", () => {

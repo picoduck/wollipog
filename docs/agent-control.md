@@ -59,13 +59,28 @@ Claude Code launches also receive an additive `wollipog` stdio MCP configuration
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.
 
-Orchestrator remains unavailable in WSL. Rebinding WSL's Windows-executable binfmt entry inside the
-bwrap namespace, or invoking its interpreter directly, would expose a general Windows process
-launcher rather than a purpose-specific Wollipog channel; those Windows processes are outside the
-Linux filesystem boundary. A future WSL implementation therefore needs a dedicated target-local
-Linux bridge that authenticates the session and exposes only the closed CLI/MCP contract. Generic
-ACP, container, and cloud targets likewise stay fail-closed until they can prove equivalent
-target-local credential and tool-isolation contracts.
+Protocol v124 completes that contract for structured Direct WSL sessions. Discovery must resolve an
+absolute, root-owned Linux Node 22+ runtime plus distro-owned compiler and bubblewrap runtimes with
+the fd-bind contract. Before each provider launch, the Windows
+runner rotates and registers the exact-session credential, waits for the control plane's positive
+hash acknowledgement, and atomically installs a root-owned, mode-0555 helper and compiled native
+launcher at fixed paths in that distro. The launcher uses `openat2` without following symlinks,
+reopens and fingerprints the authoritative cwd, HOME, and every writable bind, and retains their
+directory descriptors through bubblewrap exec. Session provider state and relay files live below a
+root-owned runner/session hash anchor; only their exact leaves are writable. A target-local shared
+HOME lease remains held until the sandbox is gone. The provider receives only a mode-0600 token and
+MCP configuration in its private bwrap `/tmp`.
+
+The helper connects to a per-launch mode-0600 Unix socket. A sibling relay outside bwrap is entered
+through the same native launcher's held directory descriptor; its Node and helper files are opened
+without following links and pinned through exec. It carries versioned bounded frames over that process's
+standard input/output to the Windows runner, which checks the
+session, token, readiness marker, and CLI command family before reusing the existing Orchestrator
+tool table. The bwrap process sees only the one socket directory; it never sees `wsl.exe`, `/init`,
+a TCP listener, or a general process-execution RPC. Relay exit removes the socket, provider stop
+reaps both processes, restart rotates the token, and terminal/delete/startup cleanup removes
+credential files. Direct WSL conversation fork/state adoption, provider-mode sessions, non-Orchestrator
+sessions, WSL Native TUI, generic ACP, container, and cloud targets remain fail-closed.
 
 ## Authorization and compatibility
 
@@ -80,7 +95,9 @@ only service-readiness metadata and does not expose the protocol version. During
 protocol-v100–v102 compatibility window, a 404 from the authenticated endpoint falls back to the
 legacy health version; authentication failures remain fail-closed, including API-only peers that
 answer 401 before routing the missing endpoint.
-Runners connected to older control planes do not inject the general surface. Conductor discovery,
+Runners connected to older control planes do not inject the general surface. WSL runners also
+withhold the Orchestrator capability unless both peers negotiate v124 and fresh discovery proves the
+complete target-local launcher contract. Conductor discovery,
 launch gating, default permission-mode clamp, and legacy manager credential remain unchanged.
 
 See [Using Wollipog](../.agents/skills/using-wollipog/SKILL.md) for the compact agent-facing skill.

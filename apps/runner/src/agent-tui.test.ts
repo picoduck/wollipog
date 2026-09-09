@@ -185,6 +185,9 @@ test("orchestrator TUI preparation fails closed for old peers, unsupported targe
   await assert.rejects(prepareAgentTuiLaunch(source, {
     ...dependencies, probe: async () => { throw new Error("isolation unavailable"); },
   }), /isolation unavailable/);
+  await assert.rejects(prepareAgentTuiLaunch(source, {
+    ...dependencies, provision: async () => { throw new Error("credential provisioning failed"); },
+  }), /credential provisioning failed/);
   assert.deepEqual(await prepareAgentTuiLaunch(meta(), {
     controlPlaneProtocolVersion: 58, provision: () => assert.fail("ordinary TUI must not reprovision"),
   }), agentTuiLaunch(meta()));

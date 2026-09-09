@@ -2781,10 +2781,18 @@ export class SessionsService {
       }
       const unsupported = this.capabilityFailure(req.runnerId, "sessionOrchestration", "Orchestrator preset");
       if (unsupported) return unsupported;
+      const contextKind = launch.context?.kind ?? "native";
+      const wslDirect = contextKind === "wsl" && req.launchSurface !== "native_tui" &&
+        ["codex", "codex-app-server", "claude-code"].includes(launch.driver) &&
+        this.capabilityFailure(req.runnerId, "wslAgentControlBridge", "Direct WSL Agent Control") === null &&
+        this.capabilityFailure(req.runnerId, "wslSafeLauncher", "Direct WSL safe launcher") === null &&
+        launch.wslAgentControl?.safeLauncherProtocolVersion === 1 &&
+        launch.wslAgentControl.bwrapRuntime === "/usr/bin/bwrap" &&
+        this.db.getRunner(req.runnerId)?.runtime?.executionIsolation?.mode === "bwrap";
       if (!(["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
           (launch.driver === "acp" && req.launchSurface !== "native_tui")) ||
-          (launch.context?.kind ?? "native") !== "native" || executionTarget.adapter !== "host") {
-        return fail("the orchestrator preset requires a supported native host harness", 409);
+          (contextKind !== "native" && !wslDirect) || executionTarget.adapter !== "host") {
+        return fail("the orchestrator preset requires a supported native host harness or verified Direct WSL bridge", 409);
       }
     }
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);

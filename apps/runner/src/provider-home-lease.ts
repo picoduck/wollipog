@@ -97,7 +97,7 @@ function providerKey(driver: AgentDriverKind, command: string): string {
 
 /** bwrap redirects mutable transcripts; container/cloud providers do not mutate the host home. */
 export function providerLaunchNeedsSharedHomeLease(isolation?: SpawnIsolation): boolean {
-  return isolation?.backend !== "bwrap" && isolation?.backend !== "container" &&
+  return isolation?.backend !== "bwrap" && isolation?.backend !== "wsl-bwrap" && isolation?.backend !== "container" &&
     isolation?.backend !== "cloud";
 }
 

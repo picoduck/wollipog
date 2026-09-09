@@ -22,7 +22,12 @@ import {
   type SessionConfig,
 } from "@wollipog/protocol";
 import { JsonRpcPeer } from "../jsonrpc.js";
-import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
+import {
+  killTree,
+  spawnAgent,
+  terminateDescendantBoundaries,
+  type AgentProcess,
+} from "../spawn.js";
 import type {
   Driver,
   DriverCallbacks,
@@ -218,6 +223,52 @@ export class CodexAppServerResumeError extends Error {
   }
 }
 
+class WslProviderAttemptTeardownError extends Error {}
+
+/** A rejected Direct WSL app-server attempt shares one pinned relay directory and HOME lease with
+ * its fallback. Do not let that fallback start until both outer processes and the in-distro reap
+ * have completed; a timeout refuses the retry instead of racing target-local authority. */
+export async function waitForWslProviderAttemptTeardown(
+  child: AgentProcess,
+  kill: (child: AgentProcess) => void = killTree,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const relay = child.wslAgentControl?.relay;
+  let providerClosed = child.closeObserved === true;
+  let relayClosed = !relay || relay.exitCode !== null || relay.signalCode !== null;
+  child.wslAgentControl?.dispose();
+  const closed = new Promise<void>((resolve, reject) => {
+    if (providerClosed && relayClosed) {
+      resolve();
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      child.off("close", onProviderClose);
+      relay?.off("close", onRelayClose);
+    };
+    const finish = () => {
+      if (!providerClosed || !relayClosed) return;
+      cleanup();
+      resolve();
+    };
+    const onProviderClose = () => { providerClosed = true; finish(); };
+    const onRelayClose = () => { relayClosed = true; finish(); };
+    if (!providerClosed) child.once("close", onProviderClose);
+    if (!relayClosed) relay!.once("close", onRelayClose);
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new WslProviderAttemptTeardownError("Direct WSL provider teardown timed out"));
+    }, timeoutMs);
+  });
+  if (!providerClosed) kill(child);
+  await closed;
+  if (await child.wslReapCompletion === false) {
+    throw new WslProviderAttemptTeardownError("Direct WSL provider process-group reap was not proven");
+  }
+}
+
 function resumeError(threadId: string, err: Json): CodexAppServerResumeError {
   const message = err?.message ?? String(err);
   const retryable =
@@ -394,7 +445,15 @@ export class CodexAppServerDriver implements Driver {
     });
 
     this.registerHandlers(peer);
-    const initialized = await peer.request<Json>("initialize", { clientInfo: { name: "wollipog", version: "0.4.0" } });
+    let initialized: Json;
+    try {
+      initialized = await peer.request<Json>("initialize", { clientInfo: { name: "wollipog", version: "0.4.0" } });
+    } catch (error) {
+      if (this.opts.isolation?.backend === "wsl-bwrap") {
+        await waitForWslProviderAttemptTeardown(child, this.kill);
+      }
+      throw error;
+    }
     this.serverIdentity = diagnosticValue(initialized?.userAgent);
     peer.notify("initialized", {});
   }
@@ -408,7 +467,8 @@ export class CodexAppServerDriver implements Driver {
         await this.startAppServer(true);
       } catch (error) {
         const startupDiagnostics = this.initializationStderr.join("\n");
-        if (this.disposed || !defaultModeQuestionFeatureUnsupported(startupDiagnostics)) {
+        if (error instanceof WslProviderAttemptTeardownError || this.disposed ||
+            !defaultModeQuestionFeatureUnsupported(startupDiagnostics)) {
           this.flushInitializationStderr();
           throw error;
         }

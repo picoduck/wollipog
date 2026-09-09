@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { windowsCommandSpec } from "./windows-cmd.js";
 import { existsSync } from "node:fs";
 import { verifiedNativeClaudeGitBashPath } from "./discovery/claude-code.js";
+import { killTree, spawnAgent, type SpawnAgentOptions, type WslBwrapSpawnIsolation } from "./spawn.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -85,13 +86,24 @@ export function orchestratorAcpSessionMeta(): Record<string, unknown> {
  * their own internal tools, so client-side fs/terminal refusal cannot establish this boundary. */
 export function withOrchestratorPreset(
   agents: AgentDefinition[],
-  host: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exists?: typeof existsSync } = {},
+  host: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exists?: typeof existsSync;
+    wslIsolationMode?: "provider" | "bwrap" | "seatbelt" | "windows-job" } = {},
 ): AgentDefinition[] {
   return agents.filter((agent) => agent.id !== "conductor").map((agent) => {
     const acpSupported = supportsClaudeAgentAcpOrchestrator(agent);
-    if ((agent.context?.kind ?? "native") !== "native" ||
+    const contextKind = agent.context?.kind ?? "native";
+    const wslSupported = contextKind === "wsl" && agent.wslAgentControl?.protocolVersion === 1 &&
+      agent.wslAgentControl.safeLauncherProtocolVersion === 1 &&
+      host.wslIsolationMode === "bwrap" &&
+      ["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp");
+    if (contextKind === "wsl" && !wslSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
+      return { ...agent, capabilities: { ...agent.capabilities,
+        permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
+    }
+    if ((contextKind !== "native" && !wslSupported) ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
-    if ((agent.driver === "claude-code" || acpSupported) && (host.platform ?? process.platform) === "win32") {
+    if (contextKind === "native" && (agent.driver === "claude-code" || acpSupported) &&
+        (host.platform ?? process.platform) === "win32") {
       if (!verifiedNativeClaudeGitBashPath(agent.env ?? {}, { env: host.env, exists: host.exists })) return agent;
     }
     if (acpSupported && !agent.capabilities) {
@@ -191,16 +203,107 @@ export function isolateCodexMcpServers(output: string): string[] {
   });
 }
 
-export async function codexOrchestratorMcpArgs(
-  opts: { command: string; args: string[]; env?: Record<string, string> },
+interface CodexOrchestratorProbeOptions {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  context?: AgentDefinition["context"];
+  isolation?: WslBwrapSpawnIsolation | SpawnAgentOptions["isolation"];
+}
+
+interface CodexOrchestratorProbeDependencies {
+  runIsolated?: (opts: CodexOrchestratorProbeOptions, cwd: string, args: string[]) => Promise<string>;
+}
+
+/** The effective MCP inventory is provider-owned behavior, so a Direct WSL probe is provider
+ * execution too. Run it through the already-prepared fd-safe boundary; a direct `wsl.exe`
+ * metadata probe would reopen the exact host path that the launcher exists to close. */
+async function runIsolatedCodexMcpProbe(
+  opts: CodexOrchestratorProbeOptions,
   cwd: string,
+  args: string[],
+): Promise<string> {
+  if (opts.isolation?.backend !== "wsl-bwrap" || opts.context?.kind !== "wsl") {
+    throw new Error("isolated Codex MCP probe requires the target-local WSL launcher");
+  }
+  const child = spawnAgent({
+    command: opts.command,
+    args,
+    cwd,
+    env: opts.env,
+    context: opts.context,
+    scrubInheritedEnv: ["OPENAI_API_KEY"],
+    isolation: opts.isolation,
+  });
+  return new Promise<string>((resolve, reject) => {
+    let stdout = "";
+    let bytes = 0;
+    let failure: Error | undefined;
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(stdout);
+    };
+    const timer = setTimeout(() => {
+      failure = new Error("isolated Codex MCP probe timed out");
+      killTree(child);
+      // The provider may already have closed while its dedicated WSL relay is wedged. In that
+      // state killTree is intentionally a no-op, so explicitly sever the broker and relay before
+      // settling the bounded probe instead of waiting forever for a close event that may not come.
+      child.wslAgentControl?.dispose();
+      const relay = child.wslAgentControl?.relay;
+      if (relay && relay.exitCode === null && relay.signalCode === null) relay.kill();
+      finish(failure);
+    }, 10_000);
+    timer.unref?.();
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (failure) return;
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > 1024 * 1024) {
+        failure = new Error("isolated Codex MCP probe output exceeded its bound");
+        child.stdout.removeAllListeners("data");
+        child.stdout.resume();
+        killTree(child);
+        return;
+      }
+      stdout += chunk;
+    });
+    // The diagnostics may contain provider configuration. Drain without retaining or surfacing it;
+    // otherwise a full pipe can deadlock the bounded probe before its close event.
+    child.stderr.resume();
+    child.once("error", () => finish(new Error("isolated Codex MCP probe could not start")));
+    child.once("close", (code) => {
+      const result = failure ?? (code === 0
+        ? undefined
+        : new Error(`isolated Codex MCP probe exited with code ${code ?? "unknown"}`));
+      // The probe and real provider deliberately reuse one pinned session directory. Wait for
+      // relay teardown so its unlink cleanup cannot race the next relay's exclusive bootstrap.
+      const relay = child.wslAgentControl?.relay;
+      if (relay && relay.exitCode === null && relay.signalCode === null) relay.once("close", () => finish(result));
+      else finish(result);
+    });
+  });
+}
+
+export async function codexOrchestratorMcpArgs(
+  opts: CodexOrchestratorProbeOptions,
+  cwd: string,
+  dependencies: CodexOrchestratorProbeDependencies = {},
 ): Promise<string[]> {
   try {
-    // The read-only mcp subcommand rejects --strict-config; retain it on the actual
-    // provider launch, where unsupported safety features must fail closed.
-    const probe = windowsCommandSpec(opts.command, [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"]);
+    if (opts.isolation?.backend === "wsl-bwrap") {
+      if (opts.context?.kind !== "wsl") throw new Error("target-local WSL isolation context mismatch");
+      const probeArgs = [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"];
+      const stdout = await (dependencies.runIsolated ?? runIsolatedCodexMcpProbe)(opts, cwd, probeArgs);
+      return isolateCodexMcpServers(stdout);
+    }
+    const { probe, env, nativeCwd } = codexOrchestratorMcpProbe(opts, cwd);
     const { stdout } = await execFileAsync(probe.file, probe.args, {
-      cwd, env: { ...process.env, ...opts.env }, timeout: 10_000, maxBuffer: 1024 * 1024,
+      ...(nativeCwd ? { cwd: nativeCwd } : {}), env, timeout: 10_000, maxBuffer: 1024 * 1024,
       windowsHide: true,
       ...(probe.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: probe.argv0 } : {}),
     });
@@ -208,4 +311,28 @@ export async function codexOrchestratorMcpArgs(
   } catch {
     throw new Error("Orchestrator launch refused: unable to isolate Codex MCP servers.");
   }
+}
+
+/** Build the MCP inventory probe in the provider's real execution context. In particular, a WSL
+ * path is never passed to Win32 exec directly, and explicit agent env crosses through WSLENV just
+ * as it does for the subsequent provider launch. */
+export function codexOrchestratorMcpProbe(
+  opts: { command: string; args: string[]; env?: Record<string, string>; context?: AgentDefinition["context"] },
+  cwd: string,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): { probe: { file: string; args: string[]; windowsVerbatimArguments?: boolean; argv0?: string };
+  env: NodeJS.ProcessEnv; nativeCwd?: string } {
+  // The read-only mcp subcommand rejects --strict-config; retain it on the actual provider launch,
+  // where unsupported safety features must fail closed.
+  const probeArgs = [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"];
+  const wsl = opts.context?.kind === "wsl" ? opts.context : undefined;
+  const env = { ...hostEnv, ...opts.env };
+  if (!wsl) return { probe: windowsCommandSpec(opts.command, probeArgs), env, nativeCwd: cwd };
+  if (opts.env) {
+    const existing = (env.WSLENV ?? "").split(":").filter(Boolean);
+    const known = new Set(existing.map((entry) => entry.split("/")[0]?.toLowerCase()));
+    env.WSLENV = [...existing, ...Object.keys(opts.env).filter((name) => !known.has(name.toLowerCase()))].join(":");
+  }
+  return { probe: { file: "wsl.exe",
+    args: ["-d", wsl.distro, "--cd", cwd, "--exec", opts.command, ...probeArgs] }, env };
 }

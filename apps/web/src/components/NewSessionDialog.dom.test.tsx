@@ -332,11 +332,11 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
   }
 });
 
-test("WSL keeps ordinary Native TUI but fails closed for a saved Orchestrator preset", async () => {
+test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and fresh launcher attestation", async () => {
   const wslRunner: RunnerView = {
     ...runner,
     os: "windows",
-    protocolVersion: 118,
+    protocolVersion: 122,
     agents: runner.agents.map((agent) => ({
       ...agent,
       context: { kind: "wsl" as const, distro: "Ubuntu-24.04" },
@@ -356,6 +356,11 @@ test("WSL keeps ordinary Native TUI but fails closed for a saved Orchestrator pr
       .find((button) => button.textContent?.includes("Native TUI"))!;
     assert.ok(tui);
     assert.equal(tui.disabled, false, "ordinary WSL Native TUI remains available");
+    await act(async () => { tui.click(); });
+    assert.equal(createButton(ordinary.container).disabled, false,
+      "ordinary WSL Native TUI remains launchable rather than only selectable");
+    await act(async () => { createButton(ordinary.container).click(); });
+    assert.equal(ordinary.requests[0]?.launchSurface, "native_tui");
   } finally {
     await unmountFixture(ordinary);
   }
@@ -376,6 +381,65 @@ test("WSL keeps ordinary Native TUI but fails closed for a saved Orchestrator pr
   } finally {
     await unmountFixture(orchestrator);
   }
+
+  const protocolOnly = await mountFixture({
+    runners: [{ ...wslRunner, protocolVersion: 124 }],
+    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+  }, undefined, undefined, async () => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+  }] }));
+  try {
+    await act(async () => { selectProject(protocolOnly.container, project.id); });
+    assert.equal(createButton(protocolOnly.container).disabled, true,
+      "a v124 runner cannot replace fresh launcher attestation");
+  } finally {
+    await unmountFixture(protocolOnly);
+  }
+
+  const safeRunner: RunnerView = {
+    ...wslRunner,
+    protocolVersion: 124,
+    runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      executionIsolation: { mode: "bwrap", network: "deny" } },
+    agents: wslRunner.agents.map((agent) => ({
+      ...agent,
+      wslAgentControl: { protocolVersion: 1, nodeRuntime: "/usr/bin/node",
+        safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" },
+    })),
+  };
+  const providerMode = await mountFixture({
+    runners: [{ ...safeRunner, runtime: { ...safeRunner.runtime!,
+      executionIsolation: { mode: "provider", network: "inherit" } } }],
+    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+  }, undefined, undefined, async () => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+  }] }));
+  try {
+    await act(async () => { selectProject(providerMode.container, project.id); });
+    assert.equal(createButton(providerMode.container).disabled, true,
+      "safe attestation cannot enable Direct WSL under provider isolation");
+    assert.equal(providerMode.requests.length, 0);
+  } finally { await unmountFixture(providerMode); }
+  const bridged = await mountFixture({
+    runners: [safeRunner],
+    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+  }, undefined, undefined, async () => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+  }] }));
+  try {
+    await act(async () => { selectProject(bridged.container, project.id); });
+    assert.equal(createButton(bridged.container).disabled, false, "verified bridge enables Direct creation");
+    const tui = [...bridged.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((button) => button.textContent?.includes("Native TUI"))!;
+    assert.equal(tui.disabled, true, "WSL Orchestrator Native TUI stays fail-closed");
+    await choosePermissionPreset(bridged.container, "Orchestrator");
+    await act(async () => { createButton(bridged.container).click(); });
+    assert.equal(bridged.requests[0]?.launchSurface, undefined, "the omitted field is the Direct launch default");
+    assert.equal(bridged.requests[0]?.config?.permissionMode, "orchestrator");
+  } finally { await unmountFixture(bridged); }
 });
 
 test("saved Orchestrator default is visible and gates Native TUI without requiring an override", async () => {

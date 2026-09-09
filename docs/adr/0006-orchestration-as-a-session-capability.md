@@ -123,12 +123,17 @@ The management credential and MCP definition are materialized runner-locally fro
 references and never persisted as token bytes.
 
 Other ACP adapters and releases remain unavailable until their exact tool-isolation contract is
-audited; ACP transport support or a self-reported display name is not sufficient. WSL, container,
-and cloud targets also remain unavailable for the preset. WSL has no narrow verified in-distro
-credential/reentry bridge. Its native interop route is a general Windows executable launcher whose
-processes are not constrained by the Linux bwrap filesystem boundary, so Wollipog does not restore
-WSL binfmt or invoke that route for Agent Control. A future WSL design requires a dedicated,
-authenticated Linux-side bridge with a closed CLI/MCP surface. Container targets deliberately
+audited; ACP transport support or a self-reported display name is not sufficient. Protocol v124
+permits structured Direct WSL only when discovery proves an exact root-owned Linux Node 22+ runtime,
+the required bubblewrap fd interface, and a fixed distro compiler. The runner installs the fixed,
+root-owned target helper and native no-follow launcher. That launcher holds cwd, writable-root, relay,
+and provider-HOME descriptors through exec and leases HOME for the sandbox lifetime. A per-launch Unix socket and a
+separate fixed-command WSL relay's standard pipes carry only authenticated, bounded Agent Control
+frames to the runner-side
+closed CLI/MCP implementation. The provider never receives a Windows executable path or a general
+execution route; its bwrap namespace still has no WSL PE/binfmt registration. Credential
+acknowledgement precedes launch, restart rotates the token, and terminal lifecycle removes it.
+Direct WSL provider mode, conversation fork/state adoption, Native TUI, and generic ACP remain unavailable. Container and cloud targets deliberately
 advertise `secrets: none` and mount only
 the worktree. Cloud targets accept adapter-owned secret references but define no portable remote
 Wollipog MCP runtime. None can yet provision and clean up the same target-local management

@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { after, test } from "node:test";
-import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
 import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
@@ -1060,4 +1060,35 @@ test("spawnAgent rejects a synthetic WSL bwrap boundary before process construct
     context: { kind: "wsl", distro: "Ubuntu" },
     isolation: { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny" },
   }), /cannot hold target-local no-follow path handles/);
+});
+
+test("Direct WSL bridge binds broker-provisioned private files and launches only the target-local helper sibling", () => {
+  const bridge = {
+    protocolVersion: 1 as const, distro: "Ubuntu", nodeRuntime: "/usr/bin/node",
+    helperPath: "/usr/local/lib/wollipog/wsl-agent-control-v1.mjs" as const,
+    sessionId: "session-a", token: "never-in-argv", tokenFile: "C:\\state\\session-a.token",
+    readyFile: "C:\\state\\session-a.ready", cpUrl: "http://127.0.0.1:4317",
+    socketPath: "/tmp/wlp-test/control.sock",
+    safeLauncherProtocolVersion: 1 as const, bwrapRuntime: "/usr/bin/bwrap",
+    socketDirectory: { path: "/var/lib/wollipog-wsl-launcher/session/relay", identity: "1:2:3" },
+  };
+  const relayArgs = buildWslAgentControlRelayArgs(bridge);
+  assert.deepEqual(relayArgs.slice(0, 7), ["-d", "Ubuntu", "--cd", "/", "--exec",
+    "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1", "relay"]);
+  assert.ok(relayArgs.includes("/var/lib/wollipog-wsl-launcher/session/relay"));
+  assert.ok(relayArgs.includes("1:2:3"));
+  assert.ok(relayArgs.includes("/usr/bin/node"));
+  assert.ok(relayArgs.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"));
+  assert.ok(relayArgs.includes("control.sock"));
+  assert.equal(relayArgs.join(" ").includes(bridge.token), false, "relay argv never receives the credential");
+});
+
+test("Direct WSL provider invocations use collision-free bounded pidfiles", () => {
+  const directory = "/var/lib/wollipog-wsl-launcher/session/relay";
+  const first = wslProviderPidfile(directory);
+  const second = wslProviderPidfile(directory);
+  assert.notEqual(first, second);
+  for (const value of [first, second]) {
+    assert.match(value, /^\/var\/lib\/wollipog-wsl-launcher\/session\/relay\/provider-[a-f0-9]{32}\.pgid$/u);
+  }
 });

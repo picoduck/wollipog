@@ -4,6 +4,8 @@ import type { AgentDefinition } from "@wollipog/protocol";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
   CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
+  codexOrchestratorMcpArgs,
+  codexOrchestratorMcpProbe,
   isolateCodexMcpServers,
   orchestratorAcpSessionMeta,
   orchestratorLaunchArgs,
@@ -14,7 +16,7 @@ import {
 
 const mcp = { command: "/runner", args: ["agent", "mcp"], env: { WOLLIPOG_PERMISSION_PRESET: "orchestrator" } };
 
-test("orchestrator capability is native-only and never revives conductor", () => {
+test("orchestrator capability requires a native harness or discovery-verified WSL bridge and never revives conductor", () => {
   const agent: AgentDefinition = { id: "agent", name: "Agent", command: "agent", args: [], env: {}, driver: "codex",
     capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["read-only"] } };
   assert.deepEqual(withOrchestratorPreset([agent])[0]!.capabilities!.permissionModes, ["read-only", "orchestrator"]);
@@ -22,6 +24,43 @@ test("orchestrator capability is native-only and never revives conductor", () =>
   for (const unsupported of [{ ...agent, driver: "acp" as const }, { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" } }]) {
     assert.equal(withOrchestratorPreset([unsupported])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
   }
+  const wsl = { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" },
+    wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: "/usr/bin/node",
+      safeLauncherProtocolVersion: 1 as const, bwrapRuntime: "/usr/bin/bwrap" } };
+  assert.equal(withOrchestratorPreset([wsl])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
+    "fresh launcher attestation is not advertised without runner-owned bwrap mode");
+  assert.equal(withOrchestratorPreset([wsl], { wslIsolationMode: "provider" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([wsl], { wslIsolationMode: "bwrap" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true);
+  const wslClaude = { ...wsl, driver: "claude-code" as const,
+    capabilities: { ...wsl.capabilities, permissionModes: ["default"] } };
+  assert.equal(withOrchestratorPreset([wslClaude], {
+    platform: "win32", env: {}, exists: () => false, wslIsolationMode: "bwrap",
+  })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true,
+  "WSL Claude uses its in-distro runtime and does not depend on Git for Windows");
+  assert.equal(withOrchestratorPreset([{ ...wsl, driver: "acp" }])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([{ ...agent, context: { kind: "wsl", distro: "Ubuntu" },
+    capabilities: { ...agent.capabilities!, permissionModes: ["read-only", "orchestrator"] } }])[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false, "stale configured capability cannot self-attest the bridge");
+});
+
+test("Codex MCP isolation probes an in-distro WSL binary through exact argv", () => {
+  const built = codexOrchestratorMcpProbe({
+    command: "/usr/bin/codex",
+    args: ["--strict-config", "-c", "mcp_servers.wollipog.enabled=true"],
+    env: { CODEX_HOME: "/home/me/.codex", EXISTING: "override" },
+    context: { kind: "wsl", distro: "Ubuntu-24.04" },
+  }, "/home/me/repo", { WSLENV: "EXISTING/u", EXISTING: "host" });
+  assert.deepEqual(built.probe, {
+    file: "wsl.exe",
+    args: ["-d", "Ubuntu-24.04", "--cd", "/home/me/repo", "--exec", "/usr/bin/codex",
+      "-c", "mcp_servers.wollipog.enabled=true", "mcp", "list", "--json"],
+  });
+  assert.equal(built.nativeCwd, undefined, "Linux cwd is passed only to wsl.exe, never Win32 exec cwd");
+  assert.equal(built.env.WSLENV, "EXISTING/u:CODEX_HOME");
+  assert.equal(built.env.EXISTING, "override");
 });
 
 test("native Windows Claude advertises orchestrator only with verified Git Bash", () => {
@@ -156,6 +195,39 @@ test("Codex MCP isolation disables every ambient server and fails closed on unve
     '[{"name":"wollipog","enabled":true},{"name":"unsafe.key"}]']) {
     assert.throws(() => isolateCodexMcpServers(invalid), /cannot verify/);
   }
+});
+
+test("Direct WSL Codex MCP inventory runs only through the prepared target-local launcher", async () => {
+  const isolation = {
+    backend: "wsl-bwrap" as const,
+    distro: "Ubuntu",
+    command: "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1",
+    args: [],
+    cwd: "/srv/canonical",
+    network: "deny" as const,
+    wslAgentControl: {} as never,
+  };
+  let observed: { cwd: string; args: string[] } | undefined;
+  const result = await codexOrchestratorMcpArgs({
+    command: "/usr/bin/codex",
+    args: ["--strict-config", "-c", "mcp_servers={}"],
+    env: {},
+    context: { kind: "wsl", distro: "Ubuntu" },
+    isolation,
+  }, isolation.cwd, {
+    runIsolated: async (_opts, cwd, args) => {
+      observed = { cwd, args };
+      return JSON.stringify([
+        { name: "wollipog", enabled: true },
+        { name: "ambient", enabled: true },
+      ]);
+    },
+  });
+  assert.deepEqual(observed, {
+    cwd: "/srv/canonical",
+    args: ["-c", "mcp_servers={}", "mcp", "list", "--json"],
+  });
+  assert.deepEqual(result, ["-c", "mcp_servers.ambient.enabled=false"]);
 });
 
 test("Claude resume removes both current and historical setting-source overrides", () => {

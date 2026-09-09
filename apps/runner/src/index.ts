@@ -83,7 +83,7 @@ import {
   removeAgentControlFiles,
   sweepAgentControlFiles,
 } from "./agent-control.js";
-import { withOrchestratorPreset } from "./orchestrator-preset.js";
+import { stripOrchestratorLaunchArgs, withOrchestratorPreset } from "./orchestrator-preset.js";
 import {
   GitOpError,
   gitDiff,
@@ -366,7 +366,7 @@ const metadata: RunnerMetadata = {
   version: VERSION,
   // Pre-discovery config rows go out verbatim so live discovery can still authoritatively
   // fill availability and capabilities; supported native agents gain the runner-owned preset.
-  agents: withOrchestratorPreset(configuredAgentDefinitions),
+  agents: withOrchestratorPreset(configuredAgentDefinitions, { wslIsolationMode: config.executionIsolation.mode }),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -388,13 +388,23 @@ const metadata: RunnerMetadata = {
 // Configured agents are the baseline; discovery augments them (config wins on conflict).
 const configAgents = metadata.agents;
 const acpAuthStatus = new Map<string, AcpAuthRuntime>();
+const freshSafeWslLaunches = new Set<string>();
+
+function safeWslLaunchKey(value: Pick<AgentDefinition, "command" | "args" | "driver" | "context">): string | null {
+  if (value.context?.kind !== "wsl") return null;
+  return JSON.stringify([value.context.distro, value.driver ?? "acp", value.command, ...(value.args ?? [])]);
+}
 
 /** Never advertise secret environment data, retired identities, or an orchestration preset
  * to a control plane that cannot enforce its credential boundary. */
 function agentsForControlPlane() {
   return metadata.agents.filter((agent) => agent.id !== "conductor")
     .map((agent) => ({ ...agent, env: {},
-      ...(!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") && agent.capabilities
+      ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
+          ((agent.context?.kind ?? "native") === "wsl" &&
+            (!runnerSupportsProtocol(controlPlaneProtocolVersion, "wslSafeLauncher") ||
+              agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
+              config.executionIsolation.mode !== "bwrap"))) && agent.capabilities
         ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
         : {}),
     }));
@@ -462,6 +472,32 @@ const registerPolicyHookCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "policy_hook_credential", sessionId, tokenHash });
 const registerAgentControlCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "agent_control_credential", sessionId, tokenHash });
+const pendingAgentControlRegistrations = new Map<string, {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+const agentControlRegistrationKey = (sessionId: string, tokenHash: string) => `${sessionId}\0${tokenHash}`;
+const registerAgentControlCredentialAndWait = (sessionId: string, tokenHash: string): Promise<void> => {
+  const key = agentControlRegistrationKey(sessionId, tokenHash);
+  if (pendingAgentControlRegistrations.has(key)) {
+    return Promise.reject(new Error("duplicate Agent Control credential registration"));
+  }
+  return new Promise<void>((resolvePromise, reject) => {
+    const timer = setTimeout(() => {
+      pendingAgentControlRegistrations.delete(key);
+      reject(new Error("Agent Control credential was not acknowledged within 10 seconds"));
+    }, 10_000);
+    timer.unref?.();
+    pendingAgentControlRegistrations.set(key, { resolve: resolvePromise, reject, timer });
+    try { registerAgentControlCredential(sessionId, tokenHash); }
+    catch (error) {
+      clearTimeout(timer);
+      pendingAgentControlRegistrations.delete(key);
+      reject(error as Error);
+    }
+  });
+};
 // The box's on-disk session store (source of truth, shared across runner instances on this box).
 const store = new SessionStore(resolve(config.dataDir, "sessions"));
 store.scrubLegacyAgentEnv();
@@ -524,14 +560,16 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       log,
       claudeHookHost,
     );
-    provisionAgentControl(
+    await provisionAgentControl(
       meta,
       {
         controlPlaneUrl: config.controlPlaneUrl,
         controlPlaneProtocolVersion,
         allowInsecureTransport,
         registerCredential: registerAgentControlCredential,
+        registerCredentialAndWait: registerAgentControlCredentialAndWait,
         orchestratorAgent: localAgent,
+        executionIsolationMode: config.executionIsolation.mode,
       },
       log,
       agentControlHost,
@@ -566,6 +604,18 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     subscriptionUsage.observe(agentId, driver, context, update);
   },
   config.workspaces.map((workspace) => workspace.path),
+  (meta) => {
+    if (meta.config.permissionMode !== "orchestrator" || meta.context.kind !== "wsl" ||
+        meta.executionTarget && meta.executionTarget.adapter !== "host") return false;
+    const agent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
+    if (!agent || agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
+        agent.context?.kind !== "wsl" || agent.context.distro !== meta.context.distro ||
+        agent.driver !== meta.driver || agent.command !== meta.command) return false;
+    const args = stripOrchestratorLaunchArgs(meta.args, meta.driver);
+    const key = safeWslLaunchKey({ ...meta, args });
+    return !!key && freshSafeWslLaunches.has(key) && args.length === agent.args.length &&
+      agent.args.every((arg, index) => arg === args[index]);
+  },
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
@@ -666,6 +716,15 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 }
 
 function sendUp(msg: RunnerToControlPlane): void {
+  if (msg.type === "session_status" && ["completed", "failed", "stopped"].includes(msg.status)) {
+    removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
+    for (const [key, pending] of pendingAgentControlRegistrations) {
+      if (!key.startsWith(`${msg.sessionId}\0`)) continue;
+      clearTimeout(pending.timer);
+      pendingAgentControlRegistrations.delete(key);
+      pending.reject(new Error(`Agent Control registration ended with session status ${msg.status}`));
+    }
+  }
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
     let projected: RunnerToControlPlane | null;
     try {
@@ -1021,6 +1080,12 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       discoverEditors(),
     ]);
     const discovered = [...nativeAgents, ...registryAgents];
+    freshSafeWslLaunches.clear();
+    for (const agent of nativeAgents) {
+      if (agent.wslAgentControl?.safeLauncherProtocolVersion !== 1) continue;
+      const key = safeWslLaunchKey(agent);
+      if (key) freshSafeWslLaunches.add(key);
+    }
     // Enrich the merged list with dynamic per-version/context models (live app-server model/list,
     // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
     metadata.agents = applyClaudeHookCapability(
@@ -1031,7 +1096,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       claudeHookFeatureEnabled,
       log,
     );
-    metadata.agents = withOrchestratorPreset(metadata.agents);
+    metadata.agents = withOrchestratorPreset(metadata.agents, { wslIsolationMode: config.executionIsolation.mode });
     // A definitive native discovery result is newer authoritative evidence than the process-local
     // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
     // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.
@@ -1201,12 +1266,33 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "agent_control_credential_registered":
       try {
-        if (msg.accepted) markAgentControlCredentialReady(agentControlHost.configDir, msg.sessionId, msg.tokenHash);
+        const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
+        const pending = pendingAgentControlRegistrations.get(pendingKey);
+        if (msg.accepted) {
+          markAgentControlCredentialReady(agentControlHost.configDir, msg.sessionId, msg.tokenHash);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingAgentControlRegistrations.delete(pendingKey);
+            pending.resolve();
+          }
+        }
         else {
           markAgentControlCredentialRejected(agentControlHost.configDir, msg.sessionId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingAgentControlRegistrations.delete(pendingKey);
+            pending.reject(new Error(msg.error ?? "Agent Control credential registration was rejected"));
+          }
           log(`agent control ${msg.sessionId}: credential registration rejected (${msg.error ?? "unknown session binding"})`);
         }
       } catch (error) {
+        const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
+        const pending = pendingAgentControlRegistrations.get(pendingKey);
+        if (pending) {
+          clearTimeout(pending.timer);
+          pendingAgentControlRegistrations.delete(pendingKey);
+          pending.reject(error as Error);
+        }
         markAgentControlCredentialRejected(agentControlHost.configDir, msg.sessionId);
         log(`agent control ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
@@ -1821,9 +1907,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
         resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
-          provision: (prepared) => {
+          provision: async (prepared) => {
             prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
-            provisionAgentControl(prepared, {
+            await provisionAgentControl(prepared, {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
             }, log, agentControlHost);
