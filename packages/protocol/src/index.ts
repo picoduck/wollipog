@@ -495,6 +495,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   nativeMacosMachineSkillSnapshots: 120,
   /** v121 runners publish a content-free, live-discovered Native TUI accounting boundary. */
   nativeTuiAccountingDiagnostics: 121,
+  /** Runner separates base model identity from context-window variants and publishes the
+   * effective post-launch window for native drivers. */
+  contextWindowVariants: 122,
   machineSkillAdoption: 115,
   machineSkillAdoptionRecovery: 116,
   chunkedAgentSkills: 96,

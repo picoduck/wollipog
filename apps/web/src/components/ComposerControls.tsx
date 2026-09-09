@@ -113,7 +113,28 @@ interface MenuModelChoice {
   defaultEffort?: string;
 }
 
-/** Pure leaf so the two independent menu-radio groups retain an executable semantic contract. */
+/** One menu-radio option shared by the Model, Context Window, and Effort groups. */
+function MenuRadioOption({ checked, title, onSelect, children }: {
+  checked: boolean;
+  title?: string;
+  onSelect: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={checked}
+      className={`cbar-opt${checked ? " on" : ""}`}
+      title={title}
+      onClick={onSelect}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Pure leaf so the independent menu-radio groups retain an executable semantic contract. */
 export function ModelEffortMenuChoices({
   models,
   modelSource,
@@ -140,17 +161,14 @@ export function ModelEffortMenuChoices({
         <div role="group" aria-label="Model">
           <div className="plus-section" role="presentation">Model{modelSource === "cached" ? " (cached)" : ""}</div>
           {models.map((model) => (
-            <button
+            <MenuRadioOption
               key={model.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={model.id === modelVal}
-              className={`cbar-opt${model.id === modelVal ? " on" : ""}`}
+              checked={model.id === modelVal}
               title={model.description}
-              onClick={() => apply({ model: model.id, effort: "" })}
+              onSelect={() => apply({ model: model.id, effort: "" })}
             >
               {model.displayName ?? model.id}
-            </button>
+            </MenuRadioOption>
           ))}
         </div>
       )}
@@ -158,31 +176,28 @@ export function ModelEffortMenuChoices({
         <div role="group" aria-label="Context Window">
           <div className="plus-section" role="presentation">Context Window</div>
           {contextChoice.options.map((option) => (
-            <button
+            <MenuRadioOption
               key={option.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={option.id === contextChoice.selectedId}
-              className={`cbar-opt${option.id === contextChoice.selectedId ? " on" : ""}`}
+              checked={option.id === contextChoice.selectedId}
               title={`${option.contextWindow.toLocaleString()} tokens; applies to the next turn`}
               // A window switch keeps the effort: variants of one base share their effort levels.
-              onClick={() => apply({ model: option.id })}
+              onSelect={() => apply({ model: option.id })}
             >
               {option.label}
-            </button>
+            </MenuRadioOption>
           ))}
         </div>
       )}
       {modelEfforts.length > 0 && (
         <div role="group" aria-label="Reasoning Effort">
           <div className="plus-section" role="presentation">Effort</div>
-          <button type="button" role="menuitemradio" aria-checked={!effortVal} className={`cbar-opt${!effortVal ? " on" : ""}`} onClick={() => apply({ effort: "" })}>
+          <MenuRadioOption checked={!effortVal} onSelect={() => apply({ effort: "" })}>
             {selectedModel?.defaultEffort ? `Default (${selectedModel.defaultEffort})` : "Default"}
-          </button>
+          </MenuRadioOption>
           {modelEfforts.map((effort) => (
-            <button key={effort} type="button" role="menuitemradio" aria-checked={effort === effortVal} className={`cbar-opt${effort === effortVal ? " on" : ""}`} onClick={() => apply({ effort })}>
+            <MenuRadioOption key={effort} checked={effort === effortVal} onSelect={() => apply({ effort })}>
               {effortLabel(effort)}
-            </button>
+            </MenuRadioOption>
           ))}
         </div>
       )}
