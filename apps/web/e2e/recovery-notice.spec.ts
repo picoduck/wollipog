@@ -89,15 +89,23 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
     }
     await expect(page.locator(".follow-tail-chip")).toContainText("Following Live Output");
     await expect(usage).toBeVisible();
-    await expect(usage).toHaveAttribute("aria-label", /^Usage: /);
     await expect(page.locator(".cbar-usage")).toHaveCount(0);
-    const usageDisclosure = await usage.evaluate((element) => ({
+    // #781: the trailing cell is now the session-cost control, so its accessible name and tooltip
+    // live on the button that opens Session Usage, not on the wrapper the geometry is read from.
+    const usageButton = usage.locator(".session-cost-button");
+    await expect(usageButton).toHaveAttribute("aria-label", /^Session Usage: /);
+    const usageDisclosure = await usageButton.evaluate((element) => ({
       text: element.textContent,
       ariaLabel: element.getAttribute("aria-label"),
       title: element.getAttribute("title"),
+      expanded: element.getAttribute("aria-expanded"),
     }));
-    expect(usageDisclosure.ariaLabel).toBe(`Usage: ${usageDisclosure.text}`);
-    expect(usageDisclosure.title).toBe(`Session usage: ${usageDisclosure.text}`);
+    // The fixture's session is priced, so the visible figure is the amount and names itself. The
+    // context figures this cell used to repeat now belong to the ring alone.
+    expect(usageDisclosure.text).toBe("$0.42");
+    expect(usageDisclosure.ariaLabel).toBe(`Session Usage: ${usageDisclosure.text}`);
+    expect(usageDisclosure.title).toBe(`Session usage — ${usageDisclosure.text} so far`);
+    expect(usageDisclosure.expanded).toBe("false");
 
     return page.locator("#frame").evaluate((frame, recoverySettled) => {
       const rect = (selector: string) => {
