@@ -6,13 +6,28 @@
 
 import { spawn } from "node:child_process";
 import {
-  chmodSync, constants, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
+  chmodSync, constants, closeSync, cpSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { hostname as osHostname, homedir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { execCapture } from "./exec-capture.js";
 import type { McpFetch } from "./session-management-mcp.js";
 import { runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
+import {
+  CHECKSUM_MANIFEST_NAME,
+  WEB_BUNDLE_ASSET_NAME,
+  controlPlaneAssetName,
+  downloadToFile,
+  downloadVerifiedAsset,
+  findAsset,
+  hostTargetTriple,
+  parseChecksumManifest,
+  resolveRelease,
+  runnerAssetName,
+  sha256File,
+  type Downloader,
+  type JsonFetch,
+} from "./release-assets.js";
 import { VERSION } from "./version.js";
 import {
   CONTROL_PLANE_UNIT,
@@ -37,7 +52,7 @@ import {
 
 const VALUE_OPTIONS = new Set([
   "--control-plane-bin", "--runner-bin", "--web-dist", "--host", "--port", "--public-origin", "--runner-id",
-  "--workspace", "--account", "--lines",
+  "--workspace", "--account", "--lines", "--release",
 ]);
 const LOOPBACK_HOST_RE = /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|\[::1\])$/u;
 const RUNNER_ID_REJECT_RE = /[\u0000-\u0020\u007f/\\?#]/u;
@@ -56,6 +71,11 @@ export interface ServiceHost {
   /** Run with inherited stdio (for `logs --follow`); resolves with the exit code. */
   spawnInherit(command: string, args: string[]): Promise<number>;
   fetch: McpFetch;
+  /** GitHub REST metadata requests (JSON). */
+  fetchJson: JsonFetch;
+  /** Stream a release asset to a file. */
+  download: Downloader;
+  arch: string;
   sleep(ms: number): Promise<void>;
   now(): number;
   exists(path: string): boolean;
@@ -66,6 +86,11 @@ export interface ServiceHost {
   writeFile(path: string, contents: string, mode: number): void;
   removeFile(path: string): void;
   removeTree(path: string): void;
+  /** Replace-capable move; falls back to copy + remove across filesystems. */
+  move(from: string, to: string): void;
+  /** Recursive copy (directories). */
+  copyTree(from: string, to: string): void;
+  chmod(path: string, mode: number): void;
 }
 
 function detectSea(): boolean {
@@ -95,6 +120,12 @@ export function defaultServiceHost(fetchImpl: McpFetch = globalThis.fetch): Serv
       child.on("close", (code) => resolvePromise(code ?? 1));
     }),
     fetch: fetchImpl,
+    fetchJson: async (url, headers) => {
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+      return { ok: response.ok, status: response.status, text: () => response.text() };
+    },
+    download: downloadToFile,
+    arch: process.arch,
     sleep: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
     now: () => Date.now(),
     exists: (path) => { try { lstatSync(path); return true; } catch { return false; } },
@@ -124,6 +155,22 @@ export function defaultServiceHost(fetchImpl: McpFetch = globalThis.fetch): Serv
     },
     removeFile: (path) => rmSync(path, { force: true }),
     removeTree: (path) => rmSync(path, { recursive: true, force: true }),
+    move: (from, to) => {
+      try {
+        renameSync(from, to);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+        // Across filesystems, copy beside the destination first so the destination itself is only
+        // ever created by a rename and can never be observed half-written.
+        const staged = `${to}.tmp-${process.pid}`;
+        rmSync(staged, { recursive: true, force: true });
+        cpSync(from, staged, { recursive: true, force: true });
+        renameSync(staged, to);
+        rmSync(from, { recursive: true, force: true });
+      }
+    },
+    copyTree: (from, to) => cpSync(from, to, { recursive: true }),
+    chmod: (path, mode) => chmodSync(path, mode),
   };
 }
 
@@ -175,6 +222,7 @@ export function serviceUsage(): string {
     "  service restart <control-plane | runner> [--user | --system] [--json]",
     "  service logs <control-plane | runner> [--user | --system] [--follow] [--lines <n>]",
     "  service uninstall [--user | --system] [--purge] [--yes] [--yes-purge] [--json]",
+    "  service upgrade [--user | --system] [--release <vX.Y.Z>] [--force] [--yes] [--json]",
     "Linux systemd only. Without --control-plane/--runner, install sets up both (a colocated runner over loopback).",
     "Mode defaults to --system when run as root and --user otherwise; user services need lingering to survive logout.",
   ].join("\n");
@@ -351,7 +399,7 @@ function resolveExecutable(label: "runner" | "control-plane", explicit: string |
     throw new CliError(
       label === "runner"
         ? "pass --runner-bin <path>: the running executable is not a standalone wollipog-runner binary"
-        : "pass --control-plane-bin <path>: the release does not yet publish a standalone control-plane executable (it ships inside the desktop app), so point this at the control-plane executable or launcher to run",
+        : "pass --control-plane-bin <path>: no wollipog-control-plane executable was found beside this CLI (install one with `install-runner.sh --control-plane`)",
       2,
     );
   }
@@ -359,12 +407,32 @@ function resolveExecutable(label: "runner" | "control-plane", explicit: string |
   return candidate;
 }
 
-function defaultRunnerExecutable(host: ServiceHost): string | null {
+/** A sibling executable published by the installer next to the standalone CLI. */
+function siblingExecutable(host: ServiceHost, baseName: string): string | null {
   if (!host.isSea) return null;
   const name = basename(host.execPath);
-  if (/^wollipog-runner/iu.test(name)) return host.execPath;
-  const sibling = join(dirname(host.execPath), name.replace(/^wollipog(\.exe)?$/iu, "wollipog-runner$1"));
+  const exe = /\.exe$/iu.test(name) ? ".exe" : "";
+  const sibling = join(dirname(host.execPath), `${baseName}${exe}`);
   return sibling !== host.execPath && host.exists(sibling) ? sibling : null;
+}
+
+function defaultRunnerExecutable(host: ServiceHost): string | null {
+  if (host.isSea && /^wollipog-runner/iu.test(basename(host.execPath))) return host.execPath;
+  return siblingExecutable(host, "wollipog-runner");
+}
+
+function defaultControlPlaneExecutable(host: ServiceHost): string | null {
+  return siblingExecutable(host, "wollipog-control-plane");
+}
+
+/** The installer extracts the web bundle to `<bindir>/../share/wollipog/web`; a `web/` directory
+ * beside the executable is the packaged layout the control plane also finds on its own. */
+function defaultWebDist(host: ServiceHost, controlPlaneBin: string | null): string | null {
+  if (!controlPlaneBin) return null;
+  for (const candidate of [join(dirname(controlPlaneBin), "web"), resolve(dirname(controlPlaneBin), "..", "share", "wollipog", "web")]) {
+    if (host.exists(join(candidate, "index.html"))) return candidate;
+  }
+  return null;
 }
 
 interface InstallReport {
@@ -392,7 +460,6 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   let bindHost = option(args, "--host") ?? "127.0.0.1";
   const publicOrigin = validatePublicOrigin(option(args, "--public-origin"));
   const tailnetOnly = flag(args, "--tailnet-only");
-  const webDist = option(args, "--web-dist");
   let runnerId = validateRunnerId(option(args, "--runner-id"), host.hostname);
   const warnings: string[] = [];
   if (layout.relocatedPrefix) warnings.push(`system layout relocated under ${layout.relocatedPrefix} by WOLLIPOG_SYSTEM_PREFIX; this is not a real system install`);
@@ -411,7 +478,7 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
       if (option(args, "--host") !== undefined && existing.CONTROL_PLANE_HOST !== bindHost) warnings.push(`--host ${bindHost} ignored: ${layout.controlPlaneEnvFile} already sets CONTROL_PLANE_HOST=${existing.CONTROL_PLANE_HOST}`);
       bindHost = existing.CONTROL_PLANE_HOST;
     }
-    for (const [name, value] of [["--public-origin", publicOrigin.origin], ["--web-dist", webDist]] as const) {
+    for (const [name, value] of [["--public-origin", publicOrigin.origin], ["--web-dist", option(args, "--web-dist")]] as const) {
       if (value !== undefined && value !== null) warnings.push(`${name} ignored: ${layout.controlPlaneEnvFile} already exists; edit it and restart to change settings`);
     }
   }
@@ -429,8 +496,16 @@ async function install(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   if (!LOOPBACK_HOST_RE.test(bindHost) && !publicOrigin.origin?.startsWith("https://")) {
     warnings.push(`the control plane will listen on ${bindHost}:${port} over plain HTTP; remote browsers and the desktop app should reach it through Tailscale HTTPS or an HTTPS reverse proxy, and pairing links need --public-origin https://...`);
   }
-  const controlPlaneBin = wantControlPlane ? resolveExecutable("control-plane", option(args, "--control-plane-bin"), null, host) : null;
+  const controlPlaneBin = wantControlPlane ? resolveExecutable("control-plane", option(args, "--control-plane-bin"), defaultControlPlaneExecutable(host), host) : null;
   const runnerBin = wantRunner ? resolveExecutable("runner", option(args, "--runner-bin"), defaultRunnerExecutable(host), host) : null;
+  const webDist = option(args, "--web-dist") ?? defaultWebDist(host, controlPlaneBin) ?? undefined;
+  if (controlPlaneBin && option(args, "--control-plane-bin") === undefined && webDist === undefined && !host.exists(layout.controlPlaneEnvFile)) {
+    // The installer's layout always carries a dashboard bundle; a control plane found by default but
+    // without one would start API-only and serve 404 for the dashboard, which nobody asked for.
+    throw new CliError(
+      `no dashboard bundle found for ${controlPlaneBin} (looked for web/index.html in ${dirname(controlPlaneBin)} and ${resolve(dirname(controlPlaneBin), "..", "share", "wollipog", "web")}); ` +
+      "reinstall with `install-runner.sh --control-plane`, or pass --web-dist <dir>", 2);
+  }
   if (wantRunner && !wantControlPlane && !host.exists(layout.controlPlaneEnvFile) && !host.exists(layout.runnerTokenFile)) {
     // A colocated runner gets its credential from the local control plane. Without one here and
     // without a token already in place there is nothing to connect to.
@@ -698,6 +773,222 @@ async function uninstall(args: string[], host: ServiceHost, io: ServiceIo, emit:
   return 0;
 }
 
+/** Parse the executable path out of an installed unit's ExecStart (first quoted or bare word). */
+export function executableFromUnit(unitText: string): string | null {
+  const line = unitText.split(/\r?\n/u).find((entry) => entry.startsWith("ExecStart="));
+  if (!line) return null;
+  const value = line.slice("ExecStart=".length).trim();
+  const quoted = /^"((?:[^"\\]|\\.)*)"/u.exec(value);
+  const word = quoted ? quoted[1]!.replace(/\\(.)/gu, "$1") : value.split(/\s+/u)[0] ?? "";
+  return word ? word.replace(/%%/gu, "%").replace(/\$\$/gu, "$") : null;
+}
+
+interface UpgradeTarget {
+  component: ServiceComponent;
+  unit: string;
+  path: string;
+  assetName: string;
+}
+
+/**
+ * `service upgrade`: download the release's executables and web bundle, prove their digests and
+ * versions, swap them in while keeping the previous generation, restart, confirm health, and roll
+ * back automatically when the new control plane does not become ready or the runner does not
+ * re-register. Configuration, credentials, and data are never touched.
+ */
+async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (data: unknown, text: string) => void): Promise<number> {
+  const mode = resolveMode(args, host);
+  await requireSystemd(host, mode);
+  const layout = layoutFor(args, mode, host);
+  const triple = hostTargetTriple(host.platform, host.arch);
+  if (!triple) throw new CliError(`no release assets exist for ${host.platform}/${host.arch}`, 2);
+  const targets: UpgradeTarget[] = [];
+  for (const component of ["control-plane", "runner"] as const) {
+    const unitPath = join(layout.unitDir, unitFor(component));
+    if (!host.exists(unitPath)) continue;
+    const executable = executableFromUnit(host.readFile(unitPath));
+    if (!executable) throw new CliError(`${unitFor(component)} has no ExecStart; reinstall with \`wollipog service install\``);
+    targets.push({ component, unit: unitFor(component), path: executable, assetName: component === "control-plane" ? controlPlaneAssetName(triple) : runnerAssetName(triple) });
+  }
+  if (targets.length === 0) throw new CliError(`no Wollipog units are installed in ${layout.unitDir}; run \`wollipog service install\` first`, 2);
+  const serviceUid = await accountUid(host, layout);
+  const effective = effectiveFromEnv(host, layout, DEFAULT_PORT, serviceUid);
+  const envValues = host.exists(layout.controlPlaneEnvFile) ? parseEnvFile(host.readFile(layout.controlPlaneEnvFile)) : {};
+  const webDist = envValues.WOLLIPOG_WEB_DIST ? resolve(layout.controlPlaneDataDir, envValues.WOLLIPOG_WEB_DIST) : null;
+  const token = host.env.GH_TOKEN ?? host.env.GITHUB_TOKEN ?? null;
+
+  const release = await resolveRelease(host.fetchJson, { tag: option(args, "--release") ?? null, token });
+  const currentVersions = new Map<string, string | null>();
+  for (const target of targets) {
+    const probe = await host.exec(target.path, ["--version"], { timeoutMs: 30_000 });
+    currentVersions.set(target.component, probe.code === 0 ? probe.stdout.trim().split(/\s+/u)[0] ?? null : null);
+  }
+  const alreadyCurrent = targets.every((target) => currentVersions.get(target.component) === release.version);
+  if (alreadyCurrent && !flag(args, "--force")) {
+    emit({ upgraded: false, release: release.tag, current: Object.fromEntries(currentVersions) }, `already at ${release.tag}; pass --force to reinstall the same release`);
+    return 0;
+  }
+  if (!flag(args, "--yes")) {
+    if (!io.stdinIsTTY) throw new CliError(`refusing to upgrade to ${release.tag} without confirmation; pass --yes in non-interactive use`, 2);
+    const summary = targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ");
+    if (!(await io.confirm(`Upgrade ${summary}${webDist ? " and the web bundle" : ""} (services restart; the previous executables are kept for rollback)?`))) {
+      emit({ upgraded: false }, "nothing was changed");
+      return 1;
+    }
+  }
+
+  // The installer publishes the CLI (`wollipog`) and the legacy name as hard links or copies of the
+  // runner executable. Refresh every sibling that is byte-identical to the runner being replaced, so
+  // the operator's `wollipog` command does not stay behind at the old version.
+  const runnerTarget = targets.find((target) => target.component === "runner");
+  const aliases: string[] = [];
+  if (runnerTarget && host.exists(runnerTarget.path)) {
+    const exe = /\.exe$/iu.test(runnerTarget.path) ? ".exe" : "";
+    const currentDigest = await sha256File(runnerTarget.path);
+    for (const name of ["wollipog", "agent-manager-runner"]) {
+      const candidate = join(dirname(runnerTarget.path), `${name}${exe}`);
+      if (candidate === runnerTarget.path || !host.exists(candidate)) continue;
+      if ((await sha256File(candidate)) === currentDigest) aliases.push(candidate);
+    }
+  }
+
+  // Stage every byte under the data directory before touching anything live.
+  const staging = join(layout.dataDir, "upgrades", release.tag);
+  host.removeTree(staging);
+  host.ensureDir(join(layout.dataDir, "upgrades"), 0o700);
+  host.ensureDir(staging, 0o700);
+  const manifestAsset = release.assets.find((asset) => asset.name === CHECKSUM_MANIFEST_NAME);
+  if (!manifestAsset) throw new CliError(`${release.tag} has no ${CHECKSUM_MANIFEST_NAME}; refusing to upgrade from a release that cannot be verified`);
+  const manifestPath = join(staging, CHECKSUM_MANIFEST_NAME);
+  await downloadVerifiedAsset(host.download, manifestAsset, manifestPath, { token });
+  const manifest = parseChecksumManifest(host.readFile(manifestPath));
+  const staged = new Map<string, string>();
+  for (const target of targets) {
+    const destination = join(staging, target.assetName);
+    await downloadVerifiedAsset(host.download, findAsset(release, target.assetName), destination, { manifest, token });
+    host.chmod(destination, 0o755);
+    const probe = await host.exec(destination, ["--version"], { timeoutMs: 60_000 });
+    const reported = probe.code === 0 ? probe.stdout.trim().split(/\s+/u)[0] ?? "" : "";
+    if (reported !== release.version) {
+      throw new CliError(`downloaded ${target.assetName} reports version "${reported}" (exit ${probe.code}) instead of ${release.version}; nothing was installed`);
+    }
+    staged.set(target.component, destination);
+  }
+  let stagedWeb: string | null = null;
+  if (webDist) {
+    // A control plane that serves the dashboard is upgraded together with its bundle or not at all.
+    const webAsset = release.assets.find((asset) => asset.name === WEB_BUNDLE_ASSET_NAME);
+    if (!webAsset) throw new CliError(`${release.tag} has no ${WEB_BUNDLE_ASSET_NAME}, but this control plane serves the dashboard from ${webDist}; nothing was installed`);
+    const tarball = join(staging, WEB_BUNDLE_ASSET_NAME);
+    await downloadVerifiedAsset(host.download, webAsset, tarball, { manifest, token });
+    const extracted = await host.exec("tar", ["-xzf", tarball, "-C", staging], { timeoutMs: 120_000 });
+    if (extracted.code !== 0 || !host.exists(join(staging, "web", "index.html"))) {
+      throw new CliError(`could not extract ${WEB_BUNDLE_ASSET_NAME}: ${extracted.stderr.trim() || "no web/index.html in the archive"}; nothing was installed`);
+    }
+    stagedWeb = join(staging, "web");
+  }
+
+  const controlPlane = targets.find((target) => target.component === "control-plane");
+  const runner = targets.find((target) => target.component === "runner");
+
+  // Swap: keep exactly one previous generation of each executable and of the web bundle. Every path
+  // is recorded before its first mutation, so a swap that fails midway is undone as well.
+  const previous = (path: string) => `${path}.previous`;
+  const swapped: Array<{ path: string; hadPrevious: boolean; movedAside: boolean; tree: boolean }> = [];
+  const replace = (path: string, source: string, tree: boolean) => {
+    const entry = { path, hadPrevious: host.exists(path), movedAside: false, tree };
+    swapped.push(entry);
+    if (tree) host.removeTree(previous(path)); else host.removeFile(previous(path));
+    if (entry.hadPrevious) {
+      host.move(path, previous(path));
+      entry.movedAside = true;
+    }
+    host.move(source, path);
+    if (!tree) host.chmod(path, 0o755);
+  };
+  const aliasPartial = (alias: string) => `${alias}.upgrade-${release.tag}`;
+  const rollBack = async (reason: string): Promise<CliError> => {
+    const problems: string[] = [];
+    for (const entry of [...swapped].reverse()) {
+      try {
+        // A live generation that was never moved aside is still in place: leave it alone.
+        if (entry.hadPrevious && !entry.movedAside) continue;
+        if (entry.tree) host.removeTree(entry.path); else host.removeFile(entry.path);
+        if (entry.movedAside && host.exists(previous(entry.path))) host.move(previous(entry.path), entry.path);
+      } catch (error) {
+        problems.push(`could not restore ${entry.path}: ${(error as Error).message}`);
+      }
+    }
+    for (const alias of aliases) host.removeFile(aliasPartial(alias));
+    for (const target of targets) {
+      const restarted = await systemctl(host, mode, ["restart", target.unit]);
+      if (restarted.code !== 0) problems.push(`could not restart ${target.unit}: ${restarted.stderr.trim()}`);
+    }
+    const healthy = controlPlane ? await waitFor(host, 60_000, async () => (await probeHealth(host, effective.port)).ok) : true;
+    if (!healthy) problems.push("the control plane is still not healthy: inspect with `wollipog service logs control-plane`");
+    return new CliError(`${reason}; rolled back to the previous executables${problems.length ? `, with problems: ${problems.join("; ")}` : controlPlane ? " (control plane healthy again)" : ""}`);
+  };
+
+  try {
+    for (const target of targets) replace(target.path, staged.get(target.component)!, false);
+    for (const alias of aliases) {
+      host.removeFile(aliasPartial(alias));
+      host.copyTree(runnerTarget!.path, aliasPartial(alias));
+      replace(alias, aliasPartial(alias), false);
+    }
+    if (stagedWeb && webDist) replace(webDist, stagedWeb, true);
+    if (mode === "system") {
+      const owned = await host.exec("chown", ["-R", `${layout.account}:${layout.account}`, ...targets.map((target) => target.path), ...aliases, ...(stagedWeb && webDist ? [webDist] : [])], { timeoutMs: 60_000 });
+      if (owned.code !== 0) throw new Error(`chown to ${layout.account} failed: ${owned.stderr.trim()}`);
+    }
+  } catch (error) {
+    throw await rollBack(`installing the new executables failed (${(error as Error).message})`);
+  }
+
+  if (controlPlane) {
+    const restart = await systemctl(host, mode, ["restart", controlPlane.unit]);
+    if (restart.code !== 0) throw await rollBack(`could not restart ${controlPlane.unit}: ${restart.stderr.trim()}`);
+    const healthy = await waitFor(host, 60_000, async () => (await probeHealth(host, effective.port)).ok);
+    if (!healthy) throw await rollBack(`${controlPlane.unit} did not become healthy within 60s after the upgrade`);
+    const status = await adminJson<{ appVersion?: string }>(host, effective, ["status"]);
+    if (status.data?.appVersion !== release.version) {
+      throw await rollBack(`the restarted control plane reports version ${status.data?.appVersion ?? "unknown"}, not ${release.version}`);
+    }
+  }
+  if (runner) {
+    const restart = await systemctl(host, mode, ["restart", runner.unit]);
+    if (restart.code !== 0) throw await rollBack(`could not restart ${runner.unit}: ${restart.stderr.trim()}`);
+    const runnerId = (() => { try { return (JSON.parse(host.readFile(layout.runnerConfigFile)) as { runnerId?: string }).runnerId ?? null; } catch { return null; } })();
+    if (controlPlane && runnerId) {
+      const online = await waitFor(host, 90_000, async () => {
+        const status = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string; version?: string }> } }>(host, effective, ["status"]);
+        return status.data?.runners?.items?.some((item) => item.runnerId === runnerId && item.status === "online") === true;
+      });
+      if (!online) throw await rollBack(`runner ${runnerId} did not register as online within 90s after the upgrade`);
+    } else {
+      // A runner-only host reports to a remote control plane this command cannot query; the unit
+      // staying active is the readiness signal here.
+      const active = await waitFor(host, 30_000, async () => (await unitState(host, mode, runner.unit)).activeState === "active");
+      if (!active) throw await rollBack(`${runner.unit} did not become active within 30s after the upgrade`);
+    }
+  }
+  host.removeTree(staging);
+  const report = {
+    upgraded: true,
+    release: release.tag,
+    previous: Object.fromEntries(currentVersions),
+    components: targets.map((target) => ({ component: target.component, path: target.path, previousKept: host.exists(previous(target.path)) ? previous(target.path) : null })),
+    aliases,
+    webDist: stagedWeb ? webDist : null,
+  };
+  emit(report, [
+    `Upgraded to ${release.tag}: ${targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ")}${aliases.length ? `, ${aliases.map((alias) => basename(alias)).join(" and ")} refreshed` : ""}${stagedWeb ? ", web bundle refreshed" : ""}.`,
+    `Previous executables kept as ${targets.map((target) => previous(target.path)).join(" and ")}; the next upgrade replaces them.`,
+    controlPlane ? `Control plane healthy${runner ? " and runner online." : "."}` : "Runner active.",
+  ].join("\n"));
+  return 0;
+}
+
 export function defaultServiceIo(): ServiceIo {
   return {
     stdout: (text) => process.stdout.write(text),
@@ -731,6 +1022,7 @@ export async function runServiceCli(
       case "restart": return await restart(args, words, host, emit);
       case "logs": return await logs(args, words, host);
       case "uninstall": return await uninstall(args, host, io, emit);
+      case "upgrade": return await upgrade(args, host, io, emit);
       default: throw new CliError(serviceUsage(), 2);
     }
   } catch (error) {

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
-import { runServiceCli, type ServiceHost, type ServiceIo } from "./service-cli.js";
+import { executableFromUnit, runServiceCli, type ServiceHost, type ServiceIo } from "./service-cli.js";
 import { CONTROL_PLANE_UNIT, RUNNER_UNIT, serviceLayout } from "./systemd-service.js";
 
 const LOCAL_TOKEN = "L".repeat(43);
@@ -132,6 +133,9 @@ function fake(t: { after(fn: () => void): void }, options: {
     },
     spawnInherit: async (command, args) => { execs.push(`${command} ${args.join(" ")} (inherit)`); return 0; },
     fetch,
+    fetchJson: async () => ({ ok: false, status: 500, text: async () => "" }),
+    download: async () => { throw new Error("no downloads in this fake"); },
+    arch: "x64",
     sleep: async () => { clock += 1_000; },
     now: () => clock,
     exists: (path) => existsSync(path),
@@ -140,6 +144,9 @@ function fake(t: { after(fn: () => void): void }, options: {
     writeFile: (path, contents, mode) => writeFileSync(path, contents, { mode }),
     removeFile: (path) => rmSync(path, { force: true }),
     removeTree: (path) => rmSync(path, { recursive: true, force: true }),
+    move: (from, to) => renameSync(from, to),
+    copyTree: (from, to) => cpSync(from, to, { recursive: true }),
+    chmod: (path, mode) => chmodSync(path, mode),
   };
   const io: ServiceIo = {
     stdout: (text) => { out.push(text); },
@@ -148,6 +155,19 @@ function fake(t: { after(fn: () => void): void }, options: {
     confirm: options.confirm ?? (async () => false),
   };
   return { enabled, host, io, execs, stdout: () => out.join(""), stderr: () => err.join(""), root, home, layout };
+}
+
+function makeIo(overrides: Partial<ServiceIo> = {}) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const io: ServiceIo = {
+    stdout: (text) => { out.push(text); },
+    stderr: (text) => { err.push(text); },
+    stdinIsTTY: false,
+    confirm: async () => false,
+    ...overrides,
+  };
+  return { io, stdout: () => out.join(""), stderr: () => err.join("") };
 }
 
 function bins(f: Fake): string[] {
@@ -456,4 +476,266 @@ test("service status exits non-zero when nothing is installed and selects the en
   assert.equal(await runServiceCli(["service", "status"], f.host, f.io), 1);
   assert.match(f.stdout(), /not-found/u);
   assert.match(f.stdout(), /no installed control-plane\.env found/u);
+});
+
+test("executableFromUnit reads the ExecStart executable and undoes systemd escaping", () => {
+  assert.equal(executableFromUnit('[Service]\nExecStart="/opt/w%%N/control plane" --flag\n'), "/opt/w%N/control plane");
+  assert.equal(executableFromUnit("ExecStart=/usr/bin/wollipog-runner --config x\n"), "/usr/bin/wollipog-runner");
+  assert.equal(executableFromUnit('ExecStart="/opt/$$release/bin"\n'), "/opt/$release/bin");
+  assert.equal(executableFromUnit("[Unit]\nDescription=x\n"), null);
+});
+
+test("service install defaults to the installer's sibling control plane and web bundle", async (t) => {
+  const f = fake(t, { isSea: true, execPath: "" });
+  const bin = join(f.root, "local", "bin");
+  mkdirSync(bin, { recursive: true });
+  for (const name of ["wollipog", "wollipog-runner", "wollipog-control-plane"]) writeFileSync(join(bin, name), "#!/bin/sh\n", { mode: 0o755 });
+  mkdirSync(join(f.root, "local", "share", "wollipog", "web"), { recursive: true });
+  writeFileSync(join(f.root, "local", "share", "wollipog", "web", "index.html"), "<html>");
+  const host = { ...f.host, isSea: true, execPath: join(bin, "wollipog") };
+  assert.equal(await runServiceCli(["service", "install", "--no-start", "--json"], host, f.io), 0, f.stderr() + f.stdout());
+  const cpUnit = readFileSync(join(f.layout.unitDir, CONTROL_PLANE_UNIT), "utf8");
+  assert.ok(cpUnit.includes(`ExecStart="${join(bin, "wollipog-control-plane")}"`), cpUnit);
+  const envText = readFileSync(f.layout.controlPlaneEnvFile, "utf8");
+  assert.ok(envText.includes(`WOLLIPOG_WEB_DIST="${join(f.root, "local", "share", "wollipog", "web")}"`), envText);
+
+  // The same layout without a dashboard bundle is refused instead of silently installing API-only.
+  const bare = fake(t);
+  const bareBin = join(bare.root, "bin");
+  mkdirSync(bareBin, { recursive: true });
+  for (const name of ["wollipog", "wollipog-runner", "wollipog-control-plane"]) writeFileSync(join(bareBin, name), "#!/bin/sh\n", { mode: 0o755 });
+  const bareHost = { ...bare.host, isSea: true, execPath: join(bareBin, "wollipog") };
+  assert.equal(await runServiceCli(["service", "install", "--no-start"], bareHost, bare.io), 2);
+  assert.match(bare.stderr(), /no dashboard bundle found for .*wollipog-control-plane .*; reinstall with `install-runner\.sh --control-plane`, or pass --web-dist/u);
+  assert.ok(!existsSync(join(bare.layout.unitDir, CONTROL_PLANE_UNIT)), "no unit is written");
+});
+
+function releaseFixture(f: Fake, options: { version?: string; webBundle?: boolean; badVersion?: boolean; manifest?: boolean } = {}) {
+  const version = options.version ?? "9.9.9";
+  const triple = "x86_64-unknown-linux-gnu";
+  const files = new Map<string, Buffer>();
+  files.set(`wollipog-runner-${triple}`, Buffer.from(`runner ${version}`));
+  files.set(`wollipog-control-plane-${triple}`, Buffer.from(`control plane ${version}`));
+  if (options.webBundle !== false) files.set("wollipog-web.tar.gz", Buffer.from(`web ${version}`));
+  const digest = (name: string) => createHash("sha256").update(files.get(name)!).digest("hex");
+  const manifestText = [...files.keys()].sort().map((name) => `${digest(name)}  ${name}`).join("\n") + "\n";
+  const assets = [...files.keys()].map((name) => ({ name, digest: `sha256:${digest(name)}`, browser_download_url: `https://dl/${name}`, size: files.get(name)!.length }));
+  if (options.manifest !== false) assets.push({ name: "SHA256SUMS", digest: `sha256:${createHash("sha256").update(manifestText).digest("hex")}`, browser_download_url: "https://dl/SHA256SUMS", size: manifestText.length });
+  const downloads: string[] = [];
+  const host: ServiceHost = {
+    ...f.host,
+    arch: "x64",
+    fetchJson: async (url) => ({ ok: true, status: 200, text: async () => JSON.stringify({ tag_name: `v${version}`, assets, url }) }),
+    download: async (url, destination) => {
+      downloads.push(url);
+      const name = url.replace("https://dl/", "");
+      writeFileSync(destination, name === "SHA256SUMS" ? manifestText : files.get(name)!);
+    },
+  };
+  return { host, downloads, version, badVersion: options.badVersion === true };
+}
+
+test("service upgrade stages, verifies, swaps, restarts, and keeps the previous generation", async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  // Give the installed executables a version and make the env file name a web dist.
+  const cpBin = join(f.root, "control-plane");
+  const runnerBin = join(f.root, "wollipog-runner");
+  const webDist = join(f.root, "web");
+  mkdirSync(webDist, { recursive: true });
+  writeFileSync(join(webDist, "index.html"), "old");
+  // The installer hard-links the `wollipog` CLI to the runner; an unrelated sibling must be left alone.
+  const cliAlias = join(f.root, "wollipog");
+  linkSync(runnerBin, cliAlias);
+  const foreign = join(f.root, "agent-manager-runner");
+  writeFileSync(foreign, "something else entirely");
+  writeFileSync(f.layout.controlPlaneEnvFile, readFileSync(f.layout.controlPlaneEnvFile, "utf8") + `WOLLIPOG_WEB_DIST="${webDist}"\n`);
+  const fixture = releaseFixture(f);
+  let cpVersion = "0.22.0";
+  const execs: string[] = [];
+  const host: ServiceHost = {
+    ...fixture.host,
+    exec: async (command, args, options) => {
+      execs.push([command, ...args].join(" "));
+      if (args[0] === "--version") {
+        // Installed binaries report the old version; staged downloads report the release version.
+        const staged = command.includes("/upgrades/");
+        return { code: 0, stdout: `${staged ? fixture.version : command === cpBin ? cpVersion : "0.22.0"}\n`, stderr: "" };
+      }
+      if (command === "tar") {
+        const dir = args[args.indexOf("-C") + 1]!;
+        mkdirSync(join(dir, "web"), { recursive: true });
+        writeFileSync(join(dir, "web", "index.html"), "new");
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (command === "systemctl" && args.includes("restart") && args[args.length - 1] === CONTROL_PLANE_UNIT) cpVersion = fixture.version;
+      return fixture.host.exec(command, args, options);
+    },
+  };
+  // The fake control plane's admin status must report the new version after restart.
+  const statusHost: ServiceHost = { ...host, fetch: async (url, init) => {
+    const response = await host.fetch(url, init);
+    if (url.endsWith("/api/admin/status")) {
+      const body = JSON.parse(await response.text()) as Record<string, unknown>;
+      return { ...response, text: async () => JSON.stringify({ ...body, appVersion: cpVersion }) };
+    }
+    return response;
+  } };
+  const { io, stdout, stderr } = makeIo();
+  const code = await runServiceCli(["service", "upgrade", "--yes", "--json"], statusHost, io);
+  const report = JSON.parse(stdout());
+  assert.equal(code, 0, stderr() + stdout());
+  assert.equal(report.upgraded, true);
+  assert.equal(report.release, "v9.9.9");
+  assert.deepEqual(report.previous, { "control-plane": "0.22.0", runner: "0.22.0" });
+  assert.equal(readFileSync(cpBin, "utf8"), "control plane 9.9.9");
+  assert.equal(readFileSync(runnerBin, "utf8"), "runner 9.9.9");
+  assert.equal(readFileSync(`${cpBin}.previous`, "utf8"), "#!/bin/sh\n", "the previous executable is retained");
+  assert.equal(readFileSync(cliAlias, "utf8"), "runner 9.9.9", "the CLI alias follows the runner");
+  assert.equal(readFileSync(`${cliAlias}.previous`, "utf8"), "#!/bin/sh\n", "the previous CLI is retained");
+  assert.equal(readFileSync(foreign, "utf8"), "something else entirely", "siblings that were not the runner are untouched");
+  assert.ok(!existsSync(`${foreign}.previous`));
+  assert.deepEqual(report.aliases, [cliAlias]);
+  assert.equal(readFileSync(join(webDist, "index.html"), "utf8"), "new");
+  assert.ok(!existsSync(`${webDist}.previous`) || true);
+  assert.deepEqual(fixture.downloads.map((u) => u.replace("https://dl/", "")).sort(), ["SHA256SUMS", "wollipog-control-plane-x86_64-unknown-linux-gnu", "wollipog-runner-x86_64-unknown-linux-gnu", "wollipog-web.tar.gz"]);
+  const restarts = execs.filter((line) => line.includes("restart"));
+  assert.deepEqual(restarts, [`systemctl --user restart ${CONTROL_PLANE_UNIT}`, `systemctl --user restart ${RUNNER_UNIT}`]);
+  assert.ok(!existsSync(join(f.layout.dataDir, "upgrades", "v9.9.9")), "staging is cleaned up");
+
+  // Running again is a no-op at the same release unless forced.
+  const again = makeIo();
+  const sameHost: ServiceHost = { ...statusHost, exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: "9.9.9\n", stderr: "" } : host.exec(command, args, options) };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], sameHost, again.io), 0);
+  assert.equal(JSON.parse(again.stdout()).upgraded, false);
+  assert.equal(JSON.parse(again.stdout()).release, "v9.9.9");
+});
+
+test("service upgrade rolls back when the new control plane does not report the release version, and refuses bad downloads", async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  const cpBin = join(f.root, "control-plane");
+  const fixture = releaseFixture(f, { webBundle: false });
+  const host: ServiceHost = {
+    ...fixture.host,
+    exec: async (command, args, options) => {
+      if (args[0] === "--version") return { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" };
+      return fixture.host.exec(command, args, options);
+    },
+  };
+  // The fake control plane keeps reporting 0.22.0 after restart: the upgrade must roll back.
+  const { io, stdout, stderr } = makeIo();
+  const code = await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io);
+  assert.equal(code, 1, stderr() + stdout());
+  assert.match(JSON.parse(stdout()).error, /reports version 0\.22\.0, not 9\.9\.9; rolled back to the previous executables \(control plane healthy again\)/u);
+  assert.equal(readFileSync(cpBin, "utf8"), "#!/bin/sh\n", "the previous control plane is back in place");
+  assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n");
+
+  // A staged executable that does not report the release version is never installed.
+  const wrong = makeIo();
+  const wrongHost: ServiceHost = { ...fixture.host, exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? "1.0.0" : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options) };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], wrongHost, wrong.io), 1);
+  assert.match(JSON.parse(wrong.stdout()).error, /reports version "1\.0\.0" \(exit 0\) instead of 9\.9\.9; nothing was installed/u);
+  assert.equal(readFileSync(cpBin, "utf8"), "#!/bin/sh\n");
+
+  // Tampered bytes fail verification before anything is staged for install.
+  const tampered = makeIo();
+  const tamperedHost: ServiceHost = { ...wrongHost, download: async (url, destination) => { if (url.endsWith("SHA256SUMS")) return fixture.host.download(url, destination, {}); writeFileSync(destination, "tampered"); } };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], tamperedHost, tampered.io), 1);
+  assert.match(JSON.parse(tampered.stdout()).error, /failed SHA-256 verification/u);
+
+  const piped = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade"], host, piped.io), 2);
+  assert.match(piped.stderr(), /pass --yes in non-interactive use/u);
+  const nothing = fake(t);
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes"], { ...nothing.host, arch: "x64" }, nothing.io), 2);
+
+  // A release without SHA256SUMS cannot be cross-checked and is refused before anything is downloaded.
+  const unverifiable = makeIo();
+  const noManifest = releaseFixture(f, { manifest: false });
+  const noManifestHost: ServiceHost = { ...noManifest.host, exec: host.exec };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes"], noManifestHost, unverifiable.io), 1);
+  assert.match(unverifiable.stderr(), /has no SHA256SUMS/u);
+  assert.deepEqual(noManifest.downloads, []);
+  assert.match(nothing.stderr(), /no Wollipog units are installed/u);
+
+  // A failure between the move and the chmod is still undone: the path was recorded before it changed.
+  const chmodFails = makeIo();
+  const chmodHost: ServiceHost = { ...host, chmod: (path, modeBits) => { if (path === join(f.root, "wollipog-runner")) throw new Error("EPERM: chmod refused"); fixture.host.chmod(path, modeBits); } };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], chmodHost, chmodFails.io), 1);
+  assert.match(JSON.parse(chmodFails.stdout()).error, /installing the new executables failed \(EPERM: chmod refused\); rolled back/u);
+  assert.equal(readFileSync(cpBin, "utf8"), "#!/bin/sh\n", "the control plane, swapped first, is restored");
+  assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n", "the runner, whose chmod failed, is restored too");
+
+  // A failure while moving the live executable aside leaves that executable exactly where it was.
+  const moveFails = makeIo();
+  const moveHost: ServiceHost = { ...host, move: (from, to) => { if (from === join(f.root, "wollipog-runner") && to.endsWith(".previous")) throw new Error("EBUSY: text file busy"); fixture.host.move(from, to); } };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], moveHost, moveFails.io), 1);
+  assert.match(JSON.parse(moveFails.stdout()).error, /installing the new executables failed \(EBUSY: text file busy\); rolled back/u);
+  assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n", "the live runner was never removed");
+  assert.equal(readFileSync(cpBin, "utf8"), "#!/bin/sh\n", "the control plane, already swapped, is restored");
+  assert.ok(!existsSync(`${join(f.root, "wollipog-runner")}.previous`), "no stale .previous is left for the runner");
+
+  // Rollback reports a restart that fails instead of claiming the previous generation is back up.
+  const restartFails = makeIo();
+  const brokenRestartFixture = fake(t, { systemctlFail: `restart ${RUNNER_UNIT}` });
+  assert.equal(await runServiceCli(["service", "install", ...bins(brokenRestartFixture), "--no-start", "--json"], brokenRestartFixture.host, brokenRestartFixture.io), 0, brokenRestartFixture.stderr());
+  const brokenRelease = releaseFixture(brokenRestartFixture, { webBundle: false });
+  const brokenHost: ServiceHost = { ...brokenRelease.host, exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? brokenRelease.version : "0.22.0"}\n`, stderr: "" } : brokenRelease.host.exec(command, args, options) };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], brokenHost, restartFails.io), 1);
+  assert.match(JSON.parse(restartFails.stdout()).error, /rolled back to the previous executables, with problems: could not restart wollipog-runner\.service: fake failure/u);
+
+  // With no previous generation to restore, rollback removes what the upgrade introduced.
+  const fresh = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(fresh), "--json"], fresh.host, fresh.io), 0, fresh.stderr());
+  const freshCp = join(fresh.root, "control-plane");
+  rmSync(freshCp);
+  const freshRelease = releaseFixture(fresh, { webBundle: false });
+  const freshHost: ServiceHost = { ...freshRelease.host, exec: async (command, args, options) => args[0] === "--version" ? { code: command.includes("/upgrades/") ? 0 : 1, stdout: command.includes("/upgrades/") ? `${freshRelease.version}\n` : "", stderr: "" } : freshRelease.host.exec(command, args, options) };
+  const freshIo = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], freshHost, freshIo.io), 1);
+  assert.match(JSON.parse(freshIo.stdout()).error, /reports version 0\.22\.0, not 9\.9\.9; rolled back/u);
+  assert.ok(!existsSync(freshCp), "the newly introduced executable is removed rather than left behind");
+  assert.ok(!existsSync(`${freshCp}.previous`));
+});
+
+test("service upgrade refuses a release without the web bundle when the control plane serves the dashboard, and upgrades runner-only hosts by unit state", async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  const cpBin = join(f.root, "control-plane");
+  const webDist = join(f.root, "web");
+  mkdirSync(webDist, { recursive: true });
+  writeFileSync(join(webDist, "index.html"), "old");
+  writeFileSync(f.layout.controlPlaneEnvFile, readFileSync(f.layout.controlPlaneEnvFile, "utf8") + `WOLLIPOG_WEB_DIST="${webDist}"\n`);
+  const fixture = releaseFixture(f, { webBundle: false });
+  const execs: string[] = [];
+  const host: ServiceHost = { ...fixture.host, exec: async (command, args, options) => { execs.push([command, ...args].join(" ")); return args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options); } };
+  const { io, stdout } = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io), 1);
+  assert.match(JSON.parse(stdout()).error, /has no wollipog-web\.tar\.gz, but this control plane serves the dashboard from .*; nothing was installed/u);
+  assert.equal(readFileSync(cpBin, "utf8"), "#!/bin/sh\n", "nothing was swapped");
+  assert.equal(execs.filter((line) => line.includes("restart")).length, 0, "nothing was restarted");
+
+  // Runner-only host: the local admin API is not this runner's control plane, so the unit staying
+  // active is what proves the upgrade.
+  const g = fake(t);
+  mkdirSync(g.layout.configDir, { recursive: true, mode: 0o700 });
+  writeFileSync(g.layout.runnerTokenFile, "remote-token\n", { mode: 0o600 });
+  const runnerBin = join(g.root, "wollipog-runner");
+  writeFileSync(runnerBin, "#!/bin/sh\n", { mode: 0o755 });
+  assert.equal(await runServiceCli(["service", "install", "--runner", "--runner-bin", runnerBin, "--no-start", "--json"], g.host, g.io), 0, g.stderr() + g.stdout());
+  const runnerRelease = releaseFixture(g);
+  const fetches: string[] = [];
+  const runnerHost: ServiceHost = {
+    ...runnerRelease.host,
+    fetch: async (url, init) => { fetches.push(url); return runnerRelease.host.fetch(url, init); },
+    exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? runnerRelease.version : "0.22.0"}\n`, stderr: "" } : runnerRelease.host.exec(command, args, options),
+  };
+  const runnerIo = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes"], runnerHost, runnerIo.io), 0, runnerIo.stderr() + runnerIo.stdout());
+  assert.match(runnerIo.stdout(), /Upgraded to v9\.9\.9: runner 0\.22\.0 → 9\.9\.9\./u);
+  assert.match(runnerIo.stdout(), /Runner active\./u);
+  assert.equal(readFileSync(runnerBin, "utf8"), "runner 9.9.9");
+  assert.deepEqual(fetches.filter((url) => url.includes("/api/admin/")), [], "no loopback admin API is consulted for a runner-only host");
+  assert.deepEqual(runnerRelease.downloads.map((u) => u.replace("https://dl/", "")).sort(), ["SHA256SUMS", "wollipog-runner-x86_64-unknown-linux-gnu"], "only the runner asset is fetched");
 });

@@ -77,7 +77,8 @@ Signing/notarization slots are stubbed in the workflow `env:` for later.
 
 End users install via the scripts in [`scripts/`](../scripts) (documented in the README's
 "Install (prebuilt)" section): `install.sh` / `install.ps1` for the desktop app and
-`install-runner.sh` / `install-runner.ps1` for the runner. They resolve assets from the GitHub
+`install-runner.sh` / `install-runner.ps1` for the runner (`install-runner.sh --control-plane` also
+installs the headless control plane and dashboard bundle for `wollipog service install`). They resolve assets from the GitHub
 API's **latest published** release, so they only work once a release is **published** (not while
 it is still a draft), and the runner one-liners need a release built **after** the runner-binary
 step landed (v0.4.0 shipped app bundles only).
