@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerToControlPlane, SessionConfig } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { claudeProjectPathKey } from "./claude-background-work.js";
+import { providerStateKey } from "./execution-isolation.js";
 
 function meta(config: SessionConfig): SessionMeta {
   return {
@@ -125,6 +126,43 @@ test("a budget trip with managed work settles idle and reconciles a killed recei
   }
 });
 
+test("startup and reconnect reconcile partial sandbox receipts for attempted orphans under a persisted tool ceiling", async () => {
+  const h = harness({ maxToolCalls: 1 });
+  try {
+    (h.sm as any).active.delete("s_governance");
+    (h.sm as any).executionIsolation = { mode: "bwrap" };
+    h.store.appendEvent("s_governance", { kind: "tool_call", toolCallId: "one", title: "Read", status: "completed" });
+    h.store.patchMeta("s_governance", {
+      status: "idle", agentSessionId: "provider-session", env: { HOME: h.root, TMPDIR: h.root },
+      backgroundWorkState: "orphaned", pendingBackgroundTaskIds: ["done", "pending"],
+      orphanedWork: { pendingTaskIds: ["done", "pending"], markedAt: 1, reason: "process_exit", recoveryAttemptedAt: 2 },
+    });
+    const ledgerDir = join(h.root, ".runner-data", "provider-state", "claude", providerStateKey("s_governance"),
+      "projects", claudeProjectPathKey("/repo"));
+    mkdirSync(ledgerDir, { recursive: true });
+    const ledger = join(ledgerDir, "provider-session.jsonl");
+    const receipt = (id: string) => JSON.stringify({
+      content: `<task-notification><task-id>${id}</task-id><status>completed</status></task-notification>`,
+    }) + "\n";
+    writeFileSync(ledger, receipt("done"));
+    h.sm.reconcileStore();
+    await (h.sm as any).runOrphanRecovery("s_governance");
+    for (let retry = 0; retry < 3; retry++) {
+      h.sm.recoverAllOrphanedWork();
+      await (h.sm as any).runOrphanRecovery("s_governance");
+      assert.deepEqual(h.store.readMeta("s_governance")?.pendingBackgroundTaskIds, ["pending"]);
+      assert.equal(h.store.readMeta("s_governance")?.orphanedWork?.recoveryAttemptedAt, 2);
+      assert.equal((h.sm as any).backgroundRecoveryHeld(h.store.readMeta("s_governance")), true);
+    }
+    appendFileSync(ledger, receipt("pending"));
+    await (h.sm as any).runOrphanRecovery("s_governance");
+    assert.deepEqual(h.store.readMeta("s_governance")?.pendingBackgroundTaskIds, []);
+    assert.equal(h.store.readMeta("s_governance")?.orphanedWork, undefined);
+    assert.equal((h.sm as any).active.size, 0, "receipt-only reconciliation never starts a provider");
+    assert.equal(h.prompts(), 0);
+  } finally { h.sm.shutdownAll(); h.cleanup(); }
+});
+
 test("runner cancels once at the distinct tool threshold and ignores duplicate frames", () => {
   const h = harness({ maxToolCalls: 2 });
   try {
@@ -154,6 +192,65 @@ test("runner cancels once at the distinct tool threshold and ignores duplicate f
   } finally {
     h.cleanup();
   }
+});
+
+test("removing and re-adding a tool ceiling reconstructs calls made while it was absent", () => {
+  const h = harness({ maxToolCalls: 10 });
+  try {
+    const call = (id: string) => (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: id, title: "Read", status: "completed",
+    });
+    call("one");
+    h.sm.rearmGovernance("s_governance", { maxToolCalls: null });
+    call("two");
+    h.entry.running = false;
+    h.sm.rearmGovernance("s_governance", { maxToolCalls: 2 });
+    assert.deepEqual([...h.entry.toolCallIds].sort(), ["one", "two"]);
+    assert.equal((h.sm as any).backgroundRecoveryHeld(h.store.readMeta("s_governance")), true);
+    h.sm.rearmGovernance("s_governance", { maxToolCalls: 3 });
+    assert.equal((h.sm as any).backgroundRecoveryHeld(h.store.readMeta("s_governance")), false);
+  } finally { h.sm.shutdownAll(); h.cleanup(); }
+});
+
+test("re-arming preserves live tool counts when durable history cannot be read", (t) => {
+  const h = harness({ maxToolCalls: 10 });
+  try {
+    h.entry.toolCallIds.add("already-counted");
+    t.mock.method(h.store, "readEvents", () => []);
+    h.sm.rearmGovernance("s_governance", { maxToolCalls: 20 });
+    assert.deepEqual([...h.entry.toolCallIds], ["already-counted"]);
+  } finally { h.sm.shutdownAll(); h.cleanup(); }
+});
+
+test("running-session admission uses live tool IDs without scanning growing history", (t) => {
+  const h = harness({ maxToolCalls: 2 });
+  try {
+    t.mock.method(h.store, "distinctToolCallCount", () => { throw new Error("must not scan live history"); });
+    h.entry.toolCallIds.add("one");
+    assert.equal((h.sm as any).backgroundRecoveryHeld(h.store.readMeta("s_governance")), false);
+    h.entry.toolCallIds.add("two");
+    assert.equal((h.sm as any).backgroundRecoveryHeld(h.store.readMeta("s_governance")), true);
+  } finally { h.sm.shutdownAll(); h.cleanup(); }
+});
+
+test("held background paths coalesce broadcasts but periodically restore missing cards", (t) => {
+  const h = harness({ costBudgetUsd: 8 });
+  let now = 100_000;
+  t.mock.method(Date, "now", () => now);
+  try {
+    h.entry.running = false;
+    const publish = () => (h.sm as any).publishHeldBackgroundRuntime(h.store.readMeta("s_governance"));
+    const publications = () => h.sent.filter((message) => message.type === "session_runtime_updated").length;
+    publish();
+    publish();
+    assert.equal(publications(), 1);
+    now += 30_000;
+    publish();
+    assert.equal(publications(), 2, "unchanged runtime is periodically republished for lost-card recovery");
+    h.store.patchMeta("s_governance", { costUsd: 8.33 });
+    publish();
+    assert.equal(publications(), 3, "changed runtime is not delayed by the cadence");
+  } finally { h.sm.shutdownAll(); h.cleanup(); }
 });
 
 test("runner cost gate uses authoritative parentless usage and re-arm clears the hold", () => {

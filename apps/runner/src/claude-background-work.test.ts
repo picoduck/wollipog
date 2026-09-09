@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { claudeProjectPathKey, discoverClaudeTaskLifecycle, discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext } from "./claude-background-work.js";
+import { claudeProjectPathKey, discoverClaudeTaskLifecycle, discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-tasks-"));
@@ -21,6 +22,109 @@ function fixture() {
 
 test("Claude project keys match the provider's Windows path encoding", () => {
   assert.equal(claudeProjectPathKey("C:\\Users\\misko\\repo.with spaces"), "C--Users-misko-repo-with-spaces");
+});
+
+test("native receipt cache avoids repeated reads and invalidates append, replacement, truncation, and roots", async (t) => {
+  const f = fixture();
+  const notification = (id: string) => `<task-notification><task-id>${id}</task-id><status>completed</status></task-notification>`;
+  let reads = 0;
+  const original = fs.readFileSync;
+  const spy = t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+    if (String(args[0]) === f.transcript) reads++;
+    return original(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    writeFileSync(f.transcript, `${" ".repeat(8 * 1024 * 1024)}${notification("done")}`);
+    const inspect = () => inspectClaudeBackgroundWork(f.cwd, f.sessionId, ["done", "pending"], f);
+    assert.deepEqual([...inspect().terminalTaskIds], ["done"]);
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    assert.deepEqual([...inspect().terminalTaskIds], ["done"], "a later fresh observation admits reusable proof");
+    for (let attempt = 0; attempt < 10; attempt++) assert.deepEqual([...inspect().terminalTaskIds], ["done"]);
+    assert.equal(reads, 2, "ten unchanged retries after warm-up read zero additional ledger bytes");
+    const mutable = inspect();
+    mutable.terminalTaskIds.clear();
+    mutable.terminalTaskStatuses?.clear();
+    assert.ok(inspect().terminalTaskIds.has("done"), "caller mutations do not alter cached proof");
+    appendFileSync(f.transcript, notification("pending"));
+    assert.equal(inspect().terminalTaskIds.size, 2);
+    assert.equal(reads, 3);
+    writeFileSync(`${f.transcript}.new`, notification("pending"));
+    renameSync(`${f.transcript}.new`, f.transcript);
+    assert.deepEqual([...inspect().terminalTaskIds], ["pending"]);
+    truncateSync(f.transcript, 0);
+    assert.equal(inspect().terminalTaskIds.size, 0);
+    writeFileSync(f.transcript, notification("done"));
+    assert.equal(inspect().terminalTaskIds.size, 1);
+    writeFileSync(f.transcript, notification("else"));
+    assert.equal(inspect().terminalTaskIds.size, 0, "same-length edits invalidate terminal proof");
+    assert.equal(inspectClaudeBackgroundWork(f.cwd, f.sessionId, ["done"], {
+      ...f, projectsRoot: join(f.root, "different-projects"),
+    }).terminalTaskIds.size, 0);
+    rmSync(f.transcript);
+    assert.equal(inspect().terminalTaskIds.size, 0);
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("WSL receipt cache revalidates fingerprints and isolates contexts and command runners", async () => {
+  let version = "__WOLLIPOG_LEDGER__:1:2:100:mtime:ctime:600";
+  let reads = 0;
+  let changedDuringRead = false;
+  const run = async (_context: unknown, _command: string, args: string[]) => {
+    if (args[1]!.includes("find")) return { stdout: `done.output\n${version}\n`, stderr: "" };
+    reads++;
+    return { stdout: "<task-id>done</task-id><status>killed</status></task-notification>",
+      stderr: changedDuringRead ? "__WOLLIPOG_LEDGER__:changed" : `WSL startup notice\n${version}\n` };
+  };
+  const context = { kind: "wsl" as const, distro: "test-distro" };
+  const inspect = () => inspectClaudeBackgroundWorkInContext(context, "/repo", "session", ["done", "pending"], { run });
+  assert.equal((await inspect()).terminalTaskStatuses?.get("done"), "killed");
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+  assert.equal((await inspect()).terminalTaskStatuses?.get("done"), "killed");
+  for (let retry = 0; retry < 10; retry++) assert.equal((await inspect()).terminalTaskIds.size, 1);
+  assert.equal(reads, 2);
+  version += ":replacement";
+  await inspect();
+  assert.equal(reads, 3);
+  await inspectClaudeBackgroundWorkInContext({ ...context, distro: "other-distro" }, "/repo", "session", ["done", "pending"], { run });
+  assert.equal(reads, 4);
+  await inspectClaudeBackgroundWorkInContext(context, "/repo", "session", ["done", "pending"], { run, projectsRoot: "/sandbox/projects" });
+  assert.equal(reads, 5);
+  version += ":append";
+  changedDuringRead = true;
+  assert.equal((await inspect()).terminalTaskIds.size, 0, "a changing ledger cannot become cached completion proof");
+  const unknown = await inspectClaudeBackgroundWorkInContext(context, "/repo", "session", ["done"], {
+    run: async () => ({ stdout: "", stderr: "" }),
+  });
+  assert.equal(unknown.terminalTaskIds.size, 0);
+});
+
+test("context discovery and receipt recovery share four inspection slots", async () => {
+  let active = 0;
+  let peak = 0;
+  const releases: Array<() => void> = [];
+  const run = async () => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise<void>((resolve) => releases.push(resolve));
+    active--;
+    return { stdout: "", stderr: "" };
+  };
+  const operations = Array.from({ length: 12 }, (_, index) => index % 2
+    ? inspectClaudeBackgroundWorkInContext({ kind: "wsl", distro: "test" }, "/repo", `session-${index}`, [], { run })
+    : discoverIncompleteClaudeTasksInContext({ kind: "wsl", distro: "test" }, "/repo", `session-${index}`, { run }));
+  for (let batch = 0; batch < 3; batch++) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(active, 4);
+    releases.splice(0).forEach((release) => release());
+  }
+  await Promise.all(operations);
+  assert.equal(peak, 4);
+  assert.equal(active, 0);
 });
 
 test("task discovery returns artifacts without a completion record and ignores completed work", () => {

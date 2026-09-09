@@ -61,6 +61,29 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   };
 }
 
+test("tool counts survive compaction and fail closed on altered immutable segments", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-tool-count-compact-"));
+  const policy = { triggerActiveBytes: 1, retainActiveBytes: 64, retainActiveEvents: 1,
+    maxSegmentBytes: 64 * 1024, orphanGraceMs: 0 };
+  const store = new SessionStore(root, undefined, policy);
+  try {
+    store.create(meta());
+    for (let i = 0; i < 20; i++) store.appendEvent("s_abc", {
+      kind: "tool_call", toolCallId: `call-${i % 3}`, title: "Read", status: "completed",
+    });
+    assert.equal(store.distinctToolCallCount("s_abc"), 3);
+    assert.equal(store.acquireLock("s_abc", "maintenance"), true);
+    assert.equal(store.compactHistory("s_abc", "maintenance", true).compacted, true);
+    store.releaseLock("s_abc", "maintenance");
+    assert.equal(store.distinctToolCallCount("s_abc"), 3);
+    assert.equal(store.distinctToolCallCount("s_abc"), 3);
+    const dir = join(root, "s_abc");
+    const manifest = JSON.parse(readFileSync(join(dir, "events.manifest.json"), "utf8"));
+    appendFileSync(join(dir, manifest.segments[0].file), "tampered");
+    assert.equal(store.distinctToolCallCount("s_abc"), null, "cached counts never mask segment corruption");
+  } finally { store.flushAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("create + readMeta round-trips", () => {
   const { store, root } = tmpStore();
   try {
@@ -83,6 +106,50 @@ test("create + readMeta round-trips", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("distinct tool counts reuse unchanged history and invalidate append, replacement, truncation and reset", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-tool-count-"));
+  let scannedBytes = 0;
+  const store = new SessionStore(root, (start, end) => { scannedBytes += end - start; });
+  try {
+    store.create(meta());
+    const event = { kind: "tool_call" as const, toolCallId: "one", title: "Read", status: "completed" as const };
+    store.appendEvent("s_abc", event);
+    store.appendEvent("s_abc", event);
+    assert.equal(store.distinctToolCallCount("s_abc"), 1);
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    assert.equal(store.distinctToolCallCount("s_abc"), 1);
+    const initialBytes = scannedBytes;
+    assert.ok(initialBytes > 0);
+    for (let retry = 0; retry < 10; retry++) assert.equal(store.distinctToolCallCount("s_abc"), 1);
+    assert.equal(scannedBytes, initialBytes, "unchanged retries do not parse history again");
+    const activePath = join(root, "s_abc", "events.ndjson");
+    const complete = readFileSync(activePath);
+    appendFileSync(activePath, '{"seq":3,"payload":');
+    assert.equal(store.distinctToolCallCount("s_abc"), 1, "a crash-torn suffix is not an event");
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    assert.equal(store.distinctToolCallCount("s_abc"), 1);
+    const afterTorn = scannedBytes;
+    assert.equal(store.distinctToolCallCount("s_abc"), 1);
+    assert.equal(scannedBytes, afterTorn, "unchanged torn suffixes can also be cached");
+    writeFileSync(activePath, complete);
+    store.appendEvent("s_abc", { ...event, toolCallId: "two" });
+    assert.equal(store.distinctToolCallCount("s_abc"), 2);
+    const path = join(root, "s_abc", "events.ndjson");
+    const replacement = readFileSync(path, "utf8").replaceAll('"two"', '"one"');
+    writeFileSync(`${path}.new`, replacement);
+    renameSync(`${path}.new`, path);
+    assert.equal(store.distinctToolCallCount("s_abc"), 1, "same seq/size cannot hide replaced history");
+    writeFileSync(path, "");
+    assert.equal(store.distinctToolCallCount("s_abc"), 0);
+    writeFileSync(path, "not-json\n");
+    assert.equal(store.distinctToolCallCount("s_abc"), null, "corrupt history is not authority to spend");
+    store.resetEvents("s_abc");
+    assert.equal(store.distinctToolCallCount("s_abc"), 0);
+    store.appendEvent("s_abc", event);
+    assert.equal(store.distinctToolCallCount("s_abc"), 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("scrubLegacyAgentEnv durably removes pre-v54 resolved secrets from session meta", () => {
