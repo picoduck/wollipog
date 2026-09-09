@@ -14,6 +14,7 @@ import {
   removeAgentControlFiles,
 } from "./agent-control.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
+import { codexOrchestratorMcpArgs } from "./orchestrator-preset.js";
 import { killTree, spawnAgent, waitForPendingKills, type AgentProcess, type BwrapSpawnIsolation } from "./spawn.js";
 import { WSL_AGENT_CONTROL_HELPER_PATH } from "./wsl-agent-control.js";
 
@@ -93,6 +94,12 @@ test("real WSL2 bridge carries CLI and MCP while adversarial routes fail closed 
   const stop = async (child: AgentProcess) => { killTree(child); await waitForPendingKills(8_000); };
 
   try {
+    assert.deepEqual(await codexOrchestratorMcpArgs({
+      command: nodeRuntime!,
+      args: ["-e", 'console.log(JSON.stringify([{name:"wollipog",enabled:true}]))'],
+      context,
+    }, "/home/wollipog"), [], "Codex MCP isolation probe executes the Linux target through WSL");
+
     const first = makeSpec();
     await provision(first);
     const firstIsolation = await isolate(first);

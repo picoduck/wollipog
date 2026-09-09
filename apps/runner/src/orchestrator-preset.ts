@@ -98,7 +98,8 @@ export function withOrchestratorPreset(
     }
     if ((contextKind !== "native" && !wslSupported) ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
-    if ((agent.driver === "claude-code" || acpSupported) && (host.platform ?? process.platform) === "win32") {
+    if (contextKind === "native" && (agent.driver === "claude-code" || acpSupported) &&
+        (host.platform ?? process.platform) === "win32") {
       if (!verifiedNativeClaudeGitBashPath(agent.env ?? {}, { env: host.env, exists: host.exists })) return agent;
     }
     if (acpSupported && !agent.capabilities) {
@@ -199,15 +200,13 @@ export function isolateCodexMcpServers(output: string): string[] {
 }
 
 export async function codexOrchestratorMcpArgs(
-  opts: { command: string; args: string[]; env?: Record<string, string> },
+  opts: { command: string; args: string[]; env?: Record<string, string>; context?: AgentDefinition["context"] },
   cwd: string,
 ): Promise<string[]> {
   try {
-    // The read-only mcp subcommand rejects --strict-config; retain it on the actual
-    // provider launch, where unsupported safety features must fail closed.
-    const probe = windowsCommandSpec(opts.command, [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"]);
+    const { probe, env, nativeCwd } = codexOrchestratorMcpProbe(opts, cwd);
     const { stdout } = await execFileAsync(probe.file, probe.args, {
-      cwd, env: { ...process.env, ...opts.env }, timeout: 10_000, maxBuffer: 1024 * 1024,
+      ...(nativeCwd ? { cwd: nativeCwd } : {}), env, timeout: 10_000, maxBuffer: 1024 * 1024,
       windowsHide: true,
       ...(probe.windowsVerbatimArguments ? { windowsVerbatimArguments: true, argv0: probe.argv0 } : {}),
     });
@@ -215,4 +214,28 @@ export async function codexOrchestratorMcpArgs(
   } catch {
     throw new Error("Orchestrator launch refused: unable to isolate Codex MCP servers.");
   }
+}
+
+/** Build the MCP inventory probe in the provider's real execution context. In particular, a WSL
+ * path is never passed to Win32 exec directly, and explicit agent env crosses through WSLENV just
+ * as it does for the subsequent provider launch. */
+export function codexOrchestratorMcpProbe(
+  opts: { command: string; args: string[]; env?: Record<string, string>; context?: AgentDefinition["context"] },
+  cwd: string,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): { probe: { file: string; args: string[]; windowsVerbatimArguments?: boolean; argv0?: string };
+  env: NodeJS.ProcessEnv; nativeCwd?: string } {
+  // The read-only mcp subcommand rejects --strict-config; retain it on the actual provider launch,
+  // where unsupported safety features must fail closed.
+  const probeArgs = [...opts.args.filter((arg) => arg !== "--strict-config"), "mcp", "list", "--json"];
+  const wsl = opts.context?.kind === "wsl" ? opts.context : undefined;
+  const env = { ...hostEnv, ...opts.env };
+  if (!wsl) return { probe: windowsCommandSpec(opts.command, probeArgs), env, nativeCwd: cwd };
+  if (opts.env) {
+    const existing = (env.WSLENV ?? "").split(":").filter(Boolean);
+    const known = new Set(existing.map((entry) => entry.split("/")[0]?.toLowerCase()));
+    env.WSLENV = [...existing, ...Object.keys(opts.env).filter((name) => !known.has(name.toLowerCase()))].join(":");
+  }
+  return { probe: { file: "wsl.exe",
+    args: ["-d", wsl.distro, "--cd", cwd, "--exec", opts.command, ...probeArgs] }, env };
 }

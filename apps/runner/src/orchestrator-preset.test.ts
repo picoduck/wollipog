@@ -4,6 +4,7 @@ import type { AgentDefinition } from "@wollipog/protocol";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
   CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
+  codexOrchestratorMcpProbe,
   isolateCodexMcpServers,
   orchestratorAcpSessionMeta,
   orchestratorLaunchArgs,
@@ -25,10 +26,32 @@ test("orchestrator capability requires a native harness or discovery-verified WS
   const wsl = { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" },
     wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: "/usr/bin/node" } };
   assert.equal(withOrchestratorPreset([wsl])[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
+  const wslClaude = { ...wsl, driver: "claude-code" as const,
+    capabilities: { ...wsl.capabilities, permissionModes: ["default"] } };
+  assert.equal(withOrchestratorPreset([wslClaude], { platform: "win32", env: {}, exists: () => false })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true,
+  "WSL Claude uses its in-distro runtime and does not depend on Git for Windows");
   assert.equal(withOrchestratorPreset([{ ...wsl, driver: "acp" }])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
   assert.equal(withOrchestratorPreset([{ ...agent, context: { kind: "wsl", distro: "Ubuntu" },
     capabilities: { ...agent.capabilities!, permissionModes: ["read-only", "orchestrator"] } }])[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), false, "stale configured capability cannot self-attest the bridge");
+});
+
+test("Codex MCP isolation probes an in-distro WSL binary through exact argv", () => {
+  const built = codexOrchestratorMcpProbe({
+    command: "/usr/bin/codex",
+    args: ["--strict-config", "-c", "mcp_servers.wollipog.enabled=true"],
+    env: { CODEX_HOME: "/home/me/.codex", EXISTING: "override" },
+    context: { kind: "wsl", distro: "Ubuntu-24.04" },
+  }, "/home/me/repo", { WSLENV: "EXISTING/u", EXISTING: "host" });
+  assert.deepEqual(built.probe, {
+    file: "wsl.exe",
+    args: ["-d", "Ubuntu-24.04", "--cd", "/home/me/repo", "--exec", "/usr/bin/codex",
+      "-c", "mcp_servers.wollipog.enabled=true", "mcp", "list", "--json"],
+  });
+  assert.equal(built.nativeCwd, undefined, "Linux cwd is passed only to wsl.exe, never Win32 exec cwd");
+  assert.equal(built.env.WSLENV, "EXISTING/u:CODEX_HOME");
+  assert.equal(built.env.EXISTING, "override");
 });
 
 test("native Windows Claude advertises orchestrator only with verified Git Bash", () => {

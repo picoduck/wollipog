@@ -168,6 +168,18 @@ test("verified Direct WSL rotates credentials and provisions only the target-loc
     removeAgentControlFiles(launch.sessionId, root);
     assert.equal(wslAgentControlLaunch(launch.sessionId), undefined);
 
+    const missing = { ...spec("codex-app-server"), sessionId: "s_missing_distro", context: launch.context,
+      config: { permissionMode: "orchestrator" as const } };
+    await assert.rejects(async () => provisionAgentControl(missing, {
+      ...control,
+      orchestratorAgent: { ...agent, id: missing.agentId },
+      registerCredentialAndWait: async (sessionId, hash) => markAgentControlCredentialReady(root, sessionId, hash),
+    }, () => {}, { ...host, installWslHelper: async () => { throw new Error("distro disappeared"); } }),
+    /distro disappeared/);
+    assert.equal(wslAgentControlLaunch(missing.sessionId), undefined);
+    assert.equal(existsSync(agentControlTokenPath(root, missing.sessionId)), false,
+      "failed creation after distro removal revokes the rotated credential");
+
     const generic = { ...spec("acp"), context: launch.context, config: { permissionMode: "orchestrator" as const } };
     await assert.rejects(async () => provisionAgentControl(generic, { ...control, orchestratorAgent: { ...agent, driver: "acp" } }, () => {}, host), /supported native harness or verified Direct WSL/);
   } finally { rmSync(root, { recursive: true, force: true }); }

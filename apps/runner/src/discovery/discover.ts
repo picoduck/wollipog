@@ -538,7 +538,10 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
   }
   const enriched = safeConfigAgents.map((c) => {
     const d = launchKeys(c).map((k) => byKey.get(k)).find(Boolean);
-    if (!d) return c;
+    if (!d) {
+      const { wslAgentControl: _unverifiedWslAgentControl, ...configured } = c;
+      return configured;
+    }
     // A bare path-less config command ("codex") is a pointer, not a launch override — and it
     // spawns via the daemon's non-login PATH, which is exactly where version-manager installs
     // are invisible. Adopt discovery's RESOLVED launch (absolute command + base args) so the

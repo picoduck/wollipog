@@ -29,6 +29,12 @@ test("Direct WSL Agent Control requires an exact absolute Node 22+ runtime", () 
   assert.equal(supportedWslAgentControlNodeRuntime({ command: "/usr/bin/node", args: ["wrapper.js"] }, "v24.1.0"), undefined);
 });
 
+test("config-only agents cannot self-attest a Direct WSL Agent Control runtime", () => {
+  const configured = cfg({ context: { kind: "wsl", distro: "Ubuntu" },
+    wslAgentControl: { protocolVersion: 1, nodeRuntime: "/unverified/node" } });
+  assert.equal(mergeAgents([configured], [])[0]!.wslAgentControl, undefined);
+});
+
 test("parseVersion extracts a semver token from --version noise", () => {
   assert.equal(parseVersion("1.2.3"), "1.2.3");
   assert.equal(parseVersion("claude 1.2.3 (Claude Code)"), "1.2.3");
