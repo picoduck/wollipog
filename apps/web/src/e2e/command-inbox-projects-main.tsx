@@ -258,6 +258,42 @@ function initialModel(): FixtureModel {
       }],
       ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {}],
       ["session-plain", "Plain", {}],
+      // #782: line three is unconditional, so the scenario has to carry every combination of branch
+      // state and background work — that product is exactly what used to make cards two, three, or
+      // four lines tall. Appended, so the indices the #664 and #679 assertions use are untouched.
+      ["session-no-branch-waiting", "No Branch, Waiting on an External Job", {
+        backgroundWorkState: "running",
+      }],
+      ["session-branch-waiting", "A Long Branch and a Badge on the Same Line", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/waiting",
+        worktrees: [{
+          id: "wt-waiting",
+          path: "/repos/alpha/.agent-worktrees/waiting",
+          branch: "fix/issue-782-keep-every-session-card-at-three-rows-and-always-show-git-branch-state",
+          baseRef: "release/2027-q1-hardening-of-the-inbox-virtualisation-and-activity-strip-measurement-path",
+          source: "created",
+          pullRequest: { url: "https://github.com/picoduck/wollipog/pull/782", state: "open" },
+        }],
+        backgroundWorkState: "running",
+      }],
+      // An active worktree the inventory never described: honest "Branch Unavailable", not "No Branch".
+      ["session-branch-unknown", "Worktree Held, Branch Never Reported", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/unreported",
+        backgroundWorkState: "continuation_pending",
+      }],
+      ["session-orphaned", "Orphaned Background Work Beside a Branch", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/orphaned",
+        worktrees: [{
+          id: "wt-orphaned",
+          path: "/repos/alpha/.agent-worktrees/orphaned",
+          branch: "fix/issue-782-orphaned",
+          source: "created",
+        }],
+        backgroundWorkState: "orphaned",
+      }],
     ];
     initial.sessions = rows.map(([id, title, extra], index) => {
       const value = session(id, title, "alpha", "alpha-workspace");

@@ -5,6 +5,8 @@ import {
   isConventionalDefaultBaseRef,
   matchesDefaultBranch,
   pullRequestStateLabel,
+  sessionBranchState,
+  branchStateLabel,
 } from "./worktree-identity.js";
 
 test("conventional default base refs are recognised through remote and ref prefixes", () => {
@@ -89,5 +91,31 @@ test("matchesDefaultBranch accepts the spellings Git produces and nothing else",
   }
   for (const ref of ["mainline", "main-line", "fork/main", "origin/origin/main", "feature/main"]) {
     assert.equal(matchesDefaultBranch(ref, "main"), false, ref);
+  }
+});
+
+// #782: the Inbox card's third line is unconditional, so this has to answer for every session,
+// including the ones no branch fact ever reached.
+test("sessionBranchState separates a named branch, no branch, and an unreported branch", () => {
+  const worktree = { id: "wt", path: "/repos/a/wt", branch: "fix/issue-782", source: "created" as const };
+  const named = sessionBranchState({ useWorktree: true, worktreePath: "/repos/a/wt", worktrees: [worktree] });
+  assert.deepEqual(named, { kind: "branch", worktree });
+  assert.equal(branchStateLabel(named), "fix/issue-782");
+
+  // No worktree wanted and none held: the session authoritatively works without a branch.
+  const none = sessionBranchState({ useWorktree: false, worktreePath: null });
+  assert.deepEqual(none, { kind: "none" });
+  assert.equal(branchStateLabel(none), "No Branch");
+
+  // Held but unnamed (older runner, or a projection without the inventory), and requested but not
+  // yet materialised. Neither may be reported as having no branch.
+  for (const session of [
+    { useWorktree: true, worktreePath: "/repos/a/wt", worktrees: undefined },
+    { useWorktree: true, worktreePath: "/repos/a/wt", worktrees: [{ ...worktree, path: "/repos/a/other" }] },
+    { useWorktree: true, worktreePath: null },
+  ]) {
+    const state = sessionBranchState(session);
+    assert.deepEqual(state, { kind: "unknown" });
+    assert.equal(branchStateLabel(state), "Branch Unavailable");
   }
 });
