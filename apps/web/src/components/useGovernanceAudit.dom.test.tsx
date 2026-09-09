@@ -78,3 +78,42 @@ test("landed ids are bounded by the audit snapshot", async () => {
   await act(async () => { root.unmount(); });
   container.remove();
 });
+
+test("frozen anchors are dropped when the event history is replaced", async () => {
+  // A replaced history restarts sequence numbers, so an anchor from the old epoch would compare
+  // against unrelated new events and drag the row to the tail.
+  const seen: string[][] = [];
+  const oldItems: TimelineItem[] = [
+    { kind: "agent_message", id: 101, text: "m101" } as TimelineItem,
+    { kind: "agent_message", id: 102, text: "m102" } as TimelineItem,
+  ];
+  const oldAnchors: GovernanceAnchorEvent[] = [{ seq: 101, ts: 100 }, { seq: 102, ts: 300 }];
+  const newItems: TimelineItem[] = [
+    { kind: "agent_message", id: 1, text: "m1" } as TimelineItem,
+    { kind: "agent_message", id: 2, text: "m2" } as TimelineItem,
+    { kind: "agent_message", id: 3, text: "m3" } as TimelineItem,
+  ];
+  const newAnchors: GovernanceAnchorEvent[] = [{ seq: 1, ts: 1_000 }, { seq: 2, ts: 1_100 }, { seq: 3, ts: 1_200 }];
+  function Probe({ epoch }: { epoch: number }) {
+    const merged = useGovernanceTimeline(
+      epoch === 0 ? oldItems : newItems,
+      decisions,
+      epoch === 0 ? oldAnchors : newAnchors,
+      false,
+      `session:${epoch}`,
+    );
+    seen.push(merged.map((item) => item.kind === "governance_decision" ? "g" : String(item.id)));
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  for (const epoch of [0, 1]) {
+    await act(async () => { root.render(<Probe epoch={epoch} />); });
+  }
+  assert.deepEqual(seen.at(0), ["101", "g", "102"], "landed in the old history after seq 101");
+  assert.deepEqual(seen.at(-1), ["g", "1", "2", "3"],
+    "re-anchored at the head of the replaced history (its timestamp predates every new event)");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});

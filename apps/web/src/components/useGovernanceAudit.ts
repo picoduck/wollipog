@@ -71,28 +71,38 @@ export function useGovernanceTimeline(
   events: readonly GovernanceAnchorEvent[] | undefined,
   /** The turn is still running, so a trailing work run may keep growing. */
   turnRunning = false,
+  /**
+   * Identity of the event history the anchors refer to (session id plus event epoch). Sequence
+   * numbers restart when the history is replaced, so frozen anchors from the old history would
+   * compare against unrelated new events; they are dropped when this key changes.
+   */
+  historyKey = "",
 ): TimelineItem[] {
   const previousRef = useRef<TimelineItem[] | null>(null);
   // Rows that have rendered once keep their anchor and are never held again (see
   // MergeGovernanceOptions.landed). Bounded by the audit snapshot: an id that has left the
   // newest-N window can never be merged again, so it is dropped here.
-  const landedRef = useRef(new Map<string, number>());
+  const landedRef = useRef<{ historyKey: string; anchors: Map<string, number> }>({ historyKey, anchors: new Map() });
   return useMemo(() => {
     const anchors = events ?? [];
+    if (landedRef.current.historyKey !== historyKey) {
+      landedRef.current = { historyKey, anchors: new Map() };
+      previousRef.current = null;
+    }
     const transcriptDecisions = transcriptGovernanceDecisions(decisions, items);
     const merged = mergeGovernanceDecisions(items, transcriptDecisions, anchors, {
       holdTrailingRun: turnRunning,
-      landed: landedRef.current,
+      landed: landedRef.current.anchors,
     });
     const current = new Set(decisions.map((decision) => decision.auditId));
     const landed = new Map<string, number>();
-    for (const [auditId, anchor] of landedRef.current) {
+    for (const [auditId, anchor] of landedRef.current.anchors) {
       if (current.has(auditId)) landed.set(auditId, anchor);
     }
     for (const [auditId, anchor] of landedGovernanceAnchors(merged)) {
       if (!landed.has(auditId) || !Number.isFinite(landed.get(auditId))) landed.set(auditId, anchor);
     }
-    landedRef.current = landed;
+    landedRef.current = { historyKey, anchors: landed };
     if (merged === items) {
       previousRef.current = null;
       return items;
@@ -118,5 +128,5 @@ export function useGovernanceTimeline(
     }
     previousRef.current = merged;
     return merged;
-  }, [decisions, events, items, turnRunning]);
+  }, [decisions, events, historyKey, items, turnRunning]);
 }
