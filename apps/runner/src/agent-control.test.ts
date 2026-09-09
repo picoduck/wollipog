@@ -148,6 +148,7 @@ test("verified Direct WSL rotates credentials and provisions only the target-loc
         safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" } };
     const hashes: string[] = [];
     const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const,
       orchestratorAgent: agent, registerCredentialAndWait: async (_id: string, hash: string) => {
         hashes.push(hash);
         markAgentControlCredentialReady(root, launch.sessionId, hash);
@@ -163,6 +164,15 @@ test("verified Direct WSL rotates credentials and provisions only the target-loc
     assert.ok(launch.args.some((arg) => arg.includes('"WOLLIPOG_AGENT_CONTROL_SOCKET" = "/tmp/wollipog-agent-control/control.sock"')),
       "Codex MCP receives the private socket explicitly instead of relying on ambient inheritance");
     assert.ok(launch.args.includes("--strict-config"));
+
+    const unsupported = { ...spec("codex-app-server"), sessionId: "s_provider_mode", context: launch.context,
+      config: { permissionMode: "orchestrator" as const } };
+    await assert.rejects(async () => provisionAgentControl(unsupported, {
+      ...control, executionIsolationMode: "provider", orchestratorAgent: { ...agent, id: unsupported.agentId },
+    }, () => {}, host), /verified Direct WSL bridge/u);
+    assert.equal(wslAgentControlLaunch(unsupported.sessionId), undefined);
+    assert.equal(existsSync(agentControlTokenPath(root, unsupported.sessionId)), false,
+      "unsupported isolation fails before credential or target-local provisioning");
 
     await provisionAgentControl(launch, control, () => {}, host);
     const second = wslAgentControlLaunch(launch.sessionId)!;

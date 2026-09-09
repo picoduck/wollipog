@@ -589,6 +589,13 @@ test("orchestrator is creation-only and requires the negotiated native harness b
       "protocol support alone cannot replace fresh target-local launcher attestation");
     agent.wslAgentControl = { protocolVersion: 1, nodeRuntime: "/usr/bin/node",
       safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" };
+    meta.runtime = { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      admission: { agentLimits: {}, agentWeights: {} },
+      executionIsolation: { mode: "provider", network: "inherit" } };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).status, 409,
+      "target-local launcher attestation cannot enable the default provider isolation mode");
+    meta.runtime.executionIsolation = { mode: "bwrap", network: "deny" };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.equal(svc.createSession({ ...request, config: { permissionMode: "orchestrator" } }).ok, true,
       "current structured Direct WSL may use the authenticated target-local safe launcher");

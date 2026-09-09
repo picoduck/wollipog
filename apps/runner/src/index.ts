@@ -366,7 +366,7 @@ const metadata: RunnerMetadata = {
   version: VERSION,
   // Pre-discovery config rows go out verbatim so live discovery can still authoritatively
   // fill availability and capabilities; supported native agents gain the runner-owned preset.
-  agents: withOrchestratorPreset(configuredAgentDefinitions),
+  agents: withOrchestratorPreset(configuredAgentDefinitions, { wslIsolationMode: config.executionIsolation.mode }),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -403,7 +403,8 @@ function agentsForControlPlane() {
       ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
           ((agent.context?.kind ?? "native") === "wsl" &&
             (!runnerSupportsProtocol(controlPlaneProtocolVersion, "wslSafeLauncher") ||
-              agent.wslAgentControl?.safeLauncherProtocolVersion !== 1))) && agent.capabilities
+              agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
+              config.executionIsolation.mode !== "bwrap"))) && agent.capabilities
         ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
         : {}),
     }));
@@ -568,6 +569,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         registerCredential: registerAgentControlCredential,
         registerCredentialAndWait: registerAgentControlCredentialAndWait,
         orchestratorAgent: localAgent,
+        executionIsolationMode: config.executionIsolation.mode,
       },
       log,
       agentControlHost,
@@ -1094,7 +1096,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       claudeHookFeatureEnabled,
       log,
     );
-    metadata.agents = withOrchestratorPreset(metadata.agents);
+    metadata.agents = withOrchestratorPreset(metadata.agents, { wslIsolationMode: config.executionIsolation.mode });
     // A definitive native discovery result is newer authoritative evidence than the process-local
     // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
     // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.

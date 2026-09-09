@@ -2787,7 +2787,8 @@ export class SessionsService {
         this.capabilityFailure(req.runnerId, "wslAgentControlBridge", "Direct WSL Agent Control") === null &&
         this.capabilityFailure(req.runnerId, "wslSafeLauncher", "Direct WSL safe launcher") === null &&
         launch.wslAgentControl?.safeLauncherProtocolVersion === 1 &&
-        launch.wslAgentControl.bwrapRuntime === "/usr/bin/bwrap";
+        launch.wslAgentControl.bwrapRuntime === "/usr/bin/bwrap" &&
+        this.db.getRunner(req.runnerId)?.runtime?.executionIsolation?.mode === "bwrap";
       if (!(["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
           (launch.driver === "acp" && req.launchSurface !== "native_tui")) ||
           (contextKind !== "native" && !wslDirect) || executionTarget.adapter !== "host") {

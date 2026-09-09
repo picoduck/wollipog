@@ -86,13 +86,15 @@ export function orchestratorAcpSessionMeta(): Record<string, unknown> {
  * their own internal tools, so client-side fs/terminal refusal cannot establish this boundary. */
 export function withOrchestratorPreset(
   agents: AgentDefinition[],
-  host: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exists?: typeof existsSync } = {},
+  host: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exists?: typeof existsSync;
+    wslIsolationMode?: "provider" | "bwrap" | "seatbelt" | "windows-job" } = {},
 ): AgentDefinition[] {
   return agents.filter((agent) => agent.id !== "conductor").map((agent) => {
     const acpSupported = supportsClaudeAgentAcpOrchestrator(agent);
     const contextKind = agent.context?.kind ?? "native";
     const wslSupported = contextKind === "wsl" && agent.wslAgentControl?.protocolVersion === 1 &&
       agent.wslAgentControl.safeLauncherProtocolVersion === 1 &&
+      host.wslIsolationMode === "bwrap" &&
       ["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp");
     if (contextKind === "wsl" && !wslSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
       return { ...agent, capabilities: { ...agent.capabilities,

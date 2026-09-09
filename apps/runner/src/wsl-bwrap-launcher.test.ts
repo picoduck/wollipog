@@ -18,7 +18,7 @@ const haveCompiler = process.platform === "linux" &&
       const stat = statSync("/usr/bin/bwrap");
       const help = spawnSync("/usr/bin/bwrap", ["--help"], { encoding: "utf8" });
       return stat.uid === 0 && (stat.mode & 0o022) === 0 && help.status === 0 &&
-        ["--bind-fd", "--ro-bind-fd", "--sync-fd"].every((flag) => `${help.stdout}${help.stderr}`.includes(flag));
+        ["--bind-fd", "--ro-bind-fd"].every((flag) => `${help.stdout}${help.stderr}`.includes(flag));
     } catch { return false; }
   })();
 
@@ -129,7 +129,21 @@ test("target launcher refuses a prepare-to-launch directory replacement", { skip
 });
 
 test("checked-in launcher source stays available to source-checkout provisioning", () => {
-  assert.match(readFileSync(WSL_BWRAP_LAUNCHER_SOURCE_PATH, "utf8"), /RESOLVE_NO_SYMLINKS/);
+  const source = readFileSync(WSL_BWRAP_LAUNCHER_SOURCE_PATH, "utf8");
+  assert.match(source, /RESOLVE_NO_SYMLINKS/);
+  assert.match(source, /ready_entry\(ready_fd, "control\.sock", S_IFSOCK\)/,
+    "provider launch waits against the already-opened relay bind source");
+  assert.doesNotMatch(source, /"--sync-fd"/,
+    "no filesystem-authority descriptor is inherited by the bwrap init process");
+});
+
+test("target launcher rejects singleton flags without values", { skip: process.platform !== "linux" }, (t) => {
+  const f = fixture();
+  t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  for (const option of ["--bwrap", "--home", "--cwd", "--pidfile", "--network"]) {
+    const rejected = spawnSync(f.launcher, ["launch", option], { encoding: "utf8" });
+    assert.equal(rejected.status, 125, `${option} fails closed instead of dereferencing argv[argc]`);
+  }
 });
 
 test("target-local state roots contain only fixed prefixes and full hashes", () => {

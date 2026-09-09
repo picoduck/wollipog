@@ -395,12 +395,28 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   const safeRunner: RunnerView = {
     ...wslRunner,
     protocolVersion: 124,
+    runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      executionIsolation: { mode: "bwrap", network: "deny" } },
     agents: wslRunner.agents.map((agent) => ({
       ...agent,
       wslAgentControl: { protocolVersion: 1, nodeRuntime: "/usr/bin/node",
         safeLauncherProtocolVersion: 1, bwrapRuntime: "/usr/bin/bwrap" },
     })),
   };
+  const providerMode = await mountFixture({
+    runners: [{ ...safeRunner, runtime: { ...safeRunner.runtime!,
+      executionIsolation: { mode: "provider", network: "inherit" } } }],
+    capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
+  }, undefined, undefined, async () => ({ defaults: [{
+    agentId: "claude", driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu-24.04" }, name: "Claude",
+    installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
+  }] }));
+  try {
+    await act(async () => { selectProject(providerMode.container, project.id); });
+    assert.equal(createButton(providerMode.container).disabled, true,
+      "safe attestation cannot enable Direct WSL under provider isolation");
+    assert.equal(providerMode.requests.length, 0);
+  } finally { await unmountFixture(providerMode); }
   const bridged = await mountFixture({
     runners: [safeRunner],
     capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },

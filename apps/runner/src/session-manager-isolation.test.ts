@@ -276,6 +276,30 @@ test("safe Direct WSL uses one target-resolved cwd for isolation, driver constru
   }
 });
 
+test("Direct WSL Orchestrator fails before provisioning when runner isolation is not bwrap", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-provider-refusal-"));
+  try {
+    const manager = new SessionManager(
+      () => {}, () => {}, new SessionStore(root), "runner", undefined,
+      (() => { throw new Error("must not construct provider"); }) as never,
+      join(root, ".runner-data"), 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" },
+    );
+    // Even a fresh exact discovery match cannot authorize an execution mode without the launcher.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (manager as any).authorizeSafeWslLaunch = () => true;
+    assert.throws(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (manager as any).assertHostIsolationContextSupported({
+        ...meta(), context: { kind: "wsl", distro: "Ubuntu" }, config: { permissionMode: "orchestrator" },
+      });
+    }, /target-local bwrap launcher/u);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a new WSL bwrap session fails before its durable row or worktree is materialized", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-isolation-create-fail-"));
   try {

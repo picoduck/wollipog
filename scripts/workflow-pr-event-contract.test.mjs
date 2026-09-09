@@ -257,6 +257,8 @@ test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provide
     "native stderr capture must not terminate PowerShell before the explicit exit and TAP checks");
   assert.match(platform, /apt-get install -y bubblewrap build-essential curl xz-utils/u,
     "the real target must compile the checked-in native launcher source");
+  assert.match(platform, /tar --no-same-owner -xJf/u,
+    "the pinned Linux Node fixture must install as root instead of preserving archive owner ids");
   assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-agent-control\.wsl\.test\.ts/u,
     "the real WSL job must exercise the safe launcher and authenticated broker end to end");
   assert.match(platform, /\$safeWslOutput -notmatch '\(\?m\)\^# pass 1\\r\?\$'/u);

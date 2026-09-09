@@ -225,13 +225,13 @@ export function NewSessionDialog({
   const directWslOrchestrator = orchestratorContext === "wsl" &&
     ["claude-code", "codex", "codex-app-server"].includes(agent?.driver ?? "acp") &&
     agent?.wslAgentControl?.safeLauncherProtocolVersion === 1 &&
-    runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher");
+    runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher") &&
+    runner?.runtime?.executionIsolation?.mode === "bwrap";
   const orchestratorSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration") &&
     agent?.capabilities?.permissionModes?.includes("orchestrator") &&
     (orchestratorContext === "native" || directWslOrchestrator) &&
     (!executionTarget || executionTarget.adapter === "host");
   const directWslRequiresSafeOrchestrator = orchestratorContext === "wsl" &&
-    runner?.runtime?.executionIsolation?.mode === "bwrap" &&
     (!executionTarget || executionTarget.adapter === "host");
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
   const nativeTuiStartFenceSupported = runnerSupportsProtocol(

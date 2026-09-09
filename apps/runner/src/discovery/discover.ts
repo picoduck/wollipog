@@ -94,7 +94,7 @@ async function probeWslSafeLauncher(distro: string, nodeRuntime: string | undefi
   const result = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", script, "wollipog-probe", nodeRuntime], { timeoutMs: 5_000 });
   if (result.code !== 0) return null;
   const help = `${result.stdout}\n${result.stderr}`;
-  return ["--bind-fd", "--ro-bind-fd", "--sync-fd"].every((flag) => help.includes(flag))
+  return ["--bind-fd", "--ro-bind-fd"].every((flag) => help.includes(flag))
     ? { bwrapRuntime: "/usr/bin/bwrap" }
     : null;
 }

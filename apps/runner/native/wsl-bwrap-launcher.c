@@ -17,6 +17,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef SYS_openat2
@@ -133,6 +134,17 @@ static void require_identity(int fd, const char *expected, const char *label) {
   }
 }
 
+static bool help_has_option(const char *output, const char *option) {
+  size_t length = strlen(option);
+  for (const char *found = output; (found = strstr(found, option)); found += length) {
+    char before = found == output ? '\n' : found[-1];
+    char after = found[length];
+    if ((before == ' ' || before == '\t' || before == '\n') &&
+        (after == '\0' || after == ' ' || after == '\t' || after == '\n')) return true;
+  }
+  return false;
+}
+
 static char *canonical_path(int fd) {
   char proc[64];
   if (snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd) >= (int)sizeof(proc)) fail("fd path overflow");
@@ -205,8 +217,7 @@ static bool help_has_fd_contract(int bwrap_fd) {
   pid_t pid = fork();
   if (pid < 0) fail("cannot fork bwrap probe");
   if (pid == 0) {
-    dup2(pipefd[1], STDOUT_FILENO);
-    dup2(pipefd[1], STDERR_FILENO);
+    if (dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0) _exit(127);
     close(pipefd[0]);
     close(pipefd[1]);
     char *const argv[] = { (char *)"bwrap", (char *)"--help", NULL };
@@ -214,20 +225,26 @@ static bool help_has_fd_contract(int bwrap_fd) {
     _exit(127);
   }
   close(pipefd[1]);
-  char output[65537];
+  char output[65537], chunk[4096];
   size_t used = 0;
-  while (used < sizeof(output) - 1) {
-    ssize_t n = read(pipefd[0], output + used, sizeof(output) - 1 - used);
+  bool overflow = false;
+  for (;;) {
+    ssize_t n = read(pipefd[0], chunk, sizeof(chunk));
     if (n == 0) break;
-    if (n < 0) { if (errno == EINTR) continue; break; }
-    used += (size_t)n;
+    if (n < 0) { if (errno == EINTR) continue; close(pipefd[0]); fail("cannot read bwrap probe output"); }
+    size_t available = sizeof(output) - 1 - used;
+    size_t retain = (size_t)n < available ? (size_t)n : available;
+    if (retain > 0) { memcpy(output + used, chunk, retain); used += retain; }
+    if (retain < (size_t)n) overflow = true;
   }
   close(pipefd[0]);
   output[used] = '\0';
   int status = 0;
-  while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-  return WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
-    strstr(output, "--bind-fd") && strstr(output, "--ro-bind-fd") && strstr(output, "--sync-fd");
+  pid_t waited;
+  do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+  if (waited != pid) fail("cannot wait for bwrap probe");
+  return !overflow && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+    help_has_option(output, "--bind-fd") && help_has_option(output, "--ro-bind-fd");
 }
 
 static void emit_path(int fd) {
@@ -246,11 +263,20 @@ static int prepare_main(int argc, char **argv) {
   size_t ensure_count = 0;
   memset(binds, 0, sizeof(binds));
   for (int i = 2; i < argc; i++) {
-    if (strcmp(argv[i], "--bwrap") == 0 && ++i < argc) bwrap = argv[i];
-    else if (strcmp(argv[i], "--home") == 0 && ++i < argc) home = argv[i];
-    else if (strcmp(argv[i], "--cwd") == 0 && ++i < argc) cwd = argv[i];
-    else if (strcmp(argv[i], "--ensure") == 0 && ++i < argc && ensure_count < MAX_BINDS * 2) ensures[ensure_count++] = argv[i];
-    else if ((strcmp(argv[i], "--rw") == 0 || strcmp(argv[i], "--ro") == 0) && i + 2 < argc && bind_count < MAX_BINDS) {
+    if (strcmp(argv[i], "--bwrap") == 0) {
+      if (bwrap || i + 1 >= argc) fail("invalid or duplicate --bwrap");
+      bwrap = argv[++i];
+    } else if (strcmp(argv[i], "--home") == 0) {
+      if (home || i + 1 >= argc) fail("invalid or duplicate --home");
+      home = argv[++i];
+    } else if (strcmp(argv[i], "--cwd") == 0) {
+      if (cwd || i + 1 >= argc) fail("invalid or duplicate --cwd");
+      cwd = argv[++i];
+    } else if (strcmp(argv[i], "--ensure") == 0) {
+      if (i + 1 >= argc || ensure_count >= MAX_BINDS * 2) fail("invalid or excessive --ensure");
+      ensures[ensure_count++] = argv[++i];
+    } else if (strcmp(argv[i], "--rw") == 0 || strcmp(argv[i], "--ro") == 0) {
+      if (i + 2 >= argc || bind_count >= MAX_BINDS) fail("invalid or excessive prepare bind");
       bool readonly = strcmp(argv[i], "--ro") == 0;
       binds[bind_count++] = (Bind){ .source = argv[++i], .target = argv[++i], .readonly = readonly, .source_fd = -1 };
     } else fail("invalid prepare arguments");
@@ -329,6 +355,21 @@ static int write_pidfile(const char *path, pid_t pid, int *parent_fd_out, char *
   return 0;
 }
 
+static bool ready_entry(int directory_fd, const char *name, mode_t type) {
+  struct open_how how = {
+    .flags = (type == S_IFREG ? O_RDONLY : O_PATH) | O_CLOEXEC | O_NOFOLLOW,
+    .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+  };
+  int fd = (int)syscall(SYS_openat2, directory_fd, name, &how, sizeof(how));
+  if (fd < 0) return false;
+  struct stat st;
+  bool valid = fstat(fd, &st) == 0 && (st.st_mode & S_IFMT) == type &&
+    st.st_uid == geteuid() && (st.st_mode & 0077) == 0 &&
+    (type != S_IFREG || st.st_nlink == 1);
+  close(fd);
+  return valid;
+}
+
 static int launch_main(int argc, char **argv) {
   const char *bwrap = NULL, *home = NULL, *home_id = NULL, *cwd = NULL, *cwd_id = NULL;
   const char *pidfile = NULL, *network = NULL;
@@ -338,18 +379,30 @@ static int launch_main(int argc, char **argv) {
   int command_at = -1;
   for (int i = 2; i < argc; i++) {
     if (strcmp(argv[i], "--") == 0) { command_at = i + 1; break; }
-    if (strcmp(argv[i], "--bwrap") == 0 && ++i < argc) bwrap = argv[i];
-    else if (strcmp(argv[i], "--home") == 0 && i + 2 < argc) { home = argv[++i]; home_id = argv[++i]; }
-    else if (strcmp(argv[i], "--cwd") == 0 && i + 2 < argc) { cwd = argv[++i]; cwd_id = argv[++i]; }
-    else if (strcmp(argv[i], "--pidfile") == 0 && ++i < argc) pidfile = argv[i];
-    else if (strcmp(argv[i], "--network") == 0 && ++i < argc) network = argv[i];
-    else if ((strcmp(argv[i], "--rw") == 0 || strcmp(argv[i], "--ro") == 0) && i + 4 < argc && bind_count < MAX_BINDS) {
+    if (strcmp(argv[i], "--bwrap") == 0) {
+      if (bwrap || i + 1 >= argc) fail("invalid or duplicate --bwrap");
+      bwrap = argv[++i];
+    } else if (strcmp(argv[i], "--home") == 0) {
+      if (home || i + 2 >= argc) fail("invalid or duplicate --home");
+      home = argv[++i]; home_id = argv[++i];
+    } else if (strcmp(argv[i], "--cwd") == 0) {
+      if (cwd || i + 2 >= argc) fail("invalid or duplicate --cwd");
+      cwd = argv[++i]; cwd_id = argv[++i];
+    } else if (strcmp(argv[i], "--pidfile") == 0) {
+      if (pidfile || i + 1 >= argc) fail("invalid or duplicate --pidfile");
+      pidfile = argv[++i];
+    } else if (strcmp(argv[i], "--network") == 0) {
+      if (network || i + 1 >= argc) fail("invalid or duplicate --network");
+      network = argv[++i];
+    } else if (strcmp(argv[i], "--rw") == 0 || strcmp(argv[i], "--ro") == 0) {
+      if (i + 4 >= argc || bind_count >= MAX_BINDS) fail("invalid or excessive launch bind");
       bool readonly = strcmp(argv[i], "--ro") == 0;
       binds[bind_count++] = (Bind){ .source = argv[++i], .expected_source = argv[++i],
         .target = argv[++i], .expected_target = argv[++i], .readonly = readonly, .source_fd = -1 };
     } else fail("invalid launch arguments");
   }
-  if (!bwrap || !home || !home_id || !cwd || !cwd_id || !pidfile || !network || command_at < 0 || command_at >= argc)
+  if (!bwrap || !home || !home_id || !cwd || !cwd_id ||
+      !pidfile || !network || command_at < 0 || command_at >= argc)
     fail("launch arguments are incomplete");
   if (strcmp(network, "inherit") != 0 && strcmp(network, "deny") != 0) fail("network must be inherit or deny");
   if (geteuid() == 0) fail("root execution is refused");
@@ -369,7 +422,7 @@ static int launch_main(int argc, char **argv) {
   /* O_PATH fds cannot carry flock(2). Reopen the already-pinned directory itself for reading;
    * this does not traverse another pathname and preserves the identity established above. */
   int home_lock_fd = openat(home_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-  if (home_lock_fd < 0 || flock(home_lock_fd, LOCK_SH | LOCK_NB) != 0)
+  if (home_lock_fd < 0 || flock(home_lock_fd, LOCK_EX | LOCK_NB) != 0)
     fail("provider HOME has an exclusive target-local lease");
   for (size_t i = 0; i < bind_count; i++) {
     binds[i].source_fd = open_directory(binds[i].source, false);
@@ -380,14 +433,34 @@ static int launch_main(int argc, char **argv) {
     close(target_fd);
   }
 
+  int ready_fd = -1;
+  for (size_t i = 0; i < bind_count; i++) {
+    if (strcmp(binds[i].target, "/tmp/wollipog-agent-control") == 0) {
+      if (!binds[i].readonly) fail("Agent Control ready directory must be read-only");
+      if (ready_fd >= 0) fail("ready directory bind is ambiguous");
+      ready_fd = binds[i].source_fd;
+    }
+  }
+  if (ready_fd >= 0) {
+    bool ready = false;
+    for (int attempt = 0; attempt < 200; attempt++) {
+      if (ready_entry(ready_fd, "control.sock", S_IFSOCK) &&
+          ready_entry(ready_fd, "token", S_IFREG) && ready_entry(ready_fd, "mcp.json", S_IFREG)) {
+        ready = true;
+        break;
+      }
+      struct timespec delay = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
+      while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {}
+    }
+    if (!ready) fail("target-local Agent Control relay did not become ready");
+  }
+
   pid_t child = fork();
   if (child < 0) fail("cannot fork bwrap");
   if (child == 0) {
     if (setsid() < 0) _exit(125);
     /* F_DUPFD returns a distinct inherited descriptor with FD_CLOEXEC clear. Do not assume WSL
      * gives this process a small inherited descriptor table. */
-    int sync_fd = fcntl(home_lock_fd, F_DUPFD, 3);
-    if (sync_fd < 0) _exit(125);
     int bind_fds[MAX_BINDS];
     for (size_t i = 0; i < bind_count; i++) {
       bind_fds[i] = fcntl(binds[i].source_fd, F_DUPFD, 3);
@@ -408,7 +481,6 @@ static int launch_main(int argc, char **argv) {
     args[n++] = (char *)"--dir"; args[n++] = (char *)"/dev/shm";
     args[n++] = (char *)"--proc"; args[n++] = (char *)"/proc";
     args[n++] = (char *)"--tmpfs"; args[n++] = (char *)"/tmp";
-    args[n++] = (char *)"--sync-fd"; args[n++] = fd_text(sync_fd);
     for (size_t i = 0; i < bind_count; i++) {
       /* Recreate destinations hidden by the fresh /tmp mount. For existing destinations this is
        * idempotent; source authority still comes only from the held descriptor below. */

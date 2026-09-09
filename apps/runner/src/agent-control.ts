@@ -215,6 +215,8 @@ export function provisionAgentControl(
     registerCredentialAndWait?: (sessionId: string, tokenHash: string) => Promise<void>;
     /** Exact runner-local catalog row used to authorize an ACP Orchestrator launch. */
     orchestratorAgent?: AgentDefinition;
+    /** Direct WSL is proven only by the target-local bwrap launcher. */
+    executionIsolationMode?: "provider" | "bwrap" | "seatbelt" | "windows-job";
   },
   log: (message: string) => void,
   host: AgentControlHost,
@@ -240,7 +242,8 @@ export function provisionAgentControl(
           runnerSupportsProtocol(config.controlPlaneProtocolVersion, "wslAgentControlBridge") &&
           runnerSupportsProtocol(config.controlPlaneProtocolVersion, "wslSafeLauncher") &&
           wslAgentControl?.protocolVersion === WSL_AGENT_CONTROL_PROTOCOL &&
-          wslAgentControl.safeLauncherProtocolVersion === 1 && wslLaunchMatches))) {
+          wslAgentControl.safeLauncherProtocolVersion === 1 &&
+          config.executionIsolationMode === "bwrap" && wslLaunchMatches))) {
     throw new Error("the orchestrator preset requires a current supported native harness or verified Direct WSL bridge on the host");
   }
   if (orchestrator && (spec.driver ?? "acp") === "acp") {

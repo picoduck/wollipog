@@ -107,7 +107,7 @@ test("real WSL2 bridge carries CLI and MCP while adversarial routes fail closed 
     driver: agent.driver, context, config: { permissionMode: "orchestrator" } });
   const provision = async (spec: SessionLaunchSpec) => provisionAgentControl(spec, {
     controlPlaneUrl: `ws://127.0.0.1:${port}/runner`, controlPlaneProtocolVersion: PROTOCOL_VERSION,
-    orchestratorAgent: agent,
+    orchestratorAgent: agent, executionIsolationMode: "bwrap",
     registerCredentialAndWait: async (sessionId, hash) => markAgentControlCredentialReady(host.configDir, sessionId, hash),
   }, () => {}, host);
   const isolate = async (spec: SessionLaunchSpec) => await resolveExecutionIsolation(

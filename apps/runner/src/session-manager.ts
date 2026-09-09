@@ -3706,8 +3706,10 @@ export class SessionManager {
     meta: Pick<SessionMeta, "agentId" | "command" | "args" | "driver" | "context" | "config" | "executionTarget">,
   ): void {
     if (meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return;
-    if (this.executionIsolation.mode === "bwrap" && meta.context.kind === "wsl" &&
-        this.authorizeSafeWslLaunch?.(meta) === true) return;
+    if (meta.context.kind === "wsl" && meta.config.permissionMode === "orchestrator") {
+      if (this.executionIsolation.mode === "bwrap" && this.authorizeSafeWslLaunch?.(meta) === true) return;
+      throw new Error("Direct WSL Orchestrator requires the freshly attested target-local bwrap launcher");
+    }
     assertExecutionIsolationContextSupported(this.executionIsolation, meta.context);
   }
 

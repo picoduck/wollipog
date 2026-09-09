@@ -27,10 +27,17 @@ test("orchestrator capability requires a native harness or discovery-verified WS
   const wsl = { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" },
     wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: "/usr/bin/node",
       safeLauncherProtocolVersion: 1 as const, bwrapRuntime: "/usr/bin/bwrap" } };
-  assert.equal(withOrchestratorPreset([wsl])[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
+  assert.equal(withOrchestratorPreset([wsl])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false,
+    "fresh launcher attestation is not advertised without runner-owned bwrap mode");
+  assert.equal(withOrchestratorPreset([wsl], { wslIsolationMode: "provider" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([wsl], { wslIsolationMode: "bwrap" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true);
   const wslClaude = { ...wsl, driver: "claude-code" as const,
     capabilities: { ...wsl.capabilities, permissionModes: ["default"] } };
-  assert.equal(withOrchestratorPreset([wslClaude], { platform: "win32", env: {}, exists: () => false })[0]!
+  assert.equal(withOrchestratorPreset([wslClaude], {
+    platform: "win32", env: {}, exists: () => false, wslIsolationMode: "bwrap",
+  })[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), true,
   "WSL Claude uses its in-distro runtime and does not depend on Git for Windows");
   assert.equal(withOrchestratorPreset([{ ...wsl, driver: "acp" }])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
