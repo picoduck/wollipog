@@ -57,3 +57,24 @@ test("a governance row flushed by a settled turn survives the next turn starting
   await act(async () => { root.unmount(); });
   container.remove();
 });
+
+test("landed ids are bounded by the audit snapshot", async () => {
+  const seen: number[] = [];
+  const snapshots = [0, 1, 2].map((round) => governanceDecisions(
+    Array.from({ length: 3 }, (_, i) => ({ ...entry, auditId: `r${round}-${i}`, requestId: `hook-${round}-${i}`, timestamp: 250 + i })),
+  ));
+  function Probe({ round }: { round: number }) {
+    const merged = useGovernanceTimeline(items, snapshots[round]!, anchors, false);
+    seen.push(merged.filter((item) => item.kind === "governance_decision").length);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  for (const round of [0, 1, 2]) {
+    await act(async () => { root.render(<Probe round={round} />); });
+  }
+  assert.deepEqual(seen.slice(-1), [3], "only the current snapshot's rows render");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});

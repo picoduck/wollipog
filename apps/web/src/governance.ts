@@ -219,6 +219,20 @@ function governanceItem(decision: GovernanceDecision): TimelineItem {
 }
 
 /**
+ * Anchor of every governance row in a merged timeline: the sequence of the row's predecessor
+ * (or -Infinity at the window head). Callers freeze these for rows that have rendered.
+ */
+export function landedGovernanceAnchors(merged: readonly TimelineItem[]): Map<string, number> {
+  const anchors = new Map<string, number>();
+  let previousSeq = Number.NEGATIVE_INFINITY;
+  for (const item of merged) {
+    if (item.kind === "governance_decision") anchors.set(item.decision.auditId, previousSeq);
+    else previousSeq = item.id;
+  }
+  return anchors;
+}
+
+/**
  * Splice governance rows into a derived timeline at their chronological positions.
  *
  * Returns the input array unchanged (same identity) when there is nothing to add, so sessions
@@ -234,12 +248,15 @@ export interface MergeGovernanceOptions {
    */
   holdTrailingRun?: boolean;
   /**
-   * Audit ids of decisions that have already rendered. A row that landed while the turn was
-   * settled must stay put when the next turn starts: the status flips to running before that
-   * turn's first event arrives, and holding the row again would make it vanish until a
-   * standalone event came in.
+   * Anchors of decisions that have already rendered, by audit id. A landed row is never held and
+   * never moves: the status flips to running before the next turn's first event arrives, so
+   * holding it again would make it vanish until a standalone event came in; and a later event
+   * carrying an earlier timestamp (a recovered history, clocks that disagree between the runner
+   * and the control plane) would otherwise re-anchor the row to the tail, where every streamed
+   * work item is an insertion in front of it. A row pinned to the window head (-Infinity) is the
+   * exception: it stays live so paging older activity can move it into place.
    */
-  landed?: ReadonlySet<string>;
+  landed?: ReadonlyMap<string, number>;
 }
 
 export function mergeGovernanceDecisions(
@@ -250,8 +267,13 @@ export function mergeGovernanceDecisions(
 ): TimelineItem[] {
   if (!decisions.length) return items;
   const suffixMin = suffixMinTimestamps(events);
+  const anchorOf = (decision: GovernanceDecision): number => {
+    const frozen = landed?.get(decision.auditId);
+    if (frozen !== undefined && Number.isFinite(frozen)) return frozen;
+    return anchorSeqFrom(events, suffixMin, decision.timestamp);
+  };
   const anchored = decisions
-    .map((decision) => ({ decision, anchorSeq: anchorSeqFrom(events, suffixMin, decision.timestamp) }))
+    .map((decision) => ({ decision, anchorSeq: anchorOf(decision) }))
     .sort((a, b) =>
       a.anchorSeq - b.anchorSeq ||
       a.decision.timestamp - b.decision.timestamp ||

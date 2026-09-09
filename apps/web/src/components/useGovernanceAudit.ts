@@ -4,6 +4,7 @@ import { useApi } from "../api-context.js";
 import {
   GOVERNANCE_AUDIT_LIMIT,
   governanceDecisions,
+  landedGovernanceAnchors,
   mergeGovernanceDecisions,
   sameGovernanceSnapshot,
   transcriptGovernanceDecisions,
@@ -72,8 +73,10 @@ export function useGovernanceTimeline(
   turnRunning = false,
 ): TimelineItem[] {
   const previousRef = useRef<TimelineItem[] | null>(null);
-  // Rows that have rendered once never get held again (see MergeGovernanceOptions.landed).
-  const landedRef = useRef(new Set<string>());
+  // Rows that have rendered once keep their anchor and are never held again (see
+  // MergeGovernanceOptions.landed). Bounded by the audit snapshot: an id that has left the
+  // newest-N window can never be merged again, so it is dropped here.
+  const landedRef = useRef(new Map<string, number>());
   return useMemo(() => {
     const anchors = events ?? [];
     const transcriptDecisions = transcriptGovernanceDecisions(decisions, items);
@@ -81,9 +84,15 @@ export function useGovernanceTimeline(
       holdTrailingRun: turnRunning,
       landed: landedRef.current,
     });
-    for (const item of merged) {
-      if (item.kind === "governance_decision") landedRef.current.add(item.decision.auditId);
+    const current = new Set(decisions.map((decision) => decision.auditId));
+    const landed = new Map<string, number>();
+    for (const [auditId, anchor] of landedRef.current) {
+      if (current.has(auditId)) landed.set(auditId, anchor);
     }
+    for (const [auditId, anchor] of landedGovernanceAnchors(merged)) {
+      if (!landed.has(auditId) || !Number.isFinite(landed.get(auditId))) landed.set(auditId, anchor);
+    }
+    landedRef.current = landed;
     if (merged === items) {
       previousRef.current = null;
       return items;

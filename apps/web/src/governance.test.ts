@@ -4,6 +4,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
 import {
+  landedGovernanceAnchors,
   governanceAnchorSeq,
   governanceAuditPresentation,
   governanceDecisions,
@@ -259,11 +260,41 @@ test("a row that already landed stays put when the next turn starts before its f
   const items = [message(1), work(2), work(3)];
   const settled = mergeGovernanceDecisions(items, decisions, anchors);
   assert.equal(settled.at(-1)!.kind, "governance_decision");
-  const landed = new Set(["h"]);
+  const landed = landedGovernanceAnchors(settled);
+  assert.deepEqual([...landed], [["h", 3]]);
   const nextTurn = mergeGovernanceDecisions(items, decisions, anchors, { holdTrailingRun: true, landed });
   assert.deepEqual(nextTurn.map((item) => item.kind), settled.map((item) => item.kind));
   assert.equal(nextTurn.at(-1), settled.at(-1), "the landed row keeps its identity");
   // A decision that never landed is still held.
   const fresh = governanceDecisions([entry({ auditId: "h2", requestId: "hook-2", timestamp: 260 })]);
   assert.equal(mergeGovernanceDecisions(items, fresh, anchors, { holdTrailingRun: true, landed }), items);
+});
+
+test("a landed row keeps its anchor when a later event carries an earlier timestamp", () => {
+  // Runner and control-plane clocks can disagree, and a recovered history can step backwards.
+  // Re-anchoring a visible row to such an event would drag it to the tail, where every streamed
+  // work item becomes an insertion in front of it.
+  const decisions = governanceDecisions([entry({ auditId: "h", timestamp: 250 })]);
+  const before = [message(1), message(2), message(3)];
+  const settled = mergeGovernanceDecisions(before, decisions, events);
+  assert.deepEqual(settled.map((item) => item.kind), [
+    "agent_message", "agent_message", "governance_decision", "agent_message",
+  ]);
+  const landed = landedGovernanceAnchors(settled);
+  const skewed = [...events, { seq: 4, ts: 150 }, { seq: 5, ts: 160 }, { seq: 6, ts: 170 }];
+  const streaming = [message(1), message(2), message(3), message(4), work(5), work(6)];
+  const merged = mergeGovernanceDecisions(streaming, decisions, skewed, { holdTrailingRun: true, landed });
+  assert.deepEqual(merged.map((item) => item.kind), [
+    "agent_message", "agent_message", "governance_decision", "agent_message", "agent_message", "agent_thought", "agent_thought",
+  ]);
+  // Without the frozen anchor the row would have followed the skewed event to the tail.
+  assert.equal(mergeGovernanceDecisions(streaming, decisions, skewed).at(-1)!.kind, "governance_decision");
+  // A row pinned to the window head stays live so an older page can move it into place.
+  const older = governanceDecisions([entry({ auditId: "o", requestId: "hook-o", timestamp: 10 })]);
+  const headPinned = mergeGovernanceDecisions([message(2), message(3)], older, events.slice(1));
+  assert.deepEqual([...landedGovernanceAnchors(headPinned)], [["o", Number.NEGATIVE_INFINITY]]);
+  const paged = mergeGovernanceDecisions([message(1), message(2), message(3)], older, [{ seq: 1, ts: 5 }, ...events.slice(1)], {
+    landed: landedGovernanceAnchors(headPinned),
+  });
+  assert.equal(paged.findIndex((item) => item.kind === "governance_decision"), 1);
 });
