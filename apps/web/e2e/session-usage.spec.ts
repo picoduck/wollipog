@@ -27,8 +27,13 @@ test("desktop: per-turn usage, the ring popover with totals and the per-model sp
   await expect(popover).toBeVisible();
   // Occupancy and capacity only: cumulative usage and billing moved to the cost control (#781).
   await expect(popover).toContainText("Used");
+  await expect(popover).toContainText("72k");
+  // #806's capacity provenance survives the split — which window is being measured against is an
+  // occupancy fact, not billing.
   await expect(popover).toContainText("Capacity");
-  await expect(popover).toContainText("200k");
+  await expect(popover).toContainText("200K · Provider Reported");
+  await expect(popover).toContainText("Remaining");
+  await expect(popover).toContainText("128k");
   await expect(popover).toContainText("compacts automatically");
   await expect(popover).not.toContainText("By Model");
   await expect(popover).not.toContainText("Total Processed");
