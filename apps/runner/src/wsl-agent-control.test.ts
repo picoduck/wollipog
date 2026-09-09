@@ -115,6 +115,17 @@ test("broker rejects wrong-session, wrong-token, and stale credentials before op
   dispose();
 });
 
+test("broken broker output disposes without an unhandled pipe error or follow-up write", async () => {
+  const f = fixture();
+  const dispose = attachWslAgentControlBroker(f.fromHelper, f.toHelper, f.config);
+  f.toHelper.destroy(new Error("simulated EPIPE"));
+  await tick();
+  assert.doesNotThrow(dispose, "disposal is idempotent after the write pipe fails");
+  assert.doesNotThrow(() => f.fromHelper.write(`${JSON.stringify({ type: "open", id: "late", v: 1,
+    kind: "mcp", sessionId: f.config.sessionId, token: f.config.token })}\n`));
+  await tick();
+});
+
 test("broker authenticates exact MCP session and exposes only the Orchestrator tool table", async () => {
   const f = fixture();
   const dispose = attachWslAgentControlBroker(f.fromHelper, f.toHelper, f.config, async () => ({

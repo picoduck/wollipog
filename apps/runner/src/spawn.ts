@@ -301,7 +301,7 @@ export function buildWslArgs(distro: string, cwd: string, pidfile: string, opts:
     ? "pidfile=$1; runtime=$2; helper=$3; socket=$4; shift 4; " +
       "socket_dir=${socket%/*}; umask 077; mkdir -- \"$socket_dir\"; " +
       "relay=; provider=; watcher=; cleanup(){ test -n \"$watcher\" && kill \"$watcher\" 2>/dev/null || true; test -n \"$provider\" && kill \"$provider\" 2>/dev/null || true; test -n \"$relay\" && kill \"$relay\" 2>/dev/null || true; rm -f -- \"$socket\" \"$socket_dir/token\" \"$socket_dir/mcp.json\"; rmdir -- \"$socket_dir\" 2>/dev/null || true; }; trap cleanup EXIT HUP INT TERM; " +
-      "\"$runtime\" \"$helper\" serve \"$socket\" <&3 >&4 2>/dev/null & relay=$!; " +
+      "\"$runtime\" \"$helper\" serve \"$socket\" <&3 >&4 2>/dev/null & relay=$!; exec 3<&- 4>&-; " +
       "ready=0; i=0; while test $i -lt 200; do if test -S \"$socket\" && test -f \"$socket_dir/token\" && test -f \"$socket_dir/mcp.json\"; then ready=1; break; fi; kill -0 \"$relay\" 2>/dev/null || break; i=$((i+1)); sleep .05; done; test $ready -eq 1 || exit 125; " +
       "if command -v setsid >/dev/null 2>&1; then setsid sh -c 'echo $$ > \"$0\"; exec \"$@\"' \"$pidfile\" \"$@\" & provider=$!; else \"$@\" & provider=$!; fi; " +
       "(while kill -0 \"$provider\" 2>/dev/null && kill -0 \"$relay\" 2>/dev/null; do sleep .1; done; kill -0 \"$relay\" 2>/dev/null || kill \"$provider\" 2>/dev/null || true) & watcher=$!; " +

@@ -101,8 +101,11 @@ export function attachWslAgentControlBroker(
 ): () => void {
   const connections = new Map<string, { input?: PassThrough; closed: boolean }>();
   let pending = "";
+  let disposed = false;
   const send = (message: Record<string, unknown>) => {
-    if (!output.destroyed) output.write(`${JSON.stringify(message)}\n`);
+    if (!disposed && !output.destroyed && !("writableEnded" in output && output.writableEnded)) {
+      output.write(`${JSON.stringify(message)}\n`);
+    }
   };
   const close = (id: string, exit = 1, message?: string) => {
     const connection = connections.get(id);
@@ -179,13 +182,16 @@ export function attachWslAgentControlBroker(
     }
   };
   const dispose = () => {
+    if (disposed) return;
+    disposed = true;
     input.off("data", onData);
     for (const id of [...connections.keys()]) close(id, 1);
-    output.end();
+    if (!output.destroyed && !("writableEnded" in output && output.writableEnded)) output.end();
   };
   input.on("data", onData);
   input.once("error", dispose);
   input.once("end", dispose);
+  output.once("error", dispose);
   send({
     type: "bootstrap",
     token: Buffer.from(config.token).toString("base64"),

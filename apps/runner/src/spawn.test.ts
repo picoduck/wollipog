@@ -1087,6 +1087,8 @@ test("Direct WSL bridge binds broker-provisioned private files and launches only
   assert.ok(args.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"));
   assert.ok(args.includes("/tmp/wlp-test/control.sock"));
   assert.ok(args.includes("/usr/bin/bwrap"));
+  assert.match(args.join(" "), /relay=\$!; exec 3<&- 4>&-/u,
+    "only the relay inherits the dedicated broker pipes");
   assert.equal(args.join(" ").includes(bridge.token), false);
   assert.equal(args.join(" ").includes("wsl.exe"), false, "provider argv never receives a Windows launcher");
 });
