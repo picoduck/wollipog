@@ -1052,15 +1052,12 @@ test("POSIX kill completion settles when close was already observed", {
   assert.deepEqual(signals, [], "an already-closed PID is not safe to signal after possible reuse");
 });
 
-test("bubblewrap remains the in-distro executable for an isolated WSL launch", () => {
-  const isolated = buildBwrapArgs(
-    { command: "/usr/bin/agent", args: ["--prompt", "two words"], cwd: "/home/me/repo" },
-    { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny" },
-  );
-  const args = buildWslArgs("Ubuntu", "/home/me/repo", "/tmp/x.pgid", {
-    command: "/usr/bin/bwrap", args: isolated, cwd: "/home/me/repo", context: { kind: "wsl", distro: "Ubuntu" },
-  });
-  assert.ok(args.includes("/usr/bin/bwrap"));
-  assert.ok(args.includes("--unshare-net"));
-  assert.deepEqual(args.slice(-3), ["/usr/bin/agent", "--prompt", "two words"]); // original argv boundaries survive
+test("spawnAgent rejects a synthetic WSL bwrap boundary before process construction", () => {
+  assert.throws(() => spawnAgent({
+    command: "/usr/bin/agent",
+    args: ["--prompt", "two words"],
+    cwd: "/home/me/alias",
+    context: { kind: "wsl", distro: "Ubuntu" },
+    isolation: { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny" },
+  }), /cannot hold target-local no-follow path handles/);
 });

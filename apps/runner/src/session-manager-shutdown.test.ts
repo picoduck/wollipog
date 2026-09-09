@@ -60,7 +60,7 @@ test("provider-home ownership is released only after shutdown process trees are 
   restarted.releaseAll();
 });
 
-test("subscription probes resolve runner isolation before acquiring provider-HOME ownership", async (t) => {
+test("WSL metadata helpers reject bwrap before target resolution or provider-HOME ownership", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-subscription-probe-isolation-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const manager = new SessionManager(
@@ -72,38 +72,30 @@ test("subscription probes resolve runner isolation before acquiring provider-HOM
     undefined,
     root,
   );
-  const isolation = { backend: "bwrap" as const, command: "bwrap", args: [], network: "deny" as const };
-  let resolvedState: unknown;
-  let leaseRequest: unknown;
-  (manager as unknown as { resolveIsolation: (...args: unknown[]) => Promise<typeof isolation> }).resolveIsolation =
-    async (...args: unknown[]) => {
-      resolvedState = args[3];
-      return isolation;
-    };
+  const policy = { mode: "bwrap" as const, network: "deny" as const };
+  let resolutions = 0;
+  let leaseRequests = 0;
+  let removals = 0;
+  (manager as unknown as { executionIsolation: typeof policy }).executionIsolation = policy;
+  (manager as unknown as { resolveIsolation: (...args: unknown[]) => Promise<never> }).resolveIsolation =
+    async () => { resolutions++; throw new Error("must not resolve"); };
+  (manager as unknown as { removeIsolationState: (...args: unknown[]) => Promise<void> }).removeIsolationState =
+    async () => { removals++; };
   (manager as unknown as { providerHomeLeases: { acquire(request: unknown): void } }).providerHomeLeases = {
-    acquire: (request) => { leaseRequest = request; },
+    acquire: () => { leaseRequests++; },
   };
   const agent: AgentDefinition = {
     id: "codex", name: "Codex", command: "codex", args: [], env: {},
     driver: "codex-app-server", context: { kind: "wsl", distro: "Ubuntu" },
   };
-  assert.deepEqual(
-    await manager.prepareSubscriptionUsageProbe(agent, { HOME: "/home/alice" }, "a".repeat(32)),
-    { cwd: "/tmp", isolation },
-  );
-  assert.deepEqual(resolvedState, {
-    driver: "codex-app-server",
-    dataDir: root,
-    env: { HOME: "/home/alice" },
-    sessionId: `subscription-usage:${"a".repeat(32)}`,
-    cwd: "/tmp",
-  });
-  assert.deepEqual(leaseRequest, {
-    driver: "codex-app-server",
-    command: "codex",
-    context: { kind: "wsl", distro: "Ubuntu" },
-    env: { HOME: "/home/alice" },
-    isolation,
+  await assert.rejects(() => manager.prepareSubscriptionUsageProbe(
+    agent, { HOME: "/home/alice" }, "a".repeat(32),
+  ), /cannot hold target-local no-follow path handles/);
+  await assert.rejects(() => manager.prepareSessionNamingExecution(
+    agent, { HOME: "/home/alice" }, "/work/alias",
+  ), /cannot hold target-local no-follow path handles/);
+  assert.deepEqual({ resolutions, leaseRequests, removals }, {
+    resolutions: 0, leaseRequests: 0, removals: 0,
   });
   manager.shutdownAll();
 });

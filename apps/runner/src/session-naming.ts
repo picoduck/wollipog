@@ -398,6 +398,7 @@ export interface SessionNamingExecutorOptions {
   rateWindowMs?: number;
   now?: () => number;
   spawn?: (options: SpawnAgentOptions) => AgentProcess;
+  preflight?: (agent: AgentDefinition) => void | Promise<void>;
   prepareDirectory?: (agent: AgentDefinition) => Promise<NeutralDirectory>;
   authorize?: (
     agent: AgentDefinition,
@@ -424,6 +425,7 @@ export class SessionNamingExecutor {
   private readonly rateWindowMs: number;
   private readonly now: () => number;
   private readonly spawn: (options: SpawnAgentOptions) => AgentProcess;
+  private readonly preflight?: SessionNamingExecutorOptions["preflight"];
   private readonly prepareDirectory: (agent: AgentDefinition) => Promise<NeutralDirectory>;
   private readonly authorize?: SessionNamingExecutorOptions["authorize"];
   private readonly generateOverride?: SessionNamingExecutorOptions["generate"];
@@ -434,6 +436,7 @@ export class SessionNamingExecutor {
     this.rateWindowMs = Math.max(1, Math.floor(options.rateWindowMs ?? DEFAULT_RATE_WINDOW_MS));
     this.now = options.now ?? Date.now;
     this.spawn = options.spawn ?? spawnAgent;
+    this.preflight = options.preflight;
     this.prepareDirectory = options.prepareDirectory ?? prepareNeutralDirectory;
     this.authorize = options.authorize;
     this.generateOverride = options.generate;
@@ -482,6 +485,13 @@ export class SessionNamingExecutor {
     }
     const account = sessionNamingAccountForAgent(agent);
     if (!account) return fail("account_unavailable");
+    try {
+      await this.preflight?.(agent);
+    } catch (error) {
+      return error instanceof SessionNamingFailure
+        ? fail(error.code, error.phase)
+        : fail("provider_failed", "isolation");
+    }
     const now = this.now();
     this.recent = this.recent.filter((startedAt) => now - startedAt < this.rateWindowMs);
     if (this.active >= this.maxConcurrent || this.recent.length >= this.rateLimit) return fail("rate_limited");

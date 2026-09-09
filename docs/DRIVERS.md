@@ -76,7 +76,8 @@ export interface Driver {
 
 Runner-owned isolation is resolved once per session before driver construction. Provider mode keeps
 the driver mappings below unchanged. Bubblewrap, macOS Seatbelt, and Windows Job Object modes pass the same resolved boundary to Claude,
-Codex exec/app-server, ACP, provider fork helpers, and ACP-created command terminals. Bubblewrap makes `/`
+Codex exec/app-server, ACP, provider fork helpers, and ACP-created command terminals. On native Linux,
+Bubblewrap makes `/`
 read-only, overlays only the session/terminal root writable, supplies an ephemeral `/tmp`, and may
 unshare networking. ACP filesystem calls remain independently constrained to the canonical session
 root and explicitly activated additional-directory grants. A strict resolution failure is terminal;
@@ -88,10 +89,10 @@ restart cannot overlap a fork helper. The Windows Job
 launcher provides kill-on-close descendant containment only; it never claims filesystem or network
 restriction, and `network: "deny"` is rejected for that mode.
 
-The bwrap profile maps Claude's `projects` and Codex's `sessions` stores to hashed per-manager-session
-roots under runner data. In WSL, those roots live below
-`~/.agent-manager/runner-instances/<attested-owner>/`, so runners with the same distro user cannot
-reconcile or remove each other's state. Provider forks copy the completed source store into the child partition before
+The native-Linux bwrap profile maps Claude's `projects` and Codex's `sessions` stores to hashed
+per-manager-session roots under runner data. Historical WSL partitions below
+`~/.agent-manager/runner-instances/<attested-owner>/` remain attributable for cleanup and explicit
+offline recovery, but are not used to launch new provider processes. Provider forks copy the completed source store into the child partition before
 publishing the child, after polling for a non-empty size-stable provider-specific fork artifact; a
 missing or continuously growing artifact fails the fork. Failed forks and session deletion remove only
 their exact partition. Functional
@@ -123,9 +124,10 @@ removes access to cloud model APIs. New checkpoint refs use
 cleanup journals retain their exact unscoped layout until explicit offline adoption. Native provider
 mode remains the broadest compatibility default but takes an exclusive whole-HOME lease shared by
 Claude, Codex, ACP, Seatbelt, Windows Job, and Agent TUI launches. Direct WSL provider mode fails
-closed; choose bwrap or a dedicated distro/account.
+closed, and WSL bwrap also fails closed because the Windows relay cannot hold target-local no-follow
+directory handles through bwrap exec. Use a supported native, container, or cloud execution target.
 Standalone Agent TUI processes are not bwrapped, so Agent TUI attachment from a WSL session requires
-a dedicated distro/account even when the session's structured provider launch uses bwrap.
+a separately controlled provider-home boundary.
 
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
 owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never
@@ -134,7 +136,7 @@ older runner. To retire those files, stop every pre-attestation runner for the O
 redacted `--state-doctor inventory`, then use the explicit quarantine action. Adoption conditionally
 copies legacy checkpoint or WSL provider state and preserves all source bytes; divergent targets fail
 closed. Provider-home bytes remain operator-owned even though native mutable launches are cross-process
-leased. Use bwrap or separate WSL distros/accounts for concurrent owners.
+leased. Use a supported native, container, or cloud execution target for concurrent owners.
 
 `makeDriver(spec, cb): Driver` (`drivers/factory.ts`) switches on `spec.driver`
 (`"acp" | "claude-code" | "codex"`). `AcpDriver` (`drivers/acp-driver.ts`) constructs the existing

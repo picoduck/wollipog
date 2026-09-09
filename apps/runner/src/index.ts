@@ -472,6 +472,7 @@ const sessionCommandReceipts = new SessionCommandReceiptStore(
 );
 sessionCommandReceipts.prune();
 const sessionNaming = new SessionNamingExecutor({
+  preflight: (agent) => sessions.preflightSessionNamingExecution(agent),
   authorize: (agent, env, cwd) => sessions.prepareSessionNamingExecution(agent, env, cwd),
 });
 // The resolver closes over `metadata`, so it always sees the LIVE agent list (discovery replaces

@@ -64,7 +64,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: node --import tsx --test --test-name-pattern="Windows uses junction-shaped" apps/runner/src/skills.test.ts
 
-      - name: Verify WSL Orchestrator Stays Fail-Closed
+      - name: Verify WSL Boundaries Stay Fail-Closed
         if: matrix.os == 'windows-2025'
         shell: pwsh
         run: |
@@ -82,6 +82,18 @@ jobs:
             if ($listing -notmatch 'Ubuntu-24\.04\s+Stopped\s+2') { throw "Ubuntu-24.04 is not a stopped WSL2 distro: $listing" }
             $uid = ((wsl.exe -d Ubuntu-24.04 --exec id -u | Out-String) -replace "`0", "").Trim()
             if ($LASTEXITCODE -ne 0 -or $uid -eq "0" -or $uid -notmatch '^[0-9]+$') { throw "WSL default user is not non-root: $uid" }
+
+            $env:WOLLIPOG_WSL_FAIL_CLOSED_DISTRO = "Ubuntu-24.04"
+            $savedBoundaryPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $wslBoundaryOutput = node --import tsx --test --test-reporter=tap apps/runner/src/wsl-bwrap-fail-closed.integration.test.ts 2>&1 | Out-String
+            $wslBoundaryExit = $LASTEXITCODE
+            $ErrorActionPreference = $savedBoundaryPreference
+            Write-Host $wslBoundaryOutput
+            if ($wslBoundaryExit -ne 0) { throw "WSL Direct bwrap fail-closed integration test failed" }
+            if ($wslBoundaryOutput -notmatch '(?m)^# pass 1\r?$' -or $wslBoundaryOutput -notmatch '(?m)^# skipped 0\r?$') {
+              throw "WSL Direct bwrap integration test did not execute exactly once"
+            }
 
             $cmdPath = ((wsl.exe -d Ubuntu-24.04 --exec sh -c 'command -v cmd.exe' | Out-String) -replace "`0", "").Trim()
             if ($LASTEXITCODE -ne 0 -or -not $cmdPath.StartsWith('/')) { throw "WSL Windows interop probe could not resolve cmd.exe: $cmdPath" }

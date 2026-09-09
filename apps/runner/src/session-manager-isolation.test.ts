@@ -136,7 +136,7 @@ test("strict isolation resolution failure prevents driver construction", async (
     const manager = new SessionManager(
       (message) => messages.push(message), () => {}, store, "runner", undefined,
       (() => { constructed = true; throw new Error("must not construct"); }) as never,
-      undefined, 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      join(root, ".runner-data"), 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
       { mode: "bwrap", network: "deny" }, async () => { throw new Error("bwrap missing"); },
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -151,7 +151,86 @@ test("strict isolation resolution failure prevents driver construction", async (
   }
 });
 
-test("container sessions bypass host isolation and pass the checked container adapter to the driver", async () => {
+test("WSL bwrap rejection precedes preparation, state migration, root resolution, and driver construction", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-isolation-fail-"));
+  try {
+    const store = new SessionStore(root);
+    store.create({
+      ...meta(),
+      context: { kind: "wsl", distro: "Ubuntu" },
+      repoPath: "/work/alias",
+      providerStateVersion: undefined,
+    });
+    let prepared = 0;
+    let migrated = 0;
+    let resolved = 0;
+    let constructed = 0;
+    const messages: unknown[] = [];
+    const manager = new SessionManager(
+      (message) => messages.push(message), () => {}, store, "runner", undefined,
+      (() => { constructed++; throw new Error("must not construct"); }) as never,
+      undefined, 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "deny" },
+      async () => { resolved++; throw new Error("must not resolve paths"); },
+      undefined, undefined,
+      async () => { migrated++; },
+    );
+    // Test-only assignment proves the policy gate precedes launch discovery as well as filesystem
+    // work. Production supplies this callback through the constructor.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (manager as any).prepareLaunch = async () => { prepared++; };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), false);
+    assert.deepEqual({ prepared, migrated, resolved, constructed }, {
+      prepared: 0, migrated: 0, resolved: 0, constructed: 0,
+    });
+    assert.match(JSON.stringify(messages), /cannot hold target-local no-follow path handles/);
+    assert.equal(store.readMeta("s1")?.providerStateVersion, undefined);
+
+    const forked = await manager.forkConversation("s1", "child", 1, "child");
+    assert.equal(forked.ok, false);
+    assert.match(forked.error ?? "", /cannot hold target-local no-follow path handles/);
+    assert.equal(store.has("child"), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a new WSL bwrap session fails before its durable row or worktree is materialized", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-isolation-create-fail-"));
+  try {
+    const store = new SessionStore(root);
+    let worktrees = 0;
+    let constructed = 0;
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined,
+      (() => { constructed++; throw new Error("must not construct"); }) as never,
+      join(root, ".runner-data"), 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "deny" },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (manager as any).createSessionWorktree = async () => {
+      worktrees++;
+      throw new Error("must not materialize a target-local worktree");
+    };
+
+    assert.equal(await manager.start({
+      sessionId: "new-wsl", workspaceId: "repo", workspacePath: "/work/alias",
+      agentId: "claude", command: "claude", args: [], env: {}, useWorktree: true,
+      driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu" },
+    }), false);
+    assert.deepEqual({ worktrees, constructed }, { worktrees: 0, constructed: 0 });
+    assert.equal(store.has("new-wsl"), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a WSL restart with a persisted container target bypasses host isolation", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-container-"));
   try {
     const store = new SessionStore(root);
@@ -161,15 +240,19 @@ test("container sessions bypass host isolation and pass the checked container ad
       boundaries: { filesystem: "container" as const, network: "deny" as const, secrets: "none" as const, billing: "none" as const },
       environment: { id: "tools", revision: 1, image: `x@sha256:${"a".repeat(64)}`, setupCheckDigest: "b".repeat(64) },
     };
-    store.create({ ...meta(), worktreePath: "/repo-worktree", executionTarget: target });
+    store.create({
+      ...meta(), context: { kind: "wsl", distro: "Ubuntu" },
+      repoPath: "/repo-worktree", worktreePath: "/repo-worktree", executionTarget: target,
+    });
     let captured: DriverOptions | undefined;
+    const messages: unknown[] = [];
     const adapter = {
       backend: "container" as const, command: "docker", args: [], image: target.environment.image,
       network: "deny" as const, templateId: "tools", runnerKey: "runnerkey", containerName: "wollipog-s1", hostAgentCommand: "claude", hostAgentArgs: [],
       agentCommand: "claude", agentArgs: [],
     };
     const manager = new SessionManager(
-      () => {}, () => {}, store, "runner", undefined,
+      (message) => messages.push(message), () => {}, store, "runner", undefined,
       ((_driver: unknown, opts: DriverOptions) => {
         captured = opts;
         return {
@@ -184,9 +267,14 @@ test("container sessions bypass host isolation and pass the checked container ad
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = manager as any;
     internals.containerTargets = { isolation: () => adapter };
-    assert.equal(await internals.acquireAdmission("s1"), true);
-    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    assert.equal(await manager.start({
+      sessionId: "s1", workspaceId: "repo", workspacePath: "/repo-worktree",
+      agentId: "claude", command: "claude", args: [], env: {}, useWorktree: false,
+      driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu" },
+      // A restart may omit the immutable target; the durable row remains authoritative.
+    }), true);
     assert.deepEqual(captured?.isolation, adapter);
+    assert.equal(JSON.stringify(messages).includes("target-local no-follow"), false);
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

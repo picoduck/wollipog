@@ -462,7 +462,7 @@ test("new-format artifacts make the legacy single-marker reader fail closed", (t
   registry.releaseAll();
 });
 
-test("provider-home leases fail closed for WSL direct mode and bypass redirected bwrap homes", (t) => {
+test("provider-home leases fail closed for both WSL Direct isolation modes", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-wsl-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   mkdirSync(join(home, "work"));
@@ -470,11 +470,20 @@ test("provider-home leases fail closed for WSL direct mode and bypass redirected
   assert.throws(() => registry.acquire({
     ...request(home),
     context: { kind: "wsl", distro: "Ubuntu" },
-  }), /cannot be safely owner-leased.*bwrap/);
-  registry.acquire({
+  }), /cannot be safely owner-leased.*native, container, or cloud/);
+  assert.throws(() => registry.acquire({
     ...request(home),
     context: { kind: "wsl", distro: "Ubuntu" },
     isolation: { backend: "bwrap", command: "bwrap", args: [], network: "inherit" },
+  }), /target-local no-follow path handles/);
+  registry.acquire({
+    ...request(home),
+    context: { kind: "wsl", distro: "Ubuntu" },
+    isolation: {
+      backend: "container", command: "docker", args: [], image: "image@sha256:test",
+      network: "deny", templateId: "test", runnerKey: "runner", containerName: "test",
+      hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
+    },
   });
 });
 

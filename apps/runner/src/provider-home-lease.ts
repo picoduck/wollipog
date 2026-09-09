@@ -17,6 +17,7 @@ import {
 import { homedir, hostname as systemHostname } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AgentContext, AgentDriverKind } from "@wollipog/protocol";
+import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import type { SpawnIsolation } from "./spawn.js";
 
 const OWNER_HASH = /^[a-f0-9]{64}$/u;
@@ -256,11 +257,14 @@ export class ProviderHomeLeaseRegistry {
   }
 
   acquire(request: ProviderHomeLeaseRequest): void {
+    if (request.context.kind === "wsl" && request.isolation?.backend === "bwrap") {
+      throw new Error(WSL_BWRAP_UNAVAILABLE_ERROR);
+    }
     if (!providerLaunchNeedsSharedHomeLease(request.isolation)) return;
     const provider = providerKey(request.driver, request.command);
     if (request.context.kind === "wsl") {
       throw new Error(
-        `shared ${provider} provider home in WSL cannot be safely owner-leased; use bwrap for structured provider launches or use a dedicated distro/OS account`,
+        `shared ${provider} provider home in WSL cannot be safely owner-leased; use a supported native, container, or cloud execution target`,
       );
     }
     const requestedHome = request.env.HOME || homedir();

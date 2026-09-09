@@ -86,6 +86,7 @@ import {
   resolveExecutionIsolation,
   verifyExecutionIsolationForkState,
 } from "./execution-isolation.js";
+import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
 import type { SpawnIsolation } from "./spawn.js";
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
@@ -1422,6 +1423,7 @@ export class SessionManager {
     sourceId: string,
   ): Promise<SubscriptionUsageProbeAuthorization> {
     const context = agent.context ?? { kind: "native" as const };
+    assertExecutionIsolationContextSupported(this.executionIsolation, context);
     const cwd = context.kind === "wsl"
       ? "/tmp"
       : join(this.stateDir, "subscription-usage-probes", sourceId);
@@ -1449,12 +1451,18 @@ export class SessionManager {
   /** Put metadata-only naming helpers behind the same runner-owned process and provider-HOME
    * boundaries as ordinary sessions. Seatbelt's shared provider store also uses its existing
    * cross-process exclusive admission group; overload fails closed instead of queueing a title. */
+  preflightSessionNamingExecution(agent: AgentDefinition): void {
+    const context = agent.context ?? { kind: "native" as const };
+    assertExecutionIsolationContextSupported(this.executionIsolation, context);
+  }
+
   async prepareSessionNamingExecution(
     agent: AgentDefinition,
     env: Record<string, string>,
     cwd: string,
   ): Promise<SessionNamingExecutionAuthorization> {
     const context = agent.context ?? { kind: "native" as const };
+    this.preflightSessionNamingExecution(agent);
     const driver = agent.driver ?? "acp";
     const taskId = `session-naming:${randomUUID()}`;
     const provider = driver === "claude-code"
@@ -2371,6 +2379,19 @@ export class SessionManager {
       return false;
     }
     const context = spec.context ?? { kind: "native" as const };
+    try {
+      this.assertHostIsolationContextSupported({
+        context,
+        executionTarget: spec.executionTarget ?? this.store.readMeta(spec.sessionId)?.executionTarget,
+      });
+    } catch (error) {
+      const message = `execution isolation unavailable: ${errText(error)}`;
+      // A restart rejection must not replace or relabel a still-live provider. New sessions have
+      // no durable row to mutate; their command receipt carries the same precise failure instead.
+      if (this.store.has(spec.sessionId)) this.emitEvent(spec.sessionId, { kind: "error", message });
+      durable?.failed(message, "INVALID_COMMAND");
+      return false;
+    }
     if (this.forking.has(spec.sessionId)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "conversation fork is in progress — wait before restarting" });
       this.emitStatus(spec.sessionId, "idle");
@@ -3185,6 +3206,7 @@ export class SessionManager {
     launchGeneration?: number,
   ): Promise<void> {
     if (this.executionIsolation.mode !== "bwrap") return;
+    this.assertHostIsolationContextSupported(meta);
     const expectedVersion = meta.context.kind === "wsl" ? 3 : 2;
     if (meta.providerStateVersion === expectedVersion) return;
     // Native v2 already uses the session-owned provider HOME layout. Never stamp it with the WSL
@@ -3258,6 +3280,9 @@ export class SessionManager {
     let isolation: SpawnIsolation | undefined;
     let launchPreparation: void | SessionLaunchPreparation;
     try {
+      // This must precede discovery, authentication, provider-state migration, and worktree-boundary
+      // preparation. Unsupported contexts fail without touching target-local paths or providers.
+      this.assertHostIsolationContextSupported(meta);
       const priorCapabilities = meta.capabilities;
       const priorSessionSlashCommands = meta.sessionSlashCommands;
       launchPreparation = await this.prepareLaunch?.(meta);
@@ -3651,6 +3676,7 @@ export class SessionManager {
     if (meta.executionTarget?.adapter === "cloud") {
       return this.prepareCloudIsolation(meta, cwd, launchGeneration);
     }
+    this.assertHostIsolationContextSupported(meta);
     return this.requestedWorktreeIsolation(meta).then((additionalWritableRoots) => this.resolveIsolation(this.executionIsolation, meta.context, {}, {
       driver: meta.driver,
       dataDir: this.stateDir,
@@ -3660,6 +3686,13 @@ export class SessionManager {
       ...(additionalWritableRoots.length ? { additionalWritableRoots } : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
+  }
+
+  private assertHostIsolationContextSupported(
+    meta: Pick<SessionMeta, "context" | "executionTarget">,
+  ): void {
+    if (meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return;
+    assertExecutionIsolationContextSupported(this.executionIsolation, meta.context);
   }
 
   private async requestedWorktreeIsolation(meta: SessionMeta): Promise<string[]> {
@@ -6919,6 +6952,11 @@ export class SessionManager {
   ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]>; handoffDraft?: ConversationHandoffDraft }> {
     const source = this.store.readMeta(sourceSessionId);
     if (!source) return { ok: false, error: "source session not found on this box" };
+    try {
+      this.assertHostIsolationContextSupported(source);
+    } catch (error) {
+      return { ok: false, error: `execution isolation unavailable: ${errText(error)}` };
+    }
     const supportsFork = providerSupportsConversationFork(source.driver, source.capabilities);
     if (!supportsFork && !handoff) return { ok: false, error: "this provider session does not support conversation fork" };
     if (handoff) {

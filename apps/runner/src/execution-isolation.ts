@@ -5,6 +5,7 @@ import { cp, mkdir, opendir, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import type { RunnerExecutionIsolation } from "./config.js";
+import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
 import { runContextCommand } from "./context-command.js";
 import { resolveNative, type ResolvedBinary } from "./discovery/resolve.js";
 import type { SpawnIsolation } from "./spawn.js";
@@ -254,28 +255,9 @@ export async function resolveExecutionIsolation(
 ): Promise<SpawnIsolation | undefined> {
   const runtime = { ...defaultDeps, ...deps };
   if (policy.mode === "provider") return undefined;
+  assertExecutionIsolationContextSupported(policy, context);
   if (context.kind === "wsl") {
-    if (policy.mode !== "bwrap") {
-      throw new Error(`${policy.mode} isolation is native-host only; WSL sessions require bwrap`);
-    }
-    const resolved = await runtime.resolveWsl(context);
-    if (!resolved) throw new Error(`bubblewrap is required inside WSL distro ${context.distro} by runner policy`);
-    if (resolved.uid === 0) throw new Error(`bubblewrap isolation refuses root execution inside WSL distro ${context.distro}`);
-    const mapping = state && statePath(state.driver);
-    const writableBinds = mapping ? (() => {
-      const targetHome = absoluteHome(state?.env.HOME ?? resolved.home, "HOME inside WSL");
-      const location = providerStateLocation(wslRunnerStateBase(resolved.home, state.ownerHash), state.driver, state.sessionId)!;
-      return [{
-        source: location.leaf,
-        target: `${targetHome}/${mapping.relative}`,
-      }];
-    })() : [];
-    for (const root of state?.additionalWritableRoots ?? []) writableBinds.push({ source: root, target: root });
-    if (writableBinds.length) await runtime.mkdirWsl(context, writableBinds.flatMap((bind) => [bind.source, bind.target]));
-    return {
-      backend: "bwrap", command: resolved.command, args: [], network: policy.network,
-      ...(writableBinds.length ? { writableBinds } : {}),
-    };
+    throw new Error(`${policy.mode} isolation is native-host only; WSL Direct execution is unavailable`);
   }
   if (policy.mode === "seatbelt") {
     if (runtime.platform !== "darwin") throw new Error(`Seatbelt isolation requires native macOS; native ${runtime.platform} sessions fail closed`);
@@ -322,7 +304,7 @@ export async function resolveExecutionIsolation(
     };
   }
   if (runtime.platform !== "linux") {
-    throw new Error(`bubblewrap isolation requires Linux or WSL; native ${runtime.platform} sessions fail closed`);
+    throw new Error(`bubblewrap isolation requires native Linux; native ${runtime.platform} sessions fail closed`);
   }
   if (runtime.uid() === 0) throw new Error("bubblewrap isolation refuses a root runner");
   const binary = await runtime.resolveNative("bwrap");

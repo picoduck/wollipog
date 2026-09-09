@@ -1,6 +1,6 @@
 # ADR 0003: Runner-owned execution isolation
 
-- Status: Accepted for Linux/WSL, native macOS, and native Windows
+- Status: Accepted for native Linux, native macOS, and native Windows; WSL Direct fails closed
 - Date: 2026-07-12
 - Decision owners: Wollipog maintainers
 
@@ -17,11 +17,11 @@ adapter process, so wrapping only the adapter would leave a policy gap.
 honestly as provider-owned behavior and does not claim a uniform OS boundary. Native mutable provider
 launches take an owner-attested process-lifetime lease for the whole canonical effective `HOME`, shared
 by Claude, Codex, unknown ACP adapters, Seatbelt, Windows Job, and standalone Agent TUI processes.
-Direct WSL provider mode fails closed; bwrap or a dedicated distro/account is required. Container and
-cloud provider homes are independent.
+Direct WSL provider mode and WSL bwrap mode fail closed. Container and cloud provider homes are
+independent.
 
-`mode: "bwrap"` is an opt-in runner-owned profile for native Linux and WSL. Before constructing a
-driver, the runner resolves `bwrap` in the target process namespace. It then launches every provider
+`mode: "bwrap"` is an opt-in runner-owned profile for native Linux. Before constructing a driver,
+the runner resolves `bwrap` in the native process namespace. It then launches every provider
 session-serving process and provider helper with:
 
 - a read-only bind of `/`;
@@ -32,14 +32,21 @@ session-serving process and provider helper with:
 - an optional unshared network namespace for `network: "deny"`.
 
 Argument boundaries remain argv-native; no workspace, command, or provider argument is interpolated
-into shell text. WSL resolution and execution both happen inside the selected distro. The profile is
+into shell text. The profile is
 forwarded through Claude one-shot/persistent/fork processes, Codex exec/app-server, ACP itself, and
 ACP terminal creation. ACP filesystem operations retain their separate canonical-root and explicit
 additional-directory-grant enforcement.
 
-Strict mode never falls back. A missing binary, native Windows/macOS target, or launch failure ends
-the session before an unisolated driver is constructed. Root callers are refused on native Linux and
-inside WSL because a privileged process could remount or otherwise escape a write-containment claim.
+Strict mode never falls back. A missing binary, native Windows/macOS/WSL target, or launch failure
+ends the session before an unisolated driver is constructed. Root callers are refused on native Linux
+because a privileged process could remount or otherwise escape a write-containment claim.
+
+WSL bwrap is unavailable until a target-local launcher can resolve every writable root without
+following links, hold directory descriptors through bwrap exec, and pass the same resolved cwd to
+the outer WSL launch and every provider protocol request. Canonicalizing a pathname before launch is
+not sufficient: bwrap later reopens the name, leaving a same-UID replacement race. The runner rejects
+this context before provider discovery, provider-state migration, writable-root preparation, or
+driver construction.
 
 `mode: "seatbelt"` is an explicit native-macOS profile. The runner resolves `/usr/bin/sandbox-exec`
 and supplies a parameter-free `(deny default)` profile that permits process execution and system/file
@@ -123,13 +130,14 @@ therefore be exceeded temporarily by protected state. External-session discovery
 scan the user's real CLI store, so manager-owned isolated transcripts do not appear as external/import
 candidates.
 
+Historical WSL bwrap state is retained for recovery even though new WSL bwrap launches are disabled.
 Because the legacy WSL root is shared by runners using the same distro user, startup reconciliation writes
 a hashed runner-ownership marker only onto partitions referenced by this runner's durable store. Age/size
 GC requires that exact marker; peer-owned and unclaimed WSL partitions are never candidates. Each WSL
 context fails independently, so one offline distro cannot block native or later-distro cleanup. The global
-The WSL legacy leaf is not automatically retired because no one runner can prove every peer migrated.
+WSL legacy leaf is not automatically retired because no one runner can prove every peer migrated.
 
-Persisted sessions without a provider-state layout version predate partitioning. Before such a session
+Persisted native sessions without a provider-state layout version predate partitioning. Before such a session
 launches or forks under bwrap, the runner copies the legacy provider-wide store into that session's hashed
 partition under the durable per-session ownership lock and records version 2. The copy double-checks the
 version after lock acquisition and refreshes the lock while it runs, so concurrent runners cannot remove
@@ -146,7 +154,7 @@ selective retirement belongs to reconciliation once every live provider id can b
 
 Credentials, configuration, plugin state, and unknown ACP adapter layouts remain read-only. OAuth
 refresh or an adapter that requires a different writable home path may fail with `EROFS`; the runner
-does not broaden home write access by guessing. Provider mode remains the compatibility option.
+does not broaden home write access by guessing. Provider mode remains the native compatibility option.
 
 The runner creates an empty real-home target directory when a provider has never created its transcript
 path; bubblewrap needs that mountpoint under the read-only parent. An explicit absolute agent `HOME`
@@ -163,6 +171,9 @@ are intentionally outside this profile. They keep their existing authenticated u
 ## Alternatives and follow-up
 
 - Provider-only sandboxing remains available but is not represented as uniform enforcement.
+- WSL Direct requires a separately shipped target-local launcher that holds no-follow directory
+  descriptors through exec and supplies one authoritative cwd to bwrap and every provider protocol.
+  Until that contract exists, both provider and bwrap modes remain unavailable for WSL Direct.
 - Containers would add image/runtime lifecycle and are deferred to the execution-target roadmap.
 - Apple entitlement-based App Sandbox cannot be attached to arbitrary installed CLI executables;
   Seatbelt is kept explicit and fail-closed instead of being selected automatically.

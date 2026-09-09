@@ -248,6 +248,42 @@ test("executor returns only a bounded title and secret-free provider boundary", 
   assert.equal(boundaryCleaned, 1);
 });
 
+test("executor preflight rejects before preparing a target-local naming directory", async () => {
+  let prepared = 0;
+  let generated = 0;
+  let rejectPreflight = true;
+  const executor = new SessionNamingExecutor({
+    rateLimit: 1,
+    preflight: () => {
+      if (rejectPreflight) throw new Error("execution context unavailable");
+    },
+    prepareDirectory: async () => {
+      prepared++;
+      return { cwd: "/must-not-exist", cleanup: async () => {} };
+    },
+    generate: async () => { generated++; return "Valid Native Title"; },
+  });
+  assert.deepEqual(await executor.execute(request("preflight"), claudeAgent(), {}), {
+    type: "generate_session_title_result",
+    requestId: "preflight",
+    ok: false,
+    code: "provider_failed",
+    phase: "isolation",
+  });
+  assert.deepEqual({ prepared, generated }, { prepared: 0, generated: 0 });
+
+  rejectPreflight = false;
+  assert.deepEqual(await executor.execute(request("native-after-rejection"), claudeAgent(), {}), {
+    type: "generate_session_title_result",
+    requestId: "native-after-rejection",
+    ok: true,
+    title: "Valid Native Title",
+    provider: "claude",
+    billingSource: "subscription",
+  });
+  assert.deepEqual({ prepared, generated }, { prepared: 1, generated: 1 });
+});
+
 test("executor fails closed under concurrency/rate pressure and sanitizes provider errors", async () => {
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => { release = resolve; });

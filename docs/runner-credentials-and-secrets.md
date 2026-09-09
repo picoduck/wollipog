@@ -185,8 +185,10 @@ partitions because their production constructors all receive the claimed data ro
 installation, discovery, and login bytes remain operator-owned files. Mutable native provider,
 Seatbelt, Windows Job, ACP, and Agent TUI launches are serialized across control-plane owners by a
 process-lifetime lease beneath the canonical effective `HOME`. Direct WSL provider mode fails closed
-because its external lock cannot safely prove Windows process liveness; use bwrap or a dedicated
-distro/OS account. Container and cloud provider homes are independent.
+because its external lock cannot safely prove Windows process liveness. WSL bwrap mode also fails
+closed because the Windows relay cannot hold target-local no-follow directory handles through bwrap
+exec. Use a supported native, container, or cloud execution target. Container and cloud provider
+homes are independent.
 
 The runner scrubs obsolete Conductor configs only inside its owned
 `<dataDir>/conductor/runner-instances/<owner-hash>` directory.

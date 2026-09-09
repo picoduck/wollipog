@@ -17,6 +17,7 @@ import { posix, win32 } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { containerLabelArgs } from "./container-identity.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
+import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-job.js";
 import { DESCENDANT_MARKER_ENV, PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { quoteWindowsCmdToken } from "./windows-cmd.js";
@@ -289,6 +290,9 @@ export function buildWslArgs(distro: string, cwd: string, pidfile: string, opts:
 }
 
 export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
+  if (opts.context?.kind === "wsl" && opts.isolation?.backend === "bwrap") {
+    throw new Error(WSL_BWRAP_UNAVAILABLE_ERROR);
+  }
   const remoteBoundary = opts.isolation?.backend === "container" || opts.isolation?.backend === "cloud";
   const scrubInheritedEnv = [...RUNNER_ONLY_ENV, ...(opts.scrubInheritedEnv ?? [])];
   let file = opts.command;

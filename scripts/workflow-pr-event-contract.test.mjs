@@ -245,7 +245,16 @@ test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provide
   const platform = readFileSync(resolve(process.cwd(), WORKFLOWS[2]), "utf8");
 
   assert.match(platform, /os: \[windows-latest, windows-2025, macos-latest\]/u);
-  assert.match(platform, /Verify WSL Orchestrator Stays Fail-Closed/u);
+  assert.match(platform, /Verify WSL Boundaries Stay Fail-Closed/u);
+  assert.match(platform, /WOLLIPOG_WSL_FAIL_CLOSED_DISTRO = "Ubuntu-24\.04"/u);
+  assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-bwrap-fail-closed\.integration\.test\.ts/u,
+    "the real WSL job must exercise the product's Direct bwrap rejection against a target-local alias");
+  assert.match(platform, /\$wslBoundaryOutput -notmatch '\(\?m\)\^# pass 1\\r\?\$'/u);
+  assert.match(platform, /\$wslBoundaryOutput -notmatch '\(\?m\)\^# skipped 0\\r\?\$'/u,
+    "the WSL boundary job must fail if its opt-in real integration test silently skips");
+  assert.match(platform,
+    /\$savedBoundaryPreference = \$ErrorActionPreference[\s\S]*\$ErrorActionPreference = "Continue"[\s\S]*\$wslBoundaryExit = \$LASTEXITCODE[\s\S]*\$ErrorActionPreference = \$savedBoundaryPreference/u,
+    "native stderr capture must not terminate PowerShell before the explicit exit and TAP checks");
   assert.match(platform, /wsl\.exe -d Ubuntu-24\.04 -- cmd\.exe \/d \/c exit 0/u,
     "the capability-sensitive outside probe must use WSL's ordinary binfmt command path");
   assert.match(platform, /WSLInterop registration outside bwrap:/u);
