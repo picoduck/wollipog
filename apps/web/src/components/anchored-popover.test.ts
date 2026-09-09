@@ -39,11 +39,37 @@ test("a taller-than-expected panel is bounded by its side rather than overflowin
   assert.ok(placement.maxHeight <= 600, "never taller than the space it was given");
 });
 
-test("a short screen still yields a usable, internally scrollable panel", () => {
-  // Neither side can hold the footprint; the larger side wins and the floor keeps it usable.
-  const placement = placePanel({ top: 80, bottom: 100, left: 10 }, { width: 390, height: 200 }, PANEL);
-  assert.equal(placement.maxHeight, 120, "the minimum height floor applies, and the panel scrolls");
-  assert.ok(placement.top !== undefined || placement.bottom !== undefined);
+test("a screen too short for either side stops anchoring rather than overflowing", () => {
+  // Below has 86px and above 66px: neither can host the panel, so it fills the viewport instead.
+  const viewport = { width: 390, height: 200 };
+  const placement = placePanel({ top: 80, bottom: 100, left: 10 }, viewport, PANEL);
+  assert.equal(placement.top, 8);
+  assert.equal(placement.bottom, undefined);
+  assert.equal(placement.maxHeight, 184);
+  assert.ok(
+    placement.top! + placement.maxHeight <= viewport.height,
+    "a fixed panel hanging off the edge has no ancestor left to scroll",
+  );
+});
+
+test("the panel never extends past the viewport, wherever the trigger sits", () => {
+  // The invariant the whole placement exists to hold, swept rather than sampled.
+  for (const height of [180, 240, 420, 700, 800, 1200]) {
+    for (let top = 0; top + 20 <= height; top += 10) {
+      const viewport = { width: 390, height };
+      const p = placePanel({ top, bottom: top + 20, left: 40 }, viewport, PANEL);
+      const where = `viewport ${height}, trigger ${top}`;
+      assert.ok(p.maxHeight >= 0, `${where}: negative height`);
+      if (p.top !== undefined) {
+        assert.ok(p.top >= 0, `${where}: placed above the top edge`);
+        assert.ok(p.top + p.maxHeight <= height, `${where}: bottom edge at ${p.top + p.maxHeight}`);
+      } else {
+        const panelTop = height - p.bottom! - p.maxHeight;
+        assert.ok(p.bottom! >= 0, `${where}: placed below the bottom edge`);
+        assert.ok(panelTop >= 0, `${where}: top edge at ${panelTop}`);
+      }
+    }
+  }
 });
 
 test("the panel is kept clear of both horizontal edges", () => {

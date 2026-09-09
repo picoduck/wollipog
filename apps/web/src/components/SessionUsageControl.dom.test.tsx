@@ -199,17 +199,29 @@ test("a free session reports $0.00 once the ledger proves the provider priced it
   await view.cleanup();
 });
 
-test("a lagging ledger never renders rows that contradict their own total", async () => {
-  const view = await mount(session({ tokensIn: 9_000, tokensOut: 1_000, costUsd: 2 }), {
+test("a lagging ledger drives nothing in the panel, not just the token rows", async () => {
+  // A previously provider-priced zero plus newer, not-yet-ledgered tokens: if any part of the
+  // panel still read from this response, the session would claim to be free.
+  const view = await mount(session({ tokensIn: 9_000, tokensOut: 1_000, costUsd: 0 }), {
     sessionId: "s1",
-    totals: amount({ inputTokens: 100, outputTokens: 10, processedTokens: 110, costUsd: 0.5, costSource: "providerReported" }),
-    byModel: [],
+    totals: amount({ inputTokens: 100, outputTokens: 10, processedTokens: 110, costUsd: 0, costSource: "providerReported" }),
+    byModel: [
+      { model: "stale-model", ...amount({ inputTokens: 100, outputTokens: 10, processedTokens: 110, costSource: "providerReported" }) },
+    ],
+    pricing: { status: "fresh", source: "litellm", fetchedAt: 1, knownModels: 1200 },
   });
+
+  assert.equal(view.button()!.textContent, "$—", "a stale priced zero must not be shown as $0.00");
   await view.open();
-  const rows = facts(view.popover()!.querySelector(".session-usage-facts"));
+  const popover = view.popover()!;
+  const rows = facts(popover.querySelector(".session-usage-facts"));
   assert.equal(rows["Input"], "9.0k");
   assert.equal(rows["Output"], "1.0k");
   assert.equal(rows["Total Processed"], "10k");
+  assert.equal(view.button()!.textContent, "$—");
+  // The rest of the rejected response is rejected too, so nothing on screen disagrees.
+  assert.equal(popover.querySelector(".session-usage-models"), null);
+  assert.doesNotMatch(popover.textContent ?? "", /stale-model|rate table|reported by the provider/);
   await view.cleanup();
 });
 

@@ -15,7 +15,7 @@ export interface AnchoredPopover<Root extends HTMLElement, Anchor extends HTMLEl
 /** Gap between the trigger and the panel, and the panel's minimum clearance from a screen edge. */
 const GAP = 6;
 const MARGIN = 8;
-/** A panel is never squeezed below this; on a very short screen it scrolls internally instead. */
+/** Below this, a side is too cramped to host the panel at all and anchoring is abandoned. */
 const MIN_HEIGHT = 120;
 
 export interface Placement {
@@ -45,9 +45,17 @@ export function placePanel(
   const spaceBelow = viewport.height - rect.bottom - GAP - MARGIN;
   const spaceAbove = rect.top - GAP - MARGIN;
   const below = spaceBelow >= size.height || spaceBelow >= spaceAbove;
+  const clearance = below ? spaceBelow : spaceAbove;
+  // Neither side can host a usable panel — a short screen, or a trigger pinned mid-viewport. Stop
+  // anchoring and fill the viewport within its margins: a panel that is merely detached from its
+  // trigger is recoverable, one whose tail hangs off a fixed element is not, because no ancestor
+  // is left to scroll and the panel's own scrollport is partly outside the screen.
+  if (clearance < MIN_HEIGHT) {
+    return { left, top: MARGIN, maxHeight: Math.max(0, viewport.height - MARGIN * 2) };
+  }
   return below
-    ? { left, top: rect.bottom + GAP, maxHeight: Math.max(MIN_HEIGHT, spaceBelow) }
-    : { left, bottom: viewport.height - rect.top + GAP, maxHeight: Math.max(MIN_HEIGHT, spaceAbove) };
+    ? { left, top: rect.bottom + GAP, maxHeight: clearance }
+    : { left, bottom: viewport.height - rect.top + GAP, maxHeight: clearance };
 }
 
 /**

@@ -84,12 +84,11 @@ export function sessionUsageTotals(
   const totals = breakdown.totals;
   // A ledger that has not caught up with the runner's running counters must not be mixed with
   // them: raising only the total to the live floor renders rows that contradict their own sum
-  // (Input 100, Output 10, Total Processed 10,000). The runner's counters are self-consistent, so
-  // they stay authoritative until the ledger passes them; only the cost keeps its floor, because
-  // understating what a session has spent is the one error worth avoiding in both directions.
-  if (totals.processedTokens < session.tokensIn + session.tokensOut) {
-    return { ...fallback, costUsd: Math.max(totals.costUsd, session.costUsd) };
-  }
+  // (Input 100, Output 10, Total Processed 10,000). The runner's counters are self-consistent and
+  // are the more current figure, so they stay authoritative — including for cost — until the
+  // ledger passes them. `detailed: false` is how the caller knows to ignore the rest of the
+  // response too, so no part of the panel is drawn from a source the totals rejected.
+  if (totals.processedTokens < session.tokensIn + session.tokensOut) return fallback;
   const split = totals.cachedInputTokens + totals.cacheCreationTokens > 0;
   return {
     inputTokens: split ? totals.uncachedInputTokens : totals.inputTokens,

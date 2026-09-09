@@ -41,11 +41,17 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
     if (open) void loadBreakdown();
   }, [open, loadBreakdown]);
 
-  const loaded = breakdown && loadedFor.current === session.id ? breakdown : null;
+  const fetched = breakdown && loadedFor.current === session.id ? breakdown : null;
+  const totals = sessionUsageTotals(session, fetched);
+  // One decision for the whole panel. `sessionUsageTotals` rejects a ledger that trails the
+  // runner's live counters, and everything else derived from that response — the cost label, the
+  // provenance sentence, the per-model rows — has to be rejected with it. Otherwise a stale
+  // provider-priced zero would label newer, not-yet-ledgered tokens "$0.00", and the model rows
+  // would disagree with the totals printed above them.
+  const loaded = totals.detailed ? fetched : null;
   const label = sessionCostLabel(session, loaded);
   if (!label) return null;
 
-  const totals = sessionUsageTotals(session, loaded);
   const provenance = costProvenanceNote(loaded);
   const byModel = loaded?.byModel ?? [];
   // A priced zero is an amount, not a gap: `priceUsage` keeps a provider-reported 0 as
