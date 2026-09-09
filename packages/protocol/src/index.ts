@@ -335,7 +335,8 @@
 // 118: agent-spawn events may carry bounded, structured display identity. The control plane uses
 //      the complete runner history to expose a bounded child-session registry without making the
 //      dashboard's currently loaded transcript window an identity or liveness source.
-export const PROTOCOL_VERSION = 118;
+// 119: portable machine skill snapshots and native Windows skill deployment.
+export const PROTOCOL_VERSION = 119;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -482,6 +483,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopAttemptCorrelation: 89,
   agentSkills: 90,
   machineSkillSnapshots: 111,
+  nativeWindowsMachineSkillSnapshots: 119,
+  nativeWindowsSkillDeployment: 119,
   machineSkillAdoption: 115,
   machineSkillAdoptionRecovery: 116,
   chunkedAgentSkills: 96,

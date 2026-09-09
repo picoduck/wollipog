@@ -5,6 +5,7 @@ import { SKILL_MAX_FILES, SKILL_MAX_FILE_BYTES, SKILL_MAX_TOTAL_BYTES, validSkil
   type SkillSnapshotResultMessage } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { SKILL_DIRS } from "./skills.js";
+import { listWindowsSkillCandidates, readWindowsSkillCandidate } from "./windows-skill-snapshots.js";
 
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fingerprint = (stat: Stats) => `${stat.dev}:${stat.ino}:${stat.ctimeMs}:${stat.mtimeMs}`;
@@ -47,8 +48,10 @@ export function openSkillDirectory(home: string, relative: string, durable = fal
 export class MachineSkillSnapshots {
   private readonly candidates = new Map<string, { candidate: MachineSkillCandidate; expires: number }>();
   constructor(private readonly options: { home: string; agents: () => AgentDefinition[]; platform?: NodeJS.Platform;
-    now?: () => number; maxRawEntriesPerDirectory?: number }) {}
+    now?: () => number; maxRawEntriesPerDirectory?: number;
+    windowsList?: typeof listWindowsSkillCandidates; windowsRead?: typeof readWindowsSkillCandidate }) {}
   private now() { return this.options.now?.() ?? Date.now(); }
+  private platform() { return this.options.platform ?? process.platform; }
   private directories(): string[] {
     const dirs = new Set<string>([".agents/skills"]);
     for (const agent of this.options.agents()) {
@@ -71,7 +74,9 @@ export class MachineSkillSnapshots {
   }
   handle(message: SkillSnapshotMessage): SkillSnapshotResultMessage {
     const result: SkillSnapshotResultMessage = { type: "skill_snapshot_result", runnerId: message.runnerId, requestId: message.requestId };
-    if ((this.options.platform ?? process.platform) !== "linux") return { ...result, error: "Machine skill snapshots currently require a Linux runner." };
+    if (!new Set<NodeJS.Platform>(["linux", "win32"]).has(this.platform())) {
+      return { ...result, error: "Machine skill snapshots currently require a Linux or Windows runner." };
+    }
     for (const [id, entry] of this.candidates) if (entry.expires <= this.now()) this.candidates.delete(id);
     try {
       if (message.operation === "list") return { ...result, candidates: this.list() };
@@ -79,6 +84,10 @@ export class MachineSkillSnapshots {
       const entry = typeof message.candidateId === "string" ? this.candidates.get(message.candidateId) : undefined;
       if (!entry || !this.directories().includes(entry.candidate.sourceDirectory)) throw new Error();
       const candidate = entry.candidate;
+      if (this.platform() === "win32") {
+        const files = (this.options.windowsRead ?? readWindowsSkillCandidate)(this.options.home, candidate);
+        return { ...result, snapshot: { candidate, files, digest: skillVersionDigest(files), executablePaths: [] } };
+      }
       const fd = this.openDirectory(`${candidate.sourceDirectory}/${candidate.name}`);
       try {
         if (directoryGeneration(fd) !== candidate.generation) throw new Error();
@@ -97,6 +106,15 @@ export class MachineSkillSnapshots {
     }
   }
   private list(): MachineSkillCandidate[] {
+    if (this.platform() === "win32") {
+      const found = (this.options.windowsList ?? listWindowsSkillCandidates)(this.options.home, this.directories())
+        .map((entry) => ({ id: randomUUID(), ...entry }));
+      for (const candidate of found) {
+        this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000 });
+      }
+      while (this.candidates.size > 256) this.candidates.delete(this.candidates.keys().next().value!);
+      return found;
+    }
     const found: MachineSkillCandidate[] = [];
     for (const relative of this.directories()) {
       let fd: number;
@@ -119,7 +137,8 @@ export class MachineSkillSnapshots {
               child = openSync(`${fdPath(fd)}/${entry.name}`, directoryFlags);
               manifest = openSync(`${fdPath(child)}/SKILL.md`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
               if (!fstatSync(manifest).isFile()) continue;
-              const candidate = { id: randomUUID(), name: entry.name, sourceDirectory: relative, generation: directoryGeneration(child) };
+              const candidate = { id: randomUUID(), name: entry.name, sourceDirectory: relative,
+                generation: directoryGeneration(child) };
               found.push(candidate);
               this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000 });
             } catch { /* Unsupported or concurrently removed candidates are not offered. */ }

@@ -88,6 +88,7 @@ async function reconcile(
     removedSkillRetentionMs?: number;
     previousVersionGraceMs?: number;
     now?: number;
+    replaceWindowsJunction?: (path: string, expectedTarget: string, target: string) => void;
   } = {},
 ) {
   return reconcileSkills({
@@ -108,6 +109,9 @@ async function reconcile(
       ? { previousVersionGraceMs: overrides.previousVersionGraceMs }
       : {}),
     ...(overrides.now !== undefined ? { now: overrides.now } : {}),
+    ...(overrides.replaceWindowsJunction
+      ? { replaceWindowsJunction: overrides.replaceWindowsJunction }
+      : {}),
   });
 }
 
@@ -1699,25 +1703,38 @@ test("store gc logs what it removes", async () => {
   }
 });
 
-test("windows performs no writes and reports every link as unsupported", async () => {
+test("Windows uses junction-shaped managed links and atomically retargets only a verified link", async () => {
   const roots = makeRoots();
   try {
-    const result = await reconcile(
-      roots,
-      [
-        entry("alpha", [
-          { agentId: claudeAgent.id, invocation: "agent" },
-          { agentId: codexAgent.id, invocation: "manual" },
-        ]),
-      ],
-      { platform: "win32" },
-    );
-    for (const link of result.deployed[0]!.links) {
-      assert.equal(link.status, "unsupported");
-      assert.match(link.detail ?? "", /Windows/);
-    }
-    assert.equal(existsSync(join(roots.dataDir, "skills")), false);
-    assert.deepEqual(readdirSync(roots.home), []);
+    const targets = [
+      { agentId: claudeAgent.id, invocation: "agent" as const },
+      { agentId: codexAgent.id, invocation: "manual" as const },
+    ];
+    const first = entry("alpha", targets);
+    const created = await reconcile(roots, [first], { platform: "win32" });
+    assert.equal(created.deployed[0]?.links.find((link) => link.agentId === claudeAgent.id)?.status, "linked");
+    assert.equal(created.deployed[0]?.links.find((link) => link.agentId === codexAgent.id)?.status, "unsupported");
+    const canonical = join(roots.home, ".agents", "skills", "alpha");
+    const oldTarget = readlinkSync(canonical);
+    const replacements: string[][] = [];
+    const second = entry("alpha", targets, skillFiles("alpha", "Updated.\n"));
+    const updated = await reconcile(roots, [second], {
+      platform: "win32",
+      ...(process.platform === "win32" ? {} : { replaceWindowsJunction: (path: string, expectedTarget: string, target: string) => {
+        replacements.push([path, expectedTarget, target]);
+        assert.equal(readlinkSync(path), oldTarget);
+        unlinkSync(path);
+        symlinkSync(target, path, "dir");
+      } }),
+    });
+    assert.equal(updated.deployed[0]?.links.find((link) => link.agentId === claudeAgent.id)?.status, "linked");
+    assert.equal(replacements.length, process.platform === "win32" ? 0 : 1,
+      "only the seam-based run records the canonical version switch");
+    if (process.platform !== "win32") assert.equal(replacements[0]?.[0], canonical);
+    assert.equal(linkTarget(canonical), join(skillsStoreRoot(roots.dataDir), "alpha", second.versionDigest));
+    const removed = await reconcile(roots, [], { platform: "win32" });
+    assert.ok(removed.removedLinks.some((entry) => entry.path === "~/.agents/skills/alpha"));
+    assert.equal(existsSync(canonical), false);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }

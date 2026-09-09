@@ -161,9 +161,18 @@ test("machine discovery, preview and import are authorized, immutable, deduplica
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [], workspaces: [] }, 2, 110);
   assert.equal((await discover()).statusCode, 409);
   assert.equal(reads, 0);
-  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "darwin", version: "1", agents: [], workspaces: [] }, 3, 111);
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "macos", version: "1", agents: [], workspaces: [] }, 3, 116);
   assert.equal((await discover()).statusCode, 409);
-  assert.equal(reads, 0, "unsupported platform never reaches the runner");
+  assert.equal(reads, 0, "macOS never receives a snapshot command without a native no-follow reader");
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "macos", version: "1", agents: [], workspaces: [] }, 3, 117);
+  assert.equal((await discover()).statusCode, 409, "macOS stays unavailable without a native no-follow reader");
+  assert.equal(reads, 0);
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "windows", version: "1", agents: [], workspaces: [] }, 3, 118);
+  assert.equal((await discover()).statusCode, 409);
+  assert.equal(reads, 0, "an older Windows runner never receives the native snapshot command");
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "windows", version: "1", agents: [], workspaces: [] }, 3, 119);
+  assert.equal((await discover()).statusCode, 200, "protocol 119 enables read-only Windows discovery");
+  assert.equal(reads, 1);
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [], workspaces: [] }, 3, 111);
   for (const malformed of [[{ ...candidate, sourceDirectory: "/etc" }], [candidate, candidate],
     [{ ...candidate, id: "a".repeat(65) }], [{ ...candidate, name: "../escape" }],
@@ -259,7 +268,9 @@ test("adoption requires a fresh explicit approval, prepares desired state, and c
           assert.equal(request.confirmation, "explicit");
           assert.equal(request.candidate.id, candidate.id);
           return { type: "skill_adoption_result", runnerId, requestId, status: "adopted",
-            operationId: "operation", backupDirectory: ".codex/skills/.wollipog-adoption-operation" };
+            operationId: "123e4567-e89b-42d3-a456-426614174000",
+            backupDirectory: ".codex/skills/.wollipog-adoption-123e4567-e89b-42d3-a456-426614174000",
+            privateRunnerField: "must not cross the API boundary" };
         }
         assert.equal(request.type, "skill_snapshot");
         if (request.type !== "skill_snapshot") throw new Error();
@@ -325,7 +336,11 @@ test("adoption requires a fresh explicit approval, prepares desired state, and c
     payload: { previewId: approvedPreview.previewId } })).json();
   const adopted = await adopt();
   assert.equal(adopted.statusCode, 200, adopted.body);
-  assert.equal(adopted.json().status, "adopted");
+  assert.deepEqual(adopted.json(), {
+    status: "adopted",
+    operationId: "123e4567-e89b-42d3-a456-426614174000",
+    backupDirectory: ".codex/skills/.wollipog-adoption-123e4567-e89b-42d3-a456-426614174000",
+  });
   assert.equal(syncRequests, 3);
   assert.equal(adoptionRequests, 1);
   assert.equal((await adopt()).statusCode, 404, "approval is one-shot after a runner command");
@@ -376,7 +391,7 @@ test("recovery inspection and explicit restore are authorized, capability-gated,
     payload: { confirmation } });
   assert.equal((await inspect()).statusCode, 409, "protocol 115 cannot receive recovery commands");
   assert.equal(requests, 0);
-  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "darwin", version: "1",
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "macos", version: "1",
     agents: [], workspaces: [] }, 2, 116);
   assert.equal((await inspect()).statusCode, 409, "unsupported platforms do not receive commands");
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1",

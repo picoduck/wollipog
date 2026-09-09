@@ -37,13 +37,31 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     return principal;
   };
   const ownerKey = (principal: NonNullable<ReturnType<typeof authorize>>) => `${principal.organizationId}:${principal.userId}`;
-  const available = (runnerId: string, reply: FastifyReply) => {
+  const snapshotAvailable = (runnerId: string, reply: FastifyReply) => {
     const runner = deps.db.getRunner(runnerId);
     if (!runner || !deps.hub.isRunnerOnline(runnerId)) { reply.code(409).send({ error: "Machine is offline." }); return false; }
     if (!runnerSupportsProtocol(runner.protocolVersion, "machineSkillSnapshots")) {
       reply.code(409).send({ error: runnerCapabilityRequirement(runner.protocolVersion, "machineSkillSnapshots", "Machine skill snapshots") }); return false;
     }
-    if (runner.os !== "linux") { reply.code(409).send({ error: "Machine skill snapshots currently require a Linux runner." }); return false; }
+    if (runner.os === "windows" &&
+        !runnerSupportsProtocol(runner.protocolVersion, "nativeWindowsMachineSkillSnapshots")) {
+      reply.code(409).send({ error: runnerCapabilityRequirement(
+        runner.protocolVersion, "nativeWindowsMachineSkillSnapshots", "Windows machine skill snapshots",
+      ) });
+      return false;
+    }
+    if (runner.os !== "linux" && runner.os !== "windows") {
+      reply.code(409).send({ error: "Machine skill snapshots currently require a Linux or Windows runner." });
+      return false;
+    }
+    return true;
+  };
+  const adoptionAvailable = (runnerId: string, reply: FastifyReply) => {
+    if (!snapshotAvailable(runnerId, reply)) return false;
+    if (deps.db.getRunner(runnerId)?.os !== "linux") {
+      reply.code(409).send({ error: "Machine skill adoption currently requires a Linux runner." });
+      return false;
+    }
     return true;
   };
   const recoveryAvailable = (runnerId: string, reply: FastifyReply) => {
@@ -84,11 +102,36 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       detail: operation.detail,
     };
   };
+  const adoptionResult = (value: unknown, candidate: MachineSkillCandidate) => {
+    if (!value || typeof value !== "object") return null;
+    const result = value as Record<string, unknown>;
+    if (!new Set(["adopted", "rejected", "recovery_required"]).has(String(result.status))) return null;
+    const error = result.error;
+    if (error !== undefined && (typeof error !== "string" || error.length === 0 || error.length > 300)) return null;
+    if (result.status === "rejected") {
+      return typeof error === "string" && result.operationId === undefined && result.backupDirectory === undefined
+        ? { status: "rejected" as const, error }
+        : null;
+    }
+    const operationId = result.operationId;
+    if (typeof operationId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId) ||
+        result.backupDirectory !== `${candidate.sourceDirectory}/.wollipog-adoption-${operationId}`) return null;
+    if (result.status === "adopted") {
+      return error === undefined
+        ? { status: "adopted" as const, operationId, backupDirectory: result.backupDirectory as string }
+        : null;
+    }
+    return typeof error === "string"
+      ? { status: "recovery_required" as const, operationId,
+          backupDirectory: result.backupDirectory as string, error }
+      : null;
+  };
 
   app.post("/api/runners/:id/skill-snapshots", async (req, reply) => {
     const runnerId = (req.params as { id: string }).id;
     const principal = authorize(req, reply, runnerId);
-    if (!principal || !available(runnerId, reply)) return;
+    if (!principal || !snapshotAvailable(runnerId, reply)) return;
     purge();
     if (pending || discoveries.size >= 4) return reply.code(429).send({ error: "Finish or close another machine import first." });
     pending = true;
@@ -115,7 +158,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     const principal = authorize(req, reply, discovery.runnerId);
     if (!principal) return;
     if (discovery.owner !== ownerKey(principal)) return reply.code(404).send({ error: "Discovery not found." });
-    if (!available(discovery.runnerId, reply)) return;
+    if (!snapshotAvailable(discovery.runnerId, reply)) return;
     const candidateId = (req.body as { candidateId?: unknown } | null)?.candidateId;
     const candidate = discovery.candidates.find((entry) => entry.id === candidateId);
     if (!candidate) return reply.code(400).send({ error: "Select a discovered skill." });
@@ -154,7 +197,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     if (discovery.owner !== ownerKey(principal) || !discovery.preview) return reply.code(404).send({ error: "Preview not found." });
     const preview = discovery.preview;
     if ((req.body as { previewId?: unknown } | null)?.previewId !== preview.id) return reply.code(409).send({ error: "Review the current snapshot first." });
-    if (!available(discovery.runnerId, reply)) return;
+    if (!adoptionAvailable(discovery.runnerId, reply)) return;
     const accessible = (human: NonNullable<ReturnType<typeof authorize>>) => {
       const skill = deps.db.getSkillByName(preview.candidate.name);
       return !skill || deps.db.canAccessSkill(human, skill.id);
@@ -174,7 +217,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       const currentPrincipal = authorize(req, reply, discovery.runnerId);
       if (!currentPrincipal) return;
       if (ownerKey(currentPrincipal) !== discovery.owner || !accessible(currentPrincipal)) return reply.code(404).send({ error: "Preview not found." });
-      if (!available(discovery.runnerId, reply)) return;
+      if (!adoptionAvailable(discovery.runnerId, reply)) return;
       if (result.type !== "skill_snapshot_result" || result.runnerId !== discovery.runnerId || result.requestId !== requestId || result.error || !result.snapshot) throw new Error();
       const { snapshot } = result;
       const candidate = preview.candidate;
@@ -216,7 +259,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
         body.confirmation !== "explicit") {
       return reply.code(409).send({ error: "Run and confirm the current adoption preflight first." });
     }
-    if (!available(discovery.runnerId, reply)) return;
+    if (!adoptionAvailable(discovery.runnerId, reply)) return;
     const runner = deps.db.getRunner(discovery.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "machineSkillAdoption")) {
       return reply.code(409).send({ error: runnerCapabilityRequirement(runner?.protocolVersion, "machineSkillAdoption", "Machine skill adoption") });
@@ -237,7 +280,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
           ownerKey(currentPrincipal) !== discovery.owner) {
         return reply.code(409).send({ error: "The adoption approval changed or expired. Preview the source again." });
       }
-      if (!available(discovery.runnerId, reply)) return;
+      if (!adoptionAvailable(discovery.runnerId, reply)) return;
       if (source.type !== "skill_snapshot_result" || source.requestId !== sourceRequestId ||
           source.runnerId !== discovery.runnerId || source.error || !source.snapshot) throw new Error();
       const snapshot = source.snapshot;
@@ -267,7 +310,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
           ownerKey(afterSyncPrincipal) !== discovery.owner) {
         return reply.code(409).send({ error: "Assignments or connectivity changed while preparing adoption. Run preflight again." });
       }
-      if (!available(discovery.runnerId, reply)) return;
+      if (!adoptionAvailable(discovery.runnerId, reply)) return;
       const afterSyncRunner = deps.db.getRunner(discovery.runnerId);
       if (!runnerSupportsProtocol(afterSyncRunner?.protocolVersion, "machineSkillAdoption")) {
         return reply.code(409).send({ error: runnerCapabilityRequirement(afterSyncRunner?.protocolVersion, "machineSkillAdoption", "Machine skill adoption") });
@@ -284,8 +327,10 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       delete discovery.adoption;
       delete discovery.preview;
       if (result.type !== "skill_adoption_result" || result.requestId !== requestId || result.runnerId !== discovery.runnerId) throw new Error();
-      if (result.status !== "rejected") deps.pushSkillsSync(discovery.runnerId);
-      return result;
+      const projected = adoptionResult(result, preview.candidate);
+      if (!projected) throw new Error();
+      if (projected.status !== "rejected") deps.pushSkillsSync(discovery.runnerId);
+      return projected;
     } catch {
       delete discovery.adoption;
       return reply.code(502).send({ error: adoptionDispatched

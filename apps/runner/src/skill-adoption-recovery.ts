@@ -191,7 +191,22 @@ export function listSkillAdoptionRecovery(home: string, dataDir: string,
     } catch { /* unavailable harness directories have no inspectable recovery operations */ }
     finally { if (parent !== undefined) closeSync(parent); }
   }
-  return { operations, truncated };
+  // A copied journal can otherwise make the control plane reject the entire bounded response for
+  // duplicate operation IDs. Keep one visible, explicitly blocked representative so the operator
+  // can identify the collision; restore independently requires the ID to resolve uniquely.
+  const unique = new Map<string, SkillAdoptionRecoveryOperation>();
+  const duplicateIds = new Set<string>();
+  for (const operation of operations) {
+    if (unique.has(operation.operationId)) duplicateIds.add(operation.operationId);
+    else unique.set(operation.operationId, operation);
+  }
+  return {
+    operations: [...unique.values()].map((operation) => duplicateIds.has(operation.operationId)
+      ? { ...operation, state: "blocked" as const,
+          detail: "This operation ID appears in more than one recovery journal. Resolve the duplicate journals manually." }
+      : operation),
+    truncated,
+  };
 }
 
 export interface RestoreSkillAdoptionRecoveryOptions {

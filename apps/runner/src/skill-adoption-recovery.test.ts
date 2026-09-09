@@ -62,6 +62,33 @@ test("lists and restores an adopted source while preserving its managed link in 
   assert.equal(f.recovery(adopted.operationId).status, "not_needed");
 });
 
+test("duplicate copied operation IDs remain visible as one blocked recovery item", linux, (t) => {
+  const f = fixture(t);
+  const adopted = adoptMachineSkill(f.options);
+  assert.equal(adopted.status, "adopted");
+  if (adopted.status !== "adopted") return;
+  const originalJournal = join(f.home, adopted.backupDirectory);
+  const canonicalParent = join(f.home, ".agents/skills");
+  const copiedJournal = join(canonicalParent, `.wollipog-adoption-${adopted.operationId}`);
+  fs.mkdirSync(canonicalParent, { recursive: true });
+  fs.cpSync(originalJournal, copiedJournal, { recursive: true, dereference: false });
+  const intentPath = join(copiedJournal, "intent.json");
+  const intent = JSON.parse(fs.readFileSync(intentPath, "utf8"));
+  const parent = fs.statSync(canonicalParent);
+  fs.writeFileSync(intentPath, JSON.stringify({
+    ...intent,
+    sourceDirectory: ".agents/skills",
+    parentIdentity: `${parent.dev}:${parent.ino}`,
+  }));
+
+  const listed = listSkillAdoptionRecovery(f.home, f.dataDir, agents);
+  assert.equal(listed.operations.length, 1);
+  assert.equal(listed.operations[0]?.operationId, adopted.operationId);
+  assert.equal(listed.operations[0]?.state, "blocked");
+  assert.match(listed.operations[0]?.detail ?? "", /more than one recovery journal/i);
+  assert.equal(f.recovery(adopted.operationId).status, "blocked");
+});
+
 test("restores an operation interrupted after preserving the original", linux, (t) => {
   const f = fixture(t);
   f.options.checkpoint = (stage) => { if (stage === "source_preserved") throw new Error("interrupt"); };

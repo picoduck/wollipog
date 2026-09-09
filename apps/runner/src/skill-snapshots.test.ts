@@ -80,8 +80,34 @@ for (const unsafe of ["file-link", "directory-link", "hard-link", "oversized", "
   });
 }
 test("unsupported platforms never attempt filesystem discovery", () => {
-  const snapshots = new MachineSkillSnapshots({ home: "/does-not-exist", agents: () => agents, platform: "darwin" });
-  assert.match(snapshots.handle(message).error!, /Linux/);
+  const snapshots = new MachineSkillSnapshots({ home: "/does-not-exist", agents: () => agents, platform: "aix" });
+  assert.match(snapshots.handle(message).error!, /Linux or Windows/);
+});
+
+test("the Windows native adapter validates helper candidates and snapshot files", () => {
+  let reads = 0;
+  const files = [{ path: "SKILL.md", encoding: "utf8" as const, content: "---\nname: alpha\n---\nWindows" }];
+  const snapshots = new MachineSkillSnapshots({
+    home: "C:\\Users\\runner",
+    agents: () => agents,
+    platform: "win32",
+    windowsList: (_home, directories) => {
+      assert.deepEqual(directories.sort(), [".agents/skills", ".codex/skills"]);
+      return [{ name: "alpha", sourceDirectory: ".codex/skills", generation: "a".repeat(64) }];
+    },
+    windowsRead: (_home, candidate) => {
+      reads++;
+      assert.equal(candidate.generation, "a".repeat(64));
+      return files;
+    },
+  });
+  const candidate = snapshots.handle(message).candidates?.[0];
+  assert.ok(candidate);
+  const read = snapshots.handle({ ...message, operation: "read", candidateId: candidate.id });
+  assert.deepEqual(read.snapshot?.files, files);
+  assert.equal(read.snapshot?.digest, skillVersionDigest(files));
+  assert.deepEqual(read.snapshot?.executablePaths, []);
+  assert.equal(reads, 1);
 });
 
 test("machine discovery keeps separate hard raw and useful-entry bounds", { skip: process.platform !== "linux" }, (t) => {

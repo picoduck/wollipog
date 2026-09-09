@@ -13,7 +13,9 @@ import "../styles.css";
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "runner-host",
-  os: "linux",
+  os: new URLSearchParams(location.search).has("macos")
+    ? "macos"
+    : new URLSearchParams(location.search).has("windows") ? "windows" : "linux",
   version: "1",
   status: "online",
   displayName: "Build Machine",
@@ -37,7 +39,11 @@ const runner: RunnerView = {
   lastSeen: 1,
   protocolVersion: new URLSearchParams(location.search).has("legacySkills")
     ? 1
-    : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery,
+    : new URLSearchParams(location.search).has("legacyRecovery")
+      ? RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery - 1
+      : new URLSearchParams(location.search).has("windows")
+        ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillSnapshots
+        : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery,
 };
 
 const snapshot: ControlPlaneToUi = {

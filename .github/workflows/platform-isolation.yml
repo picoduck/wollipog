@@ -51,3 +51,11 @@ jobs:
       - name: Verify Windows Orchestrator Harness
         if: matrix.os == 'windows-latest'
         run: node --import tsx --test apps/runner/src/windows-cmd.test.ts apps/runner/src/context-command.test.ts apps/runner/src/discovery/resolve.test.ts apps/runner/src/discovery/claude-code.test.ts apps/runner/src/discovery/discover.test.ts apps/runner/src/orchestrator-preset.test.ts apps/runner/src/agent-control.test.ts apps/runner/src/agent-tui.test.ts
+
+      - name: Verify Native Windows Skill Filesystem Adapters
+        if: matrix.os == 'windows-latest'
+        run: node --import tsx --test apps/runner/src/windows-skill-junction.test.ts apps/runner/src/windows-skill-snapshots.test.ts apps/runner/src/skill-snapshots.test.ts
+
+      - name: Verify Native Windows Skill Reconciliation
+        if: matrix.os == 'windows-latest'
+        run: node --import tsx --test --test-name-pattern="Windows uses junction-shaped" apps/runner/src/skills.test.ts
