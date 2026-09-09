@@ -247,6 +247,9 @@ export function SessionHeader({
       // an implementation detail to lean on rather than a guarantee. Remember what was focused and
       // put focus back where it belongs once the row has settled.
       const focusedBadge = items.find((item) => item === document.activeElement) ?? null;
+      // Each measurement decides the handover afresh, so a pending one from a previous measurement
+      // can never outlive the layout that asked for it.
+      focusDisclosureRef.current = false;
       for (const item of items) item.hidden = false;
       if (!isMobile || items.length === 0) {
         setHiddenStatusCount(0);
@@ -339,8 +342,19 @@ export function SessionHeader({
 
   useEffect(() => {
     if (!focusDisclosureRef.current) return;
+    // The measurement that set the flag ran in a layout effect, so the commit that renders the
+    // trigger has not happened yet and this effect first sees the old state. Hold the flag rather
+    // than spending it on a null ref; the next measurement clears it if the row changes its mind.
+    const trigger = statusPopover.triggerRef.current;
+    if (!trigger) return;
     focusDisclosureRef.current = false;
-    statusPopover.triggerRef.current?.focus();
+    // Only claim focus nobody else has taken. This effect runs a commit after the measurement, and
+    // in that window the user may have focused something else — a menu, a dialog, the composer —
+    // which a bare focus() would yank them out of. Same rule as the async action path below:
+    // reclaim a dropped focus, never move a live one.
+    if (document.activeElement === document.body || document.activeElement === null) {
+      trigger.focus();
+    }
   });
 
   useEffect(() => {

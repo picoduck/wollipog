@@ -297,3 +297,18 @@ test("a badge that loses the row hands focus to the disclosure that now holds it
   await expect(badge).toBeHidden();
   await expect(page.locator(".session-status-overflow-trigger")).toBeFocused();
 });
+
+test("the first overflow hands focus to the disclosure once it exists", async ({ page }) => {
+  // At 768px every badge fits, so there is no `+N` trigger to hand focus to at measurement time:
+  // this is the deferred path, where the handover waits for the trigger to render.
+  await loadInbox(page, 768);
+  await openSession(page);
+  await expect(page.locator(".session-status-overflow-trigger")).toHaveCount(0);
+  const badge = page.locator(".session-header-statuses > .background-work-badge");
+  await badge.focus();
+  await expect(badge).toBeFocused();
+
+  await page.setViewportSize({ width: 320, height: 900 });
+  await expect(badge).toBeHidden();
+  await expect(page.locator(".session-status-overflow-trigger")).toBeFocused();
+});
