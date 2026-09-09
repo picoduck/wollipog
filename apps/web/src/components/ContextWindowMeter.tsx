@@ -3,6 +3,7 @@ import type { SessionUsageResponse, SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { compactionNote, computeContextFill } from "../context-meter.js";
 import { resolveCaps } from "../caps.js";
+import { advertisedContextWindow, contextWindowDiscrepancy, formatContextWindow } from "../context-window-options.js";
 import { formatCost, formatTokens } from "../format.js";
 import { useStoreSelector } from "../store.js";
 
@@ -14,15 +15,20 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
  * consumed, and a click-to-open popover with the figures behind it — percent, used over capacity,
  * the session's total processed tokens, the compaction note, and the usage split by the model
  * that produced it.
- * Reads the per-model `contextWindow` off the agent's advertised capabilities (protocol v11), or
- * the provider gauge when the runner publishes one. Renders nothing when the window is unknown.
+ * Capacity is the window the provider reports serving (the runner's live gauge) and, until the
+ * first turn reports one, the provider-stated window on the agent's catalog entry (protocol v11).
+ * Renders nothing when neither is known; nothing is inferred from a model name. When the served
+ * window differs from what the selected model advertises, the popover says so instead of
+ * silently metering against the wrong size.
  */
 export function ContextWindowMeter({ session }: { session: SessionView }) {
   const api = useApi();
   const runners = useStoreSelector((s) => s.runners);
   const models = resolveCaps(runners.get(session.runnerId), session)?.models ?? [];
   const model = models.find((m) => m.id === session.model) ?? models.find((m) => m.default);
-  const contextWindow = session.contextWindow ?? model?.contextWindow;
+  const served = session.contextWindow && session.contextWindow > 0 ? session.contextWindow : undefined;
+  const contextWindow = served ?? model?.contextWindow;
+  const discrepancy = contextWindowDiscrepancy(advertisedContextWindow(models, session.model), served);
   const fill = computeContextFill({
     tokensIn: session.tokensIn,
     tokensOut: session.tokensOut,
@@ -154,9 +160,17 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
             <span style={{ width: `${fill.fillPct}%` }} />
           </div>
           <dl className="context-popover-facts">
+            <div><dt>Capacity</dt><dd>{formatContextWindow(contextWindow!)} · {served ? "Provider Reported" : "Model Catalog"}</dd></div>
             <div><dt>Total Processed</dt><dd>{formatTokens(processed)}</dd></div>
             {session.costUsd > 0 && <div><dt>Session Cost</dt><dd>{formatCost(session.costUsd)}</dd></div>}
           </dl>
+          {discrepancy && (
+            <p className="context-popover-note context-popover-discrepancy" role="status">
+              {discrepancy.kind === "smaller"
+                ? `The provider is serving a ${formatContextWindow(discrepancy.served)} context window, not the ${formatContextWindow(discrepancy.advertised)} the selected model advertises. The meter uses the served size.`
+                : `The provider is serving a ${formatContextWindow(discrepancy.served)} context window; the selected model advertises ${formatContextWindow(discrepancy.advertised)}. The meter uses the served size.`}
+            </p>
+          )}
           <p className="context-popover-note">{compactionNote(session.driver)}</p>
           {breakdownError && <p className="context-popover-note" role="alert">{breakdownError}</p>}
           {byModel.length > 0 && (

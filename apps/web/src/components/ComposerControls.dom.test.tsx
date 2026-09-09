@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { SessionConfig } from "@wollipog/protocol";
 import {
   ApprovalsMenuChoices,
+  ModelEffortMenuChoices,
   type PermissionModeDetails,
 } from "./ComposerControls.js";
 import { handleMenuKeyDown } from "./interactions.js";
@@ -105,6 +106,54 @@ test("permission details are keyboard reachable and do not select the mode", asy
     await act(async () => { modeButton.click(); });
     assert.deepEqual(applied, [{ permissionMode: "danger-full-access" }]);
     assert.equal(closeCount, 1);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("the Context Window group offers provider-stated variants and switches only the model id", async () => {
+  const applied: Partial<SessionConfig>[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (contextChoice: Parameters<typeof ModelEffortMenuChoices>[0]["contextChoice"]) => act(async () => {
+    root.render(
+      <div role="menu" onKeyDown={(event) => handleMenuKeyDown(event, () => undefined)}>
+        <ModelEffortMenuChoices
+          models={[{ id: "opus[1m]", displayName: "Opus 5" }, { id: "sonnet", displayName: "Sonnet 5" }]}
+          modelVal="opus[1m]"
+          selectedModel={{ id: "opus[1m]", displayName: "Opus 5" }}
+          contextChoice={contextChoice}
+          modelEfforts={["low", "high"]}
+          effortVal="high"
+          apply={(patch) => applied.push(patch)}
+        />
+      </div>,
+    );
+  });
+  try {
+    await render({
+      baseModelId: "opus",
+      options: [
+        { id: "opus", contextWindow: 200_000, label: "200K" },
+        { id: "opus[1m]", contextWindow: 1_000_000, label: "1M" },
+      ],
+      selectedId: "opus[1m]",
+    });
+    const group = container.querySelector('[role="group"][aria-label="Context Window"]');
+    assert.ok(group, "a real choice renders a Context Window group");
+    const radios = [...group!.querySelectorAll('[role="menuitemradio"]')] as HTMLButtonElement[];
+    assert.deepEqual(radios.map((radio) => radio.textContent), ["200K", "1M"]);
+    assert.deepEqual(radios.map((radio) => radio.getAttribute("aria-checked")), ["false", "true"]);
+    assert.equal(radios[0]!.title, "200,000 tokens; applies to the next turn");
+    await act(async () => { radios[0]!.click(); });
+    assert.deepEqual(applied, [{ model: "opus" }], "a window switch changes the model id and keeps the effort");
+
+    await render(null);
+    assert.equal(container.querySelector('[role="group"][aria-label="Context Window"]'), null,
+      "no group without a real provider-listed choice");
+    assert.ok(container.querySelector('[role="group"][aria-label="Model"]'));
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

@@ -3458,6 +3458,11 @@ textarea {
 .cbar-effort {
   color: var(--text-faint);
 }
+/* Selected context-window variant ("1M") beside the model name; present only for a real choice. */
+.cbar-context {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
 .cbar-approvals {
   display: inline-flex;
   align-items: center;
@@ -4110,6 +4115,8 @@ textarea,
 .context-popover-facts dt, .context-popover-model dt { color: var(--text-dim); }
 .context-popover-facts dd, .context-popover-model dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
 .context-popover-note { margin: 8px 0 0; color: var(--text-dim); }
+/* The provider served a different window than the selected model advertises. */
+.context-popover-discrepancy { color: var(--warning-on-tint, var(--warning)); }
 .context-popover-models { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); display: grid; gap: 8px; }
 .context-popover-label { color: var(--text-dim); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .04em; }
 .context-popover-model-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-xs); }

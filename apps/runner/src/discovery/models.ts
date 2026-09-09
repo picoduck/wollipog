@@ -175,30 +175,28 @@ function claudeResolvedDisplayName(modelId: string): string | null {
   return `${family} ${match[2]}${match[3] ? `.${match[3]}` : ""}`;
 }
 
-const CLAUDE_STANDARD_CONTEXT_WINDOW = 200_000;
-
-function claudeModelFamily(modelId: string): string | null {
-  const normalized = modelId.replace(/\[[^\]]+\]$/, "");
-  const resolved = /^claude-([a-z]+)-\d+/.exec(normalized)?.[1];
-  if (resolved) return resolved;
-  return /^(opus|fable|sonnet|haiku)$/.exec(normalized)?.[1] ?? null;
-}
-
-function claudeContextWindow(info: ClaudeModelInfo): number | undefined {
+/** Context window from Claude Code's own catalog evidence only: a size stated in the entry's
+ * description ("Opus 5 with 1M context"), or a provider-resolved `[1m]` variant id. A picker alias
+ * carrying `[1m]` while its resolved model does not (`claude-fable-5-1[1m]` → `claude-fable-5-1`)
+ * proves nothing, and a family name never implies 200K: Sonnet 5 serves 1M. Unknown stays unknown
+ * until the live session reports its effective window (`result.modelUsage[*].contextWindow`). */
+export function claudeContextWindow(info: Pick<ClaudeModelInfo, "description" | "resolvedModel">): number | undefined {
   const description = typeof info.description === "string" ? info.description : "";
   const match = /\b(\d+(?:\.\d+)?)\s*([kKmM])\s+context\b/.exec(description);
   if (match) {
     const multiplier = match[2]!.toLowerCase() === "m" ? 1_000_000 : 1_000;
     return Math.round(Number(match[1]) * multiplier);
   }
-  const ids = [info.value, info.resolvedModel].filter((value): value is string => typeof value === "string");
-  if (ids.some((id) => /\[1m\]$/i.test(id))) return 1_000_000;
-  for (const id of [info.resolvedModel, info.value]) {
-    if (typeof id !== "string") continue;
-    const family = claudeModelFamily(id);
-    if (family) return CLAUDE_STANDARD_CONTEXT_WINDOW;
-  }
+  if (typeof info.resolvedModel === "string" && /\[1m\]$/i.test(info.resolvedModel)) return 1_000_000;
   return undefined;
+}
+
+/** `opus[1m]` is a context-window variant of the launchable base `opus`; ids without a bracketed
+ * launch option are their own base. Grouping happens on the picker alias, not the resolved model,
+ * so distinct picker entries that merely resolve alike ("Opus Plan") never collapse. */
+export function claudeBaseModelId(modelId: string): string | undefined {
+  const match = /^(.+?)\[[^\]]+\]$/.exec(modelId);
+  return match && match[1] ? match[1] : undefined;
 }
 
 function claudeLiveDisplayName(info: ClaudeModelInfo, id: string): string {
@@ -237,6 +235,7 @@ export function parseClaudeModels(initialization: unknown): AgentModel[] {
       default: id === "default",
       efforts: efforts.length ? [...new Set(efforts)] : undefined,
       contextWindow: claudeContextWindow(info),
+      ...(claudeBaseModelId(id) ? { baseModelId: claudeBaseModelId(id) } : {}),
     });
   }
   const deduped = [...new Map(models.map((model) => [model.id, model])).values()];

@@ -21,6 +21,11 @@ import {
   resolveEffectiveCaps,
   type ElicitationAvailability,
 } from "../caps.js";
+import {
+  collapseContextWindowVariants,
+  contextWindowChoice,
+  type ContextWindowChoice,
+} from "../context-window-options.js";
 import { useStoreSelector } from "../store.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { Modal } from "./common.js";
@@ -34,7 +39,7 @@ function useSessionConfig(session: SessionView) {
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const caps = resolveCaps(runner, session);
   const effectiveCaps = resolveEffectiveCaps(runner, session);
-  const models = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
+  const listedModels = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
   // The orchestration tool boundary is established at process creation and cannot
   // safely be entered or escaped by changing a live provider permission mode.
   const permModes = session.permissionMode === "orchestrator" ? ["orchestrator"]
@@ -46,9 +51,14 @@ function useSessionConfig(session: SessionView) {
   const modelEfforts = effective.efforts;
   const effortVal = effective.effort ?? "";
   const permVal = permissionModeForDisplay(session.permissionMode, permModes, session.driver);
+  // Context-window variants of one base (`opus` / `opus[1m]`) are one Model entry plus a Context
+  // Window group; both come only from provider-stated windows, so most catalogs collapse nothing.
+  const models = collapseContextWindowVariants(listedModels, modelVal || session.model);
+  const contextChoice = contextWindowChoice(listedModels, modelVal || session.model);
   return {
     caps,
     models,
+    contextChoice,
     modelSource: caps?.modelSource,
     permModes,
     modelVal,
@@ -109,6 +119,7 @@ export function ModelEffortMenuChoices({
   modelSource,
   modelVal,
   selectedModel,
+  contextChoice,
   modelEfforts,
   effortVal,
   apply,
@@ -117,6 +128,8 @@ export function ModelEffortMenuChoices({
   modelSource?: string;
   modelVal: string;
   selectedModel?: MenuModelChoice;
+  /** Present only when the provider lists two windows for the selected model's base. */
+  contextChoice?: ContextWindowChoice | null;
   modelEfforts: string[];
   effortVal: string;
   apply: Apply;
@@ -137,6 +150,25 @@ export function ModelEffortMenuChoices({
               onClick={() => apply({ model: model.id, effort: "" })}
             >
               {model.displayName ?? model.id}
+            </button>
+          ))}
+        </div>
+      )}
+      {contextChoice && (
+        <div role="group" aria-label="Context Window">
+          <div className="plus-section" role="presentation">Context Window</div>
+          {contextChoice.options.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={option.id === contextChoice.selectedId}
+              className={`cbar-opt${option.id === contextChoice.selectedId ? " on" : ""}`}
+              title={`${option.contextWindow.toLocaleString()} tokens; applies to the next turn`}
+              // A window switch keeps the effort: variants of one base share their effort levels.
+              onClick={() => apply({ model: option.id })}
+            >
+              {option.label}
             </button>
           ))}
         </div>
@@ -164,11 +196,14 @@ export function modelEffortControlLabel(selectedModel: MenuModelChoice | undefin
 }
 
 export function ModelEffortControl({ session, apply }: { session: SessionView; apply: Apply }) {
-  const { models, modelSource, modelVal, selectedModel, modelEfforts, effortVal } = useSessionConfig(session);
+  const { models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal } = useSessionConfig(session);
   if (models.length === 0 && modelEfforts.length === 0) return null;
+  const pickerModel = models.find((model) => model.id === modelVal) ?? selectedModel;
+  const selectedWindow = contextChoice?.options.find((option) => option.id === contextChoice.selectedId);
   const label = (
     <>
-      <span className="cbar-model">{modelEffortControlLabel(selectedModel, modelVal)}</span>
+      <span className="cbar-model">{modelEffortControlLabel(pickerModel, modelVal)}</span>
+      {selectedWindow && <span className="cbar-context">{selectedWindow.label}</span>}
       {effortVal && <span className="cbar-effort">{effortLabel(effortVal)}</span>}
     </>
   );
@@ -176,13 +211,18 @@ export function ModelEffortControl({ session, apply }: { session: SessionView; a
     <BarMenu
       align="right"
       label={label}
-      title={modelSource === "cached" ? "Model metadata is cached; Rediscover to refresh" : "Model & reasoning effort (applies next turn)"}
+      title={modelSource === "cached"
+        ? "Model metadata is cached; Rediscover to refresh"
+        : contextChoice
+          ? "Model, context window & reasoning effort (applies next turn)"
+          : "Model & reasoning effort (applies next turn)"}
     >
       {() => <ModelEffortMenuChoices
         models={models}
         modelSource={modelSource}
         modelVal={modelVal}
         selectedModel={selectedModel}
+        contextChoice={contextChoice}
         modelEfforts={modelEfforts}
         effortVal={effortVal}
         apply={apply}

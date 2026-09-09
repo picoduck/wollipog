@@ -175,13 +175,10 @@ export function resolveCaps(runner: RunnerView | undefined, session: SessionView
   const alt = agents.find((a) => (a.driver ?? "acp") === session.driver && hasKnobs(a.capabilities))?.capabilities;
   if (alt) return mergeSessionCapabilities(alt, sessionCapabilities);
   if (session.driver === "claude-code") {
+    // The persisted id stays selectable, but its window is unknown here: a `[1m]` suffix is a
+    // launch option, not evidence of what the provider serves (the live gauge reports that).
     const selectedFallback = session.model && !CLAUDE_DEFAULT_CAPS.models.some((model) => model.id === session.model)
-      ? [{
-          id: session.model,
-          displayName: session.model,
-          contextWindow: /\[1m\]$/i.test(session.model) ? 1_000_000 : undefined,
-          hidden: true,
-        }]
+      ? [{ id: session.model, displayName: session.model, hidden: true }]
       : [];
     return mergeSessionCapabilities({
       ...CLAUDE_DEFAULT_CAPS,

@@ -3418,7 +3418,7 @@ export class SessionManager {
           const current = this.store.readMeta(sessionId);
           if (!current) return;
           this.store.patchMeta(sessionId, {
-            contextTokensUsed: usage.contextTokensUsed,
+            ...(usage.contextTokensUsed != null ? { contextTokensUsed: usage.contextTokensUsed } : {}),
             contextWindow: usage.contextWindow,
             ...(usage.costUsd != null ? { costUsd: Math.max(current.costUsd, usage.costUsd) } : {}),
           });
@@ -5726,13 +5726,15 @@ export class SessionManager {
     }
   }
 
-  /** Persist turn configuration without presenting a model resolved under an older alias. */
+  /** Persist turn configuration without presenting a model resolved under an older alias. The
+   * effective context window was observed for the previous model, so a model or context-window
+   * change drops it until the next turn reports what the provider actually serves. */
   private patchSessionConfig(sessionId: string, config: SessionConfig): void {
     const current = this.store.readMeta(sessionId);
     const modelChanged = current?.config.model !== config.model;
     this.store.patchMeta(sessionId, {
       config,
-      ...(modelChanged ? { resolvedModel: null } : {}),
+      ...(modelChanged ? { resolvedModel: null, contextWindow: undefined } : {}),
     });
   }
 
