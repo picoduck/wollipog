@@ -216,6 +216,9 @@ for stale in control.sock token mcp.json provider.pgid; do
     test ! -d "$root/relay/$stale"; /usr/bin/rm -f -- "$root/relay/$stale"
   fi
 done
+for stale in "$root/relay"/provider-*.pgid; do
+  if test -e "$stale" || test -L "$stale"; then test ! -d "$stale"; /usr/bin/rm -f -- "$stale"; fi
+done
 `;
   await runRootScript(distro, script, [root, String(uid)]);
   return { root, provider: `${root}/provider`, relay: `${root}/relay` };

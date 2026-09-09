@@ -234,7 +234,6 @@ async function runIsolatedCodexMcpProbe(
     context: opts.context,
     scrubInheritedEnv: ["OPENAI_API_KEY"],
     isolation: opts.isolation,
-    bridgeAgentControl: false,
   });
   return new Promise<string>((resolve, reject) => {
     let stdout = "";
@@ -270,9 +269,16 @@ async function runIsolatedCodexMcpProbe(
     // otherwise a full pipe can deadlock the bounded probe before its close event.
     child.stderr.resume();
     child.once("error", () => finish(new Error("isolated Codex MCP probe could not start")));
-    child.once("close", (code) => finish(failure ?? (code === 0
-      ? undefined
-      : new Error(`isolated Codex MCP probe exited with code ${code ?? "unknown"}`))));
+    child.once("close", (code) => {
+      const result = failure ?? (code === 0
+        ? undefined
+        : new Error(`isolated Codex MCP probe exited with code ${code ?? "unknown"}`));
+      // The probe and real provider deliberately reuse one pinned session directory. Wait for
+      // relay teardown so its unlink cleanup cannot race the next relay's exclusive bootstrap.
+      const relay = child.wslAgentControl?.relay;
+      if (relay && relay.exitCode === null) relay.once("close", () => finish(result));
+      else finish(result);
+    });
   });
 }
 

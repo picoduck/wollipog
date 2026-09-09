@@ -120,10 +120,6 @@ export interface SpawnAgentOptions {
   descendantOwner?: object;
   /** False for user-owned interactive shells whose daemonized children are not provider-owned. */
   trackDescendants?: boolean;
-  /** Internal no-relay mode for a provider metadata probe that already runs through the exact
-   * target-local WSL isolation. The probe must not race the subsequent provider relay for the
-   * session's one socket directory. */
-  bridgeAgentControl?: boolean;
 }
 
 export interface BwrapSpawnIsolation {
@@ -353,6 +349,10 @@ export function buildWslAgentControlRelayArgs(bridge: WslAgentControlLaunch): st
   });
 }
 
+export function wslProviderPidfile(relayDirectory: string): string {
+  return posix.join(relayDirectory, `provider-${randomUUID().replace(/-/g, "")}.pgid`);
+}
+
 export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   if (opts.context?.kind === "wsl" && opts.isolation?.backend === "bwrap") {
     throw new Error(WSL_BWRAP_UNAVAILABLE_ERROR);
@@ -366,8 +366,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   let wslReap: WslReapInfo | undefined;
   let isolationEnv: Record<string, string> = {};
   let explicitEnv = withoutRunnerOnlyEnv(opts.env);
-  let bridge = opts.bridgeAgentControl !== false &&
-    (opts.isolation?.backend === "bwrap" || opts.isolation?.backend === "wsl-bwrap")
+  let bridge = (opts.isolation?.backend === "bwrap" || opts.isolation?.backend === "wsl-bwrap")
     ? opts.isolation.wslAgentControl : undefined;
   if (bridge) {
     if (opts.context?.kind !== "wsl" || opts.context.distro !== bridge.distro) {
@@ -424,7 +423,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       const isolation = opts.isolation;
       const relayDirectory = isolation.wslAgentControl.socketDirectory?.path;
       if (!relayDirectory) throw new Error("target-local WSL launcher is missing its pinned session directory");
-      const pidfile = posix.join(relayDirectory, "provider.pgid");
+      const pidfile = wslProviderPidfile(relayDirectory);
       file = "wsl.exe";
       args = ["-d", isolation.distro, "--cd", isolation.cwd, "--exec", isolation.command,
         ...isolation.args, "--pidfile", pidfile, "--", ...target];

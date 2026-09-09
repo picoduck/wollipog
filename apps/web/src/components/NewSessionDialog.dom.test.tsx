@@ -356,6 +356,11 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
       .find((button) => button.textContent?.includes("Native TUI"))!;
     assert.ok(tui);
     assert.equal(tui.disabled, false, "ordinary WSL Native TUI remains available");
+    await act(async () => { tui.click(); });
+    assert.equal(createButton(ordinary.container).disabled, false,
+      "ordinary WSL Native TUI remains launchable rather than only selectable");
+    await act(async () => { createButton(ordinary.container).click(); });
+    assert.equal(ordinary.requests[0]?.launchSurface, "native_tui");
   } finally {
     await unmountFixture(ordinary);
   }

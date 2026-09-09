@@ -232,6 +232,7 @@ export function NewSessionDialog({
     (orchestratorContext === "native" || directWslOrchestrator) &&
     (!executionTarget || executionTarget.adapter === "host");
   const directWslRequiresSafeOrchestrator = orchestratorContext === "wsl" &&
+    launchSurface !== "native_tui" && runner?.runtime?.executionIsolation?.mode === "bwrap" &&
     (!executionTarget || executionTarget.adapter === "host");
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
   const nativeTuiStartFenceSupported = runnerSupportsProtocol(

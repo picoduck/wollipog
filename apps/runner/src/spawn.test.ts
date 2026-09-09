@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { after, test } from "node:test";
-import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
 import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
@@ -1081,4 +1081,14 @@ test("Direct WSL bridge binds broker-provisioned private files and launches only
   assert.ok(relayArgs.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"));
   assert.ok(relayArgs.includes("control.sock"));
   assert.equal(relayArgs.join(" ").includes(bridge.token), false, "relay argv never receives the credential");
+});
+
+test("Direct WSL provider invocations use collision-free bounded pidfiles", () => {
+  const directory = "/var/lib/wollipog-wsl-launcher/session/relay";
+  const first = wslProviderPidfile(directory);
+  const second = wslProviderPidfile(directory);
+  assert.notEqual(first, second);
+  for (const value of [first, second]) {
+    assert.match(value, /^\/var\/lib\/wollipog-wsl-launcher\/session\/relay\/provider-[a-f0-9]{32}\.pgid$/u);
+  }
 });

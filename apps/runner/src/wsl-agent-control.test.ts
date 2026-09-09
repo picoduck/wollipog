@@ -74,7 +74,8 @@ test("target-local relay materializes owner-only bootstrap files and owns frame 
   assert.equal(existsSync(socketPath), false);
   assert.equal(existsSync(join(dir, "token")), false);
   assert.equal(existsSync(join(dir, "mcp.json")), false);
-  assert.equal(existsSync(dir), false, "relay removes its per-launch directory on exit");
+  assert.equal(existsSync(dir), true,
+    "relay preserves the pinned session directory for a subsequent metadata/provider launch");
 });
 
 function fixture(): { config: WslAgentControlLaunch; fromHelper: PassThrough; toHelper: PassThrough; lines: string[] } {
