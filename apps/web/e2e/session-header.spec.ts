@@ -626,11 +626,13 @@ test("mobile Session pane and action controls share trailing columns", async ({ 
   expect(withoutOptionalAction.sidePanel.center).toBeCloseTo(withoutOptionalAction.moreActions.center, 1);
 });
 
+// #784 put background work into this measured row, so five badges now compete for it and the row
+// prefers background work over everything else. A phone shows the one badge its width allows —
+// 320px cannot fit "Waiting on External Job" beside four action controls, so it keeps the lifecycle
+// badge instead — and the disclosure carries the other four, workers included.
 for (const viewport of [
-  { name: "320-pixel phone", width: 320, hiddenCounts: [3] },
-  // At this exact threshold Chromium may fit one more badge on a direct load than after a resize.
-  // Both outcomes remain unclipped and correctly disclose the statuses they hide.
-  { name: "390-pixel phone", width: 390, hiddenCounts: [2, 3] },
+  { name: "320-pixel phone", width: 320, hiddenCounts: [4], inlineBackgroundWork: false },
+  { name: "390-pixel phone", width: 390, hiddenCounts: [4], inlineBackgroundWork: true },
 ]) {
   test(`the session bar discloses overflowed statuses on a ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: 800 });
@@ -656,14 +658,22 @@ for (const viewport of [
     await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toHaveCount(1);
     await expect(header.locator('[aria-label="Changes: Ready for Review"]')).toHaveCount(1);
     await expect(header.locator('[aria-label="Changes: Uncommitted Changes"]')).toHaveCount(1);
-    await expect(header.locator(
-      '.session-header-background-work [aria-label="Background Work: Waiting on External Job"]',
-    )).toBeVisible();
+    const inlineBackgroundWork = header.locator(
+      '.session-header-statuses > [aria-label="Background Work: Waiting on External Job"]',
+    );
+    await expect(inlineBackgroundWork).toHaveCount(1);
+    if (viewport.inlineBackgroundWork) await expect(inlineBackgroundWork).toBeVisible();
+    else await expect(inlineBackgroundWork).toBeHidden();
     await expect(header.locator(
       '.sr-only > [role="status"][aria-label="Background Work: Waiting on External Job"]',
     )).toHaveCount(1);
-    const activeSubagent = header.getByRole("button", { name: "1 Worker Active" });
-    await expect(activeSubagent).toBeVisible();
+    // Workers rank with the lifecycle group, so at these widths the badge is disclosed rather than
+    // inline; the popover copy below is asserted enabled, which is where it stays reachable.
+    // A CSS locator, not a role locator: a displaced badge leaves the accessibility tree, and its
+    // presence in the row's measured set is exactly what is being asserted here.
+    const activeSubagent = header.locator('[aria-label="1 Worker Active"]');
+    await expect(activeSubagent).toHaveCount(1);
+    const activeSubagentInline = await activeSubagent.evaluate((element) => !element.hidden);
     const overflowTrigger = header.locator(".session-status-overflow-trigger");
     await expect(overflowTrigger).toBeVisible();
     const hiddenCount = Number.parseInt((await overflowTrigger.textContent())?.replace("+", "") ?? "", 10);
@@ -788,8 +798,9 @@ for (const viewport of [
     expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
     expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
     expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
-    // Background work has a deliberate full-width line above the measured status/action line.
-    expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(130);
+    // #784: background work rides the measured status/action line, so a running job no longer buys
+    // the header a line of its own. The topbar, that line, and the worktree identity are all of it.
+    expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(105);
     expect(metrics.share.width).toBeGreaterThanOrEqual(36);
     expect(metrics.share.height).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
@@ -805,17 +816,19 @@ for (const viewport of [
     expect(metrics.forkIsTopmostAtCenter).toBe(true);
     expect(metrics.shareIsTopmostAtCenter).toBe(true);
     expect(metrics.moreActionsIsTopmostAtCenter).toBe(true);
-    expect(metrics.activeSubagentIsTopmostAtCenter).toBe(true);
-    expect(metrics.activeSubagent.x).toBeGreaterThanOrEqual(metrics.statuses.x);
-    expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
+    if (activeSubagentInline) {
+      expect(metrics.activeSubagentIsTopmostAtCenter).toBe(true);
+      expect(metrics.activeSubagent.x).toBeGreaterThanOrEqual(metrics.statuses.x);
+      expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
+    }
     expect(metrics.overflow.right).toBeLessThanOrEqual(metrics.fork.x);
     expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(7, 0);
     expect(metrics.fork.right).toBeLessThanOrEqual(metrics.share.x);
     expect(metrics.share.x - metrics.fork.right).toBeCloseTo(7, 0);
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
-    expect(metrics.totalBadgeCount).toBe(4);
-    expect(metrics.badges.length).toBe(4 - hiddenCount);
+    expect(metrics.totalBadgeCount).toBe(5);
+    expect(metrics.badges.length).toBe(5 - hiddenCount);
     expect(metrics.badgeRows).toBe(1);
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
     expect(Math.abs(center(metrics.actions) - center(metrics.firstVisibleStatus))).toBeLessThanOrEqual(1);
@@ -941,11 +954,12 @@ test("status overflow count follows width and live Session status changes", asyn
   });
 
   const header = page.locator(".session-detail > .detail-head");
-  await expect(header.getByRole("button", { name: "Show 3 Hidden Statuses" })).toHaveText("+3");
+  // Five badges compete for the row since #784 put background work in it.
+  await expect(header.getByRole("button", { name: "Show 4 Hidden Statuses" })).toHaveText("+4");
 
   await page.setViewportSize({ width: 390, height: 800 });
   const landscapeOverflowTrigger = header.locator(".session-status-overflow-trigger");
-  await expect(landscapeOverflowTrigger).toHaveText(/^\+[23]$/);
+  await expect(landscapeOverflowTrigger).toHaveText(/^\+[34]$/);
   await landscapeOverflowTrigger.click();
   await expect(page.getByRole("dialog", { name: "Session Statuses" })).toBeVisible();
 
@@ -955,12 +969,13 @@ test("status overflow count follows width and live Session status changes", asyn
   await expect(header.getByRole("button", { name: "Share" })).toBeFocused();
 
   await page.setViewportSize({ width: 320, height: 800 });
-  await expect(header.getByRole("button", { name: "Show 3 Hidden Statuses" })).toHaveText("+3");
+  await expect(header.getByRole("button", { name: "Show 4 Hidden Statuses" })).toHaveText("+4");
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       backgroundWorkState: undefined,
     });
   });
+  // Losing the badge drops the count with it: the row is measured, not guessed.
   const updatedTrigger = header.getByRole("button", { name: "Show 3 Hidden Statuses" });
   await expect(updatedTrigger).toHaveText("+3");
   await updatedTrigger.click();

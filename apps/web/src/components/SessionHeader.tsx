@@ -43,6 +43,34 @@ import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./
 import { useIsMobile } from "./useIsMobile.js";
 
 /**
+ * The order badges are offered a place in the measured status row when it cannot hold them all
+ * (#784).
+ *
+ * Background work is claimed first. It is authoritative and it has no other home on a phone — a
+ * session waiting on an external job is invisible everywhere else on that screen — so the lifecycle
+ * group and then the passive change statuses yield to it, rather than it taking a line of its own.
+ * Within a tier the leftmost badge is claimed first, so what survives still reads left to right.
+ *
+ * Offering rather than reserving is the point: a row too narrow for the background badge at all
+ * (320px cannot hold "Waiting on External Job") keeps the statuses that DO fit instead of emptying
+ * itself for one that never will. Clipping is never an option, so that case belongs to the `+N`
+ * disclosure — which lists every status either way — and to the badge's own live region.
+ */
+export function statusKeepOrder(items: HTMLElement[]): HTMLElement[] {
+  // The active-subagents badge shares the background-work badge's CLASS but not its rank: workers
+  // are foreground work, and they rank with the lifecycle group they run inside.
+  const tier = (item: HTMLElement) =>
+    item.classList.contains("background-work-badge") &&
+      !item.classList.contains("active-subagents-badge")
+      ? 0
+      : item.parentElement?.classList.contains("change-status-indicators") ? 2 : 1;
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => tier(left.item) - tier(right.item) || left.index - right.index)
+    .map(({ item }) => item);
+}
+
+/**
  * The responsive Session header. Desktop keeps one compact row for identity, status, Share / More
  * Actions, and shell controls. Mobile identity moves into the app topbar, leaving this component
  * as the single status/action line above the transcript.
@@ -171,13 +199,13 @@ export function SessionHeader({
         onOpenBackgroundWork();
       } : undefined} />
   );
-  const renderNoninteractiveStatuses = (includeBackground = true) => (
+  const renderNoninteractiveStatuses = () => (
     <>
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} onOpenAttention={onOpenAttention ? () => {
         closeStatusPopover(false);
         onOpenAttention();
       } : undefined} />
-      {includeBackground && renderBackgroundWork()}
+      {renderBackgroundWork()}
       <ChangeStatusBadge change={changeStatus ?? null} />
       {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
@@ -228,24 +256,35 @@ export function SessionHeader({
       const occupiedOverflowWidth = overflowTrigger ? overflowWidth + gap : 0;
       const availableWithoutTrigger = containerBox.width + occupiedOverflowWidth;
       const availableWithTrigger = Math.max(0, availableWithoutTrigger - overflowWidth - gap);
-      const ordered = items
-        .map((item) => ({ item, box: item.getBoundingClientRect() }))
-        .sort((left, right) => left.box.left - right.box.left);
-      const totalWidth = Math.max(...ordered.map(({ box }) => box.right - containerBox.left));
-      let visibleCount = ordered.length;
-
-      if (totalWidth > availableWithoutTrigger + 0.5) {
-        visibleCount = 0;
-        for (const { box } of ordered) {
-          if (box.right - containerBox.left > availableWithTrigger + 0.5) break;
-          visibleCount += 1;
+      // The row's right edge, measured from the container's own left. An item past the container's
+      // clip still has real geometry, and the container's left never moves: only its width changes
+      // with the disclosure trigger, which the two budgets above already account for.
+      const usedWidth = () => {
+        let right = 0;
+        for (const item of items) {
+          if (item.hidden) continue;
+          right = Math.max(right, item.getBoundingClientRect().right - containerBox.left);
         }
+        return right;
+      };
+
+      if (usedWidth() <= availableWithoutTrigger + 0.5) {
+        setHiddenStatusCount(0);
+        return;
       }
 
-      ordered.forEach(({ item }, index) => {
-        item.hidden = index >= visibleCount;
-      });
-      setHiddenStatusCount(ordered.length - visibleCount);
+      // Claim the row in priority order and keep a badge only if the row still fits with it in.
+      // Re-measured every time rather than cut as a suffix of one initial layout: a badge's
+      // position depends on which badges BEFORE it are in the row, so what fits is only knowable
+      // with the candidate set actually applied.
+      for (const item of items) item.hidden = true;
+      let hiddenCount = items.length;
+      for (const item of statusKeepOrder(items)) {
+        item.hidden = false;
+        if (usedWidth() > availableWithTrigger + 0.5) item.hidden = true;
+        else hiddenCount -= 1;
+      }
+      setHiddenStatusCount(hiddenCount);
     };
 
     measure();
@@ -357,11 +396,8 @@ export function SessionHeader({
           </div>
         </>
       )}
-      {isMobile && visibleBackgroundWorkState && (
-        <div className="session-header-background-work">{renderBackgroundWork()}</div>
-      )}
       <div className="session-header-statuses" ref={statusesRef}>
-        {renderNoninteractiveStatuses(!isMobile)}
+        {renderNoninteractiveStatuses()}
         {activeSubagents && (
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} workers={activeSubagents.workers} />
         )}

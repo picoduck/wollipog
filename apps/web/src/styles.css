@@ -318,6 +318,10 @@
      but that is a different accommodation). Comments give the px value at a 16px root. --- */
   --text-2xs: 0.625rem;   /* 10 */
   --text-xs: 0.6875rem;   /* 11 */
+  /* The status-pill scale. Named for the surface rather than the step because the lifecycle badge
+     and the background-work badge beside it have to be the SAME size (#784), and a shared token is
+     the only way that survives one of them being retuned. */
+  --text-status: 0.71875rem; /* 11.5 */
   --text-sm: 0.75rem;     /* 12 */
   --text-base: 0.8125rem; /* 13 — the app's working default */
   --text-md: 0.875rem;    /* 14 — body */
@@ -1177,7 +1181,7 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11.5px;
+  font-size: var(--text-status);
   font-weight: 600;
   padding: 3px 9px;
   border-radius: 999px;
@@ -1662,6 +1666,19 @@ textarea {
   min-width: 0;
   gap: 5px;
 }
+/* In the Session header (and in the overflow disclosure that shows the same badges) background work
+   is a PEER of the lifecycle statuses, not its own surface: it takes their type scale, weight,
+   padding and dot size so "Waiting on External Job" is exactly as tall as "Running" (#784). Only
+   colour and wording distinguish background work from foreground state. */
+.session-header-statuses .background-work-badge,
+.session-status-popover-content .background-work-badge {
+  gap: 6px;
+  padding: 3px 9px;
+  font-size: var(--text-status);
+  font-weight: 600;
+}
+.session-header-statuses .background-work-dot,
+.session-status-popover-content .background-work-dot { width: 7px; height: 7px; }
 .session-worktree-identity {
   flex: 0 1 auto;
   min-width: 0;
@@ -9001,7 +9018,10 @@ body.shell-dock-dragging * {
   padding: 0 6px;
   font-size: var(--text-2xs);
   font-weight: 700;
-  line-height: 18px;
+  /* 16px of line box plus the badge's 1px border on each edge is exactly the 18px an
+     `.inbox-status-pill` measures, so the badge is the same height as the card's Running pill
+     rather than 2px taller than it (#784). */
+  line-height: 16px;
 }
 .inbox-row-background-work .background-work-dot { width: 5px; height: 5px; }
 .inbox-pin-indicator { color: var(--accent); font-size: 8px; }
@@ -10968,25 +10988,10 @@ body.shell-dock-dragging * {
     justify-self: start;
     max-width: 100%;
   }
-  /* Authoritative work gets a full-width line: even a 320px phone can show the complete label
-     while lifecycle, subagents, and the action controls retain their own measured line. */
-  .session-detail > .detail-head:has(> .session-header-background-work) {
-    grid-template-rows: auto minmax(36px, auto);
-    row-gap: 4px;
-  }
-  .session-detail > .detail-head > .session-header-background-work {
-    grid-area: 1 / 1 / auto / -1;
-    justify-self: start;
-  }
-  .session-detail > .detail-head:has(> .session-header-background-work) > :is(.session-header-statuses, .detail-actions) {
-    grid-row: 2;
-  }
-  .session-detail > .detail-head:has(> .session-header-background-work) > :is(.session-worktree-identity, .session-header-note) {
-    grid-row: 3;
-  }
-  .session-detail > .detail-head:has(> .session-header-background-work):has(> .session-worktree-identity) > .session-header-note {
-    grid-row: 4;
-  }
+  /* Background work used to take a full-width line of its own here, which separated it from the
+     lifecycle badge it belongs beside and made the header taller the moment a job started (#784).
+     It now rides the measured status row: the row's priority order keeps it visible and pushes
+     passive statuses into the +N disclosure instead. */
   .session-detail > .detail-head > .session-header-note {
     grid-column: 1 / -1;
     grid-row: 2;
