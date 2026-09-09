@@ -1318,9 +1318,13 @@ export class SessionManager {
       return { removed: true, snapshot };
     } finally {
       const provider = this.active.get(sessionId);
-      if (transferredFrom && provider?.worktreeLeaseOwner === transferredFrom &&
-        this.store.transferWorktreeLease(sessionId, cleanupLeaseOwner, transferredFrom)) {
-        // The provider is still running: give it back its lease.
+      if (transferredFrom && provider?.worktreeLeaseOwner === transferredFrom) {
+        // The provider is still running: give it back its lease. If the hand-back itself fails
+        // (disk error), the lease stays held under the cleanup owner and is tied to the running
+        // provider, so retirement releases it and the provider is never left unprotected.
+        if (!this.store.transferWorktreeLease(sessionId, cleanupLeaseOwner, transferredFrom)) {
+          provider.worktreeLeaseOwner = cleanupLeaseOwner;
+        }
       } else {
         // No transfer, or the provider went away during cleanup (its own release was a no-op
         // because the lease was ours): free the lease so the session can launch again.
