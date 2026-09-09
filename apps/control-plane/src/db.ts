@@ -11254,10 +11254,18 @@ export class ControlPlaneDb {
     return row.c ?? 0;
   }
 
+  /** A model change (including a context-window variant) invalidates the provider-resolved model
+   * and the context window the provider served for it; both return with the next turn. */
   updateSessionConfig(id: string, config: SessionConfig, now: number): void {
     const model = config.model ?? null;
-    this.stmt("UPDATE sessions SET model=?, resolved_model=CASE WHEN model IS ? THEN resolved_model ELSE NULL END, effort=?, permission_mode=?, updated_at=? WHERE id=?")
-      .run(model, model, config.effort ?? null, config.permissionMode ?? null, now, id);
+    this.stmt(
+      `UPDATE sessions
+          SET model=?,
+              resolved_model=CASE WHEN model IS ? THEN resolved_model ELSE NULL END,
+              context_window=CASE WHEN model IS ? THEN context_window ELSE NULL END,
+              effort=?, permission_mode=?, updated_at=?
+        WHERE id=?`,
+    ).run(model, model, model, config.effort ?? null, config.permissionMode ?? null, now, id);
   }
 
   /** Accumulate a turn's token/cost usage into the session totals. */

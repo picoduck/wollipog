@@ -335,20 +335,18 @@ export function claudeEffectiveContextWindow(
 }
 
 /** Claude Code accepts any `[1m]` launch option and only learns at the first request that the
- * account cannot use it; the turn then fails with an API 400. Name the cause and the way out
- * instead of leaving a bare provider error, and stay silent for every other failure. */
+ * account cannot use it; the turn then fails with an API 400 whose text names the long-context
+ * beta. Only that provider text is evidence: a 400 for any other reason on a `[1m]` model must not
+ * be blamed on the window. Name the cause and the way out instead of leaving a bare error. */
 export function claudeContextWindowRejection(result: unknown, resolvedModel: string | null): string | null {
   if (!result || typeof result !== "object") return null;
   const record = result as { is_error?: unknown; api_error_status?: unknown; result?: unknown };
   if (record.is_error !== true || record.api_error_status !== 400) return null;
   const detail = typeof record.result === "string" ? record.result.trim() : "";
-  const longContext = /long[- ]context/iu.test(detail);
-  const requested = resolvedModel && /\[1m\]$/iu.test(resolvedModel);
-  if (!longContext && !requested) return null;
+  if (!/long[- ]context/iu.test(detail)) return null;
   const model = resolvedModel ?? "the selected model";
-  const provider = detail ? ` Provider response: ${detail}` : "";
-  return `The provider rejected the 1M context window for ${model}; the turn did not run.${provider} ` +
-    "Choose a different Context Window in the composer's model menu before the next turn.";
+  return `The provider rejected the 1M context window for ${model}; the turn did not run. ` +
+    `Provider response: ${detail} Choose a different Context Window in the composer's model menu before the next turn.`;
 }
 
 export class ClaudeCodeDriver implements Driver {

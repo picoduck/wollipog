@@ -25,10 +25,12 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
   const api = useApi();
   const runners = useStoreSelector((s) => s.runners);
   const models = resolveCaps(runners.get(session.runnerId), session)?.models ?? [];
+  // With no explicit selection the provider launches its default entry, so that entry (not a family
+  // substitute) is what the session advertises.
   const model = models.find((m) => m.id === session.model) ?? models.find((m) => m.default);
   const served = session.contextWindow && session.contextWindow > 0 ? session.contextWindow : undefined;
   const contextWindow = served ?? model?.contextWindow;
-  const discrepancy = contextWindowDiscrepancy(advertisedContextWindow(models, session.model), served);
+  const discrepancy = contextWindowDiscrepancy(advertisedContextWindow(models, session.model ?? model?.id), served);
   const fill = computeContextFill({
     tokensIn: session.tokensIn,
     tokensOut: session.tokensOut,

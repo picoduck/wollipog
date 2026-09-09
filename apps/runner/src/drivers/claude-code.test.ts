@@ -3563,6 +3563,8 @@ test("Claude explains a provider rejection of the 1M context window instead of a
   // Other failures stay as they were: no context-window story is invented for them.
   assert.equal(claudeContextWindowRejection({ is_error: true, api_error_status: 500, result: "overloaded" }, "claude-opus-5[1m]"), null);
   assert.equal(claudeContextWindowRejection({ is_error: true, api_error_status: 400, result: "invalid request" }, "claude-opus-5"), null);
-  assert.match(claudeContextWindowRejection({ is_error: true, api_error_status: 400, result: "bad model option" }, "claude-opus-5[1m]") ?? "", /rejected the 1M context window/);
+  // A 400 for another reason on a [1m] model is not blamed on the window.
+  assert.equal(claudeContextWindowRejection({ is_error: true, api_error_status: 400, result: "prompt is too long" }, "claude-opus-5[1m]"), null);
+  assert.match(claudeContextWindowRejection({ is_error: true, api_error_status: 400, result: "Long context is unavailable" }, null) ?? "", /for the selected model/);
   assert.equal(claudeContextWindowRejection({ is_error: false, api_error_status: 400 }, "claude-opus-5[1m]"), null);
 });
