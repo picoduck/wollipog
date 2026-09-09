@@ -1,4 +1,4 @@
-import type { SessionWorktreeView } from "@wollipog/protocol";
+import type { SessionView, SessionWorktreeView } from "@wollipog/protocol";
 
 export type WorktreePullRequestState = NonNullable<SessionWorktreeView["pullRequest"]>["state"];
 
@@ -70,4 +70,38 @@ export function displayBaseRef(
   const defaultBranch = worktree.defaultBranch?.trim();
   if (defaultBranch) return matchesDefaultBranch(baseRef, defaultBranch) ? null : baseRef;
   return isConventionalDefaultBaseRef(baseRef) ? null : baseRef;
+}
+
+/**
+ * What a session card can honestly say about its Git branch (#782).
+ *
+ * Three states, not two. A row that simply omitted the branch could not be read: "this session has
+ * no branch" and "nobody told us this session's branch" looked identical, and both looked like a
+ * shorter card. `worktrees` is an additive projection, so a session can hold an active worktree
+ * whose identity never reached the client — that is `unknown`, never `none`.
+ */
+export type SessionBranchState =
+  | { kind: "branch"; worktree: SessionWorktreeView }
+  | { kind: "none" }
+  | { kind: "unknown" };
+
+export function sessionBranchState(
+  session: Pick<SessionView, "worktrees" | "worktreePath" | "useWorktree">,
+): SessionBranchState {
+  if (session.worktreePath) {
+    const worktree = session.worktrees?.find((candidate) => candidate.path === session.worktreePath);
+    // An active worktree whose entry is missing: an older runner, or a projection that dropped the
+    // inventory. The session HAS a branch; we just cannot name it.
+    return worktree ? { kind: "branch", worktree } : { kind: "unknown" };
+  }
+  // Requested but not yet materialised, or materialisation failed. Either way the branch it will
+  // work on is not decided yet, so claiming "No Branch" would be a claim we cannot support.
+  if (session.useWorktree) return { kind: "unknown" };
+  return { kind: "none" };
+}
+
+/** Title Case label for the Git state shown on a session card's third line. */
+export function branchStateLabel(state: SessionBranchState): string {
+  if (state.kind === "branch") return state.worktree.branch;
+  return state.kind === "none" ? "No Branch" : "Branch Unavailable";
 }

@@ -8,7 +8,7 @@ import {
   reminderBadgeLabel,
   snoozedSessionAttentionReason,
 } from "../session-reminders.js";
-import { displayBaseRef, pullRequestStateLabel } from "../worktree-identity.js";
+import { branchStateLabel, displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { BackgroundWorkBadge } from "./common.js";
@@ -79,8 +79,14 @@ function InboxRowInner({
   const active = isHeartbeatBusy(session.status);
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || null;
-  const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
+  // #782: the card's third line is unconditional. Deriving the state up front is what makes it so —
+  // the row no longer asks "is there a worktree?" but "what can this card honestly say about Git?".
+  const branchState = sessionBranchState(session);
+  const activeWorktree = branchState.kind === "branch" ? branchState.worktree : null;
   const worktreeBaseRef = activeWorktree ? displayBaseRef(activeWorktree) : null;
+  const backgroundWork = session.backgroundWorkState && session.backgroundWorkState !== "resumed"
+    ? session.backgroundWorkState
+    : null;
 
   return (
     <div
@@ -118,36 +124,58 @@ function InboxRowInner({
             <span className="inbox-row-title">{session.title}</span>
             {active && <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />}
           </span>
-          {activeWorktree && (
-            <span className="inbox-row-worktree">
-              <span className="inbox-row-branch" title={`Branch: ${activeWorktree.branch}`}>
-                {activeWorktree.branch}
-              </span>
-              {worktreeBaseRef && (
-                <span className="inbox-row-base">
-                  {/* The arrow is decoration; assistive technology gets the word it stands for. */}
-                  <span className="sr-only">Base: </span>
-                  <span aria-hidden="true">← </span>
-                  {worktreeBaseRef}
-                </span>
-              )}
-              {activeWorktree.pullRequest && (
+          {/* Line three, on EVERY card (#782). Git state on the left, background work on the right,
+              directly under the activity strip. Before this the Git line appeared only for a session
+              with an active worktree and the background badge wrapped onto a line of its own, so the
+              list stepped between two, three, and four rows and never said whether a card without a
+              Git line had no branch or merely an unreported one. */}
+          <span className="inbox-row-meta">
+            <span className="inbox-row-git">
+              {/* The word the line stands for, so the row's accessible name carries the Git state. */}
+              <span className="sr-only">Branch: </span>
+              {activeWorktree ? (
+                <>
+                  <span className="inbox-row-branch" title={`Branch: ${activeWorktree.branch}`}>
+                    {activeWorktree.branch}
+                  </span>
+                  {worktreeBaseRef && (
+                    <span className="inbox-row-base">
+                      {/* The arrow is decoration; assistive technology gets the word it stands for. */}
+                      <span className="sr-only">Base: </span>
+                      <span aria-hidden="true">← </span>
+                      {worktreeBaseRef}
+                    </span>
+                  )}
+                  {activeWorktree.pullRequest && (
+                    <span
+                      className={"inbox-row-pr-pill " + (activeWorktree.pullRequest.state === "open"
+                        ? "open"
+                        : activeWorktree.pullRequest.state === "merged" ? "merged" : "closed")}
+                      aria-label={`Pull Request: ${pullRequestStateLabel(activeWorktree.pullRequest.state)}`}
+                    >
+                      {pullRequestStateLabel(activeWorktree.pullRequest.state)} PR
+                    </span>
+                  )}
+                </>
+              ) : (
+                /* Words, not an absence and not a colour: the label itself is the whole signal, and
+                   the subdued italic only reinforces what it already says in text. */
                 <span
-                  className={"inbox-row-pr-pill " + (activeWorktree.pullRequest.state === "open"
-                    ? "open"
-                    : activeWorktree.pullRequest.state === "merged" ? "merged" : "closed")}
-                  aria-label={`Pull Request: ${pullRequestStateLabel(activeWorktree.pullRequest.state)}`}
+                  className={`inbox-row-branch-state ${branchState.kind}`}
+                  title={branchState.kind === "none"
+                    ? "This session is not working on a Git branch."
+                    : "This session's branch state has not been reported by its runner."}
                 >
-                  {pullRequestStateLabel(activeWorktree.pullRequest.state)} PR
+                  {branchStateLabel(branchState)}
                 </span>
               )}
             </span>
-          )}
-          {session.backgroundWorkState && session.backgroundWorkState !== "resumed" && (
-            <span className="inbox-row-background-work">
-              <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={false} />
-            </span>
-          )}
+            {backgroundWork && (
+              <span className="inbox-row-background-work">
+                <BackgroundWorkBadge state={backgroundWork} compact announce={false} />
+              </span>
+            )}
+          </span>
           <span className="inbox-row-signals">
             <span
               className={"inbox-status-pill " + (stopFailed ? "failed" : status.busy ? "running" : "activity")}

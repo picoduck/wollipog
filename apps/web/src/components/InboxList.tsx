@@ -8,23 +8,19 @@ import { InboxRow, type InboxRowProps } from "./InboxRow.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 
 /**
- * A collapsed inbox row, measured. TanStack corrects from the real height on first paint, so these
- * only have to be close enough that the initial scrollbar is not absurd — and, since InboxView
+ * A collapsed inbox row, measured. TanStack corrects from the real height on first paint, so this
+ * only has to be close enough that the initial scrollbar is not absurd — and, since InboxView
  * restores an absolute `scrollTop`, close enough that a restore against unmeasured rows lands in
  * the same reading neighbourhood.
  *
- * Two numbers, not one, because #664 gave a session with an active worktree a third line. One
- * constant cannot be right for both, and an inbox of worktree sessions is the common case here:
- * every session created through the issue workflow requests a worktree. Measured across both
- * densities: two-line rows are 61-67px, three-line rows 82-88px, margins included.
+ * ONE number, because #782 made every card three lines. #664 needed two, since a session without an
+ * active worktree lost line three and a per-row predicate had to guess which shape it was; that
+ * guess is gone along with the shape it guessed at. Measured across both densities: 82-88px,
+ * margins included.
  */
-const INBOX_ROW_ESTIMATE = 64;
-const INBOX_WORKTREE_ROW_ESTIMATE = 85;
+const INBOX_ROW_ESTIMATE = 85;
 
-const estimateInboxRow = ({ session }: InboxListEntry) =>
-  session.worktrees?.some((worktree) => worktree.path === session.worktreePath)
-    ? INBOX_WORKTREE_ROW_ESTIMATE
-    : INBOX_ROW_ESTIMATE;
+const estimateInboxRow = () => INBOX_ROW_ESTIMATE;
 
 export interface InboxListEntry {
   session: SessionView;

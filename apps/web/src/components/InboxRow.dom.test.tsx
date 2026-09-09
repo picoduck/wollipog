@@ -174,7 +174,7 @@ test("a session with a worktree gets a third line, and a default base ref is lef
       source: "created", pullRequest: { url: "https://example.test/pull/1", state: "open" },
     }),
     (container) => {
-      const line = container.querySelector<HTMLElement>(".inbox-row-worktree")!;
+      const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
       assert.equal(line.querySelector(".inbox-row-branch")?.textContent, "fix/issue-664");
       assert.equal(line.querySelector(".inbox-row-base"), null, "origin/main is what every reader assumes");
       assert.equal(line.querySelector(".inbox-row-pr-pill")?.textContent, "Open PR");
@@ -191,7 +191,7 @@ test("a base ref that is not the default is spelled out on the worktree line", a
       pullRequest: { url: "https://example.test/pull/2", state: "merged" },
     }),
     (container) => {
-      const line = container.querySelector<HTMLElement>(".inbox-row-worktree")!;
+      const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
       // The arrow is hidden from assistive technology; the word it stands for is not.
       assert.equal(line.querySelector(".inbox-row-base")?.textContent, "Base: ← fix/issue-664");
       assert.equal(line.querySelector(".inbox-row-pr-pill")?.textContent, "Merged PR");
@@ -199,12 +199,73 @@ test("a base ref that is not the default is spelled out on the worktree line", a
   );
 });
 
-test("Inbox rows no longer render the message preview, and rows without a worktree stay two lines", async () => {
+test("Inbox rows no longer render the message preview, and every row keeps its Git line", async () => {
   await withRow(worktreeSession(null), (container) => {
     assert.doesNotMatch(container.textContent ?? "", /first line of the last message/);
     assert.equal(container.querySelector(".inbox-row-snippet"), null);
-    assert.equal(container.querySelector(".inbox-row-worktree"), null);
+    // #782: line three is unconditional, so a session with no worktree says so instead of vanishing.
+    assert.notEqual(container.querySelector(".inbox-row-meta"), null);
+    assert.equal(container.querySelector(".inbox-row-branch-state")?.textContent, "No Branch");
     // The strip is still there for a busy session; it is the line's only fixed-width item.
     assert.notEqual(container.querySelector(".inbox-row-activity"), null);
   });
+});
+
+// #782: three states, and the distinction between the last two is the whole point. A session that
+// holds a worktree the client cannot name must not be described as having no branch at all.
+test("a session's Git line names its branch, admits to none, or admits to not knowing", async () => {
+  const cases: Array<[Partial<SessionView>, string, string | null]> = [
+    [{ useWorktree: false, worktreePath: null }, "No Branch", "none"],
+    [{ useWorktree: true, worktreePath: null }, "Branch Unavailable", "unknown"],
+    [{ useWorktree: true, worktreePath: "/repos/alpha/wt", worktrees: undefined }, "Branch Unavailable", "unknown"],
+    [{
+      useWorktree: true,
+      worktreePath: "/repos/alpha/wt",
+      // An inventory that names a DIFFERENT worktree still leaves the active one unnamed.
+      worktrees: [{ id: "other", path: "/repos/alpha/other", branch: "fix/other", source: "created" }],
+    } as Partial<SessionView>, "Branch Unavailable", "unknown"],
+    [{
+      useWorktree: true,
+      worktreePath: "/repos/alpha/wt",
+      worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-782", source: "created" }],
+    } as Partial<SessionView>, "fix/issue-782", null],
+  ];
+  for (const [extra, label, stateClass] of cases) {
+    await withRow({ ...worktreeSession(null), ...extra } as SessionView, (container) => {
+      const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
+      assert.notEqual(line, null, `${label}: line three is always present`);
+      const state = line.querySelector<HTMLElement>(".inbox-row-branch-state");
+      if (stateClass) {
+        assert.equal(state?.textContent, label);
+        assert.ok(state!.classList.contains(stateClass), `${label} carries its own state class`);
+        assert.equal(line.querySelector(".inbox-row-branch"), null);
+      } else {
+        assert.equal(state, null);
+        assert.equal(line.querySelector(".inbox-row-branch")?.textContent, label);
+      }
+      // The accessible name says which of the three it is, not just what the text happens to read.
+      assert.match(container.querySelector<HTMLElement>(".inbox-row")!.textContent ?? "", new RegExp(`Branch: ${label}`));
+    });
+  }
+});
+
+// #782: the badge shares line three with the Git state instead of taking a fourth line.
+test("background work sits on the Git line, whatever the session's branch state", async () => {
+  for (const extra of [
+    { useWorktree: false, worktreePath: null },
+    {
+      useWorktree: true,
+      worktreePath: "/repos/alpha/wt",
+      worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-782", source: "created" }],
+    },
+  ] as Partial<SessionView>[]) {
+    await withRow({ ...worktreeSession(null), ...extra, backgroundWorkState: "running" } as SessionView, (container) => {
+      const meta = container.querySelector<HTMLElement>(".inbox-row-meta")!;
+      assert.notEqual(meta.querySelector(".inbox-row-git"), null);
+      const badge = meta.querySelector(".inbox-row-background-work .background-work-badge");
+      assert.equal(badge?.getAttribute("aria-label"), "Background Work: Waiting on External Job");
+      // Nothing outside line three carries it, which is what a fourth row would look like.
+      assert.equal(container.querySelectorAll(".inbox-row-background-work").length, 1);
+    });
+  }
 });
