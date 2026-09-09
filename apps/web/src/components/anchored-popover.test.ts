@@ -52,21 +52,43 @@ test("a screen too short for either side stops anchoring rather than overflowing
   );
 });
 
+test("a trigger scrolled off either edge pins the panel to that edge, still on screen", () => {
+  // The placement re-runs on scroll, so an open panel's trigger can leave the viewport entirely.
+  // An unclamped rectangle reports more clearance than the whole window and sails past every bound.
+  const viewport = { width: 390, height: 800 };
+  const offTop = placePanel({ top: -120, bottom: -100, left: 40 }, viewport, PANEL);
+  assert.ok(offTop.top! >= 0, `placed at ${offTop.top}, above the top edge`);
+  assert.ok(offTop.top! + offTop.maxHeight <= 800);
+
+  const offBottom = placePanel({ top: 900, bottom: 920, left: 40 }, viewport, PANEL);
+  const panelTop = 800 - offBottom.bottom! - offBottom.maxHeight;
+  assert.ok(offBottom.bottom! >= 0);
+  assert.ok(panelTop >= 0, `top edge at ${panelTop}`);
+});
+
 test("the panel never extends past the viewport, wherever the trigger sits", () => {
-  // The invariant the whole placement exists to hold, swept rather than sampled.
-  for (const height of [180, 240, 420, 700, 800, 1200]) {
-    for (let top = 0; top + 20 <= height; top += 10) {
-      const viewport = { width: 390, height };
-      const p = placePanel({ top, bottom: top + 20, left: 40 }, viewport, PANEL);
-      const where = `viewport ${height}, trigger ${top}`;
-      assert.ok(p.maxHeight >= 0, `${where}: negative height`);
-      if (p.top !== undefined) {
-        assert.ok(p.top >= 0, `${where}: placed above the top edge`);
-        assert.ok(p.top + p.maxHeight <= height, `${where}: bottom edge at ${p.top + p.maxHeight}`);
-      } else {
-        const panelTop = height - p.bottom! - p.maxHeight;
-        assert.ok(p.bottom! >= 0, `${where}: placed below the bottom edge`);
-        assert.ok(panelTop >= 0, `${where}: top edge at ${panelTop}`);
+  // The invariant the whole placement exists to hold, swept rather than sampled — including
+  // triggers off both edges, a trigger taller than the screen, and a degenerate viewport.
+  for (const height of [0, 40, 180, 240, 420, 700, 800, 1200]) {
+    for (let top = -200; top <= height + 200; top += 10) {
+      for (const triggerHeight of [0, 20, height + 400]) {
+        const viewport = { width: 390, height };
+        const p = placePanel({ top, bottom: top + triggerHeight, left: 40 }, viewport, PANEL);
+        const where = `viewport ${height}, trigger ${top}+${triggerHeight}`;
+        assert.ok(p.maxHeight >= 0, `${where}: negative height ${p.maxHeight}`);
+        assert.equal(
+          Number(p.top !== undefined) + Number(p.bottom !== undefined),
+          1,
+          `${where}: a fixed element given both top and bottom stretches between them`,
+        );
+        if (p.top !== undefined) {
+          assert.ok(p.top >= 0, `${where}: placed above the top edge at ${p.top}`);
+          assert.ok(p.top + p.maxHeight <= height, `${where}: bottom edge at ${p.top + p.maxHeight}`);
+        } else {
+          const panelTop = height - p.bottom! - p.maxHeight;
+          assert.ok(p.bottom! >= 0, `${where}: placed below the bottom edge`);
+          assert.ok(panelTop >= 0, `${where}: top edge at ${panelTop}`);
+        }
       }
     }
   }

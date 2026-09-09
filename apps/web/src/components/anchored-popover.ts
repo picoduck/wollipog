@@ -42,8 +42,15 @@ export function placePanel(
   size: { width: number; height: number },
 ): Placement {
   const left = Math.max(MARGIN, Math.min(rect.left, viewport.width - size.width - MARGIN));
-  const spaceBelow = viewport.height - rect.bottom - GAP - MARGIN;
-  const spaceAbove = rect.top - GAP - MARGIN;
+  // The trigger can be scrolled wholly off either edge while its panel is open — the placement
+  // runs again on scroll. An unclamped off-screen rectangle reports more clearance than the whole
+  // viewport (a trigger 120px above the top "leaves" 886px below it in an 800px window), which
+  // would sail past every bound below and place the panel off-screen. Clamping the anchor to the
+  // viewport degrades that into pinning the panel to the edge the trigger left by.
+  const anchorTop = clamp(rect.top, 0, viewport.height);
+  const anchorBottom = clamp(rect.bottom, 0, viewport.height);
+  const spaceBelow = viewport.height - anchorBottom - GAP - MARGIN;
+  const spaceAbove = anchorTop - GAP - MARGIN;
   const below = spaceBelow >= size.height || spaceBelow >= spaceAbove;
   const clearance = below ? spaceBelow : spaceAbove;
   // Neither side can host a usable panel — a short screen, or a trigger pinned mid-viewport. Stop
@@ -51,11 +58,18 @@ export function placePanel(
   // trigger is recoverable, one whose tail hangs off a fixed element is not, because no ancestor
   // is left to scroll and the panel's own scrollport is partly outside the screen.
   if (clearance < MIN_HEIGHT) {
-    return { left, top: MARGIN, maxHeight: Math.max(0, viewport.height - MARGIN * 2) };
+    const maxHeight = Math.max(0, viewport.height - MARGIN * 2);
+    // The top margin itself is conditional: on a viewport shorter than the margins it would be the
+    // thing pushing the panel off screen.
+    return { left, top: Math.min(MARGIN, Math.max(0, viewport.height - maxHeight)), maxHeight };
   }
   return below
-    ? { left, top: rect.bottom + GAP, maxHeight: clearance }
-    : { left, bottom: viewport.height - rect.top + GAP, maxHeight: clearance };
+    ? { left, top: anchorBottom + GAP, maxHeight: clearance }
+    : { left, bottom: viewport.height - anchorTop + GAP, maxHeight: clearance };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max));
 }
 
 /**
