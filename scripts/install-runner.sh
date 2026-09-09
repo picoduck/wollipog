@@ -115,19 +115,22 @@ release_asset_record() {
 if [ -n "$release" ]; then
   printf '%s\n' "$release" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "--release must look like v1.2.3, got $release" >&2; exit 1; }
   api="https://api.github.com/repos/$repo/releases/tags/$release"
-  gh_endpoint="repos/$repo/releases/tags/$release"
 else
   api="https://api.github.com/repos/$repo/releases/latest"
-  gh_endpoint="repos/$repo/releases/latest"
 fi
 gh_jq='.tag_name, (.assets[] | [.name, (.digest // ""), .browser_download_url] | @tsv)'
-# The tags endpoint only knows published releases; an authenticated gh can find a draft by
-# filtering the release list instead.
+# Raw `gh api` metadata keeps the publisher digests (`gh release view` drops them). The tags
+# endpoint only knows published releases; an authenticated gh can find a draft by filtering the
+# release list instead.
 gh_release_lookup() {
-  gh api "$gh_endpoint" --jq "$gh_jq" 2>/dev/null && return 0
-  [ -n "$release" ] || return 1
-  gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$release\") | $gh_jq" 2>/dev/null | grep -q . || return 1
-  gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$release\") | $gh_jq" 2>/dev/null
+  if [ -z "$release" ]; then
+    gh api "repos/$repo/releases/latest" --jq "$gh_jq" 2>/dev/null
+    return
+  fi
+  gh api "repos/$repo/releases/tags/$release" --jq "$gh_jq" 2>/dev/null && return 0
+  listed=$(gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$release\") | $gh_jq" 2>/dev/null) || return 1
+  [ -n "$listed" ] || return 1
+  printf '%s\n' "$listed"
 }
 use_gh=0
 legacy_selected=0

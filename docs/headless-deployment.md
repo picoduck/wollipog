@@ -159,7 +159,7 @@ Reinstall is the supported way to regenerate unit files; executables are upgrade
 
 ```bash
 wollipog service upgrade                 # latest published release
-wollipog service upgrade --release v0.23.0   # an exact tag; with GH_TOKEN a draft is reachable too
+wollipog service upgrade --release v0.23.0   # an exact tag; with GH_TOKEN a draft made for that tag works too
 wollipog service upgrade --yes --json    # non-interactive, for automation
 ```
 
@@ -213,7 +213,9 @@ version reported over the loopback admin API, the runner re-registering, and tha
 credentials did not change. It then blocks the control plane's port and forces an upgrade to prove
 the rollback restores the previous bytes, checks that upgrading to the current release is a no-op,
 and purges. It runs automatically when a release is published (from the previous published release)
-and on demand for any pair of tags, including a draft from the release workflow's dry run.
+and on demand for any pair of tags, including a draft created for a real tag before it is published
+(a branch-dispatched `v0.0.0-test.<run>` throwaway cannot be used: its executables report the
+source version, not the tag).
 
 ## Native services versus dashboard-managed SSH runners
 

@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       to_tag:
-        description: "Release to upgrade to (vX.Y.Z[-suffix]); a draft is fine"
+        description: "Release to upgrade to (vX.Y.Z[-suffix]). A draft created for a real tag works; a branch-dispatched v0.0.0-test.N throwaway does not, because its executables report the source version"
         required: true
         type: string
       from_tag:
@@ -49,9 +49,12 @@ jobs:
           set -euo pipefail
           if [ "$EVENT_NAME" = release ]; then
             to="$RELEASE_TAG"
-            # The newest published, non-prerelease, non-draft release other than the one just published.
-            from=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=30" \
-              --jq --arg to "$to" '[.[] | select(.draft == false and .prerelease == false and .tag_name != $to)] | sort_by(.published_at) | reverse | .[0].tag_name // empty')
+            # The newest earlier published, non-prerelease release that can actually be installed
+            # headlessly and upgraded from: it must carry the control-plane asset (releases before
+            # that have neither the asset nor `service upgrade`). Until one exists, rehearse on the
+            # published release itself with --force.
+            from=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" | jq -r --arg to "$to" \
+              '[.[] | select(.draft == false and .prerelease == false and .tag_name != $to and (.assets | any(.name == "wollipog-control-plane-x86_64-unknown-linux-gnu")))] | sort_by(.published_at) | reverse | .[0].tag_name // empty')
             [ -n "$from" ] || from="$to"
           else
             to="$INPUT_TO"

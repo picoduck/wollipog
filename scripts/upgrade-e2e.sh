@@ -34,6 +34,10 @@ step() { echo; echo "== $*"; }
 [ -n "$to_tag" ] || fail "set WOLLIPOG_E2E_TO_TAG"
 for tag in "$from_tag" "$to_tag"; do
   printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || fail "tag $tag must look like v1.2.3"
+  # A branch-dispatched throwaway draft is tagged v0.0.0-test.<run> while its executables still
+  # report the source version, so neither this script's checks nor `service upgrade`'s staged
+  # --version check can accept it. A draft created for a real tag carries the tag's version.
+  case "$tag" in v0.0.0-test.*) fail "$tag is a throwaway dry-run draft whose executables do not report its version; use a draft or release made for a real tag" ;; esac
 done
 [ -n "$install_user" ] && [ "$install_user" != root ] || fail "set WOLLIPOG_E2E_USER to the unprivileged account that runs the installer"
 user_home=$(getent passwd "$install_user" | cut -d: -f6)
@@ -102,8 +106,10 @@ install_json=$("$cli" service install --system --port "$port" --json) || { echo 
 echo "$install_json" | jq -c '{health, units}'
 echo "$install_json" | jq -e '.health.controlPlane.ok == true and .health.runnerOnline == true' >/dev/null || fail "install did not report a healthy control plane with the runner online"
 [ "$(admin_status | jq -r .appVersion)" = "$from_version" ] || fail "control plane reports $(admin_status | jq -r .appVersion) over the admin API, expected $from_version"
-cp_path=$(systemctl show -p ExecStart --value "$cp_unit" | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
-runner_path=$(systemctl show -p ExecStart --value "$runner_unit" | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
+# ExecStart renders as `{ path=<executable> ; argv[]=... ; ... }`; the path may contain spaces.
+unit_executable() { systemctl show -p ExecStart --value "$1" | sed -n 's/^{ path=\(.*\) ; argv\[\]=.*/\1/p' | head -n1; }
+cp_path=$(unit_executable "$cp_unit")
+runner_path=$(unit_executable "$runner_unit")
 [ -x "$cp_path" ] && [ -x "$runner_path" ] || fail "could not resolve unit executables ($cp_path, $runner_path)"
 echo "units run $cp_path and $runner_path"
 config_before=$(cat /etc/wollipog/control-plane.env /etc/wollipog/runner.config.json /etc/wollipog/runner.token | sha256sum)
@@ -149,6 +155,9 @@ echo "$rollback_out" | jq -e '.error | test("rolled back to the previous executa
 [ "$(version_of "$cp_path")" = "$to_version" ] || fail "restored control plane reports $(version_of "$cp_path"), expected $to_version"
 kill "$blocker_pid"; blocker_pid=""
 sed -i "s/^CONTROL_PLANE_PORT=.*/CONTROL_PLANE_PORT=$port/" /etc/wollipog/control-plane.env
+# Restart=on-failure retried every 5 s against the blocked port and exhausted StartLimitBurst
+# during the two 60 s health waits; clear that before asking systemd to start the units again.
+systemctl reset-failed "$cp_unit" "$runner_unit"
 systemctl restart "$cp_unit"
 wait_until 60 "the control plane to be healthy after the rollback rehearsal" healthy
 systemctl restart "$runner_unit"
