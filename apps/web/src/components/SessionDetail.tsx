@@ -2118,7 +2118,12 @@ function SessionDetailLoaded({
     `${session.updatedAt}:${session.pendingApproval?.requestId ?? ""}`,
     mode === "expanded",
   );
-  const timelineItems = useGovernanceTimeline(items, governanceDecisions, evs);
+  const timelineItems = useGovernanceTimeline(
+    items,
+    governanceDecisions,
+    evs,
+    session.status === "running" || session.status === "starting",
+  );
   const observedLastEventAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || undefined;
   const activeTurnProgressProjector = useRef<IncrementalActiveTurnProgress | null>(null);
   activeTurnProgressProjector.current ??= new IncrementalActiveTurnProgress();

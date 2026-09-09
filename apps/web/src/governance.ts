@@ -125,29 +125,29 @@ export interface GovernanceAnchorEvent {
 }
 
 /**
- * Running maximum of event timestamps, in sequence order.
+ * Suffix minimum of event timestamps, in sequence order.
  *
  * Events are ordered by sequence, and their timestamps are NOT required to be non-decreasing:
  * hydrated runner pages validate contiguous `seq` and a non-negative `ts` and nothing more, so a
  * recovered history can legitimately step backwards in time. Binary-searching raw timestamps
- * would then anchor a decision to the wrong event. The running maximum is non-decreasing by
- * construction and equals the raw timestamps whenever the history is well behaved, so the same
- * search stays correct: a decision is placed after the last event by which everything recorded so
- * far had already happened.
+ * would then anchor a decision to whichever slots the probes happened to hit. The suffix minimum
+ * is non-decreasing by construction, and the last index whose suffix minimum is at or before a
+ * timestamp is exactly the last event at or before it: that event qualifies and every later one
+ * is strictly newer. On a well-behaved history it equals the raw timestamps.
  */
-function runningMaxTimestamps(events: readonly GovernanceAnchorEvent[]): number[] {
-  const running: number[] = new Array(events.length);
-  let max = Number.NEGATIVE_INFINITY;
-  for (let index = 0; index < events.length; index += 1) {
-    max = Math.max(max, events[index]!.ts);
-    running[index] = max;
+function suffixMinTimestamps(events: readonly GovernanceAnchorEvent[]): number[] {
+  const suffix: number[] = new Array(events.length);
+  let min = Number.POSITIVE_INFINITY;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    min = Math.min(min, events[index]!.ts);
+    suffix[index] = min;
   }
-  return running;
+  return suffix;
 }
 
 function anchorSeqFrom(
   events: readonly GovernanceAnchorEvent[],
-  running: readonly number[],
+  suffixMin: readonly number[],
   timestamp: number,
 ): number {
   let low = 0;
@@ -155,7 +155,7 @@ function anchorSeqFrom(
   let anchor = Number.NEGATIVE_INFINITY;
   while (low <= high) {
     const mid = (low + high) >> 1;
-    if (running[mid]! <= timestamp) {
+    if (suffixMin[mid]! <= timestamp) {
       anchor = events[mid]!.seq;
       low = mid + 1;
     } else {
@@ -173,7 +173,7 @@ function anchorSeqFrom(
  * activity moves it into place without ever omitting it.
  */
 export function governanceAnchorSeq(events: readonly GovernanceAnchorEvent[], timestamp: number): number {
-  return anchorSeqFrom(events, runningMaxTimestamps(events), timestamp);
+  return anchorSeqFrom(events, suffixMinTimestamps(events), timestamp);
 }
 
 /**
@@ -224,15 +224,27 @@ function governanceItem(decision: GovernanceDecision): TimelineItem {
  * Returns the input array unchanged (same identity) when there is nothing to add, so sessions
  * without governance activity keep the incremental row projector's fast path.
  */
+export interface MergeGovernanceOptions {
+  /**
+   * The transcript ends in a work run that is still growing (the turn is running). Decisions that
+   * belong inside or after that run are held back until a standalone row closes it: emitting
+   * them now would put the row at the tail, and every streamed work item would then be inserted
+   * in front of it instead of appended, which throws the row projector off its append fast path
+   * for the rest of the turn. Once the turn settles the held decisions flush in one projection.
+   */
+  holdTrailingRun?: boolean;
+}
+
 export function mergeGovernanceDecisions(
   items: TimelineItem[],
   decisions: readonly GovernanceDecision[],
   events: readonly GovernanceAnchorEvent[],
+  { holdTrailingRun = false }: MergeGovernanceOptions = {},
 ): TimelineItem[] {
   if (!decisions.length) return items;
-  const running = runningMaxTimestamps(events);
+  const suffixMin = suffixMinTimestamps(events);
   const anchored = decisions
-    .map((decision) => ({ decision, anchorSeq: anchorSeqFrom(events, running, decision.timestamp) }))
+    .map((decision) => ({ decision, anchorSeq: anchorSeqFrom(events, suffixMin, decision.timestamp) }))
     .sort((a, b) =>
       a.anchorSeq - b.anchorSeq ||
       a.decision.timestamp - b.decision.timestamp ||
@@ -256,6 +268,8 @@ export function mergeGovernanceDecisions(
     if (!isCollapsibleWorkItem(item)) flushBefore(item.id);
     merged.push(item);
   }
-  flushBefore(Number.POSITIVE_INFINITY);
-  return merged;
+  const trailingRunOpen = holdTrailingRun && items.length > 0 && isCollapsibleWorkItem(items[items.length - 1]!);
+  if (!trailingRunOpen) flushBefore(Number.POSITIVE_INFINITY);
+  // Nothing landed: hand back the same array so the caller's identity checks keep the fast path.
+  return merged.length === items.length ? items : merged;
 }

@@ -209,14 +209,44 @@ test("unchanged decisions keep their item identity so the row projector stays in
 test("anchoring stays well defined when a recovered history steps backwards in time", () => {
   // Hydrated pages validate contiguous seq and a non-negative ts and nothing more, so timestamps
   // are not guaranteed to be non-decreasing. Searching them raw is not merely inaccurate, it is
-  // undefined: the answer depends on which slots the search happens to probe. Anchoring on the
-  // running maximum is deterministic and conservative — a decision is never placed after an event
-  // that was recorded as happening later than it.
-  const jumbled = [{ seq: 1, ts: 100 }, { seq: 2, ts: 300 }, { seq: 3, ts: 200 }];
-  assert.equal(governanceAnchorSeq(jumbled, 250), 1);
+  // undefined: the answer depends on which slots the search happens to probe. The anchor is the
+  // last event at or before the decision, so an outcome never lands before the request it
+  // resolves when that request is the latest qualifying event.
+  const jumbled = [{ seq: 1, ts: 100 }, { seq: 2, ts: 300 }, { seq: 3, ts: 200 }, { seq: 4, ts: 400 }];
+  assert.equal(governanceAnchorSeq(jumbled, 250), 3);
   assert.equal(governanceAnchorSeq(jumbled, 350), 3);
   assert.equal(governanceAnchorSeq(jumbled, 100), 1);
   assert.equal(governanceAnchorSeq(jumbled, 50), Number.NEGATIVE_INFINITY);
+  assert.equal(governanceAnchorSeq(jumbled, 400), 4);
   // Well-behaved histories are unaffected.
   assert.equal(governanceAnchorSeq(events, 250), 2);
+
+  // The resolved tool call (seq 3) recorded an earlier timestamp than the message before it; the
+  // outcome still follows it.
+  const decisions = governanceDecisions([entry({ auditId: "h", timestamp: 250 })]);
+  const merged = mergeGovernanceDecisions([message(1), message(2), work(3), message(4)], decisions, jumbled);
+  assert.deepEqual(merged.map((item) => item.kind), [
+    "agent_message", "agent_message", "agent_thought", "governance_decision", "agent_message",
+  ]);
+});
+
+test("a decision inside a still-growing tail run is held so streamed work stays a pure append", () => {
+  // Emitting the row at the tail would make every later work item an insertion in front of it,
+  // which knocks the row projector off its append fast path for the rest of the turn.
+  const decisions = governanceDecisions([entry({ auditId: "h", timestamp: 250 })]);
+  const anchors = [{ seq: 1, ts: 100 }, { seq: 2, ts: 200 }, { seq: 3, ts: 300 }, { seq: 4, ts: 400 }, { seq: 5, ts: 500 }];
+  const running = { holdTrailingRun: true };
+  const first = [message(1), work(2), work(3)];
+  assert.equal(mergeGovernanceDecisions(first, decisions, anchors.slice(0, 3), running), first);
+  const second = [message(1), work(2), work(3), work(4)];
+  assert.equal(mergeGovernanceDecisions(second, decisions, anchors.slice(0, 4), running), second);
+  // A standalone row closes the run and the held decision lands before it.
+  const third = [message(1), work(2), work(3), work(4), message(5)];
+  assert.deepEqual(mergeGovernanceDecisions(third, decisions, anchors, running).map((item) => item.kind), [
+    "agent_message", "agent_thought", "agent_thought", "agent_thought", "governance_decision", "agent_message",
+  ]);
+  // Once the turn has settled, a transcript that ends in a run still shows the outcome.
+  assert.deepEqual(mergeGovernanceDecisions(second, decisions, anchors.slice(0, 4)).map((item) => item.kind), [
+    "agent_message", "agent_thought", "agent_thought", "agent_thought", "governance_decision",
+  ]);
 });

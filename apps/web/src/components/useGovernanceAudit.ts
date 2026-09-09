@@ -68,12 +68,14 @@ export function useGovernanceTimeline(
   items: TimelineItem[],
   decisions: readonly GovernanceDecision[],
   events: readonly GovernanceAnchorEvent[] | undefined,
+  /** The turn is still running, so a trailing work run may keep growing. */
+  turnRunning = false,
 ): TimelineItem[] {
   const previousRef = useRef<TimelineItem[] | null>(null);
   return useMemo(() => {
     const anchors = events ?? [];
     const transcriptDecisions = transcriptGovernanceDecisions(decisions, items);
-    const merged = mergeGovernanceDecisions(items, transcriptDecisions, anchors);
+    const merged = mergeGovernanceDecisions(items, transcriptDecisions, anchors, { holdTrailingRun: turnRunning });
     if (merged === items) {
       previousRef.current = null;
       return items;
@@ -99,5 +101,5 @@ export function useGovernanceTimeline(
     }
     previousRef.current = merged;
     return merged;
-  }, [decisions, events, items]);
+  }, [decisions, events, items, turnRunning]);
 }
