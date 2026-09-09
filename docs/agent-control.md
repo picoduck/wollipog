@@ -66,8 +66,9 @@ hash acknowledgement, and atomically installs a root-owned, mode-0555, hash-veri
 fixed path in that distro. The provider receives only a mode-0600 token and MCP configuration in
 its private bwrap `/tmp`.
 
-The helper connects to a per-launch mode-0600 Unix socket. A sibling relay outside bwrap carries
-versioned bounded frames over two inherited `wsl.exe` pipes to the Windows runner, which checks the
+The helper connects to a per-launch mode-0600 Unix socket. A sibling relay outside bwrap runs as a
+separate fixed-command `wsl.exe` child and carries versioned bounded frames over that process's
+standard input/output to the Windows runner, which checks the
 session, token, readiness marker, and CLI command family before reusing the existing Orchestrator
 tool table. The bwrap process sees only the one socket directory; it never sees `wsl.exe`, `/init`,
 a TCP listener, or a general process-execution RPC. Relay exit removes the socket, provider stop

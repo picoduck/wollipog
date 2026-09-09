@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { after, test } from "node:test";
-import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
 import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
@@ -1083,12 +1083,17 @@ test("Direct WSL bridge binds broker-provisioned private files and launches only
     context: { kind: "wsl", distro: "Ubuntu" }, isolation,
     env: { WOLLIPOG_AGENT_CONTROL_SOCKET: "/tmp/wollipog-agent-control/control.sock" },
   });
-  assert.ok(args.includes("/usr/bin/node"));
-  assert.ok(args.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"));
   assert.ok(args.includes("/tmp/wlp-test/control.sock"));
   assert.ok(args.includes("/usr/bin/bwrap"));
-  assert.match(args.join(" "), /relay=\$!; exec 3<&- 4>&-/u,
-    "only the relay inherits the dedicated broker pipes");
+  assert.equal(args.includes("/usr/bin/node"), false, "provider launcher does not receive the relay runtime");
+  assert.equal(args.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"), false,
+    "provider launcher does not receive the relay helper");
   assert.equal(args.join(" ").includes(bridge.token), false);
   assert.equal(args.join(" ").includes("wsl.exe"), false, "provider argv never receives a Windows launcher");
+  const relayArgs = buildWslAgentControlRelayArgs(bridge);
+  assert.deepEqual(relayArgs.slice(0, 4), ["-d", "Ubuntu", "--exec", "sh"]);
+  assert.ok(relayArgs.includes("/usr/bin/node"));
+  assert.ok(relayArgs.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"));
+  assert.ok(relayArgs.includes("/tmp/wlp-test/control.sock"));
+  assert.equal(relayArgs.join(" ").includes(bridge.token), false, "relay argv never receives the credential");
 });

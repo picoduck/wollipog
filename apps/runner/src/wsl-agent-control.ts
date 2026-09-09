@@ -16,7 +16,7 @@ const MAX_ARGS = 128;
 const MAX_ARG_LENGTH = 16 * 1024;
 
 /** Dependency-free target-local relay. It can only connect to the runner-created AF_UNIX socket
- * or serve that socket over two inherited pipes; it never spawns a process or opens a network
+ * or serve that socket over its runner-owned process stdio; it never spawns a process or opens a network
  * connection. The runner remains the sole authorization and HTTP boundary. */
 export const WSL_AGENT_CONTROL_HELPER_SOURCE = String.raw`#!/usr/bin/env node
 import net from "node:net";

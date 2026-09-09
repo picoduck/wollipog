@@ -8,7 +8,7 @@
  *    orphan the real agent. We use `taskkill /T /F` to kill the whole tree.
  */
 
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { spawn, type ChildProcessByStdio, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -82,8 +82,13 @@ export type AgentProcess = ChildProcessByStdio<Writable, Readable, Readable> & {
   closeObserved?: boolean;
   /** Kernel-identity ownership for descendants that escape the provider's POSIX process group. */
   posixBoundary?: PosixProcessBoundary;
-  /** Dedicated inherited pipes for the target-local WSL Agent Control relay. */
-  wslAgentControl?: { input: Writable; output: Readable; dispose: () => void };
+  /** Dedicated standard pipes and process for the target-local WSL Agent Control relay. */
+  wslAgentControl?: {
+    input: Writable;
+    output: Readable;
+    relay: ChildProcessWithoutNullStreams;
+    dispose: () => void;
+  };
 };
 
 export interface SpawnAgentOptions {
@@ -298,20 +303,29 @@ export function buildWslArgs(distro: string, cwd: string, pidfile: string, opts:
   const bridge = opts.isolation?.backend === "bwrap" ? opts.isolation.wslAgentControl : undefined;
   const socket = bridge?.socketPath;
   const wrapper = bridge && socket
-    ? "pidfile=$1; runtime=$2; helper=$3; socket=$4; shift 4; " +
-      "socket_dir=${socket%/*}; umask 077; mkdir -- \"$socket_dir\"; " +
-      "relay=; provider=; watcher=; cleanup(){ test -n \"$watcher\" && kill \"$watcher\" 2>/dev/null || true; test -n \"$provider\" && kill \"$provider\" 2>/dev/null || true; test -n \"$relay\" && kill \"$relay\" 2>/dev/null || true; rm -f -- \"$socket\" \"$socket_dir/token\" \"$socket_dir/mcp.json\"; rmdir -- \"$socket_dir\" 2>/dev/null || true; }; trap cleanup EXIT HUP INT TERM; " +
-      "\"$runtime\" \"$helper\" serve \"$socket\" <&3 >&4 2>/dev/null & relay=$!; exec 3<&- 4>&-; " +
-      "ready=0; i=0; while test $i -lt 200; do if test -S \"$socket\" && test -f \"$socket_dir/token\" && test -f \"$socket_dir/mcp.json\"; then ready=1; break; fi; kill -0 \"$relay\" 2>/dev/null || break; i=$((i+1)); sleep .05; done; test $ready -eq 1 || exit 125; " +
+    ? "pidfile=$1; socket=$2; shift 2; " +
+      "socket_dir=${socket%/*}; provider=; watcher=; cleanup(){ test -n \"$watcher\" && kill \"$watcher\" 2>/dev/null || true; test -n \"$provider\" && kill \"$provider\" 2>/dev/null || true; }; trap cleanup EXIT HUP INT TERM; " +
+      "ready=0; i=0; while test $i -lt 200; do if test -S \"$socket\" && test -f \"$socket_dir/token\" && test -f \"$socket_dir/mcp.json\"; then ready=1; break; fi; i=$((i+1)); sleep .05; done; test $ready -eq 1 || exit 125; " +
       "if command -v setsid >/dev/null 2>&1; then setsid sh -c 'echo $$ > \"$0\"; exec \"$@\"' \"$pidfile\" \"$@\" & provider=$!; else \"$@\" & provider=$!; fi; " +
-      "(while kill -0 \"$provider\" 2>/dev/null && kill -0 \"$relay\" 2>/dev/null; do sleep .1; done; kill -0 \"$relay\" 2>/dev/null || kill \"$provider\" 2>/dev/null || true) & watcher=$!; " +
+      "(while kill -0 \"$provider\" 2>/dev/null && test -S \"$socket\"; do sleep .1; done; test -S \"$socket\" || kill \"$provider\" 2>/dev/null || true) & watcher=$!; " +
       "wait \"$provider\"; status=$?; provider=; kill \"$watcher\" 2>/dev/null || true; wait \"$watcher\" 2>/dev/null || true; watcher=; exit $status"
     : "if command -v setsid >/dev/null 2>&1; then " +
       "setsid sh -c 'echo $$ > \"$0\"; exec \"$@\"' \"$@\"; " +
       "else shift; exec \"$@\"; fi";
-  // Positionals to the outer sh: $0=sh (dummy), $1=pidfile, $2..=env-prefix+command+args.
+  // Positionals to the outer sh: $0=sh (dummy), $1=pidfile, then optional socket and command argv.
   return ["-d", distro, "--cd", cwd, "--exec", "sh", "-c", wrapper, "sh", pidfile,
-    ...(bridge && socket ? [bridge.nodeRuntime, bridge.helperPath, socket] : []), ...inner];
+    ...(bridge && socket ? [socket] : []), ...inner];
+}
+
+/** Launch the fixed target-local relay as a separate runner-owned WSL process. Standard
+ * stdin/stdout are the only Windows handles WSL promises to translate; the provider gets neither
+ * those handles nor this argv and can reach only the relay's closed AF_UNIX socket surface. */
+export function buildWslAgentControlRelayArgs(bridge: WslAgentControlLaunch): string[] {
+  if (!bridge.socketPath) throw new Error("target-local Agent Control relay requires a socket path");
+  const wrapper = "socket=$1; runtime=$2; helper=$3; socket_dir=${socket%/*}; " +
+    "umask 077; mkdir -- \"$socket_dir\"; exec \"$runtime\" \"$helper\" serve \"$socket\"";
+  return ["-d", bridge.distro, "--exec", "sh", "-c", wrapper, "sh",
+    bridge.socketPath, bridge.nodeRuntime, bridge.helperPath];
 }
 
 export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
@@ -498,28 +512,60 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   const descendantMarker = !isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false
     ? randomUUID()
     : undefined;
-  const child = spawn(file, args, {
-    cwd,
-    env: {
-      ...inherited,
-      ...explicitEnv,
-      ...isolationEnv,
-      ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
-    },
-    // Resolve .cmd/.bat shims on Windows; harmless on POSIX for our commands.
-    shell,
-    stdio: bridge ? ["pipe", "pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    // POSIX: make the agent a process-group leader so killTree can signal the whole
-    // group — claude/codex spawn bash/tool children that a single-pid SIGTERM would
-    // orphan. Windows uses taskkill /T; the WSL bridge has its own setsid+PGID reap.
-    detached: !isWindows,
-  }) as AgentProcess;
+  let bridgeRelay: ChildProcessWithoutNullStreams | undefined;
+  let disposeBridge: (() => void) | undefined;
+  let bridgeStderr = "";
   if (bridge) {
-    const bridgeInput = child.stdio[3] as Writable;
-    const bridgeOutput = child.stdio[4] as Readable;
-    const dispose = attachWslAgentControlBroker(bridgeOutput, bridgeInput, bridge);
-    child.wslAgentControl = { input: bridgeInput, output: bridgeOutput, dispose };
+    bridgeRelay = spawn("wsl.exe", buildWslAgentControlRelayArgs(bridge), {
+      env: inherited,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    bridgeRelay.stderr.setEncoding("utf8");
+    bridgeRelay.stderr.on("data", (chunk: string) => {
+      if (bridgeStderr.length < 8_192) bridgeStderr += chunk;
+    });
+    disposeBridge = attachWslAgentControlBroker(bridgeRelay.stdout, bridgeRelay.stdin, bridge);
+  }
+
+  let child: AgentProcess;
+  try {
+    child = spawn(file, args, {
+      cwd,
+      env: {
+        ...inherited,
+        ...explicitEnv,
+        ...isolationEnv,
+        ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
+      },
+      // Resolve .cmd/.bat shims on Windows; harmless on POSIX for our commands.
+      shell,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      // POSIX: make the agent a process-group leader so killTree can signal the whole
+      // group — claude/codex spawn bash/tool children that a single-pid SIGTERM would
+      // orphan. Windows uses taskkill /T; the WSL bridge has its own setsid+PGID reap.
+      detached: !isWindows,
+    }) as AgentProcess;
+  } catch (error) {
+    disposeBridge?.();
+    throw error;
+  }
+  if (bridge && bridgeRelay && disposeBridge) {
+    const relay = bridgeRelay;
+    const dispose = disposeBridge;
+    child.wslAgentControl = { input: relay.stdin, output: relay.stdout, relay, dispose };
+    relay.once("error", (error) => {
+      if (bridgeStderr.length < 8_192) bridgeStderr += `${(error as Error).message}\n`;
+    });
+    relay.once("close", () => {
+      dispose();
+      if (!child.closeObserved && child.exitCode === null) {
+        if (bridgeStderr.trim()) process.stderr.write(`target-local Agent Control relay failed: ${bridgeStderr.trim()}\n`);
+        killTree(child);
+      }
+    });
     child.once("close", dispose);
   }
   child.once("close", () => {

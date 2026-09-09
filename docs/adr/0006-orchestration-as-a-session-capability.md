@@ -125,8 +125,9 @@ references and never persisted as token bytes.
 Other ACP adapters and releases remain unavailable until their exact tool-isolation contract is
 audited; ACP transport support or a self-reported display name is not sufficient. Protocol v123
 permits structured Direct WSL only when discovery proves an exact Linux Node 22+ runtime and the
-runner installs the fixed, root-owned, hash-verified target helper. A per-launch Unix socket and
-inherited pipe pair carry only authenticated, bounded Agent Control frames to the runner-side
+runner installs the fixed, root-owned, hash-verified target helper. A per-launch Unix socket and a
+separate fixed-command WSL relay's standard pipes carry only authenticated, bounded Agent Control
+frames to the runner-side
 closed CLI/MCP implementation. The provider never receives a Windows executable path or a general
 execution route; its bwrap namespace still has no WSL PE/binfmt registration. Credential
 acknowledgement precedes launch, restart rotates the token, and terminal lifecycle removes it.
