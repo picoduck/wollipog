@@ -72,10 +72,18 @@ export function useGovernanceTimeline(
   turnRunning = false,
 ): TimelineItem[] {
   const previousRef = useRef<TimelineItem[] | null>(null);
+  // Rows that have rendered once never get held again (see MergeGovernanceOptions.landed).
+  const landedRef = useRef(new Set<string>());
   return useMemo(() => {
     const anchors = events ?? [];
     const transcriptDecisions = transcriptGovernanceDecisions(decisions, items);
-    const merged = mergeGovernanceDecisions(items, transcriptDecisions, anchors, { holdTrailingRun: turnRunning });
+    const merged = mergeGovernanceDecisions(items, transcriptDecisions, anchors, {
+      holdTrailingRun: turnRunning,
+      landed: landedRef.current,
+    });
+    for (const item of merged) {
+      if (item.kind === "governance_decision") landedRef.current.add(item.decision.auditId);
+    }
     if (merged === items) {
       previousRef.current = null;
       return items;

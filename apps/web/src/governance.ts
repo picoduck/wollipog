@@ -233,13 +233,20 @@ export interface MergeGovernanceOptions {
    * for the rest of the turn. Once the turn settles the held decisions flush in one projection.
    */
   holdTrailingRun?: boolean;
+  /**
+   * Audit ids of decisions that have already rendered. A row that landed while the turn was
+   * settled must stay put when the next turn starts: the status flips to running before that
+   * turn's first event arrives, and holding the row again would make it vanish until a
+   * standalone event came in.
+   */
+  landed?: ReadonlySet<string>;
 }
 
 export function mergeGovernanceDecisions(
   items: TimelineItem[],
   decisions: readonly GovernanceDecision[],
   events: readonly GovernanceAnchorEvent[],
-  { holdTrailingRun = false }: MergeGovernanceOptions = {},
+  { holdTrailingRun = false, landed }: MergeGovernanceOptions = {},
 ): TimelineItem[] {
   if (!decisions.length) return items;
   const suffixMin = suffixMinTimestamps(events);
@@ -269,7 +276,14 @@ export function mergeGovernanceDecisions(
     merged.push(item);
   }
   const trailingRunOpen = holdTrailingRun && items.length > 0 && isCollapsibleWorkItem(items[items.length - 1]!);
-  if (!trailingRunOpen) flushBefore(Number.POSITIVE_INFINITY);
+  if (!trailingRunOpen) {
+    flushBefore(Number.POSITIVE_INFINITY);
+  } else if (landed) {
+    for (; next < anchored.length; next += 1) {
+      const { decision } = anchored[next]!;
+      if (landed.has(decision.auditId)) merged.push(governanceItem(decision));
+    }
+  }
   // Nothing landed: hand back the same array so the caller's identity checks keep the fast path.
   return merged.length === items.length ? items : merged;
 }

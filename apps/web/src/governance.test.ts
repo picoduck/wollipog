@@ -250,3 +250,20 @@ test("a decision inside a still-growing tail run is held so streamed work stays 
     "agent_message", "agent_thought", "agent_thought", "agent_thought", "governance_decision",
   ]);
 });
+
+test("a row that already landed stays put when the next turn starts before its first event", () => {
+  // The status flips to running before the new turn's user message arrives; with unchanged items
+  // the hold would otherwise pull an already-visible tail row back out.
+  const decisions = governanceDecisions([entry({ auditId: "h", timestamp: 250 })]);
+  const anchors = [{ seq: 1, ts: 100 }, { seq: 2, ts: 200 }, { seq: 3, ts: 300 }];
+  const items = [message(1), work(2), work(3)];
+  const settled = mergeGovernanceDecisions(items, decisions, anchors);
+  assert.equal(settled.at(-1)!.kind, "governance_decision");
+  const landed = new Set(["h"]);
+  const nextTurn = mergeGovernanceDecisions(items, decisions, anchors, { holdTrailingRun: true, landed });
+  assert.deepEqual(nextTurn.map((item) => item.kind), settled.map((item) => item.kind));
+  assert.equal(nextTurn.at(-1), settled.at(-1), "the landed row keeps its identity");
+  // A decision that never landed is still held.
+  const fresh = governanceDecisions([entry({ auditId: "h2", requestId: "hook-2", timestamp: 260 })]);
+  assert.equal(mergeGovernanceDecisions(items, fresh, anchors, { holdTrailingRun: true, landed }), items);
+});
