@@ -22,11 +22,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  # The required status context "Typecheck, Test & Sidecar Bundle" is the `check` job below. It
+  # only aggregates: the work runs in two parallel jobs with their own time budgets, because the
+  # browser end-to-end suite alone takes ~19 minutes and was crowding the single 30-minute job
+  # (a merge-queue run that hits the budget is cancelled and the PR silently leaves the queue).
+  checks:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
-    name: Typecheck, Test & Sidecar Bundle
+    name: Typecheck, Unit Tests & Bundles
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -83,6 +87,38 @@ jobs:
       - name: Unit Tests
         run: pnpm test
 
+      - name: Validate Web Production Build
+        run: pnpm --filter @wollipog/web build
+
+      - name: Validate Runner Bundle
+        run: pnpm --filter @wollipog/runner exec node scripts/build-binary.mjs --bundle-only
+
+      # esbuild-only pass (build-sidecar.mjs --bundle-only): proves the control plane and
+      # its deps still bundle into one CJS file. Skips the SEA/postject/Tauri steps, so no
+      # rustc or target triple is needed here.
+      - name: Validate Control-Plane Bundle
+        run: pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only
+
+  browser:
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    name: Browser End-to-End Tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Resolve Playwright Version
         id: playwright-version
         run: |
@@ -116,11 +152,29 @@ jobs:
       # esbuild-only pass (build-binary.mjs --bundle-only): proves the runner and its
       # dependencies still bundle into one CJS file. Skips SEA/postject packaging, so no
       # rustc or target triple is needed here.
-      - name: Validate Runner Bundle
-        run: pnpm --filter @wollipog/runner exec node scripts/build-binary.mjs --bundle-only
 
-      # esbuild-only pass (build-sidecar.mjs --bundle-only): proves the control plane and
-      # its deps still bundle into one CJS file. Skips the SEA/postject/Tauri steps, so no
-      # rustc or target triple is needed here.
-      - name: Validate Control-Plane Bundle
-        run: pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only
+  check:
+    # Runs whenever the jobs above ran (always(), so a failed or cancelled job is reported rather
+    # than leaving the required context missing); the draft guard keeps drafts off hosted runners.
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
+    name: Typecheck, Test & Sidecar Bundle
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    needs: [checks, browser]
+    steps:
+      - name: Require Every Job to Have Succeeded
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
+        run: |
+          status=0
+          report() {
+            case "$2" in
+              success) echo "$1: success" ;;
+              cancelled) echo "::error::$1 was cancelled: it exceeded its timeout-minutes budget or the run was cancelled"; status=1 ;;
+              *) echo "::error::$1 ended with result '$2'"; status=1 ;;
+            esac
+          }
+          report "Typecheck, Unit Tests & Bundles" "$CHECKS_RESULT"
+          report "Browser End-to-End Tests" "$BROWSER_RESULT"
+          exit "$status"

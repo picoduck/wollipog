@@ -27,14 +27,23 @@ function workflowContract(path) {
 
   assert.ok(pullRequestTypes, `${path}: missing pull_request types`);
   assert.ok(concurrencyGroup, `${path}: missing concurrency group`);
-  assert.equal(jobGuards.length, 1, `${path}: expected one job-level if guard`);
+  assert.ok(jobGuards.length >= 1, `${path}: expected at least one job-level if guard`);
   assert.match(text, /^  cancel-in-progress: true$/m, `${path}: concurrency must cancel in progress`);
+  // Every job carries the same draft guard. An aggregating job may wrap it in
+  // `always() && (...)` so it still reports when the jobs it needs fail or are cancelled.
+  const guards = [...new Set(jobGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
+  assert.equal(guards.length, 1, `${path}: every job must carry the same draft guard, got ${JSON.stringify(guards)}`);
 
   return {
     pullRequestTypes: pullRequestTypes[1].split(",").map((value) => value.trim()),
     groupTemplate: concurrencyGroup[1].trim(),
-    jobGuard: jobGuards[0][1].trim(),
+    jobGuard: guards[0],
   };
+}
+
+function unwrapAggregatorGuard(expression) {
+  const wrapped = expression.match(/^\$\{\{\s*always\(\)\s*&&\s*\((.+)\)\s*\}\}$/);
+  return wrapped ? wrapped[1].trim() : expression;
 }
 
 function groupExpressions(groupTemplate) {
@@ -184,6 +193,32 @@ test("PR workflows keep least-privilege permissions and an always-present requir
     /^\s+paths-ignore:/m,
     `${WORKFLOWS[0]}: path filters can suppress the required status check`,
   );
+});
+
+test("the required CI check aggregates parallel jobs that each own a time budget", () => {
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+  const jobsText = ci.split(/^jobs:\r?\n/m)[1];
+  const starts = [...jobsText.matchAll(/^  ([a-z]+):$/gm)];
+  const byId = Object.fromEntries(starts.map((match, index) => [
+    match[1],
+    jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
+  ]));
+  assert.deepEqual(Object.keys(byId), ["checks", "browser", "check"], "CI jobs drifted");
+  for (const id of ["checks", "browser"]) {
+    assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
+    assert.doesNotMatch(byId[id], /^    needs:/m, `${id}: the work jobs run in parallel, not chained`);
+  }
+  assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
+  assert.doesNotMatch(byId.checks, /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
+    "the browser suites must not share the unit-test job's budget");
+  assert.match(byId.checks, /^      - name: Unit Tests$/m);
+  assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
+  assert.match(byId.check, /^    needs: \[checks, browser\]$/m, "the aggregator must wait for every work job");
+  assert.match(byId.check, /^    if: \$\{\{ always\(\) && \(/m,
+    "the aggregator must run when a needed job failed or was cancelled, or the required context never reports");
+  assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
+  assert.match(byId.check, /needs\.browser\.result/, "the aggregator must inspect the browser job result");
+  assert.match(byId.check, /cancelled\) .*timeout-minutes budget/, "a cancelled job is reported as a budget hit, not a flaky test");
 });
 
 test("workflow actions use immutable commit pins", () => {
