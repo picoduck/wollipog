@@ -62,9 +62,9 @@ Group assignments retain the selected machine-wide version policy when they expa
 ## Implemented machine snapshot import
 
 **Import from Machine** discovers real skill directories in `.agents/skills` and configured native
-Claude/Codex harness locations on an online Linux runner using protocol 111 or newer, or a Windows
-runner using protocol 119 or newer. An owner or administrator must have access to the source
-machine. The control plane requests opaque candidate
+Claude/Codex harness locations on an online Linux runner using protocol 111 or newer, a Windows
+runner using protocol 119 or newer, or a macOS runner using protocol 120 or newer. An owner or
+administrator must have access to the source machine. The control plane requests opaque candidate
 IDs from an on-demand inventory, never arbitrary host paths, and never adds file contents to the
 periodic `skills_state` report. Discovery lists at most 64 candidates, examines at most 256 entries
 per harness directory, and retains at most 256 expiring candidate IDs on the runner. Shared harness
@@ -72,13 +72,14 @@ locations are scanned once; divergent same-name directories remain separate cand
 4,096-entry raw iteration ceiling keeps skipped private journals from removing the hard discovery
 bound while preserving the 256-entry useful-work budget.
 
-The runner opens every untrusted path component with `O_NOFOLLOW` relative to pinned directory
-descriptors through `/proc/self/fd` on Linux. Windows uses pinned native handles opened with
+Linux opens every untrusted path component with `O_NOFOLLOW` through pinned `/proc/self/fd`
+descriptors. The fixed runner-owned macOS helper uses `openat` with the same descriptor-relative
+no-follow discipline. Windows uses pinned native handles opened with
 `FILE_FLAG_OPEN_REPARSE_POINT` and without delete sharing. Symlinks, junctions,
 hard links, special files, excessive depth/entry counts, and trees
 exceeding the existing 64-file / 512 KiB-per-file / 2 MiB-total limits fail closed. Two bounded reads
 must agree before content is returned. The configured HOME itself may resolve through a symlink;
-its untrusted descendants may not. macOS and mixed-context WSL imports are not implemented.
+its untrusted descendants may not. Mixed-context WSL imports are not implemented.
 
 The preview shows the complete proposed files, digest, script-path indicators, and any existing
 version's files. An import commits exactly those previewed bytes with machine/directory/name,

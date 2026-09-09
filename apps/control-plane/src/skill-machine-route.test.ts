@@ -161,18 +161,18 @@ test("machine discovery, preview and import are authorized, immutable, deduplica
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [], workspaces: [] }, 2, 110);
   assert.equal((await discover()).statusCode, 409);
   assert.equal(reads, 0);
-  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "macos", version: "1", agents: [], workspaces: [] }, 3, 116);
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "macos", version: "1", agents: [], workspaces: [] }, 3, 119);
   assert.equal((await discover()).statusCode, 409);
-  assert.equal(reads, 0, "macOS never receives a snapshot command without a native no-follow reader");
-  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "macos", version: "1", agents: [], workspaces: [] }, 3, 117);
-  assert.equal((await discover()).statusCode, 409, "macOS stays unavailable without a native no-follow reader");
-  assert.equal(reads, 0);
+  assert.equal(reads, 0, "an older macOS runner never receives the native snapshot command");
+  db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "macos", version: "1", agents: [], workspaces: [] }, 3, 120);
+  assert.equal((await discover()).statusCode, 200, "protocol 120 enables read-only macOS discovery");
+  assert.equal(reads, 1);
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "windows", version: "1", agents: [], workspaces: [] }, 3, 118);
   assert.equal((await discover()).statusCode, 409);
-  assert.equal(reads, 0, "an older Windows runner never receives the native snapshot command");
+  assert.equal(reads, 1, "an older Windows runner never receives the native snapshot command");
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "windows", version: "1", agents: [], workspaces: [] }, 3, 119);
   assert.equal((await discover()).statusCode, 200, "protocol 119 enables read-only Windows discovery");
-  assert.equal(reads, 1);
+  assert.equal(reads, 2);
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [], workspaces: [] }, 3, 111);
   for (const malformed of [[{ ...candidate, sourceDirectory: "/etc" }], [candidate, candidate],
     [{ ...candidate, id: "a".repeat(65) }], [{ ...candidate, name: "../escape" }],

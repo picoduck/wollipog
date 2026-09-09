@@ -81,7 +81,29 @@ for (const unsafe of ["file-link", "directory-link", "hard-link", "oversized", "
 }
 test("unsupported platforms never attempt filesystem discovery", () => {
   const snapshots = new MachineSkillSnapshots({ home: "/does-not-exist", agents: () => agents, platform: "aix" });
-  assert.match(snapshots.handle(message).error!, /Linux or Windows/);
+  assert.match(snapshots.handle(message).error!, /Linux, macOS, or Windows/);
+});
+
+test("the macOS native adapter preserves executable metadata", () => {
+  const files = [{ path: "SKILL.md", encoding: "utf8" as const, content: "---\nname: alpha\n---\nmacOS" }];
+  const snapshots = new MachineSkillSnapshots({
+    home: "/Users/runner",
+    agents: () => agents,
+    platform: "darwin",
+    macosList: (_home, directories) => {
+      assert.deepEqual(directories.sort(), [".agents/skills", ".codex/skills"]);
+      return [{ name: "alpha", sourceDirectory: ".codex/skills", generation: "a".repeat(64) }];
+    },
+    macosRead: (_home, candidate) => {
+      assert.equal(candidate.generation, "a".repeat(64));
+      return { files, executablePaths: ["SKILL.md"] };
+    },
+  });
+  const candidate = snapshots.handle(message).candidates?.[0];
+  assert.ok(candidate);
+  const read = snapshots.handle({ ...message, operation: "read", candidateId: candidate.id });
+  assert.deepEqual(read.snapshot?.files, files);
+  assert.deepEqual(read.snapshot?.executablePaths, ["SKILL.md"]);
 });
 
 test("the Windows native adapter validates helper candidates and snapshot files", () => {
