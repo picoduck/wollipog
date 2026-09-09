@@ -63,11 +63,15 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if echo "$url" | grep -q '/releases/latest$'; then cat "$TEST_RELEASE_JSON"; exit 0; fi
+if echo "$url" | grep -q '/releases/tags/'; then
+  tag=$(basename "$url"); [ "$tag" = "$TEST_RELEASE_TAG" ] || exit 22
+  cat "$TEST_RELEASE_JSON"; exit 0
+fi
 name=$(basename "$url")
 cp "$TEST_ASSETS_DIR/$name" "$out"
 `);
-  const run = (...args) => spawnSync("sh", ["-c", 'PATH="$1:$PATH"; HOME="$2"; TEST_RELEASE_JSON="$3"; TEST_ASSETS_DIR="$4"; export PATH HOME TEST_RELEASE_JSON TEST_ASSETS_DIR; shift 4; exec sh "$@"',
-    "installer-test", fakeBin, home, join(root, "release.json"), assetsDir, installer, ...args], { encoding: "utf8" });
+  const run = (...args) => spawnSync("sh", ["-c", 'PATH="$1:$PATH"; HOME="$2"; TEST_RELEASE_JSON="$3"; TEST_ASSETS_DIR="$4"; TEST_RELEASE_TAG="$5"; export PATH HOME TEST_RELEASE_JSON TEST_ASSETS_DIR TEST_RELEASE_TAG; shift 5; exec sh "$@"',
+    "installer-test", fakeBin, home, join(root, "release.json"), assetsDir, releaseTag, installer, ...args], { encoding: "utf8" });
   return { root, home, run };
 }
 
@@ -86,6 +90,24 @@ posixTest("install-runner.sh --control-plane installs the verified control plane
   assert.match(result.stdout, /Next:\s+.*service install/u);
   assert.deepEqual(readdirSync(bin).filter((name) => name.includes(".download.")), [], "no staging files remain");
   assert.deepEqual(readdirSync(join(h.home, ".local", "share", "wollipog")).filter((name) => name.startsWith(".web.")), []);
+});
+
+posixTest("install-runner.sh --release installs an exact tag and rejects malformed or unknown tags", (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  const exact = h.run("--release", releaseTag, "--control-plane");
+  assert.equal(exact.status, 0, exact.stderr + exact.stdout);
+  assert.equal(readFileSync(join(h.home, ".local", "bin", "wollipog-control-plane"), "utf8"), "control plane bytes\n");
+  assert.match(exact.stdout, new RegExp(`from ${releaseTag.replace(/\./g, "\\.")}`));
+
+  const malformed = h.run("--release", "latest");
+  assert.notEqual(malformed.status, 0);
+  assert.match(malformed.stderr, /--release must look like v1\.2\.3/u);
+
+  // An unknown tag fails the tags endpoint; without gh there is nothing else to try.
+  const unknown = h.run("--release", "v9.9.9");
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /GitHub release lookup failed for v9\.9\.9/u);
 });
 
 posixTest("install-runner.sh --control-plane fails closed on a tampered control plane and on a release without headless assets", (t) => {

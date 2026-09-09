@@ -76,18 +76,43 @@ export async function resolveRelease(
     : `https://api.github.com/repos/${repository}/releases/latest`;
   const headers: Record<string, string> = { accept: "application/vnd.github+json", "user-agent": "wollipog-cli" };
   if (options.token) headers.authorization = `Bearer ${options.token}`;
-  const response = await fetchJson(url, headers);
-  if (!response.ok) {
-    throw new Error(response.status === 404
-      ? `no ${options.tag ? `release ${options.tag}` : "published release"} found for ${repository} (a private repository needs GH_TOKEN with Contents: read)`
-      : `GitHub release lookup failed: HTTP ${response.status}`);
+  type ReleaseBody = { tag_name?: unknown; assets?: unknown };
+  let response = await fetchJson(url, headers);
+  let body: ReleaseBody | null = null;
+  if (response.status === 404 && options.tag && options.token) {
+    // The tags endpoint only knows published releases. With a token, look through the release
+    // list, which includes drafts the token may read, so a draft produced by the release
+    // workflow's dry run can be rehearsed before it is published.
+    response = await fetchJson(`https://api.github.com/repos/${repository}/releases?per_page=100`, headers);
+    if (response.ok) {
+      let list: unknown;
+      try {
+        list = JSON.parse(await response.text());
+      } catch {
+        throw new Error("GitHub release metadata was not valid JSON");
+      }
+      const match = Array.isArray(list)
+        ? (list as Array<{ tag_name?: unknown }>).find((entry) => entry && entry.tag_name === options.tag)
+        : undefined;
+      if (!match) {
+        throw new Error(`no release ${options.tag} found for ${repository} (a private repository needs GH_TOKEN with Contents: read)`);
+      }
+      body = match as ReleaseBody;
+    }
   }
-  let body: { tag_name?: unknown; assets?: unknown };
-  try {
-    body = JSON.parse(await response.text()) as typeof body;
-  } catch {
-    throw new Error("GitHub release metadata was not valid JSON");
+  if (!body) {
+    if (!response.ok) {
+      throw new Error(response.status === 404
+        ? `no ${options.tag ? `release ${options.tag}` : "published release"} found for ${repository} (a private repository needs GH_TOKEN with Contents: read)`
+        : `GitHub release lookup failed: HTTP ${response.status}`);
+    }
+    try {
+      body = JSON.parse(await response.text()) as ReleaseBody;
+    } catch {
+      throw new Error("GitHub release metadata was not valid JSON");
+    }
   }
+  if (!body || typeof body !== "object") throw new Error("GitHub release metadata has no usable tag name");
   if (typeof body.tag_name !== "string" || !RELEASE_TAG_PATTERN.test(body.tag_name)) {
     throw new Error("GitHub release metadata has no usable tag name");
   }

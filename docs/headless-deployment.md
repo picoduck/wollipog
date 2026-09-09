@@ -159,7 +159,7 @@ Reinstall is the supported way to regenerate unit files; executables are upgrade
 
 ```bash
 wollipog service upgrade                 # latest published release
-wollipog service upgrade --release v0.23.0
+wollipog service upgrade --release v0.23.0   # an exact tag; with GH_TOKEN a draft is reachable too
 wollipog service upgrade --yes --json    # non-interactive, for automation
 ```
 
@@ -204,6 +204,16 @@ and the runner re-registers; with both units stopped, starting only the runner p
 plane in first; `systemctl stop` completes inside `TimeoutStopSec` with `Result=success`; and
 `uninstall --purge` leaves nothing behind. The script refuses to run on a host that already has
 Wollipog units or data.
+
+`scripts/upgrade-e2e.sh` (the "Upgrade End-to-End" workflow) goes one step further with real
+releases: it installs a release headlessly with `install-runner.sh --release <tag> --control-plane`,
+brings it up in system mode, runs `wollipog service upgrade --release <tag>` to another release, and
+checks the new executables, the retained previous generation, the refreshed `wollipog` alias, the
+version reported over the loopback admin API, the runner re-registering, and that configuration and
+credentials did not change. It then blocks the control plane's port and forces an upgrade to prove
+the rollback restores the previous bytes, checks that upgrading to the current release is a no-op,
+and purges. It runs automatically when a release is published (from the previous published release)
+and on demand for any pair of tags, including a draft from the release workflow's dry run.
 
 ## Native services versus dashboard-managed SSH runners
 
