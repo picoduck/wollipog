@@ -1598,3 +1598,39 @@ test("an upward Session Reading claim at the head loads the next page, a downwar
     await unmountFixture(fixture);
   }
 });
+
+test("a nested scroller that can still move upward consumes head input instead of paging", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 0 });
+    const output = domWindow.document.createElement("pre") as unknown as HTMLElement;
+    fixture.scroller.append(output as never);
+    setScrollerMetrics(output, { clientHeight: 200, scrollHeight: 600, scrollTop: 120 });
+
+    await act(async () => {
+      fireDomEvent.wheel(output, { deltaY: -40 });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1, "a tool output scrolling up inside the transcript is not a request for history");
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchstart", 100) as never);
+      output.dispatchEvent(touchInputEvent("touchmove", 118) as never);
+      output.dispatchEvent(touchInputEvent("touchmove", 140) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchend") as never);
+    });
+    await flushAsyncWork(250);
+    assert.equal(pages.tailCalls.length, 1, "a finger drag inside that output is consumed by it as well");
+
+    output.scrollTop = 0;
+    await act(async () => {
+      fireDomEvent.wheel(output, { deltaY: -40 });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "once the output cannot move, the same gesture reaches the transcript head");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

@@ -228,6 +228,21 @@ const OPENING_HISTORY_HEADROOM_PX = EARLIER_ACTIVITY_TRIGGER_PX;
 
 type EarlierActivityIntent = "single-scroll" | "touch-traversal";
 
+/** A scrollable descendant (a tool output, a diff, a code block) that can still move upward
+ * consumes the gesture itself; the reader region only sees the event because it bubbles, so the
+ * direct head evaluation must not treat it as a request for earlier activity. */
+function nestedScrollerConsumesUpwardInput(target: EventTarget | null, reader: HTMLElement): boolean {
+  let node = target as Partial<HTMLElement> | null;
+  while (node && node !== reader) {
+    if (typeof node.scrollTop === "number" && node.scrollTop > 0.5 &&
+        (node.scrollHeight ?? 0) > (node.clientHeight ?? 0) + 1) {
+      return true;
+    }
+    node = node.parentElement ?? null;
+  }
+  return false;
+}
+
 type ComposerMutationKind = "send" | "steer" | "promote" | "edit" | "stop";
 type ComposerMutationEntry = {
   token: symbol;
@@ -2005,11 +2020,13 @@ function SessionDetailLoaded({
     maybeLoadEarlier(scroll, "input");
   }, [maybeLoadEarlier]);
 
-  const requestEarlierFromTouchAtHead = useCallback((clientY: number | null) => {
+  const requestEarlierFromTouchAtHead = useCallback((clientY: number | null, target: EventTarget | null) => {
     const state = automaticEarlierLoadRef.current;
     if (state.readerIntent !== "touch-traversal" || !state.touchTraversalStarted) return;
     if (clientY === null || state.touchStartY === null) return;
     if (clientY - state.touchStartY < EARLIER_ACTIVITY_HEAD_DRAG_PX) return;
+    const scroll = scrollRef.current;
+    if (!scroll || nestedScrollerConsumesUpwardInput(target, scroll)) return;
     requestEarlierFromInputAtHead();
   }, [requestEarlierFromInputAtHead]);
 
@@ -4049,7 +4066,9 @@ function SessionDetailLoaded({
               onWheel={(event) => {
                 if (event.deltaY < 0) {
                   markSingleEarlierActivityIntent();
-                  requestEarlierFromInputAtHead();
+                  if (!nestedScrollerConsumesUpwardInput(event.target, event.currentTarget)) {
+                    requestEarlierFromInputAtHead();
+                  }
                 }
                 followTail.onWheel(event);
               }}
@@ -4060,7 +4079,7 @@ function SessionDetailLoaded({
               onPointerMove={(event) => {
                 if (event.pointerType === "touch") {
                   markTouchEarlierActivityMovement(event.clientY);
-                  requestEarlierFromTouchAtHead(event.clientY);
+                  requestEarlierFromTouchAtHead(event.clientY, event.target);
                 }
                 followTail.onPointerMove(event);
               }}
@@ -4077,7 +4096,7 @@ function SessionDetailLoaded({
               onTouchMove={(event) => {
                 const clientY = event.touches[0]?.clientY ?? null;
                 markTouchEarlierActivityMovement(clientY);
-                requestEarlierFromTouchAtHead(clientY);
+                requestEarlierFromTouchAtHead(clientY, event.target);
               }}
               onTouchEnd={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
               onTouchCancel={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
