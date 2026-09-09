@@ -2635,6 +2635,17 @@ export class SessionStore {
     return false;
   }
 
+  /** The current worktree lease record for a session, or null when none is held or it is unreadable. */
+  readWorktreeLease(id: string): { owner: string; pid: number } | null {
+    try {
+      const record = JSON.parse(readFileSync(this.worktreeLeasePath(id), "utf8")) as { owner?: unknown; pid?: unknown };
+      if (typeof record.owner !== "string" || !Number.isSafeInteger(record.pid) || (record.pid as number) <= 0) return null;
+      return { owner: record.owner, pid: record.pid as number };
+    } catch {
+      return null;
+    }
+  }
+
   releaseWorktreeLease(id: string, owner: string): void {
     const path = this.worktreeLeasePath(id);
     try {
