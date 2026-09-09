@@ -250,6 +250,13 @@ async function runIsolatedCodexMcpProbe(
     const timer = setTimeout(() => {
       failure = new Error("isolated Codex MCP probe timed out");
       killTree(child);
+      // The provider may already have closed while its dedicated WSL relay is wedged. In that
+      // state killTree is intentionally a no-op, so explicitly sever the broker and relay before
+      // settling the bounded probe instead of waiting forever for a close event that may not come.
+      child.wslAgentControl?.dispose();
+      const relay = child.wslAgentControl?.relay;
+      if (relay && relay.exitCode === null && relay.signalCode === null) relay.kill();
+      finish(failure);
     }, 10_000);
     timer.unref?.();
     child.stdout.setEncoding("utf8");
@@ -276,7 +283,7 @@ async function runIsolatedCodexMcpProbe(
       // The probe and real provider deliberately reuse one pinned session directory. Wait for
       // relay teardown so its unlink cleanup cannot race the next relay's exclusive bootstrap.
       const relay = child.wslAgentControl?.relay;
-      if (relay && relay.exitCode === null) relay.once("close", () => finish(result));
+      if (relay && relay.exitCode === null && relay.signalCode === null) relay.once("close", () => finish(result));
       else finish(result);
     });
   });

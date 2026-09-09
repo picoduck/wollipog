@@ -277,8 +277,12 @@ export function provisionAgentControl(
   if (wslOrchestrator && context.kind === "wsl" && wslAgentControl) {
     const provisionWsl = async (): Promise<void> => {
       await Promise.all([
-        (host.installWslHelper ?? installWslHelper)(context.distro),
-        (host.installWslLauncher ?? installWslBwrapLauncher)(context.distro),
+        (async () => {
+          // Both installers publish into the same root-owned directory. Serialize their
+          // check-and-create steps so a fresh distro cannot lose an otherwise harmless mkdir race.
+          await (host.installWslHelper ?? installWslHelper)(context.distro);
+          await (host.installWslLauncher ?? installWslBwrapLauncher)(context.distro);
+        })(),
         credentialRegistration ?? Promise.reject(new Error("Direct WSL Agent Control requires credential acknowledgement before launch")),
       ]);
       const runtime = wslAgentControl.nodeRuntime;

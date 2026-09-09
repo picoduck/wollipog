@@ -79,6 +79,8 @@ export type AgentProcess = ChildProcessByStdio<Writable, Readable, Readable> & {
    * signal the whole group. Absent for native spawns.
    */
   wslReap?: WslReapInfo;
+  /** Exact completion for this launch's bounded in-distro process-group reap. */
+  wslReapCompletion?: Promise<boolean>;
   /** Internal proof that Node already emitted close; close is not replayed to later listeners. */
   closeObserved?: boolean;
   /** Kernel-identity ownership for descendants that escape the provider's POSIX process group. */
@@ -733,7 +735,7 @@ export function killTree(child: AgentProcess): void {
   if (child.wslReap) {
     // WSL bridge: child.pid is only the wsl.exe relay; the agent is a Linux process
     // group inside the distro, outside the Win32 tree. taskkill alone can't reap it.
-    reapWslGroup(child.wslReap, child.pid);
+    child.wslReapCompletion = reapWslGroup(child.wslReap, child.pid);
     return;
   }
   if (isWindows) {
@@ -807,20 +809,19 @@ export function killTree(child: AgentProcess): void {
  * inside the distro. Read the leader's PGID from the pidfile the launch wrapper wrote,
  * signal the whole group (TERM, then KILL after ~2s), drop the relay, and clean up.
  */
-function reapWslGroup(reap: WslReapInfo, relayPid: number): void {
+function reapWslGroup(reap: WslReapInfo, relayPid: number): Promise<boolean> {
   const { distro, pidfile } = reap;
 
   // Shutdown must be able to wait until the in-distro kill sequence has actually run —
   // TERM alone isn't enough: an agent that traps SIGTERM would survive if process.exit
   // cancelled the KILL escalation timer. Resolved below once the SIGKILL has been sent
   // (or the pidfile retries are exhausted); the safety cap covers a hung wsl.exe.
-  let resolveReap!: () => void;
-  trackPendingKill(
-    new Promise<void>((resolve) => {
-      resolveReap = resolve;
-      setTimeout(resolve, 6000).unref?.();
-    }),
-  );
+  let resolveReap!: (complete: boolean) => void;
+  const completion = new Promise<boolean>((resolve) => {
+    resolveReap = resolve;
+    setTimeout(() => resolve(false), 6000).unref?.();
+  });
+  trackPendingKill(completion);
 
   // Drop the Windows-side relay regardless — frees the wsl.exe host and gives a
   // well-behaved agent stdio EOF even if the in-distro kill below can't run.
@@ -841,7 +842,7 @@ function reapWslGroup(reap: WslReapInfo, relayPid: number): void {
         // Not written yet — retry up to ~2s, then give up (setsid absent → plain-exec
         // fallback, or the agent died before writing; the relay taskkill is the fallback).
         if (++attempts < 10) setTimeout(tryReap, 200).unref?.();
-        else resolveReap();
+        else resolveReap(false);
         return;
       }
       // Negative pid = the whole process group. The `--` is REQUIRED: without it,
@@ -849,7 +850,7 @@ function reapWslGroup(reap: WslReapInfo, relayPid: number): void {
       execFile("wsl.exe", ["-d", distro, "--exec", "kill", "-TERM", "--", `-${pgid}`], () => {
         setTimeout(() => {
           execFile("wsl.exe", ["-d", distro, "--exec", "kill", "-KILL", "--", `-${pgid}`], () => {
-            resolveReap(); // KILL delivered — a TERM-trapping agent is reaped; shutdown may proceed
+            resolveReap(true); // KILL delivered — a TERM-trapping agent is reaped; shutdown may proceed
             execFile("wsl.exe", ["-d", distro, "--exec", "rm", "-f", pidfile], () => {
               /* best-effort cleanup */
             });
@@ -859,4 +860,5 @@ function reapWslGroup(reap: WslReapInfo, relayPid: number): void {
     });
   };
   tryReap();
+  return completion;
 }

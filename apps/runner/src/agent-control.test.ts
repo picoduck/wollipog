@@ -136,9 +136,18 @@ test("verified Direct WSL rotates credentials and provisions only the target-loc
   const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-agent-control-"));
   try {
     const installs: string[] = [];
+    let helperFinished = false;
     const host: AgentControlHost = { isSea: true, execPath: "C:\\runner.exe", execArgv: [], configDir: root,
-      installWslHelper: async (distro) => { installs.push(`helper:${distro}`); },
-      installWslLauncher: async (distro) => { installs.push(`launcher:${distro}`); } };
+      installWslHelper: async (distro) => {
+        helperFinished = false;
+        installs.push(`helper:${distro}`);
+        await Promise.resolve();
+        helperFinished = true;
+      },
+      installWslLauncher: async (distro) => {
+        assert.equal(helperFinished, true, "shared root-owned install directory is initialized serially");
+        installs.push(`launcher:${distro}`);
+      } };
     const launch = spec("codex-app-server");
     launch.context = { kind: "wsl", distro: "Ubuntu-24.04" };
     launch.config = { permissionMode: "orchestrator" };
