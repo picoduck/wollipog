@@ -182,3 +182,47 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
   }
   expect(consoleErrors.filter((message) => message.includes("same key"))).toEqual([]);
 });
+
+test("a downward finger drag at the head loads the next page without a scroll event", async ({ page }) => {
+  await page.goto("/recovery-notice-e2e.html?pagination=resolve&pagination-delay=300&height=720&width=412");
+
+  const reader = page.locator(".detail-scroll");
+  const control = page.locator(".transcript-earlier-activity");
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
+  await reader.dispatchEvent("wheel", { deltaY: -40 });
+  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await page.waitForTimeout(250);
+  await reader.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.waitForTimeout(250);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+  await expect(control).toBeInViewport();
+
+  const dispatchTouch = async (type: "touchstart" | "touchmove" | "touchend", clientY?: number) =>
+    reader.evaluate((element, [kind, y]) => {
+      const event = new Event(kind as string, { bubbles: true });
+      Object.defineProperty(event, "touches", { value: y === null ? [] : [{ clientY: y }] });
+      element.dispatchEvent(event);
+    }, [type, clientY ?? null] as const);
+
+  // A short touch is a tap or a jitter, never a request for history.
+  await dispatchTouch("touchstart", 100);
+  await dispatchTouch("touchmove", 110);
+  await dispatchTouch("touchend");
+  await page.waitForTimeout(250);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+
+  // A genuine downward drag at the head has no scroll event to ride on, yet it means "earlier".
+  await dispatchTouch("touchstart", 100);
+  await dispatchTouch("touchmove", 118);
+  await dispatchTouch("touchmove", 140);
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+  await dispatchTouch("touchmove", 170);
+  await dispatchTouch("touchend");
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
+  await expect(control).toContainText("Loading Earlier Activity…");
+  await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+});

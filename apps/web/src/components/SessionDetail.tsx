@@ -212,7 +212,12 @@ const STOP_TURN_RETRY_MS = 8_000;
 const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 const EARLIER_ACTIVITY_REARM_FRAMES = 8;
-const EARLIER_ACTIVITY_TOUCH_IDLE_MS = 180;
+/** One reader gesture rarely maps to one scroll event: a wheel tick or reading key under smooth
+ * scrolling, and a touch drag with its momentum, each emit a stream of scroll events. An armed
+ * traversal survives that stream while it keeps moving upward and expires after this idle gap. */
+const EARLIER_ACTIVITY_INTENT_IDLE_MS = 180;
+/** A finger must travel this far downward at the head before it counts as asking for history. */
+const EARLIER_ACTIVITY_HEAD_DRAG_PX = 24;
 /** Opening recovery may add at most the same 2,000 raw events that server-side turn alignment
  * searches. This keeps a pathological single turn bounded while normal underfilled readers need
  * only one or two pages. */
@@ -757,11 +762,12 @@ function SessionDetailLoaded({
     settleFrame: null as number | null,
     readerIntent: null as EarlierActivityIntent | null,
     readerIntentTop: null as number | null,
-    touchActive: false,
+    inputHeld: false,
     nativeTouchActive: false,
     touchInputY: null as number | null,
+    touchStartY: null as number | null,
     touchTraversalStarted: false,
-    touchEndTimer: null as number | null,
+    intentIdleTimer: null as number | null,
     readerIntentMovedUp: false,
   });
   const openingHistoryFillRef = useRef({
@@ -1779,36 +1785,71 @@ function SessionDetailLoaded({
 
   const clearEarlierActivityIntent = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
-    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
-    state.touchEndTimer = null;
+    if (state.intentIdleTimer !== null) window.clearTimeout(state.intentIdleTimer);
+    state.intentIdleTimer = null;
     state.readerIntent = null;
     state.readerIntentTop = null;
     state.readerIntentMovedUp = false;
-    state.touchActive = false;
+    state.inputHeld = false;
     state.nativeTouchActive = false;
     state.touchInputY = null;
+    state.touchStartY = null;
     state.touchTraversalStarted = false;
   }, []);
+
+  // Expire an armed traversal once its scroll stream goes quiet, unless the reader still holds the
+  // finger or button that started it. A prepend, a live row, or a reveal that scrolls later must
+  // never inherit intent from input the reader finished long ago.
+  const deferEarlierActivityIdleEnd = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (!state.readerIntent) return;
+    if (state.intentIdleTimer !== null) window.clearTimeout(state.intentIdleTimer);
+    state.intentIdleTimer = window.setTimeout(() => {
+      state.intentIdleTimer = null;
+      if (!state.inputHeld && state.readerIntent) clearEarlierActivityIntent();
+    }, EARLIER_ACTIVITY_INTENT_IDLE_MS);
+  }, [clearEarlierActivityIntent]);
 
   const markEarlierActivityIntent = useCallback((
     intent: EarlierActivityIntent,
     touchInputY: number | null = null,
   ) => {
     const state = automaticEarlierLoadRef.current;
-    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
-    state.touchEndTimer = null;
+    if (state.intentIdleTimer !== null) window.clearTimeout(state.intentIdleTimer);
+    state.intentIdleTimer = null;
     state.readerIntent = intent;
     state.readerIntentTop = scrollRef.current?.scrollTop ?? null;
     state.readerIntentMovedUp = false;
-    state.touchActive = intent === "touch-traversal";
+    state.inputHeld = intent === "touch-traversal";
     state.touchInputY = touchInputY;
+    state.touchStartY = touchInputY;
     state.touchTraversalStarted = false;
     cancelEarlierActivitySettle();
-  }, [cancelEarlierActivitySettle]);
+    // A touch stays armed while the finger is down; a single scroll must produce its stream soon.
+    if (intent === "single-scroll") deferEarlierActivityIdleEnd();
+  }, [cancelEarlierActivitySettle, deferEarlierActivityIdleEnd]);
 
   const markSingleEarlierActivityIntent = useCallback(() => {
     markEarlierActivityIntent("single-scroll");
   }, [markEarlierActivityIntent]);
+
+  // A scrollbar press stays armed for as long as the button is held: the drag it starts may begin
+  // well after the idle window and still end at the head.
+  const markPointerEarlierActivityIntent = useCallback((target: HTMLElement) => {
+    markEarlierActivityIntent("single-scroll");
+    const state = automaticEarlierLoadRef.current;
+    state.inputHeld = true;
+    const view = target.ownerDocument.defaultView ?? window;
+    const release = () => {
+      view.removeEventListener("pointerup", release);
+      view.removeEventListener("pointercancel", release);
+      if (state.readerIntent !== "single-scroll" || !state.inputHeld) return;
+      state.inputHeld = false;
+      deferEarlierActivityIdleEnd();
+    };
+    view.addEventListener("pointerup", release);
+    view.addEventListener("pointercancel", release);
+  }, [deferEarlierActivityIdleEnd, markEarlierActivityIntent]);
 
   const markTouchEarlierActivityIntent = useCallback((clientY: number | null = null) => {
     markEarlierActivityIntent("touch-traversal", clientY);
@@ -1830,24 +1871,12 @@ function SessionDetailLoaded({
     state.touchInputY = clientY;
   }, []);
 
-  const deferTouchEarlierActivityEnd = useCallback(() => {
-    const state = automaticEarlierLoadRef.current;
-    if (state.readerIntent !== "touch-traversal") return;
-    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
-    state.touchEndTimer = window.setTimeout(() => {
-      state.touchEndTimer = null;
-      if (!state.touchActive && state.readerIntent === "touch-traversal") {
-        clearEarlierActivityIntent();
-      }
-    }, EARLIER_ACTIVITY_TOUCH_IDLE_MS);
-  }, [clearEarlierActivityIntent]);
-
   const finishTouchEarlierActivityIntent = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
     if (state.readerIntent !== "touch-traversal") return;
-    state.touchActive = false;
-    deferTouchEarlierActivityEnd();
-  }, [deferTouchEarlierActivityEnd]);
+    state.inputHeld = false;
+    deferEarlierActivityIdleEnd();
+  }, [deferEarlierActivityIdleEnd]);
 
   const finishPointerTouchEarlierActivityIntent = useCallback(() => {
     if (automaticEarlierLoadRef.current.nativeTouchActive) return;
@@ -1888,7 +1917,9 @@ function SessionDetailLoaded({
   useEffect(() => cancelEarlierActivitySettle, [cancelEarlierActivitySettle, timelineHistoryKey]);
   useEffect(() => clearEarlierActivityIntent, [clearEarlierActivityIntent, timelineHistoryKey]);
 
-  const maybeLoadEarlier = useCallback((scroll: HTMLElement) => {
+  // `source` names what delivered the reader here: the scroll stream of a gesture, or explicit
+  // upward input at the head, where the browser has no scroll event left to emit.
+  const maybeLoadEarlier = useCallback((scroll: HTMLElement, source: "scroll" | "input" = "scroll") => {
     const state = automaticEarlierLoadRef.current;
     if (state.historyKey !== timelineHistoryKey) {
       cancelEarlierActivitySettle();
@@ -1899,19 +1930,29 @@ function SessionDetailLoaded({
       state.readerStarted = false;
     }
     const readerIntent = state.readerIntent;
-    if (eventWindow?.hasOlder !== true || eventWindow.loadingOlder || eventWindow.error ||
-        eventWindow.baseSeq <= 1 || state.requestedBase !== null || state.settling ||
-        !readerIntent) {
+    if (eventWindow?.hasOlder !== true || eventWindow.error || eventWindow.baseSeq <= 1 || !readerIntent) {
       clearEarlierActivityIntent();
+      return;
+    }
+    if (eventWindow.loadingOlder || state.requestedBase !== null || state.settling) {
+      // A page in flight or a prepend still settling is a pause, not an answer. Keep the traversal
+      // armed under its idle expiry: the prepend that follows moves the reader away from the head,
+      // which reads as forward movement and releases it; a stream that outlives the settle window
+      // can still load once the window closes.
+      if (!state.inputHeld) deferEarlierActivityIdleEnd();
       return;
     }
 
     const previousIntentTop = state.readerIntentTop;
     const movedUp = previousIntentTop !== null && scroll.scrollTop < previousIntentTop - 1;
     const movedDown = previousIntentTop !== null && scroll.scrollTop > previousIntentTop + 1;
-    if (readerIntent === "touch-traversal" && movedUp &&
-        (state.touchActive || state.touchTraversalStarted)) {
-      state.touchTraversalStarted = true;
+    if (movedDown) {
+      // Reading forward is never a request for history, whatever armed the traversal.
+      clearEarlierActivityIntent();
+      return;
+    }
+    if (movedUp && (readerIntent === "single-scroll" || state.inputHeld || state.touchTraversalStarted)) {
+      state.touchTraversalStarted = readerIntent === "touch-traversal";
       state.readerIntentMovedUp = true;
     }
 
@@ -1934,19 +1975,19 @@ function SessionDetailLoaded({
       initialTriggerTop,
     );
     if (scroll.scrollTop > triggerTop) {
-      // A wheel tick or reading-key scroll is a single scroll. Touch, however, emits a stream of
-      // scroll events for one drag and its momentum. Keep that traversal armed while it continues
-      // upward so the first event cannot consume intent before a later event reaches the head.
-      if (readerIntent === "touch-traversal" && !movedDown) {
-        state.readerIntentTop = scroll.scrollTop;
-        if (state.touchEndTimer !== null) deferTouchEarlierActivityEnd();
-      } else {
-        clearEarlierActivityIntent();
-      }
+      // Keep the traversal armed while its stream continues upward. A gesture that starts above
+      // the trigger and lands inside it, or at the head itself, is exactly the one that must load;
+      // consuming its intent on the first event would strand the reader at the manual control.
+      state.readerIntentTop = scroll.scrollTop;
+      if (!state.inputHeld) deferEarlierActivityIdleEnd();
       return;
     }
-    if (readerIntent === "touch-traversal" && (!state.readerIntentMovedUp || movedDown)) {
-      if (movedDown) clearEarlierActivityIntent();
+    // Explicit input at the head stands in for the scroll movement that cannot happen there; above
+    // the head, that same input still has a scroll stream on the way, so leave it to that path.
+    const atHead = scroll.scrollTop < 1;
+    if (source === "input" && !atHead) return;
+    if (readerIntent === "touch-traversal" && !state.readerIntentMovedUp &&
+        !(source === "input" && state.touchTraversalStarted)) {
       return;
     }
 
@@ -1954,7 +1995,23 @@ function SessionDetailLoaded({
     state.readerStarted = true;
     state.nextTriggerTop = null;
     if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
-  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, deferTouchEarlierActivityEnd, eventWindow, loadOlder, timelineHistoryKey]);
+  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, deferEarlierActivityIdleEnd, eventWindow, loadOlder, timelineHistoryKey]);
+
+  // At the head, upward input produces no scroll event, so the scroll path can never see it.
+  // Evaluate the armed intent directly, but only when the reader cannot scroll further up.
+  const requestEarlierFromInputAtHead = useCallback(() => {
+    const scroll = scrollRef.current;
+    if (!scroll || scroll.scrollTop >= 1) return;
+    maybeLoadEarlier(scroll, "input");
+  }, [maybeLoadEarlier]);
+
+  const requestEarlierFromTouchAtHead = useCallback((clientY: number | null) => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.readerIntent !== "touch-traversal" || !state.touchTraversalStarted) return;
+    if (clientY === null || state.touchStartY === null) return;
+    if (clientY - state.touchStartY < EARLIER_ACTIVITY_HEAD_DRAG_PX) return;
+    requestEarlierFromInputAtHead();
+  }, [requestEarlierFromInputAtHead]);
 
   const loadEarlierFromControl = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
@@ -3981,15 +4038,21 @@ function SessionDetailLoaded({
                 maybeLoadEarlier(event.currentTarget);
               }}
               onWheel={(event) => {
-                markSingleEarlierActivityIntent();
+                if (event.deltaY < 0) {
+                  markSingleEarlierActivityIntent();
+                  requestEarlierFromInputAtHead();
+                }
                 followTail.onWheel(event);
               }}
               onPointerDown={(event) => {
                 if (event.pointerType === "touch") markTouchEarlierActivityIntent(event.clientY);
-                else markSingleEarlierActivityIntent();
+                else markPointerEarlierActivityIntent(event.currentTarget);
               }}
               onPointerMove={(event) => {
-                if (event.pointerType === "touch") markTouchEarlierActivityMovement(event.clientY);
+                if (event.pointerType === "touch") {
+                  markTouchEarlierActivityMovement(event.clientY);
+                  requestEarlierFromTouchAtHead(event.clientY);
+                }
                 followTail.onPointerMove(event);
               }}
               onPointerUp={(event) => {
@@ -4003,7 +4066,9 @@ function SessionDetailLoaded({
                 followTail.onTouchStart();
               }}
               onTouchMove={(event) => {
-                markTouchEarlierActivityMovement(event.touches[0]?.clientY ?? null);
+                const clientY = event.touches[0]?.clientY ?? null;
+                markTouchEarlierActivityMovement(clientY);
+                requestEarlierFromTouchAtHead(clientY);
               }}
               onTouchEnd={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
               onTouchCancel={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
@@ -4011,7 +4076,10 @@ function SessionDetailLoaded({
                 if (event.defaultPrevented) return;
                 if (inTypingContext(event.currentTarget.ownerDocument)) return;
                 if (mode !== "expanded" && !isFollowTailResumeKey(event)) return;
-                if (isFollowTailUpwardReadingKey(event)) markSingleEarlierActivityIntent();
+                if (isFollowTailUpwardReadingKey(event)) {
+                  markSingleEarlierActivityIntent();
+                  requestEarlierFromInputAtHead();
+                }
                 if (!followTail.onKeyDown(event)) return;
                 event.preventDefault();
               }}
