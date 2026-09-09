@@ -76,10 +76,13 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "Reply and transcript discovery hints must share the same component and keycap markup");
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
-  assert.match(detail, /className="transcript-status-trailing"[\s\S]*mode === "expanded" && isMobile && usage[\s\S]*className="transcript-status-usage"/,
-    "mobile expanded usage occupies the strip's trailing track");
-  assert.match(detail, /className="composer-bar"[\s\S]*usage && !isMobile[\s\S]*className="cbar-usage"[\s\S]*className="cbar-right"/,
-    "desktop usage remains between the composer's permission and model controls");
+  assert.match(detail, /className="transcript-status-trailing"[\s\S]*mode === "expanded" && isMobile && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>/,
+    "mobile expanded session cost occupies the strip's trailing track");
+  assert.match(detail, /className="composer-bar"[\s\S]*!isMobile && <SessionUsageControl session=\{session\} className="cbar-usage" \/>[\s\S]*className="cbar-right"/,
+    "desktop session cost remains between the composer's permission and model controls");
+  // #781: the trailing control is the cost alone — the context meter one cell over owns occupancy.
+  assert.doesNotMatch(detail, /of \$\{[a-zA-Z]+\} context|sessionPreviewUsage/,
+    "no combined context-and-cost summary may return to the status strip");
   assert.doesNotMatch(detail, /follow-live-shortcut/,
     "the strip hosts no edge-distributed or spacer-balanced shortcut hints");
   assert.match(css, /\.transcript-status-strip\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto\s*minmax\(0,\s*1fr\);[^}]*flex:\s*none;[^}]*min-height:\s*42px;[^}]*padding:\s*6px 14px;[^}]*background:\s*var\(--bg\);/);

@@ -1,0 +1,252 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
+import { Window } from "happy-dom";
+import type { SessionUsageResponse, SessionView, UsageAmount, UsageCostSource } from "@wollipog/protocol";
+import type { ApiClient } from "../api.js";
+import { ApiProvider } from "../api-context.js";
+import { SessionUsageControl } from "./SessionUsageControl.js";
+
+const domWindow = new Window();
+for (const [name, value] of Object.entries({
+  window: domWindow,
+  document: domWindow.document,
+  navigator: domWindow.navigator,
+  HTMLElement: domWindow.HTMLElement,
+  Node: domWindow.Node,
+  React,
+  IS_REACT_ACT_ENVIRONMENT: true,
+})) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+
+function amount(overrides: Partial<UsageAmount> = {}): UsageAmount {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+    uncachedInputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    reasoningTokens: 0,
+    processedTokens: 0,
+    cacheSavingsUsd: 0,
+    costSource: "providerReported" as UsageCostSource,
+    unpricedRecords: 0,
+    ...overrides,
+  };
+}
+
+function session(overrides: Partial<SessionView> = {}): SessionView {
+  return {
+    id: "s1",
+    tokensIn: 25_000,
+    tokensOut: 900,
+    costUsd: 0.59,
+    contextTokensUsed: 25_000,
+    contextWindow: 258_000,
+    ...overrides,
+  } as SessionView;
+}
+
+async function mount(view: SessionView, usage: SessionUsageResponse | Error | null) {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const client = {
+    sessionUsage: async () => {
+      if (usage instanceof Error) throw usage;
+      if (!usage) return new Promise<never>(() => {});
+      return usage;
+    },
+  } as unknown as ApiClient;
+  await act(async () => {
+    root.render(<ApiProvider client={client}><SessionUsageControl session={view} /></ApiProvider>);
+  });
+  return {
+    container,
+    button: () => container.querySelector<HTMLButtonElement>(".session-cost-button"),
+    popover: () => container.querySelector<HTMLElement>(".session-usage-popover"),
+    async open() {
+      await act(async () => { container.querySelector<HTMLButtonElement>(".session-cost-button")!.click(); });
+    },
+    async cleanup() {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    },
+  };
+}
+
+/** Reads a definition list as `{ term: value }` so assertions name the fact, not the DOM order. */
+function facts(list: Element | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  const terms = [...(list?.querySelectorAll("dt") ?? [])];
+  const values = [...(list?.querySelectorAll("dd") ?? [])];
+  terms.forEach((term, index) => { out[term.textContent ?? ""] = values[index]?.textContent ?? ""; });
+  return out;
+}
+
+test("a priced session shows only the cost, and opens Session Usage with cumulative tokens", async () => {
+  const view = await mount(session(), {
+    sessionId: "s1",
+    totals: amount({
+      inputTokens: 40_000,
+      uncachedInputTokens: 2_000,
+      cachedInputTokens: 36_000,
+      cacheCreationTokens: 2_000,
+      outputTokens: 900,
+      reasoningTokens: 300,
+      processedTokens: 40_900,
+      costUsd: 0.59,
+      costSource: "providerReported",
+    }),
+    byModel: [],
+  });
+
+  const button = view.button()!;
+  assert.equal(button.textContent, "$0.59");
+  assert.equal(button.getAttribute("aria-label"), "Session Usage: $0.59");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  // The trailing control shows no context figures at all — that is the ring's job (#781).
+  assert.doesNotMatch(view.container.textContent ?? "", /context/i);
+  assert.doesNotMatch(view.container.textContent ?? "", /258k/);
+
+  await view.open();
+  const popover = view.popover()!;
+  assert.equal(button.getAttribute("aria-expanded"), "true");
+  assert.equal(popover.getAttribute("aria-label"), "Session Usage");
+  assert.equal(button.getAttribute("aria-controls"), popover.getAttribute("id"));
+  const rows = facts(popover.querySelector(".session-usage-facts"));
+  assert.equal(rows["Input"], "2.0k");
+  assert.equal(rows["Output"], "900");
+  assert.equal(rows["Cache Read"], "36k");
+  assert.equal(rows["Cache Write"], "2.0k");
+  assert.equal(rows["Reasoning"], "300");
+  assert.equal(rows["Total Processed"], "41k");
+  assert.match(popover.textContent ?? "", /Cost as reported by the provider\./);
+  // Occupancy and capacity stay with the context meter; the usage panel never repeats them.
+  assert.doesNotMatch(popover.textContent ?? "", /Capacity|Remaining|258k/);
+
+  await view.cleanup();
+});
+
+test("Escape dismisses the popover and the control keeps its own accessible name", async () => {
+  const view = await mount(session(), { sessionId: "s1", totals: amount(), byModel: [] });
+  await view.open();
+  assert.ok(view.popover());
+  await act(async () => {
+    domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+  });
+  assert.equal(view.popover(), null);
+  assert.equal(view.button()!.getAttribute("aria-expanded"), "false");
+  await view.cleanup();
+});
+
+test("an unpriced session refuses to show $0.00 and says so in the panel", async () => {
+  const view = await mount(session({ costUsd: 0 }), {
+    sessionId: "s1",
+    totals: amount({
+      inputTokens: 25_000,
+      outputTokens: 900,
+      processedTokens: 25_900,
+      costSource: "unpriced",
+      unpricedRecords: 4,
+    }),
+    byModel: [],
+  });
+
+  const button = view.button()!;
+  assert.equal(button.textContent, "$—");
+  assert.equal(button.getAttribute("aria-label"), "Session Usage: Cost Unavailable");
+  assert.equal(button.classList.contains("is-unpriced"), true);
+
+  await view.open();
+  const popover = view.popover()!;
+  assert.match(popover.querySelector(".session-usage-head")!.textContent ?? "", /Not Priced/);
+  assert.doesNotMatch(popover.textContent ?? "", /\$0\.00/);
+  assert.match(popover.textContent ?? "", /4 records could not be priced, so this cost is a lower bound\./);
+  const rows = facts(popover.querySelector(".session-usage-facts"));
+  assert.equal(rows["Input"], "25k");
+  assert.equal(rows["Output"], "900");
+  await view.cleanup();
+});
+
+test("a session with an unknown context window still shows its cost", async () => {
+  const view = await mount(
+    session({ contextWindow: undefined, contextTokensUsed: undefined }),
+    { sessionId: "s1", totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59 }), byModel: [] },
+  );
+  assert.equal(view.button()!.textContent, "$0.59");
+  await view.open();
+  const rows = facts(view.popover()!.querySelector(".session-usage-facts"));
+  assert.equal(rows["Input"], "25k");
+  assert.equal(rows["Total Processed"], "26k");
+  await view.cleanup();
+});
+
+test("a mixed-model session splits by model and names the unpriced one", async () => {
+  const view = await mount(session({ costUsd: 1.21 }), {
+    sessionId: "s1",
+    totals: amount({
+      inputTokens: 184_000,
+      uncachedInputTokens: 24_000,
+      cachedInputTokens: 160_000,
+      outputTokens: 21_000,
+      processedTokens: 205_000,
+      costUsd: 1.21,
+      costSource: "unpriced",
+      unpricedRecords: 3,
+    }),
+    byModel: [
+      {
+        model: "gpt-5.5-codex",
+        ...amount({
+          inputTokens: 160_000,
+          uncachedInputTokens: 20_000,
+          cachedInputTokens: 140_000,
+          outputTokens: 18_000,
+          processedTokens: 178_000,
+          costUsd: 1.21,
+          costSource: "providerReported",
+        }),
+      },
+      {
+        model: "gpt-5.5-codex-mini",
+        ...amount({
+          inputTokens: 24_000,
+          outputTokens: 3_000,
+          processedTokens: 27_000,
+          costSource: "unpriced",
+          unpricedRecords: 3,
+        }),
+      },
+    ],
+    pricing: { status: "fresh", source: "litellm", fetchedAt: 1, knownModels: 1200 },
+  });
+
+  await view.open();
+  const popover = view.popover()!;
+  const models = [...popover.querySelectorAll(".session-usage-model")];
+  assert.equal(models.length, 2);
+  assert.equal(models[0]!.querySelector(".session-usage-model-name")!.textContent, "gpt-5.5-codex");
+  assert.equal(facts(models[0]!.querySelector("dl"))["Cost"], "$1.21");
+  assert.equal(models[1]!.querySelector(".session-usage-model-name")!.textContent, "gpt-5.5-codex-mini");
+  assert.equal(facts(models[1]!.querySelector("dl"))["Cost"], "Not Priced");
+  await view.cleanup();
+});
+
+test("a session that has processed nothing renders no control", async () => {
+  const view = await mount(session({ tokensIn: 0, tokensOut: 0, costUsd: 0 }), null);
+  assert.equal(view.button(), null);
+  await view.cleanup();
+});
+
+test("a failed usage fetch reports the error and still shows the runner's own totals", async () => {
+  const view = await mount(session(), new Error("usage endpoint unavailable"));
+  await view.open();
+  const popover = view.popover()!;
+  assert.match(popover.querySelector("[role=alert]")!.textContent ?? "", /usage endpoint unavailable/);
+  const rows = facts(popover.querySelector(".session-usage-facts"));
+  assert.equal(rows["Input"], "25k");
+  assert.equal(rows["Output"], "900");
+  await view.cleanup();
+});

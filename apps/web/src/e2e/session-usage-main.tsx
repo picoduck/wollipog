@@ -38,6 +38,10 @@ const settled = params.get("settled") === "1";
  * session on `opus[1m]`; `?served=<tokens>` is the window the provider reported after launch. */
 const contextChoice = params.get("context") === "choice";
 const servedWindow = Number(params.get("served") ?? "0");
+// `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
+// drops the session cost (an unpriced or cost-silent runner). Both keep the token counts.
+const unknownContextWindow = params.get("window") === "none";
+const unpricedCost = params.get("cost") === "none";
 
 const SESSION_ID = "session-usage-e2e";
 
@@ -90,12 +94,12 @@ const session: SessionView = {
   permissionMode: null,
   tokensIn: 184_000,
   tokensOut: 21_000,
-  costUsd: 1.37,
-  contextTokensUsed: Number(params.get("used") ?? "72000"),
+  costUsd: unpricedCost ? 0 : 1.37,
+  contextTokensUsed: unknownContextWindow ? undefined : Number(params.get("used") ?? "72000"),
   adopted: false,
   // A known context window makes the ContextWindowMeter render in the strip's leading cell,
   // so the specs can prove the active recovery echo wins that cell in compact mode.
-  contextWindow: 200_000,
+  contextWindow: unknownContextWindow ? undefined : 200_000,
 };
 const driverName = params.get("driver") === "claude-code" || contextChoice ? "claude-code" : "codex-app-server";
 session.driver = driverName as SessionView["driver"];
@@ -232,7 +236,9 @@ const client = {
   ...api,
   sessionUsage: async () => ({
     sessionId: SESSION_ID,
-    totals: usageAmount(184_000, 21_000, 1.37, 205_000),
+    totals: unpricedCost
+      ? usageAmount(184_000, 21_000, 0, 205_000, "unpriced")
+      : usageAmount(184_000, 21_000, 1.37, 205_000),
     byModel: [
       { model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex", ...usageAmount(160_000, 18_000, 1.21, 178_000) },
       { model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini", ...usageAmount(24_000, 3_000, 0, 27_000, "unpriced") },
