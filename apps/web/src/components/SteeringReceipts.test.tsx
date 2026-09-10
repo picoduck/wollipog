@@ -224,7 +224,10 @@ test("a completed Queue Again receipt is clearly settled and manually dismissibl
   assert.match(html, /Queued Again/);
   assert.match(html, /Queued for a later turn\./);
   assert.doesNotMatch(html, /Transport uncertain\./);
-  assert.match(html, />Dismiss<\/button>/);
+  assert.match(html, /class="icon-btn steering-receipt-dismiss"/);
+  assert.match(html, /aria-label="Dismiss"/);
+  assert.doesNotMatch(html, /class="steering-receipt-actions"/,
+    "a completed receipt must not reserve a full dismiss-action row");
 });
 
 test("uncertain receipt actions call the matching callback and local pending state disables both", async () => {
@@ -247,7 +250,9 @@ test("uncertain receipt actions call the matching callback and local pending sta
 
   await act(async () => root.render(render()));
   let buttons = [...container.querySelectorAll("button")] as HTMLButtonElement[];
-  assert.deepEqual(buttons.map((button) => button.textContent?.trim()), ["Queue Again", "Dismiss"]);
+  assert.equal(buttons.length, 2);
+  assert.equal(container.querySelector('.steering-receipt-dismiss')?.getAttribute("aria-label"), "Dismiss");
+  assert.equal(container.querySelector('.steering-receipt-actions')?.textContent?.trim(), "Queue Again");
   await act(async () => { buttons[0]!.click(); buttons[1]!.click(); });
   assert.deepEqual(queueAgain, ["actionable"]);
   assert.deepEqual(dismissed, ["actionable"]);
@@ -278,7 +283,10 @@ test("one rejected receipt can be durably dismissed", async () => {
     onDismiss={(submissionId) => { dismissed.push(submissionId); }}
   />));
   const button = container.querySelector("button") as HTMLButtonElement;
-  assert.equal(button.textContent?.trim(), "Dismiss");
+  assert.equal(button.classList.contains("steering-receipt-dismiss"), true);
+  assert.equal(button.getAttribute("aria-label"), "Dismiss");
+  assert.equal(container.querySelector(".steering-receipt-actions"), null,
+    "a rejection uses the compact corner dismissal instead of an action row");
   await act(async () => button.click());
   assert.deepEqual(dismissed, ["rejected-one"]);
 

@@ -627,6 +627,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(delivered).toContainText("Queued for a later turn.");
     await expect(delivered).not.toContainText("Transport uncertain.");
     await expect(manual.getByRole("button", { name: "Dismiss" })).toBeVisible();
+    await expect(manual.locator(".steering-receipt-dismiss")).toHaveAttribute("title", "Dismiss");
+    await expect(manual.locator(".steering-receipt-actions")).toHaveCount(0);
     await page.screenshot({ path: test.info().outputPath(`queue-again-settled-${viewport.width}.png`) });
 
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage(

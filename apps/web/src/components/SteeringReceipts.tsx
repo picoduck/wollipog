@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { SteeringAttemptView } from "@wollipog/protocol";
 import { steeringReceiptPresentation, type SteeringReceiptTone } from "../conversation-steering.js";
 import type { TimelineItem } from "../timeline.js";
+import { CloseIcon } from "./Icons.js";
 
 export const MAX_VISIBLE_STEERING_RECEIPTS = 50;
 export const MAX_RECENT_PREVIOUS_TURN_RECEIPTS = 5;
@@ -134,6 +135,7 @@ function SteeringReceiptCard({
   const dismissibleRejection = status === "rejected";
   const dismissibleQueuedAgain = attempt.resolution?.state === "applied" &&
     attempt.resolution.action === "queue_again";
+  const dismissible = recoverable || dismissibleRejection || dismissibleQueuedAgain;
   const durableDetail = detail ?? (dismissibleQueuedAgain
     ? "Queued for a later turn."
     : attempt.state === "rejected" || attempt.state === "converted_to_queue" || attempt.state === "uncertain"
@@ -147,8 +149,22 @@ function SteeringReceiptCard({
       className="steering-receipt"
       data-submission-id={attempt.submissionId}
       data-status={status}
+      data-dismissible={dismissible || undefined}
       data-testid={`steering-attempt-${attempt.submissionId}`}
+      aria-busy={actionPending || undefined}
     >
+      {dismissible && (
+        <button
+          className="icon-btn steering-receipt-dismiss"
+          type="button"
+          aria-label="Dismiss"
+          title="Dismiss"
+          disabled={actionPending}
+          onClick={() => onDismiss(attempt.submissionId)}
+        >
+          <CloseIcon />
+        </button>
+      )}
       <div className="steering-receipt-head">
         <span className="steering-receipt-status" data-status={status}>{label}</span>
         <span className="steering-receipt-source">
@@ -167,25 +183,15 @@ function SteeringReceiptCard({
           {localPendingDetail && localPendingDetail !== durableDetail && <span>{localPendingDetail}</span>}
         </div>
       )}
-      {(recoverable || dismissibleRejection || dismissibleQueuedAgain) && (
+      {recoverable && (
         <div className="steering-receipt-actions" aria-busy={actionPending || undefined}>
-          {recoverable && (
-            <button
-              className="btn ghost sm steering-receipt-action"
-              type="button"
-              disabled={actionPending}
-              onClick={() => onQueueAgain(attempt.submissionId)}
-            >
-              Queue Again
-            </button>
-          )}
           <button
             className="btn ghost sm steering-receipt-action"
             type="button"
             disabled={actionPending}
-            onClick={() => onDismiss(attempt.submissionId)}
+            onClick={() => onQueueAgain(attempt.submissionId)}
           >
-            Dismiss
+            Queue Again
           </button>
         </div>
       )}
