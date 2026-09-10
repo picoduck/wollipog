@@ -536,7 +536,21 @@ export function InboxView({
   const orderUpdateAvailable = !isMobile && !boardMode && heldOrder !== null && (
     displayedIds.length !== liveDisplayedIds.length || displayedIds.some((id, index) => id !== liveDisplayedIds[index])
   );
-  const displayedSelection = repairedSelection && displayedIds.includes(repairedSelection) ? repairedSelection : null;
+  // A selection that threading hid (its thread was collapsed, or a search kept the parent and not
+  // the child) lands on its nearest displayed ancestor, so a row is always active and Enter, F2,
+  // and the rest keep a target. The persisted selection itself is untouched: expanding the thread
+  // again brings the child back as the selected row.
+  const displayedSelection = useMemo(() => {
+    if (!repairedSelection) return null;
+    const displayed = new Set(displayedIds);
+    const seen = new Set<string>();
+    let id: string | null = repairedSelection;
+    while (id && !displayed.has(id) && !seen.has(id)) {
+      seen.add(id);
+      id = sessions.get(id)?.parentSessionId ?? null;
+    }
+    return id && displayed.has(id) ? id : null;
+  }, [displayedIds, repairedSelection, sessions]);
   const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
   const expanded = expandedSessionId !== null;
   useEffect(() => {
@@ -805,11 +819,16 @@ export function InboxView({
     }
   }, [collapseThreads, expandThreads, selectRow, threadRowOf]);
   const toggleAllThreads = useCallback(() => {
-    const parents = entries.filter((entry) => entry.thread.children !== null).map((entry) => entry.session.id);
+    // EVERY parent in the split, not only the rendered ones: an inner parent hidden inside a
+    // collapsed thread must expand with the rest, or "expand all" leaves it shut.
+    const present = new Set(liveEntries.map((entry) => entry.session.id));
+    const parents = [...new Set(liveEntries
+      .map((entry) => entry.session.parentSessionId)
+      .filter((parentId): parentId is string => Boolean(parentId) && present.has(parentId!)))];
     if (parents.length === 0) return;
     if (parents.some((id) => collapsedThreads.has(id))) expandThreads(parents);
     else collapseThreads(parents);
-  }, [collapseThreads, collapsedThreads, entries, expandThreads]);
+  }, [collapseThreads, collapsedThreads, expandThreads, liveEntries]);
   const goToParent = useCallback(() => {
     const parentId = threadRowOf(displayedSelection)?.thread.parentId;
     if (parentId) selectRow(parentId);
@@ -1262,6 +1281,7 @@ export function InboxView({
           <Board
             sessions={boardSessions}
             reminders={reminders}
+            stalledSessionIds={stalledSessionIds}
             searchActive={normalizedQuery.length > 0 || (activeSplit?.key ?? null) !== null || reminderMode === "snoozed"}
             onShowAll={() => {
               exitSearch();

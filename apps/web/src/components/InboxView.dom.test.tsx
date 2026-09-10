@@ -11,6 +11,8 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
+import { INBOX_COLLAPSED_THREADS_KEY } from "../inbox.js";
+import { saveKeySet } from "../pins.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -1442,6 +1444,69 @@ test("InboxView threads a family under its parent and t, Shift+T, p, and the arr
   await act(async () => { container.querySelector<HTMLElement>(".inbox-thread-family")!.click(); });
   assert.equal(rowTitles(container).length, 2);
   assert.equal(selectedTitle(), "Session Lone");
+});
+
+test("InboxView keeps a hidden selection on its nearest visible ancestor and Shift+T reaches hidden parents (#896)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  // Collapse state persists per instance, and the previous test left a thread collapsed.
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set());
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-repair-test",
+    runtimeKey: "inbox-thread-repair-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([
+      session("Parent", 30, { status: "running" }),
+      session("Child", 20, { status: "running", parentSessionId: "Parent" }),
+      session("Grandchild", 10, { status: "running", parentSessionId: "Child" }),
+      session("Lone", 5),
+    ]));
+  });
+  const selectedTitle = () =>
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')?.textContent ?? null;
+  const press = async (key: string, shiftKey = false) => {
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }));
+    });
+  };
+  container.querySelector<HTMLElement>(".inbox-list")!.focus();
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
+
+  // Shift+T collapses the root AND the inner parent; the second press must reopen both.
+  await press("T", true);
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
+  await press("T", true);
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
+
+  // An outside change hides the selected row inside a collapsed thread: the selection lands on
+  // the nearest visible ancestor instead of vanishing.
+  await press("j"); await press("j"); await press("j");
+  assert.equal(selectedTitle(), "Session Lone");
+  // t on the inner parent would toggle ITS thread; climb to the root and collapse from there.
+  await press("k"); await press("k"); await press("k"); await press("t");
+  assert.equal(selectedTitle(), "Session Parent");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
+  await press("j");
+  assert.equal(selectedTitle(), "Session Lone");
+  await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 5, { parentSessionId: "Parent" }) }); });
+  assert.deepEqual(rowTitles(container), ["Session Parent"]);
+  assert.equal(selectedTitle(), "Session Parent", "the hidden selection surfaces on its collapsed parent");
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
+  assert.equal(selectedTitle(), "Session Lone", "expanding restores the persisted selection");
 });
 
 test("every mounted root is torn down before the next test starts", () => {

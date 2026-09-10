@@ -196,11 +196,14 @@ export function sortInboxSessions(
     return key;
   };
   const ordered: SessionView[] = [];
+  const emitted = new Set<string>();
   const emit = (session: SessionView, trail: Set<string>) => {
+    if (emitted.has(session.id)) return;
+    emitted.add(session.id);
     ordered.push(session);
     const next = new Set(trail).add(session.id);
     const children = (childrenByParent.get(session.id) ?? [])
-      .filter((child) => !next.has(child.id))
+      .filter((child) => !next.has(child.id) && !emitted.has(child.id))
       .sort((left, right) => compareInboxOrderKeys(familyKey(left, next), familyKey(right, next)));
     for (const child of children) emit(child, next);
   };
@@ -209,6 +212,9 @@ export function sortInboxSessions(
     !session.parentSessionId || !present.has(session.parentSessionId) || session.parentSessionId === session.id);
   roots.sort((left, right) => compareInboxOrderKeys(familyKey(left, new Set()), familyKey(right, new Set())));
   for (const root of roots) emit(root, new Set());
+  // A parent cycle has no root. Its members are still sessions the user owns, so they follow the
+  // rooted families in their own order rather than vanishing from every split.
+  for (const session of all) emit(session, new Set());
   return ordered;
 }
 
@@ -265,8 +271,10 @@ export function inboxThreadChildrenLabel(children: InboxThreadChildren): string 
 /**
  * Thread an ordered, filtered list of rows: each parent is followed by its descendants, indented
  * one level, and a collapsed parent's descendants leave the list entirely rather than hiding
- * inside a taller row, so every row stays one card (#896). The input order is preserved for
- * everything else, which is what lets a held browsing order survive threading unchanged.
+ * inside a taller row, so every row stays one card (#896). A family takes the position of its
+ * FIRST member in the input, whichever that is: a child that a fired reminder or a held browsing
+ * order placed ahead of its parent pulls the whole thread up to that slot, so the input's own
+ * ordering contract survives threading. Everything else keeps its place.
  */
 export function threadInboxRows<T extends { session: SessionView }>(
   rows: readonly T[],
@@ -278,9 +286,13 @@ export function threadInboxRows<T extends { session: SessionView }>(
   const rowById = new Map(rows.map((row) => [row.session.id, row]));
   const present = new Set(sessions.map((session) => session.id));
   const out: Array<T & { thread: InboxThreadPosition }> = [];
+  const emitted = new Set<string>();
   const emit = (row: T, depth: number, parentId: string | null, last: boolean, trail: Set<string>) => {
+    if (emitted.has(row.session.id)) return;
+    emitted.add(row.session.id);
     const next = new Set(trail).add(row.session.id);
-    const children = (childrenByParent.get(row.session.id) ?? []).filter((child) => !next.has(child.id));
+    const children = (childrenByParent.get(row.session.id) ?? [])
+      .filter((child) => !next.has(child.id) && !emitted.has(child.id));
     const summary: InboxThreadChildren | null = children.length === 0 ? null : {
       count: children.length,
       waiting: children.filter((child) => isInboxBlocked(child)).length,
@@ -297,10 +309,20 @@ export function threadInboxRows<T extends { session: SessionView }>(
       emit(rowById.get(child.id)!, Math.min(depth + 1, 1), row.session.id, index === children.length - 1, next);
     });
   };
+  /** The top of a row's present ancestry; a cycle ends at the last member before it repeats. */
+  const topOf = (row: T): T => {
+    let current = row;
+    const seen = new Set([row.session.id]);
+    for (;;) {
+      const parentId = current.session.parentSessionId;
+      if (!parentId || !present.has(parentId) || seen.has(parentId)) return current;
+      seen.add(parentId);
+      current = rowById.get(parentId)!;
+    }
+  };
   for (const row of rows) {
-    const parentId = row.session.parentSessionId;
-    if (parentId && present.has(parentId) && parentId !== row.session.id) continue;
-    emit(row, 0, null, false, new Set());
+    if (emitted.has(row.session.id)) continue;
+    emit(topOf(row), 0, null, false, new Set());
   }
   return out;
 }

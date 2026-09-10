@@ -383,6 +383,23 @@ test("threadInboxRows nests children under a present parent and drops a collapse
   assert.deepEqual(threadInboxRows([], new Set()), []);
 });
 
+test("a parent cycle and a child placed ahead of its parent both keep every session", () => {
+  // Two sessions naming each other as parent have no root; they must not vanish from every split.
+  const cycle = [session("a", { parentSessionId: "b" }), session("b", { parentSessionId: "a" }), session("c")];
+  assert.deepEqual(sortInboxSessions(cycle).map(({ id }) => id).sort(), ["a", "b", "c"]);
+  const threadedCycle = threadInboxRows(cycle.map((s) => ({ session: s })), new Set());
+  assert.deepEqual(threadedCycle.map((row) => row.session.id).sort(), ["a", "b", "c"]);
+  assert.equal(threadedCycle.length, 3, "no member is emitted twice");
+  // A fired reminder (or a held browsing order) can put a child ahead of its parent: the whole
+  // family takes that earlier slot rather than sinking to the parent's.
+  const ahead = threadInboxRows([
+    { session: session("child", { parentSessionId: "parent" }) },
+    { session: session("other") },
+    { session: session("parent") },
+  ], new Set());
+  assert.deepEqual(ahead.map((row) => [row.session.id, row.thread.depth]), [["parent", 0], ["child", 1], ["other", 0]]);
+});
+
 test("the family chip label leads with the count and follows with the most pressing fact", () => {
   const child = (state: "blocked" | "stalled" | "running" | "done" | "idle") => ({ id: state, title: state, state });
   assert.equal(inboxThreadChildrenLabel({ count: 1, waiting: 0, children: [child("running")] }), "1 Child · 1 Running");
