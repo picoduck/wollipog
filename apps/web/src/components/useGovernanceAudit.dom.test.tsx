@@ -258,6 +258,99 @@ test("a non-overlapping newest window drops retained pages so its gap remains re
   container.remove();
 });
 
+test("persistent backfill failures latch automatic retries while leaving manual retry available", async () => {
+  let calls = 0;
+  const client = {
+    governanceAudit: async (_id: string, _limit: number, before?: string) => {
+      calls += 1;
+      if (calls === 1) return {
+        entries: [{ ...entry, auditId: "newest", timestamp: 300 }],
+        nextBefore: "newest",
+        hasMore: true,
+      };
+      throw new Error(before ? "older page unavailable" : "newest page unavailable");
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe() {
+    latest = useGovernanceAudit("session-1", "revision-1", true, 100);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe /></ApiProvider>);
+    for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(calls, 3, "one failed cursor and one failed rebase cannot spin automatic requests");
+  await act(async () => {
+    latest!.loadOlder();
+    for (let index = 0; index < 4; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(calls, 5, "the visible manual control can make one deliberate retry");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("an older response issued against a replaced snapshot is discarded before it can skip a gap", async () => {
+  const audit = (auditId: string, timestamp: number): GovernanceAuditEntry => ({
+    ...entry, auditId, requestId: `hook-${auditId}`, timestamp,
+  });
+  let resolveOlder!: (page: { entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean }) => void;
+  const olderPage = new Promise<{ entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean }>(
+    (resolve) => { resolveOlder = resolve; },
+  );
+  const cursors: Array<string | undefined> = [];
+  let newestFetches = 0;
+  const client = {
+    governanceAudit: async (_id: string, _limit: number, before?: string) => {
+      cursors.push(before);
+      if (before === "old-head") return olderPage;
+      if (before === "new-head") return { entries: [audit("bridge", 250)], hasMore: false };
+      newestFetches += 1;
+      return newestFetches === 1
+        ? { entries: [audit("old-head", 200)], nextBefore: "old-head", hasMore: true }
+        : {
+            entries: Array.from({ length: 200 }, (_, index) => audit(`new-${index}`, 300 + index)),
+            nextBefore: "new-head",
+            hasMore: true,
+          };
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe({ auditRevision }: { auditRevision: string }) {
+    latest = useGovernanceAudit("session-1", auditRevision, true);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe auditRevision="one" /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  await act(async () => {
+    latest!.loadOlder();
+    root.render(<ApiProvider client={client}><Probe auditRevision="two" /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(latest?.decisions.length, 200);
+  await act(async () => {
+    resolveOlder({ entries: [audit("too-old", 100)], nextBefore: "too-old", hasMore: true });
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(latest?.decisions.some((decision) => decision.auditId === "too-old"), false);
+  await act(async () => {
+    latest!.loadOlder();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(cursors, [undefined, "old-head", undefined, "new-head"]);
+  assert.equal(latest?.decisions[0]?.auditId, "bridge");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
 test("raw audit rows do not expose an empty Governance tab", async () => {
   const client = {
     governanceAudit: async () => ({

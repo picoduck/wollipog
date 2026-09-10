@@ -37,6 +37,7 @@ interface AuditPageState {
   hasMore: boolean;
   loadedOlder: boolean;
   loadingOlder: boolean;
+  autoLoadBlocked: boolean;
 }
 
 function mergeAuditEntries(
@@ -74,6 +75,7 @@ export function useGovernanceAudit(
     hasMore: false,
     loadedOlder: false,
     loadingOlder: false,
+    autoLoadBlocked: false,
   });
   const pageRef = useRef(page);
   pageRef.current = page;
@@ -81,7 +83,7 @@ export function useGovernanceAudit(
   useEffect(() => {
     if (!enabled) {
       setPage((previous) => previous.entries.length || previous.sessionId
-        ? { sessionId: "", entries: NO_ENTRIES, hasMore: false, loadedOlder: false, loadingOlder: false }
+        ? { sessionId: "", entries: NO_ENTRIES, hasMore: false, loadedOlder: false, loadingOlder: false, autoLoadBlocked: false }
         : previous);
       return;
     }
@@ -98,6 +100,7 @@ export function useGovernanceAudit(
                 hasMore: response.hasMore,
                 loadedOlder: false,
                 loadingOlder: false,
+                autoLoadBlocked: false,
               };
             }
             const retainedPagesStillJoin = previous.loadedOlder &&
@@ -110,6 +113,7 @@ export function useGovernanceAudit(
                 hasMore: response.hasMore,
                 loadedOlder: false,
                 loadingOlder: false,
+                autoLoadBlocked: false,
               };
             }
             const entries = retainedPagesStillJoin
@@ -118,6 +122,7 @@ export function useGovernanceAudit(
             return {
               ...previous,
               entries: sameGovernanceSnapshot(previous.entries, entries) ? previous.entries : entries,
+              autoLoadBlocked: false,
               ...(!previous.loadedOlder
                 ? { nextBefore: response.nextBefore, hasMore: response.hasMore }
                 : {}),
@@ -127,7 +132,14 @@ export function useGovernanceAudit(
       })
       .catch(() => {
         if (active && pageRef.current.sessionId !== sessionId) {
-          setPage({ sessionId, entries: NO_ENTRIES, hasMore: false, loadedOlder: false, loadingOlder: false });
+          setPage({
+            sessionId,
+            entries: NO_ENTRIES,
+            hasMore: false,
+            loadedOlder: false,
+            loadingOlder: false,
+            autoLoadBlocked: false,
+          });
         }
       });
     return () => {
@@ -139,17 +151,24 @@ export function useGovernanceAudit(
     const current = pageRef.current;
     if (!enabled || current.sessionId !== sessionId || current.loadingOlder || !current.hasMore || !current.nextBefore) return;
     const cursor = current.nextBefore;
-    setPage((value) => value.sessionId === sessionId ? { ...value, loadingOlder: true } : value);
+    const issuedEntries = current.entries;
+    setPage((value) => value.sessionId === sessionId
+      ? { ...value, loadingOlder: true, autoLoadBlocked: false }
+      : value);
     void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT, cursor)
       .then((response) => {
-        setPage((value) => value.sessionId === sessionId ? {
-          ...value,
-          entries: mergeAuditEntries(response.entries, value.entries),
-          nextBefore: response.nextBefore,
-          hasMore: response.hasMore,
-          loadedOlder: true,
-          loadingOlder: false,
-        } : value);
+        setPage((value) => {
+          if (value.sessionId !== sessionId) return value;
+          if (value.entries !== issuedEntries) return { ...value, loadingOlder: false };
+          return {
+            ...value,
+            entries: mergeAuditEntries(response.entries, value.entries),
+            nextBefore: response.nextBefore,
+            hasMore: response.hasMore,
+            loadedOlder: true,
+            loadingOlder: false,
+          };
+        });
       })
       .catch(() => {
         // Retention can prune the opaque cursor between fetches. Rebase on the current newest page
@@ -163,10 +182,13 @@ export function useGovernanceAudit(
               hasMore: response.hasMore,
               loadedOlder: false,
               loadingOlder: false,
+              autoLoadBlocked: false,
             } : value);
           })
           .catch(() => {
-            setPage((value) => value.sessionId === sessionId ? { ...value, loadingOlder: false } : value);
+            setPage((value) => value.sessionId === sessionId
+              ? { ...value, loadingOlder: false, autoLoadBlocked: true }
+              : value);
           });
       });
   }, [api, enabled, sessionId]);
@@ -175,10 +197,19 @@ export function useGovernanceAudit(
     if (page.sessionId !== sessionId) return;
     const oldestAuditAt = page.entries[0]?.timestamp;
     if (Number.isFinite(oldestTranscriptAt) && oldestAuditAt != null &&
-        oldestAuditAt > oldestTranscriptAt! && page.hasMore && !page.loadingOlder) {
+        oldestAuditAt > oldestTranscriptAt! && page.hasMore && !page.loadingOlder && !page.autoLoadBlocked) {
       loadOlder();
     }
-  }, [loadOlder, oldestTranscriptAt, page.entries, page.hasMore, page.loadingOlder, page.sessionId, sessionId]);
+  }, [
+    loadOlder,
+    oldestTranscriptAt,
+    page.autoLoadBlocked,
+    page.entries,
+    page.hasMore,
+    page.loadingOlder,
+    page.sessionId,
+    sessionId,
+  ]);
 
   const visibleEntries = page.sessionId === sessionId ? page.entries : NO_ENTRIES;
   const decisions = useMemo(() => governanceDecisions(visibleEntries), [visibleEntries]);
