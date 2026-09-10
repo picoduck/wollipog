@@ -18,6 +18,7 @@ import {
   sessionNamingAgentFailureCode,
   sessionEventWireProjectionRequiredForProtocol,
   sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
   SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
@@ -869,13 +870,13 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(sessionEventWireProjectionVariant(130), 0);
   assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 3);
 
-  // The variant is the count of unmet policies, so it stays a dense index as policies are added.
-  // It is also the base of the projected-epoch encoding: a second policy renumbers every peer's
-  // epoch into values that collide with the current ones, which is why adding one is a migration.
+  // The variant is the count of unmet policies, so it stays a dense index. The count is the
+  // projected-epoch radix, and the explicit offset fences the retired one-policy encoding.
   assert.equal(sessionEventWireProjectionVariant(86), 2);
   assert.equal(sessionEventWireProjectionVariant(undefined), 2);
   assert.equal(sessionEventWireProjectionVariant(87), 1);
   assert.equal(sessionEventWireProjectionVariant(130), 0);
+  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 2);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

@@ -6379,7 +6379,7 @@ test("current policy-hook peers fence terminal responses behind a content-safe r
     db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.nativePolicyHookEvents - 1);
     const legacy = await svc.evaluatePolicyHookCausally(id, { ...request, toolUseId: "tool-legacy" }, true);
     assert.equal(legacy.data?.decision, "deny");
-    assert.equal(hub.sentToRunner.length, sent, "pre-v126 runners retain audit-backed synthesis without a new command");
+    assert.equal(hub.sentToRunner.length, sent, "pre-v130 runners retain audit-backed synthesis without a new command");
   } finally { db.close(); }
 });
 

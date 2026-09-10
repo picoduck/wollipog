@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   PROTOCOL_VERSION,
+  SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
   SESSION_EVENT_WIRE_PROJECTION_VARIANTS as VARIANTS,
   sessionEventWireProjectionVariant,
 } from "@wollipog/protocol";
@@ -10,7 +11,8 @@ import {
  * rather than hardcoded, so adding an event-omission policy does not silently invalidate these
  * expectations the way a literal would. */
 function wireEpoch(localEpoch: number, peer: number): number {
-  return localEpoch * VARIANTS + sessionEventWireProjectionVariant(peer);
+  return SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET +
+    localEpoch * VARIANTS + sessionEventWireProjectionVariant(peer);
 }
 
 /** A peer that needs no additive session-event projection at all. It moves whenever a new event
@@ -432,6 +434,44 @@ test("every distinct wire projection gets its own dense sequence space", () => {
   }
 });
 
+test("the second projection policy fences every prior one-policy wire generation", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    const legacy = store.snapshots(86)[0]!;
+    const intermediate = store.snapshots(129)[0]!;
+    const current = store.snapshots(CURRENT_PEER)[0]!;
+
+    // Before v130 the one-policy encoding at local epoch zero was 1 for v86 and 0 for every
+    // v87+ peer. The reserved offset makes every new projection larger, so every control plane
+    // resyncs when the runner upgrades even if its negotiated protocol changes at the same time.
+    assert.notEqual(legacy.historyEpoch, 1);
+    assert.notEqual(intermediate.historyEpoch, 0);
+    assert.equal(legacy.historyEpoch, 4);
+    assert.equal(intermediate.historyEpoch, 3);
+
+    assert.equal(current.historyEpoch, 2);
+    for (let localEpoch = 0; localEpoch < 8; localEpoch++) {
+      const retiredFormatMaximum = localEpoch * 2 + 1;
+      for (const peer of [86, 129, CURRENT_PEER]) {
+        assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > retiredFormatMaximum,
+          `v${peer} local epoch ${localEpoch} sorts above the retired encoding`);
+      }
+    }
+
+    const stale = store.readEventPageForProtocol("s_abc", {
+      afterSeq: 0,
+      limit: 1,
+      logEpoch: 0,
+      throughSeq: 0,
+    }, CURRENT_PEER);
+    assert.equal(stale.ok, false);
+    if (!stale.ok) assert.equal(stale.code, "history_epoch_changed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("peer protocol changes fence dense sequence spaces with distinct wire epochs", () => {
   const { store, root } = tmpStore();
   try {
@@ -467,7 +507,7 @@ test("current protocol pagination decodes projected epochs after multiple histor
     const first = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, PROTOCOL_VERSION);
     assert.equal(first.ok, true);
     if (!first.ok) return;
-    assert.equal(first.page.logEpoch, 6);
+    assert.equal(first.page.logEpoch, wireEpoch(2, CURRENT_PEER));
     assert.equal(first.page.hasMore, true);
     const second = store.readEventPageForProtocol("s_abc", {
       afterSeq: first.page.nextAfterSeq,

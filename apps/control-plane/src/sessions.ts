@@ -1923,7 +1923,7 @@ export class SessionsService {
     });
   }
 
-  /** Evaluate one hook invocation and, for v126 peers, fence its terminal response behind the
+  /** Evaluate one hook invocation and, for v130 peers, fence its terminal response behind the
    * runner-owned event append. The hook process cannot release the matching provider tool call
    * until this promise settles, so the runner allocates the decision's sequence first even when
    * its provider adapter later delivers events in a batch. */
