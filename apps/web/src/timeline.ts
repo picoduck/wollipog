@@ -4,6 +4,7 @@ import type {
   ApprovalContext,
   AuthoritativeSubagentLifecycle,
   EventPayloadReference,
+  GovernanceActor,
   GovernanceReviewer,
   PermissionOption,
   PlanEntry,
@@ -179,9 +180,8 @@ export type TimelineItem =
       answeredByPolicies?: string[];
       resolutionReason?: StructuredRequestResolutionReason;
     }
-  /** A governance outcome whose request never produced a transcript event of its own (policy
-   * hooks). Synthesized client-side from the content-safe audit log and anchored chronologically;
-   * `id` is negative so it cannot collide with an event sequence. */
+  /** A content-safe policy-hook outcome. Current histories use the runner event sequence as `id`;
+   * legacy histories synthesize a negative id from the audit and anchor it chronologically. */
   | { kind: "governance_decision"; id: number; decision: GovernanceDecision }
   | { kind: "checkpoint"; id: number; turn: number }
   | { kind: "checkpoint_restored"; id: number; turn: number }
@@ -233,6 +233,51 @@ export interface SubagentRollup {
  * boundaries. Real providers keep this set small; the cap prevents malformed/unclosed streams
  * from turning stable message identities into transcript-lifetime state. */
 export const MAX_OPEN_PROVIDER_TEXT_ITEMS = 128;
+
+const GOVERNANCE_ACTOR_LABELS: Record<GovernanceActor["kind"], string> = {
+  human: "You",
+  policy: "Policy",
+  agent: "Agent",
+  system: "System",
+};
+
+function nativePolicyHookDecision(ev: SessionEvent): GovernanceDecision | null {
+  const payload = ev.payload;
+  if (payload.kind !== "policy_hook_decision") return null;
+  if ((payload.stage !== "policy_decision" && payload.stage !== "resolution") ||
+      (payload.outcome !== "allowed" && payload.outcome !== "denied" &&
+       payload.outcome !== "timed_out" && payload.outcome !== "aborted")) return null;
+  const tone = payload.outcome === "timed_out" ? "timed-out"
+    : payload.outcome === "allowed" ? "allowed"
+      : payload.actor.kind === "policy" ? "policy" : "denied";
+  const label = payload.outcome === "timed_out" ? "Approval Timed Out"
+    : payload.outcome === "aborted" ? "Approval Aborted"
+    : payload.outcome === "allowed"
+      ? payload.actor.kind === "human" ? "Approved by You" : "Allowed by Policy"
+      : payload.actor.kind === "human" ? "Denied by You" : "Blocked by Policy";
+  const detail = payload.outcome === "timed_out"
+    ? "The policy deadline expired, so the tool was denied."
+    : payload.outcome === "aborted"
+      ? "The approval ended before the tool could run."
+    : payload.outcome === "allowed"
+      ? payload.actor.kind === "human"
+        ? "The suspended tool invocation resumed."
+        : "The matched policy allowed this tool."
+      : payload.actor.kind === "human"
+        ? "The suspended tool invocation was blocked."
+        : "The matched policy denied this tool.";
+  const actor = GOVERNANCE_ACTOR_LABELS[payload.actor.kind];
+  return {
+    auditId: payload.auditId,
+    requestId: payload.requestId,
+    label,
+    detail,
+    tone,
+    decidedBy: payload.actor.id ? `${actor} · ${payload.actor.id}` : actor,
+    ...(payload.governancePolicyId ? { policyId: payload.governancePolicyId } : {}),
+    timestamp: ev.ts,
+  };
+}
 
 /** A rendered row is either a standalone item or a collapsible block of "work" (reasoning + tools). */
 export type TimelineGroup =
@@ -711,6 +756,18 @@ export class TimelineBuilder {
           ...(Number.isFinite(ev.ts) ? { createdAt: ev.ts } : {}),
         }) - 1);
         break;
+      case "policy_hook_decision": {
+        this.breakText();
+        const decision = nativePolicyHookDecision(ev);
+        if (decision) {
+          this.markDirty(this.items.push({
+            kind: "governance_decision",
+            id: ev.seq,
+            decision,
+          }) - 1);
+        }
+        break;
+      }
       case "command_output":
         this.pushText("command_output", ev.seq, p.text, undefined, p.parentToolUseId, undefined, p.textRefs);
         break;

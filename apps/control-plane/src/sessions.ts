@@ -65,6 +65,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type PendingApproval,
   type PolicyHookEvaluationRequest,
   type PolicyHookEvaluationResponse,
+  type RecordPolicyHookDecisionMessage,
   type PodContextEntry,
   type PodMemberRole,
   type PodOrchestrationActionResult,
@@ -181,6 +182,8 @@ type Logger = { info: (m: string) => void; warn: (m: string) => void; error: (m:
 export const EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS = 30_000;
 export const EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS = 45_000;
 export const STEERING_REQUEST_TIMEOUT_MS = 15_000;
+/** Leave headroom inside the hook sidecar's 1.5s HTTP deadline for request parsing and response. */
+export const POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS = 1_000;
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** One day beyond the browser's seven-day queued-edit recovery window. */
@@ -1464,6 +1467,15 @@ export class SessionsService {
     return this.db.listGovernanceAudit(sessionId, limit);
   }
 
+  governanceAuditPage(
+    sessionId: string,
+    limit = 200,
+    before?: string,
+  ): ServiceResult<{ entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean }> {
+    const page = this.db.governanceAuditPage(sessionId, limit, before);
+    return page ? ok(page) : fail("governance audit cursor is invalid for this session", 400);
+  }
+
   governancePolicies(): GovernancePolicy[] {
     return [sessionSpawnSafetyPolicy(), ...this.db.listGovernancePolicies()];
   }
@@ -1909,6 +1921,79 @@ export class SessionsService {
       retryAfterMs: 250,
       ...(begun.approval.expiresAt != null ? { expiresAt: begun.approval.expiresAt } : {}),
     });
+  }
+
+  /** Evaluate one hook invocation and, for v126 peers, fence its terminal response behind the
+   * runner-owned event append. The hook process cannot release the matching provider tool call
+   * until this promise settles, so the runner allocates the decision's sequence first even when
+   * its provider adapter later delivers events in a batch. */
+  async evaluatePolicyHookCausally(
+    sessionId: string,
+    input: unknown,
+    hookCanPollDurableAsk = false,
+  ): Promise<ServiceResult<PolicyHookEvaluationResponse>> {
+    const failClosed = (): ServiceResult<PolicyHookEvaluationResponse> => ok({
+      decision: "deny",
+      reason: "Policy decision history could not be recorded; the tool was blocked fail-closed.",
+    });
+    const result = this.evaluatePolicyHook(sessionId, input, hookCanPollDurableAsk);
+    if (!result.ok || !result.data ||
+        (result.data.decision !== "allow" && result.data.decision !== "deny")) return result;
+
+    const parsed = parsePolicyHookRequest(input);
+    if (!parsed.ok || parsed.value.hookEventName !== "PreToolUse" || !parsed.value.toolUseId) {
+      return result;
+    }
+    const session = this.db.getSession(sessionId);
+    if (!session || !runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "nativePolicyHookEvents",
+    )) return result;
+
+    const requestId = policyHookRequestId(sessionId, parsed.value);
+    const audit = this.db.policyHookDecisionAudit(sessionId, requestId);
+    if (!audit || audit.stage !== "resolution" ||
+        !["allowed", "denied", "timed_out", "aborted"].includes(audit.outcome)) {
+      return failClosed();
+    }
+    const appendRequestId = `policy_hook_event_${randomUUID()}`;
+    const message: RecordPolicyHookDecisionMessage = {
+      type: "record_policy_hook_decision",
+      requestId: appendRequestId,
+      sessionId,
+      decision: {
+        auditId: audit.auditId,
+        requestId: audit.requestId,
+        stage: audit.stage,
+        outcome: audit.outcome,
+        actor: audit.actor,
+        ...(audit.governancePolicyId ? { governancePolicyId: audit.governancePolicyId } : {}),
+        toolCallId: parsed.value.toolUseId,
+      },
+    };
+    try {
+      const recorded = await this.hub.requestFromRunner(
+        session.runnerId,
+        appendRequestId,
+        message,
+        POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS,
+      );
+      if (recorded.type !== "policy_hook_decision_recorded" ||
+          recorded.sessionId !== sessionId || recorded.auditId !== audit.auditId ||
+          !recorded.accepted || !Number.isSafeInteger(recorded.eventSeq) || recorded.eventSeq! < 1) {
+        return failClosed();
+      }
+      return result;
+    } catch (error) {
+      this.log.warn(
+        `policy-hook event append failed for ${sessionId}: ${
+          isRunnerRequestTimeoutError(error) ? "runner acknowledgement timed out"
+            : isRunnerRequestNotSentError(error) ? "runner is offline"
+              : error instanceof Error ? error.message : "unknown runner error"
+        }`,
+      );
+      return failClosed();
+    }
   }
 
   /** Expire durable asks even when their hook process is gone, then promote the next queued ask. */

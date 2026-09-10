@@ -2891,6 +2891,7 @@ textarea {
   padding-bottom: 6px;
 }
 .governance-history-row:last-child { border-bottom: none; }
+.governance-history-more { margin: 12px; width: calc(100% - 24px); }
 .governance-history-time {
   margin-inline-start: auto;
   color: var(--text-dim);

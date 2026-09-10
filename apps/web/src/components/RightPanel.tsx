@@ -187,6 +187,10 @@ export function RightPanel({
   onAttachWorkspaceReference,
   items,
   governanceDecisions = EMPTY_GOVERNANCE_DECISIONS,
+  governanceAvailable = governanceDecisions.length > 0,
+  governanceHasMore = false,
+  governanceLoadingOlder = false,
+  onLoadOlderGovernance,
   earlierActivityUnloaded = false,
   parentTurnEventIds = EMPTY_PARENT_TURN_EVENTS,
   onOpenParentTurn = () => undefined,
@@ -211,6 +215,10 @@ export function RightPanel({
   items: TimelineItem[];
   /** Consolidated, content-safe governance outcomes for this session, oldest-first. */
   governanceDecisions?: readonly GovernanceDecision[];
+  governanceAvailable?: boolean;
+  governanceHasMore?: boolean;
+  governanceLoadingOlder?: boolean;
+  onLoadOlderGovernance?: () => void;
   /** The transcript is showing a bounded window with older turns still unloaded. */
   earlierActivityUnloaded?: boolean;
   /** Loaded parent turns that can be revealed directly in the virtual transcript. */
@@ -371,7 +379,7 @@ export function RightPanel({
             backgroundAvailable={(session.backgroundJobs?.length ?? 0) > 0 ||
               session.backgroundJobsAvailable === true ||
               session.backgroundWorkTracking != null || session.backgroundWorkState != null}
-            governanceAvailable={governanceDecisions.length > 0}
+            governanceAvailable={governanceAvailable}
           />
         ) : (
           <div className="rp-body">
@@ -400,7 +408,14 @@ export function RightPanel({
                 onAttachWorkspaceReference={onAttachWorkspaceReference}
               />
             )}
-            {state.mode === "governance" && <GovernanceHistoryPanel decisions={governanceDecisions} />}
+            {state.mode === "governance" && (
+              <GovernanceHistoryPanel
+                decisions={governanceDecisions}
+                hasMore={governanceHasMore}
+                loadingOlder={governanceLoadingOlder}
+                onLoadOlder={onLoadOlderGovernance}
+              />
+            )}
             {state.mode === "browser" && <BrowserPanel session={session} />}
             {state.mode === "sidechat" && (
               <SideChatPanel session={session} runnerOnline={runnerOnline} onInsertDraft={onInsertSideChatDraft} />

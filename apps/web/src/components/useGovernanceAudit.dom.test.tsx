@@ -5,8 +5,10 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
 import { governanceDecisions, type GovernanceAnchorEvent } from "../governance.js";
+import { ApiProvider } from "../api-context.js";
+import type { ApiClient } from "../api.js";
 import type { TimelineItem } from "../timeline.js";
-import { useGovernanceTimeline } from "./useGovernanceAudit.js";
+import { useGovernanceAudit, useGovernanceTimeline, type GovernanceAuditState } from "./useGovernanceAudit.js";
 
 const domWindow = new Window();
 for (const [name, value] of Object.entries({
@@ -36,6 +38,154 @@ const items: TimelineItem[] = [
   { kind: "agent_thought", id: 2, text: "t2" } as TimelineItem,
   { kind: "agent_thought", id: 3, text: "t3" } as TimelineItem,
 ];
+
+test("transcript-window backfill follows cursors until the oldest visible activity is covered", async () => {
+  const calls: Array<{ id: string; limit: number; before?: string }> = [];
+  const audit = (auditId: string, timestamp: number): GovernanceAuditEntry => ({
+    ...entry, auditId, requestId: `hook-${auditId}`, timestamp,
+  });
+  const client = {
+    governanceAudit: async (id: string, limit: number, before?: string) => {
+      calls.push({ id, limit, ...(before ? { before } : {}) });
+      return before
+        ? { entries: [audit("older", 900), audit("tie-first", 1_000)], hasMore: false }
+        : { entries: [audit("tie-second", 1_000), audit("newest", 1_100)], nextBefore: "tie-second", hasMore: true };
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe() {
+    latest = useGovernanceAudit("session-1", "revision-1", true, 950);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe /></ApiProvider>);
+    for (let index = 0; index < 4; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(calls, [
+    { id: "session-1", limit: 200 },
+    { id: "session-1", limit: 200, before: "tie-second" },
+  ]);
+  assert.deepEqual(latest?.decisions.map((decision) => decision.auditId), [
+    "older", "tie-first", "tie-second", "newest",
+  ]);
+  assert.equal(latest?.hasMore, false);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("manual governance-history paging prepends the next older page", async () => {
+  const calls: Array<string | undefined> = [];
+  const audit = (auditId: string, timestamp: number): GovernanceAuditEntry => ({
+    ...entry, auditId, requestId: `hook-${auditId}`, timestamp,
+  });
+  const client = {
+    governanceAudit: async (_id: string, _limit: number, before?: string) => {
+      calls.push(before);
+      return before
+        ? { entries: [audit("old", 100)], hasMore: false }
+        : { entries: [audit("new", 200)], nextBefore: "new", hasMore: true };
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe() {
+    latest = useGovernanceAudit("session-1", "revision-1", true);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(latest?.hasMore, true);
+  await act(async () => {
+    latest!.loadOlder();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(calls, [undefined, "new"]);
+  assert.deepEqual(latest?.decisions.map((decision) => decision.auditId), ["old", "new"]);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("revision refreshes retain loaded history and a session switch drops the prior snapshot", async () => {
+  const audit = (sessionId: string, auditId: string, timestamp: number): GovernanceAuditEntry => ({
+    ...entry,
+    auditId,
+    requestId: `hook-${auditId}`,
+    scope: { sessionId, runnerId: "runner-1" },
+    timestamp,
+  });
+  let sessionOneTail = 0;
+  const client = {
+    governanceAudit: async (id: string, _limit: number, before?: string) => {
+      if (id === "session-2") return { entries: [audit(id, "session-2", 300)], hasMore: false };
+      if (before) return { entries: [audit(id, "old", 100)], hasMore: false };
+      sessionOneTail += 1;
+      return sessionOneTail === 1
+        ? { entries: [audit(id, "new", 200)], nextBefore: "new", hasMore: true }
+        : { entries: [audit(id, "newer", 250)], hasMore: false };
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe({ id, revision }: { id: string; revision: string }) {
+    latest = useGovernanceAudit(id, revision, true);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe id="session-1" revision="revision-1" /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  await act(async () => {
+    latest!.loadOlder();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe id="session-1" revision="revision-2" /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(latest?.decisions.map((decision) => decision.auditId), ["old", "new", "newer"]);
+
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe id="session-2" revision="revision-1" /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(latest?.decisions.map((decision) => decision.auditId), ["session-2"]);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("raw audit rows do not expose an empty Governance tab", async () => {
+  const client = {
+    governanceAudit: async () => ({
+      entries: [{ ...entry, approvalKind: "permission" as const }],
+      hasMore: false,
+    }),
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe() {
+    latest = useGovernanceAudit("session-1", "revision-1", true);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(latest?.decisions.length, 0);
+  assert.equal(latest?.available, false);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
 
 test("a governance row flushed by a settled turn survives the next turn starting", async () => {
   const seen: string[][] = [];

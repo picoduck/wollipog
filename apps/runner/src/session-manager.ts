@@ -42,6 +42,7 @@ import type {
   SessionConfig,
   SessionCommandInvocationErrorCode,
   SessionEventPayload,
+  PolicyHookDecisionEvent,
   SessionLaunchSpec,
   SessionSnapshot,
   SessionStatus,
@@ -856,6 +857,13 @@ export class SessionManager {
   private readonly providerAuthAutomaticAttempted = new Set<string>();
   /** Create/attach/select all merge durable session inventory, so serialize them per session. */
   private readonly worktreeOperations = new Map<string, Promise<unknown>>();
+  /** Decisions can reach the runner while Claude's matching tool frame is still buffered. Hold
+   * them briefly so their durable sequence follows that exact tool id instead of racing ahead. */
+  private readonly pendingPolicyHookDecisions = new Map<string, {
+    payload: PolicyHookDecisionEvent;
+    resolves: Array<(result: { accepted: boolean; auditId: string; eventSeq?: number; error?: string }) => void>;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
   /** Exact duplicate create requests join one operation, including after a control-plane retry. */
   private readonly worktreeCreates = new Map<string, {
     promise: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }>;
@@ -8923,6 +8931,118 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Persist a CP-resolved policy-hook decision in the runner's authoritative sequence space.
+   * Runtime picking/validation is intentional: this command crosses a privileged boundary and
+   * must never smuggle the hook's raw tool input, answers, or policy predicates into history.
+   */
+  async recordPolicyHookDecision(
+    sessionId: string,
+    value: unknown,
+  ): Promise<{ accepted: boolean; auditId: string; eventSeq?: number; error?: string }> {
+    const fail = (auditId: string, error: string) => ({ accepted: false, auditId, error });
+    if (!value || typeof value !== "object" || Array.isArray(value)) return fail("", "decision is malformed");
+    const raw = value as Record<string, unknown>;
+    const auditId = typeof raw.auditId === "string" ? raw.auditId : "";
+    const allowedKeys = new Set([
+      "auditId", "requestId", "stage", "outcome", "actor", "governancePolicyId", "toolCallId",
+    ]);
+    if (Object.keys(raw).some((key) => !allowedKeys.has(key))) return fail(auditId, "decision contains unsafe fields");
+    const bounded = (field: unknown, max: number) => typeof field === "string" &&
+      field.length > 0 && field.length <= max && !/[\x00-\x1f\x7f]/u.test(field);
+    if (!bounded(raw.auditId, 256) || !bounded(raw.requestId, 512) || !bounded(raw.toolCallId, 512)) {
+      return fail(auditId, "decision identity is invalid");
+    }
+    if (raw.stage !== "policy_decision" && raw.stage !== "resolution") {
+      return fail(auditId, "decision stage is not terminal");
+    }
+    if (raw.outcome !== "allowed" && raw.outcome !== "denied" && raw.outcome !== "timed_out" && raw.outcome !== "aborted") {
+      return fail(auditId, "decision outcome is not terminal");
+    }
+    if (!raw.actor || typeof raw.actor !== "object" || Array.isArray(raw.actor)) {
+      return fail(auditId, "decision actor is invalid");
+    }
+    const actor = raw.actor as Record<string, unknown>;
+    if (Object.keys(actor).some((key) => key !== "kind" && key !== "id") ||
+        !["human", "agent", "policy", "system"].includes(String(actor.kind)) ||
+        (actor.id !== undefined && !bounded(actor.id, 256)) ||
+        (raw.governancePolicyId !== undefined && !bounded(raw.governancePolicyId, 256))) {
+      return fail(auditId, "decision provenance is invalid");
+    }
+    if (!this.store.has(sessionId)) return fail(auditId, "session does not exist");
+    const payload: PolicyHookDecisionEvent = {
+      kind: "policy_hook_decision",
+      auditId,
+      requestId: raw.requestId as string,
+      stage: raw.stage,
+      outcome: raw.outcome,
+      actor: {
+        kind: actor.kind as PolicyHookDecisionEvent["actor"]["kind"],
+        ...(typeof actor.id === "string" ? { id: actor.id } : {}),
+      },
+      ...(typeof raw.governancePolicyId === "string" ? { governancePolicyId: raw.governancePolicyId } : {}),
+      toolCallId: raw.toolCallId as string,
+    };
+    const tail = this.store.logTailSeq(sessionId);
+    const recent = this.store.readEvents(sessionId, Math.max(0, tail - 500));
+    const existing = recent.find((event) =>
+      event.payload.kind === "policy_hook_decision" && event.payload.auditId === auditId);
+    if (existing) {
+      if (JSON.stringify(existing.payload) !== JSON.stringify(payload)) {
+        return fail(auditId, "decision conflicts with the existing audit event");
+      }
+      return { accepted: true, auditId, eventSeq: existing.seq };
+    }
+    const toolObserved = recent.some((event) =>
+      event.payload.kind === "tool_call" && event.payload.toolCallId === payload.toolCallId);
+    if (toolObserved) return this.appendPolicyHookDecision(sessionId, payload);
+
+    const pendingKey = `${sessionId}\0${payload.toolCallId}`;
+    const pending = this.pendingPolicyHookDecisions.get(pendingKey);
+    if (pending) {
+      if (JSON.stringify(pending.payload) !== JSON.stringify(payload)) {
+        return fail(auditId, pending.payload.auditId === auditId
+          ? "decision conflicts with the pending audit event"
+          : "another decision is waiting for this tool event");
+      }
+      return new Promise((resolvePromise) => pending.resolves.push(resolvePromise));
+    }
+    if (this.pendingPolicyHookDecisions.size >= 512) {
+      return fail(auditId, "too many decisions are waiting for tool events");
+    }
+    return new Promise((resolvePromise) => {
+      const timer = setTimeout(() => {
+        const current = this.pendingPolicyHookDecisions.get(pendingKey);
+        if (!current || current.payload.auditId !== auditId) return;
+        this.pendingPolicyHookDecisions.delete(pendingKey);
+        const result = fail(auditId, "matching tool event was not observed");
+        for (const resolve of current.resolves) resolve(result);
+      }, 750);
+      timer.unref?.();
+      this.pendingPolicyHookDecisions.set(pendingKey, { payload, resolves: [resolvePromise], timer });
+    });
+  }
+
+  private appendPolicyHookDecision(
+    sessionId: string,
+    payload: PolicyHookDecisionEvent,
+  ): { accepted: boolean; auditId: string; eventSeq?: number; error?: string } {
+    const stored = this.emitEvent(sessionId, payload);
+    return stored
+      ? { accepted: true, auditId: payload.auditId, eventSeq: stored.seq }
+      : { accepted: false, auditId: payload.auditId, error: "decision history append failed" };
+  }
+
+  private flushPolicyHookDecisionAfterToolCall(sessionId: string, toolCallId: string): void {
+    const pendingKey = `${sessionId}\0${toolCallId}`;
+    const pending = this.pendingPolicyHookDecisions.get(pendingKey);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingPolicyHookDecisions.delete(pendingKey);
+    const result = this.appendPolicyHookDecision(sessionId, pending.payload);
+    for (const resolve of pending.resolves) resolve(result);
+  }
+
   private onDriverBackgroundWork(sessionId: string, update: DriverBackgroundWorkUpdate): void {
     const current = this.store.readMeta(sessionId);
     if (!current || current.driver !== "claude-code") return;
@@ -9609,6 +9729,9 @@ export class SessionManager {
     const managedAttentionResolution = (payload.kind === "permission_resolved" || payload.kind === "question_resolved") &&
       pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId);
     if (!this.emitEvent(sessionId, payload)) return;
+    if (payload.kind === "tool_call") {
+      this.flushPolicyHookDecisionAfterToolCall(sessionId, payload.toolCallId);
+    }
     if (managedAttentionResolution && entry) {
       this.emitStatus(sessionId, this.store.readMeta(sessionId)?.pendingApproval
         ? "input_required" : entry.running ? "running" : "idle");

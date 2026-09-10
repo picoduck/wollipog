@@ -905,6 +905,64 @@ test("allowed review decisions collapse inside their turn work while preserving 
   ]);
 });
 
+test("native policy-hook decisions retain the runner sequence between exact tool lifecycle events", () => {
+  const tool = ev({ kind: "tool_call", toolCallId: "tool-native", title: "Write", status: "pending" });
+  const decision = ev({
+    kind: "policy_hook_decision",
+    auditId: "audit-native",
+    requestId: "hook-native",
+    stage: "resolution",
+    outcome: "allowed",
+    actor: { kind: "human", id: "device-1" },
+    governancePolicyId: "policy-native",
+    toolCallId: "tool-native",
+  });
+  const update = ev({ kind: "tool_call_update", toolCallId: "tool-native", status: "completed" });
+  const items = deriveTimeline([tool, decision, update]);
+
+  assert.deepEqual(items.map((item) => item.kind), ["tool_call", "governance_decision"]);
+  const native = items[1];
+  assert.ok(native?.kind === "governance_decision");
+  assert.equal(native.id, decision.seq);
+  assert.deepEqual(native.decision, {
+    auditId: "audit-native",
+    requestId: "hook-native",
+    label: "Approved by You",
+    detail: "The suspended tool invocation resumed.",
+    tone: "allowed",
+    decidedBy: "You · device-1",
+    policyId: "policy-native",
+    timestamp: decision.ts,
+  });
+});
+
+test("native policy-hook decisions render policy allows and abandoned approvals", () => {
+  const items = deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "tool-allow", title: "Read", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-allow",
+      requestId: "hook-allow",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "policy", id: "allow-read" },
+      toolCallId: "tool-allow",
+    }),
+    ev({ kind: "tool_call", toolCallId: "tool-aborted", title: "Write", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-aborted",
+      requestId: "hook-aborted",
+      stage: "resolution",
+      outcome: "aborted",
+      actor: { kind: "system", id: "session-stopped" },
+      toolCallId: "tool-aborted",
+    }),
+  ]);
+  const labels = items.flatMap((item) => item.kind === "governance_decision" ? [item.decision.label] : []);
+  assert.deepEqual(labels, ["Allowed by Policy", "Approval Aborted"]);
+});
+
 test("exceptional automated review outcomes stay prominent and split allowed summaries", () => {
   const items = deriveTimeline([
     ev({

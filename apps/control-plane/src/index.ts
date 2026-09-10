@@ -1143,6 +1143,11 @@ app.register(async (instance) => {
           }
         }
         break;
+      case "policy_hook_decision_recorded":
+        if (runnerId && !hub.resolveRunnerRequest(msg, runnerId)) {
+          app.log.warn(`runner ${runnerId} sent an unsolicited policy-hook decision receipt`);
+        }
+        break;
       case "agent_control_credential":
         {
           const accepted = db.setAgentControlCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
@@ -3452,7 +3457,7 @@ app.post("/api/sessions/:id/policy-hook", { bodyLimit: 128 * 1024 }, async (req,
     return reply.code(403).send({ error: "policy hook session claim does not match the route" });
   }
   if (!pollHeader.ok) return reply.code(403).send({ error: "policy hook capability headers conflict" });
-  return respond(reply, svc.evaluatePolicyHook(
+  return respond(reply, await svc.evaluatePolicyHookCausally(
     id,
     req.body,
     pollHeader.value === POLICY_HOOK_POLL_CAPABILITY,
@@ -3470,12 +3475,14 @@ app.post("/api/sessions/:id/approve", async (req, reply) => {
 
 app.get("/api/sessions/:id/governance-audit", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const rawLimit = (req.query as { limit?: string }).limit;
+  const query = req.query as { limit?: string; before?: string };
+  const rawLimit = query.limit;
   const limit = rawLimit == null ? 200 : Number(rawLimit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
     return reply.code(400).send({ error: "limit must be an integer between 1 and 500" });
   }
-  return { entries: svc.governanceAudit(id, limit) };
+  const before = typeof query.before === "string" && query.before ? query.before : undefined;
+  return respond(reply, svc.governanceAuditPage(id, limit, before));
 });
 
 function questionPolicyAdministrator(req: FastifyRequest) {

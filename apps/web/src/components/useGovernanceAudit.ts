@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
@@ -18,36 +18,142 @@ const NO_ENTRIES: GovernanceAuditEntry[] = [];
 /**
  * The session's governance audit, oldest-first and content-safe.
  *
- * The endpoint is an unpaginated newest-N snapshot, so it is refetched whenever the session
- * revision moves. Audit records are append-only, so an unchanged id list means unchanged content
- * and the previous array identity is kept — without that, every session update would invalidate
- * the derived timeline and force a full row re-projection.
+ * Newest entries are refetched whenever the session revision moves; explicitly or automatically
+ * loaded older pages stay attached beneath that moving tail. Audit ids make overlapping refetches
+ * idempotent while the server cursor preserves the database's tied-timestamp ordering.
  */
-export function useGovernanceAudit(sessionId: string, revision: string, enabled: boolean): GovernanceDecision[] {
+export interface GovernanceAuditState {
+  decisions: GovernanceDecision[];
+  available: boolean;
+  hasMore: boolean;
+  loadingOlder: boolean;
+  loadOlder: () => void;
+}
+
+interface AuditPageState {
+  sessionId: string;
+  entries: GovernanceAuditEntry[];
+  nextBefore?: string;
+  hasMore: boolean;
+  loadedOlder: boolean;
+  loadingOlder: boolean;
+}
+
+function mergeAuditEntries(
+  older: readonly GovernanceAuditEntry[],
+  newer: readonly GovernanceAuditEntry[],
+): GovernanceAuditEntry[] {
+  const seen = new Set<string>();
+  const merged: GovernanceAuditEntry[] = [];
+  for (const entry of [...older, ...newer]) {
+    if (seen.has(entry.auditId)) continue;
+    seen.add(entry.auditId);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+export function useGovernanceAudit(
+  sessionId: string,
+  revision: string,
+  enabled: boolean,
+  oldestTranscriptAt?: number,
+): GovernanceAuditState {
   const api = useApi();
-  const [entries, setEntries] = useState<GovernanceAuditEntry[]>(NO_ENTRIES);
+  const [page, setPage] = useState<AuditPageState>({
+    sessionId: "",
+    entries: NO_ENTRIES,
+    hasMore: false,
+    loadedOlder: false,
+    loadingOlder: false,
+  });
+  const pageRef = useRef(page);
+  pageRef.current = page;
 
   useEffect(() => {
     if (!enabled) {
-      setEntries((previous) => (previous.length ? NO_ENTRIES : previous));
+      setPage((previous) => previous.entries.length || previous.sessionId
+        ? { sessionId: "", entries: NO_ENTRIES, hasMore: false, loadedOlder: false, loadingOlder: false }
+        : previous);
       return;
     }
     let active = true;
     void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT)
       .then((response) => {
         if (active) {
-          setEntries((previous) => sameGovernanceSnapshot(previous, response.entries) ? previous : response.entries);
+          setPage((previous) => {
+            if (previous.sessionId !== sessionId) {
+              return {
+                sessionId,
+                entries: response.entries,
+                nextBefore: response.nextBefore,
+                hasMore: response.hasMore,
+                loadedOlder: false,
+                loadingOlder: false,
+              };
+            }
+            const entries = previous.loadedOlder
+              ? mergeAuditEntries(previous.entries, response.entries)
+              : response.entries;
+            return {
+              ...previous,
+              entries: sameGovernanceSnapshot(previous.entries, entries) ? previous.entries : entries,
+              ...(!previous.loadedOlder
+                ? { nextBefore: response.nextBefore, hasMore: response.hasMore }
+                : {}),
+            };
+          });
         }
       })
       .catch(() => {
-        if (active) setEntries((previous) => (previous.length ? NO_ENTRIES : previous));
+        if (active && pageRef.current.sessionId !== sessionId) {
+          setPage({ sessionId, entries: NO_ENTRIES, hasMore: false, loadedOlder: false, loadingOlder: false });
+        }
       });
     return () => {
       active = false;
     };
   }, [api, enabled, revision, sessionId]);
 
-  return useMemo(() => governanceDecisions(entries), [entries]);
+  const loadOlder = useCallback(() => {
+    const current = pageRef.current;
+    if (!enabled || current.sessionId !== sessionId || current.loadingOlder || !current.hasMore || !current.nextBefore) return;
+    const cursor = current.nextBefore;
+    setPage((value) => value.sessionId === sessionId ? { ...value, loadingOlder: true } : value);
+    void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT, cursor)
+      .then((response) => {
+        setPage((value) => value.sessionId === sessionId ? {
+          ...value,
+          entries: mergeAuditEntries(response.entries, value.entries),
+          nextBefore: response.nextBefore,
+          hasMore: response.hasMore,
+          loadedOlder: true,
+          loadingOlder: false,
+        } : value);
+      })
+      .catch(() => {
+        setPage((value) => value.sessionId === sessionId ? { ...value, loadingOlder: false } : value);
+      });
+  }, [api, enabled, sessionId]);
+
+  useEffect(() => {
+    if (page.sessionId !== sessionId) return;
+    const oldestAuditAt = page.entries[0]?.timestamp;
+    if (Number.isFinite(oldestTranscriptAt) && oldestAuditAt != null &&
+        oldestAuditAt > oldestTranscriptAt! && page.hasMore && !page.loadingOlder) {
+      loadOlder();
+    }
+  }, [loadOlder, oldestTranscriptAt, page.entries, page.hasMore, page.loadingOlder, page.sessionId, sessionId]);
+
+  const visibleEntries = page.sessionId === sessionId ? page.entries : NO_ENTRIES;
+  const decisions = useMemo(() => governanceDecisions(visibleEntries), [visibleEntries]);
+  return {
+    decisions,
+    available: decisions.length > 0 || (page.sessionId === sessionId && page.hasMore),
+    hasMore: page.sessionId === sessionId && page.hasMore,
+    loadingOlder: page.sessionId === sessionId && page.loadingOlder,
+    loadOlder,
+  };
 }
 
 function hasParentItem(items: readonly TimelineItem[], indexes: readonly number[]): boolean {

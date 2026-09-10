@@ -9,9 +9,9 @@
  * Placement contract: `requestId` is the only join key between an audit entry and a transcript
  * row. Resolved permissions and questions already render their own outcome in place, so those
  * entries are left alone (annotating them again would duplicate the outcome). Policy-hook
- * decisions have no transcript event at all — the runner polls the hook and the approval lives
- * only on the live approval card — so they are materialized as their own compact chronological
- * row, anchored to the last loaded event at or before the decision's timestamp.
+ * decisions on current runners have native transcript events at their exact sequence; older
+ * histories have only the audit record, so those are materialized as compact chronological rows
+ * anchored to the last loaded event at or before the decision's timestamp.
  */
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
 import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
@@ -34,8 +34,8 @@ export interface GovernanceDecision extends GovernanceOutcome {
   timestamp: number;
 }
 
-/** How many audit records the session view pulls. The endpoint is an unpaginated newest-N
- * snapshot (max 500), so this is the whole governance history the client ever sees. */
+/** Number of newest audit records fetched per page. Older pages are loaded to cover the visible
+ * transcript window and can also be requested explicitly from Governance History. */
 export const GOVERNANCE_AUDIT_LIMIT = 200;
 
 export function governanceAuditPresentation(entry: GovernanceAuditEntry): GovernanceOutcome | null {
@@ -49,6 +49,12 @@ export function governanceAuditPresentation(entry: GovernanceAuditEntry): Govern
   if (entry.stage !== "resolution") return null;
   if (entry.outcome === "timed_out") {
     return { label: "Approval Timed Out", detail: "The policy deadline expired, so the tool was denied.", tone: "timed-out" };
+  }
+  if (entry.outcome === "aborted") {
+    return { label: "Approval Aborted", detail: "The approval ended before the tool could run.", tone: "denied" };
+  }
+  if (entry.actor.kind === "policy" && entry.outcome === "allowed") {
+    return { label: "Allowed by Policy", detail: "The matched policy allowed this tool.", tone: "allowed" };
   }
   if (entry.actor.kind === "human" && entry.outcome === "allowed") {
     return { label: "Approved by You", detail: "The suspended tool invocation resumed.", tone: "allowed" };
@@ -74,8 +80,8 @@ function decidedByLabel(actor: GovernanceAuditEntry["actor"]): string {
 /**
  * Project the audit snapshot into oldest-first display decisions.
  *
- * Deduplicated on `auditId` and totally ordered on (timestamp, auditId) so a refetch of the
- * newest-N snapshot can never reorder or duplicate an outcome that is already on screen.
+ * Deduplicated on `auditId` and ordered by timestamp while preserving the endpoint's stable
+ * `(created_at, row_id)` order for ties. Random audit ids must not scramble rows across pages.
  */
 export function governanceDecisions(entries: readonly GovernanceAuditEntry[]): GovernanceDecision[] {
   const seen = new Set<string>();
@@ -93,7 +99,7 @@ export function governanceDecisions(entries: readonly GovernanceAuditEntry[]): G
       timestamp: entry.timestamp,
     });
   }
-  return decisions.sort((a, b) => a.timestamp - b.timestamp || (a.auditId < b.auditId ? -1 : 1));
+  return decisions.sort((a, b) => a.timestamp - b.timestamp);
 }
 
 /** Audit ids are append-only records, so the id list identifies the snapshot's content. */
@@ -113,10 +119,18 @@ export function transcriptGovernanceDecisions(
   items: readonly TimelineItem[],
 ): GovernanceDecision[] {
   const represented = new Set<string>();
+  const nativeRequests = new Set<string>();
   for (const item of items) {
     if (item.kind === "permission" || item.kind === "question") represented.add(item.requestId);
+    if (item.kind === "governance_decision" && item.id > 0) {
+      represented.add(item.decision.auditId);
+      nativeRequests.add(item.decision.requestId);
+    }
   }
-  return decisions.filter((decision) => !represented.has(decision.requestId));
+  return decisions.filter((decision) =>
+    !represented.has(decision.requestId) &&
+    !represented.has(decision.auditId) &&
+    !nativeRequests.has(decision.requestId));
 }
 
 export interface GovernanceAnchorEvent {

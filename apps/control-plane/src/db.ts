@@ -11814,6 +11814,49 @@ export class ControlPlaneDb {
     return entry;
   }
 
+  /** Canonical terminal audit row used to materialize one native policy-hook transcript event.
+   * Resolution is the last content-safe fact for a hook invocation, including human approval and
+   * expiry, and is inserted before a terminal hook response can be released. */
+  policyHookDecisionAudit(sessionId: string, requestId: string): GovernanceAuditEntry | null {
+    const row = this.stmt(
+      `SELECT audit_id, request_id, approval_kind, stage, outcome, actor_kind, actor_id,
+              scope, content_digest, policy_rule, governance_policy_id, option_id, created_at
+       FROM governance_audit
+       WHERE session_id=? AND request_id=? AND approval_kind='policy_hook'
+         AND stage='resolution' AND outcome IN ('allowed','denied','timed_out','aborted')
+       ORDER BY created_at DESC, row_id DESC LIMIT 1`,
+    ).get(sessionId, requestId) as unknown as {
+      audit_id: string;
+      request_id: string;
+      approval_kind: GovernanceAuditEntry["approvalKind"];
+      stage: GovernanceAuditEntry["stage"];
+      outcome: GovernanceAuditEntry["outcome"];
+      actor_kind: GovernanceAuditEntry["actor"]["kind"];
+      actor_id: string | null;
+      scope: string;
+      content_digest: string | null;
+      policy_rule: string | null;
+      governance_policy_id: string | null;
+      option_id: string | null;
+      created_at: number;
+    } | undefined;
+    if (!row) return null;
+    return {
+      auditId: row.audit_id,
+      requestId: row.request_id,
+      approvalKind: row.approval_kind,
+      stage: row.stage,
+      outcome: row.outcome,
+      actor: { kind: row.actor_kind, ...(row.actor_id ? { id: row.actor_id } : {}) },
+      scope: JSON.parse(row.scope) as GovernanceAuditEntry["scope"],
+      ...(row.content_digest ? { contentDigest: row.content_digest } : {}),
+      ...(row.policy_rule ? { policyRule: JSON.parse(row.policy_rule) as GovernanceAuditEntry["policyRule"] } : {}),
+      ...(row.governance_policy_id ? { governancePolicyId: row.governance_policy_id } : {}),
+      ...(row.option_id ? { optionId: row.option_id } : {}),
+      timestamp: row.created_at,
+    };
+  }
+
   hasGovernanceAuditEntry(
     sessionId: string,
     requestId: string,
@@ -11848,14 +11891,42 @@ export class ControlPlaneDb {
 
   /** Latest bounded audit window returned oldest-first for a stable timeline. */
   listGovernanceAudit(sessionId: string, limit = 200): GovernanceAuditEntry[] {
+    return this.governanceAuditPage(sessionId, limit)?.entries ?? [];
+  }
+
+  /**
+   * One stable newest-first cursor page, presented oldest-first to callers. The opaque audit id is
+   * resolved inside the requested session before its (created_at, row_id) coordinate is used, so a
+   * cursor can neither cross session boundaries nor skip/repeat rows whose timestamps tie.
+   */
+  governanceAuditPage(
+    sessionId: string,
+    limit = 200,
+    before?: string,
+  ): { entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean } | null {
     const normalized = Number.isFinite(limit) ? Math.trunc(limit) : 200;
     const bounded = Math.max(1, Math.min(500, normalized));
+    const cursor = before === undefined
+      ? undefined
+      : this.stmt(
+        `SELECT created_at, row_id FROM governance_audit WHERE session_id=? AND audit_id=?`,
+      ).get(sessionId, before) as { created_at: number; row_id: number } | undefined;
+    if (before !== undefined && !cursor) return null;
     const rows = this.stmt(
       `SELECT audit_id, request_id, approval_kind, stage, outcome, actor_kind, actor_id,
-              scope, content_digest, policy_rule, governance_policy_id, option_id, created_at
-       FROM governance_audit WHERE session_id=?
+              scope, content_digest, policy_rule, governance_policy_id, option_id, created_at, row_id
+       FROM governance_audit
+       WHERE session_id=?
+         AND (? IS NULL OR created_at < ? OR (created_at = ? AND row_id < ?))
        ORDER BY created_at DESC, row_id DESC LIMIT ?`,
-    ).all(sessionId, bounded) as unknown as Array<{
+    ).all(
+      sessionId,
+      cursor?.created_at ?? null,
+      cursor?.created_at ?? null,
+      cursor?.created_at ?? null,
+      cursor?.row_id ?? null,
+      bounded + 1,
+    ) as unknown as Array<{
       audit_id: string;
       request_id: string;
       approval_kind: GovernanceAuditEntry["approvalKind"];
@@ -11869,8 +11940,11 @@ export class ControlPlaneDb {
       governance_policy_id: string | null;
       option_id: string | null;
       created_at: number;
+      row_id: number;
     }>;
-    return rows.reverse().map((row) => ({
+    const hasMore = rows.length > bounded;
+    const page = rows.slice(0, bounded);
+    const entries = page.reverse().map((row) => ({
       auditId: row.audit_id,
       requestId: row.request_id,
       approvalKind: row.approval_kind,
@@ -11884,6 +11958,12 @@ export class ControlPlaneDb {
       ...(row.option_id ? { optionId: row.option_id } : {}),
       timestamp: row.created_at,
     }));
+    const oldest = entries[0];
+    return {
+      entries,
+      hasMore,
+      ...(hasMore && oldest ? { nextBefore: oldest.auditId } : {}),
+    };
   }
 
   governanceRequestProvenance(sessionId: string, requestId: string): ApprovalQueueProvenance | null {

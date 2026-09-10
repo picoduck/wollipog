@@ -79,6 +79,89 @@ function harness(config: SessionConfig) {
   };
 }
 
+test("policy-hook decisions wait for their exact buffered tool event and deduplicate by audit id", async () => {
+  const h = harness({});
+  try {
+    const decision = {
+      auditId: "audit-exact",
+      requestId: "policy-hook:s_governance:exact",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "human", id: "device-1" },
+      governancePolicyId: "policy-1",
+      toolCallId: "tool-exact",
+    };
+    const pending = h.sm.recordPolicyHookDecision("s_governance", decision);
+    const joinedRetry = h.sm.recordPolicyHookDecision("s_governance", decision);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.store.readEvents("s_governance").length, 0, "the decision cannot race ahead of a buffered tool");
+
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: "tool-other", title: "Read", status: "pending",
+    });
+    assert.equal(h.store.readEvents("s_governance").length, 1, "an unrelated tool id cannot release the fence");
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: "tool-exact", title: "Write", status: "pending",
+    });
+
+    const recorded = await pending;
+    assert.deepEqual(recorded, { accepted: true, auditId: "audit-exact", eventSeq: 3 });
+    assert.deepEqual(await joinedRetry, recorded, "a concurrent retry joins the same causal append");
+    assert.deepEqual(h.store.readEvents("s_governance").map((event) => event.payload.kind), [
+      "tool_call", "tool_call", "policy_hook_decision",
+    ]);
+    const replay = await h.sm.recordPolicyHookDecision("s_governance", decision);
+    assert.deepEqual(replay, recorded, "a lost acknowledgement cannot append the same audit twice");
+    const conflict = await h.sm.recordPolicyHookDecision("s_governance", { ...decision, outcome: "denied" });
+    assert.equal(conflict.accepted, false);
+    assert.match(conflict.error ?? "", /conflicts/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a policy-hook decision times out when its matching tool event never arrives", async () => {
+  const h = harness({});
+  try {
+    const recorded = await h.sm.recordPolicyHookDecision("s_governance", {
+      auditId: "audit-aborted",
+      requestId: "policy-hook:s_governance:aborted",
+      stage: "resolution",
+      outcome: "aborted",
+      actor: { kind: "system", id: "policy-hook-abandoned" },
+      toolCallId: "tool-never-observed",
+    });
+    assert.deepEqual(recorded, {
+      accepted: false,
+      auditId: "audit-aborted",
+      error: "matching tool event was not observed",
+    });
+    assert.equal(h.store.readEvents("s_governance").length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("policy-hook decision append rejects fields outside the content-safe protocol subset", async () => {
+  const h = harness({});
+  try {
+    const rejected = await h.sm.recordPolicyHookDecision("s_governance", {
+      auditId: "audit-unsafe",
+      requestId: "request-unsafe",
+      stage: "resolution",
+      outcome: "denied",
+      actor: { kind: "policy" },
+      toolCallId: "tool-unsafe",
+      toolInput: { secret: true },
+    });
+    assert.equal(rejected.accepted, false);
+    assert.match(rejected.error ?? "", /unsafe fields/);
+    assert.equal(h.store.readEvents("s_governance").length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("a budget trip with managed work settles idle and reconciles a killed receipt without another turn", async () => {
   const h = harness({ costBudgetUsd: 8 });
   try {

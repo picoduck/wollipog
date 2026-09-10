@@ -713,6 +713,8 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
       snapshot: projectSnapshotForCurrentProtocol(msg.snapshot),
     }, controlPlaneProtocolVersion);
   }
+  if (msg.type === "policy_hook_decision_recorded" &&
+      !runnerSupportsProtocol(controlPlaneProtocolVersion, "nativePolicyHookEvents")) return null;
   return projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion);
 }
 
@@ -1278,6 +1280,31 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`Claude hooks ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
       break;
+    case "record_policy_hook_decision": {
+      runCommandTask("record_policy_hook_decision", (async () => {
+        let recorded: Awaited<ReturnType<SessionManager["recordPolicyHookDecision"]>>;
+        try {
+          recorded = await sessions.recordPolicyHookDecision(msg.sessionId, msg.decision);
+        } catch (error) {
+          log(`policy-hook decision append ${msg.sessionId}: ${errText(error)}`);
+          recorded = {
+            accepted: false,
+            auditId: typeof msg.decision?.auditId === "string" ? msg.decision.auditId : "",
+            error: "decision history append failed",
+          };
+        }
+        sendUp({
+          type: "policy_hook_decision_recorded",
+          requestId: msg.requestId,
+          sessionId: msg.sessionId,
+          auditId: recorded.auditId,
+          accepted: recorded.accepted,
+          ...(recorded.eventSeq !== undefined ? { eventSeq: recorded.eventSeq } : {}),
+          ...(recorded.error ? { error: recorded.error } : {}),
+        });
+      })());
+      break;
+    }
     case "agent_control_credential_registered":
       try {
         const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
