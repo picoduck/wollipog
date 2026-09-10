@@ -41,9 +41,11 @@ const serviceTierFixture = params.has("tiers");
 const serviceTierChoice = params.get("tiers") === "1";
 const servedWindow = Number(params.get("served") ?? "0");
 // `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
-// drops the session cost (an unpriced or cost-silent runner). Both keep the token counts.
+// marks the session unpriced, while `?cost=free` carries provider-reported zero provenance.
+// Every variant keeps the token counts.
 const unknownContextWindow = params.get("window") === "none";
 const unpricedCost = params.get("cost") === "none";
+const freeCost = params.get("cost") === "free";
 
 const SESSION_ID = "session-usage-e2e";
 
@@ -96,7 +98,9 @@ const session: SessionView = {
   permissionMode: null,
   tokensIn: 184_000,
   tokensOut: 21_000,
-  costUsd: unpricedCost ? 0 : 1.37,
+  costUsd: unpricedCost || freeCost ? 0 : 1.37,
+  ...(freeCost ? { costSource: "providerReported" as const }
+    : unpricedCost ? { costSource: "unpriced" as const } : {}),
   contextTokensUsed: unknownContextWindow ? undefined : Number(params.get("used") ?? "72000"),
   adopted: false,
   // A known context window makes the ContextWindowMeter render in the strip's leading cell,
@@ -275,6 +279,7 @@ const client = {
     sessionId: SESSION_ID,
     totals: unpricedCost
       ? usageAmount(184_000, 21_000, 0, 205_000, "unpriced")
+      : freeCost ? usageAmount(184_000, 21_000, 0, 205_000)
       : usageAmount(184_000, 21_000, 1.37, 205_000, "modelPriced"),
     byModel: [
       { model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex", ...usageAmount(160_000, 18_000, 1.21, 178_000) },

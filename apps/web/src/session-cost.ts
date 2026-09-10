@@ -24,17 +24,23 @@ const UNKNOWN_COST = "$—";
  *
  * Zero is not automatically "unknown". `priceUsage` keeps a provider-reported cost of exactly 0 as
  * `providerReported`, so a genuinely free session has a real amount and must be allowed to say
- * `$0.00`. Only the ledger carries that provenance, so the strip admits it does not know until
- * `breakdown` has arrived, and never invents a `$0.00` for a session nobody managed to price.
+ * `$0.00`. A caught-up session snapshot carries that provenance for first render; loaded detail
+ * supersedes it only when its token total is also current. Neither path invents `$0.00` for usage
+ * nobody managed to price.
  */
 export function sessionCostLabel(
-  session: Pick<SessionView, "tokensIn" | "tokensOut" | "costUsd">,
+  session: Pick<SessionView, "tokensIn" | "tokensOut" | "costUsd" | "costSource">,
   breakdown: SessionUsageResponse | null = null,
 ): SessionCostLabel | null {
   const cost = formatCost(Math.max(session.costUsd, breakdown?.totals.costUsd ?? 0));
   if (cost) return { text: cost, priced: true, ariaLabel: `Session Usage: ${cost}` };
   if (session.tokensIn + session.tokensOut > 0) {
-    if (breakdown && breakdown.totals.costSource !== "unpriced") {
+    // Callers normally reject stale detail wholesale, but keep this shared formatter safe on its
+    // own: provenance from a ledger behind the session's live counters cannot price newer usage.
+    const detailIsCurrent = breakdown &&
+      breakdown.totals.processedTokens >= session.tokensIn + session.tokensOut;
+    const source = detailIsCurrent ? breakdown.totals.costSource : session.costSource;
+    if (source && source !== "unpriced") {
       return { text: "$0.00", priced: true, ariaLabel: "Session Usage: $0.00" };
     }
     return { text: UNKNOWN_COST, priced: false, ariaLabel: "Session Usage: Cost Unavailable" };
