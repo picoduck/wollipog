@@ -3342,15 +3342,21 @@ export class SessionManager {
    * host directory into the guest and cloud targets snapshot it, so a path that disappeared or was
    * recreated locally is a wrong-bytes problem there too, not a remote-only concern.
    *
-   * `branch` is the session's recorded `worktreeBranch` and may legitimately be absent on a row
-   * that predates it or was adopted. Absent means unknown, never `agent/<sessionId>`: a worktree
-   * can carry any branch the operator gave it, and inventing an identity here would fail a launch
-   * over a name the runner made up rather than one it ever stored. */
+   * `branch` is the session's recorded `worktreeBranch`, absent only on a row that predates the
+   * field. Such a row still implies an identity — the runner's own deterministic name for this
+   * session's worktree — so it is derived rather than skipped, exactly as `attributedWorktrees()`
+   * and safe discard already derive it. `createWorktree` emits two forms of that name and a legacy
+   * row cannot say which one made it, so either proves the tree is still this session's; anything
+   * else is a switched or recreated worktree and fails closed. */
   private async persistedWorktreeFailure(
     meta: SessionMeta,
     path: string,
     branch: string | undefined,
   ): Promise<string | null> {
+    const expected = branch ? [branch] : [
+      `agent/${meta.sessionId}`,
+      ...(this.runnerOwnerHash ? [`agent/${this.runnerOwnerHash.slice(0, 16)}/${meta.sessionId}`] : []),
+    ];
     try {
       const verified = await attachRequestedWorktree(meta.repoPath, meta.sessionId, path, {
         context: meta.context,
@@ -3361,9 +3367,9 @@ export class SessionManager {
         // worktree health, and branch identity are all still re-proved.
         allowedProjectPaths: [path],
       });
-      return !branch || verified.branch === branch
+      return expected.includes(verified.branch)
         ? null
-        : `it is now on branch ${verified.branch} instead of the recorded ${branch}`;
+        : `it is now on branch ${verified.branch} instead of ${expected.join(" or ")}`;
     } catch (error) {
       return errText(error);
     }

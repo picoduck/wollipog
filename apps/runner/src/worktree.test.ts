@@ -2931,3 +2931,56 @@ test("conversation fork refuses to spawn its temporary provider in a removed wor
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a legacy row without a recorded branch still fails closed when its worktree switches", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-legacy-branch-verify-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    // Metadata predating worktreeBranch: only worktreePath, on the runner's deterministic legacy
+    // name for this session. Absence is not permission to skip the identity check.
+    const legacy = await createWorktree(repo, "s_legacy_branch", { dataDir });
+    assert.equal(legacy.branch, "agent/s_legacy_branch");
+    store.create({
+      sessionId: "s_legacy_branch", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: legacy.path, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "legacy",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    assert.equal(store.readMeta("s_legacy_branch")?.worktreeBranch, undefined);
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    execFileSync("git", ["-C", legacy.path, "switch", "-c", "operator/other-work"]);
+
+    const internals = manager as unknown as {
+      recoveryQueues: Map<string, unknown[]>;
+      recoverQueuedAppServer: (sessionId: string) => Promise<void>;
+    };
+    internals.recoveryQueues.set("s_legacy_branch", [{ id: "q1", text: "held", images: [], queuedAt: 1 }]);
+    await internals.recoverQueuedAppServer("s_legacy_branch");
+
+    assert.deepEqual(launchedCwds, [], "a switched legacy worktree never reaches a provider");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /instead of agent\/s_legacy_branch/.test(message.payload.message ?? "")), true,
+      "and the error names the identity the legacy row implies");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
