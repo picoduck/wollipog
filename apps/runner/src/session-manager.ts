@@ -26,6 +26,7 @@ import type {
   EditQueuedPromptMessage,
   EditQueuedPromptResultMessage,
   ExternalSessionDescriptor,
+  GovernanceTrippedMessage,
   InvokeSessionCommandMessage,
   InterruptTurnResultReason,
   PromptImage,
@@ -410,6 +411,9 @@ interface ActiveSession {
   toolCallIds?: Set<string>;
   /** A runner-side threshold cancelled this turn. Queued prompts remain held until CP re-arms. */
   governanceTripped?: "cost_budget" | "max_tool_calls";
+  /** Exact content-free crossing evidence. Pin every field in memory so a reconnect cannot report
+   * a later metadata edit as though it were the threshold that actually cancelled this turn. */
+  governanceTrip?: Omit<GovernanceTrippedMessage, "type" | "sessionId">;
   /** Request-scoped option semantics for live permission asks. The current approval card can be
    * cleared by a settled status or replaced while this driver still owns the original request, so
    * it cannot classify a later successful resolution. This retains only option ids/kinds in the
@@ -1600,6 +1604,15 @@ export class SessionManager {
         this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion),
         protocolVersion,
       ));
+  }
+
+  /** Re-publish runner-owned queue holds after reconnect. The notice is deliberately idempotent:
+   * the control plane deduplicates its deterministic request id and retains the existing card. */
+  reportGovernanceTrips(): void {
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "governanceTripReporting")) return;
+    for (const [sessionId, entry] of this.active) {
+      if (entry.governanceTrip) this.reportGovernanceTrip(sessionId, entry);
+    }
   }
 
   /** Pre-negotiation register metadata. History is published only after the peer version is known. */
@@ -6043,6 +6056,7 @@ export class SessionManager {
         const pending = entry.governanceRearmPending;
         entry.governanceRearmPending = undefined;
         entry.governanceTripped = pending === "resume" ? undefined : pending;
+        entry.governanceTrip = undefined;
         this.emitStatus(sessionId, "idle");
         if (!entry.governanceTripped && (entry.queue.length || entry.pendingWorktreeRebind)) {
           setImmediate(() => this.scheduleDrain(sessionId));
@@ -7584,7 +7598,10 @@ export class SessionManager {
       if (holdFor === "control_plane") {
         this.setControlPlaneHold(sessionId, entry, true);
         if (entry.running && entry.governanceTripped) entry.governanceRearmPending = "resume";
-        else if (!entry.running) entry.governanceTripped = undefined;
+        else if (!entry.running) {
+          entry.governanceTripped = undefined;
+          entry.governanceTrip = undefined;
+        }
         return;
       }
       if (holdFor === undefined && (entry.controlPlaneHold || this.recoveryHolds.has(sessionId))) {
@@ -7605,7 +7622,10 @@ export class SessionManager {
     this.store.patchMeta(sessionId, { config: merged });
     const entry = this.active.get(sessionId);
     if (!entry) return;
-    if (!holdFor) {
+    // A threshold-bearing message is also used for ordinary live config synchronization. Only a
+    // real governance Continue may release a separate Stop-Turn interrupt hold; otherwise a budget
+    // edit could silently resume FIFO work the user deliberately paused.
+    if (!holdFor && entry.governanceTripped) {
       entry.interruptRequested = false;
       this.setInterruptQueueHold(sessionId, entry, false);
     }
@@ -7635,6 +7655,7 @@ export class SessionManager {
         return;
       }
       entry.governanceTripped = undefined;
+      entry.governanceTrip = undefined;
       this.emitStatus(sessionId, "idle");
       return;
     }
@@ -7650,7 +7671,10 @@ export class SessionManager {
       return;
     }
     entry.governanceTripped = holdFor;
-    this.emitStatus(sessionId, "idle");
+    entry.governanceTrip = undefined;
+    // Ordinary threshold synchronization must not erase a provider-owned question/permission.
+    // The runner store is authoritative for that barrier, just as it is on provider callbacks.
+    this.emitStatus(sessionId, meta.pendingApproval ? "input_required" : "idle");
     if (!holdFor && (entry.queue.length || entry.pendingWorktreeRebind)) this.scheduleDrain(sessionId);
   }
 
@@ -9544,9 +9568,21 @@ export class SessionManager {
     tripped: NonNullable<ActiveSession["governanceTripped"]>,
   ): void {
     entry.governanceTripped = tripped;
-    const detail = tripped === "cost_budget"
-      ? `Runner governance paused this turn at the $${meta.config.costBudgetUsd!.toFixed(2)} cost threshold.`
-      : `Runner governance paused this turn at ${meta.config.maxToolCalls} distinct tool calls.`;
+    const threshold = tripped === "cost_budget" ? meta.config.costBudgetUsd : meta.config.maxToolCalls;
+    if (threshold != null) {
+      entry.governanceTrip = {
+        tripId: randomUUID(),
+        kind: tripped,
+        threshold,
+        observed: tripped === "cost_budget" ? meta.costUsd : entry.toolCallIds?.size ?? 0,
+      };
+      this.reportGovernanceTrip(sessionId, entry);
+    }
+    const detail = threshold == null
+      ? `Runner governance paused this turn after crossing a ${tripped === "cost_budget" ? "cost" : "tool-call"} threshold.`
+      : tripped === "cost_budget"
+        ? `Runner governance paused this turn at the $${threshold.toFixed(2)} cost threshold.`
+        : `Runner governance paused this turn at ${threshold} distinct tool calls.`;
     if (!this.emitEvent(sessionId, { kind: "stderr", text: `${detail} Continue or stop from the approval card.` })) {
       return;
     }
@@ -9555,6 +9591,20 @@ export class SessionManager {
     } catch (error) {
       this.log(`governance cancel failed for ${sessionId}: ${errText(error)}`);
     }
+  }
+
+  private reportGovernanceTrip(
+    sessionId: string,
+    entry: ActiveSession,
+  ): void {
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "governanceTripReporting")) return;
+    const trip = entry.governanceTrip;
+    if (!trip) return;
+    this.send({
+      type: "governance_tripped",
+      sessionId,
+      ...trip,
+    });
   }
 
   private onDriverStderr(sessionId: string, text: string): void {

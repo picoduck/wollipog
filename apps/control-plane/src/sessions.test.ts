@@ -820,7 +820,7 @@ test("agent-created sessions retain trusted parent attribution and reserve bound
     }
     const denied = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
     assert.equal(denied.ok, false);
-    assert.match(denied.error!, /spawn cap/);
+    assert.match(denied.error!, /0 remaining live child slots/);
     db.deleteSession(children[0]!.id);
     assert.equal(db.childSessionAllocations(parent.id).count, 4);
     assert.equal(svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id }).ok, false);
@@ -834,8 +834,97 @@ test("agent-created sessions retain trusted parent attribution and reserve bound
   }
 });
 
+test("terminal or archived children free live slots while lifetime spend reservations remain", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const parent = svc.createSession(request, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const children = Array.from({ length: 4 }, () => {
+      const created = svc.createSession(request, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      });
+      assert.ok(created.ok, created.error);
+      return created.data!;
+    });
+    assert.equal(db.childSessionAllocations(parent.id).liveCount, 4);
+    assert.match(
+      svc.createSession(request, undefined, undefined, false, false, false, {
+        parentSessionId: parent.id,
+      }).error ?? "",
+      /0 remaining live child slots/,
+    );
+
+    db.updateSessionStatus(children[0]!.id, "completed", Date.now());
+    db.updateSessionStatus(children[1]!.id, "failed", Date.now());
+    db.updateSessionStatus(children[2]!.id, "stopped", Date.now());
+    db.setSessionArchived(children[3]!.id, true, Date.now());
+    assert.deepEqual({ ...db.childSessionAllocations(parent.id) }, {
+      count: 4,
+      liveCount: 0,
+      costBudgetUsd: 20,
+      maxToolCalls: 2_000,
+    });
+
+    const fifth = svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    assert.ok(fifth.ok, fifth.error);
+    assert.equal(fifth.data!.costBudgetUsd, 5);
+    assert.equal(fifth.data!.maxToolCalls, 500);
+    assert.deepEqual({ ...db.childSessionAllocations(parent.id) }, {
+      count: 5,
+      liveCount: 1,
+      costBudgetUsd: 25,
+      maxToolCalls: 2_500,
+    });
+  } finally { db.close(); }
+});
+
+test("a live owner can raise the concurrent child cap and restarts consume the same slots", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const parent = svc.createSession({ ...request, config: { maxChildSessions: 1 } }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const child = svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    }).data!;
+    assert.equal(svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    }).status, 409);
+    assert.equal(svc.setConfig(parent.id, { maxChildSessions: 65 }).status, 400);
+    const selfEscalation = svc.setConfig(
+      parent.id,
+      { costBudgetUsd: 0, maxChildSessions: 2 },
+      { kind: "agent", id: parent.id },
+    );
+    assert.equal(selfEscalation.status, 403, "self-service never clears a spend ceiling");
+    assert.equal(db.getSession(parent.id)!.maxChildSessions, 1, "a rejected mixed edit is atomic");
+    assert.ok(svc.setConfig(parent.id, { maxChildSessions: 2 }, { kind: "agent", id: parent.id }).ok);
+    assert.equal(db.getSession(parent.id)!.maxChildSessions, 2);
+    const sibling = svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    assert.ok(sibling.ok, sibling.error);
+
+    db.updateSessionStatus(child.id, "stopped", Date.now());
+    assert.ok(svc.restart(child.id).ok, "a terminal child reclaims its released live slot");
+    db.updateSessionStatus(child.id, "stopped", Date.now());
+    const replacement = svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    assert.ok(replacement.ok, replacement.error);
+    assert.equal(svc.restart(child.id).status, 409, "restart cannot exceed the parent's live cap");
+  } finally { db.close(); }
+});
+
 for (const kind of ["run", "workflow"] as const) {
-  test(`agent-created ${kind} applies Project defaults and rejects explicit unlimited or invalid allowances`, () => {
+  test(`agent-created ${kind} applies Project defaults and rejects malformed allowances`, () => {
     const { db, svc, hub } = makeHarness();
     try {
       const owner = db.localIdentityContext();
@@ -853,7 +942,7 @@ for (const kind of ["run", "workflow"] as const) {
             { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
       };
       const before = hub.sentOfType("start_session").length;
-      for (const invalid of [{ costBudgetUsd: 0 }, { maxToolCalls: 0 }, { maxToolCalls: 0.5 }, { config: { maxChildSessions: 65 } }]) {
+      for (const invalid of [{ costBudgetUsd: -1 }, { maxToolCalls: -1 }, { maxToolCalls: 0.5 }, { config: { maxChildSessions: 65 } }]) {
         assert.equal(create(invalid).ok, false);
         assert.equal(db.listRuns().length, 0);
         assert.equal(db.childSessionAllocations(parent.id).count, 0);
@@ -865,6 +954,13 @@ for (const kind of ["run", "workflow"] as const) {
         assert.equal(child.costBudgetUsd, 2.5);
         assert.equal(child.maxToolCalls, 30);
         assert.equal(child.projectId, null, "defaults come from the parent even when the child is filed elsewhere");
+        db.updateSessionStatus(child.id, "completed", Date.now());
+      }
+      const unlimited = create({ costBudgetUsd: 0, maxToolCalls: 0 });
+      assert.ok(unlimited.ok, unlimited.error);
+      for (const child of unlimited.data!.sessions) {
+        assert.equal(child.costBudgetUsd, null, "explicit zero opts out of an unbounded parent's Project default");
+        assert.equal(child.maxToolCalls, null);
       }
       db.updateSessionStatus(parent.id, "completed", Date.now());
       assert.equal(create().status, 409);
@@ -901,7 +997,7 @@ for (const kind of ["run", "workflow"] as const) {
       assert.equal(hub.sentOfType("start_session").length, before + 2);
       const denied = create();
       assert.equal(denied.status, 409);
-      assert.match(denied.error!, /spawn slots/);
+      assert.match(denied.error!, /remaining live child slot/);
       assert.equal(db.listRuns().length, 1, "a rejected fan-out must not persist an empty or partial run");
       assert.equal(db.childSessionAllocations(parent.id).count, 2);
       assert.equal(hub.sentOfType("start_session").length, before + 2);
@@ -937,9 +1033,49 @@ for (const kind of ["run", "workflow"] as const) {
       for (const child of created.data!.sessions) {
         assert.equal(child.parentSessionId, parent.id);
         assert.equal(child.costBudgetUsd, 5);
-        assert.equal(child.maxToolCalls, 100);
+        assert.equal(child.maxToolCalls, 500);
       }
       assert.equal(db.childSessionAllocations(parent.id).count, 2);
+    } finally { db.close(); }
+  });
+}
+
+for (const kind of ["run", "workflow"] as const) {
+  test(`agent-created ${kind} releases its whole fan-out from the concurrent child cap`, () => {
+    const { db, svc } = makeHarness();
+    try {
+      const owner = db.localIdentityContext();
+      const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+      const parent = svc.createSession({
+        runnerId: RUNNER_ID,
+        workspaceId: WORKSPACE_ID,
+        agentId: AGENT_ID,
+        config: { maxChildSessions: 2 },
+      }, undefined, scope).data!;
+      db.updateSessionStatus(parent.id, "running", Date.now());
+      const create = () => kind === "run"
+        ? svc.createRun({
+            runnerId: RUNNER_ID,
+            workspaceId: WORKSPACE_ID,
+            agentIds: [AGENT_ID, CODEX_APP_AGENT_ID],
+            task: "Build and review",
+          }, { parentSessionId: parent.id })
+        : svc.createWorkflowRun({
+            runnerId: RUNNER_ID,
+            workspaceId: WORKSPACE_ID,
+            workflowId: "builtin:build-review",
+            task: "Build and review",
+            agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
+          }, { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+      const first = create();
+      assert.ok(first.ok, first.error);
+      assert.equal(db.childSessionAllocations(parent.id).liveCount, 2);
+      assert.match(create().error ?? "", /0 remaining live child slots/);
+      for (const child of first.data!.sessions) db.updateSessionStatus(child.id, "completed", Date.now());
+      const second = create();
+      assert.ok(second.ok, second.error);
+      assert.equal(db.childSessionAllocations(parent.id).liveCount, 2);
+      assert.equal(db.childSessionAllocations(parent.id).count, 4);
     } finally { db.close(); }
   });
 }
@@ -11211,6 +11347,193 @@ test("setConfig persists a tool-call limit in its own column and clears on 0", (
   assert.equal(db.getSession(id)!.maxToolCalls, 2);
   svc.setConfig(id, { maxToolCalls: 0 });
   assert.equal(db.getSession(id)!.maxToolCalls, null);
+});
+
+test("unparked live guardrail edits synchronize explicit values and clears or roll back atomically", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { model: "sonnet", maxChildSessions: 3 } });
+  db.raw().prepare("UPDATE sessions SET resolved_model=?, context_window=? WHERE id=?")
+    .run("claude-sonnet-resolved", 200_000, id);
+  hub.sentToRunner.length = 0;
+
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 7, maxToolCalls: 12 }).ok);
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, {
+    costBudgetUsd: 7,
+    maxToolCalls: 12,
+  });
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 0, maxToolCalls: 0 }).ok);
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, {
+    costBudgetUsd: null,
+    maxToolCalls: null,
+  });
+  assert.equal(db.getSession(id)!.costBudgetUsd, null);
+  assert.equal(db.getSession(id)!.maxToolCalls, null);
+
+  db.raw().prepare("UPDATE sessions SET service_tier=? WHERE id=?").run("fast", id);
+  hub.deliver = false;
+  const failed = svc.setConfig(id, {
+    model: "opus",
+    maxToolCalls: 50,
+    maxChildSessions: 9,
+  });
+  assert.equal(failed.status, 409);
+  assert.equal(failed.error, "runner is offline");
+  const rolledBack = db.getSession(id)!;
+  assert.equal(rolledBack.model, "sonnet");
+  assert.equal(rolledBack.resolvedModel, "claude-sonnet-resolved");
+  assert.equal(rolledBack.contextWindow, 200_000);
+  assert.equal(rolledBack.serviceTier, "fast");
+  assert.equal(rolledBack.maxToolCalls, null);
+  assert.equal(rolledBack.maxChildSessions, 3);
+});
+
+test("a model-only edit never releases or round-trips an existing guardrail card", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { model: "sonnet" } });
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 1 }).ok);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 2 });
+  const requestId = db.getSession(id)!.pendingApproval!.requestId;
+  hub.sentToRunner.length = 0;
+
+  assert.ok(svc.setConfig(id, { model: "opus" }).ok);
+  assert.equal(hub.sentOfType("rearm_governance").length, 0);
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, requestId);
+  assert.equal(db.getSession(id)!.status, "input_required");
+  assert.equal(db.getSession(id)!.model, "opus");
+});
+
+test("runner trip reports create one replay-safe card and Continue honors changed or cleared rules", () => {
+  const { db, hub, svc } = makeHarness();
+  const cleared = seedSession(svc, hub);
+  db.updateSessionStatus(cleared, "running", Date.now());
+  db.setPendingApproval(cleared, {
+    requestId: "permission-1",
+    title: "Allow Bash?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+  const clearedTrip = {
+    type: "governance_tripped" as const,
+    sessionId: cleared,
+    tripId: "trip-cleared",
+    kind: "max_tool_calls" as const,
+    threshold: 100,
+    observed: 100,
+  };
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  let requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.equal(requests.length, 2, "duplicate/reconnect reports retain one runner card");
+  assert.equal(requests[0]!.requestId, "permission-1", "an unrelated request keeps the primary slot");
+  const runnerCard = requests[1]!;
+  assert.equal(runnerCard.requestId, "runner-max_tool_calls:trip-cleared");
+  assert.deepEqual(runnerCard.runnerGuardrail, {
+    tripId: "trip-cleared", kind: "max_tool_calls", threshold: 100, observed: 100,
+  });
+  assert.equal(svc.governanceAudit(cleared).filter((entry) =>
+    entry.requestId === runnerCard.requestId && entry.stage === "policy_decision").length, 1);
+
+  for (const refresh of [
+    () => svc.onSessionStatus(cleared, "idle"),
+    () => svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id: cleared, status: "idle", pendingApproval: null })]),
+    () => svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id: cleared, status: "idle", pendingApproval: null })),
+  ]) {
+    refresh();
+    assert.equal(db.getSession(cleared)!.status, "input_required");
+    assert.deepEqual(
+      pendingRequests(db.getSession(cleared)!.pendingApproval).map((request) => request.requestId),
+      ["permission-1", runnerCard.requestId],
+      "runner idle/status hydration preserves every request when a policy card is additional",
+    );
+  }
+
+  // A legacy/displacing path may have kept only the provider request. Reconnect replay must
+  // restore the unresolved trip without writing a second asked-audit entry.
+  db.setPendingApproval(cleared, {
+    requestId: "permission-2",
+    title: "Allow Read?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests.map((request) => request.requestId), ["permission-2", runnerCard.requestId]);
+  assert.equal(svc.governanceAudit(cleared).filter((entry) =>
+    entry.requestId === runnerCard.requestId && entry.stage === "policy_decision").length, 1);
+
+  // A new live provider ask takes the primary card but retains the runner trip behind it. Once the
+  // provider ask resolves, Continue remains immediately reachable and no queued prompt is stranded.
+  svc.onSessionEvent(cleared, {
+    kind: "permission_request",
+    requestId: "permission-3",
+    title: "Allow Write?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests.map((request) => request.requestId), ["permission-3", runnerCard.requestId]);
+  assert.ok(svc.approve(cleared, "permission-3", "allow").ok);
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests.map((request) => request.requestId), [runnerCard.requestId]);
+
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.approve(cleared, runnerCard.requestId, "continue").ok);
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, { maxToolCalls: null });
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests, []);
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  assert.equal(db.getSession(cleared)!.pendingApproval, null, "a stale replay cannot resurrect a resolved trip");
+
+  const changed = seedSession(svc, hub);
+  db.updateSessionMaxToolCalls(changed, 200, Date.now(), 200);
+  db.updateSessionStatus(changed, "running", Date.now());
+  svc.onGovernanceTripped(RUNNER_ID, {
+    type: "governance_tripped",
+    sessionId: changed,
+    tripId: "trip-changed",
+    kind: "max_tool_calls",
+    threshold: 100,
+    observed: 100,
+  });
+  const changedCard = db.getSession(changed)!.pendingApproval!;
+  assert.match(changedCard.title, /100 distinct tool calls/);
+  assert.ok(svc.approve(changed, changedCard.requestId, "continue").ok);
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, { maxToolCalls: 200 });
+  assert.equal(db.getSession(changed)!.maxToolCalls, 200, "a newer raised rule is not advanced again");
+});
+
+test("a runner cost trip promotes the CP crossing instead of granting two budget windows", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { costBudgetUsd: 1 } });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 2 });
+  const cpRequestId = db.getSession(id)!.pendingApproval!.requestId;
+  const trip = {
+    type: "governance_tripped" as const,
+    sessionId: id,
+    tripId: "trip-cost-crossing",
+    kind: "cost_budget" as const,
+    threshold: 1,
+    observed: 2,
+  };
+
+  svc.onGovernanceTripped(RUNNER_ID, trip);
+  svc.onGovernanceTripped(RUNNER_ID, trip);
+  const requests = pendingRequests(db.getSession(id)!.pendingApproval);
+  assert.equal(requests.length, 1, "one crossing retains exactly one approval card");
+  assert.equal(requests[0]!.requestId, cpRequestId, "the existing card remains safe for an in-flight click");
+  assert.deepEqual(requests[0]!.runnerGuardrail, {
+    tripId: "trip-cost-crossing", kind: "cost_budget", threshold: 1, observed: 2,
+  });
+  assert.equal(svc.governanceAudit(id).filter((entry) =>
+    entry.requestId === "runner-cost_budget:trip-cost-crossing" &&
+    entry.stage === "policy_decision" && entry.outcome === "asked").length, 1);
+
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.approve(id, cpRequestId, "continue").ok);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  assert.equal(db.getSession(id)!.costBudgetUsd, 3, "the crossing advances by one original budget window");
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, { costBudgetUsd: 3 });
+  svc.onGovernanceTripped(RUNNER_ID, trip);
+  assert.equal(db.getSession(id)!.pendingApproval, null, "a promoted card records the deterministic trip resolution too");
 });
 
 test("crossing the tool-call limit parks the session at turn settle", () => {

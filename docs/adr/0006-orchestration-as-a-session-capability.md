@@ -31,14 +31,17 @@ Agent credentials cannot unarchive sessions. Human device authority is unchanged
 
 Agent-created children receive finite guardrails before their initial prompt can execute.
 An unbounded parent defaults each child to the parent Project's human-managed child allowances,
-or $5 and 100 tool calls when no Project override exists. Project settings and the human-only
+or $5 and 500 tool calls when no Project override exists. An agent caller may explicitly request
+larger finite values or pass zero to inherit no limit when the parent itself is unbounded. Project settings and the human-only
 `PATCH /api/projects/:id` surface accept `childSessionDefaults` with a positive finite
 `costBudgetUsd` and a positive integer `maxToolCalls`; null restores the installation fallback.
 The parent's Project supplies these defaults even when the child is filed elsewhere.
 A bounded parent divides its
 remaining, unreserved allowance across its remaining spawn slots; explicit child limits can narrow
-that allocation. The default lifetime spawn cap is four, configurable at session creation with
-`config.maxChildSessions` from zero through 64. Reservations survive deletion of child history.
+that allocation. The default concurrent live-child cap is four, configurable at creation or on a
+live session with `config.maxChildSessions` from zero through 64. Completed, failed, stopped, and
+archived children free live slots. Lifetime usage reservations survive terminal states and deletion,
+so a finite parent's already-allocated spend cannot be reused.
 These are admission allowances; existing runtime cost and tool-call enforcement remains responsible
 for stopping a child when it reaches its limit.
 

@@ -51,6 +51,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type GovernanceAuditEntry,
   type GovernanceAuditOutcome,
   type GovernanceAuditStage,
+  type GovernanceTrippedMessage,
   type GovernancePolicy,
   type GitSummaryInfo,
   type ForgeReviewReconciliation,
@@ -360,6 +361,11 @@ function sessionGuardrailConfigError(config: unknown): string | null {
     if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
       return `${key} must be a finite number`;
     }
+  }
+  if (candidate.maxChildSessions !== undefined &&
+      (!Number.isSafeInteger(candidate.maxChildSessions) ||
+        (candidate.maxChildSessions as number) < 0 || (candidate.maxChildSessions as number) > 64)) {
+    return "maxChildSessions must be an integer from 0 to 64";
   }
   const checkpoints = candidate.costCheckpointsUsd;
   if (checkpoints !== undefined && (!Array.isArray(checkpoints) || checkpoints.some(
@@ -2253,6 +2259,32 @@ export class SessionsService {
     ));
   }
 
+  /** A promoted control-plane card keeps its visible request id, while reconnect replay uses the
+   * runner trip's deterministic id. Record a terminal result under both identities so a stale
+   * duplicate cannot resurrect a trip that was already continued, stopped, or dismissed. */
+  private recordRunnerGuardrailResolution(
+    session: SessionView,
+    request: PendingApproval,
+    outcome: GovernanceAuditOutcome,
+    actor: GovernanceActor,
+    now: number,
+    options: { content?: unknown; optionId?: string | null } = {},
+  ): void {
+    this.recordGovernanceAudit(session, request, "resolution", outcome, actor, now, options);
+    const replayRequestId = runnerGuardrailRequestId(request);
+    if (replayRequestId && replayRequestId !== request.requestId) {
+      this.recordGovernanceAudit(
+        session,
+        { ...request, requestId: replayRequestId },
+        "resolution",
+        outcome,
+        actor,
+        now,
+        options,
+      );
+    }
+  }
+
   private governanceAuditRecord(
     session: SessionView,
     request: Pick<PendingApproval, "requestId" | "kind" | "context">,
@@ -2582,8 +2614,9 @@ export class SessionsService {
       return fail("the creating parent session is no longer active", 409);
     }
     const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
-    if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.count) {
-      return fail("the parent session has insufficient remaining child spawn slots for this run", 409);
+    if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount) {
+      const remaining = Math.max(0, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount);
+      return fail(`the parent session has ${remaining} remaining live child slot${remaining === 1 ? "" : "s"}; raise maxChildSessions before creating this run`, 409);
     }
     const applied: SessionConfig[] = [];
     for (const config of configs) {
@@ -2595,13 +2628,14 @@ export class SessionsService {
         ...parent,
         costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
-      }, config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.count,
+      }, config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
       parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
       if ("error" in guarded) return fail(guarded.error, 409);
       applied.push(guarded.config);
       reserved.count++;
-      reserved.costBudgetUsd += guarded.config.costBudgetUsd!;
-      reserved.maxToolCalls += guarded.config.maxToolCalls!;
+      reserved.liveCount++;
+      reserved.costBudgetUsd += guarded.config.costBudgetUsd ?? 0;
+      reserved.maxToolCalls += guarded.config.maxToolCalls ?? 0;
     }
     const gate = this.sessionSpawnGate(parentSessionId, request, configs.length);
     return gate.ok ? ok(applied) : fail(gate.error!, gate.status);
@@ -2639,7 +2673,7 @@ export class SessionsService {
         ...parent,
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
-      }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.count,
+      }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
       parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
       if ("error" in guarded) return fail(guarded.error, 409);
       req = { ...req, config: guarded.config };
@@ -3433,6 +3467,11 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
+    if (actor.kind === "agent" && actor.id === sessionId &&
+        (config.maxChildSessions === undefined ||
+          Object.keys(config).some((key) => key !== "maxChildSessions"))) {
+      return fail("an agent may change only its own maxChildSessions", 403);
+    }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, config);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
@@ -3491,75 +3530,107 @@ export class SessionsService {
       serviceTier,
       permissionMode: config.permissionMode ?? session.permissionMode ?? undefined,
     }, agentCapabilities, session.agentId, session.driver);
-    this.db.updateSessionConfig(sessionId, merged, Date.now());
+    const now = Date.now();
+    this.db.updateSessionConfig(sessionId, merged, now);
     // Guardrails ride their own columns so config writes never clobber them. Only touch one when
     // the caller explicitly sent a value: a positive number sets the limit, 0/negative clears it.
     if (config.costBudgetUsd !== undefined) {
-      this.db.updateSessionCostBudget(sessionId, config.costBudgetUsd > 0 ? config.costBudgetUsd : null, Date.now());
+      this.db.updateSessionCostBudget(sessionId, config.costBudgetUsd > 0 ? config.costBudgetUsd : null, now);
     }
     if (config.maxToolCalls !== undefined) {
       // Floor BEFORE the positivity check: 0.5 must clear (floored 0), not store a phantom 0
       // that looks armed in the UI but never gates.
       const floored = Math.floor(config.maxToolCalls);
-      this.db.updateSessionMaxToolCalls(sessionId, floored > 0 ? floored : null, Date.now());
+      this.db.updateSessionMaxToolCalls(sessionId, floored > 0 ? floored : null, now);
     }
     if (config.costCheckpointsUsd !== undefined) {
       // An empty list clears the checkpoints and the approved level with them.
-      this.db.updateSessionCostCheckpoints(sessionId, normalizeCostCheckpoints(config.costCheckpointsUsd), Date.now());
+      this.db.updateSessionCostCheckpoints(sessionId, normalizeCostCheckpoints(config.costCheckpointsUsd), now);
+    }
+    if (config.maxChildSessions !== undefined) {
+      this.db.updateSessionMaxChildSessions(sessionId, config.maxChildSessions, now);
     }
     // A guardrail change while parked on a policy card must re-evaluate: drop the (possibly
     // stale) card and re-gate — re-parks with a fresh card if a rule still trips, otherwise
     // unlocks the composer. Without this, raising a limit leaves the session 409-locked behind
     // a card whose rule no longer trips, and Continue would blind-clear the new limit.
-    const guardrailChanged = config.costBudgetUsd !== undefined || config.maxToolCalls !== undefined ||
+    const thresholdChanged = config.costBudgetUsd !== undefined || config.maxToolCalls !== undefined;
+    const guardrailChanged = thresholdChanged ||
       config.costCheckpointsUsd !== undefined;
     const parked = session.pendingApproval;
-    // A soft rule armed on an unparked session that already exceeds it must park now: nothing on
-    // the runner will cancel the turn, so the next prompt would otherwise be admitted first.
-    if (guardrailChanged && !parked) this.gateOnPolicy(sessionId, Date.now(), true, true);
-    if (guardrailChanged && parked && isGuardrailApproval(parked)) {
-      const now = Date.now();
-      const configured = this.db.getSession(sessionId)!;
-      const holdFor = this.runnerHoldAfter(configured, this.guardrailFields(configured));
-      const thresholdPatch: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
-      if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
-      if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
-      // A checkpoint-only edit sends an empty threshold patch: a v105 runner still applies the
-      // hold change, and queued prompts keep the per-prompt budgets they were queued with.
-      const runner = this.db.getRunner(session.runnerId);
-      if (runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
-        const sent = this.hub.sendToRunner(session.runnerId, {
-          type: "rearm_governance",
-          sessionId,
-          config: thresholdPatch,
-          ...(holdFor ? { holdFor } : {}),
-        });
-        if (!sent) {
-          this.recordGovernanceAudit(session, parked, "resolution", "delivery_failed", actor, now, { content: config });
-          this.db.updateSessionConfig(sessionId, {
-            model: session.model ?? undefined,
-            effort: session.effort ?? undefined,
-            serviceTier: session.serviceTier ?? undefined,
-            permissionMode: session.permissionMode ?? undefined,
-          }, now);
-          if (config.costBudgetUsd !== undefined) {
-            this.db.updateSessionCostBudget(sessionId, session.costBudgetUsd ?? null, now, session.costBudgetStepUsd ?? null);
-          }
-          if (config.maxToolCalls !== undefined) {
-            this.db.updateSessionMaxToolCalls(sessionId, session.maxToolCalls ?? null, now, session.maxToolCallsStep ?? null);
-          }
-          if (config.costCheckpointsUsd !== undefined) {
-            this.db.restoreSessionCostCheckpoints(sessionId, session.costCheckpointsUsd ?? null, session.costCheckpointApprovedUsd ?? null, now);
-          }
-          return fail("runner is offline", 409);
-        }
+    const parkedGuardrail = pendingRequests(parked).find((request) => isGuardrailApproval(request));
+    const configured = this.db.getSession(sessionId)!;
+    const holdFor = parkedGuardrail
+      ? this.runnerHoldAfter(configured, this.guardrailFields(configured))
+      : undefined;
+    const thresholdPatch: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
+    if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
+    if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
+    const rollback = () => {
+      this.db.restoreSessionConfig(sessionId, {
+        model: session.model ?? undefined,
+        effort: session.effort ?? undefined,
+        serviceTier: session.serviceTier ?? undefined,
+        permissionMode: session.permissionMode ?? undefined,
+      }, session.resolvedModel ?? null, session.contextWindow ?? null, now);
+      if (config.costBudgetUsd !== undefined) {
+        this.db.updateSessionCostBudget(sessionId, session.costBudgetUsd ?? null, now, session.costBudgetStepUsd ?? null);
       }
-      this.db.setPendingApproval(sessionId, null);
-      this.db.updateSessionStatus(sessionId, "idle", now);
-      this.recordGovernanceAudit(session, parked, "resolution", "dismissed", actor, now, { content: config });
-      this.gateOnPolicy(sessionId, now);
+      if (config.maxToolCalls !== undefined) {
+        this.db.updateSessionMaxToolCalls(sessionId, session.maxToolCalls ?? null, now, session.maxToolCallsStep ?? null);
+      }
+      if (config.costCheckpointsUsd !== undefined) {
+        this.db.restoreSessionCostCheckpoints(
+          sessionId,
+          session.costCheckpointsUsd ?? null,
+          session.costCheckpointApprovedUsd ?? null,
+          now,
+        );
+      }
+      if (config.maxChildSessions !== undefined) {
+        this.db.updateSessionMaxChildSessions(sessionId, session.maxChildSessions ?? null, now);
+      }
+    };
+    // Every live threshold edit is a runner round trip, including explicit clears. A parked card
+    // also needs a re-arm when only a control-plane checkpoint changed so its queue hold follows
+    // the freshly evaluated rule. Persist first for one authoritative computed snapshot, but roll
+    // the whole config request back if that live runner cannot receive it.
+    const runner = this.db.getRunner(session.runnerId);
+    if (!isTerminal(session.status) && (thresholdChanged || (guardrailChanged && parkedGuardrail)) &&
+        runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
+      const sent = this.hub.sendToRunner(session.runnerId, {
+        type: "rearm_governance",
+        sessionId,
+        config: thresholdPatch,
+        ...(holdFor ? { holdFor } : {}),
+      });
+      if (!sent) {
+        if (parkedGuardrail) {
+          this.recordRunnerGuardrailResolution(
+            session,
+            parkedGuardrail,
+            "delivery_failed",
+            actor,
+            now,
+            { content: config },
+          );
+        }
+        rollback();
+        return fail("runner is offline", 409);
+      }
+    }
+    if (guardrailChanged && parkedGuardrail) {
+      const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, parkedGuardrail.requestId);
+      this.db.setPendingApproval(sessionId, remaining);
+      this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
+      this.recordRunnerGuardrailResolution(session, parkedGuardrail, "dismissed", actor, now, { content: config });
+      if (!remaining) this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
       this.clearSettledPolicyResumeStatus(sessionId);
+    } else if (guardrailChanged && !parked) {
+      // A soft rule armed on an unparked session that already exceeds it must park now: nothing on
+      // the runner will cancel the turn, so the next prompt would otherwise be admitted first.
+      this.gateOnPolicy(sessionId, now, true, true);
     }
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated);
@@ -4416,6 +4487,16 @@ export class SessionsService {
     if (session.archived) {
       return fail("unarchive the session before restarting it", 409);
     }
+    if (session.parentSessionId && isTerminal(session.status)) {
+      const parent = this.db.getSession(session.parentSessionId);
+      if (parent) {
+        const allocated = this.db.childSessionAllocations(parent.id);
+        const cap = parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP;
+        if (allocated.liveCount >= cap) {
+          return fail("the parent session has 0 remaining live child slots; raise maxChildSessions before restarting this child", 409);
+        }
+      }
+    }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (!session.agentId) return fail("session is missing its agent", 400);
@@ -4761,22 +4842,38 @@ export class SessionsService {
     if (isGuardrailApproval(pending)) {
       if (optionId === "continue") {
         const runner = this.db.getRunner(session.runnerId);
-        const nextConfig: Pick<SessionConfig, "costBudgetUsd" | "maxToolCalls"> = {};
+        const nextConfig: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
         if (pending.kind === "cost_budget") {
           const step = session.costBudgetStepUsd ?? session.costBudgetUsd;
-          if (!session.costBudgetUsd || !step) return fail("cost guardrail has no re-arm window", 409);
-          nextConfig.costBudgetUsd = Math.max(session.costBudgetUsd, session.costUsd) + step;
+          if (pending.runnerGuardrail && session.costBudgetUsd == null) {
+            nextConfig.costBudgetUsd = null;
+          } else {
+            if (!session.costBudgetUsd || !step) return fail("cost guardrail has no re-arm window", 409);
+            const observed = Math.max(session.costUsd, pending.runnerGuardrail?.observed ?? session.costUsd);
+            nextConfig.costBudgetUsd = pending.runnerGuardrail && session.costBudgetUsd > observed
+              ? session.costBudgetUsd
+              : Math.max(session.costBudgetUsd, observed) + step;
+          }
         } else {
           const step = session.maxToolCallsStep ?? session.maxToolCalls;
-          if (!session.maxToolCalls || !step) return fail("tool guardrail has no re-arm window", 409);
-          nextConfig.maxToolCalls = Math.max(session.maxToolCalls, session.toolCallCount ?? 0) + step;
+          if (pending.runnerGuardrail && session.maxToolCalls == null) {
+            nextConfig.maxToolCalls = null;
+          } else {
+            if (!session.maxToolCalls || !step) return fail("tool guardrail has no re-arm window", 409);
+            const observed = Math.max(session.toolCallCount ?? 0, pending.runnerGuardrail?.observed ?? 0);
+            nextConfig.maxToolCalls = pending.runnerGuardrail && session.maxToolCalls > observed
+              ? session.maxToolCalls
+              : Math.max(session.maxToolCalls, observed) + step;
+          }
         }
         // Every rule, not only the two runner-owned thresholds: a checkpoint or the owner's daily
         // allowance that trips after this re-arm must keep the runner's queue held too.
         const holdFor = this.runnerHoldAfter(session, {
           ...this.guardrailFields(session),
-          costBudgetUsd: nextConfig.costBudgetUsd ?? session.costBudgetUsd,
-          maxToolCalls: nextConfig.maxToolCalls ?? session.maxToolCalls,
+          costBudgetUsd: Object.hasOwn(nextConfig, "costBudgetUsd")
+            ? nextConfig.costBudgetUsd : session.costBudgetUsd,
+          maxToolCalls: Object.hasOwn(nextConfig, "maxToolCalls")
+            ? nextConfig.maxToolCalls : session.maxToolCalls,
         });
         if (runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
           const sent = this.hub.sendToRunner(session.runnerId, {
@@ -4786,17 +4883,23 @@ export class SessionsService {
             ...(holdFor ? { holdFor } : {}),
           });
           if (!sent) {
-            this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, now, { optionId });
+            this.recordRunnerGuardrailResolution(session, pending, "delivery_failed", actor, now, { optionId });
             return fail("runner is offline", 409);
           }
         }
-        this.db.setPendingApproval(sessionId, null);
-        if (pending.kind === "cost_budget") this.db.rearmSessionCostBudget(sessionId, session.costUsd, now);
-        else this.db.rearmSessionMaxToolCalls(sessionId, session.toolCallCount ?? 0, now);
-        this.db.updateSessionStatus(sessionId, "idle", now);
+        const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, pending.requestId);
+        this.db.setPendingApproval(sessionId, remaining);
+        if (pending.kind === "cost_budget") {
+          if (nextConfig.costBudgetUsd != null && nextConfig.costBudgetUsd !== session.costBudgetUsd) {
+            this.db.updateSessionCostBudget(sessionId, nextConfig.costBudgetUsd, now, session.costBudgetStepUsd);
+          }
+        } else if (nextConfig.maxToolCalls != null && nextConfig.maxToolCalls !== session.maxToolCalls) {
+          this.db.updateSessionMaxToolCalls(sessionId, nextConfig.maxToolCalls, now, session.maxToolCallsStep);
+        }
+        this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
         // Asks are serialized through the single approval slot: if ANOTHER rule is also tripped,
         // park again immediately with its own card instead of waiting for the next turn settle.
-        this.gateOnPolicy(sessionId, now);
+        if (!remaining) this.gateOnPolicy(sessionId, now);
         this.reconcilePolicyHookTimeouts(now, sessionId);
         this.clearSettledPolicyResumeStatus(sessionId);
       } else {
@@ -4805,10 +4908,9 @@ export class SessionsService {
         this.sendStopCommand(session.runnerId, sessionId);
         this.db.updateSessionStatus(sessionId, "stopped", now);
       }
-      this.recordGovernanceAudit(
+      this.recordRunnerGuardrailResolution(
         session,
         pending,
-        "resolution",
         optionId === "continue" ? "allowed" : "denied",
         actor,
         now,
@@ -6690,7 +6792,7 @@ export class SessionsService {
     // A trailing idle must not pass THROUGH a parked guardrail card: updateSessionStatus would
     // wipe it and the re-gate would mint a fresh requestId, invalidating an in-flight
     // Continue/Stop click (and flickering the card). The pause is CP state — keep it sticky.
-    if (status === "idle" && isPolicyApproval(session.pendingApproval)) {
+    if (status === "idle" && hasPolicyApproval(session.pendingApproval)) {
       this.db.notePolicyResumeStatus(sessionId, "idle");
       this.hub.sessionChangedById(sessionId);
       return;
@@ -6723,6 +6825,74 @@ export class SessionsService {
     // the notification carries the ask instead of a misleading "ready".
     this.notifyTransition(session, sessionId);
     this.hub.sessionChangedById(sessionId);
+  }
+
+  /** Materialize the decision for a runner-owned cancellation even when the control-plane rule
+   * was changed or cleared before the trip arrived. Duplicate/reconnect notices retain one card,
+   * and an unrelated unanswered request keeps ownership of the visible primary slot. */
+  onGovernanceTripped(runnerId: string, message: GovernanceTrippedMessage): void {
+    const session = this.db.getSession(message.sessionId);
+    if (!session || session.runnerId !== runnerId || session.archived || isTerminal(session.status)) return;
+    if (typeof message.tripId !== "string" || !message.tripId || message.tripId.length > 128 ||
+        (message.kind !== "cost_budget" && message.kind !== "max_tool_calls") ||
+        !Number.isFinite(message.threshold) || message.threshold <= 0 ||
+        !Number.isFinite(message.observed) || message.observed < message.threshold ||
+        (message.kind === "max_tool_calls" &&
+          (!Number.isSafeInteger(message.threshold) || !Number.isSafeInteger(message.observed)))) {
+      this.log.warn(`ignoring malformed governance trip for ${message.sessionId} from ${runnerId}`);
+      return;
+    }
+    const requestId = `runner-${message.kind}:${message.tripId}`;
+    const pending = pendingRequests(session.pendingApproval);
+    if (pending.some((request) => request.runnerGuardrail?.tripId === message.tripId &&
+        request.runnerGuardrail.kind === message.kind)) return;
+    if (this.db.hasTerminalGovernanceResolution(message.sessionId, requestId)) return;
+    const alreadyAsked = this.db.hasGovernanceAuditEntry(
+      message.sessionId,
+      requestId,
+      "policy_decision",
+      "asked",
+    );
+    const existing = pending.find((request) =>
+      request.kind === message.kind && !request.runnerGuardrail);
+    const title = message.kind === "cost_budget"
+      ? `Runner paused at the $${message.threshold.toFixed(2)} cost threshold. Continue with the current guardrails?`
+      : `Runner paused at ${message.threshold} distinct tool calls. Continue with the current guardrails?`;
+    const runnerGuardrail = {
+      tripId: message.tripId,
+      kind: message.kind,
+      threshold: message.threshold,
+      observed: message.observed,
+    };
+    // Cost usage reaches the CP before the runner's following trip frame, so the CP may already
+    // have parked the same crossing. Promote that card with the runner evidence instead of asking
+    // twice (and advancing the threshold twice). Keep its request identity for an in-flight click;
+    // the separate runner request id below makes reconnect replay idempotent.
+    const approval: PendingApproval = existing ? { ...existing, runnerGuardrail } : {
+      requestId,
+      kind: message.kind,
+      title,
+      options: [
+        { optionId: "continue", name: "Continue", kind: "allow_once" },
+        { optionId: "cancel", name: "Stop", kind: "reject_once" },
+      ],
+      runnerGuardrail,
+    };
+    const now = Date.now();
+    this.db.setPendingApproval(message.sessionId, existing
+      ? replacePendingApproval(session.pendingApproval, approval)
+      : appendPendingApproval(session.pendingApproval, approval));
+    if (session.status === "idle") this.db.notePolicyResumeStatus(message.sessionId, "idle");
+    this.db.updateSessionStatus(message.sessionId, "input_required", now);
+    if (!alreadyAsked) {
+      this.recordGovernanceAudit(session, { ...approval, requestId }, "policy_decision", "asked",
+        { kind: "system", id: "runner-governance" }, now, {
+          policyRule: message.kind === "cost_budget"
+            ? { kind: "cost_budget", budgetUsd: message.threshold }
+            : { kind: "max_tool_calls", maxCalls: message.threshold },
+        });
+    }
+    this.hub.sessionChangedById(message.sessionId);
   }
 
   private reconcileWorkflowSessionStatus(sessionId: string, status: SessionStatus, now: number): void {
@@ -7217,7 +7387,10 @@ export class SessionsService {
         });
       }
 
-      this.db.setPendingApproval(sessionId, addPendingRequest(this.db.getSession(sessionId)?.pendingApproval, approval));
+      this.db.setPendingApproval(
+        sessionId,
+        addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
+      );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       // Push BEFORE any runner-side trailing status event (which would then be a non-transition).
       this.notifyTransition(session, sessionId);
@@ -7307,7 +7480,10 @@ export class SessionsService {
         }
       }
       this.hub.sessionEvent(ev);
-      this.db.setPendingApproval(sessionId, addPendingRequest(this.db.getSession(sessionId)?.pendingApproval, approval));
+      this.db.setPendingApproval(
+        sessionId,
+        addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
+      );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       this.notifyTransition(session, sessionId);
     }
@@ -7452,7 +7628,7 @@ export class SessionsService {
           // snapshot. The old invocation cannot resume, so never resurrect its durable card.
           this.abortPolicyHookApprovals(existing, now, "provider-session-inactive");
           this.db.clearPolicyResumeStatus(snap.id);
-        } else if (snap.status === "idle" && isPolicyApproval(existing.pendingApproval)) {
+        } else if (snap.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
           this.db.notePolicyResumeStatus(snap.id, "idle");
         } else if (snap.status !== "idle") {
           this.db.clearPolicyResumeStatus(snap.id);
@@ -7545,7 +7721,7 @@ export class SessionsService {
     if (isTerminal(runtimeSnapshot.status)) {
       this.abortPolicyHookApprovals(existing, now, "provider-session-ended");
       this.db.clearPolicyResumeStatus(snapshot.id);
-    } else if (runtimeSnapshot.status === "idle" && isPolicyApproval(existing.pendingApproval)) {
+    } else if (runtimeSnapshot.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
       this.db.notePolicyResumeStatus(snapshot.id, "idle");
     } else if (runtimeSnapshot.status !== "idle") {
       this.db.clearPolicyResumeStatus(snapshot.id);
@@ -8213,4 +8389,47 @@ type RunnerHoldKind = RunnerGuardrailKind | "control_plane";
 
 function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | undefined {
   return kind === "cost_budget" || kind === "max_tool_calls" ? kind : undefined;
+}
+
+function hasPolicyApproval(pending: PendingApproval | null | undefined): boolean {
+  return pendingRequests(pending).some((request) => isPolicyApproval(request));
+}
+
+/** Unlike addPendingRequest (which intentionally gives a CP policy card exclusive ownership), a
+ * runner trip must wait behind an unrelated provider request without replacing it. */
+function appendPendingApproval(
+  current: PendingApproval | null | undefined,
+  next: PendingApproval,
+): PendingApproval {
+  const requests = pendingRequests(current);
+  if (requests.some((request) => request.requestId === next.requestId)) return current!;
+  const [first, ...rest] = [...requests, next];
+  return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
+}
+
+/** A live provider ask owns the primary card, but it cannot erase a runner trip: that trip already
+ * cancelled the turn and holds the FIFO until its own Continue/Stop decision. CP-only soft cards
+ * keep their historical displacement semantics and are re-derived after the provider ask settles. */
+function addPendingRequestPreservingRunnerGuardrails(
+  current: PendingApproval | null | undefined,
+  next: PendingApproval,
+): PendingApproval {
+  const runnerCards = pendingRequests(current).filter((request) => request.runnerGuardrail);
+  let combined = addPendingRequest(current, next);
+  for (const runnerCard of runnerCards) combined = appendPendingApproval(combined, runnerCard);
+  return combined;
+}
+
+function runnerGuardrailRequestId(request: PendingApproval): string | null {
+  const trip = request.runnerGuardrail;
+  return trip ? `runner-${trip.kind}:${trip.tripId}` : null;
+}
+
+function replacePendingApproval(
+  current: PendingApproval | null | undefined,
+  replacement: PendingApproval,
+): PendingApproval {
+  const [first, ...rest] = pendingRequests(current).map((request) =>
+    request.requestId === replacement.requestId ? replacement : request);
+  return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
 }

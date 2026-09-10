@@ -161,6 +161,7 @@ function mapSession(s: Json): Json {
     agentId: s?.agentId ?? null,
     runId: s?.runId ?? null,
     parentSessionId: s?.parentSessionId ?? null,
+    maxChildSessions: s?.maxChildSessions ?? null,
     costUsd: s?.costUsd,
     costBudgetUsd: s?.costBudgetUsd ?? null,
     costCheckpointsUsd: s?.costCheckpointsUsd ?? null,
@@ -342,7 +343,8 @@ const GOVERNANCE_POLICY_PROPERTIES: Json = {
 
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "list_sessions", "get_session", "get_session_events",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
-  "stop_session", "archive_session", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree"]);
+  "stop_session", "restart_session", "archive_session", "set_guardrails", "create_worktree", "attach_worktree",
+  "select_worktree", "discard_worktree"]);
 
 export const TOOLS: McpTool[] = [
   /* ------------------------------- READS --------------------------------- */
@@ -989,7 +991,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a new agent session on a runner, optionally with the initial task prompt and guardrails. Subject to session permissions and governance policies.",
+      "Start a child session. An unbounded parent defaults omitted limits to $5 and 500 tool calls; explicit 0 opts out, while finite parent ceilings always bound children. The result reports effective guardrails. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1004,6 +1006,7 @@ export const TOOLS: McpTool[] = [
         permissionMode: { type: "string", enum: [...WORKER_PERMISSION_MODES] },
         costBudgetUsd: { type: "number" },
         maxToolCalls: { type: "number" },
+        maxChildSessions: { type: "integer", minimum: 0, maximum: 64 },
       },
       required: ["runnerId", "agentId"],
       additionalProperties: false,
@@ -1028,6 +1031,7 @@ export const TOOLS: McpTool[] = [
       if (typeof args.permissionMode === "string") config.permissionMode = args.permissionMode;
       if (typeof args.costBudgetUsd === "number") config.costBudgetUsd = args.costBudgetUsd;
       if (typeof args.maxToolCalls === "number") config.maxToolCalls = args.maxToolCalls;
+      if (typeof args.maxChildSessions === "number") config.maxChildSessions = args.maxChildSessions;
       const body: Json = { runnerId: args.runnerId, agentId: args.agentId };
       if (typeof args.workspaceId === "string") body.workspaceId = args.workspaceId;
       if (typeof args.workspacePath === "string") body.workspacePath = args.workspacePath;
@@ -1085,6 +1089,25 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
+    name: "restart_session",
+    description: "Restart a stopped descendant session, subject to its parent's available live-child slots. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId) {
+        return errorResult("refusing: that is my own session (an agent cannot restart itself)");
+      }
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/restart`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
     name: "archive_session",
     description: "Archive a descendant session without deleting its history. Existing stop-before-archive and visibility checks apply.",
     inputSchema: {
@@ -1103,28 +1126,32 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "set_guardrails",
-    description: "Set or clear a session's cost budget (USD) and/or tool-call limit; 0 clears. Subject to session permissions and governance policies.",
+    description: "Set or clear a descendant's cost budget (USD) and/or tool-call limit (0 clears), or set a descendant's or this session's concurrent live-child limit from 0 through 64. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string" },
         costBudgetUsd: { type: "number" },
         maxToolCalls: { type: "number" },
+        maxChildSessions: { type: "integer", minimum: 0, maximum: 64 },
       },
       required: ["sessionId"],
       additionalProperties: false,
     },
     handler: async (args, deps) => {
       if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
-      if (args.sessionId === deps.selfSessionId) {
-        return errorResult("refusing: that is my own session (an agent cannot reconfigure itself)");
+      if (args.sessionId === deps.selfSessionId &&
+          (typeof args.maxChildSessions !== "number" ||
+            typeof args.costBudgetUsd === "number" || typeof args.maxToolCalls === "number")) {
+        return errorResult("refusing: an agent may change only its own maxChildSessions");
       }
       // ONLY guardrail keys ever ride this call — never model/effort/permissionMode.
       const body: Json = {};
       if (typeof args.costBudgetUsd === "number") body.costBudgetUsd = args.costBudgetUsd;
       if (typeof args.maxToolCalls === "number") body.maxToolCalls = args.maxToolCalls;
+      if (typeof args.maxChildSessions === "number") body.maxChildSessions = args.maxChildSessions;
       if (!Object.keys(body).length) {
-        return errorResult("at least one of costBudgetUsd or maxToolCalls is required (0 clears a limit)");
+        return errorResult("at least one of costBudgetUsd, maxToolCalls, or maxChildSessions is required (0 clears a cost/tool limit)");
       }
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/config`, body);
       if (!r.ok) return errorResult(r.message);

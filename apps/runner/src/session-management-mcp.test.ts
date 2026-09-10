@@ -148,6 +148,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "create_session",
       "prompt_session",
       "stop_session",
+      "restart_session",
       "archive_session",
       "set_guardrails",
       "create_run",
@@ -199,7 +200,7 @@ test("mutating tools describe governance instead of promising a now-optional hum
     "upsert_governance_policy", "delete_governance_policy",
     "create_workflow_definition", "create_workflow_version", "create_workflow_run",
     "dispatch_workflow_node", "create_workflow_artifact", "complete_workflow_attempt",
-    "resolve_workflow_gate", "create_session", "prompt_session", "stop_session",
+    "resolve_workflow_gate", "create_session", "prompt_session", "stop_session", "restart_session",
     "set_guardrails", "create_run", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree",
   ];
   for (const name of mutations) {
@@ -627,7 +628,11 @@ test("create_session arms budgets before the initial prompt can execute", async 
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions`);
   assert.deepEqual((calls[0]!.body as any).config, { model: "opus", costBudgetUsd: 5, maxToolCalls: 40 });
   assert.equal(resultJson(result).session.costBudgetUsd, 5);
+  assert.equal(resultJson(result).session.maxToolCalls, 40);
   assert.equal(resultJson(result).session.parentSessionId, SELF_ID);
+  const description = TOOLS.find((tool) => tool.name === "create_session")!.description;
+  assert.match(description, /\$5 and 500 tool calls/);
+  assert.match(description, /explicit 0 opts out/);
 });
 
 test("prompt_session -> POST /api/sessions/:id/prompt {text}", async () => {
@@ -692,10 +697,33 @@ test("run creation tools keep the exact batch request alive until spawn approval
 });
 
 test("set_guardrails -> POST /api/sessions/:id/config with ONLY the given guardrail keys", async () => {
-  const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "s_2", costBudgetUsd: 3 } }));
-  await callTool(deps, "set_guardrails", { sessionId: "s_2", costBudgetUsd: 3 });
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "s_2", costBudgetUsd: 3, maxChildSessions: 8 } }));
+  const result = await callTool(deps, "set_guardrails", { sessionId: "s_2", costBudgetUsd: 3, maxChildSessions: 8 });
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_2/config`);
-  assert.deepEqual(calls[0]!.body, { costBudgetUsd: 3 }, "maxToolCalls omitted when not given");
+  assert.deepEqual(calls[0]!.body, { costBudgetUsd: 3, maxChildSessions: 8 }, "maxToolCalls omitted when not given");
+  assert.equal(resultJson(result).session.maxChildSessions, 8);
+});
+
+test("set_guardrails lets a session change only its own live-child limit", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 200,
+    body: { id: SELF_ID, maxChildSessions: 8 },
+  }));
+  const result = await callTool(deps, "set_guardrails", {
+    sessionId: SELF_ID,
+    maxChildSessions: 8,
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/config`);
+  assert.deepEqual(calls[0]!.body, { maxChildSessions: 8 });
+});
+
+test("restart_session uses the descendant restart route and refuses self", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "s_2", status: "starting" } }));
+  assert.equal((await callTool(deps, "restart_session", { sessionId: "s_2" })).isError, undefined);
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_2/restart`);
+  assert.equal((await callTool(deps, "restart_session", { sessionId: SELF_ID })).isError, true);
+  assert.equal(calls.length, 1);
 });
 
 test("create_run -> POST /api/runs with the full body", async () => {
@@ -872,7 +900,6 @@ test("self-targeting mutations refuse with isError and make NO fetch", async () 
   for (const [tool, args] of [
     ["prompt_session", { sessionId: SELF_ID, text: "hi" }],
     ["stop_session", { sessionId: SELF_ID }],
-    ["set_guardrails", { sessionId: SELF_ID, costBudgetUsd: 1 }],
   ] as const) {
     const { deps, calls } = makeDeps();
     const result = await callTool(deps, tool, args as Record<string, unknown>);
@@ -880,6 +907,12 @@ test("self-targeting mutations refuse with isError and make NO fetch", async () 
     assert.match(resultText(result), /my own session/, tool);
     assert.equal(calls.length, 0, `${tool} must not reach the control plane`);
   }
+
+  const { deps, calls } = makeDeps();
+  const guardrails = await callTool(deps, "set_guardrails", { sessionId: SELF_ID, costBudgetUsd: 1 });
+  assert.equal(guardrails.isError, true);
+  assert.match(resultText(guardrails), /only its own maxChildSessions/);
+  assert.equal(calls.length, 0, "self spend/tool changes must not reach the control plane");
 });
 
 test("create_session refuses conductor recursion, bypassPermissions, and a missing workspace — no fetch", async () => {
@@ -924,7 +957,7 @@ test("set_guardrails without either limit refuses — no fetch", async () => {
   const { deps, calls } = makeDeps();
   const result = await callTool(deps, "set_guardrails", { sessionId: "s_2" });
   assert.equal(result.isError, true);
-  assert.match(resultText(result), /costBudgetUsd or maxToolCalls/);
+  assert.match(resultText(result), /costBudgetUsd, maxToolCalls, or maxChildSessions/);
   assert.equal(calls.length, 0);
 });
 

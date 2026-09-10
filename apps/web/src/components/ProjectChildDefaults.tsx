@@ -8,14 +8,14 @@ export function ProjectChildDefaults({ project, disabled, onSave }: {
   onSave: (defaults: ChildSessionDefaults | null) => Promise<unknown>;
 }) {
   const [cost, setCost] = useState(String(project.childSessionDefaults?.costBudgetUsd ?? 5));
-  const [tools, setTools] = useState(String(project.childSessionDefaults?.maxToolCalls ?? 100));
+  const [tools, setTools] = useState(String(project.childSessionDefaults?.maxToolCalls ?? 500));
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (dirty || saving) return;
     setCost(String(project.childSessionDefaults?.costBudgetUsd ?? 5));
-    setTools(String(project.childSessionDefaults?.maxToolCalls ?? 100));
+    setTools(String(project.childSessionDefaults?.maxToolCalls ?? 500));
   }, [project.childSessionDefaults?.costBudgetUsd, project.childSessionDefaults?.maxToolCalls, dirty, saving]);
   const submit = async (defaults: ChildSessionDefaults | null) => {
     setSaving(true);

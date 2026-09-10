@@ -27,10 +27,13 @@ human-principal requests and do not send an agent-session claim header.
 wollipog session list [--archived] --json
 wollipog session get ID --json
 wollipog session events ID [--after SEQ] [--limit COUNT] --json
-wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] --json
+wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] --json
 wollipog session prompt ID TEXT --json
 wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] --json
 wollipog session stop ID --json
+wollipog session restart ID --json
+wollipog session archive ID --json
+wollipog session guardrails ID [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] --json
 wollipog worktree create [--session ID] --branch NAME [--base REF] --json
 wollipog worktree attach [--session ID] --path PATH --json
 wollipog worktree select [--session ID] --path PATH --json
@@ -58,6 +61,14 @@ or closed; an unavailable forge keeps the durable open linkage unchanged.
 Claude Code launches also receive an additive `wollipog` stdio MCP configuration. Both adapters
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.
+
+Agent-created children of an unbounded parent default to a $5 cost budget and 500 tool calls. The
+creator may request larger finite values or pass zero for no cost/tool limit; a finite parent's
+remaining ceiling still bounds every child at creation. `maxChildSessions` defaults to four
+concurrent live children and accepts zero through 64. Completed, failed, stopped, and archived
+children release live slots, while their lifetime usage reservations remain charged to a finite
+parent. Live cost/tool edits require delivery to an online current runner and fail closed rather
+than leaving control-plane and runner thresholds out of sync.
 
 Protocol v124 completes that contract for structured Direct WSL sessions. Discovery must resolve an
 absolute, root-owned Linux Node 22+ runtime plus distro-owned compiler and bubblewrap runtimes with

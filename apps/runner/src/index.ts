@@ -1254,6 +1254,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // dead), but OURS survived the socket blip — re-report every non-empty queue or those
       // prompts stay invisible and uncancelable until the queue next changes.
       sessions.reportQueues();
+      sessions.reportGovernanceTrips();
       sessions.recoverAllOrphanedWork();
       for (const receipt of durableCommands.recentUpdates()) sendDurableUpdate(receipt);
       for (const receipt of sessionCommandReceipts.recentUpdates()) sendSessionCommandUpdate(receipt);

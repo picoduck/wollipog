@@ -9812,12 +9812,24 @@ export class ControlPlaneDb {
     `).get(targetId, ancestorId));
   }
 
-  childSessionAllocations(parentSessionId: string): { count: number; costBudgetUsd: number; maxToolCalls: number } {
+  childSessionAllocations(parentSessionId: string): {
+    /** Lifetime creations remain the stable ordinal and deletion-resistant accounting fence. */
+    count: number;
+    /** Only nonterminal, unarchived children occupy the concurrent admission cap. */
+    liveCount: number;
+    costBudgetUsd: number;
+    maxToolCalls: number;
+  } {
     return this.stmt(
       `SELECT child_spawn_count AS count, child_cost_reserved_usd AS costBudgetUsd,
-              child_tool_calls_reserved AS maxToolCalls
+              child_tool_calls_reserved AS maxToolCalls,
+              (SELECT COUNT(*) FROM sessions child
+                WHERE child.parent_session_id=? AND child.archived=0
+                  AND child.status NOT IN ('completed','failed','stopped')) AS liveCount
        FROM sessions WHERE id=?`,
-    ).get(parentSessionId) as unknown as { count: number; costBudgetUsd: number; maxToolCalls: number };
+    ).get(parentSessionId, parentSessionId) as unknown as {
+      count: number; liveCount: number; costBudgetUsd: number; maxToolCalls: number;
+    };
   }
 
   sessionHasIndividualOwner(sessionId: string): boolean {
@@ -10115,7 +10127,7 @@ export class ControlPlaneDb {
     let keepPolicyPause = false;
     try {
       const cur = existing?.pending_approval ? (JSON.parse(existing.pending_approval) as PendingApproval) : null;
-      keepPolicyPause = isPolicyApproval(cur) && !isTerminal(snap.status);
+      keepPolicyPause = pendingRequests(cur).some((request) => isPolicyApproval(request)) && !isTerminal(snap.status);
     } catch {
       /* malformed cached approval — fall through to the snapshot */
     }
@@ -11269,6 +11281,12 @@ export class ControlPlaneDb {
       .run(max, step, now, id);
   }
 
+  /** Concurrent directly-created child limit. Zero pauses new child/restart admission; null
+   * restores the installation fallback when an atomic config delivery rolls back. */
+  updateSessionMaxChildSessions(id: string, max: number | null, now: number): void {
+    this.stmt("UPDATE sessions SET max_child_sessions=?, updated_at=? WHERE id=?").run(max, now, id);
+  }
+
   /** Advance the absolute cost threshold by its original fixed allowance window. */
   rearmSessionCostBudget(id: string, observedCostUsd: number, now: number): number | null {
     const row = this.stmt(
@@ -11319,6 +11337,31 @@ export class ControlPlaneDb {
               effort=?, service_tier=?, permission_mode=?, updated_at=?
         WHERE id=?`,
     ).run(model, model, model, config.effort ?? null, config.serviceTier ?? null, config.permissionMode ?? null, now, id);
+  }
+
+  /** Restore the complete selected/provider model projection after an atomic live-config delivery
+   * fails. updateSessionConfig intentionally clears provider evidence on a forward model change,
+   * so applying only the old selected config cannot reconstruct these two fields. */
+  restoreSessionConfig(
+    id: string,
+    config: SessionConfig,
+    resolvedModel: string | null,
+    contextWindow: number | null,
+    now: number,
+  ): void {
+    this.stmt(
+      `UPDATE sessions SET model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, context_window=?, updated_at=?
+       WHERE id=?`,
+    ).run(
+      config.model ?? null,
+      resolvedModel,
+      config.effort ?? null,
+      config.serviceTier ?? null,
+      config.permissionMode ?? null,
+      contextWindow,
+      now,
+      id,
+    );
   }
 
   /** Accumulate a turn's token/cost usage into the session totals. */
@@ -11751,6 +11794,15 @@ export class ControlPlaneDb {
       `SELECT 1 FROM governance_audit
        WHERE session_id=? AND request_id=? AND stage=? AND outcome=? LIMIT 1`,
     ).get(sessionId, requestId, stage, outcome));
+  }
+
+  hasTerminalGovernanceResolution(sessionId: string, requestId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM governance_audit
+       WHERE session_id=? AND request_id=? AND stage='resolution'
+         AND outcome IN ('allowed', 'denied', 'dismissed', 'answered', 'timed_out', 'aborted')
+       LIMIT 1`,
+    ).get(sessionId, requestId));
   }
 
   pruneGovernanceAudit(createdBefore: number, limit = 1_000): number {

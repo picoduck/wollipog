@@ -3787,9 +3787,14 @@ textarea {
   font-size: 12.5px;
 }
 .plus-budget-copy {
-  display: grid;
+  display: block;
   min-width: 0;
-  gap: 2px;
+}
+.plus-budget-label-row {
+  display: flex;
+  align-items: center;
+  min-height: 29px;
+  gap: 4px;
 }
 .plus-budget-label {
   color: var(--text-dim);
@@ -3797,10 +3802,45 @@ textarea {
   font-weight: var(--weight-semibold);
   line-height: var(--leading-tight);
 }
-.plus-budget-hint {
-  font-size: 11px;
+.plus-budget-help {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.plus-budget-info {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
   color: var(--text-faint);
-  line-height: 1.35;
+  cursor: pointer;
+}
+.plus-budget-info:hover,
+.plus-budget-info:focus-visible,
+.plus-budget-help.is-open .plus-budget-info {
+  background: var(--bg-elev-2);
+  color: var(--text);
+}
+.plus-budget-help-popover {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: -6px;
+  z-index: var(--z-popovercontent);
+  width: min(224px, calc(100vw - 32px));
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  font-weight: var(--weight-normal);
+  line-height: 1.4;
+  overflow-y: auto;
   overflow-wrap: anywhere;
 }
 
