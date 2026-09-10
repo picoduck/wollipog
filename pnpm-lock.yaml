@@ -17,6 +17,9 @@ importers:
       concurrently:
         specifier: ^9.2.4
         version: 9.2.4
+      semver:
+        specifier: 7.8.5
+        version: 7.8.5
       tsx:
         specifier: ^4.19.2
         version: 4.22.4
