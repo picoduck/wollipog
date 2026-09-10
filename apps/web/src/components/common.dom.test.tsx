@@ -172,15 +172,21 @@ test("responsive compact background-work badges carry wide and narrow visible la
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   try {
-    await act(async () => {
-      root.render(<BackgroundWorkBadge state="running" compact responsiveCompact announce={false} />);
-    });
-    const badge = container.querySelector(".background-work-badge")!;
-    assert.equal(badge.getAttribute("aria-label"), "Background Work: Waiting on External Job");
-    assert.equal(badge.querySelector(".background-work-label-wide")?.textContent, "Waiting on External Job");
-    assert.equal(badge.querySelector(".background-work-label-narrow")?.textContent, "External Job");
-    assert.equal(badge.querySelector(".background-work-label-wide")?.getAttribute("aria-hidden"), "true");
-    assert.equal(badge.querySelector(".background-work-label-narrow")?.getAttribute("aria-hidden"), "true");
+    for (const [state, full, wide, narrow] of [
+      ["running", "Waiting on External Job", "Waiting on External Job", "Job"],
+      ["continuation_pending", "Continuation Pending", "Continuation Pending", "Pending"],
+      ["orphaned", "Orphaned", "Background Work Orphaned", "Orphaned"],
+    ] as const) {
+      await act(async () => {
+        root.render(<BackgroundWorkBadge state={state} compact responsiveCompact announce={false} />);
+      });
+      const badge = container.querySelector(".background-work-badge")!;
+      assert.equal(badge.getAttribute("aria-label"), `Background Work: ${full}`);
+      assert.equal(badge.querySelector(".background-work-label-wide")?.textContent, wide);
+      assert.equal(badge.querySelector(".background-work-label-narrow")?.textContent, narrow);
+      assert.equal(badge.querySelector(".background-work-label-wide")?.getAttribute("aria-hidden"), "true");
+      assert.equal(badge.querySelector(".background-work-label-narrow")?.getAttribute("aria-hidden"), "true");
+    }
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

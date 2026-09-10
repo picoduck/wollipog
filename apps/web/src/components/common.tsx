@@ -268,10 +268,10 @@ const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
 };
 
 const NARROW_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
-  running: "External Job",
-  continuation_pending: "Continuation",
-  orphaned: "Orphaned Work",
-  resumed: "Resumed Work",
+  running: "Job",
+  continuation_pending: "Pending",
+  orphaned: "Orphaned",
+  resumed: "Resumed",
 };
 
 export function BackgroundWorkBadge({ state, compact = false, responsiveCompact = false, announce = true, onOpen }: {

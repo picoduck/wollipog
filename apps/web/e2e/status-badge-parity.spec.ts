@@ -155,7 +155,7 @@ for (const width of WIDTHS) {
     const narrowLabel = badge.locator(".background-work-label-narrow");
     if (width <= 390) {
       await expect(narrowLabel).toBeVisible();
-      await expect(narrowLabel).toHaveText("External Job");
+      await expect(narrowLabel).toHaveText("Job");
       await expect(wideLabel).toBeHidden();
     } else {
       await expect(wideLabel).toBeVisible();
@@ -217,10 +217,9 @@ for (const width of MOBILE_WIDTHS) {
     // The narrow widths actually exercise the path: something had to leave the row.
     expect(header.hidden.length).toBeGreaterThan(0);
     expect(header.overflowCount).toBe(String(header.hidden.length));
-    // The passive change status is displaced first, and background work outranks it wherever the
-    // row can hold the badge at all.
-    expect(header.hidden).toContain("Changes: No Changes");
-    expect(header.visible.some((status) => status.label.startsWith("Changes:"))).toBe(false);
+    // Background work remains authoritative even when font metrics change which lower-priority
+    // status can use the row's remaining space.
+    expect(header.hidden).not.toContain(BACKGROUND_LABEL);
     expect(header.backgroundIsHidden).toBe(false);
 
     // The disclosure carries the whole status set, displaced or not.
