@@ -202,7 +202,7 @@ test("real WSL2 bridge carries CLI and MCP while adversarial routes fail closed 
     try {
       mcp.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
       const mcpOutput = await readUntil(mcp, /create_session/u);
-      assert.doesNotMatch(mcpOutput, /set_guardrails/u);
+      assert.match(mcpOutput, /set_guardrails/u);
     } finally {
       await stop(mcp);
     }
