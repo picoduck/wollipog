@@ -443,28 +443,6 @@ export function InboxView({
     }
   }, [activeSplit, expandedSessionId, inbox.selectedSessionId, inbox.splitKey, repairedSelection, selectSession, selectSplit, sessions, snapshotLoaded]);
 
-  const selectedSession = repairedSelection ? sessions.get(repairedSelection) ?? null : null;
-
-  useEffect(() => {
-    if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
-    seenTimerRef.current = null;
-    // Board mode renders no selected preview, so dwelling there must not mark the invisible
-    // list selection as read while its activity keeps arriving.
-    if (!selectedSession || boardMode) return;
-    const sessionId = selectedSession.id;
-    const seenAt = selectedSession.lastEventAt ?? selectedSession.updatedAt;
-    seenTimerRef.current = window.setTimeout(() => {
-      const next = markSeen(loadSeen(instanceScope), sessionId, seenAt);
-      saveSeen(next, instanceScope);
-      setSeen(next);
-      seenTimerRef.current = null;
-    }, SEEN_DWELL_MS);
-    return () => {
-      if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
-      seenTimerRef.current = null;
-    };
-  }, [boardMode, instanceScope, selectedSession?.id, selectedSession?.lastEventAt, selectedSession?.updatedAt]);
-
   const normalizedQuery = deferredQuery.trim().toLocaleLowerCase();
   const liveEntries = useMemo<InboxListEntry[]>(() => (activeSplit?.sessions ?? [])
     .filter((session) => inboxSessionMatchesQuery(
@@ -552,6 +530,33 @@ export function InboxView({
     return id && displayed.has(id) ? id : null;
   }, [displayedIds, repairedSelection, sessions]);
   const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
+  // The preview surface, the seen-dwell, and the row highlight must agree on ONE session. When the
+  // persisted selection was projected onto a visible ancestor above, that ancestor is the session
+  // the preview shows and the preview's own actions act on; otherwise (a search hid the row and
+  // nothing visible stands in for it) the preview keeps following the persisted selection as before.
+  const selectedSession = displayedSelectedSession ??
+    (repairedSelection ? sessions.get(repairedSelection) ?? null : null);
+
+  useEffect(() => {
+    if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
+    seenTimerRef.current = null;
+    // Board mode renders no selected preview, so dwelling there must not mark the invisible
+    // list selection as read while its activity keeps arriving.
+    if (!selectedSession || boardMode) return;
+    const sessionId = selectedSession.id;
+    const seenAt = selectedSession.lastEventAt ?? selectedSession.updatedAt;
+    seenTimerRef.current = window.setTimeout(() => {
+      const next = markSeen(loadSeen(instanceScope), sessionId, seenAt);
+      saveSeen(next, instanceScope);
+      setSeen(next);
+      seenTimerRef.current = null;
+    }, SEEN_DWELL_MS);
+    return () => {
+      if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
+      seenTimerRef.current = null;
+    };
+  }, [boardMode, instanceScope, selectedSession?.id, selectedSession?.lastEventAt, selectedSession?.updatedAt]);
+
   const expanded = expandedSessionId !== null;
   useEffect(() => {
     // Board mode clears like expansion does: unmounting the list can swallow pointerleave, and a

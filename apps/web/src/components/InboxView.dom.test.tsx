@@ -1501,12 +1501,16 @@ test("InboxView keeps a hidden selection on its nearest visible ancestor and Shi
   assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
   await press("j");
   assert.equal(selectedTitle(), "Session Lone");
+  const previewTitle = () => container.querySelector<HTMLElement>(".session-preview-title")?.textContent ?? null;
+  assert.equal(previewTitle(), "Session Lone");
   await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 5, { parentSessionId: "Parent" }) }); });
   assert.deepEqual(rowTitles(container), ["Session Parent"]);
   assert.equal(selectedTitle(), "Session Parent", "the hidden selection surfaces on its collapsed parent");
+  assert.equal(previewTitle(), "Session Parent", "the preview and its actions follow the same projected row");
   await press("t");
   assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
   assert.equal(selectedTitle(), "Session Lone", "expanding restores the persisted selection");
+  assert.equal(previewTitle(), "Session Lone");
 });
 
 test("every mounted root is torn down before the next test starts", () => {
