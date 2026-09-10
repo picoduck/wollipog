@@ -1073,6 +1073,14 @@ const client = {
       });
       pendingSteeringResolutionSettlements.delete(submissionId);
     }
+    if (action === "dismiss" && attempt.resolution?.action === "queue_again" &&
+        attempt.resolution.state === "applied") {
+      value.steeringAttempts = value.steeringAttempts?.filter(
+        (candidate) => candidate.submissionId !== submissionId,
+      );
+      pushSession(value);
+      return structuredClone(attempt);
+    }
     const queuedPromptId = action === "queue_again"
       ? attempt.queuedPromptId ?? `queued-again-${submissionId}`
       : undefined;

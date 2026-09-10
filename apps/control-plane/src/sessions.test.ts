@@ -2784,7 +2784,12 @@ test("uncertain steering resolution is correlated, idempotent, conflict-safe, an
   assert.equal((await svc.resolveSteeringAttempt(id, "submission-resolve", "queue_again")).ok, true);
   assert.equal(hub.sentOfType("resolve_steering_attempt").length, 1,
     "applied retries are local and do not require an online runner");
-  assert.equal((await svc.resolveSteeringAttempt(id, "submission-resolve", "dismiss")).status, 409);
+  const dismissedReceipt = await svc.resolveSteeringAttempt(id, "submission-resolve", "dismiss");
+  assert.equal(dismissedReceipt.ok, true, dismissedReceipt.error);
+  assert.equal(hub.sentOfType("resolve_steering_attempt").length, 1,
+    "dismissing a completed receipt cannot cancel or otherwise mutate its queued prompt");
+  assert.equal(db.getSession(id)?.steeringAttempts, undefined,
+    "the acknowledgement is removed from authoritative projections");
 });
 
 test("rejected steering receipt dismissal is durable and does not depend on runner state", async () => {
@@ -3235,6 +3240,43 @@ test("runner-owned steered user history resolves a lost receipt and suppresses r
     turnId: "turn-history", deliveryIntent: "steer",
   });
   assert.equal(db.getSession(id)?.steeringAttempts?.[0]?.state, "accepted");
+  assert.equal(hub.sessionChangedByIdCalls.includes(id), true);
+});
+
+test("canonical queued user history retires only its exact Queue Again receipt", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.createSteeringAttempt({
+    requestId: "steer-queue-history", sessionId: id, submissionId: "submission-queue-history",
+    turnId: "turn-original", source: "direct", requestSha256: "4".repeat(64), text: "later", now: 1,
+  });
+  db.markSteeringAttemptUncertain("steer-queue-history", 2);
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "resolve_steering_attempt");
+    return {
+      type: "resolve_steering_attempt_result", requestId: message.requestId, sessionId: id,
+      submissionId: "submission-queue-history", action: "queue_again", applied: true,
+      queuedPromptId: "queue-history-exact",
+    };
+  };
+  assert.equal((await svc.resolveSteeringAttempt(id, "submission-queue-history", "queue_again")).ok, true);
+
+  assert.equal(svc.onSessionQueue(RUNNER_ID, id, [], false), true);
+  assert.equal(db.getSession(id)?.steeringAttempts?.length, 1,
+    "an empty queue alone does not prove delivery");
+  svc.onSessionEvent(id, {
+    kind: "user_message", text: "same text is insufficient", turnId: "queue-history-other",
+  });
+  assert.equal(db.getSession(id)?.steeringAttempts?.length, 1);
+  svc.onSessionEvent(id, {
+    kind: "user_message", text: "in-turn steering is not queue delivery",
+    turnId: "queue-history-exact", deliveryIntent: "steer", submissionId: "another-submission",
+  });
+  assert.equal(db.getSession(id)?.steeringAttempts?.length, 1);
+  svc.onSessionEvent(id, {
+    kind: "user_message", text: "authoritative canonical delivery", turnId: "queue-history-exact",
+  });
+  assert.equal(db.getSession(id)?.steeringAttempts, undefined);
   assert.equal(hub.sessionChangedByIdCalls.includes(id), true);
 });
 

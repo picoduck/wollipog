@@ -3168,6 +3168,9 @@ textarea {
   font-size: var(--text-sm);
   overflow: hidden;
 }
+.steering-terminal-receipts[data-terminal-status="queued_again"] {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--border));
+}
 .steering-terminal-controls {
   display: flex;
   align-items: center;

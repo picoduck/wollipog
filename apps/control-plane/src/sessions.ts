@@ -6847,6 +6847,10 @@ export class SessionsService {
         sessionId, steeringEvidence.submissionId, steeringEvidence.turnId, now,
       )
       : false;
+    const retiredQueuedAgain = payload.kind === "user_message" && payload.deliveryIntent !== "steer" &&
+      typeof payload.turnId === "string"
+      ? this.db.retireQueuedAgainSteeringReceiptFromUserMessage(sessionId, payload.turnId, now)
+      : false;
     const commandEvidence = payload.kind === "user_message" ? payload.commandInvocation : undefined;
     const reconciledCommand = commandEvidence
       ? this.db.resolveSessionCommandInvocationFromUserMessage(
@@ -6862,7 +6866,7 @@ export class SessionsService {
         )
       : false;
     if (payload.kind !== "question_request") this.hub.sessionEvent(ev);
-    if (reconciledSteering || reconciledCommand ||
+    if (reconciledSteering || retiredQueuedAgain || reconciledCommand ||
         payload.kind === "background_continuation_delivered") {
       this.hub.sessionChangedById(sessionId);
     }

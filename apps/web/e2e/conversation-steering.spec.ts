@@ -595,6 +595,61 @@ test("durable receipts render every disposition and uncertain recovery actions",
     .toMatchObject({ submissionId: "receipt-uncertain-dismiss", action: "dismiss" });
 });
 
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+  test(`completed Queue Again receipts reconcile and dismiss safely at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.evaluate(() => {
+      const base = {
+        turnId: "turn-original", source: "direct" as const, state: "uncertain" as const,
+        reason: "transport_uncertain" as const, createdAt: 10,
+      };
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+        queued: [
+          { id: "queue-delivered", text: "Repeated prompt text" },
+          { id: "queue-manual", text: "Keep this queued prompt" },
+        ],
+        steeringAttempts: [
+          { ...base, submissionId: "queue-again-delivered", text: "Repeated prompt text", updatedAt: 11,
+            resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-delivered" } },
+          { ...base, submissionId: "queue-again-manual", text: "Keep this queued prompt", updatedAt: 12,
+            resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-manual" } },
+        ],
+      });
+    });
+
+    const completedGroup = page.locator('[data-terminal-status="queued_again"]');
+    await expect(completedGroup).toBeVisible();
+    await expect(completedGroup).toContainText("2 Completed Receipts");
+    expect((await completedGroup.boundingBox())!.height).toBeLessThanOrEqual(48);
+    await completedGroup.getByRole("button", { name: /Completed Receipts/ }).click();
+    const delivered = receipt(page, "queue-again-delivered");
+    const manual = receipt(page, "queue-again-manual");
+    await expect(delivered).toContainText("Queued for a later turn.");
+    await expect(delivered).not.toContainText("Transport uncertain.");
+    await expect(manual.getByRole("button", { name: "Dismiss" })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath(`queue-again-settled-${viewport.width}.png`) });
+
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage(
+      "session-alpha", "Repeated prompt text", "queue-other",
+    ));
+    await expect(delivered).toBeVisible();
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage(
+      "session-alpha", "Canonical delivered prompt", "queue-delivered",
+    ));
+    await expect(delivered).toHaveCount(0);
+
+    await manual.getByRole("button", { name: "Dismiss" }).click();
+    await expect(manual).toHaveCount(0);
+    await expect(page.getByTestId("queued-prompt-queue-manual")).toContainText("Keep this queued prompt");
+    await expect.poll(() => page.evaluate(() =>
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringResolutionRequests().at(-1)
+    )).toMatchObject({ submissionId: "queue-again-manual", action: "dismiss" });
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSnapshot());
+    await expect(manual).toHaveCount(0);
+    await expect(page.getByTestId("queued-prompt-queue-manual")).toBeVisible();
+  });
+}
+
 test("concurrent uncertainty resolutions retain independent pending UI", async ({ page }) => {
   await page.evaluate(() => {
     const base = { turnId: "turn-active", source: "direct" as const, createdAt: 10 };
