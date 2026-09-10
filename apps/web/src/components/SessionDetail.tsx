@@ -2808,6 +2808,8 @@ function SessionDetailLoaded({
                 ...(session.model ? { model: session.model } : {}),
                 ...(session.effort ? { effort: session.effort } : {}),
                 ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}),
+                // The tier is a deliberate cost/latency choice; recovery must not quietly reset it.
+                ...(session.serviceTier ? { serviceTier: session.serviceTier } : {}),
               },
             }
           : undefined,
@@ -4959,7 +4961,8 @@ function SessionDetailLoaded({
           )}
         </Modal>
       )}
-      {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver} turn={handoffTurn}
+      {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver}
+        sourceServiceTier={session.serviceTier ?? undefined} turn={handoffTurn}
         onClose={() => setHandoffTurn(null)} onCreate={async (agentId, config) => {
           const release = acquireSessionFork(sessionId);
           if (!release) throw new Error("A conversation fork or handoff is already in progress.");
