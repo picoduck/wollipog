@@ -38,3 +38,16 @@ test("link errors and conflicts remain visible", () => {
   failed.reported!.error = "Sync failed";
   assert.equal(skillAgentMatrixCell(runner, agent, "review", failed).reported, "Error");
 });
+test("unsupported WSL context details pass through to the assignment matrix", () => {
+  const failed = state();
+  failed.reported!.deployed![0]!.links[0] = {
+    agentId: agent.id,
+    status: "unsupported",
+    detail: "this agent's WSL distribution name is invalid or unsafe",
+  };
+  assert.deepEqual(skillAgentMatrixCell(runner, agent, "review", failed), {
+    desired: "Manual Only",
+    reported: "Unsupported",
+    detail: "this agent's WSL distribution name is invalid or unsafe",
+  });
+});

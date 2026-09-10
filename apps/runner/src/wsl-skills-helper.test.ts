@@ -11,9 +11,9 @@ const owner = "a".repeat(64);
 const firstDigest = "1".repeat(64);
 const secondDigest = "2".repeat(64);
 
-function invoke(home: string, specification: Record<string, unknown>): Promise<{ status: number | null; stdout: string; stderr: string }> {
+function invoke(home: string, specification: Record<string, unknown>, helper = WSL_SKILLS_HELPER): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("python3", ["-c", WSL_SKILLS_HELPER], {
+    const child = spawn("python3", ["-c", helper], {
       env: { ...process.env, HOME: home }, stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = ""; let stderr = "";
@@ -23,6 +23,26 @@ function invoke(home: string, specification: Record<string, unknown>): Promise<{
     child.on("close", (status) => resolve({ status, stdout, stderr }));
     child.stdin.end(JSON.stringify(specification));
   });
+}
+
+function instrumentHelper(before: string, after: string): string {
+  assert.ok(WSL_SKILLS_HELPER.includes(before), "the crash test seam must match the fixed helper");
+  return WSL_SKILLS_HELPER.replace(before, after);
+}
+
+function compactionSiblings(home: string): string[] {
+  const root = join(home, ".agent-manager", "provider-home-leases-v1");
+  return readdirSync(root).filter((name) => name.startsWith(".mutable-home.compact-"));
+}
+
+async function fillLeaseJournal(home: string, store: string): Promise<Record<string, unknown>> {
+  const specification = { ownerHash: owner, distro: "Ubuntu", storeRoot: resolve(store), bindings: [],
+    skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true };
+  for (let pass = 0; pass < 8; pass += 1) {
+    const result = await invoke(home, specification);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  }
+  return specification;
 }
 
 test("the fixed WSL helper atomically deploys, switches, and removes owned links", async (t) => {
@@ -215,4 +235,147 @@ test("removal sweeps harness directories whose prior binding disappeared", async
   const removed = await invoke(home, { ...base, bindings: [codex], skills: [] });
   assert.equal(removed.status, 0, removed.stderr || removed.stdout);
   assert.equal(existsSync(join(home, ".claude/skills/review")), false);
+});
+
+test("a later pass recovers compaction crashes on either side of directory exchange", async (t) => {
+  for (const crash of ["before", "after"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `wollipog-wsl-skills-compact-${crash}-`));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const store = join(root, "store");
+    mkdirSync(home, { mode: 0o700 });
+    mkdirSync(store);
+    const specification = await fillLeaseJournal(home, store);
+    const helper = crash === "before"
+      ? instrumentHelper(
+          "        exchange_attempted = True\n        if not exchange_directories(root, temporary, \"mutable-home.lock\"):",
+          "        os._exit(86)\n        exchange_attempted = True\n        if not exchange_directories(root, temporary, \"mutable-home.lock\"):",
+        )
+      : instrumentHelper(
+          "        if not exchange_directories(root, temporary, \"mutable-home.lock\"):\n            fail(\"provider home lease compaction is unavailable\")\n    except:",
+          "        if not exchange_directories(root, temporary, \"mutable-home.lock\"):\n            fail(\"provider home lease compaction is unavailable\")\n        os._exit(87)\n    except:",
+        );
+    const interrupted = await invoke(home, specification, helper);
+    assert.equal(interrupted.status, crash === "before" ? 86 : 87);
+    assert.equal(compactionSiblings(home).length, 1, `${crash}-exchange crash leaves one inert sibling`);
+
+    const recovered = await invoke(home, specification);
+    assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+    assert.deepEqual(compactionSiblings(home), [], `${crash}-exchange sibling is verified and removed`);
+    const lock = join(home, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock");
+    assert.ok(readdirSync(lock).some((name) => name.startsWith("next-")), "the canonical journal remains valid");
+  }
+});
+
+test("deferred compaction cleanup is retried while foreign lookalikes remain untouched", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-cleanup-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await fillLeaseJournal(home, store);
+  const deferred = instrumentHelper(
+    "    os.close(lock)\n    cleanup_compactions(root, fresh)\n    return fresh",
+    "    os.close(lock)\n    return fresh",
+  );
+  const compacted = await invoke(home, specification, deferred);
+  assert.equal(compacted.status, 0, compacted.stderr || compacted.stdout);
+  assert.equal(compactionSiblings(home).length, 1);
+
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const fakeBase = `.mutable-home.compact-00000000-0000-4000-8000-000000000000-${"0".repeat(64)}-${"1".repeat(32)}`;
+  const foreignDirectory = join(leaseRoot, fakeBase);
+  const foreignSymlink = join(leaseRoot,
+    `.mutable-home.compact-00000000-0000-4000-8000-000000000001-${"0".repeat(64)}-${"2".repeat(32)}`);
+  mkdirSync(foreignDirectory, { mode: 0o700 });
+  writeFileSync(join(foreignDirectory, "unexpected"), "keep", { mode: 0o600 });
+  symlinkSync(home, foreignSymlink);
+
+  const recovered = await invoke(home, specification);
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.equal(existsSync(join(foreignDirectory, "unexpected")), true);
+  assert.equal(readlinkSync(foreignSymlink), home);
+  assert.deepEqual(compactionSiblings(home).sort(), [fakeBase, foreignSymlink.split("/").at(-1)!].sort());
+});
+
+test("a crash partway through verified cleanup is safely resumable", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-partial-cleanup-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await fillLeaseJournal(home, store);
+  const interruptedCleanup = instrumentHelper(
+    "            for entry in entries: os.unlink(entry, dir_fd=candidate)\n            os.fsync(candidate)",
+    "            for index, entry in enumerate(entries):\n                os.unlink(entry, dir_fd=candidate)\n                if index == 0: os._exit(88)\n            os.fsync(candidate)",
+  );
+  const interrupted = await invoke(home, specification, interruptedCleanup);
+  assert.equal(interrupted.status, 88);
+  const [sibling] = compactionSiblings(home);
+  assert.ok(sibling);
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const remaining = readdirSync(join(leaseRoot, sibling));
+  assert.ok(remaining.length > 0, "the crash leaves a partial journal");
+  assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), true,
+    "an external inode-bound proof survives partial or empty cleanup");
+
+  const recovered = await invoke(home, specification);
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.deepEqual(compactionSiblings(home), []);
+  assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), false);
+});
+
+test("an inode-bound proof recovers a crash after a compaction sibling becomes empty", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-empty-cleanup-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await fillLeaseJournal(home, store);
+  const interruptedCleanup = instrumentHelper(
+    "            for entry in entries: os.unlink(entry, dir_fd=candidate)\n            os.fsync(candidate)",
+    "            for entry in entries: os.unlink(entry, dir_fd=candidate)\n            os._exit(89)\n            os.fsync(candidate)",
+  );
+  const interrupted = await invoke(home, specification, interruptedCleanup);
+  assert.equal(interrupted.status, 89);
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const [sibling] = compactionSiblings(home);
+  assert.ok(sibling);
+  assert.deepEqual(readdirSync(join(leaseRoot, sibling)), []);
+  assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), true);
+
+  const recovered = await invoke(home, specification);
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.deepEqual(compactionSiblings(home), []);
+  assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), false);
+});
+
+test("unavailable atomic exchange preserves the append-only journal and emits a bounded diagnostic", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-unavailable-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await fillLeaseJournal(home, store);
+  const unavailable = instrumentHelper(
+    "def exchange_directories(root, left, right):\n    try:",
+    "def exchange_directories(root, left, right):\n    return False\n    try:",
+  );
+  const result = await invoke(home, specification, unavailable);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const output = JSON.parse(result.stdout) as { warnings: string[] };
+  assert.equal(output.warnings.length, 1);
+  assert.match(output.warnings[0]!, /remains append-only beyond 16 records/u);
+  assert.ok(output.warnings[0]!.length <= 500);
+  const lock = join(home, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock");
+  assert.ok(readdirSync(lock).length > 16, "the last valid chain remains append-only when exchange is unavailable");
+  assert.deepEqual(compactionSiblings(home), [], "the failed pre-exchange staging directory is removed");
+
+  const next = await invoke(home, specification, unavailable);
+  assert.equal(next.status, 0, next.stderr || next.stdout);
+  assert.ok(readdirSync(lock).length > 16, "later passes continue from the preserved valid chain");
 });

@@ -76,6 +76,7 @@ import {
 } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { replaceWindowsSkillJunction } from "./windows-skill-junction.js";
+import { validWslDistroName } from "./wsl-context.js";
 
 /** Harness skill directories, home-relative. Only native claude-code/codex deployment is built. */
 export const SKILL_DIRS: Partial<Record<AgentDriverKind, string>> = {
@@ -129,13 +130,23 @@ export interface ReconcileSkillsOptions {
 /** Chunked v96 manifests omit content for a digest already verified in this runner's store. */
 export type ReconcileSkillEntry = Omit<SkillSyncEntry, "files"> & { files?: SkillFile[] };
 
+function validReconcileTargets(value: unknown): value is SkillSyncEntry["targets"] {
+  return Array.isArray(value) && value.length <= 4096 && value.every((target) =>
+    target !== null && typeof target === "object" &&
+    typeof (target as { agentId?: unknown }).agentId === "string" &&
+    (target as { agentId: string }).agentId.length > 0 &&
+    !/[\p{Cc}\p{Cf}]/u.test((target as { agentId: string }).agentId) &&
+    ((target as { invocation?: unknown }).invocation === "agent" ||
+      (target as { invocation?: unknown }).invocation === "manual"));
+}
+
 /** One policy for both manifest cache negotiation and final reconciliation. */
 export function skillNeedsManualVariant(
   agents: AgentDefinition[],
   entry: Pick<ReconcileSkillEntry, "targets">,
 ): boolean {
   const drivers = new Map(agents.map((agent) => [agent.id, agent.driver ?? "acp"]));
-  return entry.targets.some(
+  return validReconcileTargets(entry.targets) && entry.targets.some(
     (target) => target.invocation === "manual" && drivers.get(target.agentId) === "claude-code",
   );
 }
@@ -1206,11 +1217,12 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         ? "invalid skill name"
         : !DIGEST_HEX.test(entry.versionDigest)
           ? "invalid version digest"
-          : !Array.isArray(entry.targets)
+          : !validReconcileTargets(entry.targets)
             ? "invalid skill targets"
             : null;
     } else {
       invalid = validateSkillSyncEntry(entry as SkillSyncEntry);
+      if (!invalid && !validReconcileTargets(entry.targets)) invalid = "invalid skill targets";
     }
     seenPreparedNames.add(entry.name);
     const manualNeeded = !invalid && skillNeedsManualVariant(agents, entry);
@@ -1394,9 +1406,18 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       state.links = entry.targets.map((target) => ({
         agentId: target.agentId,
         status: "unsupported" as const,
-        detail: agents.some((agent) => agent.id === target.agentId && agent.context?.kind === "wsl")
-          ? "this target reconciles inside its WSL distribution"
-          : "this agent is not present on the runner or does not support managed skills",
+        detail: (() => {
+          const agent = agents.find((candidate) => candidate.id === target.agentId);
+          if (!agent) return "this agent is not present on the runner";
+          if (agent.context?.kind !== "wsl") return "this agent is not a WSL target";
+          if (!validWslDistroName(agent.context.distro)) {
+            return "this agent's WSL distribution name is invalid or unsafe";
+          }
+          if (!SKILL_DIRS[agent.driver ?? "acp"]) {
+            return "this agent's driver does not support managed skills";
+          }
+          return "this target reconciles inside its WSL distribution";
+        })(),
       }));
       deployed.push(state);
       continue;
