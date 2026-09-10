@@ -9096,7 +9096,7 @@ body.shell-dock-dragging * {
      Desktop: line one is the lead (the sender and the Git state) and the signals column; line two
      is the title, the background badge, and the activity strip. A phone keeps #782's three-line
      stack — it has no horizontal room for the Git state beside the sender, and that shape is what
-     this one is a response to: three lines cost about 85px of desktop card to say what fits on two.
+     this one is a response to: three lines spend about 94px of desktop card saying what two say in 73.
      The COLUMNS are the same either way, and deliberately so. The desktop shape is a lead wrapper
      inside column one, not a third column: as three columns the flexible one starved, and a card
      with several attention pills lost its branch name to the signals column entirely.
@@ -9158,10 +9158,15 @@ body.shell-dock-dragging * {
    ellipsizes "Codex · Alpha" and keeps its branch name — the priority the card had when the Git
    state owned a row of its own, and the one a three-column grid could not express: there the
    flexible column starved and the branch disappeared outright.
-   On a phone this becomes `display: contents` (see the mobile block) and its two children go back
-   to being grid items at the areas below, which is #782's card exactly. */
+   A phone does not render this wrapper at all, so the sender and the Git line stay grid items in
+   #782's DOM order. The mobile block still dissolves it with `display: contents` for the one frame
+   during a resize where the media query has flipped but React has not re-rendered yet. */
 .inbox-row-lead { display: flex; min-width: 0; grid-area: 1 / 1; align-items: center; gap: 10px; }
-.inbox-row-lead > .inbox-row-sender { flex-shrink: 100; }
+/* CLIPPED, not merely shrunk. The sender is a flex box whose label already ellipsizes, but the
+   16px agent icon inside it is `flex: none`: at a crowded 770px the box resolves to 0 width and the
+   icon carried on painting 6px into the branch name beside it. Overflow here is what makes "the
+   sender yields first" mean the sender disappears rather than overlaps. */
+.inbox-row-lead > .inbox-row-sender { flex-shrink: 100; overflow: hidden; }
 .inbox-row-lead > .inbox-row-meta { flex: 1 1 auto; }
 /* The card's LAST line on desktop, so it carries the background badge as well as the strip. The
    height floor is the badge's own box (18px line + 1px border each side): without it a card holding
@@ -9437,8 +9442,10 @@ body.shell-dock-dragging * {
      no width to put the Git state beside the sender, so it gets a line of its own — with the
      background badge on it, because those are the two things a phone reader has no other way to
      see. A phone drops only what it cannot afford: the base ref, and a few cells off the strip.
-     `display: contents` dissolves the desktop lead wrapper: the sender and the Git line become
-     grid items again and land at their own areas, which is this card before #877 to the pixel. */
+     A phone renders no lead wrapper, so this rule normally matches nothing. It exists for the frame
+     during a resize where the media query has already flipped and React has not re-rendered yet:
+     dissolving the box puts the sender and the Git line back at their own grid areas instead of
+     stacking line one on top of itself for a paint. */
   .inbox-row-lead { display: contents; }
   /* The badge is on line three here, so line two is the title and the strip again and needs no
      floor of its own. Left at 20px it would add a pixel to every phone card. */

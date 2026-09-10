@@ -100,6 +100,11 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onPointerPressChange,
   onSessionMenu,
 }, ref) {
+  // The breakpoint, read ONCE for the whole list rather than once per mounted card. The same answer
+  // decides the cards' shape and the estimate the virtualizer positions unmeasured rows with, and
+  // those two must never disagree: a list estimating 97px for rows that render at 73px puts a
+  // restored scroll position most of a card out per row it has not measured yet.
+  const threeRow = useIsMobile();
   // The scroll container is BOTH the forwarded ref (InboxView restores scrollTop through it) and
   // the virtualizer's viewport.
   //
@@ -111,10 +116,6 @@ export const InboxList = forwardRef<HTMLDivElement, {
   // array it was worse: `[]` froze the handle at the first render, which for the inbox is the empty
   // state that returns before attaching anything, so the forwarded ref stayed null forever.
   // A callback ref fires only when the NODE changes, which is the actual event both sides want.
-  // Read ONCE for the whole list, not once per mounted card: the same answer decides the cards'
-  // shape and the estimate the virtualizer positions unmeasured rows with, and those two must never
-  // disagree — a list estimating 85px for rows that render at 63px scrolls to the wrong place.
-  const threeRow = useIsMobile();
   const listRef = useRef<HTMLDivElement | null>(null);
   const attachList = useCallback((node: HTMLDivElement | null) => {
     listRef.current = node;

@@ -18,6 +18,20 @@ const WIDTHS = [390, 1000, 1400] as const;
  */
 const VIEWPORT_HEIGHT = 1400;
 
+/**
+ * Resize, then WAIT FOR THE CARD TO AGREE. #877 made the card's DOM depend on the breakpoint, not
+ * just its CSS, so a resize is no longer settled the instant `setViewportSize` returns: React
+ * re-renders from the `resize` event, before the next paint but sometimes after Playwright's next
+ * `evaluate`. Measuring immediately catches a phone-shaped DOM under desktop CSS and reports three
+ * rows at 1400px. Nothing is ever painted in that state — this is a harness race, not a frame a
+ * reader can see — but every geometry assertion below has to be taken after it resolves.
+ */
+const useViewport = async (page: import("@playwright/test").Page, width: number, height = VIEWPORT_HEIGHT) => {
+  await page.setViewportSize({ width, height });
+  await expect(page.locator(".inbox-row").first().locator(":scope > *").first())
+    .toHaveClass(width <= 760 ? /inbox-row-sender/ : /inbox-row-lead/);
+};
+
 test.beforeEach(async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
   await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-row-layout");
@@ -26,7 +40,7 @@ test.beforeEach(async ({ page }) => {
 
 for (const width of WIDTHS) {
   test(`every active row shows its whole activity strip at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     const strips = await page.locator(".inbox-row").evaluateAll((rows) => rows.map((row) => {
       const strip = row.querySelector<HTMLElement>(".inbox-row-activity")!;
       const stripBox = strip.getBoundingClientRect();
@@ -53,7 +67,7 @@ for (const width of WIDTHS) {
   });
 
   test(`a long title fades instead of displacing the strip at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     const titles = await page.locator(".inbox-row").evaluateAll((rows) => rows.map((row) => {
       const node = row.querySelector<HTMLElement>(".inbox-row-title")!;
       const strip = row.querySelector<HTMLElement>(".inbox-row-activity")!;
@@ -151,7 +165,7 @@ for (const width of LAYOUT_WIDTHS) {
   const phone = width <= 760;
   const expectedRows = phone ? 3 : 2;
   test(`every card is exactly ${expectedRows} rows with an explicit Git state at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     const rows = await page.locator(".inbox-row").evaluateAll(measureRows);
 
     expect(rows).toHaveLength(11);
@@ -202,7 +216,7 @@ for (const width of LAYOUT_WIDTHS) {
 // bought nothing, and a phone card that shrank means the three-row layout was not left alone.
 test("a desktop card is shorter than a phone card, and the phone card is untouched", async ({ page }) => {
   const heightAt = async (width: number) => {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     const rows = await page.locator(".inbox-row").evaluateAll(measureRows);
     expect(rows).toHaveLength(11);
     return rows[0]!.height;
@@ -217,7 +231,7 @@ test("a desktop card is shorter than a phone card, and the phone card is untouch
 });
 
 test("a card's height does not move with selection, unread, or stalled state", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
+  await useViewport(page, 1400);
   const baseline = (await page.locator(".inbox-row").evaluateAll(measureRows)).map((row) => row.height);
   // The state classes, not a click: this asserts the CSS itself never spends layout on a state
   // that is supposed to be paint only, on every card at once rather than on whichever one is easy
@@ -236,7 +250,7 @@ test("a card's height does not move with selection, unread, or stalled state", a
 });
 
 test("the Git line names a branch, admits to none, or admits to not knowing", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
+  await useViewport(page, 1400);
   const lines = page.locator(".inbox-row-git");
   await expect(lines).toHaveCount(11);
   // Rows five and six hold no worktree and never asked for one: an authoritative absence.
@@ -259,7 +273,7 @@ test("the Git line names a branch, admits to none, or admits to not knowing", as
 // #877 made responsive, and its words and accessible name are what must not move with it.
 for (const width of [390, 1400]) {
   test(`every background-work state keeps its accessible name at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     for (const [index, label] of [
       [7, "Waiting on External Job"],
       [8, "Waiting on External Job"],
@@ -278,7 +292,7 @@ for (const width of [390, 1400]) {
 // identity, the pill is the item that must survive, and the base ref yields first.
 for (const width of [390, 770, 1000, 1400]) {
   test(`a long branch yields to the PR pill without evicting itself at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     const geometry = await page.locator(".inbox-row").nth(8).evaluate((row) => {
       const style = getComputedStyle(row);
       const rightEdge = row.getBoundingClientRect().right - parseFloat(style.paddingRight);
@@ -355,7 +369,7 @@ for (const width of [770, 900, 1000, 1400]) {
   // Two more pills than the fixture's Running and Stalled: a card that also wants an attention pill
   // and a reminder. That is an ordinary busy session, not a contrived one.
   test(`a crowded signals column takes its width from the sender, not the branch, at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     const before = await measureUnderSignalPressure(page, 0);
     const after = await measureUnderSignalPressure(page, 2);
 
@@ -374,13 +388,13 @@ for (const width of [770, 900, 1000, 1400]) {
 // crowded as a real card gets: a lifecycle pill, an attention pill, an orphaned-background-work
 // pill, a reminder and Stalled at once.
 test("the crowded extreme spends the sender completely before the branch gives up anything", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
+  await useViewport(page, 1400);
   const roomy = await measureUnderSignalPressure(page, 4);
   // A full-width desktop card has room for all of it; nothing has to yield.
   expect(roomy.branchWidth).toBeGreaterThan(300);
   expect(roomy.senderClipped).toBe(false);
 
-  await page.setViewportSize({ width: 770, height: VIEWPORT_HEIGHT });
+  await useViewport(page, 770);
   const tight = await measureUnderSignalPressure(page, 4);
   // Just above the phone breakpoint there is genuinely not enough line for all three. The order is
   // what is guaranteed: the sender is at zero before the Git line yields, the card does not change
@@ -395,7 +409,7 @@ test("the crowded extreme spends the sender completely before the branch gives u
 // ellipsize rather than push the branch off the line.
 for (const width of [770, 1400]) {
   test(`a long agent and project label yields line one to the branch at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     await page.evaluate(() => {
       const sender = document.querySelector<HTMLElement>(".inbox-row-sender > span:last-child")!;
       sender.textContent = "An Agent With an Extremely Long Name · A Project Whose Name Also Runs On and On "
@@ -424,7 +438,7 @@ for (const width of [770, 1400]) {
 }
 
 test("the worktree line hides a default base ref and keeps a stacked one", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
+  await useViewport(page, 1400);
   const worktreeLines = page.locator(".inbox-row-git");
   await expect(worktreeLines.nth(0)).toContainText("fix/issue-664-restructure-inbox-rows");
   await expect(worktreeLines.nth(0).locator(".inbox-row-base")).toHaveCount(0);
@@ -438,7 +452,7 @@ test("the worktree line hides a default base ref and keeps a stacked one", async
 // line's clip — line three reproducing the very failure line two was restructured to remove.
 for (const width of [770, 800, 1000, 1400]) {
   test(`a long base ref truncates instead of evicting the branch or the PR pill at ${width}px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     const line = page.locator(".inbox-row-git").nth(2);
     const geometry = await line.evaluate((node) => {
       const row = node.closest<HTMLElement>(".inbox-row")!;
@@ -465,7 +479,7 @@ for (const width of [770, 800, 1000, 1400]) {
 }
 
 test("a phone drops the base ref from the worktree line but keeps branch and PR state", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: VIEWPORT_HEIGHT });
+  await useViewport(page, 390);
   const stacked = page.locator(".inbox-row-git").nth(1);
   await expect(stacked.locator(".inbox-row-branch")).toBeVisible();
   await expect(stacked.locator(".inbox-row-pr-pill")).toBeVisible();
@@ -474,7 +488,7 @@ test("a phone drops the base ref from the worktree line but keeps branch and PR 
 
 test("the message preview no longer renders in Inbox rows", async ({ page }) => {
   for (const width of WIDTHS) {
-    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await useViewport(page, width);
     await expect(page.locator(".inbox-row-snippet")).toHaveCount(0);
     await expect(page.locator(".inbox-row").first()).not.toContainText("preview");
   }
@@ -483,7 +497,7 @@ test("the message preview no longer renders in Inbox rows", async ({ page }) => 
 // #679: the row compares against the repository's reported default branch instead of guessing from
 // the branch's name, so a `develop`-default repository keeps an explicit `origin/main` base.
 test("a reported default branch decides whether the base ref is worth showing", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
+  await useViewport(page, 1400);
   const nonDefault = page.locator(".inbox-row-git").nth(3);
   await expect(nonDefault.locator(".inbox-row-branch")).toHaveText("fix/issue-679-default-branch");
   await expect(nonDefault.locator(".inbox-row-base")).toContainText("← origin/main");
@@ -499,7 +513,7 @@ test("a reported default branch decides whether the base ref is worth showing", 
 // epoch that has to invalidate one shape's cached sizes without losing the reader's place.
 test("crossing the breakpoint mid-scroll keeps the reader's row and the list's geometry", async ({ page }) => {
   // Short enough that eleven cards genuinely overflow the list in BOTH shapes.
-  await page.setViewportSize({ width: 1400, height: 800 });
+  await useViewport(page, 1400, 800);
   const list = page.locator(".inbox-list");
   await expect(page.locator(".inbox-row").first()).toBeVisible();
 
@@ -529,7 +543,7 @@ test("crossing the breakpoint mid-scroll keeps the reader's row and the list's g
   });
 
   for (const width of [390, 1400, 760, 770]) {
-    await page.setViewportSize({ width, height: 800 });
+    await useViewport(page, width, 800);
     // The row the reader was on stays on screen across the shape change, rather than the list
     // jumping to wherever the old shape's estimates happened to put that scroll offset.
     await expect(page.getByText(anchorTitle)).toBeInViewport();
@@ -542,4 +556,85 @@ test("crossing the breakpoint mid-scroll keeps the reader's row and the list's g
     }, { message: `neighbouring cards at ${width}px` })
       .toEqual({ neighbours: true, overlapping: false, holed: false });
   }
+});
+
+// Round two of cross-model review, confirmed by measurement: the phone card's DOM order had moved.
+// The lead wrapper was rendered at every width and dissolved on a phone with `display: contents`,
+// which lays out identically to the pixel but does NOT reorder the accessibility tree — the row
+// announced sender, branch, title while showing sender, title, branch. A screenshot diff cannot see
+// this, so the reading order is asserted directly, at both shapes.
+for (const [width, expected] of [
+  [390, ["inbox-row-sender", "inbox-row-copy", "inbox-row-meta", "inbox-row-signals"]],
+  // On a desktop card the Git state really is on line one, so the lead's DOM order IS the visual
+  // order: sender then branch, then the title line below it.
+  [1400, ["inbox-row-lead", "inbox-row-copy", "inbox-row-signals"]],
+] as const) {
+  test(`the card's reading order matches its visual order at ${width}px`, async ({ page }) => {
+    await useViewport(page, width);
+    const order = await page.locator(".inbox-row").first().evaluate((row) =>
+      [...row.children].map((child) => child.className));
+    expect(order).toEqual([...expected]);
+
+    // The row's own text, which is what its accessible name is computed from, in reading order.
+    const reading = await page.locator(".inbox-row").first().evaluate((row) => {
+      const seen: string[] = [];
+      for (const selector of [".inbox-row-sender", ".inbox-row-title", ".inbox-row-git"]) {
+        const node = row.querySelector<HTMLElement>(selector)!;
+        seen.push(`${selector}@${[...row.querySelectorAll("*")].indexOf(node)}`);
+      }
+      return seen;
+    });
+    const positions = reading.map((entry) => Number(entry.split("@")[1]));
+    if (width <= 760) {
+      // sender, then title, then Git state — #782's order, unchanged.
+      expect(positions[0]).toBeLessThan(positions[1]!);
+      expect(positions[1]).toBeLessThan(positions[2]!);
+    } else {
+      // sender, then Git state, then title — which is what a desktop card shows.
+      expect(positions[0]).toBeLessThan(positions[2]!);
+      expect(positions[2]).toBeLessThan(positions[1]!);
+    }
+  });
+}
+
+// Round two, second finding, also confirmed: the sender's label ellipsizes but the 16px agent icon
+// is `flex: none`. With the sender box squeezed to 0 the icon kept painting, 6px into the branch
+// name beside it. "The sender yields first" has to mean it disappears, not that it overlaps.
+test("a sender squeezed to nothing takes its icon with it instead of painting over the branch", async ({ page }) => {
+  await useViewport(page, 770);
+  const geometry = await page.locator(".inbox-row").first().evaluate((row) => {
+    const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!;
+    for (let index = 0; index < 2; index += 1) {
+      const pill = document.createElement("span");
+      pill.className = "inbox-status-pill blocked";
+      pill.textContent = "Approval Required";
+      signals.prepend(pill);
+    }
+    const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!;
+    const icon = sender.querySelector("svg, img")!;
+    const meta = row.querySelector<HTMLElement>(".inbox-row-meta")!;
+    const iconBox = icon.getBoundingClientRect();
+    const metaBox = meta.getBoundingClientRect();
+    // HIT TESTING, not rectangles. `getBoundingClientRect` reports an element's own geometry whether
+    // or not an ancestor clips it, so the icon's rect still runs past a `overflow: hidden` sender.
+    // What is actually painted at the contested point is what `elementFromPoint` answers.
+    const contested = iconBox.right - 2;
+    const painted = document.elementFromPoint(contested, iconBox.top + iconBox.height / 2);
+    return {
+      senderWidth: sender.getBoundingClientRect().width,
+      senderClipsOverflow: getComputedStyle(sender).overflowX,
+      contestedInsideMeta: contested > metaBox.left,
+      iconOwnsContestedPoint: painted != null && (painted === icon || icon.contains(painted)),
+      metaOwnsContestedPoint: painted != null && meta.contains(painted),
+    };
+  });
+
+  // The premise: this pressure really does collapse the sender, and the icon's box really does
+  // extend into the Git line's territory.
+  expect(geometry.senderWidth).toBeLessThanOrEqual(1);
+  expect(geometry.senderClipsOverflow).toBe("hidden");
+  expect(geometry.contestedInsideMeta).toBe(true);
+  // And nothing of the sender is painted there: the icon is clipped away with its box.
+  expect(geometry.iconOwnsContestedPoint).toBe(false);
+  expect(geometry.metaOwnsContestedPoint).toBe(true);
 });
