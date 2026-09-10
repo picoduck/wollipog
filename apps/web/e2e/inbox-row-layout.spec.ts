@@ -318,9 +318,81 @@ for (const width of [390, 770, 1000, 1400]) {
   });
 }
 
-// #877's own failure mode: the sender and the Git state now compete for line one, and a long
-// agent-and-project label is the thing that could take the branch's width. It must ellipsize at its
-// own cap instead, on the widest and the narrowest desktop alike.
+// #877's own failure mode, and the reason line one is a flex LEAD inside column one rather than a
+// third grid column. The sender, the Git state, and the signals column all want line one; whichever
+// is asked to yield LAST is the one that survives, and the branch name is the card's identity.
+//
+// As three grid columns this was a measured regression: at 770px with four extra attention pills the
+// Git column resolved to 0px — branch, base ref and PR pill gone outright — while the card grew from
+// 65px to 75px and put the virtualization estimate out by a row. The lead's shrink factors invert
+// that, so the sender ellipsizes and then collapses before the Git line gives up anything.
+
+/** Adds `count` attention pills to the first card's signals column and measures line one. */
+const measureUnderSignalPressure = (page: import("@playwright/test").Page, count: number) =>
+  page.locator(".inbox-row").first().evaluate((row, pills) => {
+    row.querySelectorAll(".injected-pressure").forEach((node) => node.remove());
+    const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!;
+    for (let index = 0; index < pills; index += 1) {
+      const pill = document.createElement("span");
+      pill.className = "inbox-status-pill blocked injected-pressure";
+      pill.textContent = "Approval Required";
+      signals.prepend(pill);
+    }
+    const width = (selector: string) => row.querySelector<HTMLElement>(selector)?.getBoundingClientRect().width ?? 0;
+    const label = row.querySelector<HTMLElement>(".inbox-row-sender > span:last-child")!;
+    const box = row.getBoundingClientRect();
+    return {
+      height: box.height,
+      senderWidth: width(".inbox-row-sender"),
+      senderClipped: label.scrollWidth > label.clientWidth + 1,
+      branchWidth: width(".inbox-row-branch"),
+      signalsOverflowRight: (row.querySelector<HTMLElement>(".inbox-row-signals")!.getBoundingClientRect().right)
+        - (box.right - parseFloat(getComputedStyle(row).paddingRight)),
+    };
+  }, count);
+
+for (const width of [770, 900, 1000, 1400]) {
+  // Two more pills than the fixture's Running and Stalled: a card that also wants an attention pill
+  // and a reminder. That is an ordinary busy session, not a contrived one.
+  test(`a crowded signals column takes its width from the sender, not the branch, at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    const before = await measureUnderSignalPressure(page, 0);
+    const after = await measureUnderSignalPressure(page, 2);
+
+    // The branch is the card's identity and stays readable.
+    expect(after.branchWidth).toBeGreaterThan(40);
+    // The sender is what paid for it: it gave up width, or there was enough for both.
+    expect(after.senderWidth).toBeLessThanOrEqual(before.senderWidth);
+    if (after.senderWidth < before.senderWidth) expect(after.senderClipped).toBe(true);
+    // And line one never grows the card or spills past its padding.
+    expect(Math.abs(after.height - before.height)).toBeLessThanOrEqual(0.5);
+    expect(after.signalsOverflowRight).toBeLessThanOrEqual(0.5);
+  });
+}
+
+// The cliff, pinned deliberately rather than left to be discovered. Four extra pills is about as
+// crowded as a real card gets: a lifecycle pill, an attention pill, an orphaned-background-work
+// pill, a reminder and Stalled at once.
+test("the crowded extreme spends the sender completely before the branch gives up anything", async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
+  const roomy = await measureUnderSignalPressure(page, 4);
+  // A full-width desktop card has room for all of it; nothing has to yield.
+  expect(roomy.branchWidth).toBeGreaterThan(300);
+  expect(roomy.senderClipped).toBe(false);
+
+  await page.setViewportSize({ width: 770, height: VIEWPORT_HEIGHT });
+  const tight = await measureUnderSignalPressure(page, 4);
+  // Just above the phone breakpoint there is genuinely not enough line for all three. The order is
+  // what is guaranteed: the sender is at zero before the Git line yields, the card does not change
+  // height, and nothing is drawn past the card's edge. Below this the Git line truncates further —
+  // that is the accepted cost of two rows at a near-phone width, not a collision.
+  expect(tight.senderWidth).toBe(0);
+  expect(tight.signalsOverflowRight).toBeLessThanOrEqual(0.5);
+  expect(tight.height).toBeCloseTo(roomy.height, 0);
+});
+
+// The same priority with no signals pressure at all: a very long agent-and-project label must
+// ellipsize rather than push the branch off the line.
 for (const width of [770, 1400]) {
   test(`a long agent and project label yields line one to the branch at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
@@ -335,8 +407,6 @@ for (const width of [770, 1400]) {
       const label = row.querySelector<HTMLElement>(".inbox-row-sender > span:last-child")!;
       const branch = row.querySelector<HTMLElement>(".inbox-row-branch")!;
       return {
-        rowWidth: row.getBoundingClientRect().width,
-        senderWidth: sender.getBoundingClientRect().width,
         clipped: label.scrollWidth > label.clientWidth + 1,
         ellipsis: getComputedStyle(label).textOverflow,
         branchWidth: branch.getBoundingClientRect().width,
@@ -345,8 +415,7 @@ for (const width of [770, 1400]) {
       };
     });
 
-    // Capped, clipped with an ellipsis, and still leaving the branch a readable share of the line.
-    expect(geometry.senderWidth).toBeLessThanOrEqual(geometry.rowWidth * 0.4);
+    // Clipped with an ellipsis, and still leaving the branch a readable share of the line.
     expect(geometry.clipped).toBe(true);
     expect(geometry.ellipsis).toBe("ellipsis");
     expect(geometry.branchWidth).toBeGreaterThan(40);

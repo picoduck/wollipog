@@ -132,9 +132,70 @@ function InboxRowInner({
           onDoubleClick={() => { if (!longPress.consumeSuppressedClick()) onExpand(session.id); }}
           title={`Select ${session.title}`}
         >
-          <span className="inbox-row-sender" title={`${agent} · ${projectName}`}>
-            <AgentIcon driver={session.driver} agentName={session.agentName} size={16} />
-            <span>{agent} · {projectName}</span>
+          {/* Line one's LEAD. On desktop this is a flex line holding the sender and the Git state,
+              which is what lets the sender be the first thing to give up width when the signals
+              column is wide — the priority the card had before #877, when the Git state owned a
+              whole row. As three grid columns instead, the flexible one starved: a card with
+              several attention pills lost its branch name entirely.
+              On a phone the wrapper is `display: contents`, so the sender and the Git line fall
+              back to being grid items at their own areas and #782's three-row card is untouched. */}
+          <span className="inbox-row-lead">
+            <span className="inbox-row-sender" title={`${agent} · ${projectName}`}>
+              <AgentIcon driver={session.driver} agentName={session.agentName} size={16} />
+              <span>{agent} · {projectName}</span>
+            </span>
+            {/* The Git line, on EVERY card (#782): a branch name, "No Branch", or "Branch Unavailable",
+                never an absence. Before this it appeared only for a session with an active worktree
+                and the background badge wrapped onto a line of its own, so the list stepped between
+                two, three, and four rows and never said whether a card without a Git line had no
+                branch or merely an unreported one.
+                A phone keeps it as line three, sharing that line with the background badge. A desktop
+                card puts it on line ONE, after the agent and project (#877): three rows of Git state,
+                title, and sender cost roughly 85px per card where two cost about 64, and horizontal
+                space is the one thing a desktop has and a phone does not. */}
+            <span className="inbox-row-meta">
+              <span className="inbox-row-git">
+                {/* The word the line stands for, so the row's accessible name carries the Git state. */}
+                <span className="sr-only">Branch: </span>
+                {activeWorktree ? (
+                  <>
+                    <span className="inbox-row-branch" title={`Branch: ${activeWorktree.branch}`}>
+                      {activeWorktree.branch}
+                    </span>
+                    {worktreeBaseRef && (
+                      <span className="inbox-row-base">
+                        {/* The arrow is decoration; assistive technology gets the word it stands for. */}
+                        <span className="sr-only">Base: </span>
+                        <span aria-hidden="true">← </span>
+                        {worktreeBaseRef}
+                      </span>
+                    )}
+                    {activeWorktree.pullRequest && (
+                      <span
+                        className={"inbox-row-pr-pill " + (activeWorktree.pullRequest.state === "open"
+                          ? "open"
+                          : activeWorktree.pullRequest.state === "merged" ? "merged" : "closed")}
+                        aria-label={`Pull Request: ${pullRequestStateLabel(activeWorktree.pullRequest.state)}`}
+                      >
+                        {pullRequestStateLabel(activeWorktree.pullRequest.state)} PR
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  /* Words, not an absence and not a colour: the label itself is the whole signal, and
+                     the subdued italic only reinforces what it already says in text. */
+                  <span
+                    className={`inbox-row-branch-state ${branchState.kind}`}
+                    title={branchState.kind === "none"
+                      ? "This session is not working on a Git branch."
+                      : "This session's branch state has not been reported by its runner."}
+                  >
+                    {branchStateLabel(branchState)}
+                  </span>
+                )}
+              </span>
+              {threeRow && backgroundWorkBadge}
+            </span>
           </span>
           {/* The title line, and nothing else on it that can grow. The title box takes ALL the
               free width and fades at its own right edge, so whatever follows it is laid out at a
@@ -147,58 +208,6 @@ function InboxRowInner({
             <span className="inbox-row-title">{session.title}</span>
             {!threeRow && backgroundWorkBadge}
             {active && <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />}
-          </span>
-          {/* The Git line, on EVERY card (#782): a branch name, "No Branch", or "Branch Unavailable",
-              never an absence. Before this it appeared only for a session with an active worktree
-              and the background badge wrapped onto a line of its own, so the list stepped between
-              two, three, and four rows and never said whether a card without a Git line had no
-              branch or merely an unreported one.
-              A phone keeps it as line three, sharing that line with the background badge. A desktop
-              card puts it on line ONE, after the agent and project (#877): three rows of Git state,
-              title, and sender cost roughly 85px per card where two cost about 64, and horizontal
-              space is the one thing a desktop has and a phone does not. */}
-          <span className="inbox-row-meta">
-            <span className="inbox-row-git">
-              {/* The word the line stands for, so the row's accessible name carries the Git state. */}
-              <span className="sr-only">Branch: </span>
-              {activeWorktree ? (
-                <>
-                  <span className="inbox-row-branch" title={`Branch: ${activeWorktree.branch}`}>
-                    {activeWorktree.branch}
-                  </span>
-                  {worktreeBaseRef && (
-                    <span className="inbox-row-base">
-                      {/* The arrow is decoration; assistive technology gets the word it stands for. */}
-                      <span className="sr-only">Base: </span>
-                      <span aria-hidden="true">← </span>
-                      {worktreeBaseRef}
-                    </span>
-                  )}
-                  {activeWorktree.pullRequest && (
-                    <span
-                      className={"inbox-row-pr-pill " + (activeWorktree.pullRequest.state === "open"
-                        ? "open"
-                        : activeWorktree.pullRequest.state === "merged" ? "merged" : "closed")}
-                      aria-label={`Pull Request: ${pullRequestStateLabel(activeWorktree.pullRequest.state)}`}
-                    >
-                      {pullRequestStateLabel(activeWorktree.pullRequest.state)} PR
-                    </span>
-                  )}
-                </>
-              ) : (
-                /* Words, not an absence and not a colour: the label itself is the whole signal, and
-                   the subdued italic only reinforces what it already says in text. */
-                <span
-                  className={`inbox-row-branch-state ${branchState.kind}`}
-                  title={branchState.kind === "none"
-                    ? "This session is not working on a Git branch."
-                    : "This session's branch state has not been reported by its runner."}
-                >
-                  {branchStateLabel(branchState)}
-                </span>
-              )}
-            </span>
-            {threeRow && backgroundWorkBadge}
           </span>
           <span className="inbox-row-signals">
             <span
