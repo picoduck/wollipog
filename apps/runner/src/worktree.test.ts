@@ -2979,6 +2979,18 @@ test("a legacy row without a recorded branch still fails closed when its worktre
     assert.equal(messages.some((message) => message.payload?.kind === "error" &&
       /instead of agent\/s_legacy_branch/.test(message.payload.message ?? "")), true,
       "and the error names the identity the legacy row implies");
+
+    // An owner-hashed runner derives the prefixed name only for a WSL owner root. Switching a
+    // native legacy tree to that form is still a switch, not an alternative spelling of itself.
+    (manager as unknown as { runnerOwnerHash?: string }).runnerOwnerHash = "f".repeat(64);
+    const ownerBranch = `agent/${"f".repeat(16)}/s_legacy_branch`;
+    execFileSync("git", ["-C", legacy.path, "switch", "-c", ownerBranch]);
+    internals.recoveryQueues.set("s_legacy_branch", [{ id: "q2", text: "held", images: [], queuedAt: 2 }]);
+    await internals.recoverQueuedAppServer("s_legacy_branch");
+    assert.deepEqual(launchedCwds, [], "the owner-prefixed form is not accepted for a native row");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      message.payload.message?.includes(`now on branch ${ownerBranch} instead of agent/s_legacy_branch`)), true,
+      "and the refusal names the one branch the path's creation mode implies");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

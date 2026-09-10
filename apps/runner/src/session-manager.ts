@@ -3345,18 +3345,22 @@ export class SessionManager {
    * `branch` is the session's recorded `worktreeBranch`, absent only on a row that predates the
    * field. Such a row still implies an identity — the runner's own deterministic name for this
    * session's worktree — so it is derived rather than skipped, exactly as `attributedWorktrees()`
-   * and safe discard already derive it. `createWorktree` emits two forms of that name and a legacy
-   * row cannot say which one made it, so either proves the tree is still this session's; anything
-   * else is a switched or recreated worktree and fails closed. */
+   * and safe discard already derive it. The derivation mirrors `createWorktree` exactly, including
+   * which root the path came from, so it names one branch and not a set: accepting the owner-hash
+   * form for a plain path (or the reverse) would let an operator switch a legacy worktree between
+   * the two and launch against the wrong bytes. Anything else fails closed. */
   private async persistedWorktreeFailure(
     meta: SessionMeta,
     path: string,
     branch: string | undefined,
   ): Promise<string | null> {
-    const expected = branch ? [branch] : [
-      `agent/${meta.sessionId}`,
-      ...(this.runnerOwnerHash ? [`agent/${this.runnerOwnerHash.slice(0, 16)}/${meta.sessionId}`] : []),
-    ];
+    // A pre-attestation WSL worktree lives under the legacy home root and keeps the unprefixed
+    // name even on an owner-hashed runner; `createWorktree` reuses it under exactly that branch.
+    const ownerRooted = meta.context.kind === "wsl" && !!this.runnerOwnerHash &&
+      !path.includes("/.agent-manager/worktrees/");
+    const expected = branch ?? (ownerRooted
+      ? `agent/${this.runnerOwnerHash!.slice(0, 16)}/${meta.sessionId}`
+      : `agent/${meta.sessionId}`);
     try {
       const verified = await attachRequestedWorktree(meta.repoPath, meta.sessionId, path, {
         context: meta.context,
@@ -3367,9 +3371,9 @@ export class SessionManager {
         // worktree health, and branch identity are all still re-proved.
         allowedProjectPaths: [path],
       });
-      return expected.includes(verified.branch)
+      return verified.branch === expected
         ? null
-        : `it is now on branch ${verified.branch} instead of ${expected.join(" or ")}`;
+        : `it is now on branch ${verified.branch} instead of ${expected}`;
     } catch (error) {
       return errText(error);
     }
