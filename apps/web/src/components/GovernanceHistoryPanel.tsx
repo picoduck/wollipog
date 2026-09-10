@@ -52,7 +52,13 @@ export function GovernanceHistoryPanel({
         <div className="hint">No governance decisions are visible in this page yet.</div>
       )}
       {hasMore && (
-        <button className="btn governance-history-more" type="button" disabled={loadingOlder} onClick={onLoadOlder}>
+        <button
+          aria-busy={loadingOlder}
+          aria-disabled={loadingOlder}
+          className="btn governance-history-more"
+          type="button"
+          onClick={onLoadOlder}
+        >
           {loadingOlder ? "Loading Older Decisions…" : "Load Older Decisions"}
         </button>
       )}

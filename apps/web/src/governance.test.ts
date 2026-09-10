@@ -226,6 +226,18 @@ test("governance history explains an unpresentable page while older decisions re
   assert.match(html, />Load Older Decisions<\/button>/);
 });
 
+test("governance history keeps the paging control focusable while a page loads", () => {
+  const html = renderToStaticMarkup(React.createElement(GovernanceHistoryPanel, {
+    decisions: governanceDecisions([entry({ auditId: "loading" })]),
+    hasMore: true,
+    loadingOlder: true,
+  }));
+  assert.match(html, /aria-busy="true"/);
+  assert.match(html, /aria-disabled="true"/);
+  assert.doesNotMatch(html, / disabled=""/);
+  assert.match(html, />Loading Older Decisions…<\/button>/);
+});
+
 test("a governance row never splits a collapsible work run", () => {
   // Splitting a run would fragment the "Worked" block; only the first fragment keeps the original
   // disclosure key, so an open block would silently collapse its tail when the audit settled.
