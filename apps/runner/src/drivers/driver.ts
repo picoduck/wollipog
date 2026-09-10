@@ -16,6 +16,7 @@ import type {
 } from "@wollipog/protocol";
 import type { SpawnIsolation } from "../spawn.js";
 import type { PoisonedProviderHistory } from "./poisoned-provider-history.js";
+import type { ProviderRejectionShape } from "./provider-rejection-shape.js";
 
 declare const preparedDriverCommandBrand: unique symbol;
 
@@ -121,6 +122,10 @@ export interface DriverCallbacks {
    * instead of retrying, continuing, or compacting. Structure only: the offending value stays
    * inside the driver. */
   onProviderHistoryUnrecoverable?: (detail: PoisonedProviderHistory) => void;
+  /** The provider rejected an indexed item in the request that the history classifier does not
+   * recognize. Evidence only: it changes nothing about how the error is handled, and carries a
+   * content-free structural shape rather than the provider's message. */
+  onUnclassifiedProviderRejection?: (shape: ProviderRejectionShape) => void;
   onAcpCapabilities?: (capabilities: AcpRuntimeCapabilities) => void;
   /** Session-scoped ACP controls/config; never merge these onto the agent row because two live
    * sessions may advertise different modes or commands. */

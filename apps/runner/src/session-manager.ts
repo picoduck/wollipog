@@ -15,6 +15,7 @@
 
 import { buildConversationHandoff, handoffDestinationError, type ConversationHandoffDraft } from "@wollipog/protocol";
 import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
+import { UnclassifiedRejectionJournal } from "./drivers/unclassified-rejection-journal.js";
 import type {
   AgentCapabilities,
   AgentContext,
@@ -809,6 +810,8 @@ export class SessionManager {
   private readonly forkingTargets = new Set<string>();
   private readonly boxAdmission: BoxAdmission;
   private readonly stateDir: string;
+  /** Evidence for widening the provider-history classifier (#876). Nothing reads it to decide. */
+  private readonly unclassifiedRejections: UnclassifiedRejectionJournal;
   private readonly providerStateReconcileTimer: ReturnType<typeof setInterval>;
   private readonly historyMaintenanceTimer: ReturnType<typeof setInterval>;
   private readonly worktreePullRequestReconcileTimer: ReturnType<typeof setInterval>;
@@ -911,6 +914,7 @@ export class SessionManager {
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
+    this.unclassifiedRejections = new UnclassifiedRejectionJournal(this.stateDir);
     this.providerStateCleanupJournal = new ProviderStateCleanupJournal(this.stateDir);
     this.checkpointRefOwnership = new CheckpointRefOwnershipLedger(this.stateDir);
     this.boxAdmission = new BoxAdmission(this.stateDir, maxConcurrentSessions);
@@ -3546,6 +3550,12 @@ export class SessionManager {
           const live = this.active.get(sessionId);
           if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
           this.quarantineProviderHistory(sessionId, detail);
+        },
+        onUnclassifiedProviderRejection: (shape) => {
+          // Recorded for every live generation: an observation is not a session action, and
+          // dropping it because a replacement launched would lose exactly the rare evidence this
+          // journal exists to collect.
+          this.unclassifiedRejections.record(meta.driver, shape);
         },
         onSubscriptionUsage: (update) => {
           if (meta.agentId) {

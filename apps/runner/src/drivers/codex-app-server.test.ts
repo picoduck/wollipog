@@ -73,12 +73,14 @@ function makeHarness(
   const subscriptionUsage: unknown[] = [];
   const serviceTiers: Array<string | null> = [];
   const poisonedHistory: unknown[] = [];
+  const unclassifiedRejections: unknown[] = [];
   const cb: DriverCallbacks = {
     onEvent: (p) => events.push(p),
     onStderr: (line) => stderr.push(line),
     onExit: () => {},
     onAuthenticationFailure: () => { authenticationFailures += 1; },
     onProviderHistoryUnrecoverable: (detail) => poisonedHistory.push(detail),
+    onUnclassifiedProviderRejection: (shape) => unclassifiedRejections.push(shape),
     onSubscriptionUsage: (update) => subscriptionUsage.push(update),
     onServiceTierResolved: (serviceTier) => serviceTiers.push(serviceTier),
   };
@@ -97,7 +99,7 @@ function makeHarness(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const onItem = (item: unknown, completed: boolean) => (driver as any).onItem(item, completed);
   return { driver, events, stderr, subscriptionUsage, serviceTiers, onItem, poisonedHistory,
-    authenticationFailures: () => authenticationFailures };
+    unclassifiedRejections, authenticationFailures: () => authenticationFailures };
 }
 
 test("app-server launch enables Default-mode questions before the subcommand", () => {
@@ -382,6 +384,29 @@ test("a classified rejection never relays provider text that could carry content
   assert.doesNotMatch(message, /leaked-value|secret|thr_private/);
 });
 
+test("an unrecognized indexed-item rejection is recorded without changing its handling", () => {
+  const h = makeHarness();
+  const raw = "Invalid 'input[3].content[0].image_url': unsupported value 'image/tiff'";
+  (h.driver as any).emitDriverError(raw);
+  // Handling is unchanged: the ordinary error still reaches the transcript verbatim, and nothing
+  // is quarantined. Only the observation is new.
+  assert.deepEqual(h.events, [{ kind: "error", message: raw }]);
+  assert.deepEqual(h.poisonedHistory, []);
+  assert.deepEqual(h.unclassifiedRejections, [
+    { path: "input[N].content[N].image_url", phrases: ["unsupported value"], numbers: [3, 0] },
+  ]);
+});
+
+test("a recognized poisoned-history rejection is quarantined and not also recorded as unclassified", () => {
+  const h = makeHarness();
+  (h.driver as any).emitDriverError(
+    "Invalid 'input[675].arguments': string too long. Expected a string with maximum length " +
+      "1048576, but got a string with length 1426210 instead.",
+  );
+  assert.equal(h.poisonedHistory.length, 1);
+  assert.deepEqual(h.unclassifiedRejections, [], "one rejection is one piece of evidence, not two");
+});
+
 test("ordinary provider errors never signal unrecoverable provider history", () => {
   const h = makeHarness();
   for (const raw of [
@@ -391,6 +416,13 @@ test("ordinary provider errors never signal unrecoverable provider history", () 
   ]) (h.driver as any).emitDriverError(raw);
   assert.equal(h.events.length, 3);
   assert.deepEqual(h.poisonedHistory, []);
+  // The oversized prompt does name an indexed request item, so its shape is recorded as evidence.
+  // That is deliberate: the journal collects what the provider rejects about items in the request,
+  // and a reader deciding whether to widen the classifier needs to see the recoverable shapes too —
+  // `input[N].content` being too long is fixed by shortening the message, not by quarantining.
+  assert.deepEqual(h.unclassifiedRejections, [
+    { path: "input[N].content", phrases: ["string too long", "maximum length", "expected a string"], numbers: [0, 1048576] },
+  ]);
 });
 
 test("Codex app-server accepts a final JSON-RPC response delivered after exit", async () => {
