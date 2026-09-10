@@ -19,28 +19,97 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-test("Inbox request navigation keeps exact identity and never selects or approves another row", async () => {
+test("a multi-request row shows one attention pill per kind with its count and no disclosure", async () => {
   const session = { id: "session", eventEpoch: 7, runnerId: "runner", title: "Session",
     status: "input_required", driver: "codex-app-server", pendingApproval: {
-      requestId: "a", options: [], title: "First", additionalRequests: [{
-        requestId: "b / %", options: [], title: "Second", ownerToolUseId: "child",
-      }],
-    } } as unknown as SessionView;
+      requestId: "a", options: [], title: "First", additionalRequests: [
+        { requestId: "b / %", options: [], title: "Second", ownerToolUseId: "child" },
+        { requestId: "q", options: [], title: "Which one?", kind: "question" },
+      ],
+    }, attentionOwners: [{ requestId: "b / %", toolCallId: "child", resolved: true, name: "Audit Child", role: "reviewer" }],
+  } as unknown as SessionView;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const navigated: unknown[] = [];
-  let selected = 0;
   try {
     await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
       selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
-      threeRow onSelect={() => { selected++; }} onExpand={() => { selected++; }} onSessionMenu={() => {}}
-      onNavigate={(view) => navigated.push(view)} />));
-    assert.equal(container.querySelector("button button"), null, "request actions are not nested in the row button");
-    const picker = container.querySelector(".attention-requests")!;
-    await act(async () => picker.querySelectorAll("button")[1]!.click());
-    assert.deepEqual(navigated, [{ name: "session", id: "session", attention: { eventEpoch: 7, requestId: "b / %" } }]);
-    assert.equal(selected, 0);
+      threeRow={false} onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.equal(container.querySelector(".attention-requests"), null, "the request disclosure is gone (#896)");
+    assert.equal(container.querySelector("button button"), null);
+    const pills = [...container.querySelectorAll<HTMLElement>(".inbox-status-pill.blocked")];
+    assert.deepEqual(pills.map((pill) => pill.getAttribute("aria-label")),
+      ["Attention: Answer Required", "Attention: Approval Required, 2 Requests"],
+      "priority order: the question outranks the permissions, and the count rides the pill");
+    assert.equal(pills[1]!.querySelector(".inbox-status-pill-count")?.textContent, "2");
+    assert.equal(pills[1]!.getAttribute("title"), "Main Agent: First\nAudit Child · Reviewer: Second");
+    assert.doesNotMatch(container.textContent ?? "", /Actions Required|View All Requests|Request 1/);
+
+    // The phone shape has one line for the sender and the signals, so it shows the top kind and +N.
+    await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      threeRow onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    const compact = [...container.querySelectorAll<HTMLElement>(".inbox-status-pill.blocked")];
+    assert.equal(compact.length, 1);
+    assert.equal(compact[0]!.getAttribute("aria-label"), "Attention: Answer Required, 3 Requests");
+    assert.equal(compact[0]!.querySelector(".inbox-status-pill-count")?.textContent, "+2");
+    assert.equal(compact[0]!.getAttribute("title"), "Main Agent: Which one?\nMain Agent: First\nAudit Child · Reviewer: Second");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a parent row carries the chevron and family chip, and a child row its thread position", async () => {
+  const parent = { id: "parent", runnerId: "runner", title: "Orchestrator", status: "running",
+    driver: "claude-code", pendingApproval: null } as unknown as SessionView;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const toggled: string[] = [];
+  let selected = 0;
+  const children = JSON.stringify({ count: 2, waiting: 1, children: [
+    { id: "c1", title: "Child One", state: "blocked" }, { id: "c2", title: "Child Two", state: "done" },
+  ] });
+  try {
+    await act(async () => root.render(<InboxRow optionId="row" session={parent} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      threeRow={false} threadChildren={children} threadCollapsed={false}
+      onSelect={() => { selected++; }} onExpand={() => { selected++; }} onSessionMenu={() => {}}
+      onToggleThread={(id) => toggled.push(id)} />));
+    const shell = container.querySelector<HTMLElement>(".inbox-row-shell")!;
+    assert.match(shell.className, /thread-parent/);
+    const chevron = container.querySelector<HTMLButtonElement>(".inbox-thread-toggle")!;
+    assert.equal(chevron.getAttribute("aria-label"), "Collapse Thread");
+    assert.equal(chevron.getAttribute("aria-expanded"), "true");
+    assert.equal(chevron.getAttribute("tabindex"), "-1", "the grid owns the keyboard; T toggles");
+    assert.equal(container.querySelector("button button"), null, "the chevron is not nested in the row button");
+    const chip = container.querySelector<HTMLElement>(".inbox-thread-family")!;
+    assert.match(chip.className, /waiting/);
+    assert.equal(chip.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input");
+    assert.deepEqual([...chip.querySelectorAll(".inbox-thread-dot")].map((dot) => dot.className),
+      ["inbox-thread-dot blocked", "inbox-thread-dot done"]);
+    await act(async () => chevron.click());
+    await act(async () => chip.click());
+    assert.deepEqual(toggled, ["parent", "parent"]);
+    assert.equal(selected, 0, "toggling never selects or expands the row");
+
+    await act(async () => root.render(<InboxRow optionId="row" session={parent} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      threeRow={false} threadChildren={children} threadCollapsed
+      onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-label"), "Expand Thread");
+    assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input",
+      "the rollup reads the same while collapsed");
+
+    const child = { ...parent, id: "c1", title: "Child One", parentSessionId: "parent" } as SessionView;
+    await act(async () => root.render(<InboxRow optionId="row" session={child} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={2} stalled={false} activityNow={0}
+      threeRow={false} threadDepth={1} threadLast
+      onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-last/);
+    assert.equal(container.querySelector(".inbox-thread-toggle"), null);
+    assert.equal(container.querySelector(".inbox-thread-family"), null);
   } finally {
     await act(async () => root.unmount());
     container.remove();

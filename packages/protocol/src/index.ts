@@ -370,8 +370,14 @@ export const SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS =
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS + 30_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
 export type { ConversationHandoffDraft } from "./conversation-handoff.js";
-import { pendingRequests } from "./worker-attention.js";
-export { pendingRequests, addPendingRequest, removePendingRequest } from "./worker-attention.js";
+import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
+export {
+  attentionRequestRank,
+  pendingRequests,
+  prioritizedPendingRequests,
+  addPendingRequest,
+  removePendingRequest,
+} from "./worker-attention.js";
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -2037,6 +2043,51 @@ export function sessionAttentionStatus(
   }
   return { ...result, label: `Child ${result.label}`,
     description: `A child agent owns this request. ${result.description} Open Agents to inspect the owner and exact request.` };
+}
+
+/** One kind of attention a session needs, with every request of that kind behind it. */
+export interface SessionAttentionGroup extends SessionAttentionStatus {
+  /** How many requests carry this label. */
+  count: number;
+  /** In priority order, then arrival. */
+  requests: PendingApproval[];
+  /** Who owns each request, in the same order: the main agent, a resolved child, or an unresolvable child. */
+  owners: string[];
+}
+
+/**
+ * The per-kind breakdown a list card shows instead of the rolled-up "N Actions Required": one group
+ * per attention label, in priority order, each with its count. A session with one request yields
+ * one group of one, so a surface can use this for every card and never special-case the rollup.
+ */
+export function sessionAttentionBreakdown(
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
+): SessionAttentionGroup[] {
+  const requests = prioritizedPendingRequests(session.pendingApproval);
+  if (requests.length === 0) {
+    const fallback = singleSessionAttentionStatus(session);
+    return fallback ? [{ ...fallback, count: 0, requests: [], owners: [] }] : [];
+  }
+  const groups: SessionAttentionGroup[] = [];
+  for (const request of requests) {
+    const status = singleSessionAttentionStatus({ status: session.status, pendingApproval: request });
+    if (!status) continue;
+    const owner = session.attentionOwners?.find((value) =>
+      value.requestId === request.requestId && value.toolCallId === request.ownerToolUseId);
+    const role = owner?.role?.replace(/\b\p{L}/gu, (letter) => letter.toUpperCase());
+    const ownerLabel = !request.ownerToolUseId
+      ? "Main Agent"
+      : owner?.resolved ? `${owner.name ?? "Subagent"}${role ? ` · ${role}` : ""}` : "Child Owner Unavailable";
+    const group = groups.find((candidate) => candidate.label === status.label);
+    if (group) {
+      group.count += 1;
+      group.requests.push(request);
+      group.owners.push(ownerLabel);
+    } else {
+      groups.push({ ...status, count: 1, requests: [request], owners: [ownerLabel] });
+    }
+  }
+  return groups;
 }
 
 function singleSessionAttentionStatus(

@@ -94,21 +94,222 @@ export function isInboxRunning(session: Pick<SessionView, "status">): boolean {
   return session.status === "running";
 }
 
-/** Stable card ordering: pinned first, then latest event, with deterministic fallbacks. */
+export const INBOX_COLLAPSED_THREADS_KEY = "wollipog.inbox.collapsedThreads";
+
+/**
+ * How much a card wants the reader now. A session waiting on a decision that has also stalled has
+ * waited longest; one merely waiting comes next; a running one is worth watching; the rest are
+ * settled. The list orders by this before recency, so the family of an orchestrator whose child is
+ * blocked rises with that child instead of sinking under whatever ran most recently.
+ */
+export function inboxUrgency(
+  session: Pick<SessionView, "id" | "status" | "pendingApproval">,
+  stalledSessionIds: ReadonlySet<string> = new Set(),
+): number {
+  if (isInboxBlocked(session)) return stalledSessionIds.has(session.id) ? 3 : 2;
+  return isInboxActiveStatus(session.status) ? 1 : 0;
+}
+
+interface InboxOrderKey {
+  pinned: boolean;
+  urgency: number;
+  lastEventAt: number;
+  updatedAt: number;
+  id: string;
+}
+
+function compareInboxOrderKeys(left: InboxOrderKey, right: InboxOrderKey): number {
+  if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+  if (left.urgency !== right.urgency) return right.urgency - left.urgency;
+  if (left.lastEventAt !== right.lastEventAt) return right.lastEventAt - left.lastEventAt;
+  if (right.updatedAt !== left.updatedAt) return right.updatedAt - left.updatedAt;
+  return left.id.localeCompare(right.id);
+}
+
+function sessionOrderKey(
+  session: SessionView,
+  pinnedSessions: ReadonlySet<string>,
+  stalledSessionIds: ReadonlySet<string>,
+): InboxOrderKey {
+  return {
+    pinned: pinnedSessions.has(session.id),
+    urgency: inboxUrgency(session, stalledSessionIds),
+    lastEventAt: session.lastEventAt ?? Number.NEGATIVE_INFINITY,
+    updatedAt: session.updatedAt,
+    id: session.id,
+  };
+}
+
+/** A family's key is its strongest member on every axis, so the whole thread sits where its most
+ * urgent, most recent member would sit alone; the parent's id keeps the tiebreak deterministic. */
+function familyOrderKey(own: InboxOrderKey, members: InboxOrderKey[]): InboxOrderKey {
+  return members.reduce((key, member) => ({
+    pinned: key.pinned || member.pinned,
+    urgency: Math.max(key.urgency, member.urgency),
+    lastEventAt: Math.max(key.lastEventAt, member.lastEventAt),
+    updatedAt: Math.max(key.updatedAt, member.updatedAt),
+    id: key.id,
+  }), own);
+}
+
+/** Children present in `sessions` keyed by parent id; a child whose parent is absent has no entry
+ * here and orders as a top-level session. A session can never be its own ancestor, but the input
+ * is a network projection, so the walk below still guards against a cycle. */
+function inboxChildrenByParent(sessions: readonly SessionView[]): Map<string, SessionView[]> {
+  const present = new Set(sessions.map((session) => session.id));
+  const children = new Map<string, SessionView[]>();
+  for (const session of sessions) {
+    const parentId = session.parentSessionId;
+    if (!parentId || !present.has(parentId) || parentId === session.id) continue;
+    const siblings = children.get(parentId);
+    if (siblings) siblings.push(session);
+    else children.set(parentId, [session]);
+  }
+  return children;
+}
+
+/**
+ * Stable card ordering: pinned first, then urgency, then latest event, with deterministic
+ * fallbacks. A session whose parent is also in the list never orders on its own: the parent and
+ * every descendant travel as one family, placed by the family's strongest member, with the parent
+ * first and each generation ordered among itself by the same rule (#896).
+ */
 export function sortInboxSessions(
   sessions: Iterable<SessionView>,
   pinnedSessions: ReadonlySet<string> = new Set(),
+  stalledSessionIds: ReadonlySet<string> = new Set(),
 ): SessionView[] {
-  return [...sessions].sort((left, right) => {
-    const leftPinned = pinnedSessions.has(left.id);
-    const rightPinned = pinnedSessions.has(right.id);
-    if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
-    const leftActivity = left.lastEventAt ?? Number.NEGATIVE_INFINITY;
-    const rightActivity = right.lastEventAt ?? Number.NEGATIVE_INFINITY;
-    if (leftActivity !== rightActivity) return rightActivity - leftActivity;
-    if (right.updatedAt !== left.updatedAt) return right.updatedAt - left.updatedAt;
-    return left.id.localeCompare(right.id);
-  });
+  const all = [...sessions];
+  const childrenByParent = inboxChildrenByParent(all);
+  const ownKeys = new Map(all.map((session) => [session.id, sessionOrderKey(session, pinnedSessions, stalledSessionIds)]));
+  const familyKeys = new Map<string, InboxOrderKey>();
+  const familyKey = (session: SessionView, trail: Set<string>): InboxOrderKey => {
+    const cached = familyKeys.get(session.id);
+    if (cached) return cached;
+    const own = ownKeys.get(session.id)!;
+    const next = new Set(trail).add(session.id);
+    const members = (childrenByParent.get(session.id) ?? [])
+      .filter((child) => !next.has(child.id))
+      .map((child) => familyKey(child, next));
+    const key = familyOrderKey(own, members);
+    familyKeys.set(session.id, key);
+    return key;
+  };
+  const ordered: SessionView[] = [];
+  const emit = (session: SessionView, trail: Set<string>) => {
+    ordered.push(session);
+    const next = new Set(trail).add(session.id);
+    const children = (childrenByParent.get(session.id) ?? [])
+      .filter((child) => !next.has(child.id))
+      .sort((left, right) => compareInboxOrderKeys(familyKey(left, next), familyKey(right, next)));
+    for (const child of children) emit(child, next);
+  };
+  const present = new Set(all.map((session) => session.id));
+  const roots = all.filter((session) =>
+    !session.parentSessionId || !present.has(session.parentSessionId) || session.parentSessionId === session.id);
+  roots.sort((left, right) => compareInboxOrderKeys(familyKey(left, new Set()), familyKey(right, new Set())));
+  for (const root of roots) emit(root, new Set());
+  return ordered;
+}
+
+/** The dot a child contributes to its parent's family chip. */
+export type InboxThreadChildState = "blocked" | "stalled" | "running" | "done" | "idle";
+
+export interface InboxThreadChild {
+  id: string;
+  title: string;
+  state: InboxThreadChildState;
+}
+
+/** What a parent card says about its thread, whether or not the thread is expanded. */
+export interface InboxThreadChildren {
+  count: number;
+  /** Children with a pending request. */
+  waiting: number;
+  children: InboxThreadChild[];
+}
+
+/** A row's place in its thread. Depth is visual: a grandchild indents like a child (#896). */
+export interface InboxThreadPosition {
+  depth: number;
+  parentId: string | null;
+  /** The last visible member of its parent's thread, which is where the spine ends. */
+  last: boolean;
+  /** Present on a parent row, expanded or collapsed. */
+  children: InboxThreadChildren | null;
+  collapsed: boolean;
+}
+
+export function inboxThreadChildState(
+  session: Pick<SessionView, "status" | "pendingApproval">,
+  stalled: boolean,
+): InboxThreadChildState {
+  if (isInboxBlocked(session)) return stalled ? "stalled" : "blocked";
+  if (isInboxActiveStatus(session.status)) return "running";
+  if (session.status === "completed") return "done";
+  return "idle";
+}
+
+/** The compact rollup on the family chip. The count always leads; what follows is the one fact
+ * that matters most about the children right now. */
+export function inboxThreadChildrenLabel(children: InboxThreadChildren): string {
+  const parts = [`${children.count} ${children.count === 1 ? "Child" : "Children"}`];
+  const running = children.children.filter((child) => child.state === "running").length;
+  const done = children.children.filter((child) => child.state === "done").length;
+  if (children.waiting > 0) parts.push(`${children.waiting} Awaiting Input`);
+  else if (running > 0) parts.push(`${running} Running`);
+  else if (done === children.count) parts.push(`${done} Completed`);
+  return parts.join(" · ");
+}
+
+/**
+ * Thread an ordered, filtered list of rows: each parent is followed by its descendants, indented
+ * one level, and a collapsed parent's descendants leave the list entirely rather than hiding
+ * inside a taller row, so every row stays one card (#896). The input order is preserved for
+ * everything else, which is what lets a held browsing order survive threading unchanged.
+ */
+export function threadInboxRows<T extends { session: SessionView }>(
+  rows: readonly T[],
+  collapsedParents: ReadonlySet<string>,
+  stalledSessionIds: ReadonlySet<string> = new Set(),
+): Array<T & { thread: InboxThreadPosition }> {
+  const sessions = rows.map((row) => row.session);
+  const childrenByParent = inboxChildrenByParent(sessions);
+  const rowById = new Map(rows.map((row) => [row.session.id, row]));
+  const present = new Set(sessions.map((session) => session.id));
+  const out: Array<T & { thread: InboxThreadPosition }> = [];
+  const emit = (row: T, depth: number, parentId: string | null, last: boolean, trail: Set<string>) => {
+    const next = new Set(trail).add(row.session.id);
+    const children = (childrenByParent.get(row.session.id) ?? []).filter((child) => !next.has(child.id));
+    const summary: InboxThreadChildren | null = children.length === 0 ? null : {
+      count: children.length,
+      waiting: children.filter((child) => isInboxBlocked(child)).length,
+      children: children.map((child) => ({
+        id: child.id,
+        title: child.title,
+        state: inboxThreadChildState(child, stalledSessionIds.has(child.id)),
+      })),
+    };
+    const collapsed = summary !== null && collapsedParents.has(row.session.id);
+    out.push({ ...row, thread: { depth, parentId, last, children: summary, collapsed } });
+    if (collapsed) return;
+    children.forEach((child, index) => {
+      emit(rowById.get(child.id)!, Math.min(depth + 1, 1), row.session.id, index === children.length - 1, next);
+    });
+  };
+  for (const row of rows) {
+    const parentId = row.session.parentSessionId;
+    if (parentId && present.has(parentId) && parentId !== row.session.id) continue;
+    emit(row, 0, null, false, new Set());
+  }
+  return out;
+}
+
+/** Parents in a threaded list, in list order. */
+export function inboxThreadParents<T extends { session: SessionView; thread: InboxThreadPosition }>(
+  rows: readonly T[],
+): T[] {
+  return rows.filter((row) => row.thread.children !== null);
 }
 
 function inboxSplit(
@@ -179,7 +380,7 @@ export function deriveInboxSplits(
     INBOX_ALL_SPLIT_KEY,
     "all",
     "All",
-    sortInboxSessions(visible, pinnedSessions),
+    sortInboxSessions(visible, pinnedSessions, stalledSessionIds),
     stalledSessionIds,
   );
   if (!projectsSupported) {
@@ -194,7 +395,7 @@ export function deriveInboxSplits(
         group.key,
         group.id === null ? "no_project" : "project",
         group.name,
-        sortInboxSessions(group.sessions, pinnedSessions),
+        sortInboxSessions(group.sessions, pinnedSessions, stalledSessionIds),
         stalledSessionIds,
         descriptor,
       );
@@ -213,7 +414,7 @@ export function deriveInboxSplits(
     durableInboxProjectKey(project.id),
     "project",
     project.name,
-    sortInboxSessions(visible.filter((session) => session.projectId === project.id), pinnedSessions),
+    sortInboxSessions(visible.filter((session) => session.projectId === project.id), pinnedSessions, stalledSessionIds),
     stalledSessionIds,
     {
       kind: "durable",
@@ -226,6 +427,7 @@ export function deriveInboxSplits(
   const noProjectSessions = sortInboxSessions(
     visible.filter((session) => session.projectId == null),
     pinnedSessions,
+    stalledSessionIds,
   );
   const noProject = [inboxSplit(
       INBOX_NO_PROJECT_SPLIT_KEY,

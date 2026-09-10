@@ -1,4 +1,4 @@
-import { sessionAttentionStatus, type SessionReminderView, type SessionView } from "@wollipog/protocol";
+import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { memo } from "react";
 import { useLongPress } from "./interactions.js";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
@@ -11,10 +11,9 @@ import {
 import { branchStateLabel, displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
-import { BackgroundWorkBadge, quarantinedStatusMeta } from "./common.js";
+import { AttentionPills, BackgroundWorkBadge, ThreadDot, quarantinedStatusMeta } from "./common.js";
 import { sessionAgentLabel } from "./agent-options.js";
-import { AttentionRequests } from "./AttentionRequests.js";
-import type { View } from "../navigation.js";
+import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
 
 export interface InboxRowProps {
   optionId: string;
@@ -45,11 +44,20 @@ export interface InboxRowProps {
   stalled: boolean;
   activityNow: number;
   reminder?: SessionReminderView;
+  /**
+   * The row's place in its thread (#896). `threadDepth` is 1 for a child rendered under its parent
+   * and 0 otherwise; `threadLast` marks the last visible child, where the spine ends.
+   * `threadChildren` is the parent's rollup, JSON-encoded: a STRING, so that a parent row whose
+   * children have not changed compares equal under the memo below, exactly like the primitives.
+   */
+  threadDepth?: number;
+  threadLast?: boolean;
+  threadChildren?: string | null;
+  threadCollapsed?: boolean;
   /** Take the id, so the parent can pass ONE stable callback to every row. */
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
-  onNavigate?: (view: View) => void;
-  onSelectAttention?: (sessionId: string) => void;
+  onToggleThread?: (sessionId: string) => void;
   /** Right-click, long-press, or keyboard context menu for this row's session (#154). */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
 }
@@ -67,10 +75,13 @@ function InboxRowInner({
   stalled,
   activityNow,
   reminder,
+  threadDepth = 0,
+  threadLast = false,
+  threadChildren = null,
+  threadCollapsed = false,
   onSelect,
   onExpand,
-  onNavigate,
-  onSelectAttention,
+  onToggleThread,
   onSessionMenu,
 }: InboxRowProps) {
   const longPress = useLongPress(({ x, y }) => onSessionMenu(session.id, { x, y }));
@@ -81,7 +92,6 @@ function InboxRowInner({
     : stopFailed
       ? { label: "Stop Failed", className: "st-failed", busy: false }
       : quarantinedStatusMeta(session.status, session.historyQuarantine) ?? statusMeta(session.status);
-  const attention = sessionAttentionStatus(session);
   const snoozedAttention = reminder?.state === "pending" ? snoozedSessionAttentionReason(session) : null;
   const extraSnoozedAttention = snoozedAttention?.kind === "orphaned_background_work" ||
       snoozedAttention?.kind === "background_delivery_watchdog"
@@ -108,6 +118,30 @@ function InboxRowInner({
       </span>
     )
     : null;
+
+  const children: InboxThreadChildren | null = threadChildren ? JSON.parse(threadChildren) as InboxThreadChildren : null;
+  const childrenLabel = children ? inboxThreadChildrenLabel(children) : null;
+  /* The family chip: one dot per child and the rollup, on the title line of a parent card. It reads
+     the same whether the thread is expanded or collapsed, which is the point of putting the rollup
+     on the parent — a collapsed thread can never hide a waiting child (#896). Its tint follows the
+     attention colour only while a child is waiting. A span, not a button: it lives inside the row
+     button, and the chevron beside the row is the control; clicking here merely forwards to it. */
+  const familyChip = children && childrenLabel ? (
+    <span
+      className={`inbox-thread-family${children.waiting > 0 ? " waiting" : ""}`}
+      title={childrenLabel}
+      onClick={(event) => {
+        if (!onToggleThread) return;
+        event.stopPropagation();
+        onToggleThread(session.id);
+      }}
+    >
+      <span className="inbox-thread-dots" aria-hidden="true">
+        {children.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
+      </span>
+      <span className="inbox-thread-family-text">{childrenLabel}</span>
+    </span>
+  ) : null;
 
   // The sender and the Git line are named rather than written inline because the two card shapes
   // place them differently: a desktop card puts both inside the lead on line one, and a phone keeps
@@ -181,13 +215,31 @@ function InboxRowInner({
       role="row"
       aria-rowindex={rowIndex}
       aria-selected={selected}
-      className={`inbox-row-shell${selected ? " selected" : ""}${unread ? " unread" : ""}${stalled ? " stalled" : ""}`}
+      className={`inbox-row-shell${selected ? " selected" : ""}${unread ? " unread" : ""}${stalled ? " stalled" : ""}${
+        children ? " thread-parent" : ""}${threadDepth > 0 ? " thread-child" : ""}${threadLast ? " thread-last" : ""}`}
       onContextMenu={(event) => {
         event.preventDefault();
         onSessionMenu(session.id, { x: event.clientX, y: event.clientY });
       }}
     >
       <div role="gridcell" className="inbox-row-primary-cell">
+        {/* The chevron is a SIBLING of the row button, absolutely positioned into the card's leading
+            padding: a button cannot nest a button, and the list owns the keyboard (t toggles), so
+            it is not a tab stop. */}
+        {children && (
+          <button
+            type="button"
+            tabIndex={-1}
+            className="inbox-thread-toggle"
+            aria-expanded={!threadCollapsed}
+            aria-label={threadCollapsed ? "Expand Thread" : "Collapse Thread"}
+            title={`${threadCollapsed ? "Expand" : "Collapse"} Thread (T)`}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={(event) => { event.stopPropagation(); onToggleThread?.(session.id); }}
+          >
+            <span aria-hidden="true">▶</span>
+          </button>
+        )}
         <button
           type="button"
           tabIndex={-1}
@@ -218,6 +270,7 @@ function InboxRowInner({
               left of the strip (#877); a phone keeps it on line three with the Git state. */}
           <span className="inbox-row-copy">
             <span className="inbox-row-title">{session.title}</span>
+            {familyChip}
             {!threeRow && backgroundWorkBadge}
             {active && <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />}
           </span>
@@ -230,15 +283,7 @@ function InboxRowInner({
             >
               {status.label}
             </span>
-            {attention && (
-              <span
-                className="inbox-status-pill blocked"
-                title={attention.description}
-                aria-label={"Attention: " + attention.label}
-              >
-                {attention.label}
-              </span>
-            )}
+            <AttentionPills session={session} compact={threeRow} />
             {extraSnoozedAttention && (
               <span
                 className="inbox-status-pill blocked"
@@ -271,8 +316,6 @@ function InboxRowInner({
             </time>
           </span>
         </button>
-        <AttentionRequests session={session} onNavigate={onNavigate} keyboardActive={selected}
-          onActivate={() => onSelectAttention?.(session.id)} />
       </div>
     </div>
   );
