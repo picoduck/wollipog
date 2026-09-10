@@ -393,7 +393,9 @@ export function UsageView() {
                         : "";
                       return (
                         <div
-                          className={["subscription-bucket", exhausted ? "exhausted" : warning ? "warning" : "", measured ? "" : "unmeasured"].filter(Boolean).join(" ")}
+                          // Kept as one template literal: the stylesheet guardrail scans these
+                          // statically for class producers and does not see an array join.
+                          className={`subscription-bucket${exhausted ? " exhausted" : warning ? " warning" : ""}${measured ? "" : " unmeasured"}`}
                           key={bucket.id}
                         >
                           <dt>{bucket.label}</dt>
