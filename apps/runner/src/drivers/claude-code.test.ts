@@ -108,7 +108,7 @@ test("Claude rate-limit events forward during and between turns without transcri
   assert.equal(h.feed(active), null);
   (h.driver as any).processPersistentLine(JSON.stringify({
     type: "rate_limit_event",
-    rate_limits: { seven_day: { used_percentage: 45 } },
+    rate_limit_info: { status: "allowed", rateLimitType: "seven_day", utilization: 0.45 },
   }));
   assert.equal(h.subscriptionUsage.length, 2);
   assert.deepEqual(h.subscriptionUsage[0], { provider: "claude", kind: "sparse", payload: active });
