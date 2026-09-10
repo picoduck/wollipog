@@ -165,6 +165,11 @@ export async function reconcileWslSkills(options: ReconcileWslSkillsOptions): Pr
     const bindings = wslBindings(options.agents, distro);
     if (!bindings.length) continue;
     const agentIds = new Set(bindings.map((binding) => binding.agentId));
+    const hasDesiredTarget = options.desired.some((entry) => Array.isArray(entry.targets) &&
+      entry.targets.some((target) => target && typeof target.agentId === "string" && agentIds.has(target.agentId)));
+    // Non-authoritative partial passes cannot remove stale links and have nothing to report for an
+    // untargeted distro, so avoid booting it merely because the runner advertises an agent there.
+    if (!options.allowRemovals && !hasDesiredTarget) continue;
     try {
       const [helper, storeRoot] = await Promise.all([
         bootstrap(distro, options.ownerHash, run),
@@ -207,7 +212,11 @@ export function mergeWslSkillsResult(
   wsl: ReconcileSkillsResult,
   agents: AgentDefinition[],
 ): ReconcileSkillsResult {
-  const wslAgents = new Set(agents.flatMap((agent) => agent.context?.kind === "wsl" ? [agent.id] : []));
+  const wslAgents = new Set(agents.flatMap((agent) => {
+    const context = agent.context;
+    return agent.id !== "conductor" && context?.kind === "wsl" && safeDistro(context.distro) &&
+      SKILL_DIRS[agent.driver ?? "acp"] ? [agent.id] : [];
+  }));
   const rows = new Map(native.deployed.map((row) => [row.name, {
     ...row,
     links: row.links.filter((link) => !wslAgents.has(link.agentId)),

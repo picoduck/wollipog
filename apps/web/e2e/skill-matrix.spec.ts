@@ -19,6 +19,20 @@ test("version picker explains when no compatible machines exist", async ({ page 
   await expect(page.getByRole("button", { name: "Preview Version Policy" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeDisabled();
 });
+test("capable Windows machines offer WSL agents for direct assignment", async ({ page }) => {
+  await installSkillMatrixFixture(page);
+  await page.goto("/skills-removals-e2e.html?matrix=1&wslSkills=1");
+  await page.getByRole("button", { name: /code-review/i }).click();
+  const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
+  await expect(matrix.getByRole("row", { name: /^WSL Codex / }).first())
+    .toHaveAccessibleName(/^WSL Codex Not Assigned Not Reported/);
+  await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: /^Machine:/ }).click();
+  await page.getByRole("option", { name: "Build Machine", exact: true }).click();
+  await dialog.getByRole("button", { name: /^Agents:/ }).click();
+  await expect(page.getByRole("option", { name: "WSL Codex", exact: true })).toBeVisible();
+});
 for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
   test(`matrix shows targeting, reports and pins at ${width} in ${theme}`, async ({ page }, info) => {
     await installSkillMatrixFixture(page);

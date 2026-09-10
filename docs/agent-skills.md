@@ -369,7 +369,7 @@ Properties:
   native reconciler verifies and materializes the immutable version once under the runner data
   directory. A fixed Python adapter runs inside each named distribution and creates its canonical
   and harness links using descriptor-relative, no-follow operations; the canonical link targets
-  the same store through WSL's mounted native path. A durable owner marker partitions adapter state
+  the same store through WSL's mounted native path. A durable owner marker partitions adapter state,
   uses the native provider-home v2 lease journal, and publishes an explicit released successor
   before exiting. A standalone in-distribution runner can therefore take an orderly cross-owner
   handoff instead of treating the lock directory as corrupt; a live or uncleanly terminated foreign

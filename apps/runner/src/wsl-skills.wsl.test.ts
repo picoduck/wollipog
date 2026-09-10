@@ -49,7 +49,7 @@ test("the native Windows snapshot adapter reads WSL trees and rejects Linux link
     "a Linux directory symlink is not offered as a candidate");
   const valid = candidates.find((candidate) => candidate.name === validName);
   assert.ok(valid);
-  assert.deepEqual(readWindowsSkillCandidate(home, { id: "valid", ...valid }), [
+  assert.deepEqual(readWindowsSkillCandidate(home, { id: "valid", ...valid }).sort((a, b) => a.path < b.path ? -1 : 1), [
     { path: "SKILL.md", encoding: "utf8", content: "---\nname: valid\n---\nWSL snapshot\n" },
     { path: "nested/file.txt", encoding: "utf8", content: "nested" },
   ]);

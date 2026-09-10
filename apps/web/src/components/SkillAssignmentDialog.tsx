@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { RunnerView, SkillInvocationPolicy } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type RunnerView, type SkillInvocationPolicy } from "@wollipog/protocol";
 import { driverKindLabel } from "../agent-presentation.js";
 import { invocationLabel, skillEligibleAgents, type SkillAgentSelector, type SkillSummary } from "../skills.js";
 import { Modal } from "./common.js";
@@ -25,7 +25,8 @@ export function AddAssignmentDialog({ skill, runners, machineLabels, busy, error
   const [invocation, setInvocation] = useState<SkillInvocationPolicy>("agent");
   const runnerId = machineChoice === "all" ? "" : machineChoice;
   const selectedRunner = runners.find((runner) => runner.runnerId === runnerId);
-  const eligibleAgents = selectedRunner ? skillEligibleAgents(selectedRunner.agents) : [];
+  const eligibleAgents = selectedRunner ? skillEligibleAgents(selectedRunner.agents,
+    selectedRunner.os === "windows" && runnerSupportsProtocol(selectedRunner.protocolVersion, "wslMachineSkills")) : [];
 
   const submit = async () => {
     const agentSelector: SkillAgentSelector = agentChoice === "all"

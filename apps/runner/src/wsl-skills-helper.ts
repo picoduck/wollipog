@@ -1,13 +1,15 @@
 /** Fixed in-distro filesystem adapter. JSON carries only validated desired state and store paths;
  * no payload value is evaluated as Python or shell source. */
 export const WSL_SKILLS_HELPER = String.raw`#!/usr/bin/env python3
-import datetime, hashlib, json, os, re, stat, sys, uuid
+import ctypes, datetime, hashlib, json, os, re, stat, sys, uuid
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 LEASE_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 MAX_ENTRIES = 256
 MAX_MD = 65536
+MAX_LEASE_RECORDS = 16
+RENAME_EXCHANGE = 2
 DRIVER_DIRS = {"claude-code": ".claude/skills", "codex": ".codex/skills", "codex-app-server": ".codex/skills"}
 
 def fail(message):
@@ -60,7 +62,9 @@ def read_lease_record(lock, name):
     marker = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=lock)
     try:
         info = os.fstat(marker)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096: fail("provider home lease is unsafe")
+        # Native publication briefly gives the immutable record a second hard link while the
+        # destination is made durable. More links would permit an unexpected mutable alias.
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink not in (1, 2) or info.st_size > 4096: fail("provider home lease is unsafe")
         raw = os.read(marker, info.st_size + 1)
         value = json.loads(raw.decode("utf-8"))
     finally: os.close(marker)
@@ -179,12 +183,61 @@ def acquire_lease(home_fd, owner):
     except:
         os.close(root); raise
 
+def exchange_directories(root, left, right):
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+        return renameat2(root, os.fsencode(left), root, os.fsencode(right), RENAME_EXCHANGE) == 0
+    except: return False
+
+def compact_lease(root, lock, current):
+    if len(os.listdir(lock)) <= MAX_LEASE_RECORDS: return lock
+    temporary = ".mutable-home.compact-%s" % uuid.uuid4().hex
+    fresh = None
+    try:
+        os.mkdir(temporary, 0o700, dir_fd=root)
+        fresh = child_dir(root, temporary)
+        genesis = dict(current)
+        genesis.update({"previousLeaseId": None, "previousRecordHash": None})
+        publish_lease(root, fresh, "lease-%s.json" % genesis["leaseId"], genesis)
+        compacted, _ = read_lease_chain(fresh)
+        if compacted["leaseId"] != current["leaseId"] or compacted.get("state") != "active":
+            fail("provider home lease compaction failed")
+        os.fsync(fresh); os.fsync(root)
+        if not exchange_directories(root, temporary, "mutable-home.lock"):
+            fail("provider home lease compaction is unavailable")
+    except:
+        if fresh is not None:
+            try:
+                for name in os.listdir(fresh): os.unlink(name, dir_fd=fresh)
+            except: pass
+            os.close(fresh)
+        try: os.rmdir(temporary, dir_fd=root)
+        except: pass
+        # Compaction is an availability optimization. If this kernel lacks atomic directory
+        # exchange, preserve the valid old chain and still publish its release transition.
+        return lock
+    try: os.fsync(root)
+    except: pass
+    try:
+        for name in os.listdir(lock):
+            try: os.unlink(name, dir_fd=lock)
+            except: pass
+    except: pass
+    os.close(lock)
+    try: os.rmdir(temporary, dir_fd=root)
+    except: pass
+    return fresh
+
 def release_lease(lease):
     root, lock, lease_id = lease
     try:
         current, current_hash = read_lease_chain(lock)
         if current.get("version") != 2 or current.get("state") != "active" or current["leaseId"] != lease_id:
             fail("provider home lease changed before release")
+        lock = compact_lease(root, lock, current)
+        current, current_hash = read_lease_chain(lock)
         released = dict(current)
         released.update({"state": "released", "leaseId": str(uuid.uuid4()), "previousLeaseId": current["leaseId"],
             "previousRecordHash": current_hash, "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat()})
@@ -428,7 +481,7 @@ def reconcile(spec):
                     removed = unlink_owned(home_fd, relative, store_root, canonical_dir + "/" + name, owned)
                     if removed:
                         harness_keep[rel_dir].discard(name)
-                        removals.append({"path": "WSL %s: ~/%s" % (spec["distro"], relative),
+                        removals.append({"path": "~/%s (WSL %s)" % (relative, spec["distro"]),
                             "reason": "The canonical location it routes through is conflicted."})
                         outcome = (False, "error", "the canonical location is conflicted, so this harness link was removed")
                     else:
@@ -462,7 +515,7 @@ def reconcile(spec):
                     remove = rel_dir in harness_keep and parts[2] not in harness_keep[rel_dir]
                     canonical = canonical_dir + "/" + parts[2]
                 if remove and unlink_owned(home_fd, relative, store_root, canonical, owned, direct):
-                    removals.append({"path": "WSL %s: ~/%s" % (spec["distro"], relative), "reason": "No longer in the desired skill list."})
+                    removals.append({"path": "~/%s (WSL %s)" % (relative, spec["distro"]), "reason": "No longer in the desired skill list."})
         if needs_lease: save_owned(state, owned)
         unmanaged = []
         cache = {}

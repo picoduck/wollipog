@@ -27,6 +27,10 @@ test("unavailable platforms, contexts and old runners are explicit", () => {
   assert.equal(skillAgentMatrixCell({ ...runner, os: "windows" }, agent, "review", state()).desired, "Unavailable");
   assert.equal(skillAgentMatrixCell({ ...runner, protocolVersion: 1 }, agent, "review", state()).desired, "Unavailable");
   assert.equal(skillAgentMatrixCell(runner, { ...agent, context: { kind: "wsl", distro: "Ubuntu" } }, "review", state()).desired, "Unavailable");
+  assert.equal(skillAgentMatrixCell({ ...runner, os: "windows", protocolVersion: 119 }, agent, "review", state()).desired, "Manual Only");
+  const wslAgent = { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  assert.equal(skillAgentMatrixCell({ ...runner, os: "windows", protocolVersion: 124 }, wslAgent, "review", state()).desired, "Unavailable");
+  assert.equal(skillAgentMatrixCell({ ...runner, os: "windows", protocolVersion: 125 }, wslAgent, "review", state()).desired, "Manual Only");
 });
 test("link errors and conflicts remain visible", () => {
   const failed = state(); failed.reported!.deployed![0]!.links[0] = { agentId: agent.id, status: "conflict", detail: "Unmanaged directory" };

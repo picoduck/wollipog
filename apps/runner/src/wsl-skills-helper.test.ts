@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -60,8 +60,8 @@ test("the fixed WSL helper atomically deploys, switches, and removes owned links
   const removed = await invoke(home, spec(secondDigest, []));
   assert.equal(removed.status, 0, removed.stderr || removed.stdout);
   assert.deepEqual(JSON.parse(removed.stdout).removedLinks.map((entry: { path: string }) => entry.path).sort(), [
-    "WSL Ubuntu: ~/.agents/skills/review",
-    "WSL Ubuntu: ~/.codex/skills/review",
+    "~/.agents/skills/review (WSL Ubuntu)",
+    "~/.codex/skills/review (WSL Ubuntu)",
   ]);
 });
 
@@ -83,12 +83,29 @@ test("the WSL helper releases its lease for a distinct native distro runner", as
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(readdirSync(lock).some((name) => name.startsWith("next-")), true,
     "the helper publishes an explicit released successor");
+
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const record = readdirSync(lock)[0]!;
+  const publicationAlias = join(leaseRoot, ".native-publication.tmp");
+  linkSync(join(lock, record), publicationAlias);
+  const duringNativePublication = await invoke(home, { ...base,
+    skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true });
+  assert.equal(duringNativePublication.status, 0, duringNativePublication.stderr || duringNativePublication.stdout);
+  unlinkSync(publicationAlias);
+
   const registry = new ProviderHomeLeaseRegistry("b".repeat(64), { isProcessAlive: () => false });
   registry.acquireHome(home);
   registry.releaseAll();
   const handedBack = await invoke(home, { ...base,
     skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true });
   assert.equal(handedBack.status, 0, handedBack.stderr || handedBack.stdout);
+
+  for (let pass = 0; pass < 12; pass += 1) {
+    const repeated = await invoke(home, { ...base,
+      skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true });
+    assert.equal(repeated.status, 0, repeated.stderr || repeated.stdout);
+  }
+  assert.ok(readdirSync(lock).length <= 16, "short-lived reconciliation keeps the lease journal bounded");
 });
 
 test("the fixed WSL helper refuses a live provider-home owner", async (t) => {
@@ -138,7 +155,7 @@ test("the fixed WSL helper prunes stale ownership instead of granting future rem
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(readlinkSync(harness), join(home, ".agents/skills/review"));
   assert.ok(!JSON.parse(result.stdout).removedLinks.some((entry: { path: string }) =>
-    entry.path === "WSL Ubuntu: ~/.codex/skills/review"));
+    entry.path === "~/.codex/skills/review (WSL Ubuntu)"));
 });
 
 test("the fixed WSL helper rejects a binding whose driver and directory disagree", async (t) => {

@@ -68,6 +68,29 @@ test("native placeholders are replaced by authoritative WSL link state", () => {
   assert.equal(merged.unmanaged.length, 1);
 });
 
+test("native placeholders remain for WSL agents the adapter cannot safely reconcile", () => {
+  const unreconciled: AgentDefinition[] = [
+    { ...agents[1]!, id: "invalid-distro", context: { kind: "wsl", distro: "../Ubuntu" } },
+    { ...agents[1]!, id: "unsupported-driver", driver: "acp" },
+  ];
+  const merged = mergeWslSkillsResult({
+    deployed: [{ name: "review", digest, links: unreconciled.map((agent) =>
+      ({ agentId: agent.id, status: "unsupported" as const })) }], unmanaged: [], removedLinks: [],
+  }, { deployed: [], unmanaged: [], removedLinks: [] }, unreconciled);
+  assert.deepEqual(merged.deployed[0]?.links.map((link) => link.agentId), ["invalid-distro", "unsupported-driver"]);
+});
+
+test("non-authoritative untargeted passes do not boot a WSL distro", async () => {
+  let calls = 0;
+  const result = await reconcileWslSkills({
+    dataDir: "C:\\data", ownerHash, agents, desired: [], allowRemovals: false,
+    storeRoot: async () => { calls += 1; return "/mnt/c/data/skills/store"; },
+    run: async () => { calls += 1; throw new Error("should not run"); },
+  });
+  assert.equal(calls, 0);
+  assert.deepEqual(result, { deployed: [], unmanaged: [], removedLinks: [] });
+});
+
 test("an invalid WSL skill row does not collapse valid distro results", async () => {
   const result = await reconcileWslSkills({
     dataDir: "C:\\data", ownerHash, agents,

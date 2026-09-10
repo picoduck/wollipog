@@ -9,7 +9,13 @@ export function skillAgentMatrixCell(runner: RunnerView, agent: AgentDefinition,
   const target = desired?.targets.find(target => target.agentId === agent.id);
   const deployed = state.reported?.deployed?.find(skill => skill.name === skillName);
   const link = deployed?.links.find(link => link.agentId === agent.id);
-  const eligible = runnerSupportsProtocol(runner.protocolVersion, "agentSkills") && skillEligibleAgents([agent]).length > 0 && runner.os !== "windows";
+  const contextKind = agent.context?.kind ?? "native";
+  const platformSupported = contextKind === "wsl"
+    ? runner.os === "windows" && runnerSupportsProtocol(runner.protocolVersion, "wslMachineSkills")
+    : contextKind === "native" && (runner.os !== "windows" ||
+      runnerSupportsProtocol(runner.protocolVersion, "nativeWindowsSkillDeployment"));
+  const eligible = runnerSupportsProtocol(runner.protocolVersion, "agentSkills") && platformSupported &&
+    skillEligibleAgents([agent], contextKind === "wsl").length > 0;
   const requested = !eligible ? "Unavailable" : target ? invocationLabel(target.invocation) : "Not Assigned";
   if (state.reported?.error || deployed?.error) return { desired: requested, reported: "Error", detail: deployed?.error ?? state.reported?.error };
   if (!link) return { desired: requested, reported: "Not Reported", ...(!eligible ? { detail: "This execution target cannot receive managed skill links." } : {}) };
