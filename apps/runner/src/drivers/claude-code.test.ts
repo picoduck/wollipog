@@ -25,6 +25,7 @@ import {
   claudeContextWindowRejection,
   claudeEffectiveContextWindow,
   claudeErrorResultText,
+  PROVIDER_AUTHENTICATION_ERROR,
   claudePermissionArgs,
   claudePersistentSettings,
   claudePersistentSettingsForAgent,
@@ -3541,7 +3542,7 @@ test("Claude forwards the provider's account of an error result instead of an em
   // A synthetic record carries no stream deltas, so its text reaches the UI through nothing else.
   h.feed({
     type: "assistant",
-    message: { model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }], usage: { input_tokens: 0 } },
+    message: { id: "msg_synth", model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }], usage: { input_tokens: 0 } },
   });
   const stop = h.feed({
     type: "result",
@@ -3562,7 +3563,7 @@ test("Claude forwards the provider's account of an error result instead of an em
 test("Claude falls back to the synthetic message when an error result carries no text", () => {
   const h = makeHarness();
   h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
-  h.feed({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }] } });
+  h.feed({ type: "assistant", message: { id: "msg_synth", model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }] } });
   assert.equal(h.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
   const errors = h.events.filter((event) => event.kind === "error");
   assert.equal(errors.length, 1);
@@ -3577,7 +3578,7 @@ test("Claude does not repeat assistant text that already streamed, and keeps the
     type: "stream_event",
     event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial answer" } },
   });
-  streamed.feed({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "text", text: "partial answer" }] } });
+  streamed.feed({ type: "assistant", message: { id: "msg_1", model: "claude-opus-5", content: [{ type: "text", text: "partial answer" }] } });
   // Claude sets `result` to the partial answer it already streamed; echoing it would show the
   // reader the same text twice.
   assert.equal(streamed.feed({
@@ -3591,7 +3592,7 @@ test("Claude does not repeat assistant text that already streamed, and keeps the
   const late = makeHarness();
   late.feed({ type: "stream_event", event: { type: "message_start", message: { id: "msg_1" } } });
   late.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "half" } } });
-  late.feed({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "text", text: "half" }] } });
+  late.feed({ type: "assistant", message: { id: "msg_1", model: "claude-opus-5", content: [{ type: "text", text: "half" }] } });
   late.feed({ type: "result", subtype: "success", is_error: true, result: "API Error: 500 Internal", usage: {} });
   assert.equal((late.events.filter((event) => event.kind === "error")[0] as { message: string }).message,
     "API Error: 500 Internal");
@@ -3618,11 +3619,53 @@ test("Claude does not repeat assistant text that already streamed, and keeps the
   assert.deepEqual(nested.events.filter((event) => event.kind === "error"), []);
 
   // Nothing at all to say leaves the channel silent rather than inventing a reason.
-  assert.equal(claudeErrorResultText({ is_error: true }, null, false), null);
-  assert.equal(claudeErrorResultText({ is_error: true, result: "   " }, "  ", false), null);
-  assert.equal(claudeErrorResultText(null, "synthetic only", false), "synthetic only");
-  assert.equal(claudeErrorResultText(null, "already shown", true), null);
-  assert.equal(claudeErrorResultText({ result: "already shown" }, "already shown", true), null);
+  assert.equal(claudeErrorResultText({ is_error: true }, null, null), null);
+  assert.equal(claudeErrorResultText({ is_error: true, result: "   " }, "  ", null), null);
+  assert.equal(claudeErrorResultText(null, "synthetic only", null), "synthetic only");
+  assert.equal(claudeErrorResultText({ result: "already shown" }, null, "already shown"), null);
+});
+
+test("a synthetic failure after streamed output still reaches the timeline", () => {
+  // The turn answered partially, then died on the credential refresh. The partial answer is
+  // already on screen; the synthetic record is the only account of why nothing followed it, and
+  // the terminal result carries no text of its own.
+  const h = makeHarness();
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  h.feed({ type: "stream_event", event: { type: "message_start", message: { id: "msg_1" } } });
+  h.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial answer" } } });
+  h.feed({ type: "assistant", message: { id: "msg_1", model: "claude-opus-5", content: [{ type: "text", text: "partial answer" }] } });
+  h.feed({ type: "assistant", message: { id: "msg_2", model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }] } });
+  assert.equal(h.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  const errors = h.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as { message: string }).message, OAUTH_REFUSAL);
+  assert.equal(h.driver.lastTurnError(), OAUTH_REFUSAL);
+});
+
+test("an authentication diagnostic never reaches the timeline in its own words", () => {
+  // Provider auth text can carry a token or an authorization URL. Every other driver call site
+  // replaces it with static guidance; the error-result path must not be the exception.
+  const h = makeHarness();
+  const secret = "sk-ant-oat01-SENTINEL-DO-NOT-PERSIST";
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  h.feed({
+    type: "assistant",
+    message: { id: "msg_1", model: "<synthetic>", content: [{ type: "text", text: `Invalid OAuth token ${secret}` }] },
+  });
+  assert.equal(h.feed({
+    type: "result", subtype: "success", is_error: true,
+    result: `Invalid OAuth token ${secret}; visit https://console.example/auth?code=${secret}`, usage: {},
+  }), "refusal");
+  const errors = h.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as { message: string }).message, PROVIDER_AUTHENTICATION_ERROR);
+  assert.equal(h.driver.lastTurnError(), PROVIDER_AUTHENTICATION_ERROR);
+  assert.equal(h.authenticationFailures, 1, "the durable provider-auth recovery lane is signalled");
+  const serialized = JSON.stringify(h.events) + String(h.driver.lastTurnError()) + h.stderr.join("");
+  assert.equal(serialized.includes(secret), false, "no event or receipt text may carry the credential");
+  // The static replacement must also stay out of the transient-retry lane; it names a durable
+  // condition, so the automation layer classifies it terminal.
+  assert.match(PROVIDER_AUTHENTICATION_ERROR, /Sign in again/);
 });
 
 test("Claude result without a matching modelUsage entry leaves the context gauge untouched", () => {

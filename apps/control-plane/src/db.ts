@@ -18518,6 +18518,9 @@ export class ControlPlaneDb {
       revision: command.revision,
       attemptCount: command.attemptCount,
       ...(command.lastError === undefined ? {} : { lastError: command.lastError }),
+      // Without the link a client sees an unexplained rejected command beside its replacement and
+      // cannot tell that rejection apart from the execution's verdict.
+      ...(command.supersededBy === undefined ? {} : { supersededBy: command.supersededBy }),
       createdAt: command.createdAt,
       updatedAt: command.updatedAt,
       ...(command.lastSentAt === undefined ? {} : { lastSentAt: command.lastSentAt }),

@@ -1090,6 +1090,11 @@ test("a transient provider failure replaces the launch instead of failing the ex
   assert.equal(original?.state, "rejected");
   assert.equal(original?.lastError, TRANSIENT_REFUSAL, "the provider's own words survive on the command");
   assert.equal(original?.supersededBy, replacement?.commandId);
+  // The link has to survive into the public view, or a client sees an unexplained rejected command
+  // beside its replacement and cannot tell it apart from the execution's verdict.
+  const view = db.getAutomationExecution(execution.executionId)!.commands!;
+  assert.equal(view[0]?.supersededBy, replacement?.commandId);
+  assert.equal(view[1]?.supersededBy, undefined);
   assert.notEqual(replacement?.commandId, command.commandId,
     "the runner answers a replayed command id with its stored terminal receipt and runs nothing");
   assert.equal(replacement?.state, "pending");
