@@ -89,62 +89,105 @@ for (const width of WIDTHS) {
   });
 }
 
-// #782 replaces #664's two-versus-three-line contract. That contract WAS the bug: it asserted that
+// #782 replaced #664's two-versus-three-line contract. THAT contract was the bug: it asserted that
 // a session without a worktree took two lines and one with a worktree took three, and a visible
-// background badge then took a fourth nobody had accounted for. One shape now, at every width.
+// background badge then took a fourth nobody had accounted for. #877 splits the shape by BREAKPOINT
+// instead of by content — three lines on a phone, two on the desktop — which keeps what #782 was
+// actually protecting: at any one width, every card is the same shape and the same height whatever
+// it happens to contain.
+//
+// The row count is read off the resolved `grid-template-rows`, not off distinct element tops. Items
+// on one grid line are centred in it and therefore have DIFFERENT tops — the 12px sender sits 2px
+// below the 20px Git line beside it — so counting tops reports the desktop card as three lines when
+// it is two. The resolved track list is the layout's own answer.
 const measureRows = (nodes: Element[]) => nodes.map((node) => {
   const row = node as HTMLElement;
   const box = row.getBoundingClientRect();
   const style = getComputedStyle(row);
+  const centre = (element: Element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.top + rect.height / 2;
+  };
   const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!;
   const copy = row.querySelector<HTMLElement>(".inbox-row-copy")!;
   const meta = row.querySelector<HTMLElement>(".inbox-row-meta")!;
   const git = row.querySelector<HTMLElement>(".inbox-row-git");
   const badge = row.querySelector<HTMLElement>(".inbox-row-background-work");
+  const strip = row.querySelector<HTMLElement>(".inbox-row-activity")!;
   const shell = row.closest<HTMLElement>(".inbox-row-shell")!;
   const metaBox = meta.getBoundingClientRect();
   return {
     height: box.height,
-    // Three DISTINCT baselines, so a row cannot pass by stacking two things on one line.
-    lineTops: [...new Set([sender, copy, meta].map((line) => Math.round(line.getBoundingClientRect().top)))].length,
+    gridRows: style.gridTemplateRows.split(" ").filter(Boolean).length,
     gitText: (git?.textContent ?? "").trim(),
-    // Nothing may sit below line three inside the card; a fourth row is exactly what that looks like.
-    metaBottom: metaBox.bottom,
+    // Nothing may sit below the card's last line; an extra row is exactly what that looks like.
+    lastLineBottom: Math.max(metaBox.bottom, copy.getBoundingClientRect().bottom),
     cardInnerBottom: box.bottom - parseFloat(style.paddingBottom),
+    senderCentre: centre(sender),
+    copyCentre: centre(copy),
+    metaCentre: centre(meta),
     metaTop: metaBox.top,
+    badgeCentre: badge ? centre(badge) : null,
+    badgeRight: badge ? badge.getBoundingClientRect().right : null,
     badgeTop: badge ? badge.getBoundingClientRect().top : null,
     badgeWidth: badge ? badge.getBoundingClientRect().width : null,
     badgeOverflowRight: badge
       ? badge.getBoundingClientRect().right - (box.right - parseFloat(style.paddingRight))
       : null,
-    stripBottom: row.querySelector<HTMLElement>(".inbox-row-activity")!.getBoundingClientRect().bottom,
+    // Where the badge belongs is a DOM fact on desktop and a geometric one on a phone; assert both.
+    badgeOnTitleLine: badge ? copy.contains(badge) : null,
+    stripLeft: strip.getBoundingClientRect().left,
+    stripBottom: strip.getBoundingClientRect().bottom,
     top: shell.getBoundingClientRect().top,
     bottom: shell.getBoundingClientRect().bottom,
   };
 });
 
-for (const width of WIDTHS) {
-  test(`every card is exactly three rows with an explicit Git state at ${width}px`, async ({ page }) => {
+// 770px is the first desktop pixel and 760px the last phone one: the two rules meet here, and a
+// layout that only works well clear of its own breakpoint fails at exactly one of these.
+const LAYOUT_WIDTHS = [390, 760, 770, 1000, 1400] as const;
+
+for (const width of LAYOUT_WIDTHS) {
+  const phone = width <= 760;
+  const expectedRows = phone ? 3 : 2;
+  test(`every card is exactly ${expectedRows} rows with an explicit Git state at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
     const rows = await page.locator(".inbox-row").evaluateAll(measureRows);
 
     expect(rows).toHaveLength(11);
     for (const row of rows) {
-      expect(row.lineTops).toBe(3);
+      expect(row.gridRows).toBe(expectedRows);
       // Every card says something about Git; none of them says it by saying nothing.
       expect(row.gitText.length).toBeGreaterThan(0);
-      expect(row.metaBottom).toBeLessThanOrEqual(row.cardInnerBottom + 0.5);
-      if (row.badgeTop !== null) {
-        // On line three with the Git state, below the strip, and never past the card's edge.
-        expect(Math.abs(row.badgeTop - row.metaTop)).toBeLessThanOrEqual(4);
-        expect(row.badgeTop).toBeGreaterThanOrEqual(row.stripBottom - 0.5);
+      expect(row.lastLineBottom).toBeLessThanOrEqual(row.cardInnerBottom + 0.5);
+      if (phone) {
+        // Line three, under the title line, with the Git state and the background badge on it.
+        expect(row.metaCentre).toBeGreaterThan(row.copyCentre);
+        expect(row.copyCentre).toBeGreaterThan(row.senderCentre);
+      } else {
+        // The Git state shares line one with the sender; the title line is the only other line.
+        expect(Math.abs(row.metaCentre - row.senderCentre)).toBeLessThanOrEqual(1);
+        expect(row.copyCentre).toBeGreaterThan(row.senderCentre);
+      }
+      if (row.badgeCentre !== null) {
         expect(row.badgeWidth!).toBeGreaterThan(20);
         expect(row.badgeOverflowRight!).toBeLessThanOrEqual(0.5);
+        if (phone) {
+          // On line three with the Git state, below the strip.
+          expect(row.badgeOnTitleLine).toBe(false);
+          expect(Math.abs(row.badgeTop! - row.metaTop)).toBeLessThanOrEqual(4);
+          expect(row.badgeTop!).toBeGreaterThanOrEqual(row.stripBottom - 0.5);
+        } else {
+          // On the title line, immediately LEFT of the strip rather than under it.
+          expect(row.badgeOnTitleLine).toBe(true);
+          expect(Math.abs(row.badgeCentre - row.copyCentre)).toBeLessThanOrEqual(1);
+          expect(row.badgeRight!).toBeLessThanOrEqual(row.stripLeft + 0.5);
+        }
       }
     }
     // Four of the eleven carry background work, and they are the same height as the seven that do
-    // not — which is what makes ONE virtualization estimate honest.
-    expect(rows.filter((row) => row.badgeTop !== null)).toHaveLength(4);
+    // not — which is what makes ONE virtualization estimate per shape honest.
+    expect(rows.filter((row) => row.badgeCentre !== null)).toHaveLength(4);
     expect(Math.max(...rows.map((row) => row.height)) - Math.min(...rows.map((row) => row.height)))
       .toBeLessThanOrEqual(1);
     // The virtualizer positions from measured heights: no overlap, no gap it cannot explain.
@@ -154,6 +197,24 @@ for (const width of WIDTHS) {
     }
   });
 }
+
+// The density claim #877 is FOR. A desktop card that is not materially shorter than the phone card
+// bought nothing, and a phone card that shrank means the three-row layout was not left alone.
+test("a desktop card is shorter than a phone card, and the phone card is untouched", async ({ page }) => {
+  const heightAt = async (width: number) => {
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    const rows = await page.locator(".inbox-row").evaluateAll(measureRows);
+    expect(rows).toHaveLength(11);
+    return rows[0]!.height;
+  };
+  const phone = await heightAt(390);
+  const desktop = await heightAt(1400);
+  expect(phone).toBeGreaterThan(desktop + 15);
+  // The phone card's own measurement, so a later desktop change cannot quietly move it: 86px
+  // compact, and the whole point of #877 is that this number did not change.
+  expect(phone).toBeGreaterThanOrEqual(85);
+  expect(phone).toBeLessThanOrEqual(87);
+});
 
 test("a card's height does not move with selection, unread, or stalled state", async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
@@ -194,39 +255,50 @@ test("the Git line names a branch, admits to none, or admits to not knowing", as
   await expect(page.getByRole("row", { name: /Branch: fix\/issue-782-orphaned/ })).toHaveCount(1);
 });
 
-test("every background-work state reaches the right of the Git line with its accessible name", async ({ page }) => {
-  await page.setViewportSize({ width: 1400, height: VIEWPORT_HEIGHT });
-  for (const [index, label] of [
-    [7, "Waiting on External Job"],
-    [8, "Waiting on External Job"],
-    [9, "Continuation Pending"],
-    [10, "Orphaned"],
-  ] as const) {
-    const badge = page.locator(".inbox-row-meta").nth(index).locator(".background-work-badge");
-    await expect(badge).toHaveAttribute("aria-label", `Background Work: ${label}`);
-  }
-});
-
-// The long branch, long base and PR pill of row eight now share line three with a badge. The badge
-// is the item that must survive; the base ref is the one that yields first.
-for (const width of [390, 770, 1400]) {
-  test(`a long branch yields to the PR pill and the background badge at ${width}px`, async ({ page }) => {
+// The badge is found through the CARD, not through the Git line: which line carries it is what
+// #877 made responsive, and its words and accessible name are what must not move with it.
+for (const width of [390, 1400]) {
+  test(`every background-work state keeps its accessible name at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
-    const geometry = await page.locator(".inbox-row-meta").nth(8).evaluate((node) => {
-      const row = node.closest<HTMLElement>(".inbox-row")!;
+    for (const [index, label] of [
+      [7, "Waiting on External Job"],
+      [8, "Waiting on External Job"],
+      [9, "Continuation Pending"],
+      [10, "Orphaned"],
+    ] as const) {
+      const badge = page.locator(".inbox-row").nth(index).locator(".background-work-badge");
+      await expect(badge).toHaveCount(1);
+      await expect(badge).toHaveAttribute("aria-label", `Background Work: ${label}`);
+    }
+  });
+}
+
+// Row eight's long branch, long base, and PR pill share their line with the badge on a phone and
+// with the sender and the signals column on the desktop. Either way the branch is the row's
+// identity, the pill is the item that must survive, and the base ref yields first.
+for (const width of [390, 770, 1000, 1400]) {
+  test(`a long branch yields to the PR pill without evicting itself at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    const geometry = await page.locator(".inbox-row").nth(8).evaluate((row) => {
       const style = getComputedStyle(row);
       const rightEdge = row.getBoundingClientRect().right - parseFloat(style.paddingRight);
-      const pill = node.querySelector<HTMLElement>(".inbox-row-pr-pill")!;
-      const badge = node.querySelector<HTMLElement>(".background-work-badge")!;
-      const branch = node.querySelector<HTMLElement>(".inbox-row-branch")!;
+      const pill = row.querySelector<HTMLElement>(".inbox-row-pr-pill")!;
+      const badge = row.querySelector<HTMLElement>(".background-work-badge")!;
+      const branch = row.querySelector<HTMLElement>(".inbox-row-branch")!;
+      const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!;
       return {
         branchWidth: branch.getBoundingClientRect().width,
+        branchLeft: branch.getBoundingClientRect().left,
+        senderRight: sender.getBoundingClientRect().right,
         pillWidth: pill.getBoundingClientRect().width,
         badgeWidth: badge.getBoundingClientRect().width,
         pillOverflowRight: pill.getBoundingClientRect().right - rightEdge,
         badgeOverflowRight: badge.getBoundingClientRect().right - rightEdge,
-        // Nothing on the line may be drawn over anything else.
+        // Nothing on a shared line may be drawn over anything else.
         pillClearsBadge: badge.getBoundingClientRect().left - pill.getBoundingClientRect().right,
+        sameLineAsSender: Math.abs(
+          branch.getBoundingClientRect().top - sender.getBoundingClientRect().top,
+        ) <= 4,
       };
     });
 
@@ -235,7 +307,50 @@ for (const width of [390, 770, 1400]) {
     expect(geometry.badgeWidth).toBeGreaterThan(20);
     expect(geometry.pillOverflowRight).toBeLessThanOrEqual(0.5);
     expect(geometry.badgeOverflowRight).toBeLessThanOrEqual(0.5);
-    expect(geometry.pillClearsBadge).toBeGreaterThanOrEqual(-0.5);
+    if (width > 760) {
+      // The branch shares line one with the sender and starts clear of it, rather than under it.
+      expect(geometry.sameLineAsSender).toBe(true);
+      expect(geometry.branchLeft).toBeGreaterThanOrEqual(geometry.senderRight);
+    } else {
+      expect(geometry.sameLineAsSender).toBe(false);
+      expect(geometry.pillClearsBadge).toBeGreaterThanOrEqual(-0.5);
+    }
+  });
+}
+
+// #877's own failure mode: the sender and the Git state now compete for line one, and a long
+// agent-and-project label is the thing that could take the branch's width. It must ellipsize at its
+// own cap instead, on the widest and the narrowest desktop alike.
+for (const width of [770, 1400]) {
+  test(`a long agent and project label yields line one to the branch at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
+    await page.evaluate(() => {
+      const sender = document.querySelector<HTMLElement>(".inbox-row-sender > span:last-child")!;
+      sender.textContent = "An Agent With an Extremely Long Name · A Project Whose Name Also Runs On and On "
+        + "and On, Past Any Share of a Card That Line One Could Reasonably Give It at the Widest Desktop "
+        + "Viewport This Inbox Is Ever Rendered At";
+    });
+    const geometry = await page.locator(".inbox-row").first().evaluate((row) => {
+      const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!;
+      const label = row.querySelector<HTMLElement>(".inbox-row-sender > span:last-child")!;
+      const branch = row.querySelector<HTMLElement>(".inbox-row-branch")!;
+      return {
+        rowWidth: row.getBoundingClientRect().width,
+        senderWidth: sender.getBoundingClientRect().width,
+        clipped: label.scrollWidth > label.clientWidth + 1,
+        ellipsis: getComputedStyle(label).textOverflow,
+        branchWidth: branch.getBoundingClientRect().width,
+        branchLeft: branch.getBoundingClientRect().left,
+        senderRight: sender.getBoundingClientRect().right,
+      };
+    });
+
+    // Capped, clipped with an ellipsis, and still leaving the branch a readable share of the line.
+    expect(geometry.senderWidth).toBeLessThanOrEqual(geometry.rowWidth * 0.4);
+    expect(geometry.clipped).toBe(true);
+    expect(geometry.ellipsis).toBe("ellipsis");
+    expect(geometry.branchWidth).toBeGreaterThan(40);
+    expect(geometry.branchLeft).toBeGreaterThanOrEqual(geometry.senderRight);
   });
 }
 
@@ -307,4 +422,55 @@ test("a reported default branch decides whether the base ref is worth showing", 
   const onDefault = page.locator(".inbox-row-git").nth(4);
   await expect(onDefault.locator(".inbox-row-branch")).toHaveText("fix/issue-679-follow-up");
   await expect(onDefault.locator(".inbox-row-base")).toHaveCount(0);
+});
+
+// Two card shapes mean two virtualization estimates, and an estimate that does not match what the
+// cards actually measure is only visible AFTER a scroll: the rows the reader has not reached yet
+// are positioned from it. Crossing the breakpoint mid-scroll exercises both, plus the measurement
+// epoch that has to invalidate one shape's cached sizes without losing the reader's place.
+test("crossing the breakpoint mid-scroll keeps the reader's row and the list's geometry", async ({ page }) => {
+  // Short enough that eleven cards genuinely overflow the list in BOTH shapes.
+  await page.setViewportSize({ width: 1400, height: 800 });
+  const list = page.locator(".inbox-list");
+  await expect(page.locator(".inbox-row").first()).toBeVisible();
+
+  const anchorTitle = "Orphaned Background Work Beside a Branch";
+  await list.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  await expect(page.getByText(anchorTitle)).toBeVisible();
+
+  // Only CONSECUTIVE cards may be compared. The mounted set is deliberately not contiguous: the
+  // range extractor pins the selected row wherever it is, so the distance from it to the visible
+  // window is the virtualizer working, not a gap. Pairing on `data-index` measures the thing the
+  // estimate can actually get wrong.
+  const worstNeighbours = async () => await page.locator("[data-virtual-row]").evaluateAll((nodes) => {
+    const rows = nodes
+      .map((node) => ({
+        index: Number((node as HTMLElement).dataset.index),
+        box: node.getBoundingClientRect(),
+      }))
+      .sort((left, right) => left.index - right.index);
+    let overlap = 0;
+    let gap = 0;
+    for (let at = 1; at < rows.length; at += 1) {
+      if (rows[at]!.index !== rows[at - 1]!.index + 1) continue;
+      overlap = Math.max(overlap, rows[at - 1]!.box.bottom - rows[at]!.box.top);
+      gap = Math.max(gap, rows[at]!.box.top - rows[at - 1]!.box.bottom);
+    }
+    return { mounted: rows.length, overlap, gap };
+  });
+
+  for (const width of [390, 1400, 760, 770]) {
+    await page.setViewportSize({ width, height: 800 });
+    // The row the reader was on stays on screen across the shape change, rather than the list
+    // jumping to wherever the old shape's estimates happened to put that scroll offset.
+    await expect(page.getByText(anchorTitle)).toBeInViewport();
+    // Polled on the predicate itself: a width change opens a new measurement epoch, and the
+    // re-seeded rows settle over the next frame or two. What must never settle is an overlap or a
+    // hole between consecutive cards.
+    await expect.poll(async () => {
+      const { mounted, overlap, gap } = await worstNeighbours();
+      return { neighbours: mounted > 1, overlapping: overlap > 0.5, holed: gap >= 24 };
+    }, { message: `neighbouring cards at ${width}px` })
+      .toEqual({ neighbours: true, overlapping: false, holed: false });
+  }
 });

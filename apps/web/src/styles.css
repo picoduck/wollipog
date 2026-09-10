@@ -9092,13 +9092,19 @@ body.shell-dock-dragging * {
   display: grid;
   width: 100%;
   min-width: 0;
-  /* One stacked shape at every width, and EXACTLY three lines on every card (#782). Line one is
-     the sender and the signals column; line two is the title and the activity strip; line three is
-     the session's Git state on the left and its background work on the right. Before #664 the
-     desktop row packed all of it onto ONE line, so the strip's fixed 70px had to survive whatever
-     the title and the worktree label left over; before #782 line three came and went with the
-     worktree and the background badge took a fourth line of its own. */
-  grid-template-columns: minmax(0, 1fr) auto;
+  /* TWO shapes, one per breakpoint, and every card at a given width is the same one (#877).
+     Desktop, here: line one is the sender, the Git state, and the signals column; line two is the
+     title, the background badge, and the activity strip. A phone keeps #782's three-line stack
+     (see the mobile block) — it has no horizontal room for the Git state beside the sender, and
+     that shape is what this one is a response to: three lines cost about 85px of desktop card to
+     say what fits on two.
+     Before #664 the desktop row packed ALL of it onto one line, so the strip's fixed 70px had to
+     survive whatever the title and the worktree label left over; before #782 the Git line came and
+     went with the worktree and the background badge took a line of its own.
+     Column one is `fit-content(38%)`: the sender is as wide as its text and never wider than a bit
+     over a third of the card, so a long agent-and-project label ellipsizes instead of evicting the
+     branch name from the flexible column beside it. */
+  grid-template-columns: fit-content(38%) minmax(0, 1fr) auto;
   align-items: center;
   gap: 5px 10px;
   margin: 0;
@@ -9147,12 +9153,13 @@ body.shell-dock-dragging * {
 .inbox-row-git,
 .inbox-row-signals { display: flex; min-width: 0; align-items: center; }
 .inbox-row-sender { grid-area: 1 / 1; gap: 7px; color: var(--text-dim); font-size: 12px; }
-.inbox-row-copy { grid-area: 2 / 1 / auto / -1; gap: 8px; overflow: hidden; }
-/* Line three spans BOTH grid columns rather than sitting in column two, so a wide background badge
-   cannot widen the signals column and squeeze the sender line above it. The height floor is the
-   badge's own box (18px line + 1px border each side), which is what keeps a card carrying
-   background work exactly as tall as one that carries none. */
-.inbox-row-meta { grid-area: 3 / 1 / auto / -1; min-height: 20px; gap: 10px; }
+/* The card's LAST line on desktop, so it carries the background badge as well as the strip. The
+   height floor is the badge's own box (18px line + 1px border each side): without it a card holding
+   background work is a pixel taller than one that does not, and the two would need two estimates. */
+.inbox-row-copy { grid-area: 2 / 1 / auto / -1; min-height: 20px; gap: 8px; overflow: hidden; }
+/* The Git line: beside the sender on desktop, its own line three on a phone. The same 20px floor,
+   for the same reason — a PR pill must not make a card taller than one without one. */
+.inbox-row-meta { grid-area: 1 / 2; min-height: 20px; gap: 10px; }
 .inbox-row-git { flex: 1 1 auto; gap: 6px; overflow: hidden; }
 .inbox-row-sender > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inbox-row-title {
@@ -9216,12 +9223,13 @@ body.shell-dock-dragging * {
 .inbox-row-shell.unread .inbox-row-sender { color: color-mix(in srgb, var(--accent) 70%, var(--text)); }
 .inbox-row-shell.unread .inbox-row-title { color: var(--text); font-weight: 750; }
 .inbox-row-activity { margin-left: 3px; }
-.inbox-row-signals { grid-area: 1 / 2; justify-content: end; gap: 7px; color: var(--text-faint); font-size: 11px; }
-/* Pinned to the right of line three, under the activity strip. `flex: none` because the badge is
-   the item on the line that must survive: the branch and base ref shrink around it. `display: flex`
-   because this wrapper holds an INLINE-flex badge: as a block container it would open a line box and
-   add the font's leading around it, making the wrapper 21.5px tall around a 20px badge and every
-   card carrying background work 1.5px taller than one that does not. */
+.inbox-row-signals { grid-area: 1 / 3; justify-content: end; gap: 7px; color: var(--text-faint); font-size: 11px; }
+/* Pinned to the trailing edge of whichever line holds it — immediately left of the activity strip on
+   desktop, right of the Git state on a phone. `flex: none` because the badge is the item on its line
+   that must survive: the title, branch, and base ref all shrink around it. `display: flex` because
+   this wrapper holds an INLINE-flex badge: as a block container it would open a line box and add the
+   font's leading around it, making the wrapper 21.5px tall around a 20px badge and every card
+   carrying background work 1.5px taller than one that does not. */
 .inbox-row-background-work { display: flex; flex: none; align-items: center; margin-left: auto; }
 /* Sized to the PR pill and the lifecycle pills it shares the card with, so it fits line three
    instead of growing the card. #784 tracks the same alignment for the Session header. */
@@ -9414,12 +9422,17 @@ body.shell-dock-dragging * {
   .inbox-search { width: 100%; min-width: 0; flex: 1; margin-bottom: 0; }
   .inbox-search input { width: auto; flex: 1; opacity: 1; pointer-events: auto; }
   .inbox-search-key { display: inline-block; }
-  /* The stacked shape is now the shape everywhere; a phone only drops what it cannot afford —
-     the base ref on line three, and a few cells off the strip. Line three itself stays, on every
-     card, because the Git state and the background badge are the two things a phone reader has no
-     other way to see (#782). */
+  /* #782's three-line stack, unchanged, and the reason #877 is a desktop-only change: a phone has
+     no width to put the Git state beside the sender, so it gets a line of its own — with the
+     background badge on it, because those are the two things a phone reader has no other way to
+     see. A phone drops only what it cannot afford: the base ref, and a few cells off the strip. */
+  .inbox-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .inbox-row-signals { grid-area: 1 / 2; }
+  .inbox-row-meta { grid-area: 3 / 1 / auto / -1; gap: 6px; }
+  /* The badge is on line three here, so line two is the title and the strip again and needs no
+     floor of its own. Left at 20px it would add a pixel to every phone card. */
+  .inbox-row-copy { min-height: auto; }
   .inbox-row-base { display: none; }
-  .inbox-row-meta { gap: 6px; }
   .inbox-row-activity { width: 58px; gap: 0; }
   .inbox-activity-footer { gap: 6px; padding-inline: 6px; }
   .inbox-activity-summary { gap: 6px; }

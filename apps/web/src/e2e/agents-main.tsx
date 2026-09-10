@@ -127,7 +127,7 @@ function NavigationFixture({ session, onSession, online }: {
       <h2>Inbox</h2>
       <div role="grid" aria-label="Fixture Inbox"><InboxRow session={session} projectName="Fixture"
         optionId="fixture-row" selected={false} unread={false} pinned={false} rowIndex={1}
-        stalled={false} activityNow={now} onSelect={() => {}} onExpand={() => {}}
+        stalled={false} activityNow={now} threeRow={false} onSelect={() => {}} onExpand={() => {}}
         onSessionMenu={() => {}} onNavigate={navigate} /></div>
       <h2>Board</h2>
       <Board sessions={[session]} searchActive={false} onShowAll={() => {}}
