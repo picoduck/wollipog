@@ -1,4 +1,5 @@
 import type { SessionUsageResponse, SessionView } from "@wollipog/protocol";
+import { safeExternalHref } from "./external-href.js";
 import { formatCost } from "./format.js";
 
 /** What the always-visible session-cost control shows. */
@@ -119,9 +120,19 @@ export function costProvenanceNote(breakdown: SessionUsageResponse | null): stri
   if (costSource === "providerReported") return "Cost as reported by the provider.";
   if (pricing?.status === "unavailable") return "No rate table is loaded, so cost is not estimated.";
   if (pricing?.source) {
+    // URL sources render as a compact link in SessionUsageControl; returning null keeps the raw
+    // address out of prose while named sources retain their existing explanation.
+    if (safeExternalHref(pricing.source)) return null;
     return pricing.status === "cached"
       ? `Estimated from a cached ${pricing.source} rate table.`
       : `Estimated from the ${pricing.source} rate table.`;
   }
   return "Estimated from the model rate table.";
+}
+
+/** A browser-safe pricing source URL for estimated costs, when the rate table names one. */
+export function estimatedCostSourceUrl(breakdown: SessionUsageResponse | null): string | null {
+  if (!breakdown || breakdown.totals.costSource !== "modelPriced" || breakdown.pricing?.status === "unavailable") return null;
+  const source = breakdown.pricing?.source;
+  return safeExternalHref(source);
 }

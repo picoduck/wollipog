@@ -238,18 +238,69 @@ test("a session with an unknown context window still shows its cost", async () =
   await view.cleanup();
 });
 
-test("Codex App Server usage names the complete-turn protocol boundary", async () => {
+test("Codex App Server protocol details stay behind a compact info disclosure", async () => {
   const view = await mount(session({ driver: "codex-app-server" }), {
     sessionId: "s1",
     totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59 }),
     byModel: [],
   });
   await view.open();
+  const disclosure = view.popover()!.querySelector(".session-usage-info")!;
+  const button = disclosure.querySelector("button")!;
+  const detail = disclosure.querySelector(".session-usage-info-detail")!;
+  assert.equal(button.getAttribute("aria-label"), "About Codex App Server Usage");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  assert.equal(button.getAttribute("aria-controls"), detail.id);
   assert.match(
-    view.popover()!.textContent ?? "",
+    detail.textContent ?? "",
     /before protocol v127 is incomplete because it includes only the final model response.*v127\+ counts every response/s,
   );
+  assert.equal(view.popover()!.querySelector("p")?.textContent?.includes("protocol v127"), false);
   await view.cleanup();
+});
+
+test("an estimated-cost URL is a compact link instead of visible source text", async () => {
+  const source = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+  const view = await mount(session(), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59, costSource: "modelPriced" }),
+    byModel: [],
+    pricing: { status: "fresh", source, fetchedAt: 1, knownModels: 1200 },
+  });
+  await view.open();
+  const note = view.popover()!.querySelector(".session-usage-note")!;
+  const link = note.querySelector("a")!;
+  assert.equal(link.textContent, "Estimated API Costs");
+  assert.equal(link.getAttribute("href"), source);
+  assert.equal(link.getAttribute("target"), "_blank");
+  assert.equal(link.getAttribute("rel"), "noreferrer");
+  assert.doesNotMatch(note.textContent ?? "", /raw\.githubusercontent\.com/);
+  await view.cleanup();
+});
+
+test("cached and unavailable URL sources keep their provenance state", async () => {
+  const source = "https://example.com/rates.json";
+  const cached = await mount(session(), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59, costSource: "modelPriced" }),
+    byModel: [],
+    pricing: { status: "cached", source, fetchedAt: 1, knownModels: 1200 },
+  });
+  await cached.open();
+  assert.equal(cached.popover()!.querySelector(".session-usage-note")!.textContent, "Estimated API Costs (Cached Rates)");
+  assert.equal(cached.popover()!.querySelector(".session-usage-note a")!.getAttribute("href"), source);
+  await cached.cleanup();
+
+  const unavailable = await mount(session(), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59, costSource: "modelPriced" }),
+    byModel: [],
+    pricing: { status: "unavailable", source, fetchedAt: null, knownModels: 0 },
+  });
+  await unavailable.open();
+  assert.equal(unavailable.popover()!.querySelector(".session-usage-note")!.textContent, "No rate table is loaded, so cost is not estimated.");
+  assert.equal(unavailable.popover()!.querySelector(".session-usage-note a"), null);
+  await unavailable.cleanup();
 });
 
 test("a mixed-model session splits by model and names the unpriced one", async () => {
