@@ -10465,6 +10465,16 @@ body.shell-dock-dragging * {
   min-width: 0;
 }
 .transcript-status-actions:empty { display: none; }
+/* A cramped pane cannot hold all three tracks. The cost is a permanent seat and truncates rather
+   than vanishing; the Reply hint is pure discoverability for a shortcut that keeps working, so it
+   is what yields. The threshold is the width at which the strip stops fitting: the paused
+   follow-state control is ~238px, and the symmetric 1fr tracks each need the hint (~65px with its
+   gap) plus a wide cost (~61px) on top of the strip's 44px of padding and column gaps. Without
+   this, a desktop session beside an open side panel shrank the cost to a few pixels — or to
+   nothing — while the hint kept its full width (#893). */
+@container transcript-pane (max-width: 560px) {
+  .transcript-status-actions { display: none; }
+}
 /* One compact centered cluster — pager hints sit at the standard inter-control gap directly
    beside the follow-state control instead of being pushed toward the strip edges. */
 .follow-tail-control {

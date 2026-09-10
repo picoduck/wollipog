@@ -287,6 +287,36 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
     await expect(page.locator(".session-usage-popover")).toHaveCount(1);
   });
 
+  test("a cramped desktop pane keeps the cost readable by retiring the Reply hint", async ({ page }) => {
+    // A desktop session beside an open side panel: the viewport is well above the mobile
+    // breakpoint, but the transcript pane itself is narrow. With follow paused the follow-state
+    // control roughly doubles, and the trailing track has to hold a wide cost as well.
+    await page.setViewportSize({ width: 900, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=440&height=780&cost=12345.67");
+    await expect(page.locator(".follow-tail-chip")).toBeVisible();
+    await page.mouse.move(220, 300);
+    await page.mouse.wheel(0, -900);
+    await expect(page.locator(".follow-tail-chip")).toContainText("Follow Live Output");
+
+    // The hint yields — its shortcut still works, and the cost is the permanent seat.
+    await expect(page.locator(".transcript-status-actions")).toBeHidden();
+    const cost = page.locator(".transcript-status-usage .session-cost-button");
+    const legibility = await cost.evaluate((button) => ({
+      visible: button.getBoundingClientRect().width,
+      needed: button.scrollWidth,
+    }));
+    // Before the trailing track was allowed to shed the hint, this collapsed to ~14px, and to
+    // literally zero at 400px, while the fixed-width hint kept every pixel it asked for.
+    expect(legibility.visible).toBeGreaterThanOrEqual(legibility.needed - 0.5);
+
+    const geometry = await readStrip(page);
+    expect(geometry.follow.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
+    expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
+    expect(geometry.overflows).toBe(false);
+    expect(Math.abs(geometry.follow.center - geometry.strip.center)).toBeLessThanOrEqual(1);
+    await page.screenshot({ path: `${SHOT}/desktop-status-strip-cramped-pane.png` });
+  });
+
   test("an unpriced ledger keeps the placeholder and names itself in the popover", async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 820 });
     await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=none");

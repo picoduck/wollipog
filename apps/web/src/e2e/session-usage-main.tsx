@@ -52,6 +52,10 @@ const parsedCost = Number(costParam);
 const sessionCostUsd = unpricedCost || freeCost || costParam === null || !Number.isFinite(parsedCost)
   ? 1.37
   : parsedCost;
+/** The default fixture's 1.21 / 0.16 split, held as a ratio so a `?cost=` override still sums to the
+ * headline figure and a sub-cent total never produces a negative per-model row. */
+const miniModelCostUsd = sessionCostUsd * (0.16 / 1.37);
+const mainModelCostUsd = sessionCostUsd - miniModelCostUsd;
 
 const SESSION_ID = "session-usage-e2e";
 
@@ -288,12 +292,10 @@ const client = {
       : freeCost ? usageAmount(184_000, 21_000, 0, 205_000)
       : usageAmount(184_000, 21_000, sessionCostUsd, 205_000, "modelPriced"),
     byModel: [
-      // The larger model carries whatever the total is minus the mini model's fixed share, so a
-      // `?cost=` override still adds up in the popover's By Model split.
-      { model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex", ...usageAmount(160_000, 18_000, sessionCostUsd - 0.16, 178_000) },
+      { model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex", ...usageAmount(160_000, 18_000, mainModelCostUsd, 178_000) },
       {
         model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini",
-        ...usageAmount(24_000, 3_000, unpricedCost ? 0 : 0.16, 27_000, unpricedCost ? "unpriced" : "modelPriced"),
+        ...usageAmount(24_000, 3_000, unpricedCost ? 0 : miniModelCostUsd, 27_000, unpricedCost ? "unpriced" : "modelPriced"),
       },
     ],
     pricing: {
