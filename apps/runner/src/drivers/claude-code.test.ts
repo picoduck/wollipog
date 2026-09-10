@@ -3578,11 +3578,23 @@ test("Claude does not repeat assistant text that already streamed, and keeps the
     event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial answer" } },
   });
   streamed.feed({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "text", text: "partial answer" }] } });
-  assert.equal(streamed.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  // Claude sets `result` to the partial answer it already streamed; echoing it would show the
+  // reader the same text twice.
+  assert.equal(streamed.feed({
+    type: "result", subtype: "error_during_execution", is_error: true, result: "partial answer", usage: {},
+  }), "refusal");
   const errors = streamed.events.filter((event) => event.kind === "error");
   assert.equal(errors.length, 1);
   assert.match((errors[0] as { message: string }).message, /error_during_execution/);
   assert.doesNotMatch((errors[0] as { message: string }).message, /partial answer/);
+  // Text the provider did not already show still gets through after a partial stream.
+  const late = makeHarness();
+  late.feed({ type: "stream_event", event: { type: "message_start", message: { id: "msg_1" } } });
+  late.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "half" } } });
+  late.feed({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "text", text: "half" }] } });
+  late.feed({ type: "result", subtype: "success", is_error: true, result: "API Error: 500 Internal", usage: {} });
+  assert.equal((late.events.filter((event) => event.kind === "error")[0] as { message: string }).message,
+    "API Error: 500 Internal");
 
   // A context-window rejection still wins: it names the cause and the way out, the raw text does not.
   const rejected = makeHarness();
@@ -3606,9 +3618,11 @@ test("Claude does not repeat assistant text that already streamed, and keeps the
   assert.deepEqual(nested.events.filter((event) => event.kind === "error"), []);
 
   // Nothing at all to say leaves the channel silent rather than inventing a reason.
-  assert.equal(claudeErrorResultText({ is_error: true }, null), null);
-  assert.equal(claudeErrorResultText({ is_error: true, result: "   " }, "  "), null);
-  assert.equal(claudeErrorResultText(null, "synthetic only"), "synthetic only");
+  assert.equal(claudeErrorResultText({ is_error: true }, null, false), null);
+  assert.equal(claudeErrorResultText({ is_error: true, result: "   " }, "  ", false), null);
+  assert.equal(claudeErrorResultText(null, "synthetic only", false), "synthetic only");
+  assert.equal(claudeErrorResultText(null, "already shown", true), null);
+  assert.equal(claudeErrorResultText({ result: "already shown" }, "already shown", true), null);
 });
 
 test("Claude result without a matching modelUsage entry leaves the context gauge untouched", () => {

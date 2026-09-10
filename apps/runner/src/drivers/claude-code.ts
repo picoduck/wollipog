@@ -353,17 +353,25 @@ export function claudeContextWindowRejection(result: unknown, resolvedModel: str
 /** The provider's own account of a turn that ended in an error result. Claude reports a transport
  * or credential failure as a synthetic assistant message plus an error result and nothing else:
  * without this text the turn persists as a prompt with no reply and a zero-token usage record, and
- * the automation that scheduled it settles on a bare stop reason. `result` is the canonical field;
- * the synthetic message is the fallback for an error result that carries no text of its own, and
- * is used only when the turn streamed no assistant output that already reached the timeline. */
-export function claudeErrorResultText(result: unknown, unstreamedAssistantText: string | null): string | null {
+ * the automation that scheduled it settles on a bare stop reason.
+ *
+ * `result` is the canonical field, and the assistant text is the fallback for an error result that
+ * carries no text of its own. Neither may repeat what the timeline already holds: on a turn that
+ * streamed a partial answer before failing, Claude sets `result` to that same partial answer, and
+ * echoing it as an error would show the reader the identical text twice. */
+export function claudeErrorResultText(
+  result: unknown,
+  assistantText: string | null,
+  streamed: boolean,
+): string | null {
   const record = result && typeof result === "object"
     ? (result as { result?: unknown; subtype?: unknown })
     : null;
+  const shown = streamed ? (assistantText?.trim() ?? "") : "";
   const detail = typeof record?.result === "string" ? record.result.trim() : "";
-  if (detail) return truncate(detail, 2_000);
-  const synthetic = unstreamedAssistantText?.trim();
-  if (synthetic) return truncate(synthetic, 2_000);
+  if (detail && detail !== shown) return truncate(detail, 2_000);
+  const message = streamed ? "" : (assistantText?.trim() ?? "");
+  if (message) return truncate(message, 2_000);
   const subtype = typeof record?.subtype === "string" ? record.subtype : "";
   return subtype ? `The provider ended the turn with '${subtype}' and produced no output.` : null;
 }
@@ -2227,10 +2235,10 @@ export class ClaudeCodeDriver implements Driver {
         }
         if (msg.is_error || msg.subtype === "error_during_execution") {
           if (!parentId) {
-            const unstreamed = this.streamedAgentResponse ? null : this.turnAssistantText;
+            const streamed = this.streamedAgentResponse;
             this.streamedAgentResponse = false;
             const message = claudeContextWindowRejection(msg, this.resolvedModel) ??
-              claudeErrorResultText(msg, unstreamed);
+              claudeErrorResultText(msg, this.turnAssistantText, streamed);
             if (message) {
               this.turnErrorText = message;
               this.cb.onEvent({ kind: "error", message });

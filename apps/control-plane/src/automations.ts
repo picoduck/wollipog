@@ -511,12 +511,13 @@ export class AutomationsService {
       const execution = this.db.getAutomationExecution(candidate.executionId);
       if (!execution) continue;
       if (execution.status !== "running") continue;
-      // A receipted execution with undelivered launch work has no outcome yet. Its session may sit
-      // idle between a failed first attempt and its queued replacement, and idle is the success
-      // signal below — reading it now would settle the execution before the retry ever runs.
-      if (execution.deliveryMode === "receipted_v53" &&
-          this.db.listAutomationCommands(execution.executionId)
-            .some((command) => ["staged", "pending", "sent"].includes(command.state))) continue;
+      // A retrying execution has no outcome yet. Its session sits idle from the attempt the
+      // provider refused, and idle is the success signal below — reading it would settle the
+      // execution before the replacement finishes, or even before it is delivered. The wait covers
+      // every non-terminal replacement state, because a runner sends its accepted and started
+      // receipts before the relaunched session leaves idle. It is scoped to executions that
+      // actually carry a superseded command so no ordinary execution's settlement is delayed.
+      if (this.retryInFlight(execution.executionId)) continue;
       const automation = this.db.getAutomation(execution.automationId);
       let terminal: "succeeded" | "failed" | null = null;
       let error: string | undefined;
@@ -549,6 +550,13 @@ export class AutomationsService {
       });
       if (automation && settled) this.emit({ ...automation, ...(settled.specSnapshot ?? {}) }, settled, terminal);
     }
+  }
+
+  /** True while a replacement issued for a transiently refused launch has not yet terminalized. */
+  private retryInFlight(executionId: string): boolean {
+    const commands = this.db.listAutomationCommands(executionId);
+    return commands.some((command) => command.supersededBy !== undefined) &&
+      commands.some((command) => !["completed", "rejected", "uncertain"].includes(command.state));
   }
 
   private reconcileExecution(executionId: string, now: number): void {

@@ -1114,15 +1114,55 @@ test("a transient provider failure replaces the launch instead of failing the ex
   assert.equal(retry.commandId, replacement!.commandId);
   assert.equal(retry.command.type, "start_session", "the replacement carries the original launch payload");
 
+  // The runner acknowledges the relaunch before the session leaves idle, so the wait has to cover
+  // every non-terminal replacement state, not just the undelivered ones.
+  for (const [state, revision] of [["accepted", 1], ["started", 2]] as const) {
+    assert.equal(service.onDurableCommandReceipt("runner-1", {
+      type: "durable_session_command_update", commandId: retry.commandId,
+      sessionId: command.sessionId, state, revision,
+    }, 121_000 + revision), true);
+    service.recover(121_010 + revision);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running",
+      `an idle session must not settle the execution while the replacement is ${state}`);
+  }
+
   // A retry that lands leaves an ordinary completed execution.
   assert.equal(service.onDurableCommandReceipt("runner-1", {
     type: "durable_session_command_result", requestId: retry.requestId, duplicate: false,
-    commandId: retry.commandId, sessionId: command.sessionId, state: "completed", revision: 1,
+    commandId: retry.commandId, sessionId: command.sessionId, state: "completed", revision: 3,
   }, 121_100), true);
   db.updateSessionStatus(command.sessionId, "idle", 121_200);
   service.recover(121_300);
   assert.equal(db.getAutomationExecution(execution.executionId)?.status, "succeeded");
   assert.equal(db.getAutomationExecution(execution.executionId)?.error, undefined);
+});
+
+test("an execution with no retry in flight still settles from its workflow instance", () => {
+  const { db, service } = harness();
+  const automation = service.create(baseSpec({
+    action: { kind: "workflow_run", request: {
+      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+    } },
+  }), { kind: "human", id: "device" }, 0).data!;
+  service.tick(60_000);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const commands = db.listAutomationCommands(execution.executionId);
+  assert.equal(commands.length > 1, true, "a workflow launch plan has sibling commands");
+
+  // One member started; a sibling is still owed delivery. That is an ordinary in-flight plan, not
+  // a retry, so the workflow instance's own terminal status must still settle the execution.
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: commands[0]!.commandId,
+    sessionId: commands[0]!.sessionId, state: "started", revision: 2,
+  }, 60_100), true);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running");
+  assert.equal(db.listAutomationCommands(execution.executionId)
+    .some((command) => ["staged", "pending", "sent"].includes(command.state)), true);
+
+  service.recover(60_300);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "failed",
+    "the workflow instance settles its execution even while a sibling launch is undelivered");
+  assert.match(db.getAutomationExecution(execution.executionId)?.error ?? "", /workflow instance/);
 });
 
 test("a non-transient refusal fails on its first attempt and retries are bounded", () => {

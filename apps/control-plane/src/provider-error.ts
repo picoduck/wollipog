@@ -12,17 +12,24 @@
  * state in its own message that the caller should retry. Anything else stays terminal.
  */
 
-/** Conditions Claude Code reports by name and resolves on its own within about a minute. */
+/**
+ * Conditions Claude Code reports by name and resolves on its own within about a minute. Each one
+ * has to describe *contention* — another holder, a refresh already under way — not merely a failed
+ * refresh: a revoked or expired token is also reported as a refresh failure, and that never clears
+ * on its own. These outrank the durable indicators below, because the contention message ends by
+ * suggesting a fresh login if the contention persists.
+ */
 const TRANSIENT_CONDITIONS = [
-  /failed to refresh (the )?oauth token/iu,
   /another claude code process is refreshing it/iu,
-  /oauth token (refresh|renewal) (failed|is in progress)/iu,
-  /\bcredential(s)? (refresh|renewal) (failed|in progress|contention)/iu,
+  /exited mid-refresh/iu,
+  /(token|credential(s)?) (refresh|renewal) is (already )?in progress/iu,
+  /\bcredential(s)? (refresh|renewal) contention/iu,
 ];
 
 /** The provider telling the caller, in its own message, that the condition passes. */
 const RETRY_ADVICE = [
   /this is usually transient/iu,
+  /failed to refresh (the )?oauth token/iu,
   /\bretry in a (minute|moment|few (seconds|minutes))/iu,
   /\b(please )?(retry|try again) (in|after|later|shortly)/iu,
   /\btemporarily unavailable\b/iu,

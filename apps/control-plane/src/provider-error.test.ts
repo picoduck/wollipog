@@ -23,6 +23,10 @@ test("only provider text that names a passing condition earns another launch att
   // A durable condition wins over retry advice quoted beside it: waiting cannot fix a signed-out
   // account, and the OAuth message ends with exactly that advice for the persistent case.
   assert.equal(isTransientProviderError("Session expired. Please sign in again, or try again later."), false);
+  // A revoked or expired refresh token is reported as a refresh failure too. Only the contention
+  // wording outranks a durable indicator; a bare refresh failure that says to sign in does not.
+  assert.equal(isTransientProviderError("Failed to refresh OAuth token; please sign in again"), false);
+  assert.equal(isTransientProviderError("Failed to refresh OAuth token; retry in a minute"), true);
 
   // Silence is not evidence that a condition passes.
   assert.equal(isTransientProviderError(undefined), false);
