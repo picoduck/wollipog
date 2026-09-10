@@ -10,7 +10,7 @@ import {
   type SessionStatus,
   type SessionView,
 } from "@wollipog/protocol";
-import { statusMeta } from "../format.js";
+import { statusMeta, type StatusMeta } from "../format.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CheckIcon, CloseIcon, CopyIcon, WarningIcon } from "./Icons.js";
 
@@ -147,14 +147,15 @@ export function CopyButton({
   );
 }
 
-export function StatusBadge({ status, archiveStatus, archiveOperation, stopOperation, ariaLabel }: {
+export function StatusBadge({ status, archiveStatus, archiveOperation, stopOperation, historyQuarantine, ariaLabel }: {
   status: SessionStatus;
   archiveStatus?: ArchiveStatus;
   archiveOperation?: ArchiveOperationView;
   stopOperation?: StopOperationView;
+  historyQuarantine?: SessionView["historyQuarantine"];
   ariaLabel?: string;
 }) {
-  const m = sessionStatusBadgeMeta(status, archiveStatus, archiveOperation, stopOperation);
+  const m = sessionStatusBadgeMeta(status, archiveStatus, archiveOperation, stopOperation, historyQuarantine);
   const operation = stopOperation ?? archiveOperation;
   return (
     <span className={"status-badge " + m.className} title={operation?.failure?.message} aria-label={ariaLabel}>
@@ -169,6 +170,7 @@ function sessionStatusBadgeMeta(
   archiveStatus?: ArchiveStatus,
   archiveOperation?: ArchiveOperationView,
   stopOperation?: StopOperationView,
+  historyQuarantine?: SessionView["historyQuarantine"],
 ) {
   const operation = stopOperation ?? archiveOperation;
   const operationStatus = operation?.status ?? archiveStatus;
@@ -176,7 +178,17 @@ function sessionStatusBadgeMeta(
     ? { label: "Stopping", className: "st-running", busy: true }
     : operationStatus === "stop_failed"
       ? { label: "Stop Failed", className: "st-failed", busy: false }
-      : statusMeta(status);
+      : quarantinedStatusMeta(status, historyQuarantine) ?? statusMeta(status);
+}
+
+/** A quarantined conversation is idle only in the sense that nothing is running. It can never
+ * accept another prompt, so "Awaiting Prompt" would invite exactly the retry that cannot work. */
+export function quarantinedStatusMeta(
+  status: SessionStatus,
+  historyQuarantine: SessionView["historyQuarantine"],
+): StatusMeta | null {
+  if (!historyQuarantine || status === "completed" || status === "failed" || status === "stopped") return null;
+  return { label: "Quarantined", className: "st-failed", busy: false };
 }
 
 export function AttentionBadge({ session, ariaLabel, onOpen }: {
@@ -199,7 +211,8 @@ export function AttentionBadge({ session, ariaLabel, onOpen }: {
 }
 
 export function SessionStatusIndicators({ session, disconnected = false, onOpenAttention }: {
-  session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" | "stopOperation">;
+  session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
+    "stopOperation" | "historyQuarantine">;
   disconnected?: boolean;
   onOpenAttention?: () => void;
 }) {
@@ -208,6 +221,7 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
     session.archiveStatus,
     session.archiveOperation,
     session.stopOperation,
+    session.historyQuarantine,
   );
   const attention = sessionAttentionStatus(session);
   return (
@@ -217,6 +231,7 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
         archiveStatus={session.archiveStatus}
         archiveOperation={session.archiveOperation}
         stopOperation={session.stopOperation}
+        historyQuarantine={session.historyQuarantine}
         ariaLabel={`Activity: ${lifecycle.label}`}
       />
       <AttentionBadge session={session} ariaLabel={attention ? `Attention: ${attention.label}` : undefined} onOpen={onOpenAttention} />

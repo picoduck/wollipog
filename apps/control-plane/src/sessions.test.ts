@@ -9382,6 +9382,69 @@ function snapshot(over: Partial<SessionSnapshot> = {}): SessionSnapshot {
   };
 }
 
+test("a quarantined provider conversation refuses prompts and provider commands", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id, status: "idle",
+    historyQuarantine: { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork" },
+  })]);
+  assert.deepEqual(db.getSession(id)?.historyQuarantine, {
+    reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork",
+  });
+  hub.sentToRunner.length = 0;
+
+  const retried = svc.prompt(id, "try again");
+  assert.equal(retried.ok, false);
+  assert.equal(retried.status, 409);
+  assert.match(retried.error ?? "", /quarantined/);
+
+  // `/compact` arrives through the provider-command lane and is refused for the same reason.
+  const compacted = svc.invokeSessionCommand(id, {
+    submissionId: "sub-compact", providerCommandId: "compact", catalogRevision: "rev-1", argumentText: "",
+  });
+  assert.equal(compacted.ok, false);
+  assert.equal(compacted.status, 409);
+  assert.match(compacted.error ?? "", /quarantined/);
+  assert.equal(hub.sentToRunner.length, 0, "nothing is delivered to the poisoned conversation");
+
+});
+
+test("a snapshot that omits the additive quarantine field never clears the stored guard", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id, status: "idle",
+    historyQuarantine: { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork" },
+  })]);
+  assert.ok(db.getSession(id)?.historyQuarantine);
+
+  // Registration snapshots are built with a null protocol version, and a pre-v128 runner never
+  // sends the field at all. Neither may make a poisoned conversation promptable again.
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle" })]);
+  assert.deepEqual(db.getSession(id)?.historyQuarantine, {
+    reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork",
+  });
+  assert.equal(svc.prompt(id, "still blocked").status, 409);
+
+  // A supporting runner saying "there is no quarantine" is different from saying nothing: a restart
+  // onto a fresh provider conversation must be able to clear the guard, or the session is stuck
+  // rejecting prompts for a healthy thread.
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle", historyQuarantine: null })]);
+  assert.equal(db.getSession(id)?.historyQuarantine, undefined);
+  assert.equal(svc.prompt(id, "the fresh conversation works").ok, true);
+});
+
+test("an unrecognized stored quarantine is dropped rather than surfaced", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle" })]);
+  db.raw().prepare("UPDATE sessions SET history_quarantine=? WHERE id=?")
+    .run(JSON.stringify({ reason: "something_else", detectedAt: 5 }), id);
+  assert.equal(db.getSession(id)?.historyQuarantine, undefined);
+  assert.equal(svc.prompt(id, "unaffected").ok, true);
+});
+
 test("hydrateRunnerSessions inserts a session the cache never had (box is source of truth)", () => {
   const { db, hub, svc } = makeHarness();
 

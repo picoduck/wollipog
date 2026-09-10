@@ -72,11 +72,13 @@ function makeHarness(
   let authenticationFailures = 0;
   const subscriptionUsage: unknown[] = [];
   const serviceTiers: Array<string | null> = [];
+  const poisonedHistory: unknown[] = [];
   const cb: DriverCallbacks = {
     onEvent: (p) => events.push(p),
     onStderr: (line) => stderr.push(line),
     onExit: () => {},
     onAuthenticationFailure: () => { authenticationFailures += 1; },
+    onProviderHistoryUnrecoverable: (detail) => poisonedHistory.push(detail),
     onSubscriptionUsage: (update) => subscriptionUsage.push(update),
     onServiceTierResolved: (serviceTier) => serviceTiers.push(serviceTier),
   };
@@ -94,7 +96,8 @@ function makeHarness(
     : new CodexAppServerDriver(opts, cb);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const onItem = (item: unknown, completed: boolean) => (driver as any).onItem(item, completed);
-  return { driver, events, stderr, subscriptionUsage, serviceTiers, onItem, authenticationFailures: () => authenticationFailures };
+  return { driver, events, stderr, subscriptionUsage, serviceTiers, onItem, poisonedHistory,
+    authenticationFailures: () => authenticationFailures };
 }
 
 test("app-server launch enables Default-mode questions before the subcommand", () => {
@@ -267,6 +270,45 @@ test("app-server auth errors emit a secret-free auth signal", () => {
   (h.driver as any).emitDriverError(raw);
   assert.equal(h.authenticationFailures(), 1);
   assert.deepEqual(h.events, []);
+});
+
+test("an oversized historical tool call signals unrecoverable provider history", () => {
+  const h = makeHarness();
+  const raw = "Invalid 'input[675].arguments': string too long. Expected a string with maximum " +
+    "length 1048576, but got a string with length 1426210 instead.";
+  (h.driver as any).emitDriverError(raw);
+  // The transcript records a constructed description, never the provider's own text.
+  assert.equal(h.events.length, 1);
+  assert.equal((h.events[0] as any).kind, "error");
+  assert.match((h.events[0] as any).message, /rejected this conversation's stored history/);
+  assert.doesNotMatch((h.events[0] as any).message, /Invalid 'input/);
+  assert.deepEqual(h.poisonedHistory, [{
+    reason: "oversized_tool_call", itemIndex: 675, field: "arguments", limit: 1048576, length: 1426210,
+  }]);
+});
+
+test("a classified rejection never relays provider text that could carry content", () => {
+  const h = makeHarness();
+  // A future server version could append an excerpt or a thread id to the same rejection.
+  (h.driver as any).emitDriverError(
+    "Invalid 'input[1].arguments': {\"secret\":\"leaked-value\"}; string too long. " +
+      "Expected a string with maximum length 1048576, but got a string with length 2000000 instead. " +
+      "thread_id=thr_private",
+  );
+  assert.equal(h.poisonedHistory.length, 1);
+  const message = (h.events[0] as any).message as string;
+  assert.doesNotMatch(message, /leaked-value|secret|thr_private/);
+});
+
+test("ordinary provider errors never signal unrecoverable provider history", () => {
+  const h = makeHarness();
+  for (const raw of [
+    "400 Bad Request: unsupported model",
+    "Invalid 'input[0].content': string too long. Expected a string with maximum length 1048576.",
+    "context_length_exceeded",
+  ]) (h.driver as any).emitDriverError(raw);
+  assert.equal(h.events.length, 3);
+  assert.deepEqual(h.poisonedHistory, []);
 });
 
 test("Codex app-server accepts a final JSON-RPC response delivered after exit", async () => {

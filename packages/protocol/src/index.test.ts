@@ -17,6 +17,8 @@ import {
   projectSessionEventPayloadForProtocol,
   sessionNamingAgentFailureCode,
   sessionEventWireProjectionRequiredForProtocol,
+  sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -145,8 +147,10 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 127", () => {
-  assert.equal(PROTOCOL_VERSION, 127);
+test("PROTOCOL_VERSION is 128", () => {
+  assert.equal(PROTOCOL_VERSION, 128);
+  assert.equal(runnerSupportsProtocol(127, "providerHistoryQuarantine"), false);
+  assert.equal(runnerSupportsProtocol(128, "providerHistoryQuarantine"), true);
   assert.equal(runnerSupportsProtocol(121, "contextWindowVariants"), false);
   assert.equal(runnerSupportsProtocol(122, "contextWindowVariants"), true);
   assert.equal(runnerSupportsProtocol(122, "wslAgentControlBridge"), false);
@@ -841,6 +845,14 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(87), false);
+
+  // The variant is the count of unmet policies, so it stays a dense index as policies are added.
+  // It is also the base of the projected-epoch encoding: a second policy renumbers every peer's
+  // epoch into values that collide with the current ones, which is why adding one is a migration.
+  assert.equal(sessionEventWireProjectionVariant(86), 1);
+  assert.equal(sessionEventWireProjectionVariant(undefined), 1);
+  assert.equal(sessionEventWireProjectionVariant(87), 0);
+  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 2);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

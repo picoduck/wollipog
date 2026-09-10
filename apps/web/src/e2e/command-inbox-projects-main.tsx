@@ -339,6 +339,17 @@ function initialModel(): FixtureModel {
       status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
     });
   }
+  if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff") {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+      model: "gpt-5", effort: "high",
+      historyQuarantine: {
+        reason: "oversized_tool_call", detectedAt: 1,
+        recoveryTurn: 1, recovery: SCENARIO === "history-quarantine-handoff" ? "handoff" : "fork",
+        ...(SCENARIO === "history-quarantine" ? { retainedPrompt: true } : {}),
+      },
+    });
+  }
   if (SCENARIO === "composer-restart") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       status: "stopped",
@@ -472,6 +483,9 @@ let pendingCancelTurnSettlement: (() => void) | null = null;
 let deferNextPromptRequest = false;
 let pendingPromptSettlement: (() => void) | null = null;
 const promptRequests: PromptFixtureRequest[] = [];
+/** Recovery requests the fixture observed, so a spec can prove the client asked for the recorded
+ * safe checkpoint and never submitted a prompt into the quarantined conversation. */
+const recoveryRequests: Array<{ id: string; turn: number; handoff?: { agentId: string; config: SessionConfig } }> = [];
 const restartRequests: string[] = [];
 const sessionCommandRequests: SessionCommandFixtureRequest[] = [];
 let failNextSessionCommandResponse = false;
@@ -497,6 +511,15 @@ const steeringResolutionRequests: Array<{
 let deferredSteeringResolutionCount = 0;
 const pendingSteeringResolutionSettlements = new Map<string, () => void>();
 const sessionEvents = new Map<string, SessionEvent[]>();
+if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff") {
+  sessionEvents.set("session-alpha", [
+    { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Summarize the release notes.", final: true } },
+    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "Summarized the release notes.", final: true } },
+    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
+    { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "user_message", text: "Now scan every changed file.", final: true } },
+    { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "error", message: "The agent provider rejected this conversation's stored history: the recorded tool call at history position 675 cannot be resent. Its arguments field is 1,426,210 characters, over the provider's limit of 1,048,576." } },
+  ]);
+}
 if (SCENARIO === "conversation-handoff") {
   sessionEvents.set("session-alpha", [
     { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
@@ -903,6 +926,24 @@ const client = {
     sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 4, payload: { kind: "conversation_forked", sourceSessionId: id, turn,
       handoff: { sourceAgent: source.agentId!, destinationAgent: agentId, disclosure: handoffDraft.disclosure } } }]);
     pushSession(child);
+    return { ...structuredClone(child), handoffDraft };
+  },
+  recoverQuarantinedConversation: async (
+    id: string,
+    turn: number,
+    handoff?: { agentId: string; config: SessionConfig },
+  ) => {
+    recoveryRequests.push({ id, turn, handoff });
+    const source = model.sessions.find((candidate) => candidate.id === id)!;
+    const child = { ...source, id: "recovered-child", title: "Recovered Session", status: "idle" as const };
+    delete (child as { historyQuarantine?: unknown }).historyQuarantine;
+    model.sessions.push(child);
+    sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 7,
+      payload: { kind: "conversation_forked", sourceSessionId: id, turn } }]);
+    pushSession(child);
+    if (!handoff) return { ...structuredClone(child), retainedPrompt: { text: "Now scan every changed file.", images: [] } };
+    const agent = runner.agents.find((candidate) => candidate.id === handoff.agentId)!;
+    const handoffDraft = buildConversationHandoff(sessionEvents.get(id) ?? [], 3, agent, handoff.config);
     return { ...structuredClone(child), handoffDraft };
   },
   cancelTurn: async (id: string) => {
@@ -1417,6 +1458,7 @@ declare global {
       deferNextSteeringResult(): void;
       settleDeferredSteeringResult(result: SteeringFixtureResult): void;
       promptRequests(): PromptFixtureRequest[];
+      recoveryRequests(): Array<{ id: string; turn: number; handoff?: { agentId: string; config: SessionConfig } }>;
       restartRequests(): string[];
       sessionCommandRequests(): SessionCommandFixtureRequest[];
       retitleRequests(): string[];
@@ -1591,6 +1633,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     pendingSteeringSettlement(structuredClone(result));
   },
   promptRequests: () => structuredClone(promptRequests),
+  recoveryRequests: () => structuredClone(recoveryRequests),
   restartRequests: () => structuredClone(restartRequests),
   sessionCommandRequests: () => structuredClone(sessionCommandRequests),
   composerDraft: (id) => loadComposerDraft(id, "project-inbox-e2e"),

@@ -15,6 +15,7 @@ import type {
   AcpSessionContextConfig,
 } from "@wollipog/protocol";
 import type { SpawnIsolation } from "../spawn.js";
+import type { PoisonedProviderHistory } from "./poisoned-provider-history.js";
 
 declare const preparedDriverCommandBrand: unique symbol;
 
@@ -115,6 +116,11 @@ export interface DriverCallbacks {
   /** A harness request proved that its provider credentials need user action. Raw provider text
    * stays inside the driver because it can contain secrets or authorization URLs. */
   onAuthenticationFailure?: () => void;
+  /** The provider rejected an item already stored in its own conversation history, before
+   * inference. That thread can never accept another turn, so the manager must quarantine it
+   * instead of retrying, continuing, or compacting. Structure only: the offending value stays
+   * inside the driver. */
+  onProviderHistoryUnrecoverable?: (detail: PoisonedProviderHistory) => void;
   onAcpCapabilities?: (capabilities: AcpRuntimeCapabilities) => void;
   /** Session-scoped ACP controls/config; never merge these onto the agent row because two live
    * sessions may advertise different modes or commands. */

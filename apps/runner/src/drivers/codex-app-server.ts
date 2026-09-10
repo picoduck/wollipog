@@ -37,6 +37,7 @@ import type {
   DriverSteerResult,
   StopReason,
 } from "./driver.js";
+import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from "./poisoned-provider-history.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
@@ -1395,8 +1396,20 @@ export class CodexAppServerDriver implements Driver {
     }
     if (!message || this.emittedErrors.has(message)) return;
     this.emittedErrors.add(message);
-    if (isProviderAuthenticationFailure(message)) this.signalAuthenticationFailure();
-    else this.cb.onEvent({ kind: "error", message });
+    if (isProviderAuthenticationFailure(message)) {
+      this.signalAuthenticationFailure();
+      return;
+    }
+    const poisoned = classifyPoisonedProviderHistory(message);
+    if (poisoned) {
+      // The rejection belongs in the transcript as the user-visible evidence for the quarantine,
+      // but as a constructed description, never the provider's raw text: the same error could
+      // carry an argument excerpt or a thread id, and this event is durable and shareable.
+      this.cb.onEvent({ kind: "error", message: poisonedProviderHistoryMessage(poisoned) });
+      this.cb.onProviderHistoryUnrecoverable?.(poisoned);
+      return;
+    }
+    this.cb.onEvent({ kind: "error", message });
   }
 
   private signalAuthenticationFailure(): void {

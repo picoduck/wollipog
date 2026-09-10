@@ -38,6 +38,8 @@ import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   projectSessionEventPayloadForProtocol,
   sessionEventWireProjectionRequiredForProtocol,
+  sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
 } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
@@ -51,6 +53,8 @@ import type {
   ExecutionTargetRef,
   PendingApproval,
   PromptImageInput,
+  ProviderHistoryQuarantineView,
+  ProviderHistoryRecoveryMode,
   SessionConfig,
   AcpSessionContextConfig,
   SessionEventPayload,
@@ -154,6 +158,33 @@ export interface SessionMeta {
   };
   /** At-most-once tombstone written and flushed before an automatic recovery prompt is enqueued. */
   providerAuthRetryAttemptedRecoveryId?: string;
+  /** Durable quarantine of a provider-owned conversation whose stored history the provider rejects
+   * before inference. Authoritative across process restart: while it is set, no prompt, automatic
+   * continuation, or compaction may be submitted to this thread, because every submission resends
+   * the same history and fails identically. Content-free by construction. */
+  providerHistoryBlock?: {
+    version: 1;
+    reason: "oversized_tool_call";
+    detectedAt: number;
+    /** Structural provider evidence only; the offending value is never persisted. */
+    detail: { itemIndex?: number; field: "arguments"; limit?: number; length?: number };
+    /** Completed turn whose conversation checkpoint precedes the invalid item. Absent when the
+     * session never recorded one, which leaves nothing to recover in place. */
+    recoveryTurn?: number;
+    recovery?: ProviderHistoryRecoveryMode;
+    /** The prompt attempted after quarantine, retained unsent. Never submitted by the runner:
+     * only a recovered session can carry it forward. */
+    retry?: {
+      text: string;
+      images: PromptImageInput[];
+      slashCommand?: string;
+      config?: SessionConfig;
+    };
+  };
+  /** This session was created to recover `fromSessionId`'s quarantined conversation. A provider
+   * fork copies history through the checkpoint, so a fork that is quarantined again proves the
+   * invalid item predates that checkpoint; its own recovery must escalate to a fresh thread. */
+  providerHistoryRecoveryOf?: { fromSessionId: string; mode: ProviderHistoryRecoveryMode };
   /** Claude background work observed by the runner. Optional for older sessions and other drivers. */
   backgroundWorkState?: BackgroundWorkState;
   /** Runner-authoritative durable records for structured provider-managed background jobs. */
@@ -1998,12 +2029,15 @@ export class SessionStore {
     localEpoch: number,
     protocolVersion: number | null | undefined,
   ): number {
-    const variant = this.eventProjectionRequired(protocolVersion) ? 1 : 0;
+    // One dense sequence space per distinct projection, not per "projected or not": a peer that
+    // omits two event kinds numbers the log differently from one that omits a single kind, so they
+    // must never share an epoch or a reconnect would reuse cursors that now name different events.
+    const variant = sessionEventWireProjectionVariant(protocolVersion);
     if (!Number.isSafeInteger(localEpoch) || localEpoch < 0 ||
-        localEpoch > Math.floor((Number.MAX_SAFE_INTEGER - variant) / 2)) {
+        localEpoch > Math.floor((Number.MAX_SAFE_INTEGER - variant) / SESSION_EVENT_WIRE_PROJECTION_VARIANTS)) {
       throw new HistoryStoreError("history_corrupt", "session history epoch cannot be projected safely");
     }
-    return localEpoch * 2 + variant;
+    return localEpoch * SESSION_EVENT_WIRE_PROJECTION_VARIANTS + variant;
   }
 
   private projectEventsWithIndex(
@@ -2687,6 +2721,22 @@ const NATIVE_ELICITATION_OVERLAY_PROTOCOL_VERSION = 66;
 const NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION = 74;
 const MANAGED_BACKGROUND_JOBS_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundDelivery;
 const BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundWorkTracking;
+const PROVIDER_HISTORY_QUARANTINE_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.providerHistoryQuarantine;
+
+/** Bounded projection of the durable quarantine. Sizes and the offending item's position are
+ * structural provider evidence; the retained prompt is reported only as a boolean so its text
+ * stays on the runner until a recovered session carries it into a composer draft. */
+export function providerHistoryQuarantineView(m: SessionMeta): ProviderHistoryQuarantineView | undefined {
+  const block = m.providerHistoryBlock;
+  if (!block) return undefined;
+  return {
+    reason: block.reason,
+    detectedAt: block.detectedAt,
+    ...(block.recoveryTurn === undefined ? {} : { recoveryTurn: block.recoveryTurn }),
+    ...(block.recovery === undefined ? {} : { recovery: block.recovery }),
+    ...(block.retry ? { retainedPrompt: true } : {}),
+  };
+}
 
 export function metaToSnapshot(
   m: SessionMeta,
@@ -2737,6 +2787,13 @@ export function metaToSnapshot(
       : nativeCapabilities,
     preview: m.preview,
     pendingApproval: m.pendingApproval,
+    // A supporting peer always hears the current truth, including its absence: `null` is how a
+    // restart onto a fresh provider conversation clears the control plane's guard. `undefined` is
+    // reserved for peers and registration snapshots that carry no information at all.
+    historyQuarantine: controlPlaneProtocolVersion != null &&
+      controlPlaneProtocolVersion >= PROVIDER_HISTORY_QUARANTINE_PROTOCOL_VERSION
+      ? providerHistoryQuarantineView(m) ?? null
+      : undefined,
     backgroundWorkState: m.backgroundWorkState,
     backgroundWorkTracking: controlPlaneProtocolVersion != null &&
       controlPlaneProtocolVersion >= BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION

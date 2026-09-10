@@ -777,6 +777,22 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST", body: JSON.stringify({ turn, handoff: { agentId, config } }),
     }),
 
+  /** Recover a quarantined provider conversation. `agent` is supplied only when the session's
+   * recorded recovery mode is a fresh-thread handoff; otherwise the provider forks natively.
+   * A retained prompt comes back as text for the composer — it is never submitted. */
+  recoverQuarantinedConversation: (
+    id: string,
+    turn: number,
+    handoff?: { agentId: string; config: SessionConfig },
+  ) =>
+    req<SessionView & {
+      handoffDraft?: import("@wollipog/protocol").ConversationHandoffDraft;
+      retainedPrompt?: { text: string; images: import("@wollipog/protocol").PromptImageInput[] };
+    }>(`/api/sessions/${id}/fork`, {
+      method: "POST",
+      body: JSON.stringify({ turn, recovery: true, ...(handoff ? { handoff } : {}) }),
+    }),
+
   search: (q: string) =>
     req<{ results: Array<{
       sessionId: string;

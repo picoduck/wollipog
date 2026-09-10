@@ -1604,7 +1604,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       void sessions
         .forkConversation(msg.sourceSessionId, msg.targetSessionId, msg.turn, msg.title, msg.deferHistory === true,
-          msg.handoff && destination ? { agent: destination, config: msg.handoff.config } : undefined)
+          msg.handoff && destination ? { agent: destination, config: msg.handoff.config } : undefined,
+          msg.recovery === true)
         .then((result) =>
           sendUp({
             type: "fork_result",
@@ -1614,6 +1615,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             snapshot: result.snapshot,
             events: result.events,
             handoffDraft: result.handoffDraft,
+            retainedPrompt: result.retainedPrompt,
           }),
         )
         .catch((err) =>

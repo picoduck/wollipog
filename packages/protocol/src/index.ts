@@ -352,7 +352,10 @@
 // 127: Codex App Server usage derives each turn from replay-safe cumulative thread deltas while
 //      retaining the final response for context occupancy. Codex usage written by older runners
 //      may contain only the final upstream response and must be presented as incomplete history.
-export const PROTOCOL_VERSION = 127;
+// 128: provider-history quarantine. A conversation whose stored history the provider rejects
+//      before inference is durably marked unusable, stops accepting prompts and compaction, and
+//      exposes a bounded, content-free recovery coordinate instead.
+export const PROTOCOL_VERSION = 128;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -473,6 +476,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   checkpointRewind: 25,
   conversationFork: 28,
   conversationHandoff: 110,
+  /** Runner reports provider-history quarantine and accepts recovery forks/handoffs for it. */
+  providerHistoryQuarantine: 128,
   runtimeDiagnostics: 32,
   acpLogout: 34,
   acpSessionContext: 38,
@@ -675,6 +680,20 @@ export function providerAuthenticationReceiptCode(
 /** Additive event kinds that have an explicit older-peer wire policy. Kinds absent from this
  * table are sent unchanged: an unreviewed event must fail closed at an older consumer rather than
  * being silently discarded. */
+/**
+ * Additive event kinds that older peers must not receive.
+ *
+ * ADDING A SECOND ENTRY IS A MIGRATION, NOT A ONE-LINE CHANGE. The count of entries is the base of
+ * the projected-history-epoch encoding (`localEpoch * VARIANTS + variant`), so changing it renumbers
+ * every peer's epoch — and the new numbering collides with the old one rather than sorting above it.
+ * With one policy, local epoch 0 published 1 to a legacy peer; with two, local epoch 0 publishes 1
+ * to a mid-range peer whose projection differs, and a control plane comparing epochs across the
+ * upgrade sees equality and retains cached rows whose sequence numbers now name different events.
+ * A second entry therefore needs an explicit format-generation fence that forces a resync.
+ *
+ * Prefer carrying additive state on the session snapshot, which is version-gated per field and
+ * needs no sequence space at all.
+ */
 const SESSION_EVENT_WIRE_POLICIES = {
   agent_response_completed: { minProtocol: 87, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
@@ -682,15 +701,37 @@ const SESSION_EVENT_WIRE_POLICIES = {
   legacy: "omit";
 }>>;
 
+/**
+ * Which projection this peer receives, as a dense index. 0 is the exact local history; each higher
+ * value omits one more event kind.
+ *
+ * Thresholds are an ordered chain — a peer below a lower threshold is below every higher one — so
+ * counting unmet policies yields a contiguous index rather than a sparse bitmask.
+ *
+ * This must identify WHICH projection a peer gets, not merely that it gets one. Two peers omitting
+ * different event sets number the same log differently, so they occupy different dense sequence
+ * spaces; collapsing them to a single "projected" flag lets a reconnect at a different version
+ * reuse cursors whose sequence numbers now name different events.
+ */
+export function sessionEventWireProjectionVariant(
+  protocolVersion: number | null | undefined,
+): number {
+  return Object.values(SESSION_EVENT_WIRE_POLICIES).filter(
+    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
+  ).length;
+}
+
+/** Total distinct projections, including the exact one. */
+export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
+  Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
+
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
  * payload and automatically covers future reviewed event policies. */
 export function sessionEventWireProjectionRequiredForProtocol(
   protocolVersion: number | null | undefined,
 ): boolean {
-  return Object.values(SESSION_EVENT_WIRE_POLICIES).some(
-    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
-  );
+  return sessionEventWireProjectionVariant(protocolVersion) > 0;
 }
 
 /** Project one exact runner-local event payload for the currently connected control plane.
@@ -3670,6 +3711,28 @@ export interface SessionCommandInvocationView {
   updatedAt: number;
 }
 
+/** How recovery rebuilds a usable conversation from the last safe checkpoint. "fork" asks the
+ * provider to branch the thread at that turn, which excludes every later item including the
+ * invalid one. "handoff" starts a fresh provider thread seeded with a bounded, sanitized draft of
+ * the visible dialogue, for providers or checkpoints where a safe fork is unavailable. */
+export type ProviderHistoryRecoveryMode = "fork" | "handoff";
+
+/** A provider-owned conversation that can no longer accept turns because its stored history
+ * contains an item the provider rejects before inference. Bounded and content-free: it names the
+ * structural cause and the recovery coordinate, never the offending value, the prompt text, or any
+ * provider thread/credential identifier. */
+export interface ProviderHistoryQuarantineView {
+  reason: "oversized_tool_call";
+  detectedAt: number;
+  /** Completed turn whose checkpoint precedes the invalid item. Absent means no safe conversation
+   * checkpoint was ever recorded, so this session cannot be recovered in place. */
+  recoveryTurn?: number;
+  /** Absent alongside `recoveryTurn` for the same reason: there is nothing to recover from. */
+  recovery?: ProviderHistoryRecoveryMode;
+  /** True once a prompt attempted after quarantine was retained as an unsent draft. */
+  retainedPrompt?: boolean;
+}
+
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
   id: string;
@@ -3695,6 +3758,9 @@ export interface SessionView {
   titleSource?: SessionTitleSource;
   /** Canonical provider activity timestamp from stable ACP session_info_update; presentation-only. */
   providerUpdatedAt?: string;
+  /** Set when the provider conversation is quarantined; ordinary prompts and `/compact` cannot
+   * reach it and clients must offer recovery instead. Omitted by pre-v128 control planes. */
+  historyQuarantine?: ProviderHistoryQuarantineView;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */
@@ -3844,6 +3910,14 @@ export interface SessionSnapshot {
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
+  /** Set when the provider conversation is quarantined. Runner-authoritative and durable, so a
+   * reconnecting control plane never re-offers submission into a poisoned thread.
+   *
+   * Three-valued on purpose. `undefined` means this snapshot carries no information — a pre-v128
+   * peer, or a registration snapshot built before version negotiation — and must never overwrite
+   * what the control plane already stored. Explicit `null` is a v126 runner stating there is no
+   * quarantine, which is what lets a restart onto a fresh provider conversation clear the guard. */
+  historyQuarantine?: ProviderHistoryQuarantineView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
@@ -5389,6 +5463,9 @@ export interface ForkSessionMessage {
    * the new session through session_history_page after materializing its snapshot. */
   deferHistory?: boolean;
   handoff?: { agentId: string; config: SessionConfig };
+  /** v128: recover a quarantined provider conversation. The runner revalidates the source's
+   * durable quarantine and its recovery turn, and only then accepts a same-provider handoff. */
+  recovery?: true;
 }
 
 export interface ForkResultMessage {
@@ -5399,6 +5476,9 @@ export interface ForkResultMessage {
   snapshot?: SessionSnapshot;
   events?: { seq: number; ts: number; payload: SessionEventPayload }[];
   handoffDraft?: import("./conversation-handoff.js").ConversationHandoffDraft;
+  /** v128: a prompt the source retained unsent while quarantined, handed to the recovered session
+   * as a composer draft. It is never submitted by the runner or the control plane. */
+  retainedPrompt?: { text: string; images: PromptImageInput[] };
 }
 
 /** Create, attach, or select the worktree targeted by a session's Git/file actions. The runner
