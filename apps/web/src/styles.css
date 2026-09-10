@@ -3551,17 +3551,6 @@ textarea {
   align-items: center;
   gap: 6px;
 }
-/* The session-cost control occupies the otherwise-empty center of the composer bar. */
-.cbar-usage {
-  flex: 1 1 auto;
-  justify-content: center;
-  min-width: 0;
-  overflow: hidden;
-  font-size: var(--text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cbar-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cbar-menu {
   position: relative;
 }
@@ -10452,26 +10441,63 @@ body.shell-dock-dragging * {
   align-self: stretch;
   justify-self: stretch;
   min-width: 0;
+  /* End-packed, so the cost keeps the strip's trailing edge — the seat it already holds on
+     mobile — and a transcript action that comes and goes cannot slide it (#893). */
+  justify-content: flex-end;
+  column-gap: 8px;
 }
 .transcript-status-usage {
   justify-content: flex-end;
   min-width: 0;
-  margin-left: auto;
   overflow: hidden;
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .transcript-status-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Contextual actions sit BEFORE the cost in the end-packed trailing track: they claim no free
+   space of their own, so they group beside the cost rather than crowding the centered follow
+   control, and hiding them leaves the cost exactly where it was.
+
+   The lopsided `flex-shrink` is the query-independent safety net. The container query below is what
+   normally keeps a cramped pane legible, but it is inert wherever size container queries are
+   missing, and the strip must not answer that by starving the cost — a permanent seat — to feed an
+   optional hint. Weighted 100 to 1, the hint gives up essentially all of the shrink and clips
+   inside its own box before the cost loses a pixel; only once the hint is fully crushed does the
+   cost begin to ellipsise, which is what it is styled to do. In an engine with container queries
+   this never engages: past the cutoff the hint is already display:none. */
 .transcript-status-actions {
   display: flex;
-  flex: none;
+  flex: 0 100 auto;
   align-items: center;
-  margin-left: auto;
-  padding-left: 10px;
   min-width: 0;
+  overflow: hidden;
 }
 .transcript-status-actions:empty { display: none; }
+/* A cramped pane cannot hold all three tracks. The cost is a permanent seat and truncates rather
+   than vanishing; the Reply hint is pure discoverability for a shortcut that keeps working, so it
+   is what yields. Without this, a desktop session beside an open side panel shrank the cost to a
+   few pixels — or to nothing — while the hint kept its full width (#893).
+
+   The threshold is the width at which the strip stops fitting, split into the part that scales
+   with the reader's text-size preference and the part that does not. Fixed: the follow-state
+   control in its WIDEST state plus the strip's 44px of padding and column gaps. That state is
+   `previewing` ("Previewing, Follow Live Output" plus its keycap), which measures ~258px against
+   ~238px for `paused` — calibrating on `paused` left barely 2px of margin, less than the spread
+   between font stacks. Scaling: each symmetric 1fr track carries the hint with its gap (~65px) and
+   a wide cost (~61px) at a 16px root, and both use rem type, so the pair is ~16rem. A fixed 560px
+   cutoff was inactive at a 561px pane with a 24px or 32px root, where the doubled labels put the
+   cost back below its own scrollWidth — the exact inversion this rule exists to prevent.
+
+   Two rules rather than one calc(): the plain length parses in every engine that supports size
+   container queries at all, while the calc() refinement, which an older engine may drop as
+   invalid, only ever retires the hint EARLIER. Whichever survives, the cost keeps its seat. */
+@container transcript-pane (max-width: 590px) {
+  .transcript-status-actions { display: none; }
+}
+@container transcript-pane (max-width: calc(330px + 16rem)) {
+  .transcript-status-actions { display: none; }
+}
 /* One compact centered cluster — pager hints sit at the standard inter-control gap directly
    beside the follow-state control instead of being pushed toward the strip edges. */
 .follow-tail-control {

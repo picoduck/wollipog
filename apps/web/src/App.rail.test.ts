@@ -76,10 +76,12 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "Reply and transcript discovery hints must share the same component and keycap markup");
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
-  assert.match(detail, /className="transcript-status-trailing"[\s\S]*mode === "expanded" && isMobile && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>/,
-    "mobile expanded session cost occupies the strip's trailing track");
-  assert.match(detail, /className="composer-bar"[\s\S]*!isMobile && <SessionUsageControl session=\{session\} className="cbar-usage" \/>[\s\S]*className="cbar-right"/,
-    "desktop session cost remains between the composer's permission and model controls");
+  // #893: one seat for the session cost on every viewport — the strip's trailing track, AFTER the
+  // contextual actions so a hint that comes and go with the active pane cannot shift the figure.
+  assert.match(detail, /className="transcript-status-trailing"[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"[\s\S]*mode === "expanded" && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>/,
+    "expanded session cost occupies the strip's trailing track on every viewport, after the actions");
+  assert.doesNotMatch(detail, /cbar-usage|className="composer-bar"[\s\S]*<SessionUsageControl/,
+    "the composer bar hosts no session-cost control: session accounting is not a message control");
   // #781: the trailing control is the cost alone — the context meter one cell over owns occupancy.
   assert.doesNotMatch(detail, /of \$\{[a-zA-Z]+\} context|sessionPreviewUsage/,
     "no combined context-and-cost summary may return to the status strip");
@@ -93,7 +95,25 @@ test("live-follow status owns a reserved transcript strip with a compact centere
   assert.match(css, /\.transcript-status-trailing\s*\{[^}]*grid-column:\s*3;[^}]*justify-self:\s*stretch;/);
   assert.match(css, /\.transcript-status-usage\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
     "mobile usage truncates inside the trailing track rather than overlapping the center");
-  assert.match(css, /\.transcript-status-actions\s*\{[^}]*margin-left:\s*auto;/);
+  assert.match(css, /\.transcript-status-trailing\s*\{[^}]*column-gap:\s*8px;/,
+    "the trailing track spaces its actions and the cost without a per-child padding");
+  assert.doesNotMatch(css.match(/\.transcript-status-actions\s*\{[^}]*\}/)?.[0] ?? "", /margin-left:\s*auto/,
+    "only the cost may claim the trailing track's free space, so it stays pinned to the strip edge");
+  assert.match(css, /\.transcript-status-trailing\s*\{[^}]*justify-content:\s*flex-end;/,
+    "the trailing track packs to the strip edge so the cost keeps its seat as actions come and go");
+  assert.doesNotMatch(css, /\.cbar-usage/,
+    "the composer-bar cost styles retire with the control (#893)");
+  // A pane too narrow for all three tracks sheds the optional hint, never the cost. The cutoff has
+  // to be font-relative: the labels are rem, so a px-only cutoff goes inactive exactly where an
+  // enlarged root font needs it most.
+  // The query-independent safety net: where the cutoff cannot run, the hint must lose its width
+  // before the cost loses any.
+  assert.match(css, /\.transcript-status-actions\s*\{[^}]*flex:\s*0 100 auto;[^}]*overflow:\s*hidden;/,
+    "the optional hint absorbs the trailing track's shrink so the permanent cost keeps its width");
+  assert.match(css, /@container transcript-pane \(max-width: \d+px\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
+    "a plain-length cutoff retires the trailing actions in every engine with size container queries");
+  assert.match(css, /@container transcript-pane \(max-width: calc\([^)]*rem[^)]*\)\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
+    "and a font-relative cutoff retires them earlier when the reader has raised their text size");
   assert.match(css, /\.follow-tail-control\s*\{[^}]*grid-column:\s*2;[^}]*display:\s*inline-flex;[^}]*gap:\s*8px;[^}]*justify-self:\s*center;/,
     "cluster items sit at the standard inter-control gap — no flexible spacers or space-between");
   assert.doesNotMatch(css.match(/\.follow-tail-control\s*\{[^}]*\}/)?.[0] ?? "", /1fr|space-between/,

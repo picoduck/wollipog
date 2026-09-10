@@ -62,8 +62,9 @@ test("a tall pane shows the in-flow pill and the pinned summary can never inters
 
   // In the tall pane the compact echo stays out of the strip.
   await expect(page.locator(".transcript-recovery-strip-echo")).toBeHidden();
-  await expect(page.locator(".cbar-usage")).toBeVisible();
-  await expect(page.locator(".transcript-status-usage")).toHaveCount(0);
+  // #893: the session cost lives in the strip's trailing track on desktop too, never the composer.
+  await expect(page.locator(".transcript-status-usage")).toBeVisible();
+  await expect(page.locator(".cbar-usage")).toHaveCount(0);
 });
 
 test("full-height mobile Sessions keep recovery readable in the persistent strip without an empty band", async ({ page }) => {

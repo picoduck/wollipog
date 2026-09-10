@@ -41,11 +41,21 @@ const serviceTierFixture = params.has("tiers");
 const serviceTierChoice = params.get("tiers") === "1";
 const servedWindow = Number(params.get("served") ?? "0");
 // `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
-// marks the session unpriced, while `?cost=free` carries provider-reported zero provenance.
-// Every variant keeps the token counts.
+// marks the session unpriced, while `?cost=free` carries provider-reported zero provenance, and
+// `?cost=<amount>` sets the total so layout specs can stress the strip with a figure much wider
+// than the default (#893). Every variant keeps the token counts.
 const unknownContextWindow = params.get("window") === "none";
-const unpricedCost = params.get("cost") === "none";
-const freeCost = params.get("cost") === "free";
+const costParam = params.get("cost");
+const unpricedCost = costParam === "none";
+const freeCost = costParam === "free";
+const parsedCost = Number(costParam);
+const sessionCostUsd = unpricedCost || freeCost || costParam === null || !Number.isFinite(parsedCost)
+  ? 1.37
+  : parsedCost;
+/** The default fixture's 1.21 / 0.16 split, held as a ratio so a `?cost=` override still sums to the
+ * headline figure and a sub-cent total never produces a negative per-model row. */
+const miniModelCostUsd = sessionCostUsd * (0.16 / 1.37);
+const mainModelCostUsd = sessionCostUsd - miniModelCostUsd;
 
 const SESSION_ID = "session-usage-e2e";
 
@@ -98,7 +108,7 @@ const session: SessionView = {
   permissionMode: null,
   tokensIn: 184_000,
   tokensOut: 21_000,
-  costUsd: unpricedCost || freeCost ? 0 : 1.37,
+  costUsd: unpricedCost || freeCost ? 0 : sessionCostUsd,
   ...(freeCost ? { costSource: "providerReported" as const }
     : unpricedCost ? { costSource: "unpriced" as const } : {}),
   contextTokensUsed: unknownContextWindow ? undefined : Number(params.get("used") ?? "72000"),
@@ -280,12 +290,12 @@ const client = {
     totals: unpricedCost
       ? usageAmount(184_000, 21_000, 0, 205_000, "unpriced")
       : freeCost ? usageAmount(184_000, 21_000, 0, 205_000)
-      : usageAmount(184_000, 21_000, 1.37, 205_000, "modelPriced"),
+      : usageAmount(184_000, 21_000, sessionCostUsd, 205_000, "modelPriced"),
     byModel: [
-      { model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex", ...usageAmount(160_000, 18_000, 1.21, 178_000) },
+      { model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex", ...usageAmount(160_000, 18_000, mainModelCostUsd, 178_000) },
       {
         model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini",
-        ...usageAmount(24_000, 3_000, unpricedCost ? 0 : 0.16, 27_000, unpricedCost ? "unpriced" : "modelPriced"),
+        ...usageAmount(24_000, 3_000, unpricedCost ? 0 : miniModelCostUsd, 27_000, unpricedCost ? "unpriced" : "modelPriced"),
       },
     ],
     pricing: {

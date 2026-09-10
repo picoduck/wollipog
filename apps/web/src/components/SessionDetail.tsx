@@ -4386,12 +4386,9 @@ function SessionDetailLoaded({
                 )}
               </div>
               <div className="transcript-status-trailing">
-                {/* Cost only (#781): the context meter one cell over already owns occupancy, and
-                    repeating "25k of 258k context" here made the trailing figure read as a second
-                    context indicator instead of what the session has spent. */}
-                {mode === "expanded" && isMobile && (
-                  <SessionUsageControl session={session} className="transcript-status-usage" />
-                )}
+                {/* Contextual transcript actions take the slack on the cost's LEFT. They come and
+                    go with the active pane, so anchoring the cost to the strip's edge instead is
+                    what keeps the figure from sliding as the Reply hint appears (#893). */}
                 <div className="transcript-status-actions">
                   {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
                     <ShortcutHint
@@ -4404,6 +4401,15 @@ function SessionDetailLoaded({
                     />
                   )}
                 </div>
+                {/* Cost only (#781): the context meter one cell over already owns occupancy, and
+                    repeating "25k of 258k context" here made the trailing figure read as a second
+                    context indicator instead of what the session has spent. Desktop shares this
+                    seat with mobile (#893) — cumulative session accounting is session status, not
+                    a control over the message being sent, and it stays readable whether the
+                    transcript or the composer owns focus. */}
+                {mode === "expanded" && (
+                  <SessionUsageControl session={session} className="transcript-status-usage" />
+                )}
               </div>
             </div>
           </div>
@@ -4817,9 +4823,6 @@ function SessionDetailLoaded({
                     </button>
                   )}
                 </div>
-                {/* Session-level usage lives with the session-level controls, not in the
-                    transcript status strip — the otherwise-empty center of the composer bar. */}
-                {!isMobile && <SessionUsageControl session={session} className="cbar-usage" />}
                 <div className="cbar-right">
                   <ServiceTierControl
                     session={session}
