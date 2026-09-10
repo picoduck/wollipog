@@ -238,6 +238,20 @@ test("a session with an unknown context window still shows its cost", async () =
   await view.cleanup();
 });
 
+test("Codex App Server usage names the complete-turn protocol boundary", async () => {
+  const view = await mount(session({ driver: "codex-app-server" }), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59 }),
+    byModel: [],
+  });
+  await view.open();
+  assert.match(
+    view.popover()!.textContent ?? "",
+    /before protocol v127 is incomplete because it includes only the final model response.*v127\+ counts every response/s,
+  );
+  await view.cleanup();
+});
+
 test("a mixed-model session splits by model and names the unpriced one", async () => {
   const view = await mount(session({ costUsd: 1.21 }), {
     sessionId: "s1",

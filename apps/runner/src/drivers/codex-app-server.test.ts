@@ -1208,11 +1208,26 @@ test("structured Codex collaboration items expose recursive live subagent output
   });
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "grandchild-thread",
-    tokenUsage: { last: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 } },
+    tokenUsage: {
+      last: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2, cacheCreationInputTokens: 1, reasoningOutputTokens: 2 },
+      total: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2, cacheCreationInputTokens: 1, reasoningOutputTokens: 2 },
+    },
   });
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "grandchild-thread",
-    tokenUsage: { last: { inputTokens: 11, outputTokens: 5, cachedInputTokens: 3 } },
+    tokenUsage: {
+      last: { inputTokens: 11, outputTokens: 5, cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningOutputTokens: 3 },
+      total: { inputTokens: 20, outputTokens: 9, cachedInputTokens: 5, cacheCreationInputTokens: 3, reasoningOutputTokens: 5 },
+    },
+  });
+  // App Server can replay the same cumulative update around transport recovery. The cumulative
+  // counter makes this exact duplicate idempotent without mistaking two equal-sized responses.
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "grandchild-thread",
+    tokenUsage: {
+      last: { inputTokens: 11, outputTokens: 5, cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningOutputTokens: 3 },
+      total: { inputTokens: 20, outputTokens: 9, cachedInputTokens: 5, cacheCreationInputTokens: 3, reasoningOutputTokens: 5 },
+    },
   });
   notifications.get("turn/completed")!({
     threadId: "grandchild-thread",
@@ -1274,15 +1289,17 @@ test("structured Codex collaboration items expose recursive live subagent output
   });
   assert.deepEqual(h.events.find((event) => event.kind === "token_usage"), {
     kind: "token_usage",
-    inputTokens: 11,
-    outputTokens: 5,
-    cachedInputTokens: 3,
+    inputTokens: 20,
+    outputTokens: 9,
+    cachedInputTokens: 5,
+    cacheCreationInputTokens: 3,
+    reasoningOutputTokens: 5,
     parentToolUseId: innerSpawnId,
   });
   assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
     event.toolCallId === "spawn-outer" && event.subagentLifecycle === "completed"));
   assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 1,
-    "repeated cumulative child updates emit only the latest settled usage");
+    "repeated child updates emit one complete settled turn total");
   assert.equal(h.events.some((event) => event.kind === "agent_message" && event.text.includes("must not cross")), false);
 });
 
@@ -2255,7 +2272,7 @@ test("diagnosticValue bounds every provider-controlled shape", () => {
   assert.equal(diagnosticValue("a".repeat(500)), `${"a".repeat(120)}…`);
 });
 
-test("usage carries the configured model and app-server's context window becomes the provider gauge", () => {
+test("multi-response usage uses the cumulative turn delta while context uses only the final request", () => {
   const h = makeHarness({ config: { model: "gpt-5.5-codex" } as DriverOptions["config"] });
   const gauges: Array<{ contextTokensUsed: number; contextWindow: number }> = [];
   (h.driver as any).cb.onAcpUsage = (usage: { contextTokensUsed: number; contextWindow: number }) => gauges.push(usage);
@@ -2267,16 +2284,168 @@ test("usage carries the configured model and app-server's context window becomes
   (h.driver as any).eventContext = () => ({ accepted: true });
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "t1",
-    tokenUsage: { last: { inputTokens: 11_000, outputTokens: 600, cachedInputTokens: 9_000, reasoningOutputTokens: 200 }, modelContextWindow: 258_400 },
+    tokenUsage: {
+      last: { inputTokens: 11_000, outputTokens: 600, cachedInputTokens: 9_000, cacheCreationInputTokens: 100, reasoningOutputTokens: 200 },
+      total: { inputTokens: 111_000, outputTokens: 10_600, cachedInputTokens: 89_000, cacheCreationInputTokens: 500, reasoningOutputTokens: 1_200 },
+      modelContextWindow: 258_400,
+    },
   });
-  assert.deepEqual(gauges, [{ contextTokensUsed: 11_600, contextWindow: 258_400 }], "the last request plus its output is what sits in the window");
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "t1",
+    tokenUsage: {
+      last: { inputTokens: 12_000, outputTokens: 700, cachedInputTokens: 8_000, cacheCreationInputTokens: 50, reasoningOutputTokens: 300 },
+      total: { inputTokens: 123_000, outputTokens: 11_300, cachedInputTokens: 97_000, cacheCreationInputTokens: 550, reasoningOutputTokens: 1_500 },
+      modelContextWindow: 258_400,
+    },
+  });
+  assert.deepEqual(gauges, [
+    { contextTokensUsed: 11_600, contextWindow: 258_400 },
+    { contextTokensUsed: 12_700, contextWindow: 258_400 },
+  ], "each gauge uses one request, never the cumulative billable total");
   (h.driver as any).emitPendingTurnUsage();
   assert.deepEqual(h.events, [{
-    kind: "token_usage", inputTokens: 11_000, outputTokens: 600, cachedInputTokens: 9_000, reasoningOutputTokens: 200, model: "gpt-5.5-codex",
+    kind: "token_usage",
+    inputTokens: 23_000,
+    outputTokens: 1_300,
+    cachedInputTokens: 17_000,
+    cacheCreationInputTokens: 150,
+    reasoningOutputTokens: 500,
+    model: "gpt-5.5-codex",
   }]);
 
   const unpinned = makeHarness({ config: { model: "default" } as DriverOptions["config"] });
   (unpinned.driver as any).pendingTurnUsage = { input: 1, output: 1 };
   (unpinned.driver as any).emitPendingTurnUsage();
   assert.equal("model" in unpinned.events[0]!, false, "an unpinned model is not guessed");
+});
+
+test("resumed thread totals establish a baseline and replayed history is never billed again", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "resumed-thread";
+  const notifications = notificationHandlers(h.driver);
+  const historical = {
+    threadId: "resumed-thread",
+    turnId: "historical-turn",
+    tokenUsage: {
+      last: { inputTokens: 20, outputTokens: 4, cachedInputTokens: 10, reasoningOutputTokens: 2 },
+      total: { inputTokens: 100, outputTokens: 20, cachedInputTokens: 60, reasoningOutputTokens: 8 },
+    },
+  };
+  (h.driver as any).completedTurnId = "historical-turn";
+  (h.driver as any).beginRootTurnUsage();
+  notifications.get("thread/tokenUsage/updated")!(historical);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "resumed-thread",
+    turnId: "new-turn",
+    tokenUsage: {
+      last: { inputTokens: 10, outputTokens: 3, cachedInputTokens: 5, reasoningOutputTokens: 1 },
+      total: { inputTokens: 110, outputTokens: 23, cachedInputTokens: 65, reasoningOutputTokens: 9 },
+    },
+  });
+  notifications.get("turn/completed")!({
+    threadId: "resumed-thread",
+    turn: { id: "new-turn", status: "completed" },
+  });
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 10, outputTokens: 3, cachedInputTokens: 5, reasoningOutputTokens: 1,
+  }]);
+});
+
+test("failed and interrupted turns emit the complete cumulative usage exactly once", async () => {
+  for (const [status, expectedStop] of [["failed", "refusal"], ["interrupted", "cancelled"]] as const) {
+    const h = makeHarness();
+    (h.driver as any).threadId = `root-${status}`;
+    (h.driver as any).turnId = `turn-${status}`;
+    const notifications = notificationHandlers(h.driver);
+    const stopped = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+    notifications.get("thread/tokenUsage/updated")!({
+      threadId: `root-${status}`,
+      turnId: `turn-${status}`,
+      tokenUsage: {
+        last: { inputTokens: 4, outputTokens: 2, cachedInputTokens: 3, reasoningOutputTokens: 1 },
+        total: { inputTokens: 104, outputTokens: 12, cachedInputTokens: 83, reasoningOutputTokens: 5 },
+      },
+    });
+    notifications.get("thread/tokenUsage/updated")!({
+      threadId: `root-${status}`,
+      turnId: `turn-${status}`,
+      tokenUsage: {
+        last: { inputTokens: 6, outputTokens: 3, cachedInputTokens: 4, reasoningOutputTokens: 2 },
+        total: { inputTokens: 110, outputTokens: 15, cachedInputTokens: 87, reasoningOutputTokens: 7 },
+      },
+    });
+    notifications.get("turn/completed")!({
+      threadId: `root-${status}`,
+      turn: { id: `turn-${status}`, status, ...(status === "failed" ? { error: "provider failed" } : {}) },
+    });
+    assert.equal(await stopped, expectedStop);
+    assert.deepEqual(h.events.filter((event) => event.kind === "token_usage"), [{
+      kind: "token_usage", inputTokens: 10, outputTokens: 5, cachedInputTokens: 7, reasoningOutputTokens: 3,
+    }]);
+  }
+});
+
+test("legacy last-only usage accumulates distinct responses and ignores exact notification replay", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "legacy-thread";
+  const notifications = notificationHandlers(h.driver);
+  const first = {
+    threadId: "legacy-thread",
+    tokenUsage: { last: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2, reasoningOutputTokens: 2 } },
+  };
+  notifications.get("thread/tokenUsage/updated")!(first);
+  notifications.get("thread/tokenUsage/updated")!(first);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "legacy-thread",
+    tokenUsage: { last: { inputTokens: 5, outputTokens: 2, cachedInputTokens: 1, reasoningOutputTokens: 9 } },
+  });
+  (h.driver as any).emitPendingTurnUsage();
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: 3, reasoningOutputTokens: 4,
+  }], "reasoning is clamped per response and remains a subset of aggregate output");
+});
+
+test("legacy lastTurn snapshots replace rather than add their running turn total", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "legacy-turn-thread";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "legacy-turn-thread",
+    tokenUsage: { lastTurn: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 } },
+  });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "legacy-turn-thread",
+    tokenUsage: { lastTurn: { inputTokens: 12, outputTokens: 5, cachedInputTokens: 4 } },
+  });
+  (h.driver as any).emitPendingTurnUsage();
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: 4,
+  }]);
+});
+
+test("fields omitted from cumulative totals accumulate from distinct per-response usage", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "partial-total-thread";
+  const notifications = notificationHandlers(h.driver);
+  const first = {
+    threadId: "partial-total-thread",
+    tokenUsage: {
+      last: { inputTokens: 7, outputTokens: 3, cacheCreationInputTokens: 2 },
+      total: { inputTokens: 107, outputTokens: 13 },
+    },
+  };
+  notifications.get("thread/tokenUsage/updated")!(first);
+  notifications.get("thread/tokenUsage/updated")!(first);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "partial-total-thread",
+    tokenUsage: {
+      last: { inputTokens: 5, outputTokens: 2, cacheCreationInputTokens: 1 },
+      total: { inputTokens: 112, outputTokens: 15 },
+    },
+  });
+  (h.driver as any).emitPendingTurnUsage();
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: undefined,
+    cacheCreationInputTokens: 3,
+  }]);
 });

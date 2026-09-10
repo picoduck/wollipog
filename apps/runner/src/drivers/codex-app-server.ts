@@ -44,6 +44,13 @@ import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
 type ToolStatus = "in_progress" | "completed" | "failed";
+type FlatUsage = {
+  input?: number;
+  output?: number;
+  cached?: number;
+  cacheCreation?: number;
+  reasoning?: number;
+};
 
 const CODEX_SUBAGENT_LIFECYCLES: Record<string, AuthoritativeSubagentLifecycle> = {
   pendingInit: "starting",
@@ -312,9 +319,10 @@ export class CodexAppServerDriver implements Driver {
   private cancelled = false;
   private turnResolve: ((r: StopReason) => void) | null = null;
   private turnStop: StopReason = "end_turn";
-  /** Latest usage for the current turn. Emitted once when that turn settles so cumulative
-   * thread usage restored during resume is never appended to the runner totals again. */
-  private pendingTurnUsage: ReturnType<typeof flattenUsage> = null;
+  /** Complete usage for the current turn. Cumulative thread totals make repeated notifications
+   * idempotent; `last` is accumulated only as a compatibility fallback for older App Servers. */
+  private pendingTurnUsage: FlatUsage | null = null;
+  private turnUsageBaseline: FlatUsage | null = null;
   /** Once a turn settles, ignore late usage/completion notifications from its interrupt race. */
   private turnUsageClosed = false;
   private readonly seenItems = new Set<string>();
@@ -341,9 +349,16 @@ export class CodexAppServerDriver implements Driver {
   private readonly attentionOwners = new Map<string, string>();
   private readonly subagentParentByTool = new Map<string, string | undefined>();
   private readonly subagentLifecycleByThread = new Map<string, AuthoritativeSubagentLifecycle>();
-  /** Latest per-child turn usage. Like root usage, it is emitted once when that child turn settles,
-   * not once per cumulative update notification. */
-  private readonly pendingSubagentUsage = new Map<string, ReturnType<typeof flattenUsage>>();
+  /** Per-child turn usage, emitted once when that child turn settles. */
+  private readonly pendingSubagentUsage = new Map<string, FlatUsage>();
+  /** Last authoritative cumulative total observed for each admitted provider thread. Retaining it
+   * across turns and reconnect replay prevents an old notification from reopening billable usage. */
+  private readonly threadUsageTotals = new Map<string, FlatUsage>();
+  private readonly subagentUsageBaselines = new Map<string, FlatUsage>();
+  private readonly completedSubagentTurnIds = new Map<string, string>();
+  /** Old App Servers expose no cumulative total. Their fallback is necessarily best-effort, but
+   * exact replay duplicates must still not be added twice. */
+  private readonly lastOnlyUsageFingerprints = new Map<string, Set<string>>();
   private promptGeneration = 0;
   private serverIdentity = "unknown";
   private completedTurnId: string | null = null;
@@ -629,8 +644,7 @@ export class CodexAppServerDriver implements Driver {
       this.emittedErrors.clear();
       this.streamedAgentResponse = false;
       this.declinePendingRequests("provider_resolved", true);
-      this.pendingTurnUsage = null;
-      this.turnUsageClosed = false;
+      this.beginRootTurnUsage();
       this.turnResolve = resolve;
       this.turnStop = "end_turn";
       // The manager must never mistake the previous provider turn for this one if turn/start
@@ -913,11 +927,14 @@ export class CodexAppServerDriver implements Driver {
     const parentToolUseId = this.subagentToolByThread.get(threadId);
     if (!usage || !parentToolUseId) return;
     this.pendingSubagentUsage.delete(threadId);
+    this.subagentUsageBaselines.delete(threadId);
+    this.lastOnlyUsageFingerprints.delete(threadId);
     this.cb.onEvent({
       kind: "token_usage",
       inputTokens: usage.input,
       outputTokens: usage.output,
       cachedInputTokens: usage.cached,
+      ...(typeof usage.cacheCreation === "number" ? { cacheCreationInputTokens: usage.cacheCreation } : {}),
       ...(typeof usage.reasoning === "number" ? { reasoningOutputTokens: usage.reasoning } : {}),
       ...(this.eventModel()),
       parentToolUseId,
@@ -1183,7 +1200,17 @@ export class CodexAppServerDriver implements Driver {
       if (decision) this.cb.onEvent({ kind: "review_decision", ...decision });
     });
     peer.onNotification("turn/started", (p: Json) => {
-      if (p?.threadId && p.threadId !== this.threadId) return;
+      if (p?.threadId && p.threadId !== this.threadId) {
+        if (this.subagentToolByThread.has(p.threadId)) {
+          this.pendingSubagentUsage.delete(p.threadId);
+          const known = this.threadUsageTotals.get(p.threadId);
+          if (known) this.subagentUsageBaselines.set(p.threadId, known);
+          else this.subagentUsageBaselines.delete(p.threadId);
+          this.lastOnlyUsageFingerprints.delete(p.threadId);
+          this.completedSubagentTurnIds.delete(p.threadId);
+        }
+        return;
+      }
       if (!this.promptBusy || !this.turnResolve || p?.turn?.id === this.completedTurnId) return;
       this.declinePendingRequests("provider_resolved", true);
       const id = p?.turn?.id;
@@ -1191,8 +1218,8 @@ export class CodexAppServerDriver implements Driver {
         this.lastTurnId = id;
         this.setSteeringTurn(id);
       }
-      this.pendingTurnUsage = null;
-      this.turnUsageClosed = false;
+      // prompt() already opened this accounting interval before turn/start. Do not reset it here:
+      // App Server notifications are allowed to arrive before the turn/start response.
     });
     peer.onNotification("thread/settings/updated", (p: Json) => {
       if (p?.threadId !== this.threadId) return;
@@ -1201,23 +1228,98 @@ export class CodexAppServerDriver implements Driver {
       else if (serviceTier === null) this.reconcileServiceTier(null);
     });
     peer.onNotification("thread/tokenUsage/updated", (p: Json) => {
-      // Prefer the per-turn field. The total is cumulative across a resumed thread and adding it
-      // to SessionMeta would double-count restored history. Keep only the latest update and emit
-      // once at settlement because app-server may publish several updates during one turn.
-      const u = flattenUsage(p?.tokenUsage?.last ?? p?.tokenUsage?.lastTurn ?? p?.tokenUsage?.last_turn);
-      if (!u) return;
+      const lastIsPerResponse = p?.tokenUsage?.last != null;
+      const last = flattenUsage(p?.tokenUsage?.last ?? p?.tokenUsage?.lastTurn ?? p?.tokenUsage?.last_turn);
+      const total = flattenUsage(p?.tokenUsage?.total ?? p?.tokenUsage?.threadTotal ?? p?.tokenUsage?.thread_total);
+      if (!last && !total) return;
       const context = this.eventContext(p?.threadId);
       if (!context.accepted) return;
+      const usageThreadId = typeof p?.threadId === "string" && p.threadId
+        ? p.threadId
+        : this.threadId ?? "root";
+      const notificationTurnId = typeof p?.turnId === "string" && p.turnId ? p.turnId : null;
+      const replayedSettledTurn = context.parentToolUseId
+        ? notificationTurnId != null && this.completedSubagentTurnIds.get(usageThreadId) === notificationTurnId
+        : notificationTurnId != null && (
+          notificationTurnId === this.completedTurnId || (this.turnId != null && notificationTurnId !== this.turnId)
+        );
+      const previousTotal = this.threadUsageTotals.get(usageThreadId) ?? null;
+      const candidateTotal = total ? fillUsage(total, previousTotal) : null;
+      const usableTotal = candidateTotal && (!previousTotal || usageAtLeast(candidateTotal, previousTotal))
+        ? candidateTotal
+        : null;
+      if (usableTotal) this.threadUsageTotals.set(usageThreadId, usableTotal);
+      if (replayedSettledTurn) return;
+
       if (context.parentToolUseId) {
-        this.pendingSubagentUsage.set(String(p.threadId), u);
+        if (usableTotal) {
+          const baseline = this.subagentUsageBaselines.get(usageThreadId)
+            ?? previousTotal
+            ?? (last ? subtractUsage(usableTotal, last) : usableTotal);
+          this.subagentUsageBaselines.set(usageThreadId, baseline);
+          if (usageAtLeast(usableTotal, baseline)) {
+            let delta = preserveNonCumulativeUsage(
+              subtractUsage(usableTotal, baseline),
+              this.pendingSubagentUsage.get(usageThreadId) ?? null,
+              usableTotal,
+            );
+            const partial = last ? usageMissingFromTotal(last, usableTotal) : null;
+            if (partial && hasUsage(partial)) {
+              if (lastIsPerResponse && this.admitLastOnlyUsage(usageThreadId, last!)) {
+                delta = addUsage(delta, partial);
+              } else if (!lastIsPerResponse) {
+                delta = replaceNonCumulativeUsage(delta, last!, usableTotal);
+              }
+            }
+            if (hasUsage(delta)) this.pendingSubagentUsage.set(usageThreadId, delta);
+          }
+        } else if (!total && last) {
+          if (!lastIsPerResponse) this.pendingSubagentUsage.set(usageThreadId, last);
+          else if (this.admitLastOnlyUsage(usageThreadId, last)) {
+            this.pendingSubagentUsage.set(
+              usageThreadId,
+              addUsage(this.pendingSubagentUsage.get(usageThreadId) ?? null, last),
+            );
+          }
+        }
       } else if (!this.turnUsageClosed) {
-        this.pendingTurnUsage = u;
+        if (usableTotal) {
+          const baseline = this.turnUsageBaseline
+            ?? previousTotal
+            ?? (last ? subtractUsage(usableTotal, last) : usableTotal);
+          this.turnUsageBaseline = baseline;
+          if (usageAtLeast(usableTotal, baseline)) {
+            let delta = preserveNonCumulativeUsage(
+              subtractUsage(usableTotal, baseline),
+              this.pendingTurnUsage,
+              usableTotal,
+            );
+            const partial = last ? usageMissingFromTotal(last, usableTotal) : null;
+            if (partial && hasUsage(partial)) {
+              if (lastIsPerResponse && this.admitLastOnlyUsage(usageThreadId, last!)) {
+                delta = addUsage(delta, partial);
+              } else if (!lastIsPerResponse) {
+                delta = replaceNonCumulativeUsage(delta, last!, usableTotal);
+              }
+            }
+            if (hasUsage(delta)) this.pendingTurnUsage = delta;
+          }
+        } else if (!total && last) {
+          if (!lastIsPerResponse) this.pendingTurnUsage = last;
+          else if (this.admitLastOnlyUsage(usageThreadId, last)) {
+            this.pendingTurnUsage = addUsage(this.pendingTurnUsage, last);
+          }
+        }
         // App-server reports the model's context window beside the usage. The last request's
         // input (cache included) plus its output is what sits in the window now, which is the
         // same figure the Codex CLI's own "context left" reads from.
         const window = p?.tokenUsage?.modelContextWindow ?? p?.tokenUsage?.model_context_window;
-        if (typeof window === "number" && Number.isFinite(window) && window > 0 && (u.input != null || u.output != null)) {
-          this.cb.onAcpUsage?.({ contextTokensUsed: Math.max(0, (u.input ?? 0) + (u.output ?? 0)), contextWindow: Math.floor(window) });
+        if (last && typeof window === "number" && Number.isFinite(window) && window > 0 &&
+            (last.input != null || last.output != null)) {
+          this.cb.onAcpUsage?.({
+            contextTokensUsed: Math.max(0, (last.input ?? 0) + (last.output ?? 0)),
+            contextWindow: Math.floor(window),
+          });
         }
       }
     });
@@ -1227,6 +1329,9 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("turn/completed", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) {
         if (this.subagentToolByThread.has(p.threadId)) {
+          const turnId = typeof p?.turn?.id === "string" && p.turn.id ? p.turn.id : null;
+          if (turnId && this.completedSubagentTurnIds.get(p.threadId) === turnId) return;
+          if (turnId) this.completedSubagentTurnIds.set(p.threadId, turnId);
           this.flushSubagentUsage(p.threadId);
           if (p?.turn?.status === "failed") this.updateSubagentLifecycle(p.threadId, "failed");
           if (p?.turn?.status === "interrupted") this.updateSubagentLifecycle(p.threadId, "interrupted");
@@ -1257,6 +1362,9 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("turn/failed", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) {
         if (this.subagentToolByThread.has(p.threadId)) {
+          const turnId = typeof p?.turn?.id === "string" && p.turn.id ? p.turn.id : null;
+          if (turnId && this.completedSubagentTurnIds.get(p.threadId) === turnId) return;
+          if (turnId) this.completedSubagentTurnIds.set(p.threadId, turnId);
           this.flushSubagentUsage(p.threadId);
           this.updateSubagentLifecycle(p.threadId, "failed");
         }
@@ -1305,6 +1413,7 @@ export class CodexAppServerDriver implements Driver {
         inputTokens: u.input,
         outputTokens: u.output,
         cachedInputTokens: u.cached,
+        ...(typeof u.cacheCreation === "number" ? { cacheCreationInputTokens: u.cacheCreation } : {}),
         ...(typeof u.reasoning === "number" ? { reasoningOutputTokens: u.reasoning } : {}),
         ...(this.eventModel()),
       });
@@ -1320,6 +1429,22 @@ export class CodexAppServerDriver implements Driver {
     if (this.turnUsageClosed) return;
     this.turnUsageClosed = true;
     this.emitPendingTurnUsage();
+  }
+
+  private beginRootTurnUsage(): void {
+    this.pendingTurnUsage = null;
+    this.turnUsageBaseline = this.threadId ? this.threadUsageTotals.get(this.threadId) ?? null : null;
+    this.lastOnlyUsageFingerprints.delete(this.threadId ?? "root");
+    this.turnUsageClosed = false;
+  }
+
+  private admitLastOnlyUsage(threadId: string, usage: FlatUsage): boolean {
+    const seen = this.lastOnlyUsageFingerprints.get(threadId) ?? new Set<string>();
+    this.lastOnlyUsageFingerprints.set(threadId, seen);
+    const fingerprint = usageFingerprint(usage);
+    if (seen.has(fingerprint)) return false;
+    seen.add(fingerprint);
+    return true;
   }
 
   /** Map an item.started/completed payload to our normalized events. */
@@ -1530,16 +1655,85 @@ export function approvalContext(method: string, params: Json, escalated: boolean
   };
 }
 
+const USAGE_FIELDS = ["input", "output", "cached", "cacheCreation", "reasoning"] as const;
+
+function usageValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+}
+
 /** Dig token counts out of the app-server's nested token-usage object. */
-function flattenUsage(tu: Json): { input?: number; output?: number; cached?: number; reasoning?: number } | null {
+function flattenUsage(tu: Json): FlatUsage | null {
   if (!tu) return null;
   const u = tu.total ?? tu.lastTurn ?? tu.tokenUsage ?? tu;
-  const input = u.input_tokens ?? u.inputTokens ?? u.input;
-  const output = u.output_tokens ?? u.outputTokens ?? u.output;
-  const cached = u.cached_input_tokens ?? u.cachedInputTokens ?? u.cached;
-  const reasoning = u.reasoning_output_tokens ?? u.reasoningOutputTokens ?? u.reasoning;
+  const input = usageValue(u.input_tokens ?? u.inputTokens ?? u.input);
+  const output = usageValue(u.output_tokens ?? u.outputTokens ?? u.output);
+  const cached = usageValue(u.cached_input_tokens ?? u.cachedInputTokens ?? u.cached);
+  const cacheCreation = usageValue(
+    u.cache_creation_input_tokens ?? u.cacheCreationInputTokens ?? u.cache_creation ?? u.cacheCreation,
+  );
+  const rawReasoning = usageValue(u.reasoning_output_tokens ?? u.reasoningOutputTokens ?? u.reasoning);
+  const reasoning = rawReasoning == null ? undefined : output == null ? rawReasoning : Math.min(output, rawReasoning);
   if (input == null && output == null) return null;
-  return { input, output, cached, reasoning };
+  return { input, output, cached, cacheCreation, reasoning };
+}
+
+function addUsage(left: FlatUsage | null, right: FlatUsage): FlatUsage {
+  const result: FlatUsage = {};
+  for (const field of USAGE_FIELDS) {
+    if (left?.[field] != null || right[field] != null) result[field] = (left?.[field] ?? 0) + (right[field] ?? 0);
+  }
+  if (result.output != null && result.reasoning != null) result.reasoning = Math.min(result.output, result.reasoning);
+  return result;
+}
+
+function subtractUsage(total: FlatUsage, baseline: FlatUsage): FlatUsage {
+  const result: FlatUsage = {};
+  for (const field of USAGE_FIELDS) {
+    if (total[field] != null) {
+      result[field] = Math.max(0, (total[field] ?? 0) - (baseline[field] ?? 0));
+    }
+  }
+  if (result.output != null && result.reasoning != null) result.reasoning = Math.min(result.output, result.reasoning);
+  return result;
+}
+
+function usageAtLeast(total: FlatUsage, baseline: FlatUsage): boolean {
+  return USAGE_FIELDS.every((field) => total[field] == null || baseline[field] == null || total[field]! >= baseline[field]!);
+}
+
+function fillUsage(usage: FlatUsage, fallback: FlatUsage | null): FlatUsage {
+  if (!fallback) return usage;
+  const result = { ...usage };
+  for (const field of USAGE_FIELDS) if (result[field] == null && fallback[field] != null) result[field] = fallback[field];
+  return result;
+}
+
+function hasUsage(usage: FlatUsage): boolean {
+  return USAGE_FIELDS.some((field) => (usage[field] ?? 0) > 0);
+}
+
+function usageMissingFromTotal(last: FlatUsage, total: FlatUsage): FlatUsage {
+  const result: FlatUsage = {};
+  for (const field of USAGE_FIELDS) if (total[field] == null && last[field] != null) result[field] = last[field];
+  return result;
+}
+
+function preserveNonCumulativeUsage(delta: FlatUsage, pending: FlatUsage | null, total: FlatUsage): FlatUsage {
+  if (!pending) return delta;
+  const result = { ...delta };
+  for (const field of USAGE_FIELDS) if (total[field] == null && pending[field] != null) result[field] = pending[field];
+  return result;
+}
+
+function replaceNonCumulativeUsage(delta: FlatUsage, latest: FlatUsage, total: FlatUsage): FlatUsage {
+  const result = { ...delta };
+  for (const field of USAGE_FIELDS) if (total[field] == null && latest[field] != null) result[field] = latest[field];
+  if (result.output != null && result.reasoning != null) result.reasoning = Math.min(result.output, result.reasoning);
+  return result;
+}
+
+function usageFingerprint(usage: FlatUsage): string {
+  return USAGE_FIELDS.map((field) => usage[field] ?? "").join(":");
 }
 
 function truncate(s: string, n: number): string {
