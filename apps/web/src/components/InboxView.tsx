@@ -536,15 +536,19 @@ export function InboxView({
   // nothing visible stands in for it) the preview keeps following the persisted selection as before.
   const selectedSession = displayedSelectedSession ??
     (repairedSelection ? sessions.get(repairedSelection) ?? null : null);
+  // The dwell marks the session the reader is actually looking at: the expanded one when the view
+  // is expanded (a deep link can open a child whose thread is collapsed, and the projection above
+  // would otherwise name its parent), else the selected preview.
+  const seenSession = expandedSessionId ? sessions.get(expandedSessionId) ?? null : selectedSession;
 
   useEffect(() => {
     if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
     seenTimerRef.current = null;
     // Board mode renders no selected preview, so dwelling there must not mark the invisible
     // list selection as read while its activity keeps arriving.
-    if (!selectedSession || boardMode) return;
-    const sessionId = selectedSession.id;
-    const seenAt = selectedSession.lastEventAt ?? selectedSession.updatedAt;
+    if (!seenSession || boardMode) return;
+    const sessionId = seenSession.id;
+    const seenAt = seenSession.lastEventAt ?? seenSession.updatedAt;
     seenTimerRef.current = window.setTimeout(() => {
       const next = markSeen(loadSeen(instanceScope), sessionId, seenAt);
       saveSeen(next, instanceScope);
@@ -555,7 +559,7 @@ export function InboxView({
       if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
       seenTimerRef.current = null;
     };
-  }, [boardMode, instanceScope, selectedSession?.id, selectedSession?.lastEventAt, selectedSession?.updatedAt]);
+  }, [boardMode, instanceScope, seenSession?.id, seenSession?.lastEventAt, seenSession?.updatedAt]);
 
   const expanded = expandedSessionId !== null;
   useEffect(() => {

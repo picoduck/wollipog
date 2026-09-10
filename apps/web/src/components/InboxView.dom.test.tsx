@@ -13,6 +13,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
 import { INBOX_COLLAPSED_THREADS_KEY } from "../inbox.js";
 import { saveKeySet } from "../pins.js";
+import { loadSeen, saveSeen } from "../sessions-seen.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -1511,6 +1512,43 @@ test("InboxView keeps a hidden selection on its nearest visible ancestor and Shi
   assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
   assert.equal(selectedTitle(), "Session Lone", "expanding restores the persisted selection");
   assert.equal(previewTitle(), "Session Lone");
+});
+
+test("an expanded child inside a collapsed thread is the session marked seen, not its projected parent (#896)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set(["Parent"]));
+  saveSeen({});
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-seen-test",
+    runtimeKey: "inbox-thread-seen-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  // A deep link opened the child while its parent's thread is collapsed: the list projects the
+  // selection onto the parent, but the reader is looking at the child.
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView expandedSessionId="Lone" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([
+      session("Parent", 30, { status: "running" }),
+      session("Lone", 20, { status: "running", parentSessionId: "Parent" }),
+    ]));
+  });
+  assert.equal(container.querySelector(".session-preview-title")?.textContent ?? container.textContent?.includes("Session Lone"), true);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_700)); });
+  const seen = loadSeen();
+  assert.ok("Lone" in seen, "the opened child is marked seen");
+  assert.ok(!("Parent" in seen), "the projected parent is not marked seen in its place");
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set());
 });
 
 test("every mounted root is torn down before the next test starts", () => {
