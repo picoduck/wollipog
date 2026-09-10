@@ -5999,7 +5999,7 @@ function GuardrailInput({
             return;
           }
           const v = parseFloat(draft);
-          if (e.target.validity.badInput || e.target.validity.rangeOverflow ||
+          if (e.target.validity.badInput || e.target.validity.rangeOverflow || e.target.validity.rangeUnderflow ||
               (integer && Number.isFinite(v) && v > 0 && v < 1)) {
             setDraft(null); // typo — resync to the live value, don't clear an armed limit
             return;

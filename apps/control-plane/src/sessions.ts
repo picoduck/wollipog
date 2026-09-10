@@ -6815,10 +6815,22 @@ export class SessionsService {
     }
     const requestId = `runner-${message.kind}:${message.tripId}`;
     if (this.db.hasGovernanceAuditEntry(message.sessionId, requestId, "policy_decision", "asked")) return;
+    const existing = pendingRequests(session.pendingApproval).find((request) =>
+      request.kind === message.kind && !request.runnerGuardrail);
     const title = message.kind === "cost_budget"
       ? `Runner paused at the $${message.threshold.toFixed(2)} cost threshold. Continue with the current guardrails?`
       : `Runner paused at ${message.threshold} distinct tool calls. Continue with the current guardrails?`;
-    const approval: PendingApproval = {
+    const runnerGuardrail = {
+      tripId: message.tripId,
+      kind: message.kind,
+      threshold: message.threshold,
+      observed: message.observed,
+    };
+    // Cost usage reaches the CP before the runner's following trip frame, so the CP may already
+    // have parked the same crossing. Promote that card with the runner evidence instead of asking
+    // twice (and advancing the threshold twice). Keep its request identity for an in-flight click;
+    // the separate runner request id below makes reconnect replay idempotent.
+    const approval: PendingApproval = existing ? { ...existing, runnerGuardrail } : {
       requestId,
       kind: message.kind,
       title,
@@ -6826,18 +6838,15 @@ export class SessionsService {
         { optionId: "continue", name: "Continue", kind: "allow_once" },
         { optionId: "cancel", name: "Stop", kind: "reject_once" },
       ],
-      runnerGuardrail: {
-        tripId: message.tripId,
-        kind: message.kind,
-        threshold: message.threshold,
-        observed: message.observed,
-      },
+      runnerGuardrail,
     };
     const now = Date.now();
-    this.db.setPendingApproval(message.sessionId, appendPendingApproval(session.pendingApproval, approval));
+    this.db.setPendingApproval(message.sessionId, existing
+      ? replacePendingApproval(session.pendingApproval, approval)
+      : appendPendingApproval(session.pendingApproval, approval));
     if (session.status === "idle") this.db.notePolicyResumeStatus(message.sessionId, "idle");
     this.db.updateSessionStatus(message.sessionId, "input_required", now);
-    this.recordGovernanceAudit(session, approval, "policy_decision", "asked",
+    this.recordGovernanceAudit(session, { ...approval, requestId }, "policy_decision", "asked",
       { kind: "system", id: "runner-governance" }, now, {
         policyRule: message.kind === "cost_budget"
           ? { kind: "cost_budget", budgetUsd: message.threshold }
@@ -8349,5 +8358,14 @@ function appendPendingApproval(
   const requests = pendingRequests(current);
   if (requests.some((request) => request.requestId === next.requestId)) return current!;
   const [first, ...rest] = [...requests, next];
+  return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
+}
+
+function replacePendingApproval(
+  current: PendingApproval | null | undefined,
+  replacement: PendingApproval,
+): PendingApproval {
+  const [first, ...rest] = pendingRequests(current).map((request) =>
+    request.requestId === replacement.requestId ? replacement : request);
   return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
 }

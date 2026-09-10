@@ -11462,6 +11462,40 @@ test("runner trip reports create one replay-safe card and Continue honors change
   assert.equal(db.getSession(changed)!.maxToolCalls, 200, "a newer raised rule is not advanced again");
 });
 
+test("a runner cost trip promotes the CP crossing instead of granting two budget windows", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { costBudgetUsd: 1 } });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 2 });
+  const cpRequestId = db.getSession(id)!.pendingApproval!.requestId;
+  const trip = {
+    type: "governance_tripped" as const,
+    sessionId: id,
+    tripId: "trip-cost-crossing",
+    kind: "cost_budget" as const,
+    threshold: 1,
+    observed: 2,
+  };
+
+  svc.onGovernanceTripped(RUNNER_ID, trip);
+  svc.onGovernanceTripped(RUNNER_ID, trip);
+  const requests = pendingRequests(db.getSession(id)!.pendingApproval);
+  assert.equal(requests.length, 1, "one crossing retains exactly one approval card");
+  assert.equal(requests[0]!.requestId, cpRequestId, "the existing card remains safe for an in-flight click");
+  assert.deepEqual(requests[0]!.runnerGuardrail, {
+    tripId: "trip-cost-crossing", kind: "cost_budget", threshold: 1, observed: 2,
+  });
+  assert.equal(svc.governanceAudit(id).filter((entry) =>
+    entry.requestId === "runner-cost_budget:trip-cost-crossing" &&
+    entry.stage === "policy_decision" && entry.outcome === "asked").length, 1);
+
+  hub.sentToRunner.length = 0;
+  assert.ok(svc.approve(id, cpRequestId, "continue").ok);
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  assert.equal(db.getSession(id)!.costBudgetUsd, 3, "the crossing advances by one original budget window");
+  assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, { costBudgetUsd: 3 });
+});
+
 test("crossing the tool-call limit parks the session at turn settle", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

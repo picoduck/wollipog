@@ -84,6 +84,13 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
       input.dispatchEvent(new domWindow.FocusEvent("focusout", { bubbles: true }) as unknown as Event);
     });
     assert.deepEqual(applied.at(-1), { maxChildSessions: 9 });
+    applied.length = 0;
+    await act(async () => {
+      input.focus();
+      fireDomEvent.change(input, { target: { value: "-5" } });
+      input.dispatchEvent(new domWindow.FocusEvent("focusout", { bubbles: true }) as unknown as Event);
+    });
+    assert.deepEqual(applied, [], "an underflow typo cannot pause child admission");
   } finally {
     await act(async () => root.unmount());
     container.remove();
