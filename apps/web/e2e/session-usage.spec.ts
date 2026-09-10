@@ -125,6 +125,18 @@ test("desktop: an unpriced session says so instead of showing $0.00", async ({ p
   await page.screenshot({ path: `${SHOT}/desktop-unpriced.png` });
 });
 
+test("desktop: a provider-reported free session shows $0.00 on first render", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=free");
+
+  const cost = page.getByRole("button", { name: "Session Usage: $0.00" });
+  await expect(cost).toBeVisible();
+  await expect(cost).toHaveText("$0.00");
+  await expect(cost).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".session-usage-popover")).toHaveCount(0);
+  await page.screenshot({ path: `${SHOT}/desktop-free-first-render.png` });
+});
+
 test("desktop: an unknown context window hides the ring and keeps the cost control", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&window=none");

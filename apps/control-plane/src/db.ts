@@ -155,6 +155,7 @@ import {
   type SessionTitleSource,
   type SessionView,
   type SessionWorktreeView,
+  type UsageCostSource,
   type QueuedPromptView,
   type SteerDisposition,
   type SteerResultReason,
@@ -9373,6 +9374,35 @@ export class ControlPlaneDb {
     return { totals: amount(totals), byModel };
   }
 
+  /** Lightweight provenance projection for SessionView. It uses the same source counters and
+   * driver-aware processed-token expression as `sessionUsageByModel` without loading/sorting every
+   * model row on the hot Inbox path. */
+  private sessionCostSource(sessionId: string, liveProcessedTokens: number): UsageCostSource | undefined {
+    const row = this.stmt(
+      `SELECT
+         COALESCE(SUM(provider_reported_records), 0) AS provider_reported_records,
+         COALESCE(SUM(model_priced_records), 0) AS model_priced_records,
+         COALESCE(SUM(unpriced_records), 0) AS unpriced_records,
+         COALESCE(SUM(CASE WHEN driver IN ('codex', 'codex-app-server')
+                       THEN input_tokens + cache_creation_tokens + output_tokens
+                       ELSE input_tokens + cached_input_tokens + cache_creation_tokens + output_tokens END), 0)
+           AS processed_tokens
+       FROM usage_session_models WHERE session_id=?`,
+    ).get(sessionId) as {
+      provider_reported_records: number;
+      model_priced_records: number;
+      unpriced_records: number;
+      processed_tokens: number;
+    };
+    const processedTokens = Number(row.processed_tokens);
+    if (processedTokens < liveProcessedTokens || processedTokens === 0) return undefined;
+    return resolveCostSource({
+      providerReported: Number(row.provider_reported_records),
+      modelPriced: Number(row.model_priced_records),
+      unpriced: Number(row.unpriced_records),
+    });
+  }
+
   queryUsageAggregation(principal: AuthPrincipal, query: UsageAggregationQuery): UsageAggregationResponse {
     if (principal.kind !== "human") throw new Error("usage aggregation requires a human principal");
     const policy = this.ensureUsageRetentionPolicy(principal.organizationId);
@@ -14139,6 +14169,11 @@ export class ControlPlaneDb {
 
     const durablePromptQueue = this.pendingSessionPromptQueue(row.id);
     const pendingPrompts = this.pendingSessionPrompts(row.id);
+    // Provenance is useful on the lightweight session projection only when it describes all usage
+    // in that projection. A lagging ledger must not let an older provider-priced zero characterize
+    // newer runner counters whose cost is not known yet; the detailed `/usage` consumer applies
+    // the same processed-token freshness test before accepting its provenance.
+    const costSource = this.sessionCostSource(row.id, row.input_tokens + row.output_tokens);
     return {
       id: row.id,
       runnerId: row.runner_id,
@@ -14234,6 +14269,7 @@ export class ControlPlaneDb {
       contextTokensUsed: row.context_tokens_used ?? undefined,
       contextWindow: row.context_window ?? undefined,
       costUsd: row.cost_usd ?? 0,
+      costSource,
       adopted: row.adopted === 1,
       costBudgetUsd: row.cost_budget_usd ?? null,
       costBudgetStepUsd: row.cost_budget_step_usd ?? row.cost_budget_usd ?? null,

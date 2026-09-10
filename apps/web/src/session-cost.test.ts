@@ -121,7 +121,9 @@ test("a provider-reported zero is a real amount once the ledger says so", () => 
   const free = session({ tokensIn: 25_000, tokensOut: 900, costUsd: 0 });
   // Before the ledger answers, the strip cannot tell "free" from "nobody priced it".
   assert.equal(sessionCostLabel(free)?.text, "$—");
-  const priced = sessionCostLabel(free, response({ totals: amount({ costSource: "providerReported" }) }));
+  const priced = sessionCostLabel(free, response({
+    totals: amount({ costSource: "providerReported", processedTokens: 25_900 }),
+  }));
   assert.deepEqual(priced, { text: "$0.00", priced: true, ariaLabel: "Session Usage: $0.00" });
   // An unpriced ledger still refuses to invent an amount.
   assert.equal(
@@ -130,6 +132,35 @@ test("a provider-reported zero is a real amount once the ledger says so", () => 
   );
   // A session that has processed nothing renders nothing, ledger or not.
   assert.equal(sessionCostLabel(session(), response({ totals: amount({ costSource: "providerReported" }) })), null);
+});
+
+test("a caught-up snapshot renders a provider-reported zero before usage detail loads", () => {
+  const label = sessionCostLabel(session({
+    tokensIn: 25_000,
+    tokensOut: 900,
+    costUsd: 0,
+    costSource: "providerReported",
+  }));
+  assert.deepEqual(label, { text: "$0.00", priced: true, ariaLabel: "Session Usage: $0.00" });
+  assert.equal(sessionCostLabel(session({
+    tokensIn: 25_000,
+    tokensOut: 900,
+    costUsd: 0,
+    costSource: "unpriced",
+  }))?.text, "$—");
+});
+
+test("stale detail cannot claim that newer live usage was free", () => {
+  const live = session({ tokensIn: 25_000, tokensOut: 900, costUsd: 0 });
+  const stale = response({
+    totals: amount({
+      inputTokens: 100,
+      outputTokens: 10,
+      processedTokens: 110,
+      costSource: "providerReported",
+    }),
+  });
+  assert.equal(sessionCostLabel(live, stale)?.text, "$—");
 });
 
 test("the ledger's cost is used when the session's running total lags behind it", () => {

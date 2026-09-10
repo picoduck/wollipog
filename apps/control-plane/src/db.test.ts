@@ -5372,6 +5372,27 @@ test("a provider-reported cost is recorded unchanged while cache buckets still d
   assert.equal(db.getSession("sess-1")!.costUsd, 0.5);
 });
 
+test("session views carry only caught-up usage cost provenance", () => {
+  const db = withRunner();
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.appendEvent("sess-1", {
+    kind: "token_usage", inputTokens: 100, outputTokens: 10, costUsd: 0,
+  }, 3_600_100, { accrueUsage: true });
+
+  assert.equal(db.getSession("sess-1")!.costSource, "providerReported",
+    "an explicit free provider record reaches the first session projection");
+
+  db.raw().prepare("UPDATE sessions SET input_tokens=1000 WHERE id='sess-1'").run();
+  assert.equal(db.getSession("sess-1")!.costSource, undefined,
+    "provenance is withheld while newer runner counters are not in the ledger");
+
+  db.createSession(newSession({ id: "unpriced", driver: "claude-code", config: { model: "unknown-model" } }));
+  db.appendEvent("unpriced", {
+    kind: "token_usage", inputTokens: 25, outputTokens: 5,
+  }, 3_600_200, { accrueUsage: true });
+  assert.equal(db.getSession("unpriced")!.costSource, "unpriced");
+});
+
 test("an unpriceable model counts its tokens, reports unpriced, and mixed provenance resolves to the weakest", () => {
   const db = withRunner();
   db.createSession(newSession({ driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));

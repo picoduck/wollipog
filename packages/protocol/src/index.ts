@@ -3826,6 +3826,9 @@ export interface SessionView {
   contextTokensUsed?: number;
   contextWindow?: number;
   costUsd: number;
+  /** Provenance for `costUsd` when the per-model ledger has caught up with the session totals.
+   * Omitted by older control planes and while the ledger trails the runner's live counters. */
+  costSource?: UsageCostSource;
   /** True for sessions adopted from an external CLI transcript — only these can be reprocessed. */
   adopted: boolean;
   /** Sidebar grouping. Absent ⇒ derive from `workspaceId` (null ⇒ "chat"). */
