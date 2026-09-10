@@ -7672,7 +7672,9 @@ export class SessionManager {
     }
     entry.governanceTripped = holdFor;
     entry.governanceTrip = undefined;
-    this.emitStatus(sessionId, "idle");
+    // Ordinary threshold synchronization must not erase a provider-owned question/permission.
+    // The runner store is authoritative for that barrier, just as it is on provider callbacks.
+    this.emitStatus(sessionId, meta.pendingApproval ? "input_required" : "idle");
     if (!holdFor && (entry.queue.length || entry.pendingWorktreeRebind)) this.scheduleDrain(sessionId);
   }
 

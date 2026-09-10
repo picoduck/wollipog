@@ -319,6 +319,31 @@ test("live threshold synchronization preserves an unrelated turn-interruption ho
   }
 });
 
+test("idle threshold synchronization preserves a provider-owned approval status", () => {
+  const h = harness({});
+  try {
+    h.entry.running = false;
+    h.store.patchMeta("s_governance", {
+      status: "input_required",
+      pendingApproval: {
+        requestId: "question-live",
+        kind: "question",
+        title: "Choose a target",
+        options: [],
+      },
+    });
+
+    h.sm.rearmGovernance("s_governance", { costBudgetUsd: 10 });
+
+    const statuses = h.sent.filter((message) => message.type === "session_status");
+    assert.equal(statuses.at(-1)?.status, "input_required");
+    assert.equal(h.store.readMeta("s_governance")!.status, "input_required");
+    assert.equal(h.store.readMeta("s_governance")!.pendingApproval?.requestId, "question-live");
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("held queued prompts resume only after a valid re-arm", async () => {
   const h = harness({ maxToolCalls: 1 });
   try {

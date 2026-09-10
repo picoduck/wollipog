@@ -11440,11 +11440,40 @@ test("runner trip reports create one replay-safe card and Continue honors change
     );
   }
 
+  // A legacy/displacing path may have kept only the provider request. Reconnect replay must
+  // restore the unresolved trip without writing a second asked-audit entry.
+  db.setPendingApproval(cleared, {
+    requestId: "permission-2",
+    title: "Allow Read?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests.map((request) => request.requestId), ["permission-2", runnerCard.requestId]);
+  assert.equal(svc.governanceAudit(cleared).filter((entry) =>
+    entry.requestId === runnerCard.requestId && entry.stage === "policy_decision").length, 1);
+
+  // A new live provider ask takes the primary card but retains the runner trip behind it. Once the
+  // provider ask resolves, Continue remains immediately reachable and no queued prompt is stranded.
+  svc.onSessionEvent(cleared, {
+    kind: "permission_request",
+    requestId: "permission-3",
+    title: "Allow Write?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests.map((request) => request.requestId), ["permission-3", runnerCard.requestId]);
+  assert.ok(svc.approve(cleared, "permission-3", "allow").ok);
+  requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
+  assert.deepEqual(requests.map((request) => request.requestId), [runnerCard.requestId]);
+
   hub.sentToRunner.length = 0;
   assert.ok(svc.approve(cleared, runnerCard.requestId, "continue").ok);
   assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, { maxToolCalls: null });
   requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
-  assert.deepEqual(requests.map((request) => request.requestId), ["permission-1"]);
+  assert.deepEqual(requests, []);
+  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  assert.equal(db.getSession(cleared)!.pendingApproval, null, "a stale replay cannot resurrect a resolved trip");
 
   const changed = seedSession(svc, hub);
   db.updateSessionMaxToolCalls(changed, 200, Date.now(), 200);
@@ -11496,6 +11525,8 @@ test("a runner cost trip promotes the CP crossing instead of granting two budget
   assert.equal(db.getSession(id)!.pendingApproval, null);
   assert.equal(db.getSession(id)!.costBudgetUsd, 3, "the crossing advances by one original budget window");
   assert.deepEqual(hub.sentOfType("rearm_governance").at(-1)!.config, { costBudgetUsd: 3 });
+  svc.onGovernanceTripped(RUNNER_ID, trip);
+  assert.equal(db.getSession(id)!.pendingApproval, null, "a promoted card records the deterministic trip resolution too");
 });
 
 test("crossing the tool-call limit parks the session at turn settle", () => {

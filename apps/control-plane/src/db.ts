@@ -11796,6 +11796,15 @@ export class ControlPlaneDb {
     ).get(sessionId, requestId, stage, outcome));
   }
 
+  hasTerminalGovernanceResolution(sessionId: string, requestId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM governance_audit
+       WHERE session_id=? AND request_id=? AND stage='resolution'
+         AND outcome IN ('allowed', 'denied', 'dismissed', 'answered', 'timed_out', 'aborted')
+       LIMIT 1`,
+    ).get(sessionId, requestId));
+  }
+
   pruneGovernanceAudit(createdBefore: number, limit = 1_000): number {
     const bounded = Math.max(1, Math.min(10_000, Math.trunc(limit)));
     return Number(this.stmt(

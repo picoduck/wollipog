@@ -2259,6 +2259,32 @@ export class SessionsService {
     ));
   }
 
+  /** A promoted control-plane card keeps its visible request id, while reconnect replay uses the
+   * runner trip's deterministic id. Record a terminal result under both identities so a stale
+   * duplicate cannot resurrect a trip that was already continued, stopped, or dismissed. */
+  private recordRunnerGuardrailResolution(
+    session: SessionView,
+    request: PendingApproval,
+    outcome: GovernanceAuditOutcome,
+    actor: GovernanceActor,
+    now: number,
+    options: { content?: unknown; optionId?: string | null } = {},
+  ): void {
+    this.recordGovernanceAudit(session, request, "resolution", outcome, actor, now, options);
+    const replayRequestId = runnerGuardrailRequestId(request);
+    if (replayRequestId && replayRequestId !== request.requestId) {
+      this.recordGovernanceAudit(
+        session,
+        { ...request, requestId: replayRequestId },
+        "resolution",
+        outcome,
+        actor,
+        now,
+        options,
+      );
+    }
+  }
+
   private governanceAuditRecord(
     session: SessionView,
     request: Pick<PendingApproval, "requestId" | "kind" | "context">,
@@ -3575,10 +3601,9 @@ export class SessionsService {
       });
       if (!sent) {
         if (parkedGuardrail) {
-          this.recordGovernanceAudit(
+          this.recordRunnerGuardrailResolution(
             session,
             parkedGuardrail,
-            "resolution",
             "delivery_failed",
             actor,
             now,
@@ -3593,7 +3618,7 @@ export class SessionsService {
       const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, parkedGuardrail.requestId);
       this.db.setPendingApproval(sessionId, remaining);
       this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
-      this.recordGovernanceAudit(session, parkedGuardrail, "resolution", "dismissed", actor, now, { content: config });
+      this.recordRunnerGuardrailResolution(session, parkedGuardrail, "dismissed", actor, now, { content: config });
       if (!remaining) this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
       this.clearSettledPolicyResumeStatus(sessionId);
@@ -4853,7 +4878,7 @@ export class SessionsService {
             ...(holdFor ? { holdFor } : {}),
           });
           if (!sent) {
-            this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, now, { optionId });
+            this.recordRunnerGuardrailResolution(session, pending, "delivery_failed", actor, now, { optionId });
             return fail("runner is offline", 409);
           }
         }
@@ -4878,10 +4903,9 @@ export class SessionsService {
         this.sendStopCommand(session.runnerId, sessionId);
         this.db.updateSessionStatus(sessionId, "stopped", now);
       }
-      this.recordGovernanceAudit(
+      this.recordRunnerGuardrailResolution(
         session,
         pending,
-        "resolution",
         optionId === "continue" ? "allowed" : "denied",
         actor,
         now,
@@ -6814,8 +6838,17 @@ export class SessionsService {
       return;
     }
     const requestId = `runner-${message.kind}:${message.tripId}`;
-    if (this.db.hasGovernanceAuditEntry(message.sessionId, requestId, "policy_decision", "asked")) return;
-    const existing = pendingRequests(session.pendingApproval).find((request) =>
+    const pending = pendingRequests(session.pendingApproval);
+    if (pending.some((request) => request.runnerGuardrail?.tripId === message.tripId &&
+        request.runnerGuardrail.kind === message.kind)) return;
+    if (this.db.hasTerminalGovernanceResolution(message.sessionId, requestId)) return;
+    const alreadyAsked = this.db.hasGovernanceAuditEntry(
+      message.sessionId,
+      requestId,
+      "policy_decision",
+      "asked",
+    );
+    const existing = pending.find((request) =>
       request.kind === message.kind && !request.runnerGuardrail);
     const title = message.kind === "cost_budget"
       ? `Runner paused at the $${message.threshold.toFixed(2)} cost threshold. Continue with the current guardrails?`
@@ -6846,12 +6879,14 @@ export class SessionsService {
       : appendPendingApproval(session.pendingApproval, approval));
     if (session.status === "idle") this.db.notePolicyResumeStatus(message.sessionId, "idle");
     this.db.updateSessionStatus(message.sessionId, "input_required", now);
-    this.recordGovernanceAudit(session, { ...approval, requestId }, "policy_decision", "asked",
-      { kind: "system", id: "runner-governance" }, now, {
-        policyRule: message.kind === "cost_budget"
-          ? { kind: "cost_budget", budgetUsd: message.threshold }
-          : { kind: "max_tool_calls", maxCalls: message.threshold },
-      });
+    if (!alreadyAsked) {
+      this.recordGovernanceAudit(session, { ...approval, requestId }, "policy_decision", "asked",
+        { kind: "system", id: "runner-governance" }, now, {
+          policyRule: message.kind === "cost_budget"
+            ? { kind: "cost_budget", budgetUsd: message.threshold }
+            : { kind: "max_tool_calls", maxCalls: message.threshold },
+        });
+    }
     this.hub.sessionChangedById(message.sessionId);
   }
 
@@ -7347,7 +7382,10 @@ export class SessionsService {
         });
       }
 
-      this.db.setPendingApproval(sessionId, addPendingRequest(this.db.getSession(sessionId)?.pendingApproval, approval));
+      this.db.setPendingApproval(
+        sessionId,
+        addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
+      );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       // Push BEFORE any runner-side trailing status event (which would then be a non-transition).
       this.notifyTransition(session, sessionId);
@@ -7437,7 +7475,10 @@ export class SessionsService {
         }
       }
       this.hub.sessionEvent(ev);
-      this.db.setPendingApproval(sessionId, addPendingRequest(this.db.getSession(sessionId)?.pendingApproval, approval));
+      this.db.setPendingApproval(
+        sessionId,
+        addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
+      );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       this.notifyTransition(session, sessionId);
     }
@@ -8359,6 +8400,24 @@ function appendPendingApproval(
   if (requests.some((request) => request.requestId === next.requestId)) return current!;
   const [first, ...rest] = [...requests, next];
   return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
+}
+
+/** A live provider ask owns the primary card, but it cannot erase a runner trip: that trip already
+ * cancelled the turn and holds the FIFO until its own Continue/Stop decision. CP-only soft cards
+ * keep their historical displacement semantics and are re-derived after the provider ask settles. */
+function addPendingRequestPreservingRunnerGuardrails(
+  current: PendingApproval | null | undefined,
+  next: PendingApproval,
+): PendingApproval {
+  const runnerCards = pendingRequests(current).filter((request) => request.runnerGuardrail);
+  let combined = addPendingRequest(current, next);
+  for (const runnerCard of runnerCards) combined = appendPendingApproval(combined, runnerCard);
+  return combined;
+}
+
+function runnerGuardrailRequestId(request: PendingApproval): string | null {
+  const trip = request.runnerGuardrail;
+  return trip ? `runner-${trip.kind}:${trip.tripId}` : null;
 }
 
 function replacePendingApproval(
