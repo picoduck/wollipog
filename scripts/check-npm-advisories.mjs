@@ -131,7 +131,7 @@ export function normalizeGitHubRepository(repository) {
   return `${owner}/${name}`;
 }
 
-async function fetchJson(url, { fetchImpl, headers, source }) {
+async function fetchJsonResponse(url, { fetchImpl, headers, source }) {
   let response;
   try {
     response = await fetchImpl(url, { headers });
@@ -142,10 +142,14 @@ async function fetchJson(url, { fetchImpl, headers, source }) {
     throw new Error(`${source} request failed with HTTP ${response.status}`);
   }
   try {
-    return await response.json();
+    return { data: await response.json(), headers: response.headers };
   } catch (error) {
     throw new Error(`${source} returned malformed JSON: ${error.message}`);
   }
+}
+
+async function fetchJson(url, options) {
+  return (await fetchJsonResponse(url, options)).data;
 }
 
 async function repositoryForDependency(dependency, fetchImpl) {
@@ -172,18 +176,37 @@ async function advisoriesForRepository(repository, { fetchImpl, token }) {
   };
   if (token) headers.authorization = `Bearer ${token}`;
   const advisories = [];
+  let nextUrl = `https://api.github.com/repos/${repository}/security-advisories?per_page=100`;
   for (let page = 1; page <= 10; page += 1) {
-    const pageItems = await fetchJson(
-      `https://api.github.com/repos/${repository}/security-advisories?per_page=100&page=${page}`,
+    const response = await fetchJsonResponse(
+      nextUrl,
       { fetchImpl, headers, source: `GitHub advisories for ${repository}` },
     );
+    const pageItems = response.data;
     if (!Array.isArray(pageItems)) {
       throw new Error(`GitHub advisories for ${repository} did not return an array`);
     }
     advisories.push(...pageItems);
     if (pageItems.length < 100) return advisories;
+    nextUrl = nextAdvisoryPage(response.headers?.get?.("link"), repository);
   }
   throw new Error(`GitHub advisories for ${repository} exceeded the pagination safety limit`);
+}
+
+function nextAdvisoryPage(linkHeader, repository) {
+  const next = linkHeader?.split(",").map((part) => part.trim())
+    .find((part) => /;\s*rel="next"$/u.test(part))
+    ?.match(/^<([^>]+)>/u)?.[1];
+  if (!next) {
+    throw new Error(`GitHub advisories for ${repository} returned a full page without a next cursor`);
+  }
+  const url = new URL(next);
+  if (url.origin !== "https://api.github.com"
+    || url.pathname !== `/repos/${repository}/security-advisories`
+    || !url.searchParams.has("after")) {
+    throw new Error(`GitHub advisories for ${repository} returned an invalid next cursor`);
+  }
+  return url.href;
 }
 
 function normalizeAdvisoryRange(range) {
@@ -309,8 +332,12 @@ export function assessAdvisories({ findings, deferrals, now = new Date() }) {
   return { healthy: active.length === 0, active, deferred };
 }
 
+function escapeHtml(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
 function tableCell(value) {
-  return String(value).replaceAll("|", "\\|").replace(/\s+/gu, " ").trim();
+  return escapeHtml(String(value).replace(/\s+/gu, " ").trim()).replaceAll("|", "\\|");
 }
 
 export function renderReport(result, { dependencies, repositories }) {
@@ -384,10 +411,7 @@ async function main(argv) {
 }
 
 export function failureReport(error) {
-  const message = String(error?.message ?? error).replace(/\s+/gu, " ").trim()
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+  const message = escapeHtml(String(error?.message ?? error).replace(/\s+/gu, " ").trim());
   const bounded = message.length <= MAX_FAILURE_SUMMARY_LENGTH
     ? message
     : `${message.slice(0, MAX_FAILURE_SUMMARY_LENGTH - 3)}...`;

@@ -16,10 +16,15 @@ import {
   renderReport,
 } from "./check-npm-advisories.mjs";
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body, status = 200, responseHeaders = {}) {
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: {
+      get(name) {
+        return responseHeaders[name.toLowerCase()] ?? null;
+      },
+    },
     async json() {
       return body;
     },
@@ -207,6 +212,47 @@ test("detects a repository-scoped advisory absent from pnpm audit", async () => 
   assert.equal(calls.filter(({ url }) => url.startsWith("https://api.github.com/")).length, 1);
 });
 
+test("follows GitHub's validated cursor pagination instead of repeating page one", async () => {
+  const githubUrls = [];
+  const firstPage = Array.from({ length: 100 }, (_, index) => ({
+    ghsa_id: `GHSA-withdrawn-${index}`,
+    published_at: "2026-01-01T00:00:00Z",
+    withdrawn_at: "2026-01-02T00:00:00Z",
+    vulnerabilities: [],
+  }));
+  const fetchImpl = async (url) => {
+    if (url.startsWith("https://registry.npmjs.org/")) {
+      return jsonResponse({ repository: "github:fastify/fastify" });
+    }
+    githubUrls.push(url);
+    if (githubUrls.length === 1) {
+      return jsonResponse(firstPage, 200, {
+        link: '<https://api.github.com/repos/fastify/fastify/security-advisories?per_page=100&after=cursor>; rel="next"',
+      });
+    }
+    return jsonResponse([{
+      ghsa_id: "GHSA-9q9j-q6p8-xq58",
+      severity: "high",
+      published_at: "2026-09-04T08:19:48Z",
+      withdrawn_at: null,
+      vulnerabilities: [{
+        package: { ecosystem: "npm", name: "fastify" },
+        vulnerable_version_range: "< 5.12.2",
+        patched_versions: "5.12.2",
+      }],
+    }]);
+  };
+
+  const result = await collectRepositoryAdvisories(
+    [{ name: "fastify", version: "5.12.1" }],
+    { fetchImpl },
+  );
+  assert.deepEqual(result.findings, [finding()]);
+  assert.equal(githubUrls.length, 2);
+  assert.match(githubUrls[1], /after=cursor/u);
+  assert.doesNotMatch(githubUrls[1], /[?&]page=/u);
+});
+
 test("fails closed when dependency metadata or an advisory source cannot be read", async () => {
   await assert.rejects(
     collectRepositoryAdvisories(
@@ -311,8 +357,15 @@ test("renders packages, versions, advisories, ranges, sources, and deferrals", (
   );
   assert.match(activeReport, /17 direct runtime package version/u);
   assert.match(activeReport, /`fastify` \| 5\.12\.1 \| GHSA-9q9j-q6p8-xq58/u);
-  assert.match(activeReport, /< 5\.12\.2 \| 5\.12\.2 \| repository advisory/u);
+  assert.match(activeReport, /&lt; 5\.12\.2 \| 5\.12\.2 \| repository advisory/u);
   assert.match(activeReport, /npm-advisory-deferrals\.json/u);
+
+  const untrustedReport = renderReport(
+    { healthy: false, active: [finding({ patchedRange: "<details>spoof</details>" })], deferred: [] },
+    { dependencies: 1, repositories: 1 },
+  );
+  assert.doesNotMatch(untrustedReport, /<details>/u);
+  assert.match(untrustedReport, /&lt;details&gt;spoof&lt;\/details&gt;/u);
 
   const deferredFinding = {
     ...finding(),
