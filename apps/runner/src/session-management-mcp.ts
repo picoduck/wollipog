@@ -1126,7 +1126,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "set_guardrails",
-    description: "Set or clear a session's cost budget (USD) and/or tool-call limit (0 clears), or set its concurrent live-child limit from 0 through 64. Subject to session permissions and governance policies.",
+    description: "Set or clear a descendant's cost budget (USD) and/or tool-call limit (0 clears), or set a descendant's or this session's concurrent live-child limit from 0 through 64. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1140,8 +1140,10 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args, deps) => {
       if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
-      if (args.sessionId === deps.selfSessionId) {
-        return errorResult("refusing: that is my own session (an agent cannot reconfigure itself)");
+      if (args.sessionId === deps.selfSessionId &&
+          (typeof args.maxChildSessions !== "number" ||
+            typeof args.costBudgetUsd === "number" || typeof args.maxToolCalls === "number")) {
+        return errorResult("refusing: an agent may change only its own maxChildSessions");
       }
       // ONLY guardrail keys ever ride this call — never model/effort/permissionMode.
       const body: Json = {};

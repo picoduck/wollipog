@@ -704,6 +704,20 @@ test("set_guardrails -> POST /api/sessions/:id/config with ONLY the given guardr
   assert.equal(resultJson(result).session.maxChildSessions, 8);
 });
 
+test("set_guardrails lets a session change only its own live-child limit", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 200,
+    body: { id: SELF_ID, maxChildSessions: 8 },
+  }));
+  const result = await callTool(deps, "set_guardrails", {
+    sessionId: SELF_ID,
+    maxChildSessions: 8,
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/config`);
+  assert.deepEqual(calls[0]!.body, { maxChildSessions: 8 });
+});
+
 test("restart_session uses the descendant restart route and refuses self", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { id: "s_2", status: "starting" } }));
   assert.equal((await callTool(deps, "restart_session", { sessionId: "s_2" })).isError, undefined);
@@ -886,7 +900,6 @@ test("self-targeting mutations refuse with isError and make NO fetch", async () 
   for (const [tool, args] of [
     ["prompt_session", { sessionId: SELF_ID, text: "hi" }],
     ["stop_session", { sessionId: SELF_ID }],
-    ["set_guardrails", { sessionId: SELF_ID, costBudgetUsd: 1 }],
   ] as const) {
     const { deps, calls } = makeDeps();
     const result = await callTool(deps, tool, args as Record<string, unknown>);
@@ -894,6 +907,12 @@ test("self-targeting mutations refuse with isError and make NO fetch", async () 
     assert.match(resultText(result), /my own session/, tool);
     assert.equal(calls.length, 0, `${tool} must not reach the control plane`);
   }
+
+  const { deps, calls } = makeDeps();
+  const guardrails = await callTool(deps, "set_guardrails", { sessionId: SELF_ID, costBudgetUsd: 1 });
+  assert.equal(guardrails.isError, true);
+  assert.match(resultText(guardrails), /only its own maxChildSessions/);
+  assert.equal(calls.length, 0, "self spend/tool changes must not reach the control plane");
 });
 
 test("create_session refuses conductor recursion, bypassPermissions, and a missing workspace — no fetch", async () => {

@@ -898,7 +898,14 @@ test("a live owner can raise the concurrent child cap and restarts consume the s
       parentSessionId: parent.id,
     }).status, 409);
     assert.equal(svc.setConfig(parent.id, { maxChildSessions: 65 }).status, 400);
-    assert.ok(svc.setConfig(parent.id, { maxChildSessions: 2 }).ok);
+    const selfEscalation = svc.setConfig(
+      parent.id,
+      { costBudgetUsd: 0, maxChildSessions: 2 },
+      { kind: "agent", id: parent.id },
+    );
+    assert.equal(selfEscalation.status, 403, "self-service never clears a spend ceiling");
+    assert.equal(db.getSession(parent.id)!.maxChildSessions, 1, "a rejected mixed edit is atomic");
+    assert.ok(svc.setConfig(parent.id, { maxChildSessions: 2 }, { kind: "agent", id: parent.id }).ok);
     assert.equal(db.getSession(parent.id)!.maxChildSessions, 2);
     const sibling = svc.createSession(request, undefined, undefined, false, false, false, {
       parentSessionId: parent.id,

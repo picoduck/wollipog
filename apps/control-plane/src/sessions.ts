@@ -3467,6 +3467,11 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
+    if (actor.kind === "agent" && actor.id === sessionId &&
+        (config.maxChildSessions === undefined ||
+          Object.keys(config).some((key) => key !== "maxChildSessions"))) {
+      return fail("an agent may change only its own maxChildSessions", 403);
+    }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, config);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
