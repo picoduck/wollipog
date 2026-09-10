@@ -91,8 +91,10 @@ export interface DriverBackgroundWorkUpdate {
  * control-plane transport; drivers intentionally do not know the source/runner wire identity. */
 export interface DriverSubscriptionUsageUpdate {
   provider: "codex" | "claude";
-  kind: "full" | "sparse";
-  payload: unknown;
+  /** `response_observed` carries no payload. It only proves the provider answered, which is what
+   * separates a source that has never run from one whose provider reports no allowances at all. */
+  kind: "full" | "sparse" | "response_observed";
+  payload?: unknown;
 }
 
 export interface DriverCallbacks {

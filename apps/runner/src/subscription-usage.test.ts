@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { AgentDefinition, SubscriptionUsageSnapshot } from "@wollipog/protocol";
 import {
+  hasSubscriptionUtilization,
   normalizeClaudeRateLimits,
   normalizeCodexRateLimits,
   probeCodexSubscriptionUsage,
@@ -56,13 +57,15 @@ test("Claude normalization accepts named, model-specific, additional, and status
     rate_limit_info: { rate_limit_type: "burst_lane", status: "allowed_warning", resetsAt: 2_000_200_000 },
   }, base, 2_000);
   assert.ok(snapshot);
+  // The windows `rate_limit_info` describes lead; the forward-compatibility map follows.
   assert.deepEqual(snapshot.buckets.map((bucket) => bucket.id), [
-    "five_hour", "seven_day_opus", "future_lane", "burst_lane",
+    "burst_lane", "five_hour", "seven_day_opus", "future_lane",
   ]);
-  assert.equal(snapshot.buckets[1]?.label, "Weekly — Opus");
-  assert.equal(snapshot.buckets[1]?.status, "warning");
-  assert.equal(snapshot.buckets[2]?.remainingPercent, 0);
-  assert.equal(snapshot.buckets[3]?.status, "warning");
+  const byId = new Map(snapshot.buckets.map((bucket) => [bucket.id, bucket]));
+  assert.equal(byId.get("seven_day_opus")?.label, "Weekly — Opus");
+  assert.equal(byId.get("seven_day_opus")?.status, "warning");
+  assert.equal(byId.get("future_lane")?.remainingPercent, 0);
+  assert.equal(byId.get("burst_lane")?.status, "warning");
 });
 
 test("provider-controlled bucket ids are sanitized to control-plane bounds", () => {
@@ -417,4 +420,524 @@ test("source synchronization reports auth modes without probing or exposing acco
   ]);
   assert.equal(probes, 0);
   assert.doesNotMatch(JSON.stringify(manager.inventory()), /secret|email|accountId/i);
+});
+
+function claudeAgent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
+  return agent({
+    id: "claude",
+    name: "Claude Code",
+    command: "claude",
+    driver: "claude-code",
+    claudeCode: {
+      status: "ready",
+      effortLevels: [],
+      permissionModes: [],
+      streamJsonInput: true,
+      streamJsonImages: true,
+      controlProtocol: true,
+      forkSession: true,
+      replayUserMessages: true,
+      auth: { status: "authenticated", billingSource: "subscription", subscriptionType: "max" },
+    },
+    ...overrides,
+  });
+}
+
+/** Exactly the shape `claude --output-format stream-json` emits: `utilization` is the fraction of
+ * the window consumed and `resetsAt` is unix epoch seconds. */
+function rateLimitEvent(info: Record<string, unknown>): Record<string, unknown> {
+  return { type: "rate_limit_event", rate_limit_info: info, uuid: "u-1", session_id: "s-1" };
+}
+
+// Reset times are only accepted within two years of the observation clock, so these run on a
+// realistic epoch. Seconds on the wire; the normalizer stores milliseconds.
+const OBSERVED_AT = 1_760_000_000_000;
+const FIVE_HOUR_RESET = 1_760_018_000;
+const WEEK_RESET = 1_760_400_000;
+const PRIOR_FIVE_HOUR_RESET = 1_760_000_000;
+
+test("Claude unified windows reach the snapshot with utilization scaled from fraction to percent", () => {
+  const snapshot = normalizeClaudeRateLimits(rateLimitEvent({
+    status: "allowed",
+    rateLimitType: "five_hour",
+    utilization: 0.42,
+    resetsAt: FIVE_HOUR_RESET,
+    unifiedWindows: {
+      five_hour: { utilization: 0.42, resetsAt: FIVE_HOUR_RESET },
+      seven_day: { utilization: 0.07, resetsAt: WEEK_RESET },
+      seven_day_overage_included: { utilization: 0.9, resetsAt: WEEK_RESET },
+    },
+  }), base, OBSERVED_AT);
+  assert.ok(snapshot);
+  assert.equal(snapshot.state, "available");
+  assert.deepEqual(snapshot.buckets.map((bucket) => [bucket.id, bucket.usedPercent, bucket.remainingPercent]), [
+    ["five_hour", 42, 58],
+    ["seven_day", 7, 93],
+    ["seven_day_overage_included", 90, 10],
+  ], "each window stays independently represented and reads as a percentage, not a fraction");
+  assert.deepEqual(snapshot.buckets.map((bucket) => bucket.label), [
+    "Five-Hour Window", "Weekly — All Models", "Weekly — Extra Usage",
+  ]);
+  assert.equal(snapshot.buckets[0]?.resetsAt, FIVE_HOUR_RESET * 1_000, "epoch seconds become milliseconds");
+  assert.equal(snapshot.buckets[2]?.status, "warning", "a window past 80% warns on its own numbers");
+});
+
+test("the limiting window carries the top-level status instead of standing up a second card", () => {
+  const snapshot = normalizeClaudeRateLimits(rateLimitEvent({
+    status: "rejected",
+    rateLimitType: "five_hour",
+    utilization: 1.2,
+    resetsAt: FIVE_HOUR_RESET,
+    unifiedWindows: {
+      five_hour: { utilization: 1.2, resetsAt: FIVE_HOUR_RESET },
+      seven_day: { utilization: 0.3, resetsAt: WEEK_RESET },
+    },
+  }), base, OBSERVED_AT);
+  assert.ok(snapshot);
+  assert.deepEqual(snapshot.buckets.map((bucket) => bucket.id), ["five_hour", "seven_day"]);
+  assert.equal(snapshot.buckets[0]?.status, "exhausted");
+  assert.equal(snapshot.buckets[0]?.usedPercent, 100, "usage past a window cap clamps to full");
+  assert.equal(snapshot.buckets[1]?.status, "available");
+});
+
+test("a Claude window the unified set does not name still gets its own bucket", () => {
+  const snapshot = normalizeClaudeRateLimits(rateLimitEvent({
+    status: "allowed_warning",
+    rateLimitType: "seven_day_opus",
+    utilization: 0.85,
+    resetsAt: WEEK_RESET,
+    unifiedWindows: { five_hour: { utilization: 0.1, resetsAt: FIVE_HOUR_RESET } },
+  }), base, OBSERVED_AT);
+  assert.ok(snapshot);
+  assert.deepEqual(snapshot.buckets.map((bucket) => [bucket.id, bucket.usedPercent]), [
+    ["five_hour", 10], ["seven_day_opus", 85],
+  ]);
+  assert.equal(snapshot.buckets[1]?.label, "Weekly — Opus");
+});
+
+test("a reset-only Claude event yields a bucket with no percentage rather than a false zero", () => {
+  const snapshot = normalizeClaudeRateLimits(
+    rateLimitEvent({ status: "allowed", rateLimitType: "five_hour", resetsAt: FIVE_HOUR_RESET }),
+    base,
+    OBSERVED_AT,
+  );
+  assert.ok(snapshot);
+  assert.deepEqual(snapshot.buckets.map((bucket) => bucket.id), ["five_hour"]);
+  assert.equal(snapshot.buckets[0]?.usedPercent, undefined);
+  assert.equal(snapshot.buckets[0]?.remainingPercent, undefined);
+  assert.equal(hasSubscriptionUtilization(snapshot), false);
+});
+
+test("sparse Claude events preserve utilization and reject stale windows", () => {
+  let now = OBSERVED_AT;
+  const published: SubscriptionUsageSnapshot[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: (snapshot) => published.push(snapshot),
+    now: () => now,
+  });
+  const observe = (info: Record<string, unknown>) =>
+    manager.observe("claude", "claude-code", { kind: "native" }, {
+      provider: "claude",
+      kind: "sparse",
+      payload: rateLimitEvent(info),
+    });
+
+  observe({
+    status: "allowed",
+    rateLimitType: "five_hour",
+    unifiedWindows: {
+      five_hour: { utilization: 0.4, resetsAt: FIVE_HOUR_RESET },
+      seven_day: { utilization: 0.1, resetsAt: WEEK_RESET },
+    },
+  });
+  now = OBSERVED_AT + 2_000;
+  // A status/reset-only event for one window must not blank that window's known utilization.
+  observe({ status: "allowed_warning", rateLimitType: "five_hour", resetsAt: FIVE_HOUR_RESET });
+  assert.deepEqual(manager.inventory()[0]?.buckets.map((bucket) => [bucket.id, bucket.usedPercent]), [
+    ["five_hour", 40], ["seven_day", 10],
+  ], "a sparse event merges into the previously observed windows");
+  assert.equal(manager.inventory()[0]?.buckets[0]?.status, "warning");
+
+  now = OBSERVED_AT + 3_000;
+  observe({
+    status: "allowed",
+    rateLimitType: "five_hour",
+    unifiedWindows: { five_hour: { utilization: 0.9, resetsAt: FIVE_HOUR_RESET } },
+  });
+  now = OBSERVED_AT + 4_000;
+  // Delivered late, but it describes the window that already rolled over — older data.
+  observe({
+    status: "allowed",
+    rateLimitType: "five_hour",
+    unifiedWindows: { five_hour: { utilization: 0.05, resetsAt: PRIOR_FIVE_HOUR_RESET } },
+  });
+  assert.equal(
+    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent,
+    90,
+    "an out-of-order event for an earlier window cannot replace newer utilization",
+  );
+  assert.ok(published.length > 0);
+  assert.equal(manager.inventory()[0]?.detail, undefined, "real utilization leaves no explanation behind");
+});
+
+test("a Claude version reporting resets but no utilization is explained, not left generic", () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => OBSERVED_AT,
+  });
+  manager.syncSources();
+  assert.match(manager.inventory()[0]?.detail ?? "", /after the first provider response/);
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent({ status: "allowed", rateLimitType: "five_hour", resetsAt: FIVE_HOUR_RESET }),
+  });
+  const snapshot = manager.inventory()[0];
+  assert.equal(snapshot?.state, "available");
+  assert.match(snapshot?.detail ?? "", /allowance windows for this source without utilization/);
+  assert.doesNotMatch(snapshot?.detail ?? "", /first provider response/);
+});
+
+test("a status-only Claude event is explained without claiming a reset time was reported", () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => OBSERVED_AT,
+  });
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent({ status: "rejected", rateLimitType: "five_hour" }),
+  });
+  const snapshot = manager.inventory()[0];
+  assert.equal(snapshot?.buckets[0]?.status, "exhausted");
+  assert.equal(snapshot?.buckets[0]?.resetsAt, undefined, "the provider supplied no reset time");
+  // The explanation may cite reset times as a trait of older builds, but must not assert that
+  // this source reported one: a status-only event carries no reset at all.
+  assert.doesNotMatch(snapshot?.detail ?? "", /reports allowance reset times/i);
+  assert.match(snapshot?.detail ?? "", /reported allowance windows for this source without utilization/);
+});
+
+test("a delayed event cannot walk utilization backwards inside one window", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const observe = (utilization: number) =>
+    manager.observe("claude", "claude-code", { kind: "native" }, {
+      provider: "claude",
+      kind: "sparse",
+      payload: rateLimitEvent({
+        status: "allowed",
+        rateLimitType: "five_hour",
+        unifiedWindows: { five_hour: { utilization, resetsAt: FIVE_HOUR_RESET } },
+      }),
+    });
+  observe(0.9);
+  now = OBSERVED_AT + 1_000;
+  // Concurrent sessions share one source; this one observed the account earlier but reported
+  // later. Same window, so its lower usage is stale rather than a genuine decrease.
+  observe(0.4);
+  assert.equal(
+    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent,
+    90,
+    "usage only accumulates within a window, so the lower late reading is older data",
+  );
+  now = OBSERVED_AT + 2_000;
+  observe(0.95);
+  assert.equal(
+    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent,
+    95,
+    "a genuine increase in the same window still applies",
+  );
+});
+
+test("the combined Claude bucket list stays inside the control-plane bound", () => {
+  const windows = (prefix: string) => Object.fromEntries(
+    Array.from({ length: 64 }, (_, index) => [`${prefix}${index}`, { utilization: 0.5, resetsAt: FIVE_HOUR_RESET }]));
+  const snapshot = normalizeClaudeRateLimits({
+    rate_limits: windows("structured-"),
+    rate_limit_info: { status: "allowed", unifiedWindows: windows("unified-") },
+  }, base, OBSERVED_AT);
+  assert.ok(snapshot);
+  // The control plane rejects a snapshot above 64 buckets outright, discarding the whole update.
+  assert.equal(snapshot.buckets.length, 64);
+  assert.ok(
+    snapshot.buckets.every((bucket) => bucket.id.startsWith("unified-")),
+    "the windows the provider actually reports keep the capacity",
+  );
+});
+
+test("unrecognized Claude entries never displace or override a reported window", () => {
+  const legacy = Object.fromEntries(
+    Array.from({ length: 64 }, (_, index) => [`legacy${index}`, { used_percentage: 5 }]));
+  const snapshot = normalizeClaudeRateLimits({
+    // The colliding id leads, so it is reached before the capacity bound: the forward-compatibility
+    // map must not overwrite the window `rate_limit_info` already reported.
+    rate_limits: { five_hour: { used_percentage: 90, status: "allowed" }, ...legacy },
+    rate_limit_info: {
+      status: "rejected",
+      rateLimitType: "five_hour",
+      unifiedWindows: {
+        five_hour: { utilization: 0.4, resetsAt: FIVE_HOUR_RESET },
+        seven_day: { utilization: 0.2, resetsAt: WEEK_RESET },
+      },
+    },
+  }, base, OBSERVED_AT);
+  assert.ok(snapshot);
+  assert.deepEqual(snapshot.buckets.slice(0, 2).map((bucket) => bucket.id), ["five_hour", "seven_day"]);
+  assert.equal(snapshot.buckets[0]?.usedPercent, 40, "the reported window wins the id");
+  assert.equal(snapshot.buckets[0]?.status, "exhausted");
+  assert.equal(snapshot.buckets.length, 64);
+});
+
+test("an authoritative Codex refresh applies a decrease that a sparse event would not", async () => {
+  let now = OBSERVED_AT;
+  let usedPercent = 80;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    now: () => now,
+    probeCodex: async () => ({
+      state: "available",
+      rateLimits: { rateLimits: { limitId: "codex", primary: { usedPercent, resetsAt: FIVE_HOUR_RESET } } },
+    }),
+  });
+  await manager.refreshAll();
+  assert.equal(manager.inventory()[0]?.buckets[0]?.usedPercent, 80);
+  // A probe is a fresh read of account state, so a genuine decrease (a raised allowance, corrected
+  // accounting) must apply even though the window's reset time has not moved.
+  now = OBSERVED_AT + 60_000;
+  usedPercent = 60;
+  await manager.refreshAll();
+  assert.equal(
+    manager.inventory()[0]?.buckets[0]?.usedPercent,
+    60,
+    "out-of-order rules are for unordered notifications, never for an authoritative read",
+  );
+});
+
+test("a source that answered stops claiming it is waiting for its first provider response", () => {
+  const published: SubscriptionUsageSnapshot[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: (snapshot) => published.push(snapshot),
+    now: () => OBSERVED_AT,
+  });
+  manager.syncSources();
+  assert.match(manager.inventory()[0]?.detail ?? "", /after the first provider response/);
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "response_observed",
+  });
+  const snapshot = manager.inventory()[0];
+  assert.equal(snapshot?.state, "unavailable");
+  assert.doesNotMatch(snapshot?.detail ?? "", /after the first provider response/);
+  assert.match(snapshot?.detail ?? "", /answered without reporting subscription allowances/);
+  assert.equal(published.length, 1, "the corrected explanation is published once");
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "response_observed",
+  });
+  assert.equal(published.length, 1, "a repeat response signal republishes nothing");
+});
+
+test("a response signal never disturbs a source already reporting allowances", () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => OBSERVED_AT,
+  });
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent({
+      status: "allowed",
+      rateLimitType: "five_hour",
+      unifiedWindows: { five_hour: { utilization: 0.5, resetsAt: FIVE_HOUR_RESET } },
+    }),
+  });
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "response_observed",
+  });
+  const snapshot = manager.inventory()[0];
+  assert.equal(snapshot?.state, "available");
+  assert.equal(snapshot?.buckets[0]?.usedPercent, 50);
+});
+
+test("Claude execution contexts stay separate sources and a manual refresh starts no Claude turn", async () => {
+  let probes = 0;
+  const native = claudeAgent({ id: "claude", context: { kind: "native" } });
+  const wsl = claudeAgent({ id: "claude-wsl", context: { kind: "wsl", distro: "Ubuntu" } });
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [native, wsl],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => OBSERVED_AT,
+    probeCodex: async () => { probes++; return { state: "unavailable" }; },
+  });
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent({
+      status: "allowed",
+      rateLimitType: "five_hour",
+      unifiedWindows: { five_hour: { utilization: 0.6, resetsAt: FIVE_HOUR_RESET } },
+    }),
+  });
+  manager.observe("claude-wsl", "claude-code", { kind: "wsl", distro: "Ubuntu" }, {
+    provider: "claude",
+    kind: "response_observed",
+  });
+  assert.notEqual(
+    subscriptionUsageSourceId("runner-1", "claude", "claude", { kind: "native" }),
+    subscriptionUsageSourceId("runner-1", "claude-wsl", "claude", { kind: "wsl", distro: "Ubuntu" }),
+  );
+  assert.deepEqual(manager.inventory().map((snapshot) => [snapshot.agentId, snapshot.state]), [
+    ["claude", "available"], ["claude-wsl", "unavailable"],
+  ]);
+  assert.equal(manager.inventory()[0]?.buckets[0]?.usedPercent, 60);
+  assert.match(manager.inventory()[1]?.detail ?? "", /answered without reporting/);
+
+  const before = JSON.stringify(manager.inventory());
+  await manager.refreshAll();
+  assert.equal(probes, 0, "Claude sources are never probed; a refresh cannot start a turn");
+  assert.equal(JSON.stringify(manager.inventory()), before, "a refresh leaves Claude sources untouched");
+});
+
+test("a Codex push update is merged plainly, exactly as before Claude gained ordering rules", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const observe = (usedPercent: number) =>
+    manager.observe("codex", "codex-app-server", { kind: "native" }, {
+      provider: "codex",
+      kind: "sparse",
+      payload: { rateLimits: { limitId: "codex", primary: { usedPercent, resetsAt: FIVE_HOUR_RESET } } },
+    });
+  observe(80);
+  now = OBSERVED_AT + 60_000;
+  observe(60);
+  // The ordering rules were derived from Claude's per-window contract. Codex keeps the merge it
+  // had before this PR rather than inheriting a premise nothing verified for it.
+  assert.equal(manager.inventory()[0]?.buckets[0]?.usedPercent, 60);
+});
+
+test("newly reported Claude windows are never evicted by buckets already stored", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const observe = (payload: unknown) =>
+    manager.observe("claude", "claude-code", { kind: "native" }, { provider: "claude", kind: "sparse", payload });
+  observe({
+    rate_limits: Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [`legacy${index}`, { used_percentage: 5 }])),
+  });
+  assert.equal(manager.inventory()[0]?.buckets.length, 64);
+  now = OBSERVED_AT + 60_000;
+  observe(rateLimitEvent({
+    status: "allowed",
+    rateLimitType: "five_hour",
+    unifiedWindows: {
+      five_hour: { utilization: 0.83, resetsAt: FIVE_HOUR_RESET },
+      seven_day: { utilization: 0.4, resetsAt: WEEK_RESET },
+    },
+  }));
+  const buckets = manager.inventory()[0]?.buckets ?? [];
+  assert.equal(buckets.length, 64, "the control plane's bound still holds");
+  assert.equal(buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent, 83);
+  assert.equal(buckets.find((bucket) => bucket.id === "seven_day")?.usedPercent, 40);
+});
+
+test("a limiting window id past the control-plane bound still receives its status", () => {
+  const longId = "w".repeat(100);
+  const snapshot = normalizeClaudeRateLimits(rateLimitEvent({
+    status: "rejected",
+    rateLimitType: longId,
+    unifiedWindows: { [longId]: { utilization: 0.99, resetsAt: FIVE_HOUR_RESET } },
+  }), base, OBSERVED_AT);
+  assert.ok(snapshot);
+  assert.equal(snapshot.buckets.length, 1, "the truncated key is the same window, not a second one");
+  assert.equal(snapshot.buckets[0]?.id.length, 96);
+  assert.equal(
+    snapshot.buckets[0]?.status,
+    "exhausted",
+    "a rejected window must not read as merely approaching its limit",
+  );
+});
+
+test("a Codex source keeps the plain bucket truncation it had before Claude gained windows", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const limits = (entries: Array<[string, number]>) => Object.fromEntries(entries.map(([id, usedPercent]) =>
+    [id, { limitId: id, primary: { usedPercent }, secondary: { usedPercent } }]));
+  const observe = (payload: unknown) =>
+    manager.observe("codex", "codex-app-server", { kind: "native" }, { provider: "codex", kind: "sparse", payload });
+  observe({ rateLimitsByLimitId: limits(
+    Array.from({ length: 32 }, (_, index) => [`old${index}`, 10] as [string, number])) });
+  assert.equal(manager.inventory()[0]?.buckets.length, 64);
+  now = OBSERVED_AT + 60_000;
+  observe({ rateLimitsByLimitId: limits([["new", 50]]) });
+  const ids = manager.inventory()[0]?.buckets.map((bucket) => bucket.id) ?? [];
+  assert.equal(ids.length, 64);
+  assert.ok(ids.includes("old31:primary"), "reported-priority eviction is a Claude rule, not a Codex one");
+  assert.ok(!ids.includes("new:primary"));
+});
+
+test("Claude window ids that collide once bounded do not fuse into a hybrid window", () => {
+  const shared = "x".repeat(96);
+  const snapshot = normalizeClaudeRateLimits(rateLimitEvent({
+    status: "rejected",
+    rateLimitType: `${shared}A`,
+    unifiedWindows: {
+      [`${shared}A`]: { utilization: 0.1, resetsAt: FIVE_HOUR_RESET },
+      [`${shared}B`]: { utilization: 0.9, resetsAt: WEEK_RESET },
+    },
+  }), base, OBSERVED_AT);
+  assert.ok(snapshot);
+  assert.equal(snapshot.buckets.length, 1);
+  assert.equal(snapshot.buckets[0]?.status, "exhausted");
+  assert.equal(
+    snapshot.buckets[0]?.usedPercent,
+    10,
+    "the limiting window keeps its own utilization instead of a colliding window's",
+  );
+  assert.equal(snapshot.buckets[0]?.resetsAt, FIVE_HOUR_RESET * 1_000);
 });
