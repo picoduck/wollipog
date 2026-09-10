@@ -287,13 +287,7 @@ export function normalizeClaudeRateLimits(
   const root = record(payload);
   if (!root) return null;
   const buckets: SubscriptionUsageBucket[] = [];
-  const structured = record(root.rate_limits ?? root.rateLimits);
-  if (structured) {
-    for (const [id, value] of Object.entries(structured).slice(0, MAX_PROVIDER_BUCKETS)) {
-      const bucket = claudeWindow(id, value, fetchedAt);
-      if (bucket) buckets.push(bucket);
-    }
-  }
+  const claimed = new Set<string>();
   const info = record(root.rate_limit_info ?? root.rateLimitInfo);
   if (info) {
     // `unifiedWindows` is where Claude Code actually reports per-window utilization: one entry per
@@ -311,6 +305,7 @@ export function normalizeClaudeRateLimits(
       const bucket = claudeWindow(id, id === limitingId ? { ...window, status: info.status } : window, fetchedAt);
       if (!bucket) continue;
       unifiedIds.add(bucket.id);
+      claimed.add(bucket.id);
       buckets.push(bucket);
     }
     // Fold the top-level pair into the window it names. Emitting it separately would stand a
@@ -318,19 +313,35 @@ export function normalizeClaudeRateLimits(
     // arrives for a window `unifiedWindows` already describes.
     if (!limitingId || !unifiedIds.has(limitingId)) {
       const bucket = claudeWindow(limitingId ?? "subscription", info, fetchedAt);
-      if (bucket) buckets.push(bucket);
+      if (bucket) {
+        claimed.add(bucket.id);
+        buckets.push(bucket);
+      }
+    }
+  }
+  // `rate_limits` is a forward-compatibility shape no shipping Claude Code emits, so it neither
+  // overrides a window `rate_limit_info` already described nor crowds one out of the control
+  // plane's bucket bound: it is read last, skips claimed ids, and takes only spare capacity.
+  const structured = record(root.rate_limits ?? root.rateLimits);
+  if (structured) {
+    for (const [id, value] of Object.entries(structured)) {
+      if (buckets.length >= MAX_PROVIDER_BUCKETS) break;
+      const bucket = claudeWindow(id, value, fetchedAt);
+      if (bucket && !claimed.has(bucket.id)) buckets.push(bucket);
     }
   }
   if (buckets.length === 0) return null;
   const deduped = new Map<string, SubscriptionUsageBucket>();
+  // Records inside one payload are equally current, so this is a plain field merge: ordering
+  // rules belong only to sparse notifications arriving across events.
   for (const bucket of buckets) deduped.set(bucket.id, mergeBucket(deduped.get(bucket.id), bucket));
   return {
     ...base,
     provider: "claude",
     state: "available",
     fetchedAt,
-    // The structured and unified maps are bounded separately, so their union still needs the cap:
-    // the control plane rejects a snapshot above this many buckets and drops the whole update.
+    // Deduplication can only shrink the list, but the cap is what the control plane enforces:
+    // it rejects a snapshot above this many buckets and drops the whole update.
     buckets: [...deduped.values()].slice(0, MAX_PROVIDER_BUCKETS),
   };
 }
@@ -341,16 +352,26 @@ export function hasSubscriptionUtilization(snapshot: SubscriptionUsageSnapshot):
     bucket.usedPercent !== undefined || bucket.remainingPercent !== undefined);
 }
 
+/** Field-level merge with no ordering judgement. Records inside one provider payload, and every
+ * field of an authoritative probe result, are current by construction. */
 function mergeBucket(
   prior: SubscriptionUsageBucket | undefined,
   update: SubscriptionUsageBucket,
 ): SubscriptionUsageBucket {
+  return prior ? { ...prior, ...update } : update;
+}
+
+/** Merge for sparse provider notifications, which can arrive out of order: concurrent sessions on
+ * one source report independently, and `fetchedAt` is receipt time, not event time. Two signals
+ * order them — a window's reset time only ever moves forward, and within one window (an identical
+ * reset time) usage only accumulates. An update failing either test is older data, so keep the
+ * newer window intact rather than letting a late event walk utilization backwards. This never
+ * applies to an authoritative read, which is current whatever it says. */
+function mergeObservedBucket(
+  prior: SubscriptionUsageBucket | undefined,
+  update: SubscriptionUsageBucket,
+): SubscriptionUsageBucket {
   if (!prior) return update;
-  // Provider notifications are sparse and can arrive out of order — concurrent sessions on one
-  // source each report independently, and `fetchedAt` is receipt time, not event time. Two signals
-  // order them: a window's reset time only ever moves forward, and within one window (an identical
-  // reset time) usage only accumulates. An update failing either test is older data, so keep the
-  // newer window intact rather than letting a late event walk utilization backwards.
   if (prior.resetsAt !== undefined && update.resetsAt !== undefined) {
     if (update.resetsAt < prior.resetsAt) return prior;
     if (update.resetsAt === prior.resetsAt &&
@@ -365,13 +386,16 @@ function mergeBucket(
 function mergeSnapshot(
   prior: SubscriptionUsageSnapshot | undefined,
   update: SubscriptionUsageSnapshot,
+  /** `notification` is an unordered provider event; `authoritative` is a probe result we read. */
+  provenance: "notification" | "authoritative",
 ): SubscriptionUsageSnapshot {
   if (!prior || prior.provider !== update.provider) return update;
   // Sparse notifications can be delayed behind a manual read. Never let an older provider
   // observation replace fields from a newer authoritative snapshot.
   if (update.fetchedAt < prior.fetchedAt) return prior;
+  const merge = provenance === "authoritative" ? mergeBucket : mergeObservedBucket;
   const buckets = new Map(prior.buckets.map((bucket) => [bucket.id, bucket]));
-  for (const bucket of update.buckets) buckets.set(bucket.id, mergeBucket(buckets.get(bucket.id), bucket));
+  for (const bucket of update.buckets) buckets.set(bucket.id, merge(buckets.get(bucket.id), bucket));
   const spendControls = new Map((prior.spendControls ?? []).map((item) => [item.id, item]));
   for (const item of update.spendControls ?? []) {
     spendControls.set(item.id, { ...spendControls.get(item.id), ...item });
@@ -654,7 +678,7 @@ export class SubscriptionUsageManager {
       return prior ?? null;
     }
     this.lastEvent.set(sourceId, { signature, observedAt: normalized.fetchedAt });
-    const explained = this.explainMissingUtilization(mergeSnapshot(prior, normalized));
+    const explained = this.explainMissingUtilization(mergeSnapshot(prior, normalized, "notification"));
     if (explained === prior) return prior;
     this.snapshots.set(sourceId, explained);
     this.options.publish(explained);
@@ -773,7 +797,7 @@ export class SubscriptionUsageManager {
         const merged = mergeSnapshot(this.snapshots.get(source.sourceId), {
           ...normalized,
           ...(result.plan && !normalized.plan ? { plan: result.plan } : {}),
-        });
+        }, "authoritative");
         this.snapshots.set(source.sourceId, merged);
         this.options.publish(merged);
         return;

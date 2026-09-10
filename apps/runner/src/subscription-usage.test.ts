@@ -57,13 +57,15 @@ test("Claude normalization accepts named, model-specific, additional, and status
     rate_limit_info: { rate_limit_type: "burst_lane", status: "allowed_warning", resetsAt: 2_000_200_000 },
   }, base, 2_000);
   assert.ok(snapshot);
+  // The windows `rate_limit_info` describes lead; the forward-compatibility map follows.
   assert.deepEqual(snapshot.buckets.map((bucket) => bucket.id), [
-    "five_hour", "seven_day_opus", "future_lane", "burst_lane",
+    "burst_lane", "five_hour", "seven_day_opus", "future_lane",
   ]);
-  assert.equal(snapshot.buckets[1]?.label, "Weekly — Opus");
-  assert.equal(snapshot.buckets[1]?.status, "warning");
-  assert.equal(snapshot.buckets[2]?.remainingPercent, 0);
-  assert.equal(snapshot.buckets[3]?.status, "warning");
+  const byId = new Map(snapshot.buckets.map((bucket) => [bucket.id, bucket]));
+  assert.equal(byId.get("seven_day_opus")?.label, "Weekly — Opus");
+  assert.equal(byId.get("seven_day_opus")?.status, "warning");
+  assert.equal(byId.get("future_lane")?.remainingPercent, 0);
+  assert.equal(byId.get("burst_lane")?.status, "warning");
 });
 
 test("provider-controlled bucket ids are sanitized to control-plane bounds", () => {
@@ -672,6 +674,62 @@ test("the combined Claude bucket list stays inside the control-plane bound", () 
   assert.ok(snapshot);
   // The control plane rejects a snapshot above 64 buckets outright, discarding the whole update.
   assert.equal(snapshot.buckets.length, 64);
+  assert.ok(
+    snapshot.buckets.every((bucket) => bucket.id.startsWith("unified-")),
+    "the windows the provider actually reports keep the capacity",
+  );
+});
+
+test("unrecognized Claude entries never displace or override a reported window", () => {
+  const legacy = Object.fromEntries(
+    Array.from({ length: 64 }, (_, index) => [`legacy${index}`, { used_percentage: 5 }]));
+  const snapshot = normalizeClaudeRateLimits({
+    // The colliding id leads, so it is reached before the capacity bound: the forward-compatibility
+    // map must not overwrite the window `rate_limit_info` already reported.
+    rate_limits: { five_hour: { used_percentage: 90, status: "allowed" }, ...legacy },
+    rate_limit_info: {
+      status: "rejected",
+      rateLimitType: "five_hour",
+      unifiedWindows: {
+        five_hour: { utilization: 0.4, resetsAt: FIVE_HOUR_RESET },
+        seven_day: { utilization: 0.2, resetsAt: WEEK_RESET },
+      },
+    },
+  }, base, OBSERVED_AT);
+  assert.ok(snapshot);
+  assert.deepEqual(snapshot.buckets.slice(0, 2).map((bucket) => bucket.id), ["five_hour", "seven_day"]);
+  assert.equal(snapshot.buckets[0]?.usedPercent, 40, "the reported window wins the id");
+  assert.equal(snapshot.buckets[0]?.status, "exhausted");
+  assert.equal(snapshot.buckets.length, 64);
+});
+
+test("an authoritative Codex refresh applies a decrease that a sparse event would not", async () => {
+  let now = OBSERVED_AT;
+  let usedPercent = 80;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    now: () => now,
+    probeCodex: async () => ({
+      state: "available",
+      rateLimits: { rateLimits: { limitId: "codex", primary: { usedPercent, resetsAt: FIVE_HOUR_RESET } } },
+    }),
+  });
+  await manager.refreshAll();
+  assert.equal(manager.inventory()[0]?.buckets[0]?.usedPercent, 80);
+  // A probe is a fresh read of account state, so a genuine decrease (a raised allowance, corrected
+  // accounting) must apply even though the window's reset time has not moved.
+  now = OBSERVED_AT + 60_000;
+  usedPercent = 60;
+  await manager.refreshAll();
+  assert.equal(
+    manager.inventory()[0]?.buckets[0]?.usedPercent,
+    60,
+    "out-of-order rules are for unordered notifications, never for an authoritative read",
+  );
 });
 
 test("a source that answered stops claiming it is waiting for its first provider response", () => {
