@@ -271,6 +271,31 @@ test("an estimated-cost URL is a compact link instead of visible source text", a
   await view.cleanup();
 });
 
+test("cached and unavailable URL sources keep their provenance state", async () => {
+  const source = "https://example.com/rates.json";
+  const cached = await mount(session(), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59, costSource: "modelPriced" }),
+    byModel: [],
+    pricing: { status: "cached", source, fetchedAt: 1, knownModels: 1200 },
+  });
+  await cached.open();
+  assert.equal(cached.popover()!.querySelector(".session-usage-note")!.textContent, "Estimated API Costs (Cached Rates)");
+  assert.equal(cached.popover()!.querySelector(".session-usage-note a")!.getAttribute("href"), source);
+  await cached.cleanup();
+
+  const unavailable = await mount(session(), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59, costSource: "modelPriced" }),
+    byModel: [],
+    pricing: { status: "unavailable", source, fetchedAt: null, knownModels: 0 },
+  });
+  await unavailable.open();
+  assert.equal(unavailable.popover()!.querySelector(".session-usage-note")!.textContent, "No rate table is loaded, so cost is not estimated.");
+  assert.equal(unavailable.popover()!.querySelector(".session-usage-note a"), null);
+  await unavailable.cleanup();
+});
+
 test("a mixed-model session splits by model and names the unpriced one", async () => {
   const view = await mount(session({ costUsd: 1.21 }), {
     sessionId: "s1",

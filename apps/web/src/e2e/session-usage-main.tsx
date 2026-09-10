@@ -278,7 +278,10 @@ const client = {
       : usageAmount(184_000, 21_000, 1.37, 205_000, "modelPriced"),
     byModel: [
       { model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex", ...usageAmount(160_000, 18_000, 1.21, 178_000) },
-      { model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini", ...usageAmount(24_000, 3_000, 0, 27_000, "unpriced") },
+      {
+        model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini",
+        ...usageAmount(24_000, 3_000, unpricedCost ? 0 : 0.16, 27_000, unpricedCost ? "unpriced" : "modelPriced"),
+      },
     ],
     pricing: {
       status: "fresh",

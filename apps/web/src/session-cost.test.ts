@@ -164,7 +164,7 @@ test("cost provenance is stated honestly per source", () => {
   assert.equal(
     costProvenanceNote(response({
       totals: amount({ costSource: "modelPriced" }),
-      pricing: { status: "unavailable", source: "litellm", fetchedAt: null, knownModels: 0 },
+      pricing: { status: "unavailable", source: "https://example.com/rates.json", fetchedAt: null, knownModels: 0 },
     })),
     "No rate table is loaded, so cost is not estimated.",
   );
@@ -179,9 +179,9 @@ test("cost provenance is stated honestly per source", () => {
 });
 
 test("estimated cost source URLs are limited to browser-safe HTTP links", () => {
-  const withSource = (source: string) => response({
+  const withSource = (source: string, status: "fresh" | "cached" | "unavailable" = "fresh") => response({
     totals: amount({ costSource: "modelPriced" }),
-    pricing: { status: "fresh" as const, source, fetchedAt: 1, knownModels: 1200 },
+    pricing: { status, source, fetchedAt: status === "unavailable" ? null : 1, knownModels: status === "unavailable" ? 0 : 1200 },
   });
   assert.equal(
     estimatedCostSourceUrl(withSource("https://example.com/rates.json")),
@@ -190,5 +190,6 @@ test("estimated cost source URLs are limited to browser-safe HTTP links", () => 
   assert.equal(estimatedCostSourceUrl(withSource("http://localhost:4317/rates.json")), "http://localhost:4317/rates.json");
   assert.equal(estimatedCostSourceUrl(withSource("javascript:alert(1)")), null);
   assert.equal(estimatedCostSourceUrl(withSource("litellm")), null);
+  assert.equal(estimatedCostSourceUrl(withSource("https://example.com/rates.json", "unavailable")), null);
   assert.equal(estimatedCostSourceUrl(response({ totals: amount({ costSource: "providerReported" }) })), null);
 });

@@ -103,7 +103,7 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
               Historical Codex App Server usage written by runners before protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL} is incomplete because it includes only the final model response. Protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL}+ counts every response in each turn.
             </p>
           )}
-          {provenance && (
+          {(provenance || provenanceUrl) && (
             <p className="session-usage-note">
               {provenanceUrl ? (
                 <>

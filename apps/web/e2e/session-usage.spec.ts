@@ -64,7 +64,8 @@ test("desktop: the cost control opens Session Usage with cumulative tokens and t
   await expect(usage).toContainText("205k");
   await expect(usage).toContainText("By Model");
   await expect(usage).toContainText("gpt-5.5-codex-mini");
-  await expect(usage).toContainText("Not Priced");
+  await expect(usage).toContainText("$0.16");
+  await expect(usage).not.toContainText("Not Priced");
   await expect(usage).toContainText("Historical Codex App Server usage written by runners before protocol v127 is incomplete");
   const pricingSource = usage.getByRole("link", { name: "Estimated API Costs" });
   await expect(pricingSource).toHaveAttribute(
