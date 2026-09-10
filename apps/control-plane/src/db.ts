@@ -10159,7 +10159,7 @@ export class ControlPlaneDb {
         );
       }
       this.stmt(
-        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=COALESCE(?, history_quarantine), preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
+        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
             model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
             acp_session_context=COALESCE(?, acp_session_context),
             updated_at=? WHERE id=?`,
@@ -10172,7 +10172,10 @@ export class ControlPlaneDb {
         snap.providerUpdatedAt ?? null,
         backgroundWorkStateForStorage(snap.backgroundWorkState),
         snap.backgroundWorkTracking ?? null,
-        snap.historyQuarantine ? JSON.stringify(snap.historyQuarantine) : null,
+        // Three-valued, matching the snapshot field: SQL NULL carries no information and preserves
+        // whatever is stored; the empty-string sentinel is a supporting runner saying the
+        // conversation is healthy, which NULLIF turns into a real clear.
+        historyQuarantineForStorage(snap.historyQuarantine),
         snap.preview,
         pendingJson,
         snap.worktreePath,
@@ -18613,6 +18616,14 @@ function parseBackgroundWorkTracking(raw: string | null): BackgroundWorkTracking
 
 /** Revalidate the stored quarantine rather than trusting the row. It is a bounded, content-free
  * record, so anything unrecognized is dropped instead of being surfaced to a dashboard. */
+/** `undefined` -> SQL NULL (no information, preserve). `null` -> '' (explicit clear). */
+function historyQuarantineForStorage(
+  value: ProviderHistoryQuarantineView | null | undefined,
+): string | null {
+  if (value === undefined) return null;
+  return value === null ? "" : JSON.stringify(value);
+}
+
 function parseHistoryQuarantine(raw: string | null): ProviderHistoryQuarantineView | undefined {
   if (!raw) return undefined;
   let parsed: unknown;

@@ -271,6 +271,42 @@ test("a fallback recovery keeps both the seeded context and the unsent prompt", 
   }
 });
 
+test("merged recovery attachments stay within what the composer can actually send", async () => {
+  // An inline attachment is exactly { mimeType, data }; anything else the validator calls malformed.
+  const image = (id: number) => ({
+    mimeType: "image/png",
+    data: Buffer.from(`png-payload-${id}`).toString("base64"),
+  });
+  const fixture = await mount(
+    { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "handoff", retainedPrompt: true },
+    (async () => ({
+      ...session("s_capped", undefined),
+      // Each draft is independently valid; their concatenation is not.
+      handoffDraft: { text: "context", images: [image(1), image(7), image(8), image(9), image(10), image(11)], disclosure: "b" },
+      retainedPrompt: { text: "my request", images: [image(1), image(2), image(3)] },
+    })) as never,
+  );
+  try {
+    const action = fixture.banner()!.querySelector("button") as HTMLButtonElement;
+    await act(async () => { action.click(); });
+    await flushAsyncWork(5);
+    const staged = (await loadComposerDraft("s_capped"))!;
+    assert.ok(staged.images.length <= 6, `at most six images may be attached, got ${staged.images.length}`);
+    assert.equal(
+      new Set(staged.images.map((entry) => JSON.stringify(entry))).size,
+      staged.images.length,
+      "the same attachment is never carried twice",
+    );
+    // The user's own attachments win the budget over recovered context.
+    for (const own of [image(1), image(2), image(3)]) {
+      assert.ok(staged.images.some((entry) => JSON.stringify(entry) === JSON.stringify(own)));
+    }
+    assert.match(staged.text, /could not be carried into this draft/);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a quarantine with no safe checkpoint offers no recovery it cannot perform", async () => {
   const fixture = await mount({ reason: "oversized_tool_call", detectedAt: 5 });
   try {

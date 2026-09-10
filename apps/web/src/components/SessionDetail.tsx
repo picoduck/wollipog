@@ -15,6 +15,7 @@ import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
+  validatePromptImageInputs,
   isPolicyApproval,
   pendingRequests,
   isWorkspaceReference,
@@ -2817,10 +2818,29 @@ function SessionDetailLoaded({
       // confirmation just made.
       const context = recovered.handoffDraft;
       const retained = recovered.retainedPrompt;
-      const text = context && retained?.text
+      // Each draft is independently valid, but their attachments are not additive: concatenating
+      // them can exceed the per-prompt image count or aggregate byte budget, or repeat the same
+      // file, leaving a staged draft the composer refuses to send. Merge under the real validator,
+      // and let the user's own attachments win the budget over recovered context.
+      const mimeTypes = session.driver === "codex-app-server"
+        ? CODEX_APP_SERVER_IMAGE_MIME_TYPES
+        : PROMPT_IMAGE_MIME_TYPES;
+      const images: PromptImageInput[] = [];
+      const seen = new Set<string>();
+      let droppedImages = 0;
+      for (const image of [...(retained?.images ?? []), ...(context?.images ?? [])]) {
+        const key = JSON.stringify(image);
+        if (seen.has(key)) { droppedImages += 1; continue; }
+        if (!validatePromptImageInputs([...images, image], mimeTypes).ok) { droppedImages += 1; continue; }
+        seen.add(key);
+        images.push(image);
+      }
+      const body = context && retained?.text
         ? `${context.text}\n\nYour unsent message follows.\n\n${retained.text}`
         : context?.text ?? retained?.text ?? "";
-      const images = [...(context?.images ?? []), ...(retained?.images ?? [])];
+      const text = droppedImages
+        ? `${body}\n\n[${droppedImages} attachment${droppedImages === 1 ? "" : "s"} could not be carried into this draft. Re-attach anything still needed.]`
+        : body;
       if (text || images.length) {
         stageComposerDraftHandoff(recovered.id, text, images, instanceScope);
         await saveComposerDraft(recovered.id, text, images, instanceScope);

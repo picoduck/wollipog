@@ -9426,6 +9426,13 @@ test("a snapshot that omits the additive quarantine field never clears the store
     reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork",
   });
   assert.equal(svc.prompt(id, "still blocked").status, 409);
+
+  // A supporting runner saying "there is no quarantine" is different from saying nothing: a restart
+  // onto a fresh provider conversation must be able to clear the guard, or the session is stuck
+  // rejecting prompts for a healthy thread.
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle", historyQuarantine: null })]);
+  assert.equal(db.getSession(id)?.historyQuarantine, undefined);
+  assert.equal(svc.prompt(id, "the fresh conversation works").ok, true);
 });
 
 test("an unrecognized stored quarantine is dropped rather than surfaced", () => {

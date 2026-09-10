@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS as VARIANTS,
+  sessionEventWireProjectionVariant,
+} from "@wollipog/protocol";
+
+/** The wire epoch a peer sees for a given local epoch. Expressed through the projection arithmetic
+ * rather than hardcoded, so adding an event-omission policy does not silently invalidate these
+ * expectations the way a literal would. */
+function wireEpoch(localEpoch: number, peer: number): number {
+  return localEpoch * VARIANTS + sessionEventWireProjectionVariant(peer);
+}
 
 /** A peer that needs no additive session-event projection at all. It moves whenever a new event
  * kind gets an older-peer omission policy, so these tests name the boundary instead of a literal:
@@ -139,9 +150,9 @@ test("v86 wire projection omits response completions while keeping dense live an
     assert.equal(store.snapshots(86, true)[0]?.seq, 3,
       "buffered messages retain the exact local high-water until socket send");
     assert.equal(store.snapshots(CURRENT_PEER)[0]?.seq, 3);
-    assert.equal(store.snapshots(86)[0]?.historyEpoch, 1);
+    assert.equal(store.snapshots(86)[0]?.historyEpoch, wireEpoch(0, 86));
     assert.equal(store.snapshots(86, true)[0]?.historyEpoch, 0);
-    assert.equal(store.snapshots(CURRENT_PEER)[0]?.historyEpoch, 0);
+    assert.equal(store.snapshots(CURRENT_PEER)[0]?.historyEpoch, wireEpoch(0, CURRENT_PEER));
     assert.deepEqual(store.projectEventForProtocol("s_abc", first, 86), first);
     assert.equal(store.projectEventForProtocol("s_abc", completion, 86), null);
     assert.deepEqual(store.projectEventForProtocol("s_abc", second, 86), {
@@ -178,7 +189,7 @@ test("v86 wire projection omits response completions while keeping dense live an
     if (!page1.ok) return;
     assert.deepEqual(page1.events.map((event) => [event.seq, event.payload.kind]), [[1, "agent_message"]]);
     assert.deepEqual(page1.page, {
-      logEpoch: 1,
+      logEpoch: wireEpoch(0, 86),
       throughSeq: 2,
       nextAfterSeq: 1,
       hasMore: true,
@@ -206,7 +217,7 @@ test("v86 wire projection omits response completions while keeping dense live an
     assert.deepEqual(frozen, {
       ok: true,
       events: [],
-      page: { logEpoch: 1, throughSeq: 2, nextAfterSeq: 2, hasMore: false },
+      page: { logEpoch: wireEpoch(0, 86), throughSeq: 2, nextAfterSeq: 2, hasMore: false },
     });
     assert.deepEqual(store.readEventsForProtocol("s_abc", 2, 86).map((event) => [event.seq, event.payload.kind]), [
       [3, "agent_message"],
@@ -247,8 +258,8 @@ test("registration keeps history neutral until one negotiated legacy or current 
 
     const v86 = store.projectSnapshotForProtocol(exact, 86);
     const currentGeneration = store.projectSnapshotForProtocol(exact, CURRENT_PEER);
-    assert.deepEqual([v86.seq, v86.historyEpoch], [2, 1]);
-    assert.deepEqual([currentGeneration.seq, currentGeneration.historyEpoch], [3, 0]);
+    assert.deepEqual([v86.seq, v86.historyEpoch], [2, wireEpoch(0, 86)]);
+    assert.deepEqual([currentGeneration.seq, currentGeneration.historyEpoch], [3, wireEpoch(0, CURRENT_PEER)]);
     assert.deepEqual(store.projectSnapshotForProtocol(exact, 86), v86,
       "a v86 reconnect republishes the same negotiated generation");
     assert.deepEqual(store.projectSnapshotForProtocol(exact, CURRENT_PEER), currentGeneration,
@@ -336,10 +347,10 @@ test("projected snapshot corruption fallback never advertises an exact local tai
     };
 
     const legacy = store.snapshots(86)[0]!;
-    assert.deepEqual([legacy.seq, legacy.historyEpoch], [0, 1],
+    assert.deepEqual([legacy.seq, legacy.historyEpoch], [0, wireEpoch(0, 86)],
       "legacy fallback remains in its dense sequence space");
     const current = store.snapshots(CURRENT_PEER)[0]!;
-    assert.deepEqual([current.seq, current.historyEpoch], [3, 0],
+    assert.deepEqual([current.seq, current.historyEpoch], [3, wireEpoch(0, CURRENT_PEER)],
       "an exact current peer may retain the metadata high-water");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -361,21 +372,35 @@ test("projection failure for a removed session is explicit for the socket contai
   }
 });
 
+test("every distinct wire projection gets its own dense sequence space", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    // v86 omits two event kinds, v87-v125 omits one, v126+ omits none. Three projections number
+    // the same log three different ways, so a control plane that hydrated through one and
+    // reconnects through another must be forced to resync rather than reuse its cursors.
+    const epochs = [86, 87, CURRENT_PEER].map((peer) => store.snapshots(peer)[0]!.historyEpoch);
+    assert.equal(new Set(epochs).size, 3, `distinct epochs per projection, got ${epochs.join(",")}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("peer protocol changes fence dense sequence spaces with distinct wire epochs", () => {
   const { store, root } = tmpStore();
   try {
     store.create(meta());
     store.resetEvents("s_abc");
-    assert.equal(store.snapshots(86)[0]?.historyEpoch, 3);
-    assert.equal(store.snapshots(CURRENT_PEER)[0]?.historyEpoch, 2);
+    assert.equal(store.snapshots(86)[0]?.historyEpoch, wireEpoch(1, 86));
+    assert.equal(store.snapshots(CURRENT_PEER)[0]?.historyEpoch, wireEpoch(1, CURRENT_PEER));
 
     const legacy = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, 86);
     const current = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, CURRENT_PEER);
     assert.equal(legacy.ok, true);
     assert.equal(current.ok, true);
     if (legacy.ok && current.ok) {
-      assert.equal(legacy.page.logEpoch, 3);
-      assert.equal(current.page.logEpoch, 2);
+      assert.equal(legacy.page.logEpoch, wireEpoch(1, 86));
+      assert.equal(current.page.logEpoch, wireEpoch(1, CURRENT_PEER));
       assert.notEqual(legacy.page.logEpoch, current.page.logEpoch);
     }
   } finally {
@@ -1361,7 +1386,8 @@ test("registration re-reads metadata after recovering a reset intent published d
 
     const snapshot = new ResetDuringSnapshotsStore(root).snapshots()[0]!;
     assert.equal(snapshot.seq, 0);
-    assert.equal(snapshot.historyEpoch, 2, "local epoch 1 is fenced into current-peer wire epoch 2");
+    assert.equal(snapshot.historyEpoch, wireEpoch(1, CURRENT_PEER),
+      "a local epoch is fenced into its peer-specific wire epoch");
     assert.equal(readFileSync(join(root, "s_abc", "events.ndjson"), "utf8"), "");
     assert.equal(existsSync(join(root, "s_abc", "events.reset.json")), false);
   } finally {

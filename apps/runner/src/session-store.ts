@@ -38,6 +38,8 @@ import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   projectSessionEventPayloadForProtocol,
   sessionEventWireProjectionRequiredForProtocol,
+  sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
 } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
@@ -2027,12 +2029,15 @@ export class SessionStore {
     localEpoch: number,
     protocolVersion: number | null | undefined,
   ): number {
-    const variant = this.eventProjectionRequired(protocolVersion) ? 1 : 0;
+    // One dense sequence space per distinct projection, not per "projected or not": a peer that
+    // omits two event kinds numbers the log differently from one that omits a single kind, so they
+    // must never share an epoch or a reconnect would reuse cursors that now name different events.
+    const variant = sessionEventWireProjectionVariant(protocolVersion);
     if (!Number.isSafeInteger(localEpoch) || localEpoch < 0 ||
-        localEpoch > Math.floor((Number.MAX_SAFE_INTEGER - variant) / 2)) {
+        localEpoch > Math.floor((Number.MAX_SAFE_INTEGER - variant) / SESSION_EVENT_WIRE_PROJECTION_VARIANTS)) {
       throw new HistoryStoreError("history_corrupt", "session history epoch cannot be projected safely");
     }
-    return localEpoch * 2 + variant;
+    return localEpoch * SESSION_EVENT_WIRE_PROJECTION_VARIANTS + variant;
   }
 
   private projectEventsWithIndex(
@@ -2782,9 +2787,12 @@ export function metaToSnapshot(
       : nativeCapabilities,
     preview: m.preview,
     pendingApproval: m.pendingApproval,
+    // A supporting peer always hears the current truth, including its absence: `null` is how a
+    // restart onto a fresh provider conversation clears the control plane's guard. `undefined` is
+    // reserved for peers and registration snapshots that carry no information at all.
     historyQuarantine: controlPlaneProtocolVersion != null &&
       controlPlaneProtocolVersion >= PROVIDER_HISTORY_QUARANTINE_PROTOCOL_VERSION
-      ? providerHistoryQuarantineView(m)
+      ? providerHistoryQuarantineView(m) ?? null
       : undefined,
     backgroundWorkState: m.backgroundWorkState,
     backgroundWorkTracking: controlPlaneProtocolVersion != null &&

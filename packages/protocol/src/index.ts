@@ -691,15 +691,37 @@ const SESSION_EVENT_WIRE_POLICIES = {
   legacy: "omit";
 }>>;
 
+/**
+ * Which projection this peer receives, as a dense index. 0 is the exact local history; each higher
+ * value omits one more event kind.
+ *
+ * Thresholds are an ordered chain — a peer below a lower threshold is below every higher one — so
+ * counting unmet policies yields a contiguous index rather than a sparse bitmask.
+ *
+ * This must identify WHICH projection a peer gets, not merely that it gets one. Two peers omitting
+ * different event sets number the same log differently, so they occupy different dense sequence
+ * spaces; collapsing them to a single "projected" flag lets a reconnect at a different version
+ * reuse cursors whose sequence numbers now name different events.
+ */
+export function sessionEventWireProjectionVariant(
+  protocolVersion: number | null | undefined,
+): number {
+  return Object.values(SESSION_EVENT_WIRE_POLICIES).filter(
+    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
+  ).length;
+}
+
+/** Total distinct projections, including the exact one. */
+export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
+  Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
+
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
  * payload and automatically covers future reviewed event policies. */
 export function sessionEventWireProjectionRequiredForProtocol(
   protocolVersion: number | null | undefined,
 ): boolean {
-  return Object.values(SESSION_EVENT_WIRE_POLICIES).some(
-    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
-  );
+  return sessionEventWireProjectionVariant(protocolVersion) > 0;
 }
 
 /** Project one exact runner-local event payload for the currently connected control plane.
@@ -3891,8 +3913,13 @@ export interface SessionSnapshot {
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
   /** Set when the provider conversation is quarantined. Runner-authoritative and durable, so a
-   * reconnecting control plane never re-offers submission into a poisoned thread. */
-  historyQuarantine?: ProviderHistoryQuarantineView;
+   * reconnecting control plane never re-offers submission into a poisoned thread.
+   *
+   * Three-valued on purpose. `undefined` means this snapshot carries no information — a pre-v126
+   * peer, or a registration snapshot built before version negotiation — and must never overwrite
+   * what the control plane already stored. Explicit `null` is a v126 runner stating there is no
+   * quarantine, which is what lets a restart onto a fresh provider conversation clear the guard. */
+  historyQuarantine?: ProviderHistoryQuarantineView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */

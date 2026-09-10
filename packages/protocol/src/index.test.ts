@@ -17,6 +17,8 @@ import {
   projectSessionEventPayloadForProtocol,
   sessionNamingAgentFailureCode,
   sessionEventWireProjectionRequiredForProtocol,
+  sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -851,6 +853,20 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(quarantined, 126), quarantined);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(87), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(126), false);
+
+  // Each distinct omission set is its own dense sequence space. A peer that omits two event kinds
+  // numbers a log differently from one omitting a single kind, so they must not share a variant —
+  // otherwise a reconnect at a different version reuses cursors that now name different events.
+  assert.equal(sessionEventWireProjectionVariant(86), 2);
+  assert.equal(sessionEventWireProjectionVariant(undefined), 2);
+  assert.equal(sessionEventWireProjectionVariant(87), 1);
+  assert.equal(sessionEventWireProjectionVariant(125), 1);
+  assert.equal(sessionEventWireProjectionVariant(126), 0);
+  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 3);
+  assert.equal(
+    new Set([86, 87, 126].map(sessionEventWireProjectionVariant)).size, 3,
+    "every reachable projection is distinguishable",
+  );
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

@@ -333,6 +333,17 @@ test("a quarantined session refuses a worktree switch that would strand its reco
       manager.selectWorktree(fixture.sessionId, fixture.worktree.path),
       /quarantined/,
     );
+    // Select, create, and attach all funnel through activateWorktree, so the guard belongs there
+    // rather than on one entry. Assert the choke point itself: the public create/attach paths hit
+    // remote enumeration and Location validation before reaching it in this fixture.
+    const meta = fixture.store.readMeta(fixture.sessionId)!;
+    const activate = (manager as unknown as {
+      activateWorktree: (m: typeof meta, w: { id: string; path: string; branch: string; source: string }) => Promise<unknown>;
+    }).activateWorktree.bind(manager);
+    await assert.rejects(
+      activate(meta, { id: "other", path: fixture.worktree.path, branch: "other", source: "attached" }),
+      /quarantined/,
+    );
   } finally {
     manager.shutdownAll();
     fixture.cleanup();

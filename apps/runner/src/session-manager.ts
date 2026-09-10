@@ -963,6 +963,14 @@ export class SessionManager {
   }
 
   private async activateWorktree(meta: SessionMeta, worktree: SessionWorktreeView): Promise<SessionSnapshot> {
+    // Every worktree switch funnels through here — select, create, and attach alike — so the
+    // quarantine guard belongs at this choke point rather than on one entry. The recovery
+    // checkpoint is attributed to the worktree it was taken in, and a quarantined session can never
+    // complete the provider rebind a switch requires, so activating another worktree would leave
+    // the advertised recovery pointing at one the fork then refuses.
+    if (this.store.readMeta(meta.sessionId)?.providerHistoryBlock) {
+      throw new Error("this session's provider conversation is quarantined — recover it before changing worktrees");
+    }
     // A request can arrive during the current provider turn. Anchor that turn's remaining diff at
     // the newly selected tree so capture/checkpoint logic never compares two different worktrees.
     const baseTree = await withGitExecutionContext(meta.context, () => captureWorktreeTree(worktree.path));
@@ -1174,12 +1182,6 @@ export class SessionManager {
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
-      // The recovery checkpoint is attributed to the worktree it was taken in, and a quarantined
-      // session can never complete the provider rebind that a switch requires. Allowing the switch
-      // would leave the advertised recovery pointing at a worktree the fork then refuses.
-      if (meta.providerHistoryBlock) {
-        throw new Error("this session's provider conversation is quarantined — recover it before changing worktrees");
-      }
       const worktree = this.attributedWorktrees(meta)
         .find((item) => sameWorktreePath(meta.context, item.path, path));
       if (!worktree) throw new Error("worktree is not linked to this session");
