@@ -393,7 +393,7 @@ export function UsageView() {
                         : "";
                       return (
                         <div
-                          className={`subscription-bucket ${exhausted ? "exhausted" : warning ? "warning" : ""}${measured ? "" : " unmeasured"}`}
+                          className={["subscription-bucket", exhausted ? "exhausted" : warning ? "warning" : "", measured ? "" : "unmeasured"].filter(Boolean).join(" ")}
                           key={bucket.id}
                         >
                           <dt>{bucket.label}</dt>
