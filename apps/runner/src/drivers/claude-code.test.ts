@@ -3613,6 +3613,17 @@ test("Claude does not repeat assistant text that already streamed, and keeps the
     /Choose a different Context Window/,
   );
 
+  // A delta that streamed without a usable provider message id still reached the reader, so the
+  // id-less assistant record for it is not an unshown one.
+  const anonymous = makeHarness();
+  anonymous.feed({ type: "stream_event", event: { type: "message_start", message: {} } });
+  anonymous.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "visible answer" } } });
+  anonymous.feed({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "text", text: "visible answer" }] } });
+  assert.equal(anonymous.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  const anonymousError = anonymous.events.filter((event) => event.kind === "error")[0] as { message: string };
+  assert.doesNotMatch(anonymousError.message, /visible answer/);
+  assert.match(anonymousError.message, /error_during_execution/);
+
   // A subagent's failed result is its parent's business, not a session-level error.
   const nested = makeHarness();
   nested.feed({ type: "result", subtype: "success", is_error: true, result: "nested", parent_tool_use_id: "task-1", usage: {} });
@@ -3663,6 +3674,19 @@ test("an authentication diagnostic never reaches the timeline in its own words",
   assert.equal(h.authenticationFailures, 1, "the durable provider-auth recovery lane is signalled");
   const serialized = JSON.stringify(h.events) + String(h.driver.lastTurnError()) + h.stderr.join("");
   assert.equal(serialized.includes(secret), false, "no event or receipt text may carry the credential");
+
+  // The identifying phrase can sit past the bound the emitted text is truncated to, while a
+  // credential sits at the front. Classification therefore has to see the complete text.
+  const long = makeHarness();
+  long.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  assert.equal(long.feed({
+    type: "result", subtype: "success", is_error: true,
+    result: `${secret} ${"padding ".repeat(400)} invalid OAuth token`, usage: {},
+  }), "refusal");
+  const longErrors = long.events.filter((event) => event.kind === "error");
+  assert.equal(longErrors.length, 1);
+  assert.equal((longErrors[0] as { message: string }).message, PROVIDER_AUTHENTICATION_ERROR);
+  assert.equal((JSON.stringify(long.events) + String(long.driver.lastTurnError())).includes(secret), false);
   // The static replacement must also stay out of the transient-retry lane; it names a durable
   // condition, so the automation layer classifies it terminal.
   assert.match(PROVIDER_AUTHENTICATION_ERROR, /Sign in again/);

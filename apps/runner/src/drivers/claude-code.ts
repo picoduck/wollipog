@@ -360,7 +360,11 @@ export function claudeContextWindowRejection(result: unknown, resolvedModel: str
  * already see: on a turn that streamed a partial answer before failing, Claude sets `result` to
  * that same partial answer. The two accumulators are kept apart rather than collapsed into one
  * "did anything stream" flag, so a turn that streams an answer and *then* fails synthetically
- * still surfaces the synthetic record — the only copy of why it failed. */
+ * still surfaces the synthetic record — the only copy of why it failed.
+ *
+ * The text is returned whole. Truncating here would let a long authentication diagnostic lose the
+ * phrase that identifies it while keeping a leading token, so the caller classifies the complete
+ * text first and bounds only what it emits. */
 /** Static stand-in for an authentication diagnostic whose own words cannot be shown. Sentence case
  * per AGENTS.md: this is a message, not a label. */
 export const PROVIDER_AUTHENTICATION_ERROR =
@@ -375,9 +379,9 @@ export function claudeErrorResultText(
     ? (result as { result?: unknown; subtype?: unknown })
     : null;
   const detail = typeof record?.result === "string" ? record.result.trim() : "";
-  if (detail && detail !== (shownText?.trim() ?? "")) return truncate(detail, 2_000);
+  if (detail && detail !== (shownText?.trim() ?? "")) return detail;
   const unshown = unshownText?.trim();
-  if (unshown) return truncate(unshown, 2_000);
+  if (unshown) return unshown;
   const subtype = typeof record?.subtype === "string" ? record.subtype : "";
   return subtype ? `The provider ended the turn with '${subtype}' and produced no output.` : null;
 }
@@ -422,6 +426,9 @@ export class ClaudeCodeDriver implements Driver {
   /** Provider message ids that produced text deltas this turn, so an assistant record can be told
    * apart from a synthetic one by whether its own text ever reached the timeline. */
   private readonly turnStreamedMessageIds = new Set<string>();
+  /** A text delta this turn reached the timeline without a usable provider message id. An
+   * id-less assistant record can then only be the record for that delta, never an unshown one. */
+  private turnStreamedWithoutId = false;
   /** Provider account of why the active turn produced no output, kept for the durable receipt the
    * session manager writes after `prompt()` resolves. */
   private turnErrorText: string | null = null;
@@ -697,6 +704,7 @@ export class ClaudeCodeDriver implements Driver {
     this.turnShownText = "";
     this.turnUnshownText = "";
     this.turnStreamedMessageIds.clear();
+    this.turnStreamedWithoutId = false;
     this.turnErrorText = null;
     const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
     if (capabilityError) {
@@ -2106,6 +2114,7 @@ export class ClaudeCodeDriver implements Driver {
             if (!parentId) {
               this.streamedAgentResponse = true;
               if (providerMessageId) this.turnStreamedMessageIds.add(providerMessageId);
+              else this.turnStreamedWithoutId = true;
             }
           } else if (d?.type === "thinking_delta" && d.thinking) {
             this.cb.onEvent({ kind: "agent_thought", text: d.thinking, ...(messageId ? { messageId } : {}), ...pp });
@@ -2132,7 +2141,7 @@ export class ClaudeCodeDriver implements Driver {
             .map((b) => String(b.text)).join("").trim();
           if (text) {
             const id = typeof msg.message?.id === "string" ? msg.message.id : "";
-            const shown = Boolean(id) && this.turnStreamedMessageIds.has(id);
+            const shown = id ? this.turnStreamedMessageIds.has(id) : this.turnStreamedWithoutId;
             if (shown) this.turnShownText = this.turnShownText ? `${this.turnShownText}\n${text}` : text;
             else this.turnUnshownText = this.turnUnshownText ? `${this.turnUnshownText}\n${text}` : text;
           }
@@ -2259,19 +2268,23 @@ export class ClaudeCodeDriver implements Driver {
           if (!parentId) {
             this.streamedAgentResponse = false;
             const rejection = claudeContextWindowRejection(msg, this.resolvedModel);
-            let message = rejection ??
+            const candidate = rejection ??
               claudeErrorResultText(msg, this.turnUnshownText, this.turnShownText);
             // An authentication diagnostic can carry a token or an authorization URL, so its raw
             // text must never cross this boundary — it is replaced with static guidance and routed
             // to the provider-auth recovery lane, exactly as every other driver call site does.
-            if (!rejection && isProviderAuthenticationFailure(message)) {
-              this.signalAuthenticationFailure();
-              message = PROVIDER_AUTHENTICATION_ERROR;
-            }
+            // The complete text is classified before any bounding, because truncation can drop the
+            // phrase that identifies it while keeping a credential near the front.
+            const authentication = !rejection && isProviderAuthenticationFailure(candidate);
+            const message = authentication ? PROVIDER_AUTHENTICATION_ERROR
+              : candidate ? truncate(candidate, 2_000) : null;
             if (message) {
               this.turnErrorText = message;
               this.cb.onEvent({ kind: "error", message });
             }
+            // Signal last: on the persistent transport this resolves the turn synchronously, and
+            // the reader must already have the explanation by then.
+            if (authentication) this.signalAuthenticationFailure();
           }
           return "refusal";
         }
