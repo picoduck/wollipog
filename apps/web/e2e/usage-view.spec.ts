@@ -114,7 +114,7 @@ test("Claude subscription cards show used and remaining allowance per window (#2
   // has not answered yet.
   const resetOnly = cards.filter({ hasText: "Claude Code (Ubuntu)" }).first();
   await expect(resetOnly).toContainText("Allowance Reported");
-  await expect(resetOnly).toContainText("reports allowance reset times but no utilization");
+  await expect(resetOnly).toContainText("without utilization percentages");
   await expect(resetOnly).not.toContainText("after the first provider response");
 
   // A source that answered without allowance headers gets its own explanation.

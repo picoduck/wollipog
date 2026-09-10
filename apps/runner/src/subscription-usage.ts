@@ -329,7 +329,9 @@ export function normalizeClaudeRateLimits(
     provider: "claude",
     state: "available",
     fetchedAt,
-    buckets: [...deduped.values()],
+    // The structured and unified maps are bounded separately, so their union still needs the cap:
+    // the control plane rejects a snapshot above this many buckets and drops the whole update.
+    buckets: [...deduped.values()].slice(0, MAX_PROVIDER_BUCKETS),
   };
 }
 
@@ -344,11 +346,18 @@ function mergeBucket(
   update: SubscriptionUsageBucket,
 ): SubscriptionUsageBucket {
   if (!prior) return update;
-  // Provider notifications are sparse and can arrive out of order. A window's reset time only ever
-  // moves forward, so an update naming an earlier window is older data: keep the newer window
-  // intact instead of letting a late partial event drop its utilization back to unknown.
-  if (prior.resetsAt !== undefined && update.resetsAt !== undefined && update.resetsAt < prior.resetsAt) {
-    return prior;
+  // Provider notifications are sparse and can arrive out of order — concurrent sessions on one
+  // source each report independently, and `fetchedAt` is receipt time, not event time. Two signals
+  // order them: a window's reset time only ever moves forward, and within one window (an identical
+  // reset time) usage only accumulates. An update failing either test is older data, so keep the
+  // newer window intact rather than letting a late event walk utilization backwards.
+  if (prior.resetsAt !== undefined && update.resetsAt !== undefined) {
+    if (update.resetsAt < prior.resetsAt) return prior;
+    if (update.resetsAt === prior.resetsAt &&
+        prior.usedPercent !== undefined && update.usedPercent !== undefined &&
+        update.usedPercent < prior.usedPercent) {
+      return prior;
+    }
   }
   return { ...prior, ...update };
 }
@@ -652,15 +661,17 @@ export class SubscriptionUsageManager {
     return explained;
   }
 
-  /** A Claude source reporting reset times but no percentages is a provider-version limitation,
-   * not a source waiting on its first response. Say so instead of leaving the card bare. */
+  /** A Claude source reporting allowance windows without percentages is not a source waiting on
+   * its first response. Describe only what the provider actually sent: a status-only event carries
+   * no reset time either, and the cause can be the installed version or the account's responses. */
   private explainMissingUtilization(snapshot: SubscriptionUsageSnapshot): SubscriptionUsageSnapshot {
     if (snapshot.provider !== "claude" || snapshot.state !== "available") return snapshot;
     if (hasSubscriptionUtilization(snapshot)) return snapshot;
     return {
       ...snapshot,
-      detail: "This Claude Code version reports allowance reset times but no utilization " +
-        "percentages. Update Claude Code to see used and remaining allowance.",
+      detail: "Claude Code reported allowance windows for this source without utilization " +
+        "percentages. Older Claude Code versions report window status and reset times only; " +
+        "update Claude Code if this persists.",
     };
   }
 

@@ -598,8 +598,80 @@ test("a Claude version reporting resets but no utilization is explained, not lef
   });
   const snapshot = manager.inventory()[0];
   assert.equal(snapshot?.state, "available");
-  assert.match(snapshot?.detail ?? "", /reset times but no utilization percentages/);
+  assert.match(snapshot?.detail ?? "", /allowance windows for this source without utilization/);
   assert.doesNotMatch(snapshot?.detail ?? "", /first provider response/);
+});
+
+test("a status-only Claude event is explained without claiming a reset time was reported", () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => OBSERVED_AT,
+  });
+  manager.observe("claude", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    kind: "sparse",
+    payload: rateLimitEvent({ status: "rejected", rateLimitType: "five_hour" }),
+  });
+  const snapshot = manager.inventory()[0];
+  assert.equal(snapshot?.buckets[0]?.status, "exhausted");
+  assert.equal(snapshot?.buckets[0]?.resetsAt, undefined, "the provider supplied no reset time");
+  // The explanation may cite reset times as a trait of older builds, but must not assert that
+  // this source reported one: a status-only event carries no reset at all.
+  assert.doesNotMatch(snapshot?.detail ?? "", /reports allowance reset times/i);
+  assert.match(snapshot?.detail ?? "", /reported allowance windows for this source without utilization/);
+});
+
+test("a delayed event cannot walk utilization backwards inside one window", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const observe = (utilization: number) =>
+    manager.observe("claude", "claude-code", { kind: "native" }, {
+      provider: "claude",
+      kind: "sparse",
+      payload: rateLimitEvent({
+        status: "allowed",
+        rateLimitType: "five_hour",
+        unifiedWindows: { five_hour: { utilization, resetsAt: FIVE_HOUR_RESET } },
+      }),
+    });
+  observe(0.9);
+  now = OBSERVED_AT + 1_000;
+  // Concurrent sessions share one source; this one observed the account earlier but reported
+  // later. Same window, so its lower usage is stale rather than a genuine decrease.
+  observe(0.4);
+  assert.equal(
+    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent,
+    90,
+    "usage only accumulates within a window, so the lower late reading is older data",
+  );
+  now = OBSERVED_AT + 2_000;
+  observe(0.95);
+  assert.equal(
+    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent,
+    95,
+    "a genuine increase in the same window still applies",
+  );
+});
+
+test("the combined Claude bucket list stays inside the control-plane bound", () => {
+  const windows = (prefix: string) => Object.fromEntries(
+    Array.from({ length: 64 }, (_, index) => [`${prefix}${index}`, { utilization: 0.5, resetsAt: FIVE_HOUR_RESET }]));
+  const snapshot = normalizeClaudeRateLimits({
+    rate_limits: windows("structured-"),
+    rate_limit_info: { status: "allowed", unifiedWindows: windows("unified-") },
+  }, base, OBSERVED_AT);
+  assert.ok(snapshot);
+  // The control plane rejects a snapshot above 64 buckets outright, discarding the whole update.
+  assert.equal(snapshot.buckets.length, 64);
 });
 
 test("a source that answered stops claiming it is waiting for its first provider response", () => {

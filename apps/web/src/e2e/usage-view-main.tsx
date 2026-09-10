@@ -140,8 +140,9 @@ const subscription: SubscriptionUsageResponse = {
     {
       ...claudeSource, sourceId: "8a66ac9939adad73bfadb15095f19d9c",
       agentId: "claude-wsl", agentName: "Claude Code (Ubuntu)", state: "available",
-      detail: "This Claude Code version reports allowance reset times but no utilization " +
-        "percentages. Update Claude Code to see used and remaining allowance.",
+      detail: "Claude Code reported allowance windows for this source without utilization " +
+        "percentages. Older Claude Code versions report window status and reset times only; " +
+        "update Claude Code if this persists.",
       buckets: [
         { id: "five_hour", label: "Five-Hour Window",
           resetsAt: SUBSCRIPTION_NOW + 3 * 3_600_000 + 12 * 60_000, status: "available" },
