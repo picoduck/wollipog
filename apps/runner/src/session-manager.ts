@@ -465,6 +465,15 @@ interface ProviderRetirement {
 
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
  * handshake; driver identity alone is never enough. */
+/** A stop reason alone never says why the provider produced nothing. When the driver captured the
+ * provider's own account of an error turn, carry it into the durable receipt: the control plane
+ * records it as the automation's error, and it is the only thing that tells a transient
+ * credential-refresh failure apart from a real refusal. */
+export function providerStopError(stop: StopReason, client: Pick<Driver, "lastTurnError">): string {
+  const detail = stop === "refusal" ? client.lastTurnError?.()?.trim() : undefined;
+  return detail ? `provider ${stop}: ${detail}` : `provider ${stop}`;
+}
+
 function canResumeSession(meta: SessionMeta): boolean {
   if (meta.driver === "acp") {
     return meta.acpCapabilities?.sessionResume === true || meta.acpCapabilities?.loadSession === true;
@@ -6730,7 +6739,7 @@ export class SessionManager {
         this.emitStatus(sessionId, "idle");
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
-        durable?.failed(`provider ${stop}`, "COMMAND_CANCELLED");
+        durable?.failed(providerStopError(stop, entry.client), "COMMAND_CANCELLED");
       } else {
         durable?.completed();
       }
@@ -7051,7 +7060,7 @@ export class SessionManager {
         this.emitStatus(sessionId, "idle");
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
-        lifecycle.failed(`provider ${stop}`, "COMMAND_CANCELLED");
+        lifecycle.failed(providerStopError(stop, entry.client), "COMMAND_CANCELLED");
       } else {
         lifecycle.completed();
       }

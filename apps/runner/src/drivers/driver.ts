@@ -179,6 +179,11 @@ export interface Driver {
 
   /** Provider-native id of the most recently started turn, when the driver exposes one. */
   agentTurnId?(): string | null;
+
+  /** Why the turn that just settled produced no output, in the provider's own words. Only set for
+   * a turn the provider itself ended in error; the session manager attaches it to the durable
+   * receipt so a scheduler sees the cause instead of a bare stop reason. */
+  lastTurnError?(): string | null;
   /** Active steering coordinate, never a retained completed-turn checkpoint. */
   activeSteeringTurnId?(): string | null;
 

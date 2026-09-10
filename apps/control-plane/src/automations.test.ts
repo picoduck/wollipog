@@ -1061,6 +1061,157 @@ test("sent commands retry with the same id while receipted recovery preserves th
   assert.equal(db.listAutomationCommands(receiptedExecution.executionId)[0]?.attemptCount, 2);
 });
 
+const TRANSIENT_REFUSAL = "provider refusal: Failed to refresh OAuth token: another Claude Code process " +
+  "is refreshing it or exited mid-refresh. This is usually transient; retry in a minute, and if it " +
+  "persists close other Claude Code processes or sign in again";
+
+test("a transient provider failure replaces the launch instead of failing the execution", () => {
+  const { db, service, delivered } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  assert.equal(service.tick(60_000), 1);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const command = execution.commands![0]!;
+  const staged = db.listAutomationCommands(execution.executionId)[0]!;
+  const first = delivered[0] as { requestId: string; commandId: string };
+
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: command.commandId,
+    sessionId: command.sessionId, state: "started", revision: 2,
+  }, 60_100), true);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running");
+
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_result", requestId: first.requestId, duplicate: false,
+    commandId: command.commandId, sessionId: command.sessionId, state: "failed", revision: 3,
+    code: "COMMAND_CANCELLED", error: TRANSIENT_REFUSAL,
+  }, 60_200), true);
+
+  const [original, replacement] = db.listAutomationCommands(execution.executionId);
+  assert.equal(original?.state, "rejected");
+  assert.equal(original?.lastError, TRANSIENT_REFUSAL, "the provider's own words survive on the command");
+  assert.equal(original?.supersededBy, replacement?.commandId);
+  // The link has to survive into the public view, or a client sees an unexplained rejected command
+  // beside its replacement and cannot tell it apart from the execution's verdict.
+  const view = db.getAutomationExecution(execution.executionId)!.commands!;
+  assert.equal(view[0]?.supersededBy, replacement?.commandId);
+  assert.equal(view[1]?.supersededBy, undefined);
+  assert.notEqual(replacement?.commandId, command.commandId,
+    "the runner answers a replayed command id with its stored terminal receipt and runs nothing");
+  assert.equal(replacement?.state, "pending");
+  assert.equal(replacement?.attemptCount, 0);
+  assert.equal(replacement?.payloadJson, staged.payloadJson, "the replacement relaunches the exact staged plan");
+  assert.equal(replacement?.payloadSha256, staged.payloadSha256);
+  assert.equal(original?.payloadJson, "null", "the superseded row still sheds its payload when it terminalizes");
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running",
+    "a passing condition is not a verdict on the job");
+
+  // The replacement waits out the contention rather than racing it, and the session it will
+  // relaunch stays reachable meanwhile.
+  assert.equal(service.recover(60_300), 0);
+  assert.equal(delivered.length, 1, "the retry is not due yet");
+  db.updateSessionStatus(command.sessionId, "idle", 60_400);
+  assert.equal(service.recover(60_500), 0);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running",
+    "an idle session mid-retry must not settle the execution as succeeded");
+
+  assert.equal(service.recover(121_000), 0);
+  const retry = delivered[1] as { commandId: string; requestId: string; command: { type: string } };
+  assert.equal(retry.commandId, replacement!.commandId);
+  assert.equal(retry.command.type, "start_session", "the replacement carries the original launch payload");
+
+  // The runner acknowledges the relaunch before the session leaves idle, so the wait has to cover
+  // every non-terminal replacement state, not just the undelivered ones.
+  for (const [state, revision] of [["accepted", 1], ["started", 2]] as const) {
+    assert.equal(service.onDurableCommandReceipt("runner-1", {
+      type: "durable_session_command_update", commandId: retry.commandId,
+      sessionId: command.sessionId, state, revision,
+    }, 121_000 + revision), true);
+    service.recover(121_010 + revision);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running",
+      `an idle session must not settle the execution while the replacement is ${state}`);
+  }
+
+  // A retry that lands leaves an ordinary completed execution.
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_result", requestId: retry.requestId, duplicate: false,
+    commandId: retry.commandId, sessionId: command.sessionId, state: "completed", revision: 3,
+  }, 121_100), true);
+  db.updateSessionStatus(command.sessionId, "idle", 121_200);
+  service.recover(121_300);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "succeeded");
+  assert.equal(db.getAutomationExecution(execution.executionId)?.error, undefined);
+});
+
+test("an execution with no retry in flight still settles from its workflow instance", () => {
+  const { db, service } = harness();
+  const automation = service.create(baseSpec({
+    action: { kind: "workflow_run", request: {
+      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+    } },
+  }), { kind: "human", id: "device" }, 0).data!;
+  service.tick(60_000);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const commands = db.listAutomationCommands(execution.executionId);
+  assert.equal(commands.length > 1, true, "a workflow launch plan has sibling commands");
+
+  // One member started; a sibling is still owed delivery. That is an ordinary in-flight plan, not
+  // a retry, so the workflow instance's own terminal status must still settle the execution.
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: commands[0]!.commandId,
+    sessionId: commands[0]!.sessionId, state: "started", revision: 2,
+  }, 60_100), true);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running");
+  assert.equal(db.listAutomationCommands(execution.executionId)
+    .some((command) => ["staged", "pending", "sent"].includes(command.state)), true);
+
+  service.recover(60_300);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "failed",
+    "the workflow instance settles its execution even while a sibling launch is undelivered");
+  assert.match(db.getAutomationExecution(execution.executionId)?.error ?? "", /workflow instance/);
+});
+
+test("a non-transient refusal fails on its first attempt and retries are bounded", () => {
+  const { db, service, delivered } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  service.tick(60_000);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const command = execution.commands![0]!;
+
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_result", requestId: (delivered[0] as { requestId: string }).requestId,
+    duplicate: false, commandId: command.commandId, sessionId: command.sessionId,
+    state: "failed", revision: 2, code: "COMMAND_CANCELLED", error: "provider refusal",
+  }, 60_200), true);
+  assert.equal(db.listAutomationCommands(execution.executionId).length, 1, "no replacement was issued");
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "failed");
+  assert.equal(db.getAutomationExecution(execution.executionId)?.error, "provider refusal");
+
+  // A condition that never clears still terminates: the replacement chain is bounded.
+  const persistent = harness();
+  persistent.service.create(baseSpec(), { kind: "human", id: "device" }, 0);
+  persistent.service.tick(60_000);
+  const stuck = persistent.db.listAutomationExecutions(
+    persistent.db.listAutomations()[0]!.automationId)[0]!;
+  let now = 60_100;
+  let attempts = 0;
+  for (let i = 0; i < 10; i += 1) {
+    const sent = persistent.delivered.at(-1) as { commandId: string; requestId: string };
+    const accepted = persistent.service.onDurableCommandReceipt("runner-1", {
+      type: "durable_session_command_result", requestId: sent.requestId, duplicate: false,
+      commandId: sent.commandId, sessionId: stuck.sessionId!, state: "failed", revision: 2,
+      code: "COMMAND_CANCELLED", error: TRANSIENT_REFUSAL,
+    }, now);
+    assert.equal(accepted, true);
+    attempts += 1;
+    if (persistent.db.getAutomationExecution(stuck.executionId)?.status === "failed") break;
+    now += 16 * 60_000;
+    persistent.service.recover(now);
+  }
+  assert.equal(attempts, 4, "the first attempt plus a bounded three replacements");
+  assert.equal(persistent.db.getAutomationExecution(stuck.executionId)?.status, "failed");
+  assert.match(persistent.db.getAutomationExecution(stuck.executionId)?.error ?? "", /Failed to refresh OAuth token/);
+});
+
 test("receipted recovery passes the exact persisted command snapshot back to materialization", () => {
   const { db, service, failures, recoveredSnapshots } = harness();
   const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
