@@ -11807,7 +11807,7 @@ export class ControlPlaneDb {
       }
       this.stmt(
         `UPDATE policy_hook_approvals
-         SET status='denied', resolved_at=CASE WHEN status='denied' THEN resolved_at ELSE ? END
+         SET status='denied', resolved_at=COALESCE(resolved_at, ?)
          WHERE session_id=? AND request_id=?`,
       ).run(now, sessionId, requestId);
       this.stmt(

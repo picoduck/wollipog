@@ -157,6 +157,18 @@ test("a governance row lands after the last event at or before its timestamp", (
   ]);
 });
 
+test("transcript insertion preserves server order when decisions share an anchor and timestamp", () => {
+  const decisions = governanceDecisions([
+    entry({ auditId: "z-first", requestId: "hook-z", timestamp: 150 }),
+    entry({ auditId: "a-second", requestId: "hook-a", timestamp: 150 }),
+  ]);
+  const merged = mergeGovernanceDecisions([message(1), message(2)], decisions, events.slice(0, 2));
+  assert.deepEqual(
+    merged.flatMap((item) => item.kind === "governance_decision" ? [item.decision.auditId] : []),
+    ["z-first", "a-second"],
+  );
+});
+
 test("an outcome older than the loaded window pins to the window head instead of being dropped", () => {
   const decisions = governanceDecisions([entry({ auditId: "h", timestamp: 10 })]);
   const merged = mergeGovernanceDecisions([message(2), message(3)], decisions, events.slice(1));

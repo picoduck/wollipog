@@ -248,6 +248,7 @@ function nativePolicyHookDecision(ev: SessionEvent): GovernanceDecision | null {
       (payload.outcome !== "allowed" && payload.outcome !== "denied" &&
        payload.outcome !== "timed_out" && payload.outcome !== "aborted")) return null;
   const tone = payload.outcome === "timed_out" ? "timed-out"
+    : payload.outcome === "aborted" ? "denied"
     : payload.outcome === "allowed" ? "allowed"
       : payload.actor.kind === "policy" ? "policy" : "denied";
   const label = payload.outcome === "timed_out" ? "Approval Timed Out"

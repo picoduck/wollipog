@@ -3709,6 +3709,9 @@ export class SessionManager {
             ),
           }
         : {}),
+      ...(meta.driver === "claude-code"
+        ? { policyHookToolCallIds: new Set(), policyHookDecisionEvents: new Map() }
+        : {}),
     };
     for (const operation of retainedPromotions.values()) {
       if (operation.settled) continue;
@@ -6071,8 +6074,10 @@ export class SessionManager {
         // step so an interrupt received anywhere in pre-provider preparation cannot be erased.
         entry.cancelRequested = false;
         entry.interruptRequested = false;
-        entry.policyHookToolCallIds = new Set();
-        entry.policyHookDecisionEvents = new Map();
+        if (entry.policyHookToolCallIds) {
+          entry.policyHookToolCallIds = new Set();
+          entry.policyHookDecisionEvents = new Map();
+        }
         if (next.config && !configsEqual(next.config, this.store.readMeta(sessionId)?.config)) {
           // Apply the config THIS prompt was sent with (see QueuedPrompt.config). Drivers pick
           // config up at turn start, so setting it here is exactly "this turn runs under it".
@@ -9778,7 +9783,7 @@ export class SessionManager {
       pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId);
     if (!this.emitEvent(sessionId, payload)) return;
     if (payload.kind === "tool_call") {
-      if (entry) (entry.policyHookToolCallIds ??= new Set()).add(payload.toolCallId);
+      entry?.policyHookToolCallIds?.add(payload.toolCallId);
       this.flushPolicyHookDecisionAfterToolCall(sessionId, payload.toolCallId);
     }
     if (managedAttentionResolution && entry) {

@@ -297,8 +297,7 @@ export function mergeGovernanceDecisions(
     .map((decision) => ({ decision, anchorSeq: anchorOf(decision) }))
     .sort((a, b) =>
       a.anchorSeq - b.anchorSeq ||
-      a.decision.timestamp - b.decision.timestamp ||
-      (a.decision.auditId < b.decision.auditId ? -1 : 1));
+      a.decision.timestamp - b.decision.timestamp);
 
   const merged: TimelineItem[] = [];
   let next = 0;

@@ -182,7 +182,9 @@ export function useGovernanceAudit(
               hasMore: response.hasMore,
               loadedOlder: false,
               loadingOlder: false,
-              autoLoadBlocked: false,
+              // A successful newest-page recovery does not prove the older-page failure was a
+              // stale cursor. Stop automatic retries until a revision or deliberate click.
+              autoLoadBlocked: true,
             } : value);
           })
           .catch(() => {

@@ -293,6 +293,45 @@ test("persistent backfill failures latch automatic retries while leaving manual 
   container.remove();
 });
 
+test("a successful newest-page recovery still latches a persistently failing older page", async () => {
+  let calls = 0;
+  let newest = 0;
+  const client = {
+    governanceAudit: async (_id: string, _limit: number, before?: string) => {
+      calls += 1;
+      if (before) throw new Error("older page unavailable");
+      newest += 1;
+      return {
+        entries: [{ ...entry, auditId: `newest-${newest}`, timestamp: 300 + newest }],
+        nextBefore: `newest-${newest}`,
+        hasMore: true,
+      };
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe() {
+    latest = useGovernanceAudit("session-1", "revision-1", true, 100);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe /></ApiProvider>);
+    for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(calls, 3, "a successful rebase cannot restart the failing automatic cursor request");
+  assert.equal(latest?.decisions[0]?.auditId, "newest-2");
+  await act(async () => {
+    latest!.loadOlder();
+    for (let index = 0; index < 4; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(calls, 5, "manual retry remains available and relatches after its recovery");
+  assert.equal(latest?.decisions[0]?.auditId, "newest-3");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
 test("an older response issued against a replaced snapshot is discarded before it can skip a gap", async () => {
   const audit = (auditId: string, timestamp: number): GovernanceAuditEntry => ({
     ...entry, auditId, requestId: `hook-${auditId}`, timestamp,

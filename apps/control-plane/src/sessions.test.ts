@@ -6411,14 +6411,21 @@ test("native hook receipt failures block normally without opening the sidecar tr
       assert.match(result.data?.reason ?? "", /blocked fail-closed/);
     };
 
-    hub.requestHandler = (message) => ({
-      type: "policy_hook_decision_recorded",
-      requestId: message.type === "record_policy_hook_decision" ? message.requestId : "wrong-request",
-      sessionId: id,
-      auditId: message.type === "record_policy_hook_decision" ? message.decision.auditId : "wrong-audit",
-      accepted: false,
-      error: "append rejected",
-    });
+    let resolvedBeforeFailClosed: number | null | undefined;
+    hub.requestHandler = async (message) => {
+      if (message.type === "record_policy_hook_decision") {
+        resolvedBeforeFailClosed = db.getPolicyHookApproval(id, message.decision.requestId)?.resolvedAt;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return {
+        type: "policy_hook_decision_recorded",
+        requestId: message.type === "record_policy_hook_decision" ? message.requestId : "wrong-request",
+        sessionId: id,
+        auditId: message.type === "record_policy_hook_decision" ? message.decision.auditId : "wrong-audit",
+        accepted: false,
+        error: "append rejected",
+      };
+    };
     await failClosed("tool-rejected");
     const historyFailure = svc.governanceAudit(id).find((entry) =>
       entry.actor.kind === "system" && entry.actor.id === "decision-history-unavailable");
@@ -6427,6 +6434,9 @@ test("native hook receipt failures block normally without opening the sidecar tr
     assert.equal(db.policyHookDecisionAudit(id, historyFailure.requestId)?.auditId, historyFailure.auditId,
       "the fail-closed resolution supersedes the prior policy allow");
     assert.equal(db.getPolicyHookApproval(id, historyFailure.requestId)?.status, "denied");
+    assert.equal(typeof resolvedBeforeFailClosed, "number");
+    assert.equal(db.getPolicyHookApproval(id, historyFailure.requestId)?.resolvedAt, resolvedBeforeFailClosed,
+      "fail-closed conversion preserves the original terminal resolution time");
     await failClosed("tool-rejected");
     assert.equal(svc.governanceAudit(id).filter((entry) =>
       entry.requestId === historyFailure.requestId &&

@@ -958,9 +958,22 @@ test("native policy-hook decisions render policy allows and abandoned approvals"
       actor: { kind: "system", id: "session-stopped" },
       toolCallId: "tool-aborted",
     }),
+    ev({ kind: "tool_call", toolCallId: "tool-policy-aborted", title: "Edit", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-policy-aborted",
+      requestId: "hook-policy-aborted",
+      stage: "resolution",
+      outcome: "aborted",
+      actor: { kind: "policy", id: "policy-stopped" },
+      toolCallId: "tool-policy-aborted",
+    }),
   ]);
-  const labels = items.flatMap((item) => item.kind === "governance_decision" ? [item.decision.label] : []);
-  assert.deepEqual(labels, ["Allowed by Policy", "Approval Aborted"]);
+  const decisions = items.flatMap((item) => item.kind === "governance_decision" ? [item.decision] : []);
+  assert.deepEqual(decisions.map((decision) => decision.label), [
+    "Allowed by Policy", "Approval Aborted", "Approval Aborted",
+  ]);
+  assert.equal(decisions.at(-1)?.tone, "denied", "native and audit fallback tones agree for aborts");
 });
 
 test("native policy-hook system denials identify the fail-closed safety boundary", () => {
