@@ -1261,6 +1261,7 @@ CREATE TABLE IF NOT EXISTS automation_commands (
   next_attempt_at       INTEGER,
   last_error            TEXT,
   error_code            TEXT,
+  superseded_by         TEXT,
   duplicate             INTEGER,
   user_event_seq        INTEGER,
   created_at            INTEGER NOT NULL,
@@ -2668,7 +2669,8 @@ interface AutomationCommandRow {
   command_id: string; execution_id: string; ordinal: number; runner_id: string; session_id: string;
   kind: AutomationCommandView["kind"]; payload_json: string; payload_sha256: string; expires_at: number | null;
   dependency_command_id: string | null; state: AutomationCommandState; revision: number; attempt_count: number;
-  next_attempt_at: number | null; last_error: string | null; error_code: string | null; duplicate: number | null;
+  next_attempt_at: number | null; last_error: string | null; error_code: string | null;
+  superseded_by: string | null; duplicate: number | null;
   user_event_seq: number | null; created_at: number; updated_at: number; last_sent_at: number | null;
   accepted_at: number | null; started_at: number | null; completed_at: number | null;
 }
@@ -3662,6 +3664,7 @@ export class ControlPlaneDb {
       ["automation_executions", "spec_json TEXT"],
       ["automation_executions", "delivery_mode TEXT NOT NULL DEFAULT 'legacy_at_most_once'"],
       ["automation_executions", "delivery_plan_json TEXT"],
+      ["automation_commands", "superseded_by TEXT"],
     ] as const) {
       try {
         db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
@@ -18002,6 +18005,7 @@ export class ControlPlaneDb {
          AND NOT EXISTS (
            SELECT 1 FROM automation_commands blocker
            WHERE blocker.execution_id=command.execution_id AND blocker.state IN ('rejected','uncertain')
+             AND blocker.superseded_by IS NULL
          )
        ORDER BY command.next_attempt_at, command.execution_id, command.ordinal LIMIT ?`,
     ).all(...params) as unknown as AutomationCommandRow[];
@@ -18157,6 +18161,101 @@ export class ControlPlaneDb {
     }
     const command = this.getAutomationCommand(input.commandId)!;
     return { executionId: command.executionId, command, advanced: true };
+  }
+
+  /**
+   * Terminalize a command that failed for a retryable reason and issue its replacement in the same
+   * transaction, so the execution is never briefly observable as failed.
+   *
+   * The runner's receipt journal is at-most-once per command id: replaying an id that already has
+   * a terminal record returns that record instead of running anything. A retry must therefore be a
+   * new command identity, and the original must stop being the execution's verdict — which is what
+   * `superseded_by` records. It is deliberately limited to single-command executions: a plan whose
+   * later commands depend on this one would need its dependency edges rewired too, and no
+   * multi-command plan is retried today.
+   *
+   * Returns null when the command cannot be retried (already terminal, stale revision, payload
+   * already erased, or part of a multi-command plan); the caller then records the plain rejection.
+   */
+  retryAutomationCommand(input: {
+    commandId: string;
+    runnerId: string;
+    sessionId?: string;
+    /** Present on a command result; proves the receipt answers an attempt this process sent. */
+    requestId?: string;
+    revision: number;
+    error: string;
+    code?: DurableSessionCommandErrorCode;
+    nextAttemptAt: number;
+    now: number;
+  }): { executionId: string; command: AutomationCommandRecord; replacement: AutomationCommandRecord } | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.stmt(
+        `SELECT command.*, execution.automation_id FROM automation_commands command
+         JOIN automation_executions execution ON execution.execution_id=command.execution_id
+         WHERE command.command_id=?`,
+      ).get(input.commandId) as unknown as (AutomationCommandRow & { automation_id: string }) | undefined;
+      if (!row || row.runner_id !== input.runnerId ||
+          (input.sessionId !== undefined && row.session_id !== input.sessionId) ||
+          row.kind !== "start_session" || row.payload_json === "null" ||
+          ["completed", "rejected", "uncertain"].includes(row.state) ||
+          input.revision < row.revision) {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      if (input.requestId !== undefined) {
+        const attempted = this.stmt(
+          `SELECT 1 FROM automation_command_attempts
+           WHERE request_id=? AND command_id=? AND runner_id=?`,
+        ).get(input.requestId, input.commandId, input.runnerId);
+        if (!attempted) { this.db.exec("ROLLBACK"); return null; }
+      }
+      const siblings = this.stmt(
+        "SELECT command_id, ordinal, superseded_by FROM automation_commands WHERE execution_id=? ORDER BY ordinal",
+      ).all(row.execution_id) as unknown as Array<{ command_id: string; ordinal: number; superseded_by: string | null }>;
+      // Every attempt after the first is a superseded row plus the live one; anything else is a
+      // real multi-command plan whose dependency edges this path does not rewire.
+      const superseded = siblings.filter((sibling) => sibling.superseded_by !== null);
+      if (siblings.length !== superseded.length + 1) {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      const attempt = superseded.length + 1;
+      const replacementId = `${row.command_id.replace(/_r\d+$/u, "")}_r${attempt}`;
+      const replacementOrdinal = Math.max(...siblings.map((sibling) => sibling.ordinal)) + 1;
+      this.stmt(
+        `UPDATE automation_commands SET state='rejected', revision=?, next_attempt_at=NULL, last_error=?,
+         error_code=?, superseded_by=?, payload_json='null', updated_at=?, completed_at=COALESCE(completed_at,?)
+         WHERE command_id=?`,
+      ).run(input.revision, input.error, input.code ?? null, replacementId, input.now, input.now, input.commandId);
+      this.stmt(
+        `INSERT INTO automation_commands
+         (command_id, execution_id, ordinal, runner_id, session_id, kind, payload_json, payload_sha256,
+          expires_at, dependency_command_id, state, revision, attempt_count, next_attempt_at, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,'pending',0,0,?,?,?)`,
+      ).run(replacementId, row.execution_id, replacementOrdinal, row.runner_id, row.session_id, row.kind,
+        row.payload_json, row.payload_sha256, row.expires_at, row.dependency_command_id,
+        input.nextAttemptAt, input.now, input.now);
+      this.insertAutomationEvent({
+        automationId: row.automation_id, executionId: row.execution_id, kind: "command_status_changed",
+        actor: { kind: "system", id: `runner:${input.runnerId}` },
+        detail: { commandId: input.commandId, state: "rejected", revision: input.revision,
+          code: input.code ?? null, supersededBy: replacementId }, now: input.now,
+      });
+      this.insertAutomationEvent({
+        automationId: row.automation_id, executionId: row.execution_id, kind: "command_status_changed",
+        actor: { kind: "system", id: "automation-outbox" },
+        detail: { commandId: replacementId, state: "pending", ordinal: replacementOrdinal, attempt,
+          retryOf: input.commandId, nextAttemptAt: input.nextAttemptAt }, now: input.now,
+      });
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+    const command = this.getAutomationCommand(input.commandId)!;
+    return { executionId: command.executionId, command, replacement: this.getAutomationCommand(command.supersededBy!)! };
   }
 
   rejectAutomationCommand(commandId: string, error: string, now: number): AutomationCommandRecord | null {
@@ -18446,6 +18545,7 @@ export class ControlPlaneDb {
       ...(row.next_attempt_at === null ? {} : { nextAttemptAt: row.next_attempt_at }),
       ...(row.last_error ? { lastError: row.last_error } : {}),
       ...(row.error_code ? { errorCode: row.error_code as DurableSessionCommandErrorCode } : {}),
+      ...(row.superseded_by ? { supersededBy: row.superseded_by } : {}),
       ...(row.duplicate === null ? {} : { duplicate: row.duplicate === 1 }),
       ...(row.user_event_seq === null ? {} : { userEventSeq: row.user_event_seq }),
       createdAt: row.created_at,

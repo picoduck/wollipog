@@ -511,6 +511,12 @@ export class AutomationsService {
       const execution = this.db.getAutomationExecution(candidate.executionId);
       if (!execution) continue;
       if (execution.status !== "running") continue;
+      // A receipted execution with undelivered launch work has no outcome yet. Its session may sit
+      // idle between a failed first attempt and its queued replacement, and idle is the success
+      // signal below — reading it now would settle the execution before the retry ever runs.
+      if (execution.deliveryMode === "receipted_v53" &&
+          this.db.listAutomationCommands(execution.executionId)
+            .some((command) => ["staged", "pending", "sent"].includes(command.state))) continue;
       const automation = this.db.getAutomation(execution.automationId);
       let terminal: "succeeded" | "failed" | null = null;
       let error: string | undefined;
@@ -552,7 +558,9 @@ export class AutomationsService {
     const commands = this.db.listAutomationCommands(executionId);
     if (!commands.length) return;
     const schedule = this.executionSchedule(execution);
-    const failed = commands.find((command) => command.state === "rejected" || command.state === "uncertain");
+    // A superseded command was replaced by a live retry; the replacement carries the verdict.
+    const failed = commands.find((command) =>
+      (command.state === "rejected" || command.state === "uncertain") && command.supersededBy === undefined);
     if (failed) {
       if (execution.actionKind === "workflow_run") {
         this.db.terminalizeAutomationExecutionCommands(

@@ -350,6 +350,24 @@ export function claudeContextWindowRejection(result: unknown, resolvedModel: str
     `model menu, or select another model, before the next turn.`;
 }
 
+/** The provider's own account of a turn that ended in an error result. Claude reports a transport
+ * or credential failure as a synthetic assistant message plus an error result and nothing else:
+ * without this text the turn persists as a prompt with no reply and a zero-token usage record, and
+ * the automation that scheduled it settles on a bare stop reason. `result` is the canonical field;
+ * the synthetic message is the fallback for an error result that carries no text of its own, and
+ * is used only when the turn streamed no assistant output that already reached the timeline. */
+export function claudeErrorResultText(result: unknown, unstreamedAssistantText: string | null): string | null {
+  const record = result && typeof result === "object"
+    ? (result as { result?: unknown; subtype?: unknown })
+    : null;
+  const detail = typeof record?.result === "string" ? record.result.trim() : "";
+  if (detail) return truncate(detail, 2_000);
+  const synthetic = unstreamedAssistantText?.trim();
+  if (synthetic) return truncate(synthetic, 2_000);
+  const subtype = typeof record?.subtype === "string" ? record.subtype : "";
+  return subtype ? `The provider ended the turn with '${subtype}' and produced no output.` : null;
+}
+
 export class ClaudeCodeDriver implements Driver {
   private readonly preparedCommands = new WeakSet<object>();
   private sessionId: string;
@@ -380,6 +398,13 @@ export class ClaudeCodeDriver implements Driver {
   private resolvedModel: string | null = null;
   /** Context occupancy after the latest top-level assistant record of the active turn. */
   private turnContextOccupancy: number | null = null;
+  /** Text of top-level assistant records in the active turn. Ordinary text reaches the UI as
+   * `stream_event` deltas; a synthetic record (a transport or credential failure Claude reports as
+   * an assistant message) has no deltas, so this is its only copy. */
+  private turnAssistantText = "";
+  /** Provider account of why the active turn produced no output, kept for the durable receipt the
+   * session manager writes after `prompt()` resolves. */
+  private turnErrorText: string | null = null;
   private persistentBuffer: BoundedNdjsonBuffer | null = null;
   /** Monotonic across persistent and one-shot transports so late lifecycle events cannot alias a
    * turn from the transport used before a circuit fallback. */
@@ -472,6 +497,10 @@ export class ClaudeCodeDriver implements Driver {
     // Claude's CLI forks the current transcript, not an individual provider turn. SessionManager
     // therefore records this stable provider coordinate and exposes only the latest checkpoint.
     return this.firstTurn ? null : this.sessionId;
+  }
+
+  lastTurnError(): string | null {
+    return this.turnErrorText;
   }
 
   setConfig(config: SessionConfig): void {
@@ -645,6 +674,8 @@ export class ClaudeCodeDriver implements Driver {
     // inherit the previous turn's, which after a model switch would misattribute it.
     this.turnModel = null;
     this.turnContextOccupancy = null;
+    this.turnAssistantText = "";
+    this.turnErrorText = null;
     const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
     if (capabilityError) {
       this.cb.onEvent({ kind: "error", message: capabilityError });
@@ -2071,6 +2102,11 @@ export class ClaudeCodeDriver implements Driver {
           if (occupancy != null) this.turnContextOccupancy = occupancy;
         }
         const blocks: Json[] = msg.message?.content ?? [];
+        if (!parentId) {
+          const text = blocks.filter((b) => b?.type === "text" && typeof b.text === "string")
+            .map((b) => String(b.text)).join("").trim();
+          if (text) this.turnAssistantText = this.turnAssistantText ? `${this.turnAssistantText}\n${text}` : text;
+        }
         for (const b of blocks) {
           if (b?.type !== "tool_use") continue;
           const name: string = b.name ?? "tool";
@@ -2191,9 +2227,14 @@ export class ClaudeCodeDriver implements Driver {
         }
         if (msg.is_error || msg.subtype === "error_during_execution") {
           if (!parentId) {
+            const unstreamed = this.streamedAgentResponse ? null : this.turnAssistantText;
             this.streamedAgentResponse = false;
-            const rejection = claudeContextWindowRejection(msg, this.resolvedModel);
-            if (rejection) this.cb.onEvent({ kind: "error", message: rejection });
+            const message = claudeContextWindowRejection(msg, this.resolvedModel) ??
+              claudeErrorResultText(msg, unstreamed);
+            if (message) {
+              this.turnErrorText = message;
+              this.cb.onEvent({ kind: "error", message });
+            }
           }
           return "refusal";
         }

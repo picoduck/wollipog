@@ -24,6 +24,7 @@ import {
   claudeContextOccupancy,
   claudeContextWindowRejection,
   claudeEffectiveContextWindow,
+  claudeErrorResultText,
   claudePermissionArgs,
   claudePersistentSettings,
   claudePersistentSettingsForAgent,
@@ -3528,6 +3529,86 @@ test("Claude result.modelUsage publishes the effective context window and last r
   assert.equal(claudeContextOccupancy({ model: "<synthetic>", usage: { input_tokens: 0, cache_read_input_tokens: 0 } }), null);
   assert.equal(claudeContextOccupancy({ model: "claude-opus-5", usage: { input_tokens: 3, cache_read_input_tokens: 7, output_tokens: 900 } }), 10);
   assert.equal(claudeContextOccupancy({ model: "claude-opus-5" }), null);
+});
+
+const OAUTH_REFUSAL = "Failed to refresh OAuth token: another Claude Code process is refreshing it or " +
+  "exited mid-refresh. This is usually transient; retry in a minute, and if it persists close other " +
+  "Claude Code processes or sign in again";
+
+test("Claude forwards the provider's account of an error result instead of an empty turn", () => {
+  const h = makeHarness();
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  // A synthetic record carries no stream deltas, so its text reaches the UI through nothing else.
+  h.feed({
+    type: "assistant",
+    message: { model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }], usage: { input_tokens: 0 } },
+  });
+  const stop = h.feed({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    result: OAUTH_REFUSAL,
+    usage: {},
+    duration_ms: 6_701,
+  });
+  assert.equal(stop, "refusal");
+  const errors = h.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as { message: string }).message, OAUTH_REFUSAL);
+  // The same text has to reach the durable receipt, or the automation still settles on a stop reason.
+  assert.equal(h.driver.lastTurnError(), OAUTH_REFUSAL);
+});
+
+test("Claude falls back to the synthetic message when an error result carries no text", () => {
+  const h = makeHarness();
+  h.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  h.feed({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }] } });
+  assert.equal(h.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  const errors = h.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as { message: string }).message, OAUTH_REFUSAL);
+});
+
+test("Claude does not repeat assistant text that already streamed, and keeps the window story", () => {
+  const streamed = makeHarness();
+  streamed.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5" });
+  streamed.feed({ type: "stream_event", event: { type: "message_start", message: { id: "msg_1" } } });
+  streamed.feed({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial answer" } },
+  });
+  streamed.feed({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "text", text: "partial answer" }] } });
+  assert.equal(streamed.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  const errors = streamed.events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 1);
+  assert.match((errors[0] as { message: string }).message, /error_during_execution/);
+  assert.doesNotMatch((errors[0] as { message: string }).message, /partial answer/);
+
+  // A context-window rejection still wins: it names the cause and the way out, the raw text does not.
+  const rejected = makeHarness();
+  rejected.feed({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5[1m]" });
+  rejected.feed({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    api_error_status: 400,
+    result: "API Error: 400 The long context beta is not yet available.",
+    usage: {},
+  });
+  assert.match(
+    (rejected.events.filter((event) => event.kind === "error")[0] as { message: string }).message,
+    /Choose a different Context Window/,
+  );
+
+  // A subagent's failed result is its parent's business, not a session-level error.
+  const nested = makeHarness();
+  nested.feed({ type: "result", subtype: "success", is_error: true, result: "nested", parent_tool_use_id: "task-1", usage: {} });
+  assert.deepEqual(nested.events.filter((event) => event.kind === "error"), []);
+
+  // Nothing at all to say leaves the channel silent rather than inventing a reason.
+  assert.equal(claudeErrorResultText({ is_error: true }, null), null);
+  assert.equal(claudeErrorResultText({ is_error: true, result: "   " }, "  "), null);
+  assert.equal(claudeErrorResultText(null, "synthetic only"), "synthetic only");
 });
 
 test("Claude result without a matching modelUsage entry leaves the context gauge untouched", () => {

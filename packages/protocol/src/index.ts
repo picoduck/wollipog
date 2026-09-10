@@ -4501,6 +4501,9 @@ export interface AutomationCommandView {
   revision: number;
   attemptCount: number;
   lastError?: string;
+  /** Command id of the replacement issued after a retryable provider failure. A superseded command
+   * is terminal but no longer the execution's verdict; the replacement carries the outcome. */
+  supersededBy?: string;
   createdAt: number;
   updatedAt: number;
   lastSentAt?: number;

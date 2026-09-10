@@ -18,6 +18,7 @@ import type {
   PreparedDriverCommand,
 } from "./drivers/driver.js";
 import {
+  providerStopError,
   SessionManager,
   type SessionCommandInvocationLifecycle,
 } from "./session-manager.js";
@@ -899,4 +900,17 @@ test("cancelling or stopping queued commands settles them as rejected without pr
   } finally {
     h.cleanup();
   }
+});
+
+test("a durable failure receipt carries the provider's reason, not just its stop reason", () => {
+  const oauth = "Failed to refresh OAuth token: another Claude Code process is refreshing it. " +
+    "This is usually transient; retry in a minute";
+  // Without this the scheduler records `provider refusal` and cannot tell a passing credential
+  // condition from a real one; the driver held the only copy of the reason.
+  assert.equal(providerStopError("refusal", { lastTurnError: () => oauth }), `provider refusal: ${oauth}`);
+  assert.equal(providerStopError("refusal", { lastTurnError: () => "  " }), "provider refusal");
+  assert.equal(providerStopError("refusal", { lastTurnError: () => null }), "provider refusal");
+  // Drivers without the channel, and stop reasons the provider did not explain, are unchanged.
+  assert.equal(providerStopError("refusal", {}), "provider refusal");
+  assert.equal(providerStopError("cancelled", { lastTurnError: () => oauth }), "provider cancelled");
 });
