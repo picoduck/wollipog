@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 /**
  * Session-level usage (#602, #781): per-turn tokens and cost on the user message, the context ring
@@ -195,6 +195,123 @@ test.describe("Answer Mode ownership", () => {
     await choice.focus();
     await page.evaluate(() => window.resolveSessionUsageQuestion());
     await expect(composer).toBeFocused();
+  });
+});
+
+/**
+ * #893: the desktop session cost shares mobile's seat — the trailing track of the transcript
+ * status strip — instead of sitting in the middle of the composer bar between the permission and
+ * model controls. These cases pin the layout contract across every label the control can render.
+ */
+test.describe("desktop: the session cost occupies the status strip's trailing track", () => {
+  /** Every shape `sessionCostLabel` can produce, widest to narrowest. */
+  const LABELS = [
+    { name: "a short priced", query: "", text: "$1.37" },
+    { name: "a long priced", query: "&cost=12345.67", text: "$12345.67" },
+    { name: "a sub-cent priced", query: "&cost=0.0007", text: "$0.0007" },
+    { name: "an unavailable", query: "&cost=none", text: "$\u2014" },
+  ];
+
+  /** Geometry of the strip's three tracks, read in one pass so the boxes are mutually consistent. */
+  const readStrip = (page: Page) =>
+    page.locator(".transcript-status-strip").evaluate((strip) => {
+      const rect = (selector: string) => {
+        const element = strip.querySelector(selector);
+        if (!element) return null;
+        const box = element.getBoundingClientRect();
+        return { left: box.left, right: box.right, width: box.width };
+      };
+      const box = strip.getBoundingClientRect();
+      const follow = strip.querySelector(".follow-tail-chip")!.getBoundingClientRect();
+      return {
+        strip: { left: box.left, right: box.right, center: box.left + box.width / 2 },
+        meter: rect(".context-ring-button"),
+        follow: { left: follow.left, right: follow.right, center: follow.left + follow.width / 2 },
+        actions: rect(".transcript-status-actions"),
+        cost: rect(".transcript-status-usage"),
+        overflows: strip.scrollWidth > strip.clientWidth,
+      };
+    });
+
+  for (const label of LABELS) {
+    test(`${label.name} cost trails the follow control and leaves it centered`, async ({ page }) => {
+      await page.setViewportSize({ width: 1200, height: 820 });
+      await page.goto(`/session-usage-e2e.html?width=1180&height=780${label.query}`);
+
+      const cost = page.locator(".transcript-status-usage");
+      await expect(cost).toBeVisible();
+      await expect(cost).toHaveText(label.text);
+
+      // One seat, not two: the composer bar keeps outgoing-message controls only.
+      await expect(page.locator(".cbar-usage")).toHaveCount(0);
+      await expect(page.locator(".composer-bar").getByRole("button", { name: /^Session Usage/ })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /^Session Usage: / })).toHaveCount(1);
+
+      const geometry = await readStrip(page);
+      // The contextual Reply hint is present in this default (reader-active) state, so every
+      // assertion below is made with another trailing action sharing the track.
+      expect(geometry.actions!.width).toBeGreaterThan(0);
+      expect(geometry.meter!.right).toBeLessThanOrEqual(geometry.follow.left + 0.5);
+      expect(geometry.follow.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
+      expect(geometry.actions!.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
+      expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
+      expect(geometry.cost!.width).toBeGreaterThan(0);
+      expect(geometry.overflows).toBe(false);
+      // The follow control stays optically centered no matter how wide the cost renders.
+      expect(Math.abs(geometry.follow.center - geometry.strip.center)).toBeLessThanOrEqual(1);
+
+      await page.screenshot({ path: `${SHOT}/desktop-status-strip-${label.name.replace(/[^a-z]+/g, "-")}.png` });
+    });
+  }
+
+  test("a trailing action appearing or disappearing never moves the cost", async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=12345.67");
+
+    const reply = page.locator(".transcript-status-actions").getByRole("button", { name: "Reply" });
+    await expect(reply).toBeVisible();
+    const withAction = await readStrip(page);
+
+    // The Reply hint is offered only while the transcript owns focus; giving the composer focus
+    // retires it. The cost is anchored to the strip edge, so it must not shift by a pixel.
+    await page.locator(".composer-input").focus();
+    await expect(reply).toHaveCount(0);
+    const withoutAction = await readStrip(page);
+
+    expect(withoutAction.cost!.left).toBeCloseTo(withAction.cost!.left, 1);
+    expect(withoutAction.cost!.right).toBeCloseTo(withAction.cost!.right, 1);
+    expect(Math.abs(withoutAction.follow.center - withoutAction.strip.center)).toBeLessThanOrEqual(1);
+
+    // And the cost stays operable while the composer holds focus.
+    await page.getByRole("button", { name: /^Session Usage: / }).click();
+    await expect(page.locator(".session-usage-popover")).toHaveCount(1);
+  });
+
+  test("an unpriced ledger keeps the placeholder and names itself in the popover", async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=none");
+
+    const cost = page.getByRole("button", { name: "Session Usage: Cost Unavailable" });
+    await cost.click();
+    const usage = page.locator(".session-usage-popover").first();
+    await expect(usage).toContainText("Not Priced");
+    // The ledger has now answered "unpriced": the strip still refuses to invent a $0.00, and the
+    // control has not moved out of the trailing track to make room for the open panel.
+    await expect(cost).toHaveText("$\u2014");
+    const geometry = await readStrip(page);
+    expect(geometry.actions!.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
+    expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
+    expect(geometry.overflows).toBe(false);
+
+    // The popover opens from the strip's right edge and still fits the viewport.
+    const usageBox = (await usage.boundingBox())!;
+    expect(usageBox.x).toBeGreaterThanOrEqual(0);
+    expect(usageBox.x + usageBox.width).toBeLessThanOrEqual(1200);
+    await page.screenshot({ path: `${SHOT}/desktop-status-strip-unpriced-popover.png` });
+
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".session-usage-popover")).toHaveCount(0);
+    await expect(cost).toHaveAttribute("aria-expanded", "false");
   });
 });
 

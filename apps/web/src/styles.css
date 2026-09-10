@@ -3551,17 +3551,6 @@ textarea {
   align-items: center;
   gap: 6px;
 }
-/* The session-cost control occupies the otherwise-empty center of the composer bar. */
-.cbar-usage {
-  flex: 1 1 auto;
-  justify-content: center;
-  min-width: 0;
-  overflow: hidden;
-  font-size: var(--text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cbar-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cbar-menu {
   position: relative;
 }
@@ -10452,23 +10441,27 @@ body.shell-dock-dragging * {
   align-self: stretch;
   justify-self: stretch;
   min-width: 0;
+  /* End-packed, so the cost keeps the strip's trailing edge — the seat it already holds on
+     mobile — and a transcript action that comes and goes cannot slide it (#893). */
+  justify-content: flex-end;
+  column-gap: 8px;
 }
 .transcript-status-usage {
   justify-content: flex-end;
   min-width: 0;
-  margin-left: auto;
   overflow: hidden;
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .transcript-status-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Contextual actions sit BEFORE the cost in the end-packed trailing track: they claim no free
+   space of their own, so they group beside the cost rather than crowding the centered follow
+   control, and hiding them leaves the cost exactly where it was. */
 .transcript-status-actions {
   display: flex;
   flex: none;
   align-items: center;
-  margin-left: auto;
-  padding-left: 10px;
   min-width: 0;
 }
 .transcript-status-actions:empty { display: none; }
