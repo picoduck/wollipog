@@ -5,6 +5,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { InboxRow } from "../components/InboxRow.js";
+import { useIsMobile } from "../components/useIsMobile.js";
 import { Board } from "../components/Board.js";
 import { viewPath } from "../navigation.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
@@ -120,6 +121,10 @@ function NavigationFixture({ session, onSession, online }: {
   const { navigate } = useStoreActions();
   const [selected, setSelected] = useState<string | null>(null);
   const primaryRef = useRef<HTMLHeadingElement>(null);
+  // This fixture renders one row directly instead of going through InboxList, so it reads the
+  // breakpoint itself. agents.spec.ts runs this page at 390px as well as at 1280px, and a hard-coded
+  // shape would draw the desktop card on a phone viewport and quietly stop matching the product.
+  const isMobile = useIsMobile();
   return <main style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
     <h1 ref={primaryRef} tabIndex={-1}>Attention Navigation</h1>
     <output aria-label="Current Route" style={{ display: "block", overflowWrap: "anywhere" }}>{viewPath(view)}</output>
@@ -127,7 +132,7 @@ function NavigationFixture({ session, onSession, online }: {
       <h2>Inbox</h2>
       <div role="grid" aria-label="Fixture Inbox"><InboxRow session={session} projectName="Fixture"
         optionId="fixture-row" selected={false} unread={false} pinned={false} rowIndex={1}
-        stalled={false} activityNow={now} onSelect={() => {}} onExpand={() => {}}
+        stalled={false} activityNow={now} threeRow={isMobile} onSelect={() => {}} onExpand={() => {}}
         onSessionMenu={() => {}} onNavigate={navigate} /></div>
       <h2>Board</h2>
       <Board sessions={[session]} searchActive={false} onShowAll={() => {}}

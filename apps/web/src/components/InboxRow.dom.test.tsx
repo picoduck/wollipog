@@ -34,7 +34,7 @@ test("Inbox request navigation keeps exact identity and never selects or approve
   try {
     await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
       selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
-      onSelect={() => { selected++; }} onExpand={() => { selected++; }} onSessionMenu={() => {}}
+      threeRow onSelect={() => { selected++; }} onExpand={() => { selected++; }} onSessionMenu={() => {}}
       onNavigate={(view) => navigated.push(view)} />));
     assert.equal(container.querySelector("button button"), null, "request actions are not nested in the row button");
     const picker = container.querySelector(".attention-requests")!;
@@ -69,7 +69,7 @@ test("Inbox rows expose plain Stop Failed instead of Diff Ready", async () => {
   await act(async () => root.render(<InboxRow
     optionId="session-option" session={session} projectName="Project One"
     selected={false} unread={false} pinned={false} rowIndex={1}
-    stalled={false} activityNow={2}
+    stalled={false} activityNow={2} threeRow
     onSelect={() => undefined} onExpand={() => undefined}
       onSessionMenu={() => undefined}
   />));
@@ -99,7 +99,7 @@ test("returned-from-snooze rows expose the ended instant without overdue copy", 
   await act(async () => root.render(<InboxRow
     optionId="session-option" session={session} projectName="Project One"
     selected={false} unread={false} pinned={false} rowIndex={1}
-    stalled={false} activityNow={Date.now()} reminder={reminder}
+    stalled={false} activityNow={Date.now()} reminder={reminder} threeRow
     onSelect={() => undefined} onExpand={() => undefined} onSessionMenu={() => undefined}
   />));
   const pill = container.querySelector<HTMLElement>(".inbox-status-pill.reminder")!;
@@ -110,9 +110,11 @@ test("returned-from-snooze rows expose the ended instant without overdue copy", 
   container.remove();
 });
 
+/** Defaults to the phone's three-row card; #877's desktop shape is asked for explicitly. */
 async function withRow(
   session: SessionView,
   assertions: (container: HTMLDivElement) => void,
+  { threeRow = true }: { threeRow?: boolean } = {},
 ): Promise<void> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -120,7 +122,7 @@ async function withRow(
   await act(async () => root.render(<InboxRow
     optionId="session-option" session={session} projectName="Project One"
     selected={false} unread={false} pinned={false} rowIndex={1}
-    stalled={false} activityNow={2}
+    stalled={false} activityNow={2} threeRow={threeRow}
     onSelect={() => undefined} onExpand={() => undefined} onSessionMenu={() => undefined}
   />));
   try {
@@ -250,7 +252,7 @@ test("a session's Git line names its branch, admits to none, or admits to not kn
 });
 
 // #782: the badge shares line three with the Git state instead of taking a fourth line.
-test("background work sits on the Git line, whatever the session's branch state", async () => {
+test("background work sits on the Git line of a phone card, whatever the session's branch state", async () => {
   for (const extra of [
     { useWorktree: false, worktreePath: null },
     {
@@ -268,4 +270,66 @@ test("background work sits on the Git line, whatever the session's branch state"
       assert.equal(container.querySelectorAll(".inbox-row-background-work").length, 1);
     });
   }
+});
+
+/**
+ * What the title line holds, left to right. The strip's own class list carries its variant classes
+ * too, so match on the row's marker class rather than comparing whole `className` strings.
+ */
+const titleLineOrder = (copy: Element): string[] => [...copy.children].map((child) => {
+  const marker = [...child.classList].find((name) => name.startsWith("inbox-row-"));
+  return marker?.slice("inbox-row-".length) ?? child.className;
+});
+
+// #877: the desktop card has no third line to put the badge on, so it moves to the title line —
+// immediately left of the strip, which is the only other thing on that line that does not shrink.
+test("a desktop card carries background work on the title line, left of the activity strip", async () => {
+  for (const extra of [
+    { useWorktree: false, worktreePath: null },
+    {
+      useWorktree: true,
+      worktreePath: "/repos/alpha/wt",
+      worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-877", source: "created" }],
+    },
+  ] as Partial<SessionView>[]) {
+    await withRow(
+      { ...worktreeSession(null), ...extra, backgroundWorkState: "running" } as SessionView,
+      (container) => {
+        const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
+        const badge = copy.querySelector<HTMLElement>(".inbox-row-background-work")!;
+        assert.notEqual(badge, null, "the badge rides the title line on a desktop card");
+        assert.equal(
+          badge.querySelector(".background-work-badge")?.getAttribute("aria-label"),
+          "Background Work: Waiting on External Job",
+        );
+        // Document ORDER is the layout here: title, badge, strip. `flex-direction` never reverses,
+        // so the badge sitting between them in the DOM is the badge sitting between them on screen.
+        assert.deepEqual(titleLineOrder(copy), ["title", "background-work", "activity"]);
+        // Still exactly one badge: it MOVED between lines, it was not duplicated and hidden.
+        assert.equal(container.querySelectorAll(".inbox-row-background-work").length, 1);
+        assert.equal(container.querySelector(".inbox-row-meta .inbox-row-background-work"), null);
+        // The Git state itself does not move out of its own element; only its line does, in CSS.
+        assert.notEqual(container.querySelector(".inbox-row-meta .inbox-row-git"), null);
+      },
+      { threeRow: false },
+    );
+  }
+});
+
+// A badge with no strip beside it must not be treated as a special case: it is the same one item at
+// the trailing edge of the same line, and the card is the same height either way.
+test("a desktop card with background work but no activity strip keeps the badge on the title line", async () => {
+  await withRow(
+    { ...worktreeSession(null), status: "idle", backgroundWorkState: "continuation_pending" } as SessionView,
+    (container) => {
+      const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
+      assert.equal(copy.querySelector(".inbox-row-activity"), null, "an idle session draws no strip");
+      assert.deepEqual(titleLineOrder(copy), ["title", "background-work"]);
+      assert.equal(
+        copy.querySelector(".background-work-badge")?.getAttribute("aria-label"),
+        "Background Work: Continuation Pending",
+      );
+    },
+    { threeRow: false },
+  );
 });

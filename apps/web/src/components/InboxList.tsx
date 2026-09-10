@@ -6,6 +6,7 @@ import { matchesShortcut } from "../shortcuts.js";
 import { useStoreSelector } from "../store.js";
 import { InboxRow, type InboxRowProps } from "./InboxRow.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 /**
  * A collapsed inbox row, measured. TanStack corrects from the real height on first paint, so this
@@ -13,14 +14,24 @@ import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
  * restores an absolute `scrollTop`, close enough that a restore against unmeasured rows lands in
  * the same reading neighbourhood.
  *
- * ONE number, because #782 made every card three lines. #664 needed two, since a session without an
- * active worktree lost line three and a per-row predicate had to guess which shape it was; that
- * guess is gone along with the shape it guessed at. Measured across both densities: 82-88px,
- * margins included.
+ * ONE number PER SHAPE, not per row. #782 made every card the same height at a given width, and
+ * #877 gave the desktop a second, shorter shape; within either, every card measures the same, so
+ * nothing here has to guess from a session's contents the way #664's per-row predicate did.
+ * Both numbers are the midpoint of the two densities, re-measured on the virtualizer's own row
+ * wrapper — margins included, which is what it positions from. A three-row card is 94px compact and
+ * 100px comfortable; a two-row desktop card is 73px and 79px. The 85 that stood here was a stale
+ * figure from an earlier card, low enough that a long inbox's scrollbar and any restore against
+ * unmeasured rows sat a row or so short of the truth.
+ *
+ * The breakpoint change itself is safe for the cached measurements: a viewport width change opens a
+ * new measurement epoch in MeasuredVirtualList, which invalidates offscreen sizes and re-seeds the
+ * mounted rows from the DOM while holding the reader's logical anchor.
  */
-const INBOX_ROW_ESTIMATE = 85;
+const INBOX_ROW_ESTIMATE_THREE_ROW = 97;
+const INBOX_ROW_ESTIMATE_TWO_ROW = 76;
 
-const estimateInboxRow = () => INBOX_ROW_ESTIMATE;
+const estimateThreeRowInboxRow = () => INBOX_ROW_ESTIMATE_THREE_ROW;
+const estimateTwoRowInboxRow = () => INBOX_ROW_ESTIMATE_TWO_ROW;
 
 export interface InboxListEntry {
   session: SessionView;
@@ -89,6 +100,11 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onPointerPressChange,
   onSessionMenu,
 }, ref) {
+  // The breakpoint, read ONCE for the whole list rather than once per mounted card. The same answer
+  // decides the cards' shape and the estimate the virtualizer positions unmeasured rows with, and
+  // those two must never disagree: a list estimating 97px for rows that render at 73px puts a
+  // restored scroll position most of a card out per row it has not measured yet.
+  const threeRow = useIsMobile();
   // The scroll container is BOTH the forwarded ref (InboxView restores scrollTop through it) and
   // the virtualizer's viewport.
   //
@@ -177,7 +193,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
         // an element that does not exist — which is what keyboard navigation moves between.
         pinnedKey={selectedSessionId}
         preserveAnchor
-        estimateSize={estimateInboxRow}
+        estimateSize={threeRow ? estimateThreeRowInboxRow : estimateTwoRowInboxRow}
         scrollRef={listRef}
         overscan={6}
         rootRole="rowgroup"
@@ -189,6 +205,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
           const rowProps = {
             optionId: `inbox-session-${encodeResourceId(session.id)}`,
             rowIndex: index + 1,
+            threeRow,
             session,
             projectName,
             selected: session.id === selectedSessionId,
