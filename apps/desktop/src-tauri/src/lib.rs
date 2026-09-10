@@ -19,7 +19,7 @@ use atomic_write_file::AtomicWriteFile;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use fs2::FileExt;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
