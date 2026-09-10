@@ -80,7 +80,7 @@ export function deriveSteeringReceipts(
   const eligible = attempts.filter((attempt) =>
     !(attempt.resolution?.state === "applied" && attempt.resolution.action === "dismiss") &&
     !(attempt.resolution?.state === "applied" && attempt.resolution.action === "queue_again" &&
-      canonicalQueuedPrompts.has(attempt.resolution.queuedPromptId ?? attempt.queuedPromptId ?? "")) &&
+      canonicalQueuedPrompts.has(attempt.resolution.queuedPromptId ?? "")) &&
     (attempt.state !== "accepted" || (!historyPartial && !canonicalAccepted.has(attempt.submissionId))),
   );
   const recentPreviousTurn = new Set(

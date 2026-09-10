@@ -3291,21 +3291,31 @@ test("hydrated canonical queue delivery retires Queue Again receipts in both his
       requestId: message.requestId,
       sessionId: id,
       ok: true,
-      events: [{ seq: 1, ts: 100, payload: {
-        kind: "user_message", text: "delivered", turnId: `queue-hydrated-${suffix}`,
-      } }],
-      page: { logEpoch: 7, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
+      events: [
+        { seq: 1, ts: 100, payload: {
+          kind: "user_message", text: "delivered", turnId: `queue-hydrated-${suffix}`,
+        } },
+        { seq: 2, ts: 101, payload: {
+          kind: "user_message", text: "delivered first", turnId: `queue-before-result-${suffix}`,
+        } },
+      ],
+      page: { logEpoch: 7, throughSeq: 2, nextAfterSeq: 2, hasMore: false },
     } : {
       type: "session_history_result",
       requestId: message.requestId,
       sessionId: id,
       ok: true,
-      events: [{ seq: 1, ts: 100, payload: {
-        kind: "user_message", text: "delivered", turnId: `queue-hydrated-${suffix}`,
-      } }],
+      events: [
+        { seq: 1, ts: 100, payload: {
+          kind: "user_message", text: "delivered", turnId: `queue-hydrated-${suffix}`,
+        } },
+        { seq: 2, ts: 101, payload: {
+          kind: "user_message", text: "delivered first", turnId: `queue-before-result-${suffix}`,
+        } },
+      ],
     };
     svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
-      seq: 1,
+      seq: 2,
       historyEpoch: indexed ? 7 : undefined,
     })]);
     db.createSteeringAttempt({
@@ -3322,10 +3332,30 @@ test("hydrated canonical queue delivery retires Queue Again receipts in both his
       sessionId: id, submissionId: `submission-hydrated-${suffix}`,
       action: "queue_again", applied: true, queuedPromptId: `queue-hydrated-${suffix}`,
     }, 4);
+    db.createSteeringAttempt({
+      requestId: `steer-before-result-${suffix}`, sessionId: id,
+      submissionId: `submission-before-result-${suffix}`, turnId: `turn-before-result-${suffix}`,
+      source: "direct", requestSha256: "2".repeat(64), text: "later still", now: 5,
+    });
+    db.markSteeringAttemptUncertain(`steer-before-result-${suffix}`, 6);
     await svc.hydrateHistory(id);
 
-    assert.equal(db.getSession(id)?.steeringAttempts, undefined, suffix);
+    assert.equal(db.getSession(id)?.steeringAttempts?.length, 1, suffix);
     assert.ok(hub.sessionChangedByIdCalls.includes(id), suffix);
+    hub.requestHandler = (message) => ({
+      type: "resolve_steering_attempt_result",
+      requestId: message.requestId,
+      sessionId: id,
+      submissionId: `submission-before-result-${suffix}`,
+      action: "queue_again",
+      applied: true,
+      queuedPromptId: `queue-before-result-${suffix}`,
+    });
+    assert.equal((await svc.resolveSteeringAttempt(
+      id, `submission-before-result-${suffix}`, "queue_again",
+    )).ok, true, suffix);
+    assert.equal(db.getSession(id)?.steeringAttempts, undefined,
+      `${suffix}: delayed result self-heals against already hydrated delivery evidence`);
   }
 });
 

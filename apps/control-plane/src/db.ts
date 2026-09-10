@@ -3480,10 +3480,15 @@ export class ControlPlaneDb {
     }
     db.exec(
       `UPDATE session_steering_attempts
-       SET resolution_queued_prompt_id=json_extract(resolution_receipt_json,'$.queuedPromptId')
+       SET resolution_queued_prompt_id=json_extract(
+         CASE WHEN json_valid(resolution_receipt_json) THEN resolution_receipt_json ELSE '{}' END,
+         '$.queuedPromptId'
+       )
        WHERE resolution_action='queue_again' AND resolution_queued_prompt_id IS NULL
-         AND json_valid(resolution_receipt_json)
-         AND json_type(resolution_receipt_json,'$.queuedPromptId')='text'`,
+         AND json_type(
+           CASE WHEN json_valid(resolution_receipt_json) THEN resolution_receipt_json ELSE '{}' END,
+           '$.queuedPromptId'
+         )='text'`,
     );
     // Poller liveness is separate from the optional human approval deadline. A pre-column open
     // row gets one full grace horizon after upgrade: its sidecar could have polled moments before
@@ -12651,6 +12656,17 @@ export class ControlPlaneDb {
     };
   }
 
+  private hasCanonicalQueuedPromptDelivery(sessionId: string, queuedPromptId: string): boolean {
+    const safePayload = "CASE WHEN json_valid(payload) THEN payload ELSE '{}' END";
+    return this.stmt(
+      `SELECT 1 FROM session_events
+       WHERE session_id=? AND kind='user_message'
+         AND json_extract(${safePayload},'$.turnId')=?
+         AND COALESCE(json_extract(${safePayload},'$.deliveryIntent'),'')<>'steer'
+       LIMIT 1`,
+    ).get(sessionId, queuedPromptId) !== undefined;
+  }
+
   createSteeringAttempt(input: CreateSteeringAttemptInput): CreateSteeringAttemptResult {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -12910,6 +12926,16 @@ export class ControlPlaneDb {
            resolution_queued_prompt_id=COALESCE(?,resolution_queued_prompt_id),resolved_at=?,updated_at=?
            WHERE request_id=? AND resolved_at IS NULL`,
         ).run(JSON.stringify(result), result.queuedPromptId ?? null, now, now, row.request_id);
+        if (result.action === "queue_again" && result.queuedPromptId &&
+            this.hasCanonicalQueuedPromptDelivery(result.sessionId, result.queuedPromptId)) {
+          this.stmt(
+            `UPDATE session_steering_attempts
+             SET receipt_dismissed_at=COALESCE(receipt_dismissed_at,?),
+               resolution_receipt_json=NULL,resolution_queued_prompt_id=NULL,
+               updated_at=MAX(updated_at,?)
+             WHERE request_id=? AND resolved_at IS NOT NULL`,
+          ).run(now, now, row.request_id);
+        }
       } else {
         this.stmt(
           `UPDATE session_steering_attempts SET resolution_receipt_json=?,updated_at=? WHERE request_id=?`,

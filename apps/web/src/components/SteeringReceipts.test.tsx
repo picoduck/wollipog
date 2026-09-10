@@ -98,6 +98,13 @@ test("Queue Again retires only for the exact canonical queued-prompt identity", 
     kind: "user_message", id: 3, text: "Steering inside a turn", turnId: "queue-exact",
     deliveryIntent: "steer",
   }], undefined).length, 1, "an in-turn steer cannot impersonate queued-prompt delivery");
+  const missingResolutionIdentity = attempt("queued-again-no-id", "converted_to_queue", {
+    queuedPromptId: "queue-original",
+    resolution: { action: "queue_again", state: "applied" },
+  });
+  assert.equal(deriveSteeringReceipts([missingResolutionIdentity], [{
+    kind: "user_message", id: 4, text: "Original queued copy", turnId: "queue-original",
+  }], undefined).length, 1, "the original converted-queue id cannot stand in for a Queue Again id");
 });
 
 test("receipt derivation remains bounded to the projected recovery limit", () => {

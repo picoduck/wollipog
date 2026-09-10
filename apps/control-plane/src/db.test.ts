@@ -561,6 +561,60 @@ test("manual Queue Again receipt dismissal is durable without staging a runner c
   }
 });
 
+test("legacy Queue Again receipt identities migrate safely, including malformed receipt JSON", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-queue-again-migration-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    for (const [suffix, now] of [["valid", 2], ["malformed", 10]] as const) {
+      db.createSteeringAttempt({
+        requestId: `steer-migration-${suffix}`, sessionId: "sess-1",
+        submissionId: `submission-migration-${suffix}`, turnId: `turn-${suffix}`,
+        source: "direct", requestSha256: (suffix === "valid" ? "1" : "0").repeat(64),
+        text: "recover", now,
+      });
+      db.markSteeringAttemptUncertain(`steer-migration-${suffix}`, now + 1);
+      db.stageSteeringResolution(
+        "sess-1", `submission-migration-${suffix}`, "queue_again", `resolve-migration-${suffix}`, now + 2,
+      );
+    }
+    db.recordSteeringResolutionResult("runner-1", {
+      type: "resolve_steering_attempt_result", requestId: "resolve-migration-valid",
+      sessionId: "sess-1", submissionId: "submission-migration-valid",
+      action: "queue_again", applied: true, queuedPromptId: "queue-migrated",
+    }, 5);
+    db.raw().prepare(
+      `UPDATE session_steering_attempts
+       SET resolution_receipt_json='not json',resolved_at=13
+       WHERE request_id='steer-migration-malformed'`,
+    ).run();
+    db.close();
+    db = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE session_steering_attempts DROP COLUMN resolution_queued_prompt_id");
+    legacy.close();
+
+    assert.doesNotThrow(() => { db = ControlPlaneDb.open(path); },
+      "malformed legacy JSON must not make database startup fail");
+    assert.equal(db!.findSteeringAttemptBySubmission(
+      "sess-1", "submission-migration-valid",
+    )?.attempt.resolution?.queuedPromptId, "queue-migrated");
+    assert.equal(db!.retireQueuedAgainSteeringReceiptFromUserMessage(
+      "sess-1", "queue-migrated", 20,
+    ), true, "the backfilled identity remains eligible for exact retirement");
+    assert.deepEqual(db!.findSteeringAttemptBySubmission(
+      "sess-1", "submission-migration-malformed",
+    )?.attempt.resolution, { action: "queue_again", state: "applied" });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rejected steering receipts can be durably acknowledged without a runner round trip", () => {
   const db = withRunner();
   db.createSession(newSession());
