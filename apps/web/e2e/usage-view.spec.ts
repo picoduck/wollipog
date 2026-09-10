@@ -15,6 +15,9 @@ test("desktop: metric toggle flips every figure, the chart answers hover and foc
   await page.goto("/usage-view-e2e.html");
   const headline = page.locator(".usage-headline-value");
   await expect(headline).toContainText("$");
+  await expect(page.locator(".usage-coverage", { hasText: "Codex App Server" })).toContainText(
+    "Codex App Server records written by runners before protocol v127 include only the final model response and are incomplete",
+  );
   await page.screenshot({ path: `${SHOT}/desktop-dark-cost.png`, fullPage: true });
 
   const cost = await headline.textContent();

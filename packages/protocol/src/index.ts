@@ -349,7 +349,11 @@
 // 126: Codex service-tier discovery and per-session selection. AgentModel carries the provider's
 //      open-string tier catalog/default and SessionConfig carries the selected tier through
 //      persistence, forks, resumes, and turn starts. Older peers omit the additive fields.
-export const PROTOCOL_VERSION = 126;
+// 127: Codex App Server usage derives each turn from replay-safe cumulative thread deltas while
+//      retaining the final response for context occupancy. Codex usage written by older runners
+//      may contain only the final upstream response and must be presented as incomplete history.
+export const PROTOCOL_VERSION = 127;
+export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.

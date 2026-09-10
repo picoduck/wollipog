@@ -65,6 +65,7 @@ test("desktop: the cost control opens Session Usage with cumulative tokens and t
   await expect(usage).toContainText("By Model");
   await expect(usage).toContainText("gpt-5.5-codex-mini");
   await expect(usage).toContainText("Not Priced");
+  await expect(usage).toContainText("Historical Codex App Server usage written by runners before protocol v127 is incomplete");
   // The usage panel never repeats the context meter's occupancy or capacity.
   await expect(usage).not.toContainText("Capacity");
   await expect(usage).not.toContainText("Remaining");
@@ -206,6 +207,7 @@ test("mobile: the strip trails the cost alone, and it opens Session Usage", asyn
   await expect(usage).toBeVisible();
   await expect(usage).toContainText("Input");
   await expect(usage).toContainText("Output");
+  await expect(usage).toContainText("Protocol v127+ counts every response in each turn");
   const usageBox = (await usage.boundingBox())!;
   expect(usageBox.x).toBeGreaterThanOrEqual(0);
   expect(usageBox.x + usageBox.width).toBeLessThanOrEqual(390);

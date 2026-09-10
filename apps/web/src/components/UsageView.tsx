@@ -8,6 +8,7 @@ import type {
   UsageRetentionPolicy,
   UserCostWindows,
 } from "@wollipog/protocol";
+import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useHasStore, useStoreSelector } from "../store.js";
 import {
@@ -283,6 +284,10 @@ export function UsageView() {
   const notices = data
     ? coverageMessages({ offlineMachines, unpricedRecords: data.totals.unpricedRecords ?? 0, pricing: data.pricing })
     : [];
+  const includesCodexAppServer = Boolean(data && (
+    data.byDriver.some((row) => row.key === "codex-app-server") ||
+    (data.seriesByDriver ?? []).some((row) => row.driver === "codex-app-server")
+  ));
   const periodNoun = data?.granularity === "hour" ? "Hour" : "Day";
   const onOfflineNames = useCallback((names: string[]) => setOfflineMachines(names), []);
 
@@ -429,6 +434,11 @@ export function UsageView() {
           <p className="usage-coverage" role="note">
             Coverage begins {new Date(data.retention.coverageStartedAt).toLocaleString()}. Existing lifetime totals before that cutover are not backdated into buckets.
           </p>
+          {includesCodexAppServer && (
+            <p className="usage-coverage" role="note">
+              Codex App Server records written by runners before protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL} include only the final model response and are incomplete. Protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL}+ records complete turn usage.
+            </p>
+          )}
           {notices.length > 0 && (
             <div className="usage-notice" role="note" aria-label="Coverage">
               {notices.map((notice) => <p key={notice}>{notice}</p>)}

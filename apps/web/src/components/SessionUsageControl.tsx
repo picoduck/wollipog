@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { SessionUsageResponse, SessionView } from "@wollipog/protocol";
+import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL, type SessionUsageResponse, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatCost, formatTokens } from "../format.js";
 import { costProvenanceNote, sessionCostLabel, sessionUsageTotals } from "../session-cost.js";
@@ -97,6 +97,11 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
             <div><dt>Total Processed</dt><dd>{formatTokens(totals.processedTokens)}</dd></div>
             {totals.cacheSavingsUsd > 0 && <div><dt>Cache Savings</dt><dd>{formatCost(totals.cacheSavingsUsd)}</dd></div>}
           </dl>
+          {session.driver === "codex-app-server" && (
+            <p className="session-usage-note">
+              Historical Codex App Server usage written by runners before protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL} is incomplete because it includes only the final model response. Protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL}+ counts every response in each turn.
+            </p>
+          )}
           {provenance && <p className="session-usage-note">{provenance}</p>}
           {breakdownError && <p className="session-usage-note" role="alert">{breakdownError}</p>}
           {byModel.length > 0 && (

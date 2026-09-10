@@ -250,6 +250,12 @@ test("an unsplit response from an older plane is shown honestly and the window c
 
   // The headline names the response's 7-day window although the default range control says 30d.
   assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 7 days/);
+  const codexCoverage = [...container.querySelectorAll(".usage-coverage")]
+    .find((node) => node.textContent?.includes("Codex App Server"));
+  assert.match(
+    codexCoverage?.textContent ?? "",
+    /before protocol v127 include only the final model response and are incomplete.*v127\+ records complete turn usage/s,
+  );
   assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /not split by driver/);
   assert.equal(container.querySelector(".usage-legend"), null, "no legend claims a split that does not exist");
   const dayTable = container.querySelector(".usage-breakdown-section table")!;
@@ -272,6 +278,44 @@ test("an unsplit response from an older plane is shown honestly and the window c
   assert.match(usersText, /\$21\.50 of \$20\.00/);
   assert.match(usersText, /Each user may spend \$20\.00 per UTC day/);
 
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a pre-v103 response without seriesByDriver still renders", async () => {
+  const day = Date.UTC(2026, 0, 2);
+  const legacy = {
+    ...response([bucket(day, 4, 0.04)], "day"),
+    since: day,
+    through: day + 86_400_000,
+  };
+  legacy.byDriver = [{
+    key: "claude-code",
+    ...bucket(0, 4, 0.04),
+  }].map(({ bucketTs: _ignored, ...row }) => row);
+  delete (legacy as Partial<UsageAggregationResponse>).seriesByDriver;
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async () => legacy,
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+  });
+  await act(async () => {
+    await settleLoad();
+    await Promise.resolve();
+  });
+
+  assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 1 day/);
+  assert.equal(container.querySelector('[role="alert"]'), null);
+  assert.doesNotMatch(container.textContent ?? "", /Codex App Server records/);
   await act(async () => root.unmount());
   container.remove();
 });
