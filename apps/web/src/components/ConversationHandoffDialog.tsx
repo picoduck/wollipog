@@ -27,6 +27,15 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
   const lock = useRef(false);
   const reason = handoffDestinationError(agent, sourceDriver, config);
   const model = agent?.capabilities?.models.find((item) => item.id === config.model);
+  // `default` is the provider-standard tier: it is always selectable and never needs advertising,
+  // so it is excluded from the catalog list to avoid a duplicate entry.
+  const advertisedTiers = model?.serviceTiers?.filter((item) => item.id !== "default") ?? [];
+  const carriedTierUnsupported = !!config.serviceTier && config.serviceTier !== "default" &&
+    !advertisedTiers.some((item) => item.id === config.serviceTier);
+  // Render whenever the user has something to choose OR something to clear. A destination with no
+  // tier catalog at all — every Claude model — still needs the control when a tier was carried in,
+  // or the refusal below has no remedy and Create stays disabled forever.
+  const showServiceTier = advertisedTiers.length > 0 || carriedTierUnsupported;
   const submit = async () => {
     if (lock.current || reason) return;
     lock.current = true; setBusy(true); setError(undefined);
@@ -51,19 +60,16 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
     <div className="field"><span>Effort</span><Select label="Effort" value={config.effort ?? ""} disabled={busy}
       options={[{ value: "", label: "Default" }, ...(model?.efforts?.length ? model.efforts : agent?.capabilities?.effortLevels ?? []).map((item) => ({ value: item, label: effortLabel(item) }))]}
       onChange={(value) => setConfig({ ...config, effort: value || undefined })} /></div>
-    {!!model?.serviceTiers?.length && (
-      <div className="field"><span>Service Tier</span><Select label="Service Tier" value={config.serviceTier ?? ""} disabled={busy}
+    {showServiceTier && (
+      <div className="field"><span>Service Tier</span><Select label="Service Tier" value={config.serviceTier ?? "default"} disabled={busy}
         options={[
-          { value: "", label: "Default" },
-          ...model.serviceTiers.filter((item) => item.id !== "default").map((item) => ({ value: item.id, label: item.name })),
+          { value: "default", label: "Default" },
+          ...advertisedTiers.map((item) => ({ value: item.id, label: item.name })),
           // The carried-over tier stays visible by name even when this destination cannot honour
           // it, so the refusal below reads as being about a specific choice rather than a blank.
-          ...(config.serviceTier && config.serviceTier !== "default" &&
-              !model.serviceTiers.some((item) => item.id === config.serviceTier)
-            ? [{ value: config.serviceTier, label: config.serviceTier }]
-            : []),
+          ...(carriedTierUnsupported ? [{ value: config.serviceTier!, label: config.serviceTier! }] : []),
         ]}
-        onChange={(value) => setConfig({ ...config, serviceTier: value || undefined })} /></div>
+        onChange={(value) => setConfig({ ...config, serviceTier: value })} /></div>
     )}
     <div className="field"><span>Permissions</span><Select label="Permissions" value={config.permissionMode ?? ""} disabled={busy}
       options={[{ value: "", label: "Default" }, ...(agent?.capabilities?.permissionModes ?? []).map((item) => ({ value: item, label: permissionModeLabel(item, agent?.driver) }))]}
