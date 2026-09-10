@@ -317,6 +317,28 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
     await page.screenshot({ path: `${SHOT}/desktop-status-strip-cramped-pane.png` });
   });
 
+  test("an enlarged root font retires the hint too, at a pane width that fits by pixels", async ({ page }) => {
+    // Type is in rem so the browser's font-size preference actually does something (styles.css
+    // "--- Type ---"). The follow-state control is px-sized and does not grow, but the hint and the
+    // cost both do — so a pane wide enough at a 16px root can still be too narrow at 32px, and a
+    // pixel-only cutoff would leave the hint showing while the cost fell below its own scrollWidth.
+    await page.setViewportSize({ width: 1280, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=561&height=780&cost=12345.67");
+    await page.addStyleTag({ content: "html { font-size: 32px; }" });
+    await expect(page.locator(".follow-tail-chip")).toBeVisible();
+    await page.mouse.move(280, 300);
+    await page.mouse.wheel(0, -900);
+    await expect(page.locator(".follow-tail-chip")).toContainText("Follow Live Output");
+
+    await expect(page.locator(".transcript-status-actions")).toBeHidden();
+    const legibility = await page.locator(".transcript-status-usage .session-cost-button").evaluate((button) => ({
+      visible: button.getBoundingClientRect().width,
+      needed: button.scrollWidth,
+    }));
+    expect(legibility.visible).toBeGreaterThanOrEqual(legibility.needed - 0.5);
+    expect((await readStrip(page)).overflows).toBe(false);
+  });
+
   test("an unpriced ledger keeps the placeholder and names itself in the popover", async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 820 });
     await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=none");

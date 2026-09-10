@@ -103,6 +103,11 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "the trailing track packs to the strip edge so the cost keeps its seat as actions come and go");
   assert.doesNotMatch(css, /\.cbar-usage/,
     "the composer-bar cost styles retire with the control (#893)");
+  // A pane too narrow for all three tracks sheds the optional hint, never the cost. The cutoff has
+  // to be font-relative: the labels are rem, so a px-only cutoff goes inactive exactly where an
+  // enlarged root font needs it most.
+  assert.match(css, /@container transcript-pane \(max-width: calc\([^)]*rem[^)]*\)\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
+    "the trailing actions retire on a width threshold that scales with the text-size preference");
   assert.match(css, /\.follow-tail-control\s*\{[^}]*grid-column:\s*2;[^}]*display:\s*inline-flex;[^}]*gap:\s*8px;[^}]*justify-self:\s*center;/,
     "cluster items sit at the standard inter-control gap — no flexible spacers or space-between");
   assert.doesNotMatch(css.match(/\.follow-tail-control\s*\{[^}]*\}/)?.[0] ?? "", /1fr|space-between/,
