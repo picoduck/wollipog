@@ -140,6 +140,10 @@ export function AutomationsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideZap} {...props} />;
 }
 
+export function ServiceTierIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideZap} {...props} />;
+}
+
 export function SkillsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideWandSparkles} {...props} />;
 }

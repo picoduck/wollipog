@@ -10,6 +10,8 @@ import {
   ModelEffortMenuChoices,
   permissionModeOptionDescription,
   permissionModeOutcome,
+  serviceTierChoices,
+  ServiceTierMenuChoices,
 } from "./ComposerControls.js";
 
 test("model and reasoning effort are separately labelled menu-radio groups", () => {
@@ -32,6 +34,39 @@ test("an effort-only control keeps a non-empty Model label when no live catalog 
   assert.equal(modelEffortControlLabel(undefined, ""), "Model");
   assert.equal(modelEffortControlLabel(undefined, "opus"), "opus");
   assert.equal(modelEffortControlLabel({ id: "opus", displayName: "Opus 5" }, "opus"), "Opus 5");
+});
+
+test("service tier choices expose Standard and provider copy for only the selected model", () => {
+  const capabilities = {
+    models: [
+      {
+        id: "gpt-fast",
+        default: true,
+        serviceTiers: [{ id: "fast", name: "Fast", description: "Uses more credits." }],
+        defaultServiceTier: "fast",
+      },
+      { id: "gpt-standard" },
+    ],
+    effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+  };
+  const state = serviceTierChoices(capabilities, "gpt-fast", undefined);
+  assert.deepEqual(state, {
+    choices: [
+      { id: "default", name: "Standard", description: "Standard response speed. Applies to the next turn." },
+      { id: "fast", name: "Fast", description: "Uses more credits. Applies to the next turn." },
+    ],
+    selected: { id: "fast", name: "Fast", description: "Uses more credits. Applies to the next turn." },
+  });
+  assert.equal(serviceTierChoices(capabilities, "gpt-standard", "fast"), null);
+  const html = renderToStaticMarkup(React.createElement(ServiceTierMenuChoices, {
+    state: state!, apply: () => {}, close: () => {},
+  }));
+  assert.match(html, /role="group" aria-label="Service Tier"/);
+  assert.match(html, />Standard</);
+  assert.match(html, />Fast</);
+  assert.match(html, /Uses more credits\. Applies to the next turn\./);
+  assert.equal((html.match(/role="menuitemradio"/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-checked="true"/g) ?? []).length, 1);
 });
 
 test("permission outcomes distinguish available, blocked, unrestricted, and unknown modes", () => {

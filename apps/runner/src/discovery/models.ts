@@ -68,6 +68,12 @@ export function parseCodexModels(cacheJson: string, configured?: string | null):
 
 type ModelListPage = { data?: unknown; nextCursor?: unknown };
 
+function legacyServiceTierName(id: string): string {
+  return id.split(/[-_\s]+/).filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 /** Normalize the stable v2 `model/list` response into the provider-neutral capability shape. */
 export function parseCodexAppServerModels(page: unknown): AgentModel[] {
   const data = page && typeof page === "object" && Array.isArray((page as ModelListPage).data)
@@ -89,6 +95,25 @@ export function parseCodexAppServerModels(page: unknown): AgentModel[] {
     const inputModalities = Array.isArray(raw.inputModalities)
       ? raw.inputModalities.filter((value): value is "text" | "image" => value === "text" || value === "image")
       : [];
+    const currentServiceTiers = Array.isArray(raw.serviceTiers)
+      ? raw.serviceTiers.flatMap((option) => {
+          if (!option || typeof option !== "object") return [];
+          const tier = option as Record<string, unknown>;
+          if (typeof tier.id !== "string" || !tier.id || typeof tier.name !== "string" || !tier.name) return [];
+          return [{
+            id: tier.id,
+            name: tier.name,
+            ...(typeof tier.description === "string" && tier.description ? { description: tier.description } : {}),
+          }];
+        })
+      : [];
+    const legacyServiceTiers = currentServiceTiers.length === 0 && Array.isArray(raw.additionalSpeedTiers)
+      ? raw.additionalSpeedTiers
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
+          .map((tier) => ({ id: tier, name: legacyServiceTierName(tier) }))
+      : [];
+    const serviceTiers = [...currentServiceTiers, ...legacyServiceTiers]
+      .filter((tier, index, all) => all.findIndex((candidate) => candidate.id === tier.id) === index);
     models.push({
       id,
       displayName: typeof raw.displayName === "string" ? raw.displayName : id,
@@ -97,6 +122,10 @@ export function parseCodexAppServerModels(page: unknown): AgentModel[] {
       hidden: raw.hidden === true,
       efforts: efforts.length ? [...new Set(efforts)] : undefined,
       defaultEffort: typeof raw.defaultReasoningEffort === "string" ? raw.defaultReasoningEffort : undefined,
+      serviceTiers: serviceTiers.length ? serviceTiers : undefined,
+      defaultServiceTier: typeof raw.defaultServiceTier === "string" && raw.defaultServiceTier
+        ? raw.defaultServiceTier
+        : undefined,
       inputModalities: inputModalities.length ? [...new Set(inputModalities)] : undefined,
     });
   }

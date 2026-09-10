@@ -346,7 +346,10 @@
 // 123: authenticated, target-local Agent Control bridge for structured Direct WSL harnesses.
 // 124: Direct WSL is launchable only through the attested no-follow target-local launcher.
 // 125: mixed-context WSL machine skill snapshots and deployment.
-export const PROTOCOL_VERSION = 125;
+// 126: Codex service-tier discovery and per-session selection. AgentModel carries the provider's
+//      open-string tier catalog/default and SessionConfig carries the selected tier through
+//      persistence, forks, resumes, and turn starts. Older peers omit the additive fields.
+export const PROTOCOL_VERSION = 126;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -499,6 +502,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * effective post-launch window for native drivers. */
   contextWindowVariants: 122,
   wslMachineSkills: 125,
+  /** Per-model Codex service-tier catalogs and the selected session tier travel end to end. */
+  codexServiceTiers: 126,
   machineSkillAdoption: 115,
   machineSkillAdoptionRecovery: 116,
   chunkedAgentSkills: 96,
@@ -757,6 +762,10 @@ export interface AgentModel {
   efforts?: string[];
   /** The model's own default reasoning effort, if any. */
   defaultEffort?: string;
+  /** Provider-advertised service tiers for this model. Identifiers are deliberately open strings. */
+  serviceTiers?: AgentModelServiceTier[];
+  /** The model catalog's default service-tier identifier, when advertised. */
+  defaultServiceTier?: string;
   /** Total context window (tokens) for this model when the provider's own metadata states it —
    * powers the context-fill meter and the Context Window selector. Never inferred from a model
    * name or family; absent ⇒ unknown until the live session reports its effective window. */
@@ -766,6 +775,12 @@ export interface AgentModel {
    * sharing a base with distinct known `contextWindow` values form a real Context Window choice.
    * Absent ⇒ the entry is its own base. */
   baseModelId?: string;
+}
+
+export interface AgentModelServiceTier {
+  id: string;
+  name: string;
+  description?: string;
 }
 
 export interface AgentSlashCommand {
@@ -1125,12 +1140,14 @@ export interface NativeTuiAccountingBoundary {
   missingRequirements: NativeTuiAccountingRequirement[];
 }
 
-/** Resolved per-session knobs (model / reasoning effort / approval preset). */
+/** Resolved per-session knobs (model / reasoning effort / service tier / approval preset). */
 export interface SessionConfig {
   /** Control-plane-owned lifetime cap on directly created child sessions. Default: four. */
   maxChildSessions?: number;
   model?: string;
   effort?: string;
+  /** Codex service-tier id. `default` means standard speed; identifiers remain provider-defined. */
+  serviceTier?: string;
   permissionMode?: string;
   /** Absolute accumulated-cost threshold (USD). A v47 runner cancels at the first observable
    * crossing; the control plane parks and asks. Older runners retain between-turn enforcement. */
@@ -3726,6 +3743,8 @@ export interface SessionView {
   /** Provider-resolved model used by the live session; the selected alias remains in `model`. */
   resolvedModel?: string | null;
   effort: string | null;
+  /** Selected or provider-reconciled Codex service tier. Null lets the model default apply. */
+  serviceTier?: string | null;
   permissionMode: string | null;
   /** Live session-scoped controls (ACP modes/config/commands). Falls back to runner-agent
    * capabilities when absent on pre-v36 sessions. */

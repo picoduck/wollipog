@@ -1231,6 +1231,31 @@ test("concurrent runner rechecks consume one durable retry under the session loc
   }
 });
 
+test("provider-resolved service tiers persist and publish exact runtime snapshots", async () => {
+  const h = harness();
+  try {
+    assert.equal(await h.manager.start(launchSpec(h.root)), true);
+    const updatesBefore = h.sent.filter((message) => message.type === "session_runtime_updated").length;
+
+    h.callbacks().onServiceTierResolved?.("fast");
+    assert.equal(h.store.readMeta("resume-session")?.config.serviceTier, "fast");
+    const selected = h.sent.filter((message) => message.type === "session_runtime_updated").at(-1);
+    assert.equal(selected?.type === "session_runtime_updated" && selected.snapshot.config.serviceTier, "fast");
+
+    h.callbacks().onServiceTierResolved?.("fast");
+    assert.equal(h.sent.filter((message) => message.type === "session_runtime_updated").length, updatesBefore + 1,
+      "an unchanged provider tier does not publish a duplicate snapshot");
+
+    h.callbacks().onServiceTierResolved?.(null);
+    assert.equal(h.store.readMeta("resume-session")?.config.serviceTier, undefined);
+    const cleared = h.sent.filter((message) => message.type === "session_runtime_updated").at(-1);
+    assert.equal(cleared?.type === "session_runtime_updated" && cleared.snapshot.config.serviceTier, undefined);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("fresh-start authentication failure preserves its worktree and ordinary initial prompt", async () => {
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "fresh-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),

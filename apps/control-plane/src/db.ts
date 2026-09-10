@@ -471,6 +471,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   model          TEXT,
   resolved_model TEXT,
   effort         TEXT,
+  service_tier   TEXT,
   permission_mode TEXT,
   agent_capabilities TEXT,
   input_tokens   INTEGER NOT NULL DEFAULT 0,
@@ -2075,6 +2076,7 @@ interface SessionRow {
   model: string | null;
   resolved_model: string | null;
   effort: string | null;
+  service_tier: string | null;
   permission_mode: string | null;
   agent_capabilities: string | null;
   input_tokens: number;
@@ -4030,6 +4032,8 @@ export class ControlPlaneDb {
       "agent_capabilities TEXT",
       // Exact provider model resolved from a selected alias by a live native session.
       "resolved_model TEXT",
+      // Protocol v126 provider-advertised Codex service tier selected for subsequent turns.
+      "service_tier TEXT",
       // Nullable additive form lets the backfill below distinguish legacy rows. Fresh databases
       // use the CREATE TABLE default (`generated`). Existing names are preserved as user-owned.
       "title_source TEXT",
@@ -9832,8 +9836,8 @@ export class ControlPlaneDb {
       this.stmt(
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived,
-             driver, model, effort, permission_mode, workspace_path, acp_session_context, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             driver, model, effort, service_tier, permission_mode, workspace_path, acp_session_context, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -9850,6 +9854,7 @@ export class ControlPlaneDb {
         input.driver,
         input.config.model ?? null,
         input.config.effort ?? null,
+        input.config.serviceTier ?? null,
         input.config.permissionMode ?? null,
         input.workspacePath ?? null,
         input.acpSessionContext ? JSON.stringify(input.acpSessionContext) : null,
@@ -9942,9 +9947,9 @@ export class ControlPlaneDb {
       this.stmt(
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, status, use_worktree, worktree_path, workspace_path, archived,
-             driver, model, resolved_model, effort, permission_mode, agent_capabilities, preview, pending_approval, input_tokens, output_tokens, context_tokens_used, context_window, cost_usd,
+             driver, model, resolved_model, effort, service_tier, permission_mode, agent_capabilities, preview, pending_approval, input_tokens, output_tokens, context_tokens_used, context_window, cost_usd,
               acp_session_context, created_at, updated_at, last_event_at, hydrated_seq, runner_history_epoch, runner_history_tail_seq, adopted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       )
       .run(
         snap.id,
@@ -9966,6 +9971,7 @@ export class ControlPlaneDb {
         snap.config.model ?? null,
         snap.resolvedModel ?? null,
         snap.config.effort ?? null,
+        snap.config.serviceTier ?? null,
         snap.config.permissionMode ?? null,
         snap.agentCapabilities ? JSON.stringify(snap.agentCapabilities) : null,
         snap.preview,
@@ -10129,7 +10135,7 @@ export class ControlPlaneDb {
       }
       this.stmt(
         `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
-            model=?, resolved_model=?, effort=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
+            model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
             acp_session_context=COALESCE(?, acp_session_context),
             updated_at=? WHERE id=?`,
       )
@@ -10150,6 +10156,7 @@ export class ControlPlaneDb {
         snap.config.model ?? null,
         snap.resolvedModel ?? null,
         snap.config.effort ?? null,
+        snap.config.serviceTier ?? null,
         snap.config.permissionMode ?? null,
         snap.agentCapabilities ? JSON.stringify(snap.agentCapabilities) : null,
         snap.tokensIn,
@@ -11277,9 +11284,9 @@ export class ControlPlaneDb {
           SET model=?,
               resolved_model=CASE WHEN model IS ? THEN resolved_model ELSE NULL END,
               context_window=CASE WHEN model IS ? THEN context_window ELSE NULL END,
-              effort=?, permission_mode=?, updated_at=?
+              effort=?, service_tier=?, permission_mode=?, updated_at=?
         WHERE id=?`,
-    ).run(model, model, model, config.effort ?? null, config.permissionMode ?? null, now, id);
+    ).run(model, model, model, config.effort ?? null, config.serviceTier ?? null, config.permissionMode ?? null, now, id);
   }
 
   /** Accumulate a turn's token/cost usage into the session totals. */
@@ -14121,6 +14128,7 @@ export class ControlPlaneDb {
       model: row.model,
       resolvedModel: row.resolved_model,
       effort: row.effort,
+      serviceTier: row.service_tier,
       permissionMode: row.permission_mode,
       agentCapabilities: parseJson<SessionCapabilities>(row.agent_capabilities) ?? undefined,
       tokensIn: row.input_tokens ?? 0,

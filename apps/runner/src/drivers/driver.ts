@@ -125,6 +125,8 @@ export interface DriverCallbacks {
   onAcpSessionInfo?: (info: { title?: string | null; providerUpdatedAt?: string }) => void;
   /** Exact provider model resolved from a selected alias for the active native session. */
   onModelResolved?: (model: string) => void;
+  /** Provider-reconciled Codex thread service tier. Null clears an unsupported or inherited tier. */
+  onServiceTierResolved?: (serviceTier: string | null) => void;
   /** Provider-owned account usage observed on an already-running process. */
   onSubscriptionUsage?: (update: DriverSubscriptionUsageUpdate) => void;
   /** Session-scoped steering availability changed after launch (for example, a persistent

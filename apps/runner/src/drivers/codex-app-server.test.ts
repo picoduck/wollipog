@@ -46,6 +46,18 @@ function childItemId(threadId: string, itemId: string): string {
   return `codex-child:${JSON.stringify([threadId, itemId])}`;
 }
 
+const serviceTierCapabilities = {
+  models: [{
+    id: "gpt-tiered",
+    default: true,
+    serviceTiers: [{ id: "fast", name: "Fast" }, { id: "flex", name: "Flex" }],
+  }],
+  effortLevels: [],
+  slashCommands: [],
+  supportsImages: true,
+  supportsApprovals: true,
+};
+
 /**
  * Unit tests for the app-server item -> SessionEventPayload mapping and the
  * approval decision wiring. No process spawn: we drive the private onItem mapper
@@ -59,12 +71,14 @@ function makeHarness(
   const stderr: string[] = [];
   let authenticationFailures = 0;
   const subscriptionUsage: unknown[] = [];
+  const serviceTiers: Array<string | null> = [];
   const cb: DriverCallbacks = {
     onEvent: (p) => events.push(p),
     onStderr: (line) => stderr.push(line),
     onExit: () => {},
     onAuthenticationFailure: () => { authenticationFailures += 1; },
     onSubscriptionUsage: (update) => subscriptionUsage.push(update),
+    onServiceTierResolved: (serviceTier) => serviceTiers.push(serviceTier),
   };
   const opts: DriverOptions = {
     command: "codex",
@@ -80,7 +94,7 @@ function makeHarness(
     : new CodexAppServerDriver(opts, cb);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const onItem = (item: unknown, completed: boolean) => (driver as any).onItem(item, completed);
-  return { driver, events, stderr, subscriptionUsage, onItem, authenticationFailures: () => authenticationFailures };
+  return { driver, events, stderr, subscriptionUsage, serviceTiers, onItem, authenticationFailures: () => authenticationFailures };
 }
 
 test("app-server launch enables Default-mode questions before the subcommand", () => {
@@ -542,6 +556,27 @@ test("account/rateLimits/updated forwards sparse usage without creating transcri
   assert.deepEqual(h.events, []);
 });
 
+test("thread settings reconcile only this session's returned service tier", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "thread-current";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("thread/settings/updated")!({
+    threadId: "thread-other",
+    threadSettings: { serviceTier: "fast" },
+  });
+  notifications.get("thread/settings/updated")!({ threadSettings: { serviceTier: "fast" } });
+  notifications.get("thread/settings/updated")!({
+    threadId: "thread-current",
+    threadSettings: { serviceTier: "flex" },
+  });
+  notifications.get("thread/settings/updated")!({
+    threadId: "thread-current",
+    threadSettings: { serviceTier: null },
+  });
+  assert.deepEqual(h.serviceTiers, ["flex", null]);
+  assert.equal((h.driver as any).config.serviceTier, undefined);
+});
+
 test("prompt stages localImage inputs in text/image order and cleans them after settlement", async () => {
   let cleaned = 0;
   let turnParams: any = null;
@@ -697,21 +732,27 @@ test("image validation failure is readable and never calls turn/start", async ()
 });
 
 test("newSession starts a fresh thread and requires the server's actual id", async () => {
-  const h = makeHarness();
+  const h = makeHarness({ config: { model: "gpt-tiered", serviceTier: "fast" }, capabilities: serviceTierCapabilities });
   const calls: Array<{ method: string; params: unknown }> = [];
   (h.driver as any).peer = {
     request: async (method: string, params: unknown) => {
       calls.push({ method, params });
-      return { thread: { id: "fresh-1" } };
+      return { thread: { id: "fresh-1" }, serviceTier: "flex" };
     },
   };
   assert.equal(await h.driver.newSession("/fresh"), "fresh-1");
-  assert.deepEqual(calls, [{ method: "thread/start", params: { cwd: "/fresh" } }]);
+  assert.deepEqual(calls, [{ method: "thread/start", params: { cwd: "/fresh", serviceTier: "fast" } }]);
+  assert.deepEqual(h.serviceTiers, ["flex"]);
+  assert.equal((h.driver as any).config.serviceTier, "flex");
   assert.equal(h.driver.agentSessionId(), "fresh-1");
 });
 
 test("newSession validates then resumes the exact persisted thread without replaying history", async () => {
-  const h = makeHarness({ resumeId: "thread-7" });
+  const h = makeHarness({
+    resumeId: "thread-7",
+    config: { model: "gpt-tiered", serviceTier: "default" },
+    capabilities: serviceTierCapabilities,
+  });
   const calls: Array<{ method: string; params: unknown }> = [];
   (h.driver as any).peer = {
     request: async (method: string, params: unknown) => {
@@ -719,14 +760,16 @@ test("newSession validates then resumes the exact persisted thread without repla
       if (method === "thread/read") {
         return { thread: { id: "thread-7", status: { type: "idle" }, turns: [{ id: "old-turn" }] } };
       }
-      return { thread: { id: "thread-7", turns: [{ id: "old-turn" }] } };
+      return { thread: { id: "thread-7", turns: [{ id: "old-turn" }] }, serviceTier: null };
     },
   };
   assert.equal(await h.driver.newSession("/resume"), "thread-7");
   assert.deepEqual(calls, [
     { method: "thread/read", params: { threadId: "thread-7", includeTurns: false } },
-    { method: "thread/resume", params: { threadId: "thread-7" } },
+    { method: "thread/resume", params: { threadId: "thread-7", serviceTier: "default" } },
   ]);
+  assert.deepEqual(h.serviceTiers, [null]);
+  assert.equal((h.driver as any).config.serviceTier, undefined);
   assert.deepEqual(h.events, []); // provider history is never copied into the normalized log
 });
 
@@ -988,7 +1031,7 @@ test("missing coordinates explain the running server identity rather than assumi
 });
 
 test("forkSession calls thread/fork with source thread and last turn", async () => {
-  const h = makeHarness();
+  const h = makeHarness({ config: { model: "gpt-tiered", serviceTier: "fast" }, capabilities: serviceTierCapabilities });
   (h.driver as any).threadId = "thread-source";
   let seen: unknown;
   (h.driver as any).peer = {
@@ -1000,7 +1043,7 @@ test("forkSession calls thread/fork with source thread and last turn", async () 
   assert.equal(await h.driver.forkSession("turn-provider-7", "/tmp/fork"), "thread-forked");
   assert.deepEqual(seen, {
     method: "thread/fork",
-    params: { threadId: "thread-source", lastTurnId: "turn-provider-7", cwd: "/tmp/fork" },
+    params: { threadId: "thread-source", lastTurnId: "turn-provider-7", cwd: "/tmp/fork", serviceTier: "fast" },
   });
 });
 
@@ -1952,10 +1995,25 @@ test("buildCodexTurnParams: restricted modes can escalate; full access never ask
   assert.equal(buildCodexTurnParams(cfg("danger-full-access"), "t", "/w", []).approvalsReviewer, undefined);
 });
 
-test("buildCodexTurnParams: passes model/effort through, skips the 'default' model sentinel", () => {
-  const p = buildCodexTurnParams(cfg("workspace-write", { model: "gpt-5-codex", effort: "high" }), "t", "/w", []);
-  assert.equal(p.model, "gpt-5-codex");
+test("buildCodexTurnParams: passes model, effort, and service tier through, skips the 'default' model sentinel", () => {
+  const p = buildCodexTurnParams(
+    cfg("workspace-write", { model: "gpt-tiered", effort: "high", serviceTier: "fast" }),
+    "t",
+    "/w",
+    [],
+    serviceTierCapabilities,
+  );
+  assert.equal(p.model, "gpt-tiered");
   assert.equal(p.effort, "high");
+  assert.equal(p.serviceTier, "fast");
+  const unsupported = buildCodexTurnParams(
+    cfg("workspace-write", { model: "gpt-unknown", serviceTier: "fast" }),
+    "t",
+    "/w",
+    [],
+    serviceTierCapabilities,
+  );
+  assert.equal(unsupported.serviceTier, undefined, "tiers from another model are never sent");
   const d = buildCodexTurnParams(cfg("workspace-write", { model: "default" }), "t", "/w", []);
   assert.equal(d.model, undefined);
 });

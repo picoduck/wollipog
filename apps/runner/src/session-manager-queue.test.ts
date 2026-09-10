@@ -1114,6 +1114,42 @@ test("each queued prompt runs under the config it was SENT with, in order", asyn
   }
 });
 
+test("a tier-only queued change reaches the driver without changing model or effort", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-queue-tier-"));
+  const store = new SessionStore(root);
+  store.create(meta({
+    driver: "codex-app-server",
+    config: { model: "gpt", effort: "high", serviceTier: "default" },
+  }));
+  const sm = new SessionManager(() => {}, () => {}, store, "test-runner");
+  const applied: Array<{ model?: string; effort?: string; serviceTier?: string }> = [];
+  const stub = {
+    resolvePermission: () => false,
+    cancel: () => {},
+    dispose: () => {},
+    prompt: () => Promise.resolve("end_turn" as const),
+    setConfig: (config: { model?: string; effort?: string; serviceTier?: string }) => applied.push(config),
+    agentSessionId: () => "thread-1",
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (sm as any).active.set("s_q", {
+    sessionId: "s_q", client: stub, repoPath: "/home/me/repo", cwd: "/home/me/repo",
+    worktree: null, status: "running", running: true, queue: [],
+  });
+  try {
+    sm.prompt("s_q", "B", [], undefined, { model: "gpt", effort: "high", serviceTier: "fast" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (sm as any).active.get("s_q").running = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (sm as any).drain("s_q");
+    assert.equal(applied.length, 1);
+    assert.deepEqual(applied[0], { model: "gpt", effort: "high", serviceTier: "fast" });
+    assert.deepEqual(store.readMeta("s_q")?.config, { model: "gpt", effort: "high", serviceTier: "fast" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a superseded drain cannot release a same-owner replacement drain's lock", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-drain-lock-generation-"));
   const store = new SessionStore(root);

@@ -37,6 +37,8 @@ const settled = params.get("settled") === "1";
 /** `?context=choice` swaps in a Claude catalog whose Opus base lists 200K and 1M windows, with the
  * session on `opus[1m]`; `?served=<tokens>` is the window the provider reported after launch. */
 const contextChoice = params.get("context") === "choice";
+const serviceTierFixture = params.has("tiers");
+const serviceTierChoice = params.get("tiers") === "1";
 const servedWindow = Number(params.get("served") ?? "0");
 // `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
 // drops the session cost (an unpriced or cost-silent runner). Both keep the token counts.
@@ -133,6 +135,41 @@ if (contextChoice) {
   session.model = params.get("model") ?? "opus[1m]";
   session.effort = "high";
   session.contextWindow = servedWindow > 0 ? servedWindow : undefined;
+}
+if (serviceTierFixture) {
+  runner.protocolVersion = serviceTierChoice ? 126 : 125;
+  runner.agents = [{
+    id: "codex",
+    name: "Codex",
+    command: "codex",
+    args: [],
+    env: {},
+    driver: "codex-app-server",
+    available: true,
+    capabilities: {
+      modelSource: "live",
+      models: [{
+        id: "gpt-tiered",
+        displayName: "GPT Tiered",
+        default: true,
+        efforts: ["low", "high"],
+        serviceTiers: [{
+          id: "fast",
+          name: "Fast",
+          description: "Faster responses that use more ChatGPT credits.",
+        }],
+        defaultServiceTier: "default",
+      }],
+      effortLevels: ["low", "high"],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      permissionModes: ["auto-review"],
+    },
+  }] as RunnerView["agents"];
+  session.model = "gpt-tiered";
+  session.effort = "high";
+  session.serviceTier = serviceTierChoice ? "fast" : null;
 }
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
