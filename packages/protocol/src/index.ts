@@ -6876,7 +6876,7 @@ export interface CreateProjectRequest {
 
 /** Rename and/or show/hide a durable Project. Omitted fields remain unchanged. */
 export interface UpdateProjectRequest {
-  /** Human-managed defaults; null restores the installation fallback. */
+  /** Human-managed defaults; null removes them so omitted child limits can remain unlimited. */
   childSessionDefaults?: ChildSessionDefaults | null;
   name?: string;
   hidden?: boolean;
