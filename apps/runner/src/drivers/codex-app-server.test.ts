@@ -335,6 +335,17 @@ test("Direct WSL fallback waits for both provider and signalled relay teardown",
   );
 });
 
+test("Direct WSL teardown does not wait for close after an asynchronous spawn failure", async () => {
+  const child = fakeAgentProcess();
+  Object.defineProperty(child, "pid", { value: undefined });
+
+  await waitForWslProviderAttemptTeardown(
+    child,
+    () => assert.fail("a provider without a pid was never spawned and must not be killed"),
+    1,
+  );
+});
+
 test("app-server auth errors emit a secret-free auth signal", () => {
   const h = makeHarness();
   const raw = "unexpected status 401 Unauthorized: bearer token secret-value";

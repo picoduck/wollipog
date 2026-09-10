@@ -264,7 +264,9 @@ export async function waitForWslProviderAttemptTeardown(
   timeoutMs = 10_000,
 ): Promise<void> {
   const relay = child.wslAgentControl?.relay;
-  let providerClosed = child.closeObserved === true;
+  // A ChildProcess has no pid when spawn failed asynchronously. No provider exists to reap in
+  // that case, and Node does not guarantee a later close event after the terminal error.
+  let providerClosed = child.closeObserved === true || child.pid === undefined;
   let relayClosed = !relay || relay.exitCode !== null || relay.signalCode !== null;
   child.wslAgentControl?.dispose();
   const closed = new Promise<void>((resolve, reject) => {
