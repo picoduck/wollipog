@@ -7,6 +7,7 @@ import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { listMacosSkillCandidates, readMacosSkillCandidate } from "./macos-skill-snapshots.js";
 import { SKILL_DIRS } from "./skills.js";
 import { listWindowsSkillCandidates, readWindowsSkillCandidate } from "./windows-skill-snapshots.js";
+import { resolveWslHomeUnc } from "./wsl-skill-snapshots.js";
 
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fingerprint = (stat: Stats) => `${stat.dev}:${stat.ino}:${stat.ctimeMs}:${stat.mtimeMs}`;
@@ -47,11 +48,12 @@ export function openSkillDirectory(home: string, relative: string, durable = fal
  * to a pinned parent. A concurrent parent rename cannot redirect the read outside that parent.
  * No filesystem writes, subprocesses, script execution, or arbitrary client paths. */
 export class MachineSkillSnapshots {
-  private readonly candidates = new Map<string, { candidate: MachineSkillCandidate; expires: number }>();
+  private readonly candidates = new Map<string, { candidate: MachineSkillCandidate; expires: number; home?: string }>();
   constructor(private readonly options: { home: string; agents: () => AgentDefinition[]; platform?: NodeJS.Platform;
     now?: () => number; maxRawEntriesPerDirectory?: number;
     macosList?: typeof listMacosSkillCandidates; macosRead?: typeof readMacosSkillCandidate;
-    windowsList?: typeof listWindowsSkillCandidates; windowsRead?: typeof readWindowsSkillCandidate }) {}
+    windowsList?: typeof listWindowsSkillCandidates; windowsRead?: typeof readWindowsSkillCandidate;
+    wslHome?: (distro: string) => string | null }) {}
   private now() { return this.options.now?.() ?? Date.now(); }
   private platform() { return this.options.platform ?? process.platform; }
   private directories(): string[] {
@@ -63,6 +65,19 @@ export class MachineSkillSnapshots {
     }
     return [...dirs];
   }
+  private wslDirectories(distro: string): string[] {
+    const dirs = new Set<string>([".agents/skills"]);
+    for (const agent of this.options.agents()) {
+      if (agent.id === "conductor" || agent.context?.kind !== "wsl" || agent.context.distro !== distro) continue;
+      const dir = SKILL_DIRS[agent.driver ?? "acp"];
+      if (dir) dirs.add(dir);
+    }
+    return [...dirs];
+  }
+  private wslDistros(): string[] {
+    return [...new Set(this.options.agents().flatMap((agent) =>
+      agent.context?.kind === "wsl" && SKILL_DIRS[agent.driver ?? "acp"] ? [agent.context.distro] : []))];
+  }
   private openDirectory(relative: string): number {
     return openSkillDirectory(this.options.home, relative);
   }
@@ -71,7 +86,12 @@ export class MachineSkillSnapshots {
     for (const [id, entry] of this.candidates) if (entry.expires <= this.now()) this.candidates.delete(id);
     const current = this.candidates.get(expected.id)?.candidate;
     return current && current.name === expected.name && current.sourceDirectory === expected.sourceDirectory &&
-      current.generation === expected.generation && this.directories().includes(current.sourceDirectory)
+      current.generation === expected.generation && current.context?.kind === expected.context?.kind &&
+      (current.context?.kind !== "wsl" || (expected.context?.kind === "wsl" &&
+        current.context.distro === expected.context.distro && this.wslDistros().includes(current.context.distro))) &&
+      (current.context?.kind === "wsl"
+        ? this.wslDirectories(current.context.distro).includes(current.sourceDirectory)
+        : this.directories().includes(current.sourceDirectory))
       ? current : null;
   }
   handle(message: SkillSnapshotMessage): SkillSnapshotResultMessage {
@@ -84,8 +104,15 @@ export class MachineSkillSnapshots {
       if (message.operation === "list") return { ...result, candidates: this.list() };
       if (message.operation !== "read") throw new Error();
       const entry = typeof message.candidateId === "string" ? this.candidates.get(message.candidateId) : undefined;
-      if (!entry || !this.directories().includes(entry.candidate.sourceDirectory)) throw new Error();
+      if (!entry) throw new Error();
       const candidate = entry.candidate;
+      if (candidate.context?.kind === "wsl") {
+        if (this.platform() !== "win32" || !entry.home ||
+            !this.wslDirectories(candidate.context.distro).includes(candidate.sourceDirectory)) throw new Error();
+        const files = (this.options.windowsRead ?? readWindowsSkillCandidate)(entry.home, candidate);
+        return { ...result, snapshot: { candidate, files, digest: skillVersionDigest(files), executablePaths: [] } };
+      }
+      if (!this.directories().includes(candidate.sourceDirectory)) throw new Error();
       if (this.platform() === "darwin") {
         const snapshot = (this.options.macosRead ?? readMacosSkillCandidate)(this.options.home, candidate);
         return { ...result, snapshot: { candidate, ...snapshot, digest: skillVersionDigest(snapshot.files) } };
@@ -120,10 +147,28 @@ export class MachineSkillSnapshots {
       return found;
     }
     if (this.platform() === "win32") {
-      const found = (this.options.windowsList ?? listWindowsSkillCandidates)(this.options.home, this.directories())
+      const native = (this.options.windowsList ?? listWindowsSkillCandidates)(this.options.home, this.directories())
         .map((entry) => ({ id: randomUUID(), ...entry }));
-      for (const candidate of found) {
+      const found: MachineSkillCandidate[] = [...native];
+      for (const candidate of native) {
         this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000 });
+      }
+      for (const distro of this.wslDistros()) {
+        if (found.length >= 64) break;
+        try {
+          const home = (this.options.wslHome ?? resolveWslHomeUnc)(distro);
+          if (!home) continue;
+          const remaining = 64 - found.length;
+          const candidates = (this.options.windowsList ?? listWindowsSkillCandidates)(home, this.wslDirectories(distro))
+            .slice(0, remaining)
+            .map((entry): MachineSkillCandidate => ({ id: randomUUID(), ...entry, context: { kind: "wsl", distro } }));
+          for (const candidate of candidates) {
+            found.push(candidate);
+            this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000, home });
+          }
+        } catch {
+          // One stopped, wedged, or malformed distro must not hide native or other WSL candidates.
+        }
       }
       while (this.candidates.size > 256) this.candidates.delete(this.candidates.keys().next().value!);
       return found;

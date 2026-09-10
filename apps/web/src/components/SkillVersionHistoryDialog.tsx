@@ -76,7 +76,7 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
         {preview.version.id === preview.currentVersion?.id && <p>This is the current version.</p>}
         {preview.version.note && <p>{preview.version.note}</p>}
         {preview.version.gitSource && <p className="skills-hint">Git source: {preview.version.gitSource.url} · {preview.version.gitSource.commit}</p>}
-        {preview.version.machineSource && <p className="skills-hint">Machine snapshot: {preview.version.machineSource.sourceDirectory}/{preview.version.machineSource.name} · {preview.version.machineSource.digest}</p>}
+        {preview.version.machineSource && <p className="skills-hint">Machine snapshot: {preview.version.machineSource.context?.kind === "wsl" ? `WSL: ${preview.version.machineSource.context.distro} · ` : ""}{preview.version.machineSource.sourceDirectory}/{preview.version.machineSource.name} · {preview.version.machineSource.digest}</p>}
         <p>Review every file, including scripts. Preview and restore never execute skill contents. Restoring updates assignments on unpinned machines.</p>
         {[...new Set([...(preview.currentVersion?.files ?? []), ...(preview.version.files ?? [])].map((file) => file.path))].sort().map((path) => {
           const before = preview.currentVersion?.files?.find((file) => file.path === path);

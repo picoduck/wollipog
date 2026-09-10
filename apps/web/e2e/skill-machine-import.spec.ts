@@ -81,6 +81,21 @@ test("a Windows runner offers snapshots while explaining that adoption remains L
   await expect(page.getByText("Recovery inspection and source adoption require a Linux runner.")).toBeVisible();
 });
 
+test("WSL snapshot candidates identify their distro without exposing transport paths", async ({ page }) => {
+  const candidate = { id: "wsl-opaque", name: "review", sourceDirectory: ".codex/skills",
+    generation: "a".repeat(64), context: { kind: "wsl", distro: "Ubuntu" } };
+  await page.route("**/api/runners/runner-1/skill-snapshots", (route) =>
+    route.fulfill({ json: { discoveryId: "discovery", candidates: [candidate] } }));
+  await page.goto("/skills-removals-e2e.html?wslSkills=1");
+  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await page.getByRole("button", { name: "Discover Skills" }).click();
+  await expect(page.getByText("WSL: Ubuntu · .codex/skills/review")).toBeVisible();
+  await expect(page.getByRole("button", {
+    name: "Preview Files for review from WSL: Ubuntu · .codex/skills/review",
+  })).toBeVisible();
+  await expect(page.getByText(/wsl\.localhost/u)).toBeHidden();
+});
+
 test("switching machines clears inspected adoption recovery", async ({ page }) => {
   const operationId = "123e4567-e89b-42d3-a456-426614174000";
   await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) => route.fulfill({ json: {

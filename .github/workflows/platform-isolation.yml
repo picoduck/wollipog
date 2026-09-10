@@ -58,7 +58,7 @@ jobs:
 
       - name: Verify Native Windows Skill Filesystem Adapters
         if: matrix.os == 'windows-latest'
-        run: node --import tsx --test apps/runner/src/windows-skill-junction.test.ts apps/runner/src/windows-skill-snapshots.test.ts apps/runner/src/skill-snapshots.test.ts
+        run: node --import tsx --test apps/runner/src/windows-skill-junction.test.ts apps/runner/src/windows-skill-snapshots.test.ts apps/runner/src/wsl-skill-snapshots.test.ts apps/runner/src/wsl-skills.test.ts apps/runner/src/skill-snapshots.test.ts
 
       - name: Verify Native Windows Skill Reconciliation
         if: matrix.os == 'windows-latest'
@@ -97,6 +97,17 @@ jobs:
 
             $env:WOLLIPOG_TEST_WSL_DISTRO = "Ubuntu-24.04"
             $env:WOLLIPOG_TEST_WSL_NODE = "/opt/wollipog-node/bin/node"
+            $savedSkillsPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $wslSkillsOutput = node --import tsx --test --test-isolation=none --test-reporter=tap apps/runner/src/wsl-skills.wsl.test.ts 2>&1 | Out-String
+            $wslSkillsExit = $LASTEXITCODE
+            $ErrorActionPreference = $savedSkillsPreference
+            Write-Host $wslSkillsOutput
+            if ($wslSkillsExit -ne 0) { throw "real WSL managed-skills integration tests failed" }
+            if ($wslSkillsOutput -notmatch '(?m)^# pass 2\r?$' -or $wslSkillsOutput -notmatch '(?m)^# skipped 0\r?$') {
+              throw "real WSL managed-skills integration tests did not execute exactly twice"
+            }
+
             $savedSafePreference = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
             $safeWslOutput = node --import tsx --test --test-reporter=tap apps/runner/src/wsl-agent-control.wsl.test.ts 2>&1 | Out-String

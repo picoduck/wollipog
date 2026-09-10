@@ -98,7 +98,7 @@ test("assignment presentation names machines, drivers, agents, and invocation po
   assert.equal(invocationLabel("manual"), "Manual Only");
 });
 
-test("only native claude-code and codex agents are eligible deployment targets", () => {
+test("deployable native agents are eligible and WSL agents require runner capability", () => {
   const base = { name: "x", command: "x", args: [], env: {} };
   const eligible = skillEligibleAgents([
     { ...base, id: "claude", driver: "claude-code" },
@@ -107,6 +107,11 @@ test("only native claude-code and codex agents are eligible deployment targets",
     { ...base, id: "wsl", driver: "codex", context: { kind: "wsl", distro: "ubuntu" } },
   ]);
   assert.deepEqual(eligible.map((agent) => agent.id), ["claude", "codex"]);
+  const withWsl = skillEligibleAgents([
+    { ...base, id: "wsl", driver: "codex", context: { kind: "wsl", distro: "ubuntu" } },
+    { ...base, id: "wsl-acp", driver: "acp", context: { kind: "wsl", distro: "ubuntu" } },
+  ], true);
+  assert.deepEqual(withWsl.map((agent) => agent.id), ["wsl"]);
 });
 
 test("deploy badges rank offline, conflict, error, digest and link gaps, then deployed", () => {

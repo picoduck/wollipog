@@ -134,9 +134,9 @@ export function skillNeedsManualVariant(
   agents: AgentDefinition[],
   entry: Pick<ReconcileSkillEntry, "targets">,
 ): boolean {
-  const bindings = new Map(harnessBindings(agents).map((binding) => [binding.agentId, binding]));
+  const drivers = new Map(agents.map((agent) => [agent.id, agent.driver ?? "acp"]));
   return entry.targets.some(
-    (target) => target.invocation === "manual" && bindings.get(target.agentId)?.driver === "claude-code",
+    (target) => target.invocation === "manual" && drivers.get(target.agentId) === "claude-code",
   );
 }
 
@@ -1190,6 +1190,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   }
   const bindings = harnessBindings(agents);
   const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
+  const wslAgentIds = new Set(agents.flatMap((agent) =>
+    agent.context?.kind === "wsl" ? [agent.id] : []));
 
   // Materialization is runner-data-dir-local and must remain available even while another runner
   // owns the shared provider HOME. Finish that phase before attempting the provider-home lease;
@@ -1248,7 +1250,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   }
 
   const leaseNeeded = allowRemovals ||
-    prepared.some(({ invalid, materializationError }) => !invalid && !materializationError);
+    prepared.some(({ entry, invalid, materializationError }) => !invalid && !materializationError &&
+      !(entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))));
   if (leaseNeeded && options.acquireProviderHomeLease) {
     try {
       options.acquireProviderHomeLease();
@@ -1355,13 +1358,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const harnessKeep = new Map<string, Set<string>>();
   for (const relDir of new Set(Object.values(SKILL_DIRS))) harnessKeep.set(relDir, new Set());
   for (const { entry, invalid, manualNeeded, materializationError } of prepared) {
-    if (typeof entry.name === "string" && entry.name) {
+    if (typeof entry.name === "string" && entry.name && invalid) {
       canonicalKeep.add(entry.name);
-      if (invalid) {
         // A payload this runner cannot verify must not tear anything down: keep the name's
         // existing links and every stored version until a valid replacement arrives.
-        for (const set of harnessKeep.values()) set.add(entry.name);
-      }
+      for (const set of harnessKeep.values()) set.add(entry.name);
     }
     if (invalid) {
       deployed.push({ name: String(entry.name), digest: String(entry.versionDigest), links: [], error: invalid });
@@ -1374,6 +1375,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     // below), so only they force its materialization.
     const state: DeployedSkillState = { name: entry.name, digest: entry.versionDigest, links: [] };
     if (materializationError) {
+      canonicalKeep.add(entry.name);
       state.error = `could not materialize the skill version: ${materializationError}`;
       state.links = entry.targets.map((target) => ({
         agentId: target.agentId,
@@ -1385,6 +1387,22 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       deployed.push(state);
       continue;
     }
+
+    // WSL targets reconcile inside their distro after this native materialization phase. Their
+    // versions remain protected by storeKeep above, but they must not create unused native links.
+    if (entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))) {
+      state.links = entry.targets.map((target) => ({
+        agentId: target.agentId,
+        status: "unsupported" as const,
+        detail: agents.some((agent) => agent.id === target.agentId && agent.context?.kind === "wsl")
+          ? "this target reconciles inside its WSL distribution"
+          : "this agent is not present on the runner or does not support managed skills",
+      }));
+      deployed.push(state);
+      continue;
+    }
+
+    canonicalKeep.add(entry.name);
 
     const agentVariantDir = join(realStoreRoot, entry.name, entry.versionDigest);
     const manualVariantDir = `${agentVariantDir}-manual`;

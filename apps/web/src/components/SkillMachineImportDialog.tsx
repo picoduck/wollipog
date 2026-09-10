@@ -12,6 +12,8 @@ import { Modal } from "./common.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
 
 const contents = (file?: SkillFile) => !file ? "(File absent)" : file.encoding === "utf8" ? file.content : `Binary content (base64):\n${file.content}`;
+const candidateLocation = (candidate: MachineSkillDiscovery["candidates"][number]) =>
+  `${candidate.context?.kind === "wsl" ? `WSL: ${candidate.context.distro} · ` : ""}${candidate.sourceDirectory}/${candidate.name}`;
 const adoptionBlocker = (blocker: string) => ({
   library_skill_missing: "The skill is not in the library.",
   executable_mode_adoption_unsupported: "The source contains executable files. Import is available, but adoption cannot preserve executable metadata yet.",
@@ -146,7 +148,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   </>}>
     <div className="form skills-machine-import">
       <p>Import a read-only snapshot. After an identical library version is assigned, a separate confirmed action can preserve the original and replace it with a managed link. New skills stay unassigned; accepted updates deploy to current assignments on unpinned machines.</p>
-      <p className="skills-hint">Snapshot import requires protocol 111 on Linux, protocol 119 on Windows, or protocol 120 on macOS. Adoption requires a connected Linux runner on protocol 115 or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
+      <p className="skills-hint">Snapshot import requires protocol 111 on Linux, protocol 119 on Windows, protocol 120 on macOS, or protocol 125 for WSL locations. Adoption requires a connected Linux runner on protocol 115 or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
       <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy || discovery !== null}
         options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={selectRunner} /></label>
       {compatible.length === 0 && <p>No compatible connected machines. Update a Linux, macOS, or Windows runner to enable snapshot imports.</p>}
@@ -185,11 +187,11 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
         })}
       </section>}
       {discovery && <>
-        <p className="skills-hint">Up to 64 real skill directories are listed from native harness and shared skill locations. Same-name variants are shown separately; identical imports reuse the existing version.</p>
+        <p className="skills-hint">Up to 64 real skill directories are listed from native and WSL harness locations. Same-name variants are shown separately; identical imports reuse the existing version.</p>
         {!discovery.candidates.length && <p>No importable skill directories were found.</p>}
         {discovery.candidates.map((candidate) => <section className="skills-section" key={candidate.id}>
-          <strong>{candidate.name}</strong><p className="skills-hint">{candidate.sourceDirectory}/{candidate.name}</p>
-          <button className="btn sm" type="button" disabled={busy} onClick={() => void read(candidate.id)} aria-label={`Preview Files for ${candidate.name} from ${candidate.sourceDirectory}`}>Preview Files</button>
+          <strong>{candidate.name}</strong><p className="skills-hint">{candidateLocation(candidate)}</p>
+          <button className="btn sm" type="button" disabled={busy} onClick={() => void read(candidate.id)} aria-label={`Preview Files for ${candidate.name} from ${candidateLocation(candidate)}`}>Preview Files</button>
         </section>)}
       </>}
       {preview && <section className="skills-section">

@@ -154,6 +154,7 @@ import {
   storedSkillVersionAvailable,
   type ReconcileSkillEntry,
 } from "./skills.js";
+import { mergeWslSkillsResult, reconcileWslSkills } from "./wsl-skills.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { handleSkillAdoption } from "./skill-adoption-command.js";
 import {
@@ -935,7 +936,8 @@ function queueSkillsReconcile(requestId?: string): void {
     // authoritative list, and replaying it under an older requestId still reports converged truth.
     const desired = lastDesiredSkills;
     try {
-      const result = await reconcileSkills({
+      const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
+      let result = await reconcileSkills({
         dataDir: config.dataDir,
         home: homedir(),
         agents: metadata.agents,
@@ -943,13 +945,24 @@ function queueSkillsReconcile(requestId?: string): void {
         // Content frames are published immediately to bound memory. While their completion fence
         // is pending, suppress removal/GC so an interleaved discovery pass cannot reclaim that
         // newly cached digest (especially when previousVersionMinutes is configured to zero).
-        allowRemovals: desired !== null && !chunkedSkillsSync.inProgress,
+        allowRemovals,
         log,
         acquireProviderHomeLease: () =>
           sessions.acquireSkillReconciliationProviderHome(homedir()),
         removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
         previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
       });
+      if (process.platform === "win32" && metadata.agents.some((agent) => agent.context?.kind === "wsl")) {
+        const wsl = await reconcileWslSkills({
+          dataDir: config.dataDir,
+          ownerHash: dataDirLease.ownerHash,
+          agents: metadata.agents,
+          desired: desired ?? [],
+          allowRemovals,
+          log,
+        });
+        result = mergeWslSkillsResult(result, wsl, metadata.agents);
+      }
       sendUp(skillsStateMessage(config.runnerId, result, requestId));
     } catch (error) {
       sendUp({

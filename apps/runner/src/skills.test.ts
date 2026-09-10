@@ -299,6 +299,45 @@ test("an unknown target agent is reported as unsupported", async () => {
     const link = result.deployed[0]!.links.find((l) => l.agentId === "ghost")!;
     assert.equal(link.status, "unsupported");
     assert.match(link.detail ?? "", /not present/);
+    assert.equal(lstatSync(join(roots.home, ".agents", "skills", "alpha")).isSymbolicLink(), true);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a desired skill with zero targets retains its canonical link while harness links are removed", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha]);
+    const result = await reconcile(roots, [{ ...alpha, targets: [] }]);
+    assert.equal(lstatSync(join(roots.home, ".agents", "skills", "alpha")).isSymbolicLink(), true);
+    assert.equal(existsSync(join(roots.home, ".claude", "skills", "alpha")), false);
+    assert.equal(result.removedLinks.some((removal) => removal.path === "~/.agents/skills/alpha"), false);
+    assert.equal(result.removedLinks.some((removal) => removal.path === "~/.claude/skills/alpha"), true);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("an exclusively WSL-targeted skill materializes without creating native links", async () => {
+  const roots = makeRoots();
+  try {
+    const wslAgent: AgentDefinition = {
+      ...codexAgent,
+      id: "codex-wsl-Ubuntu",
+      context: { kind: "wsl", distro: "Ubuntu" },
+    };
+    const result = await reconcile(roots, [
+      entry("alpha", [{ agentId: wslAgent.id, invocation: "agent" }]),
+    ], { agents: [wslAgent] });
+    assert.equal(existsSync(join(roots.home, ".agents", "skills", "alpha")), false);
+    assert.deepEqual(result.deployed[0]?.links, [{
+      agentId: wslAgent.id,
+      status: "unsupported",
+      detail: "this target reconciles inside its WSL distribution",
+    }]);
+    assert.equal(existsSync(join(skillsStoreRoot(roots.dataDir), "alpha", result.deployed[0]!.digest)), true);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -1445,6 +1484,7 @@ test("canonical link mutations require the provider-home lease even without a ha
     const canonicalPath = join(roots.home, ".agents", "skills", "alpha");
     const blocked = await reconcile(roots, [alpha], {
       agents: [],
+      allowRemovals: false,
       acquireProviderHomeLease: () => {
         assert.equal(existsSync(canonicalPath), false);
         throw new Error("foreign owner");

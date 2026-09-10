@@ -2778,7 +2778,8 @@ export interface SkillVersionView extends SkillVersionSummary {
   files: SkillFile[];
   note: string | null;
   gitSource?: { url: string; ref: string; subdirectory: string; path: string; commit: string };
-  machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number };
+  machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
+    context?: AgentContext };
 }
 
 export interface SkillGroupView {

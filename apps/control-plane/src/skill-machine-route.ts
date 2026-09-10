@@ -17,6 +17,19 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
   type AdoptionApproval = { id: string; preview: Preview };
   type Discovery = { owner: string; runnerId: string; expires: number; candidates: MachineSkillCandidate[]; preview?: Preview; adoption?: AdoptionApproval };
   const discoveries = new Map<string, Discovery>();
+  const validCandidateContext = (candidate: MachineSkillCandidate, protocolVersion: number | null | undefined) => {
+    const context = candidate.context;
+    return context === undefined || (context?.kind === "wsl" &&
+      runnerSupportsProtocol(protocolVersion, "wslMachineSkills") &&
+      typeof context.distro === "string" && context.distro === context.distro.trim() &&
+      context.distro.length > 0 && context.distro.length <= 256 &&
+      !/[\\/:*?"<>|\p{Cc}\p{Cf}]/u.test(context.distro) && !context.distro.endsWith("."));
+  };
+  const sameCandidate = (left: MachineSkillCandidate, right: MachineSkillCandidate) =>
+    left.id === right.id && left.generation === right.generation && left.name === right.name &&
+    left.sourceDirectory === right.sourceDirectory &&
+    left.context?.kind === right.context?.kind &&
+    (left.context?.kind !== "wsl" || (right.context?.kind === "wsl" && left.context.distro === right.context.distro));
   let pending = false;
   const purge = () => { for (const [id, value] of discoveries) if (value.expires <= Date.now()) discoveries.delete(id); };
   const executablePaths = (value: unknown, files: ValidatedSkillPayload["files"]): string[] | null => {
@@ -146,11 +159,15 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       const requestId = randomUUID();
       const result = await deps.hub.requestFromRunner(runnerId, requestId, { type: "skill_snapshot", runnerId, requestId, operation: "list" });
       if (result.type !== "skill_snapshot_result" || result.runnerId !== runnerId || result.error || !Array.isArray(result.candidates) || result.candidates.length > 64) throw new Error();
+      const runner = deps.db.getRunner(runnerId)!;
       if (result.candidates.some((c) => !c || typeof c.id !== "string" || c.id.length > 64 || !validSkillName(c.name) ||
         ![".agents/skills", ".claude/skills", ".codex/skills"].includes(c.sourceDirectory) || typeof c.generation !== "string" || c.generation.length > 200) ||
+        result.candidates.some((candidate) => !validCandidateContext(candidate, runner.protocolVersion)) ||
         new Set(result.candidates.map((c) => c.id)).size !== result.candidates.length) throw new Error();
       // Keep only bounded metadata; unrecognized runner properties must not enter the cache/UI.
-      const candidates = result.candidates.map(({ id, name, sourceDirectory, generation }) => ({ id, name, sourceDirectory, generation }));
+      const candidates = result.candidates.map(({ id, name, sourceDirectory, generation, context }) =>
+        ({ id, name, sourceDirectory, generation,
+          ...(context?.kind === "wsl" ? { context: { kind: "wsl" as const, distro: context.distro } } : {}) }));
       const discoveryId = randomUUID();
       discoveries.set(discoveryId, { owner: ownerKey(principal), runnerId, expires: Date.now() + 600_000, candidates });
       return { discoveryId, candidates };
@@ -178,8 +195,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       const result = await deps.hub.requestFromRunner(discovery.runnerId, requestId, { type: "skill_snapshot", runnerId: discovery.runnerId, requestId, operation: "read", candidateId: candidate.id });
       if (result.type !== "skill_snapshot_result" || result.runnerId !== discovery.runnerId || result.error || !result.snapshot) throw new Error();
       const snapshot = result.snapshot;
-      if (snapshot.candidate?.id !== candidate.id || snapshot.candidate.generation !== candidate.generation ||
-        snapshot.candidate.name !== candidate.name || snapshot.candidate.sourceDirectory !== candidate.sourceDirectory) throw new Error();
+      if (!snapshot.candidate || !sameCandidate(snapshot.candidate, candidate)) throw new Error();
       const payload = validateSkillPayload({ name: candidate.name, files: snapshot.files });
       if (!payload.ok || payload.digest !== snapshot.digest) throw new Error();
       const existing = deps.db.getSkillByName(candidate.name);
@@ -228,8 +244,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       if (result.type !== "skill_snapshot_result" || result.runnerId !== discovery.runnerId || result.requestId !== requestId || result.error || !result.snapshot) throw new Error();
       const { snapshot } = result;
       const candidate = preview.candidate;
-      if (snapshot.candidate?.id !== candidate.id || snapshot.candidate.name !== candidate.name ||
-        snapshot.candidate.sourceDirectory !== candidate.sourceDirectory || snapshot.candidate.generation !== candidate.generation) throw new Error();
+      if (!snapshot.candidate || !sameCandidate(snapshot.candidate, candidate)) throw new Error();
       const payload = validateSkillPayload({ name: candidate.name, files: snapshot.files });
       if (!payload.ok || payload.digest !== snapshot.digest || payload.digest !== preview.payload.digest) throw new Error();
       const executable = executablePaths(snapshot.executablePaths, payload.files);
@@ -291,9 +306,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       if (source.type !== "skill_snapshot_result" || source.requestId !== sourceRequestId ||
           source.runnerId !== discovery.runnerId || source.error || !source.snapshot) throw new Error();
       const snapshot = source.snapshot;
-      if (snapshot.candidate.id !== preview.candidate.id || snapshot.candidate.name !== preview.candidate.name ||
-          snapshot.candidate.sourceDirectory !== preview.candidate.sourceDirectory ||
-          snapshot.candidate.generation !== preview.candidate.generation) throw new Error();
+      if (!sameCandidate(snapshot.candidate, preview.candidate)) throw new Error();
       const payload = validateSkillPayload({ name: preview.candidate.name, files: snapshot.files });
       if (!payload.ok || payload.digest !== snapshot.digest || payload.digest !== preview.payload.digest) throw new Error();
       const executable = executablePaths(snapshot.executablePaths, payload.files);
@@ -423,7 +436,9 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     }
     try {
       const skill = deps.db.importMachineSkill({ ...preview.payload, expectedVersionId: preview.expectedVersionId,
-        source: { runnerId: discovery.runnerId, sourceDirectory: preview.candidate.sourceDirectory, name: preview.candidate.name, digest: preview.payload.digest, importedAt: Date.now() },
+        source: { runnerId: discovery.runnerId, sourceDirectory: preview.candidate.sourceDirectory,
+          name: preview.candidate.name, digest: preview.payload.digest, importedAt: Date.now(),
+          ...(preview.candidate.context?.kind === "wsl" ? { context: preview.candidate.context } : {}) },
         scope: { organizationId: principal.organizationId, owner: { kind: "organization", organizationId: principal.organizationId } } });
       delete discovery.preview;
       if (updating) for (const runner of deps.db.listRunners()) deps.pushSkillsSync(runner.runnerId);

@@ -1,8 +1,9 @@
 # Agent Skills Management and Deployment
 
-Status: managed Linux/macOS/Windows deployment, Git import, Linux/Windows machine snapshots,
-guarded Linux adoption/recovery, version history with library rollback, machine-wide version pins,
-and assignable groups implemented; remaining mixed-context WSL work is phased.
+Status: managed Linux/macOS/Windows and mixed-context WSL deployment, Git import,
+Linux/macOS/Windows/WSL machine snapshots, guarded Linux adoption/recovery, version history with
+library rollback, machine-wide version pins, and assignable groups implemented. Project/workspace
+scope and opt-in automatic Git updates remain deferred.
 
 ## Assignable Group API
 
@@ -62,9 +63,10 @@ Group assignments retain the selected machine-wide version policy when they expa
 ## Implemented machine snapshot import
 
 **Import from Machine** discovers real skill directories in `.agents/skills` and configured native
-Claude/Codex harness locations on an online Linux runner using protocol 111 or newer, a Windows
-runner using protocol 119 or newer, or a macOS runner using protocol 120 or newer. An owner or
-administrator must have access to the source machine. The control plane requests opaque candidate
+Claude/Codex harness locations on an online Linux runner using protocol 111 or newer, a native
+Windows runner using protocol 119 or newer, a macOS runner using protocol 120 or newer, or a WSL
+distribution advertised by a Windows runner using protocol 125 or newer. An owner or administrator
+must have access to the source machine. The control plane requests opaque candidate
 IDs from an on-demand inventory, never arbitrary host paths, and never adds file contents to the
 periodic `skills_state` report. Discovery lists at most 64 candidates, examines at most 256 entries
 per harness directory, and retains at most 256 expiring candidate IDs on the runner. Shared harness
@@ -74,12 +76,15 @@ bound while preserving the 256-entry useful-work budget.
 
 Linux opens every untrusted path component with `O_NOFOLLOW` through pinned `/proc/self/fd`
 descriptors. The fixed runner-owned macOS helper uses `openat` with the same descriptor-relative
-no-follow discipline. Windows uses pinned native handles opened with
+no-follow discipline. Native Windows and its `\\wsl.localhost` distribution paths use pinned native handles opened with
 `FILE_FLAG_OPEN_REPARSE_POINT` and without delete sharing. Symlinks, junctions,
 hard links, special files, excessive depth/entry counts, and trees
 exceeding the existing 64-file / 512 KiB-per-file / 2 MiB-total limits fail closed. Two bounded reads
 must agree before content is returned. The configured HOME itself may resolve through a symlink;
-its untrusted descendants may not. Mixed-context WSL imports are not implemented.
+its untrusted descendants may not. WSL candidates carry only their validated distro context and
+home-relative source location over the protocol; the private UNC path stays runner-local.
+Windows filesystems do not expose a POSIX executable mode, so native Windows and Windows-hosted WSL
+snapshots report no executable paths; previews still show the complete bounded file content.
 
 The preview shows the complete proposed files, digest, script-path indicators, and any existing
 version's files. An import commits exactly those previewed bytes with machine/directory/name,
@@ -162,8 +167,8 @@ the substituted tree, which is detected as an identity mismatch rather than dele
 with reconciliation/GC, rechecks the latest desired digest and targets, and runs a solicited sync
 first so the target is materialized. Lost or uncorrelated results instruct the operator to inspect
 for a journal before retrying. Backups are intentionally retained without automatic cleanup.
-macOS snapshots and mixed-context WSL snapshot/deployment remain under #251. Standalone WSL
-runners report Linux and use this path.
+Adoption remains Linux-only. Windows-hosted WSL locations support snapshot import but not source
+replacement; standalone WSL runners report Linux and use the Linux adoption path.
 
 ### Adoption recovery inspection and restore
 
@@ -221,9 +226,9 @@ rolling-compatible metadata format.
 Git-imported versions retain URL, requested ref, repository path, and resolved commit separately
 from skill content. **Check for Updates** repeats the preview flow; there is no automatic polling
 or update. Import does not rename collisions: use a new source name or cancel. Non-Linux machine
-snapshot import now includes native Windows; macOS snapshots and mixed-context WSL deployment
-remain under #251. Native Windows deployment uses directory junctions. Standalone WSL
-runners report Linux and use the Linux path. Later
+snapshot import includes native Windows, native macOS, and Windows-hosted WSL distributions.
+Native Windows deployment uses directory junctions. For WSL deployment, the Windows runner invokes
+a fixed in-distribution adapter; standalone WSL runners report Linux and use the Linux path. Later
 sections describe that broader target design.
 
 This document describes a planned feature that lets users manage a library of agent skills in
@@ -360,10 +365,20 @@ Properties:
   overwrite. This is the inverse of `protectedWrite()`'s symlink refusal and needs the same rigor:
   segment-by-segment containment checks and never following links the runner did not create.
 - **Windows** uses directory junctions (no privilege or developer-mode requirement).
-- **WSL**: a Machine can host native and WSL agents (`runner_agents.context`); the reconciler
-  materializes into each context's home using the existing WSL path-mapping helpers. Note that
-  `hook-settings.ts` currently refuses WSL for settings injection; skills must support it because
-  mixed-context machines are a primary use case.
+- **WSL**: a Machine can host native and WSL agents (`runner_agents.context`). On Windows, the
+  native reconciler verifies and materializes the immutable version once under the runner data
+  directory. A fixed Python adapter runs inside each named distribution and creates its canonical
+  and harness links using descriptor-relative, no-follow operations; the canonical link targets
+  the same store through WSL's mounted native path. A durable owner marker partitions adapter state,
+  uses the native provider-home v2 lease journal, and publishes an explicit released successor
+  before exiting. A standalone in-distribution runner can therefore take an orderly cross-owner
+  handoff instead of treating the lock directory as corrupt; a live or uncleanly terminated foreign
+  owner still fails closed. After an unclean re-onboarding transition, an operator must first prove
+  that no runner or provider process uses the WSL home, quarantine
+  `.agent-manager/provider-home-leases-v1/mutable-home.lock`, and retry. Idle read-only passes do not
+  claim the lease. WSL failures are reported per target and never fall back to mutating the
+  distribution through host path APIs. Standalone WSL runners report Linux and use the ordinary
+  Linux reconciler.
 
 ### Per-harness materialization and invocation policy
 
@@ -529,8 +544,9 @@ desired-state reads stay unknown through manual sync until an authoritative refr
    import-from-machine and import-from-directory; per-machine × per-agent assignment with
    enable/disable; symlink deployment for native Claude Code and Codex; Skills view and
    per-machine section.
-2. **Phase 2** — git upstream sync, groups as assignable units, invocation-mode transforms, drift
-   detection and adopt, versions/pin/rollback, WSL and Windows-junction support.
+2. **Phase 2 (implemented)** — git upstream sync, groups as assignable units, invocation-mode
+   transforms, drift detection and guarded Linux adoption/recovery, versions/pin/rollback, and
+   Windows-junction plus mixed-context WSL support.
 3. **Phase 3** — project-scoped skills, usage analytics, sharing/export, edit-in-session,
    container mounts.
 

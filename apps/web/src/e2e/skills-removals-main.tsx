@@ -15,7 +15,8 @@ const runner: RunnerView = {
   hostname: "runner-host",
   os: new URLSearchParams(location.search).has("macos")
     ? "macos"
-    : new URLSearchParams(location.search).has("windows") ? "windows" : "linux",
+    : new URLSearchParams(location.search).has("windows") || new URLSearchParams(location.search).has("wslSkills")
+      ? "windows" : "linux",
   version: "1",
   status: "online",
   displayName: "Build Machine",
@@ -41,6 +42,8 @@ const runner: RunnerView = {
     ? 1
     : new URLSearchParams(location.search).has("legacyRecovery")
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery - 1
+      : new URLSearchParams(location.search).has("wslSkills")
+        ? RUNNER_CAPABILITY_MIN_PROTOCOL.wslMachineSkills
       : new URLSearchParams(location.search).has("windows")
         ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillSnapshots
         : new URLSearchParams(location.search).has("macos")

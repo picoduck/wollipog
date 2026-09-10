@@ -345,7 +345,8 @@
 //      post-launch context window and occupancy through the session gauge.
 // 123: authenticated, target-local Agent Control bridge for structured Direct WSL harnesses.
 // 124: Direct WSL is launchable only through the attested no-follow target-local launcher.
-export const PROTOCOL_VERSION = 124;
+// 125: mixed-context WSL machine skill snapshots and deployment.
+export const PROTOCOL_VERSION = 125;
 
 /**
  * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
@@ -500,6 +501,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** Runner separates base model identity from context-window variants and publishes the
    * effective post-launch window for native drivers. */
   contextWindowVariants: 122,
+  wslMachineSkills: 125,
   machineSkillAdoption: 115,
   machineSkillAdoptionRecovery: 116,
   chunkedAgentSkills: 96,
@@ -844,6 +846,8 @@ export interface MachineSkillCandidate {
   name: string;
   sourceDirectory: string;
   generation: string;
+  /** Absent means the runner's native host. WSL candidates stay in their named distro. */
+  context?: AgentContext;
 }
 
 export interface SkillSnapshotMessage {

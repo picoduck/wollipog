@@ -9,6 +9,7 @@ import {
   validSkillFilePath,
   validSkillName,
   type AgentDefinition,
+  type AgentContext,
   type ResourceScope,
   type DeployedSkillState,
   type SkillFile,
@@ -31,7 +32,8 @@ export interface SkillVersionSummary {
   manifest?: unknown;
   files?: SkillFile[];
   gitSource?: SkillGitSource & { path: string; commit: string };
-  machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number };
+  machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
+    context?: AgentContext };
 }
 
 export interface SkillGitSource { url: string; ref: string; subdirectory: string }
@@ -251,17 +253,18 @@ export function invocationLabel(invocation: SkillInvocationPolicy): string {
   return invocation === "manual" ? "Manual Only" : "Agent Invocable";
 }
 
-/** Drivers the runner reconciler can deploy to in the MVP (native contexts only). */
+/** Drivers the runner reconciler can deploy to. */
 const DEPLOYABLE_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
 
 /** Agents on this machine that skill deployment can actually reach. The pickers list these so an
- * assignment cannot be aimed at an ACP or WSL agent the reconciler would only mark unsupported. */
-export function skillEligibleAgents(agents: ReadonlyArray<AgentDefinition>): AgentDefinition[] {
+ * assignment cannot be aimed at an ACP or unsupported execution context. */
+export function skillEligibleAgents(agents: ReadonlyArray<AgentDefinition>, includeWsl = false): AgentDefinition[] {
   // The synthesized conductor shares its donor Claude's harness directory, so as a deploy
   // target it is a duplicate row: deploying "to the conductor" is deploying to Claude again.
   return agents.filter((agent) =>
     agent.id !== "conductor" &&
-    DEPLOYABLE_DRIVERS.has(agent.driver ?? "acp") && (agent.context?.kind ?? "native") === "native");
+    DEPLOYABLE_DRIVERS.has(agent.driver ?? "acp") &&
+    ((agent.context?.kind ?? "native") === "native" || (includeWsl && agent.context?.kind === "wsl")));
 }
 
 /* --- Deploy status derivation --- */

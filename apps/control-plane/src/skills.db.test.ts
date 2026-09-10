@@ -220,13 +220,17 @@ test("runner skill inventory replaces fully while latest non-empty removal histo
   db.setRunnerSkillState("runner-1", {
     deployed: [{ name: "alpha", digest: "d1", links: [{ agentId: "claude", status: "linked" }] }],
     unmanaged: [{ agentId: "claude", name: "hand-rolled", description: "Local skill" }],
-    removals: [{ path: "~/.codex/skills/retired", reason: "No longer in the desired skill list." }],
+    removals: [
+      { path: "~/.codex/skills/retired", reason: "No longer in the desired skill list." },
+      { path: "~/.codex/skills/retired-wsl (WSL Ubuntu)", reason: "No longer in the desired skill list." },
+    ],
   }, 500);
   const first = db.getRunnerSkillState("runner-1")!;
   assert.equal(first.updatedAt, 500);
   assert.equal(first.deployed[0]!.links[0]!.status, "linked");
   assert.deepEqual(first.removals, [
     { path: "~/.codex/skills/retired", reason: "No longer in the desired skill list." },
+    { path: "~/.codex/skills/retired-wsl (WSL Ubuntu)", reason: "No longer in the desired skill list." },
   ]);
   assert.equal(first.removalsUpdatedAt, 500);
   assert.equal(first.error, undefined);
