@@ -33,7 +33,12 @@ test("the Composer exposes and saves the live-child limit at desktop and mobile 
   await costHelp.click();
   await expect(costHelp).toHaveAttribute("aria-expanded", "true");
   await expect(menu.locator(".plus-budget-help-popover")).toContainText("Pauses when spend reaches this amount");
-  await costHelp.press("Escape");
+  const toolHelp = menu.getByRole("button", { name: "About Tool-Call Threshold" });
+  await toolHelp.click();
+  await expect(menu.locator(".plus-budget-help-popover")).toHaveCount(1);
+  await expect(costHelp).toHaveAttribute("aria-expanded", "false");
+  await expect(toolHelp).toHaveAttribute("aria-expanded", "true");
+  await toolHelp.press("Escape");
   await expect(costHelp).toHaveAttribute("aria-expanded", "false");
   await expect(menu.locator(".plus-budget-help-popover")).toHaveCount(0);
   await expect(input).toBeVisible();
@@ -50,4 +55,17 @@ test("the Composer exposes and saves the live-child limit at desktop and mobile 
   await expect(input).toBeVisible();
   await expect(input).toHaveValue("9");
   await page.screenshot({ path: `${SHOT}/mobile.png` });
+});
+
+test("guardrail help stays within a short viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 440 });
+  await openSession(page);
+  await page.getByRole("button", { name: "Add and Modes" }).click();
+  const menu = page.locator(".composer-plus-pop");
+  await menu.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await menu.getByRole("button", { name: "About Cost Checkpoints" }).click();
+  const box = await menu.locator(".plus-budget-help-popover").boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.y).toBeGreaterThanOrEqual(8);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(432);
 });

@@ -3840,6 +3840,7 @@ textarea {
   color: var(--text-dim);
   font-weight: var(--weight-normal);
   line-height: 1.4;
+  overflow-y: auto;
   overflow-wrap: anywhere;
 }
 

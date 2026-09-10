@@ -83,9 +83,20 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
     const helpPopover = container.querySelector<HTMLElement>(".plus-budget-help-popover");
     assert.ok(helpPopover);
     assert.equal(costHelp.getAttribute("aria-controls"), helpPopover.id);
-    await act(async () => fireDomEvent.keyDown(costHelp, { key: "Escape" }));
+    assert.equal(costHelp.getAttribute("aria-describedby"), helpPopover.id);
+    const toolHelp = container.querySelector<HTMLButtonElement>('[aria-label="About Tool-Call Threshold"]');
+    assert.ok(toolHelp);
+    await act(async () => {
+      fireDomEvent.pointerDown(toolHelp);
+      fireDomEvent.click(toolHelp);
+    });
+    assert.equal(container.querySelectorAll(".plus-budget-help-popover").length, 1,
+      "an outside pointer dismisses the previous disclosure before opening another");
     assert.equal(costHelp.getAttribute("aria-expanded"), "false");
-    assert.doesNotMatch(container.textContent ?? "", /Pauses when spend reaches this amount/);
+    assert.equal(toolHelp.getAttribute("aria-expanded"), "true");
+    await act(async () => fireDomEvent.keyDown(toolHelp, { key: "Escape" }));
+    assert.equal(toolHelp.getAttribute("aria-expanded"), "false");
+    assert.equal(container.querySelectorAll(".plus-budget-help-popover").length, 0);
     await act(async () => {
       input.focus();
     });

@@ -120,6 +120,7 @@ import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
+import { useAnchoredPopover } from "./anchored-popover.js";
 import {
   followTailControlLabel,
   followTailControlTooltip,
@@ -5884,7 +5885,7 @@ export function ComposerPlusMenu({
               placeholder="4"
               max="64"
               emptyMeansNoop
-              hint="Live Child Limit · concurrent sessions · 0 pauses new children"
+              hint="A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."
               onCommit={(v) => onApply({ maxChildSessions: v })}
             />
           </div>
@@ -6017,36 +6018,36 @@ function GuardrailInput({
 
 /** Compact, keyboard-dismissible disclosure for guardrail guidance that would otherwise dominate the menu. */
 function GuardrailHelp({ label, hint }: { label: string; hint: string }) {
-  const [open, setOpen] = useState(false);
+  const popover = useAnchoredPopover<HTMLSpanElement, HTMLButtonElement>({
+    width: 224,
+    height: 96,
+    consumeEscape: true,
+  });
   const popoverId = useId();
-  const buttonRef = useRef<HTMLButtonElement>(null);
   return (
     <span
-      className={`plus-budget-help${open ? " is-open" : ""}`}
+      ref={popover.rootRef}
+      className={`plus-budget-help${popover.open ? " is-open" : ""}`}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
-      }}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape" || !open) return;
-        event.preventDefault();
-        event.stopPropagation();
-        setOpen(false);
-        buttonRef.current?.focus();
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) popover.close();
       }}
     >
       <button
-        ref={buttonRef}
+        ref={popover.anchorRef}
         className="plus-budget-info"
         type="button"
         aria-label={`About ${label}`}
-        aria-expanded={open}
+        aria-expanded={popover.open}
         aria-controls={popoverId}
+        aria-describedby={popover.open ? popoverId : undefined}
         title={`About ${label}`}
-        onClick={() => setOpen((value) => !value)}
+        onClick={popover.toggle}
       >
         <InfoIcon size={13} />
       </button>
-      {open && <span className="plus-budget-help-popover" id={popoverId} role="note">{hint}</span>}
+      {popover.open && (
+        <span className="plus-budget-help-popover" id={popoverId} role="note" style={popover.style}>{hint}</span>
+      )}
     </span>
   );
 }
