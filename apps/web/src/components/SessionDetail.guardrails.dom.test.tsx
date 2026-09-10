@@ -62,7 +62,11 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
     const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]');
     assert.ok(trigger);
     await act(async () => fireDomEvent.click(trigger));
-    const input = container.querySelector<HTMLInputElement>('[aria-label="Live Child Limit"]');
+    const liveChildLabel = [...container.querySelectorAll<HTMLLabelElement>("label")]
+      .find((candidate) => candidate.textContent === "Live Child Limit");
+    const input = liveChildLabel?.htmlFor
+      ? container.querySelector<HTMLInputElement>(`#${liveChildLabel.htmlFor}`)
+      : null;
     assert.ok(input, "the Composer menu includes a labelled live-child control");
     assert.equal(input.value, "");
     assert.equal(input.placeholder, "4");
