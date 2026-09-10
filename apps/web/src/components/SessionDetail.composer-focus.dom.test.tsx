@@ -327,7 +327,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
               rightPanel={rightPanel}
               onOpenTerminal={() => {}}
               pinnedOpen={false}
-              focusComposer
+              composerFocusIntent="message"
               composerDraftLoader={loader}
               composerDraftCleanup={options.composerDraftCleanup}
             />
