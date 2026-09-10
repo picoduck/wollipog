@@ -2168,6 +2168,12 @@ export class ClaudeCodeDriver implements Driver {
           ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}),
           ...pp,
         });
+        // Token usage on a top-level result is proof the provider actually answered over the API,
+        // which is what subscription usage needs to tell "never ran" apart from "reports nothing".
+        // A subagent result or a turn that failed before any request proves neither.
+        if (!parentId && (usage.input_tokens || usage.output_tokens)) {
+          this.cb.onSubscriptionUsage?.({ provider: "claude", kind: "response_observed" });
+        }
         // The terminal result is the only place Claude states the context window it actually
         // served this turn; together with the last top-level request size it is the authoritative
         // gauge behind the context meter (never the catalog's expectation or a name-derived size).

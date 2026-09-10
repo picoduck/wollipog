@@ -41,6 +41,17 @@ function percent(value: unknown): number | undefined {
   return parsed === undefined ? undefined : Math.max(0, Math.min(100, parsed));
 }
 
+/** Anthropic reports `utilization` as the fraction of a window consumed, not a percentage: 0.42
+ * means 42% used. Values above 1 are legitimate when usage runs past a window's cap, so the scale
+ * follows the field name and never the magnitude. Percent-named fields are already 0..100. */
+function utilizationPercent(value: unknown): number | undefined {
+  const parsed = finite(value);
+  if (parsed === undefined) return undefined;
+  // Round to hundredths of a percent: scaling by 100 in binary floating point leaves noise
+  // (0.07 becomes 7.000000000000001) that would churn the event-dedupe signature for free.
+  return Math.max(0, Math.min(100, Math.round(parsed * 10_000) / 100));
+}
+
 function epochMilliseconds(value: unknown): number | undefined {
   const parsed = finite(value);
   if (parsed === undefined || parsed <= 0) return undefined;
@@ -242,7 +253,8 @@ export function normalizeCodexRateLimits(
 function claudeWindow(id: string, input: unknown, observedAt: number): SubscriptionUsageBucket | null {
   const window = record(input);
   if (!window) return null;
-  const usedPercent = percent(window.used_percentage ?? window.usedPercent ?? window.utilization);
+  const usedPercent = percent(window.used_percentage ?? window.usedPercent) ??
+    utilizationPercent(window.utilization);
   const resetsAt = boundedResetAt(window.resets_at ?? window.resetsAt, observedAt);
   const duration = boundedDurationMinutes(window.window_duration_minutes ?? window.windowDurationMinutes);
   const rawStatus = stringValue(window.status, 40);
@@ -284,13 +296,34 @@ export function normalizeClaudeRateLimits(
   }
   const info = record(root.rate_limit_info ?? root.rateLimitInfo);
   if (info) {
-    const id = stringValue(info.rateLimitType ?? info.rate_limit_type, 96) ?? "subscription";
-    const bucket = claudeWindow(id, info, fetchedAt);
-    if (bucket) buckets.push(bucket);
+    // `unifiedWindows` is where Claude Code actually reports per-window utilization: one entry per
+    // allowance window (five-hour, weekly, overage-included weekly), each carrying the fraction
+    // consumed and a reset time. It is tracked on every observation, unlike the top-level
+    // status/utilization pair, which only describes whichever window is currently limiting.
+    const limitingId = stringValue(info.rateLimitType ?? info.rate_limit_type, 96);
+    const unified = record(info.unifiedWindows ?? info.unified_windows);
+    const unifiedIds = new Set<string>();
+    for (const [id, value] of Object.entries(unified ?? {}).slice(0, MAX_PROVIDER_BUCKETS)) {
+      const window = record(value);
+      if (!window) continue;
+      // A unified window carries no status of its own; the limiting window's status is the
+      // top-level one, so fold it in rather than reporting that window as plainly available.
+      const bucket = claudeWindow(id, id === limitingId ? { ...window, status: info.status } : window, fetchedAt);
+      if (!bucket) continue;
+      unifiedIds.add(bucket.id);
+      buckets.push(bucket);
+    }
+    // Fold the top-level pair into the window it names. Emitting it separately would stand a
+    // second, percentage-less card beside the real one whenever a sparse status/reset event
+    // arrives for a window `unifiedWindows` already describes.
+    if (!limitingId || !unifiedIds.has(limitingId)) {
+      const bucket = claudeWindow(limitingId ?? "subscription", info, fetchedAt);
+      if (bucket) buckets.push(bucket);
+    }
   }
   if (buckets.length === 0) return null;
   const deduped = new Map<string, SubscriptionUsageBucket>();
-  for (const bucket of buckets) deduped.set(bucket.id, { ...deduped.get(bucket.id), ...bucket });
+  for (const bucket of buckets) deduped.set(bucket.id, mergeBucket(deduped.get(bucket.id), bucket));
   return {
     ...base,
     provider: "claude",
@@ -298,6 +331,26 @@ export function normalizeClaudeRateLimits(
     fetchedAt,
     buckets: [...deduped.values()],
   };
+}
+
+/** True when a source has usable allowance numbers, as opposed to reset times alone. */
+export function hasSubscriptionUtilization(snapshot: SubscriptionUsageSnapshot): boolean {
+  return snapshot.buckets.some((bucket) =>
+    bucket.usedPercent !== undefined || bucket.remainingPercent !== undefined);
+}
+
+function mergeBucket(
+  prior: SubscriptionUsageBucket | undefined,
+  update: SubscriptionUsageBucket,
+): SubscriptionUsageBucket {
+  if (!prior) return update;
+  // Provider notifications are sparse and can arrive out of order. A window's reset time only ever
+  // moves forward, so an update naming an earlier window is older data: keep the newer window
+  // intact instead of letting a late partial event drop its utilization back to unknown.
+  if (prior.resetsAt !== undefined && update.resetsAt !== undefined && update.resetsAt < prior.resetsAt) {
+    return prior;
+  }
+  return { ...prior, ...update };
 }
 
 function mergeSnapshot(
@@ -309,7 +362,7 @@ function mergeSnapshot(
   // observation replace fields from a newer authoritative snapshot.
   if (update.fetchedAt < prior.fetchedAt) return prior;
   const buckets = new Map(prior.buckets.map((bucket) => [bucket.id, bucket]));
-  for (const bucket of update.buckets) buckets.set(bucket.id, { ...buckets.get(bucket.id), ...bucket });
+  for (const bucket of update.buckets) buckets.set(bucket.id, mergeBucket(buckets.get(bucket.id), bucket));
   const spendControls = new Map((prior.spendControls ?? []).map((item) => [item.id, item]));
   for (const item of update.spendControls ?? []) {
     spendControls.set(item.id, { ...spendControls.get(item.id), ...item });
@@ -446,6 +499,9 @@ export class SubscriptionUsageManager {
   private readonly snapshots = new Map<string, SubscriptionUsageSnapshot>();
   private readonly lastProbeAt = new Map<string, number>();
   private readonly lastEvent = new Map<string, { signature: string; observedAt: number }>();
+  /** Sources whose provider has answered at least once. Separates a source that has simply never
+   * run from one whose provider reports no allowances, which read identically before. */
+  private readonly responded = new Set<string>();
   private readonly activeProbeChildren = new Set<AgentProcess>();
   private refreshPromise: Promise<SubscriptionUsageSnapshot[]> | null = null;
   private shuttingDown = false;
@@ -524,7 +580,10 @@ export class SubscriptionUsageManager {
       return {
         ...base,
         state: "unavailable",
-        detail: "Claude subscription usage is available after the first provider response in a session.",
+        detail: this.responded.has(sourceId)
+          ? "Claude Code answered without reporting subscription allowances. Only Claude.ai " +
+            "subscription sessions carry them; API-key, Bedrock, and Vertex sessions never do."
+          : "Claude subscription usage is available after the first provider response in a session.",
         ...(auth?.subscriptionType ? { plan: auth.subscriptionType } : {}),
       };
     }
@@ -571,6 +630,7 @@ export class SubscriptionUsageManager {
     const provider = driver === "codex-app-server" ? "codex" : driver === "claude-code" ? "claude" : null;
     if (!provider || provider !== update.provider) return null;
     const sourceId = subscriptionUsageSourceId(this.options.runnerId, agentId, provider, context);
+    if (update.kind === "response_observed") return this.observeProviderResponse(sourceId);
     const base = { sourceId, runnerId: this.options.runnerId, agentId };
     const normalized = provider === "codex"
       ? normalizeCodexRateLimits(update.payload, base, this.now())
@@ -585,11 +645,38 @@ export class SubscriptionUsageManager {
       return prior ?? null;
     }
     this.lastEvent.set(sourceId, { signature, observedAt: normalized.fetchedAt });
-    const merged = mergeSnapshot(prior, normalized);
-    if (merged === prior) return prior;
-    this.snapshots.set(sourceId, merged);
-    this.options.publish(merged);
-    return merged;
+    const explained = this.explainMissingUtilization(mergeSnapshot(prior, normalized));
+    if (explained === prior) return prior;
+    this.snapshots.set(sourceId, explained);
+    this.options.publish(explained);
+    return explained;
+  }
+
+  /** A Claude source reporting reset times but no percentages is a provider-version limitation,
+   * not a source waiting on its first response. Say so instead of leaving the card bare. */
+  private explainMissingUtilization(snapshot: SubscriptionUsageSnapshot): SubscriptionUsageSnapshot {
+    if (snapshot.provider !== "claude" || snapshot.state !== "available") return snapshot;
+    if (hasSubscriptionUtilization(snapshot)) return snapshot;
+    return {
+      ...snapshot,
+      detail: "This Claude Code version reports allowance reset times but no utilization " +
+        "percentages. Update Claude Code to see used and remaining allowance.",
+    };
+  }
+
+  /** The provider answered for this source. Only the pre-first-response wording is now wrong, so
+   * real provider data — including a source already reporting allowances — is never disturbed. */
+  private observeProviderResponse(sourceId: string): SubscriptionUsageSnapshot | null {
+    const prior = this.snapshots.get(sourceId);
+    if (!this.responded.has(sourceId)) this.responded.add(sourceId);
+    if (!prior || prior.state !== "unavailable" || prior.buckets.length > 0) return prior ?? null;
+    const source = this.sources().find((candidate) => candidate.sourceId === sourceId);
+    if (!source) return prior;
+    const updated = this.initialSnapshot(source);
+    if (updated.state !== "unavailable" || updated.detail === prior.detail) return prior;
+    this.snapshots.set(sourceId, updated);
+    this.options.publish(updated);
+    return updated;
   }
 
   refreshAll(): Promise<SubscriptionUsageSnapshot[]> {

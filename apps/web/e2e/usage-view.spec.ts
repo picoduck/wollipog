@@ -88,3 +88,43 @@ test("mobile: the overview stacks and every control stays reachable", async ({ p
   await expect(page.locator(".usage-headline-value")).toContainText("M");
   await page.screenshot({ path: `${SHOT}/mobile-dark-tokens.png`, fullPage: true });
 });
+
+test("Claude subscription cards show used and remaining allowance per window (#224)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.goto("/usage-view-e2e.html?subscriptions=1");
+  const cards = page.locator(".subscription-source");
+  await expect(cards).toHaveCount(3);
+
+  // A current Claude build: every window it tracks is listed independently, with real percentages
+  // rather than the bare "Allowance Reported" fallback.
+  const current = cards.filter({ hasText: "Claude Code on build-box" }).first();
+  const buckets = current.locator(".subscription-bucket");
+  await expect(buckets).toHaveCount(3);
+  await expect(buckets.nth(0)).toContainText("Five-Hour Window");
+  await expect(buckets.nth(0)).toContainText("17% Remaining");
+  await expect(buckets.nth(0)).toContainText("83% Used");
+  await expect(buckets.nth(0)).toContainText("Approaching Limit");
+  await expect(buckets.nth(1)).toContainText("Weekly — All Models");
+  await expect(buckets.nth(1)).toContainText("54% Remaining");
+  await expect(buckets.nth(2)).toContainText("Weekly — Extra Usage");
+  await expect(buckets.nth(2)).toContainText("88% Remaining");
+  await expect(current).not.toContainText("Allowance Reported");
+
+  // A build that reports resets but no utilization says so, instead of reading as a source that
+  // has not answered yet.
+  const resetOnly = cards.filter({ hasText: "Claude Code (Ubuntu)" }).first();
+  await expect(resetOnly).toContainText("Allowance Reported");
+  await expect(resetOnly).toContainText("reports allowance reset times but no utilization");
+  await expect(resetOnly).not.toContainText("after the first provider response");
+
+  // A source that answered without allowance headers gets its own explanation.
+  const noHeaders = cards.filter({ hasText: "Claude Code (Debian)" }).first();
+  await expect(noHeaders).toContainText("Temporarily Unavailable");
+  await expect(noHeaders).toContainText("answered without reporting subscription allowances");
+  await expect(noHeaders).not.toContainText("after the first provider response");
+
+  await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-dark.png` });
+  await page.goto("/usage-view-e2e.html?subscriptions=1&theme=light");
+  await expect(page.locator(".subscription-bucket").first()).toContainText("17% Remaining");
+  await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-light.png` });
+});

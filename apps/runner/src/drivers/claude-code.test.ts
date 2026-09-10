@@ -114,6 +114,20 @@ test("Claude rate-limit events forward during and between turns without transcri
   assert.deepEqual(h.stderr, []);
 });
 
+test("a top-level result with provider tokens reports that the account answered", () => {
+  const h = makeHarness();
+  const result = (extra: Record<string, unknown> = {}) => ({
+    type: "result", subtype: "success", usage: { input_tokens: 12, output_tokens: 7 }, ...extra,
+  });
+  // A subagent result proves the account answered only for the parent, which reports separately.
+  assert.equal(h.feed({ ...result(), parent_tool_use_id: "toolu_1" }), "end_turn");
+  // A turn that failed before reaching the API proves nothing about the account's allowances.
+  assert.equal(h.feed({ type: "result", subtype: "success", usage: { input_tokens: 0, output_tokens: 0 } }), "end_turn");
+  assert.deepEqual(h.subscriptionUsage, []);
+  assert.equal(h.feed(result()), "end_turn");
+  assert.deepEqual(h.subscriptionUsage, [{ provider: "claude", kind: "response_observed" }]);
+});
+
 const baseOpts: DriverOptions = {
   command: "claude",
   args: [],

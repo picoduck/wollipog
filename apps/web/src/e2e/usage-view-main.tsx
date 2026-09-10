@@ -15,7 +15,7 @@ import "../styles.css";
 /**
  * The Usage & Cost view over a deterministic 30-day window, for screenshots and the spec. Query
  * flags: `?theme=light|dark`, `?empty=1` for a window with no usage, `?unpriced=1` for a partially
- * unpriced window with a cached rate table.
+ * unpriced window with a cached rate table, `?subscriptions=1` for the Claude subscription cards.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -112,7 +112,52 @@ const response: UsageAggregationResponse = {
   },
 };
 
-const subscription: SubscriptionUsageResponse = { sources: [], staleAfterMs: 600_000, generatedAt: END };
+// Exactly what the runner's Claude normalizer produces from real `rate_limit_event` messages
+// (#224): a current build reporting every window it tracks, a build that reports resets but no
+// utilization, and a source that answered without carrying allowance headers at all.
+// Allowance windows are read against the live clock, so anchor them to it: a fixed past date
+// would render every card as "Reset time has passed".
+const SUBSCRIPTION_NOW = Date.now();
+const claudeSource = {
+  runnerId: "r-build-box", runnerName: "build-box", runnerStatus: "online" as const,
+  provider: "claude" as const, freshness: "fresh" as const, plan: "max",
+  fetchedAt: SUBSCRIPTION_NOW,
+};
+const subscription: SubscriptionUsageResponse = {
+  sources: params.get("subscriptions") !== "1" ? [] : [
+    {
+      ...claudeSource, sourceId: "4e9ca361dace7ad20c621d0eadac54f0",
+      agentId: "claude", agentName: "Claude Code", state: "available",
+      buckets: [
+        { id: "five_hour", label: "Five-Hour Window", usedPercent: 83, remainingPercent: 17,
+          resetsAt: SUBSCRIPTION_NOW + 2 * 3_600_000 + 41 * 60_000, status: "warning" },
+        { id: "seven_day", label: "Weekly — All Models", usedPercent: 46, remainingPercent: 54,
+          resetsAt: SUBSCRIPTION_NOW + 4 * DAY, status: "available" },
+        { id: "seven_day_overage_included", label: "Weekly — Extra Usage", usedPercent: 12,
+          remainingPercent: 88, resetsAt: SUBSCRIPTION_NOW + 4 * DAY, status: "available" },
+      ],
+    },
+    {
+      ...claudeSource, sourceId: "8a66ac9939adad73bfadb15095f19d9c",
+      agentId: "claude-wsl", agentName: "Claude Code (Ubuntu)", state: "available",
+      detail: "This Claude Code version reports allowance reset times but no utilization " +
+        "percentages. Update Claude Code to see used and remaining allowance.",
+      buckets: [
+        { id: "five_hour", label: "Five-Hour Window",
+          resetsAt: SUBSCRIPTION_NOW + 3 * 3_600_000 + 12 * 60_000, status: "available" },
+      ],
+    },
+    {
+      ...claudeSource, sourceId: "c58daf328f0472d9a39dee04533481c4",
+      agentId: "claude-api", agentName: "Claude Code (Debian)", state: "unavailable",
+      detail: "Claude Code answered without reporting subscription allowances. Only Claude.ai " +
+        "subscription sessions carry them; API-key, Bedrock, and Vertex sessions never do.",
+      buckets: [],
+    },
+  ],
+  staleAfterMs: 600_000,
+  generatedAt: END,
+};
 
 let dailyBudget: { perUserUsd: number | null; updatedAt: number | null } = { perUserUsd: 25, updatedAt: END };
 const users = [
