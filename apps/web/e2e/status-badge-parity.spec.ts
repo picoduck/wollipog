@@ -10,7 +10,7 @@ import { expect, test, type Page } from "@playwright/test";
  *    lifecycle badge, and never takes a line of its own — the header is exactly as tall while a job
  *    is running as it is when none is. When the row cannot hold everything, the passive change
  *    status moves into the `+N` disclosure and background work keeps the row.
- *  - GEOMETRY. "Waiting on External Job" is the same height, type size, weight, vertical padding
+ *  - GEOMETRY. The responsive background-work label is the same height, type size, weight, vertical padding
  *    and dot size as the lifecycle badge beside it — including "Running" itself — in the header,
  *    and the same size as the card's Running pill in the Sessions list.
  *
@@ -23,7 +23,7 @@ import { expect, test, type Page } from "@playwright/test";
  * wear the same `.status-badge` class, which is the thing being sized.
  */
 
-const MOBILE_WIDTHS = [320, 390] as const;
+const MOBILE_WIDTHS = [320, 360, 390] as const;
 const WIDTHS = [...MOBILE_WIDTHS, 768, 1280] as const;
 const BACKGROUND_LABEL = "Background Work: Waiting on External Job";
 
@@ -151,6 +151,7 @@ for (const width of WIDTHS) {
     await openSession(page);
     const badge = page.locator(".session-header-statuses > .background-work-badge");
     await expect(badge).toHaveCount(1);
+    if (width <= 390) await expect(badge).toContainText("External Job");
     // The accessible name survives whether or not the row had room to paint the badge.
     await expect(page.locator(`.detail-head .sr-only [aria-label="${BACKGROUND_LABEL}"]`))
       .toHaveCount(1);
@@ -167,19 +168,12 @@ for (const width of WIDTHS) {
     if (phone) {
       expect(new Set(header.visible.map((status) => Math.round(status.y))).size).toBe(1);
     }
-    if (header.geometry.background!.width <= header.statusesWidth + 0.5) {
-      // Wherever the badge fits at all it is in the row, not in the disclosure.
-      expect(header.visible.map((status) => status.label)).toContain(BACKGROUND_LABEL);
-      // Not clipped, not under the actions, and never a horizontal scroller.
-      expect(header.backgroundRight!).toBeLessThanOrEqual(header.statusesRight + 0.5);
-      expect(header.backgroundRight!).toBeLessThanOrEqual(header.actionsLeft + 0.5);
-    } else {
-      // 320px cannot hold this label beside the action controls at any badge sizing. The row keeps
-      // the statuses that do fit rather than emptying itself for one that never will, and the
-      // badge stays reachable in the disclosure and in its live region.
-      expect(header.backgroundIsHidden).toBe(true);
-      expect(header.visible.length).toBeGreaterThan(0);
-    }
+    // The phone label is deliberately short enough to keep authoritative background work inline,
+    // including the 320px floor where its previous copy could only live in the disclosure.
+    if (phone) expect(header.visible.map((status) => status.label)).toContain(BACKGROUND_LABEL);
+    if (width === 390) expect(header.visible.some((status) => status.label.startsWith("Activity:"))).toBe(true);
+    expect(header.backgroundRight!).toBeLessThanOrEqual(header.statusesRight + 0.5);
+    expect(header.backgroundRight!).toBeLessThanOrEqual(header.actionsLeft + 0.5);
     expect(header.pageOverflows).toBe(false);
 
     expectMatchingBadges(header.geometry.background!, header.geometry.lifecycle);
@@ -218,9 +212,7 @@ for (const width of MOBILE_WIDTHS) {
     // row can hold the badge at all.
     expect(header.hidden).toContain("Changes: No Changes");
     expect(header.visible.some((status) => status.label.startsWith("Changes:"))).toBe(false);
-    if (header.geometry.background!.width <= header.statusesWidth + 0.5) {
-      expect(header.backgroundIsHidden).toBe(false);
-    }
+    expect(header.backgroundIsHidden).toBe(false);
 
     // The disclosure carries the whole status set, displaced or not.
     await trigger.click();

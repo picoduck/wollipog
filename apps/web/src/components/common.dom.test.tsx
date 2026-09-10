@@ -166,6 +166,27 @@ test("presentational background-work badges do not create a duplicate live regio
   }
 });
 
+test("responsive compact background-work badges carry wide and narrow visible labels under one accessible name", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<BackgroundWorkBadge state="running" compact responsiveCompact announce={false} />);
+    });
+    const badge = container.querySelector(".background-work-badge")!;
+    assert.equal(badge.getAttribute("aria-label"), "Background Work: Waiting on External Job");
+    assert.equal(badge.querySelector(".background-work-label-wide")?.textContent, "Waiting on External Job");
+    assert.equal(badge.querySelector(".background-work-label-narrow")?.textContent, "External Job");
+    assert.equal(badge.querySelector(".background-work-label-wide")?.getAttribute("aria-hidden"), "true");
+    assert.equal(badge.querySelector(".background-work-label-narrow")?.getAttribute("aria-hidden"), "true");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("background-work indicators become keyboard-native panel controls when actionable", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

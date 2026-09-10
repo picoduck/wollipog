@@ -1240,6 +1240,14 @@ button.background-work-badge:focus-visible {
   background: color-mix(in srgb, var(--teal) 13%, transparent);
   border-color: color-mix(in srgb, var(--teal) 32%, transparent);
 }
+.background-work-label-narrow { display: none; }
+
+/* Keep the complete accessible name while reclaiming enough measured-row width for the lifecycle
+   badge on ordinary narrow phones. Wider mobile layouts retain the descriptive visible copy. */
+@media (max-width: 420px) {
+  .session-header-statuses > .background-work-badge .background-work-label-wide { display: none; }
+  .session-header-statuses > .background-work-badge .background-work-label-narrow { display: inline; }
+}
 .background-work-untracked {
   color: var(--text-dim);
   background: color-mix(in srgb, var(--text-dim) 10%, transparent);

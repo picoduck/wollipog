@@ -267,9 +267,18 @@ const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
   resumed: "Background Work Resumed",
 };
 
-export function BackgroundWorkBadge({ state, compact = false, announce = true, onOpen }: {
+const NARROW_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
+  running: "External Job",
+  continuation_pending: "Continuation",
+  orphaned: "Orphaned Work",
+  resumed: "Resumed Work",
+};
+
+export function BackgroundWorkBadge({ state, compact = false, responsiveCompact = false, announce = true, onOpen }: {
   state: BackgroundWorkState;
   compact?: boolean;
+  /** Switch compact visible text again on narrow phones; the accessible name stays complete. */
+  responsiveCompact?: boolean;
   announce?: boolean;
   onOpen?: () => void;
 }) {
@@ -285,7 +294,12 @@ export function BackgroundWorkBadge({ state, compact = false, announce = true, o
     {compact ? (
       <>
         <span className="sr-only">{label}</span>
-        <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
+        {responsiveCompact ? (
+          <>
+            <span className="background-work-label-wide" aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
+            <span className="background-work-label-narrow" aria-hidden="true">{NARROW_BACKGROUND_WORK_LABELS[state]}</span>
+          </>
+        ) : <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>}
       </>
     ) : label}
   </>;

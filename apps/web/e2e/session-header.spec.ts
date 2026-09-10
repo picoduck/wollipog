@@ -627,12 +627,12 @@ test("mobile Session pane and action controls share trailing columns", async ({ 
 });
 
 // #784 put background work into this measured row, so five badges now compete for it and the row
-// prefers background work over everything else. A phone shows the one badge its width allows —
-// 320px cannot fit "Waiting on External Job" beside four action controls, so it keeps the lifecycle
-// badge instead — and the disclosure carries the other four, workers included.
+// prefers background work over everything else. The compact phone label now keeps background work
+// inline at the 320px floor, and the disclosure carries lower-priority statuses, workers included.
 for (const viewport of [
-  { name: "320-pixel phone", width: 320, hiddenCounts: [4], inlineBackgroundWork: false },
-  { name: "390-pixel phone", width: 390, hiddenCounts: [4], inlineBackgroundWork: true },
+  { name: "320-pixel phone", width: 320, hiddenCounts: [4], inlineBackgroundWork: true },
+  { name: "360-pixel phone", width: 360, hiddenCounts: [3], inlineBackgroundWork: true },
+  { name: "390-pixel phone", width: 390, hiddenCounts: [3], inlineBackgroundWork: true },
 ]) {
   test(`the session bar discloses overflowed statuses on a ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: 800 });
