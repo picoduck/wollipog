@@ -53,6 +53,14 @@ function mergeAuditEntries(
   return merged;
 }
 
+function auditPagesOverlap(
+  retained: readonly GovernanceAuditEntry[],
+  newest: readonly GovernanceAuditEntry[],
+): boolean {
+  const retainedIds = new Set(retained.map((entry) => entry.auditId));
+  return newest.some((entry) => retainedIds.has(entry.auditId));
+}
+
 export function useGovernanceAudit(
   sessionId: string,
   revision: string,
@@ -92,7 +100,19 @@ export function useGovernanceAudit(
                 loadingOlder: false,
               };
             }
-            const entries = previous.loadedOlder
+            const retainedPagesStillJoin = previous.loadedOlder &&
+              auditPagesOverlap(previous.entries, response.entries);
+            if (previous.loadedOlder && !retainedPagesStillJoin) {
+              return {
+                sessionId,
+                entries: response.entries,
+                nextBefore: response.nextBefore,
+                hasMore: response.hasMore,
+                loadedOlder: false,
+                loadingOlder: false,
+              };
+            }
+            const entries = retainedPagesStillJoin
               ? mergeAuditEntries(previous.entries, response.entries)
               : response.entries;
             return {
@@ -132,7 +152,22 @@ export function useGovernanceAudit(
         } : value);
       })
       .catch(() => {
-        setPage((value) => value.sessionId === sessionId ? { ...value, loadingOlder: false } : value);
+        // Retention can prune the opaque cursor between fetches. Rebase on the current newest page
+        // so the user is never left with a permanently enabled button that repeats the same 400.
+        void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT)
+          .then((response) => {
+            setPage((value) => value.sessionId === sessionId ? {
+              sessionId,
+              entries: response.entries,
+              nextBefore: response.nextBefore,
+              hasMore: response.hasMore,
+              loadedOlder: false,
+              loadingOlder: false,
+            } : value);
+          })
+          .catch(() => {
+            setPage((value) => value.sessionId === sessionId ? { ...value, loadingOlder: false } : value);
+          });
       });
   }, [api, enabled, sessionId]);
 

@@ -293,7 +293,9 @@ const WORK_KINDS = new Set(["agent_thought", "tool_call", "command_output", "std
 /** Routine automated approvals belong to the surrounding work block. Exceptional review outcomes
  * remain standalone so denials, escalations, timeouts, and aborts cannot disappear in a summary. */
 export function isCollapsibleWorkItem(item: TimelineItem): boolean {
-  return WORK_KINDS.has(item.kind) || (item.kind === "review_decision" && item.outcome === "allowed");
+  return WORK_KINDS.has(item.kind) ||
+    (item.kind === "review_decision" && item.outcome === "allowed") ||
+    (item.kind === "governance_decision" && item.decision.tone === "allowed");
 }
 
 export function timelineBoundaryKey(item: TimelineItem): string {

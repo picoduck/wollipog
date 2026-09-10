@@ -113,6 +113,7 @@ import {
   workspaceReferenceDiffContent,
 } from "./session-files.js";
 import {
+  HISTORY_PAGE_MAX_EVENTS,
   SessionStore,
   isAdoptedSession,
   metaToSnapshot,
@@ -8998,19 +8999,42 @@ export class SessionManager {
       }
       return { accepted: true, auditId, eventSeq: activeExisting.eventSeq };
     }
-    const tail = this.store.logTailSeq(sessionId);
-    const recent = this.store.readEvents(sessionId, Math.max(0, tail - 500));
-    const existing = recent.find((event) =>
-      event.payload.kind === "policy_hook_decision" && event.payload.auditId === auditId);
-    if (existing) {
-      if (JSON.stringify(existing.payload) !== JSON.stringify(payload)) {
-        return fail(auditId, "decision conflicts with the existing audit event");
-      }
-      return { accepted: true, auditId, eventSeq: existing.seq };
+    if (active?.policyHookToolCallIds?.has(payload.toolCallId)) {
+      return this.appendPolicyHookDecision(sessionId, payload);
     }
-    const toolObserved = active?.policyHookToolCallIds?.has(payload.toolCallId) || recent.some((event) =>
-      event.payload.kind === "tool_call" && event.payload.toolCallId === payload.toolCallId);
-    if (toolObserved) return this.appendPolicyHookDecision(sessionId, payload);
+    // A turn-owned index is complete from its exact boundary, so a miss means the provider event
+    // has not arrived yet. Only launch/restart recovery lacks that proof and pays the durable scan.
+    if (!active?.policyHookToolCallIds) {
+      const tail = this.store.logTailSeq(sessionId);
+      const recent: StoredEvent[] = [];
+      let afterSeq = Math.max(0, tail - 500);
+      let logEpoch: number | undefined;
+      let throughSeq: number | undefined;
+      for (let pageNumber = 0; pageNumber < 3 && afterSeq < tail; pageNumber += 1) {
+        const recoveryPage = this.store.readEventPage(sessionId, {
+          afterSeq,
+          limit: HISTORY_PAGE_MAX_EVENTS,
+          ...(logEpoch === undefined ? {} : { logEpoch, throughSeq }),
+        });
+        if (!recoveryPage.ok) break;
+        recent.push(...recoveryPage.events);
+        if (!recoveryPage.page.hasMore) break;
+        afterSeq = recoveryPage.page.nextAfterSeq;
+        logEpoch = recoveryPage.page.logEpoch;
+        throughSeq = recoveryPage.page.throughSeq;
+      }
+      const existing = recent.find((event) =>
+        event.payload.kind === "policy_hook_decision" && event.payload.auditId === auditId);
+      if (existing) {
+        if (JSON.stringify(existing.payload) !== JSON.stringify(payload)) {
+          return fail(auditId, "decision conflicts with the existing audit event");
+        }
+        return { accepted: true, auditId, eventSeq: existing.seq };
+      }
+      const toolObserved = recent.some((event) =>
+        event.payload.kind === "tool_call" && event.payload.toolCallId === payload.toolCallId);
+      if (toolObserved) return this.appendPolicyHookDecision(sessionId, payload);
+    }
 
     const pendingKey = `${sessionId}\0${payload.toolCallId}`;
     const pending = this.pendingPolicyHookDecisions.get(pendingKey);

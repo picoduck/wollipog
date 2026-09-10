@@ -128,7 +128,7 @@ test("revision refreshes retain loaded history and a session switch drops the pr
       sessionOneTail += 1;
       return sessionOneTail === 1
         ? { entries: [audit(id, "new", 200)], nextBefore: "new", hasMore: true }
-        : { entries: [audit(id, "newer", 250)], hasMore: false };
+        : { entries: [audit(id, "new", 200), audit(id, "newer", 250)], hasMore: false };
     },
   } as unknown as ApiClient;
   let latest: GovernanceAuditState | undefined;
@@ -158,6 +158,102 @@ test("revision refreshes retain loaded history and a session switch drops the pr
     await new Promise((resolve) => setImmediate(resolve));
   });
   assert.deepEqual(latest?.decisions.map((decision) => decision.auditId), ["session-2"]);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a pruned older cursor rebases on the newest page and remains pageable", async () => {
+  const calls: Array<string | undefined> = [];
+  const audit = (auditId: string, timestamp: number): GovernanceAuditEntry => ({
+    ...entry, auditId, requestId: `hook-${auditId}`, timestamp,
+  });
+  const client = {
+    governanceAudit: async (_id: string, _limit: number, before?: string) => {
+      calls.push(before);
+      if (before === "pruned") throw new Error("cursor was pruned");
+      if (before === "fresh") return { entries: [audit("older", 100)], hasMore: false };
+      return calls.length === 1
+        ? { entries: [audit("stale-head", 200)], nextBefore: "pruned", hasMore: true }
+        : { entries: [audit("fresh-head", 300)], nextBefore: "fresh", hasMore: true };
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe() {
+    latest = useGovernanceAudit("session-1", "revision-1", true);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  await act(async () => {
+    latest!.loadOlder();
+    for (let index = 0; index < 3; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(latest?.decisions.map((decision) => decision.auditId), ["fresh-head"]);
+  assert.equal(latest?.hasMore, true);
+  await act(async () => {
+    latest!.loadOlder();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(calls, [undefined, "pruned", undefined, "fresh"]);
+  assert.deepEqual(latest?.decisions.map((decision) => decision.auditId), ["older", "fresh-head"]);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a non-overlapping newest window drops retained pages so its gap remains reachable", async () => {
+  const audit = (auditId: string, timestamp: number): GovernanceAuditEntry => ({
+    ...entry, auditId, requestId: `hook-${auditId}`, timestamp,
+  });
+  let revision = 0;
+  const client = {
+    governanceAudit: async (_id: string, _limit: number, before?: string) => {
+      if (before === "old-head") return { entries: [audit("old", 100)], hasMore: false };
+      if (before === "burst-101") return { entries: [audit("bridge", 250)], hasMore: false };
+      revision += 1;
+      if (revision === 1) return {
+        entries: [audit("old-head", 200)], nextBefore: "old-head", hasMore: true,
+      };
+      return {
+        entries: Array.from({ length: 200 }, (_, index) => audit(`burst-${index + 101}`, 301 + index)),
+        nextBefore: "burst-101",
+        hasMore: true,
+      };
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe({ auditRevision }: { auditRevision: string }) {
+    latest = useGovernanceAudit("session-1", auditRevision, true);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe auditRevision="one" /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  await act(async () => {
+    latest!.loadOlder();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(latest?.decisions.map((decision) => decision.auditId), ["old", "old-head"]);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe auditRevision="two" /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(latest?.decisions.length, 200);
+  assert.equal(latest?.decisions.some((decision) => decision.auditId === "old"), false);
+  assert.equal(latest?.hasMore, true);
+  await act(async () => {
+    latest!.loadOlder();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(latest?.decisions[0]?.auditId, "bridge");
   await act(async () => { root.unmount(); });
   container.remove();
 });

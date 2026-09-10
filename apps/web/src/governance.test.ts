@@ -124,17 +124,25 @@ test("outcomes whose request already renders in place are not annotated twice", 
   assert.deepEqual(transcriptGovernanceDecisions(decisions, items).map((d) => d.auditId), ["h"]);
 });
 
-test("a native hook event suppresses every synthesized audit outcome for the same request", () => {
+test("a native hook event suppresses matching audit outcomes but not a later fail-closed override", () => {
   const decisions = governanceDecisions([
     entry({ auditId: "policy-row", requestId: "hook-native", stage: "policy_decision", outcome: "denied", actor: { kind: "policy" } }),
     entry({ auditId: "resolution-row", requestId: "hook-native", outcome: "denied" }),
+    entry({
+      auditId: "fail-closed-row",
+      requestId: "hook-native",
+      outcome: "denied",
+      actor: { kind: "system", id: "decision-history-unavailable" },
+    }),
   ]);
   const native: TimelineItem = {
     kind: "governance_decision",
     id: 42,
     decision: { ...decisions[0]!, auditId: "native-resolution", requestId: "hook-native" },
   };
-  assert.deepEqual(transcriptGovernanceDecisions(decisions, [native]), []);
+  assert.deepEqual(transcriptGovernanceDecisions(decisions, [native]).map((decision) => decision.auditId), [
+    "fail-closed-row",
+  ]);
 });
 
 test("a governance row lands after the last event at or before its timestamp", () => {

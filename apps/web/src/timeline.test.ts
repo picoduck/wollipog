@@ -984,6 +984,36 @@ test("native policy-hook system denials identify the fail-closed safety boundary
   assert.equal(decision.decision.decidedBy, "System · decision-history-unavailable");
 });
 
+test("routine native policy-hook allows stay inside one Worked block across tools", () => {
+  const items = deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "tool-one", title: "Read", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-one",
+      requestId: "hook-one",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "policy", id: "allow-read" },
+      toolCallId: "tool-one",
+    }),
+    ev({ kind: "tool_call", toolCallId: "tool-two", title: "Write", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-two",
+      requestId: "hook-two",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "human", id: "device-1" },
+      toolCallId: "tool-two",
+    }),
+  ]);
+  const groups = groupTimeline(items);
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0]?.kind === "work" ? groups[0].items.map((item) => item.kind) : [], [
+    "tool_call", "governance_decision", "tool_call", "governance_decision",
+  ]);
+});
+
 test("exceptional automated review outcomes stay prominent and split allowed summaries", () => {
   const items = deriveTimeline([
     ev({

@@ -137,7 +137,7 @@ export function transcriptGovernanceDecisions(
   return decisions.filter((decision) =>
     !represented.has(decision.requestId) &&
     !represented.has(decision.auditId) &&
-    !nativeRequests.has(decision.requestId));
+    (!nativeRequests.has(decision.requestId) || decision.label === "Blocked Fail-Closed"));
 }
 
 export interface GovernanceAnchorEvent {

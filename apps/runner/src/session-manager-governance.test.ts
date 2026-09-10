@@ -64,6 +64,8 @@ function harness(config: SessionConfig) {
     running: true,
     queue: [],
     toolCallIds: config.maxToolCalls ? new Set<string>() : undefined,
+    policyHookToolCallIds: new Set<string>(),
+    policyHookDecisionEvents: new Map(),
   };
   // Deliberately exercise the normalized driver callback seam without spawning a provider.
   (sm as any).active.set("s_governance", entry);
@@ -137,6 +139,12 @@ test("policy-hook causal and dedup indexes survive more than the bounded recover
     for (let index = 0; index < 501; index += 1) {
       (h.sm as any).onDriverEvent("s_governance", { kind: "agent_message", text: `before-${index}` });
     }
+    const readEvents = h.store.readEvents.bind(h.store);
+    let fullHistoryReads = 0;
+    (h.store as any).readEvents = (...args: Parameters<SessionStore["readEvents"]>) => {
+      fullHistoryReads += 1;
+      return readEvents(...args);
+    };
     const recorded = await h.sm.recordPolicyHookDecision("s_governance", decision);
     assert.equal(recorded.accepted, true, "the exact turn index retains an old matching tool call");
     for (let index = 0; index < 501; index += 1) {
@@ -147,8 +155,33 @@ test("policy-hook causal and dedup indexes survive more than the bounded recover
       recorded,
       "the exact turn index deduplicates an acknowledgement after its event leaves the recovery scan",
     );
-    assert.equal(h.store.readEvents("s_governance")
+    assert.equal(fullHistoryReads, 0, "the governed hot path never parses the whole durable history");
+    assert.equal(readEvents("s_governance")
       .filter((event) => event.payload.kind === "policy_hook_decision").length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("policy-hook restart recovery uses the indexed bounded page instead of a full-history scan", async () => {
+  const h = harness({});
+  try {
+    h.store.appendEvent("s_governance", {
+      kind: "tool_call", toolCallId: "tool-recovered", title: "Read", status: "pending",
+    });
+    h.store.flushAll();
+    h.entry.policyHookToolCallIds = undefined;
+    h.entry.policyHookDecisionEvents = undefined;
+    (h.store as any).readEvents = () => { throw new Error("full history scan is forbidden"); };
+    const recorded = await h.sm.recordPolicyHookDecision("s_governance", {
+      auditId: "audit-recovered",
+      requestId: "policy-hook:s_governance:recovered",
+      stage: "resolution",
+      outcome: "denied",
+      actor: { kind: "policy", id: "deny-recovered" },
+      toolCallId: "tool-recovered",
+    });
+    assert.deepEqual(recorded, { accepted: true, auditId: "audit-recovered", eventSeq: 2 });
   } finally {
     h.cleanup();
   }
