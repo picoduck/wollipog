@@ -7,6 +7,7 @@ import {
   collectDirectRuntimeDependencies,
   collectPnpmAudit,
   collectRepositoryAdvisories,
+  failureReport,
   mergeFindings,
   normalizeGitHubRepository,
   parseDeferrals,
@@ -62,6 +63,10 @@ test("parses and deduplicates direct runtime package versions while skipping wor
   assert.throws(
     () => parseDirectRuntimeDependencies([{ dependencies: { alias: { version: "catalog:current" } } }]),
     /Unsupported resolved version/u,
+  );
+  assert.throws(
+    () => parseDirectRuntimeDependencies([]),
+    /refusing an empty coverage result/u,
   );
 });
 
@@ -175,6 +180,16 @@ test("detects a repository-scoped advisory absent from pnpm audit", async () => 
           vulnerable_version_range: ">= 4.0.0, < 5.12.2",
           patched_versions: "5.12.2",
         }],
+      }, {
+        ghsa_id: "GHSA-667r-xxjv-c9mm",
+        severity: "high",
+        published_at: "2026-09-04T08:20:48Z",
+        withdrawn_at: "2026-09-05T00:00:00Z",
+        vulnerabilities: [{
+          package: { ecosystem: "npm", name: "fastify" },
+          vulnerable_version_range: "< 5.12.2",
+          patched_versions: "5.12.2",
+        }],
       }]);
     }
     throw new Error(`Unexpected URL ${url}`);
@@ -255,6 +270,14 @@ test("applies only matching, unexpired, explicit deferrals", () => {
   assert.equal(deferred.healthy, true);
   assert.equal(deferred.deferred.length, 1);
 
+  const expiresToday = assessAdvisories({
+    findings: [finding()],
+    deferrals,
+    now: new Date("2026-09-30T23:59:59Z"),
+  });
+  assert.equal(expiresToday.healthy, true);
+  assert.equal(expiresToday.deferred.length, 1);
+
   const expired = assessAdvisories({
     findings: [finding()],
     deferrals,
@@ -303,6 +326,15 @@ test("renders packages, versions, advisories, ranges, sources, and deferrals", (
   assert.match(deferredReport, /2026-09-30 \| Reviewing reachability\./u);
 });
 
+test("failure summaries stay single-line, bounded, and HTML-safe", () => {
+  const report = failureReport(new Error(`registry failed\n<details>${"x".repeat(10_000)}`));
+  assert.equal(report.split("\n").length, 4);
+  assert.doesNotMatch(report, /<details>/u);
+  assert.match(report, /&lt;details&gt;/u);
+  assert.ok(report.length < 4_100);
+  assert.match(report, /\.\.\.\n$/u);
+});
+
 test("workflow is daily, frozen, least-privilege, and reports to the job summary", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/npm-advisory-health.yml", import.meta.url),
@@ -315,4 +347,6 @@ test("workflow is daily, frozen, least-privilege, and reports to the job summary
   assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
   assert.match(workflow, /--deferrals \.github\/npm-advisory-deferrals\.json/u);
   assert.match(workflow, /--summary "\$GITHUB_STEP_SUMMARY"/u);
+  assert.match(workflow, /timeout-minutes: 10/u);
+  assert.equal(workflow.match(/uses: [^\s]+@[0-9a-f]{40}/gu)?.length, 3);
 });

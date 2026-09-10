@@ -9,6 +9,7 @@ import semver from "semver";
 const MAX_BUFFER = 10 * 1024 * 1024;
 const COMMAND_TIMEOUT_MS = 3 * 60 * 1_000;
 const GITHUB_API_VERSION = "2022-11-28";
+const MAX_FAILURE_SUMMARY_LENGTH = 4_000;
 
 function parseJsonOutput(result, command) {
   try {
@@ -86,6 +87,9 @@ export function parseDirectRuntimeDependencies(workspaces) {
       }
       dependencies.set(`${name}@${version}`, { name, version });
     }
+  }
+  if (dependencies.size === 0) {
+    throw new Error("pnpm list returned no direct runtime dependencies; refusing an empty coverage result");
   }
   return [...dependencies.values()].sort((left, right) =>
     left.name.localeCompare(right.name) || semver.compare(left.version, right.version));
@@ -379,8 +383,15 @@ async function main(argv) {
   process.exitCode = result.healthy ? 0 : 1;
 }
 
-function failureReport(error) {
-  return `# ❌ npm Advisory Health\n\nThe advisory scan did not complete: ${error.message}\n`;
+export function failureReport(error) {
+  const message = String(error?.message ?? error).replace(/\s+/gu, " ").trim()
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+  const bounded = message.length <= MAX_FAILURE_SUMMARY_LENGTH
+    ? message
+    : `${message.slice(0, MAX_FAILURE_SUMMARY_LENGTH - 3)}...`;
+  return `# ❌ npm Advisory Health\n\nThe advisory scan did not complete: ${bounded}\n`;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
