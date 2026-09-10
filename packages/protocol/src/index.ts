@@ -481,9 +481,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   durablePromptQueueIdentity: 78,
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
-  /** The control plane serves an experiment-gated web bundle (versioned conductor storage,
-   * default off). Runners fence unconditional conductor advertisement on this floor. */
-  ungatedConductorAdvertisement: 91,
   managedBackgroundDelivery: 82,
   managedBackgroundInventory: 82,
   workerAttention: 108,
