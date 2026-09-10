@@ -463,6 +463,13 @@ function validateModelImageSupport(
     : { ok: true };
 }
 
+function modelSupportsServiceTier(
+  model: AgentCapabilities["models"][number] | undefined,
+  serviceTier: string,
+): boolean {
+  return serviceTier === "default" || Boolean(model?.serviceTiers?.some((tier) => tier.id === serviceTier));
+}
+
 /** Discovery is authoritative for optional CLI knobs. Old runners omit capabilities and retain
  * their legacy permissive behavior; current runners reject stale UI/persisted values server-side. */
 export function capabilityConfigError(
@@ -499,8 +506,7 @@ export function capabilityConfigError(
     if (!serviceTiers.length) {
       return "service tier selection is not supported by this model or agent installation";
     }
-    if (config.serviceTier !== "default" && config.serviceTier !== selectedModel?.defaultServiceTier &&
-        !serviceTiers.some((tier) => tier.id === config.serviceTier)) {
+    if (!modelSupportsServiceTier(selectedModel, config.serviceTier)) {
       return `service tier ${JSON.stringify(config.serviceTier)} is not supported by this model`;
     }
   }
@@ -583,11 +589,13 @@ export function resolveEffectiveServiceTier(
     : capabilities.models.find((candidate) => candidate.default && !candidate.hidden)
       ?? capabilities.models.find((candidate) => !candidate.hidden);
   if (!model?.serviceTiers?.length) return undefined;
-  const requested = config.serviceTier || model.defaultServiceTier || "default";
-  return requested === "default" || requested === model.defaultServiceTier ||
-    model.serviceTiers.some((tier) => tier.id === requested)
+  const advertisedDefault = model.defaultServiceTier && modelSupportsServiceTier(model, model.defaultServiceTier)
+    ? model.defaultServiceTier
+    : "default";
+  const requested = config.serviceTier || advertisedDefault;
+  return modelSupportsServiceTier(model, requested)
     ? requested
-    : model.defaultServiceTier || "default";
+    : advertisedDefault;
 }
 
 /** Resolve provider defaults into an explicit, capability-compatible pair without relying on discovery order. */
@@ -697,6 +705,9 @@ function workflowMemberCapabilityError(
   launch: AgentLaunch,
   orchestrator: boolean,
 ): string | null {
+  if (config?.serviceTier && launch.driver !== "codex-app-server") {
+    return `${agentId}: service tier selection is supported only by Codex app-server sessions`;
+  }
   const effectiveConfig = config;
   const error = capabilityConfigError(effectiveConfig, launch.capabilities);
   return error ? `${agentId}: ${error}` : null;
@@ -709,6 +720,16 @@ export function workflowRunCapabilityError(
   db: ControlPlaneDb,
   req: CreateWorkflowRunRequest,
 ): string | null {
+  if (req.config?.serviceTier && !runnerSupportsProtocol(
+    db.getRunner(req.runnerId)?.protocolVersion,
+    "codexServiceTiers",
+  )) {
+    return runnerCapabilityRequirement(
+      db.getRunner(req.runnerId)?.protocolVersion,
+      "codexServiceTiers",
+      "Codex Service Tier selection",
+    );
+  }
   const definition = db.getWorkflowDefinition(req.workflowId, req.workflowVersion);
   if (!definition) return null;
   const logicalAgentIds = [...new Set(definition.nodes
@@ -3170,13 +3191,19 @@ export class SessionsService {
     let resolvedEffectiveConfig = effectiveConfig;
     if (!snapshotCommand) {
       if (effectiveConfig) {
+        const { serviceTier: explicitServiceTier, ...explicitConfigWithoutServiceTier } = effectiveConfig;
         const explicitConfigError = capabilityConfigError(
-          claudeModelConfigForValidation({
-            ...effectiveConfig,
-            model: effectiveConfig.model ?? session.model ?? undefined,
-          }, agentCapabilities, session.driver), agentCapabilities,
+          claudeModelConfigForValidation(explicitConfigWithoutServiceTier, agentCapabilities, session.driver),
+          agentCapabilities,
         );
         if (explicitConfigError) return fail(explicitConfigError, 409);
+        if (explicitServiceTier) {
+          const serviceTierError = capabilityConfigError({
+            model: effectiveConfig.model ?? session.model ?? undefined,
+            serviceTier: explicitServiceTier,
+          }, agentCapabilities);
+          if (serviceTierError) return fail(serviceTierError, 409);
+        }
       }
       const resolved = resolveEffectiveModelEffort({
         model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
@@ -3412,13 +3439,19 @@ export class SessionsService {
           ? { elicitation: session.agentCapabilities.elicitation }
           : undefined,
     );
+    const { serviceTier: explicitServiceTier, ...explicitConfigWithoutServiceTier } = config;
     const explicitConfigError = capabilityConfigError(
-      claudeModelConfigForValidation({
-        ...config,
-        model: config.model ?? session.model ?? undefined,
-      }, agentCapabilities, session.driver), agentCapabilities,
+      claudeModelConfigForValidation(explicitConfigWithoutServiceTier, agentCapabilities, session.driver),
+      agentCapabilities,
     );
     if (explicitConfigError) return fail(explicitConfigError, 409);
+    if (explicitServiceTier) {
+      const serviceTierError = capabilityConfigError({
+        model: config.model ?? session.model ?? undefined,
+        serviceTier: explicitServiceTier,
+      }, agentCapabilities);
+      if (serviceTierError) return fail(serviceTierError, 409);
+    }
     const resolvedModelEffort = resolveEffectiveModelEffort({
       model: config.model ?? session.model ?? undefined,
       effort: config.effort ?? (config.model ? undefined : session.effort ?? undefined),
@@ -5198,7 +5231,10 @@ export class SessionsService {
     const config: SessionConfig = {
       ...(parent.model ? { model: parent.model } : {}),
       ...(parent.effort ? { effort: parent.effort } : {}),
-      ...(parent.serviceTier ? { serviceTier: parent.serviceTier } : {}),
+      ...(parent.serviceTier && runnerSupportsProtocol(
+        this.db.getRunner(parent.runnerId)?.protocolVersion,
+        "codexServiceTiers",
+      ) ? { serviceTier: parent.serviceTier } : {}),
       ...(parent.permissionMode ? { permissionMode: parent.permissionMode } : {}),
     };
     const activeParentLocation = parent.projectLocationId
@@ -5371,6 +5407,10 @@ export class SessionsService {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
+    if (req.config?.serviceTier) {
+      const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection");
+      if (unsupported) return unsupported;
+    }
     this.ensureBuiltinWorkflows();
     const definition = this.db.getWorkflowDefinition(req.workflowId, req.workflowVersion);
     if (!definition) return fail("workflow definition not found", 404);

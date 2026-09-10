@@ -151,6 +151,24 @@ test("Codex service tiers validate and resolve against the selected model indepe
     "a persisted tier removed by discovery heals to the provider default");
   assert.equal(resolveEffectiveServiceTier({ model: "gpt-standard", serviceTier: "fast" }, caps, "codex-app-server"), undefined);
   assert.equal(resolveEffectiveServiceTier({ model: "gpt-fast", serviceTier: "fast" }, caps, "claude-code"), undefined);
+
+  const legacyCaps = {
+    ...caps,
+    models: [{ id: "legacy", default: true, serviceTiers: [{ id: "priority", name: "Priority" }] }],
+  };
+  assert.equal(resolveEffectiveServiceTier({ model: "legacy" }, legacyCaps, "codex-app-server"), "default",
+    "legacy additional speed tiers still imply Standard when no provider default is advertised");
+
+  const malformedDefaultCaps = {
+    ...caps,
+    models: [{
+      id: "malformed", default: true,
+      serviceTiers: [{ id: "fast", name: "Fast" }],
+      defaultServiceTier: "missing",
+    }],
+  };
+  assert.match(capabilityConfigError({ model: "malformed", serviceTier: "missing" }, malformedDefaultCaps)!, /not supported/);
+  assert.equal(resolveEffectiveServiceTier({ model: "malformed" }, malformedDefaultCaps, "codex-app-server"), "default");
 });
 
 test("persisted Claude config normalization drops stale knobs for every agent", () => {
@@ -1745,6 +1763,71 @@ test("Codex service tiers fail closed on explicit pre-v126 input while implicit 
   assert.equal(db.getSession(current.data!.id)!.serviceTier, "fast", "effort changes preserve the tier");
   assert.ok(svc.setConfig(current.data!.id, { serviceTier: "default" }).ok);
   assert.equal(db.getSession(current.data!.id)!.effort, "high", "tier changes preserve reasoning effort");
+});
+
+test("Codex service-tier drift heals without blocking unrelated config changes or restart", () => {
+  const { db, hub, svc } = makeHarness();
+  const meta = runnerMeta();
+  const codex = meta.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
+  codex.capabilities!.models = [{
+    id: "retired-model", default: true, efforts: ["low", "high"],
+    serviceTiers: [{ id: "fast", name: "Fast" }], defaultServiceTier: "fast",
+  }];
+  db.registerRunner(meta, Date.now(), 126);
+  const created = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+    config: { model: "retired-model", serviceTier: "fast" },
+  });
+  assert.ok(created.ok, created.error);
+
+  const drifted = runnerMeta();
+  const driftedCodex = drifted.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
+  driftedCodex.capabilities!.models = [{
+    id: "replacement-model", default: true, efforts: ["low", "high"],
+    serviceTiers: [{ id: "flex", name: "Flex" }], defaultServiceTier: "flex",
+  }];
+  db.registerRunner(drifted, Date.now(), 126);
+
+  const updated = svc.setConfig(created.data!.id, { effort: "high" });
+  assert.ok(updated.ok, updated.error);
+  assert.equal(updated.data!.model, "replacement-model");
+  assert.equal(updated.data!.serviceTier, "flex");
+
+  const restarted = svc.restart(created.data!.id);
+  assert.ok(restarted.ok, restarted.error);
+  assert.equal(db.getSession(created.data!.id)!.serviceTier, "flex");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.serviceTier, "flex");
+});
+
+test("inherited and workflow service tiers respect rolling runner compatibility", () => {
+  const { db, hub, svc } = makeHarness();
+  const meta = runnerMeta();
+  const codex = meta.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
+  const model = codex.capabilities!.models.find((candidate) => candidate.id === "image-model")!;
+  model.serviceTiers = [{ id: "fast", name: "Fast" }];
+  model.defaultServiceTier = "fast";
+  db.registerRunner(meta, Date.now(), 126);
+  const parent = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+    config: { model: "image-model", serviceTier: "fast" },
+  });
+  assert.ok(parent.ok, parent.error);
+
+  db.registerRunner(meta, Date.now(), 125);
+  const sideChat = svc.createSideChat(parent.data!.id);
+  assert.ok(sideChat.ok, sideChat.error);
+  assert.equal(sideChat.data!.session.serviceTier, null);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.serviceTier, undefined);
+
+  const workflow = svc.createWorkflowRun({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    workflowId: "builtin:build-review",
+    task: "Use Fast when supported",
+    config: { serviceTier: "fast" },
+  });
+  assert.equal(workflow.status, 409);
+  assert.match(workflow.error ?? "", /requires protocol v126/);
 });
 
 test("workspace references fail closed against a pre-v106 runner", () => {
