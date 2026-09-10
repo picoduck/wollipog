@@ -252,6 +252,25 @@ test("Codex App Server usage names the complete-turn protocol boundary", async (
   await view.cleanup();
 });
 
+test("an estimated-cost URL is a compact link instead of visible source text", async () => {
+  const source = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+  const view = await mount(session(), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59, costSource: "modelPriced" }),
+    byModel: [],
+    pricing: { status: "fresh", source, fetchedAt: 1, knownModels: 1200 },
+  });
+  await view.open();
+  const note = view.popover()!.querySelector(".session-usage-note")!;
+  const link = note.querySelector("a")!;
+  assert.equal(link.textContent, "Estimated API Costs");
+  assert.equal(link.getAttribute("href"), source);
+  assert.equal(link.getAttribute("target"), "_blank");
+  assert.equal(link.getAttribute("rel"), "noreferrer");
+  assert.doesNotMatch(note.textContent ?? "", /raw\.githubusercontent\.com/);
+  await view.cleanup();
+});
+
 test("a mixed-model session splits by model and names the unpriced one", async () => {
   const view = await mount(session({ costUsd: 1.21 }), {
     sessionId: "s1",

@@ -66,6 +66,12 @@ test("desktop: the cost control opens Session Usage with cumulative tokens and t
   await expect(usage).toContainText("gpt-5.5-codex-mini");
   await expect(usage).toContainText("Not Priced");
   await expect(usage).toContainText("Historical Codex App Server usage written by runners before protocol v127 is incomplete");
+  const pricingSource = usage.getByRole("link", { name: "Estimated API Costs" });
+  await expect(pricingSource).toHaveAttribute(
+    "href",
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+  );
+  await expect(usage).not.toContainText("raw.githubusercontent.com");
   // The usage panel never repeats the context meter's occupancy or capacity.
   await expect(usage).not.toContainText("Capacity");
   await expect(usage).not.toContainText("Remaining");
@@ -208,8 +214,23 @@ test("mobile: the strip trails the cost alone, and it opens Session Usage", asyn
   await expect(usage).toContainText("Input");
   await expect(usage).toContainText("Output");
   await expect(usage).toContainText("Protocol v127+ counts every response in each turn");
+  await expect(usage.getByRole("link", { name: "Estimated API Costs" })).toBeVisible();
+  await expect(usage).not.toContainText("raw.githubusercontent.com");
   const usageBox = (await usage.boundingBox())!;
   expect(usageBox.x).toBeGreaterThanOrEqual(0);
   expect(usageBox.x + usageBox.width).toBeLessThanOrEqual(390);
+  expect(await usage.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(await usage.evaluate((element) => element.clientWidth));
   await page.screenshot({ path: `${SHOT}/mobile-session-usage.png` });
+});
+
+test("mobile light theme: the estimated cost source stays compact", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/session-usage-e2e.html?width=390&height=800");
+  await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByRole("button", { name: "Session Usage: $1.37" }).click();
+  const usage = page.locator(".session-usage-popover").first();
+  await expect(usage.getByRole("link", { name: "Estimated API Costs" })).toBeVisible();
+  expect(await usage.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(await usage.evaluate((element) => element.clientWidth));
+  await page.screenshot({ path: `${SHOT}/mobile-session-usage-light.png` });
 });

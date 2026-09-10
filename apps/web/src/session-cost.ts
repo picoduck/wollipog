@@ -119,9 +119,27 @@ export function costProvenanceNote(breakdown: SessionUsageResponse | null): stri
   if (costSource === "providerReported") return "Cost as reported by the provider.";
   if (pricing?.status === "unavailable") return "No rate table is loaded, so cost is not estimated.";
   if (pricing?.source) {
+    if (estimatedCostSourceUrl(breakdown)) {
+      return pricing.status === "cached"
+        ? "Estimated API costs use the cached rate table."
+        : "Estimated API costs use the model rate table.";
+    }
     return pricing.status === "cached"
       ? `Estimated from a cached ${pricing.source} rate table.`
       : `Estimated from the ${pricing.source} rate table.`;
   }
   return "Estimated from the model rate table.";
+}
+
+/** A browser-safe pricing source URL for estimated costs, when the rate table names one. */
+export function estimatedCostSourceUrl(breakdown: SessionUsageResponse | null): string | null {
+  if (!breakdown || breakdown.totals.costSource !== "modelPriced") return null;
+  const source = breakdown.pricing?.source;
+  if (!source) return null;
+  try {
+    const url = new URL(source);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
 }

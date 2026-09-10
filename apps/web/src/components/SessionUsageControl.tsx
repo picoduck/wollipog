@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL, type SessionUsageResponse, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatCost, formatTokens } from "../format.js";
-import { costProvenanceNote, sessionCostLabel, sessionUsageTotals } from "../session-cost.js";
+import { costProvenanceNote, estimatedCostSourceUrl, sessionCostLabel, sessionUsageTotals } from "../session-cost.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
 
 /**
@@ -53,6 +53,7 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
   if (!label) return null;
 
   const provenance = costProvenanceNote(loaded);
+  const provenanceUrl = estimatedCostSourceUrl(loaded);
   const byModel = loaded?.byModel ?? [];
   // A priced zero is an amount, not a gap: `priceUsage` keeps a provider-reported 0 as
   // `providerReported`, so a free session reads `$0.00` and only a genuinely unpriced one is
@@ -102,7 +103,16 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
               Historical Codex App Server usage written by runners before protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL} is incomplete because it includes only the final model response. Protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL}+ counts every response in each turn.
             </p>
           )}
-          {provenance && <p className="session-usage-note">{provenance}</p>}
+          {provenance && (
+            <p className="session-usage-note">
+              {provenanceUrl ? (
+                <>
+                  <a href={provenanceUrl} target="_blank" rel="noreferrer">Estimated API Costs</a>
+                  {loaded?.pricing?.status === "cached" && " (Cached Rates)"}
+                </>
+              ) : provenance}
+            </p>
+          )}
           {breakdownError && <p className="session-usage-note" role="alert">{breakdownError}</p>}
           {byModel.length > 0 && (
             <div className="session-usage-models">

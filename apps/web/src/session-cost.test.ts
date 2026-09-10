@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionUsageResponse, SessionView, UsageAmount, UsageCostSource } from "@wollipog/protocol";
-import { costProvenanceNote, sessionCostLabel, sessionUsageTotals } from "./session-cost.js";
+import { costProvenanceNote, estimatedCostSourceUrl, sessionCostLabel, sessionUsageTotals } from "./session-cost.js";
 
 function session(overrides: Partial<SessionView> = {}): SessionView {
   return { tokensIn: 0, tokensOut: 0, costUsd: 0, ...overrides } as SessionView;
@@ -176,4 +176,19 @@ test("cost provenance is stated honestly per source", () => {
     costProvenanceNote(response({ totals: amount({ costSource: "unpriced", unpricedRecords: 1 }) })),
     "1 record could not be priced, so this cost is a lower bound.",
   );
+});
+
+test("estimated cost source URLs are limited to browser-safe HTTP links", () => {
+  const withSource = (source: string) => response({
+    totals: amount({ costSource: "modelPriced" }),
+    pricing: { status: "fresh" as const, source, fetchedAt: 1, knownModels: 1200 },
+  });
+  assert.equal(
+    estimatedCostSourceUrl(withSource("https://example.com/rates.json")),
+    "https://example.com/rates.json",
+  );
+  assert.equal(estimatedCostSourceUrl(withSource("http://localhost:4317/rates.json")), "http://localhost:4317/rates.json");
+  assert.equal(estimatedCostSourceUrl(withSource("javascript:alert(1)")), null);
+  assert.equal(estimatedCostSourceUrl(withSource("litellm")), null);
+  assert.equal(estimatedCostSourceUrl(response({ totals: amount({ costSource: "providerReported" }) })), null);
 });
