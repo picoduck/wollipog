@@ -252,6 +252,10 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     const claudeSource: SessionMeta = {
       ...source,
       sessionId: "s_claude_source",
+      // Reusing one worktree for a second session id is a fixture shortcut, so record the branch
+      // the tree actually carries: a real session always persists its own worktreeBranch, and fork
+      // re-proves that recorded identity before it constructs a provider.
+      worktreeBranch: sourceWorktree.branch,
       driver: "claude-code",
       agentId: "claude-code",
       agentSessionId: "claude-source-uuid",

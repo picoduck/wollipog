@@ -581,6 +581,26 @@ export async function reuseRegisteredLegacyWslWorktree(
   throw new Error("persisted legacy WSL worktree is not healthy; recover it manually before restarting this session");
 }
 
+/** The branch `createWorktree` gives a session its own worktree under `path`. Session metadata that
+ * predates `worktreeBranch` records no identity of its own, so verification derives it here instead
+ * of inventing one. The owner-instance root is the only layout that carries the hash prefix: a
+ * pre-attestation worktree under the legacy home root keeps the plain name even on an owner-hashed
+ * runner, because that is the branch `createWorktree` reuses it under. Matching the owner root
+ * positively — rather than ruling the legacy root out — keeps an unusual WSL `$HOME` from
+ * misclassifying a real owner-rooted path. Deliberately free of WSL command execution so every case
+ * is covered on any CI host. */
+export function sessionWorktreeBranch(
+  sessionId: string,
+  path: string,
+  context: AgentContext,
+  ownerHash?: string,
+): string {
+  return context.kind === "wsl" && ownerHash &&
+    path.includes(`/.agent-manager/runner-instances/${ownerHash}/worktrees/`)
+    ? `agent/${ownerHash.slice(0, 16)}/${sessionId}`
+    : `agent/${sessionId}`;
+}
+
 export async function createWorktree(repoPath: string, sessionId: string, options: WorktreeOptions = {}): Promise<WorktreeHandle> {
   const context = options.context ?? nativeContext;
   const branch = context.kind === "wsl" && options.ownerHash

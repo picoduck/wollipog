@@ -389,7 +389,12 @@ test("worktree preparation is bounded before admission while queued Native TUI m
     ) => {
       preparationCalls.push(sessionId);
       if (sessionId === "s1") await firstPreparation;
-      return { path: join(root, `worktree-${sessionId}`), branch: `agent/${sessionId}` };
+      // A real linked worktree, not a fabricated path: launch re-proves the selection's Git
+      // registration immediately before constructing the provider.
+      const path = join(root, `worktree-${sessionId}`);
+      execFileSync("git", ["worktree", "add", "-B", `agent/${sessionId}`, path, "HEAD"],
+        { cwd: repo, stdio: "ignore" });
+      return { path, branch: `agent/${sessionId}` };
     };
 
     const first = manager.start({ ...launchSpec(repo, "s1"), useWorktree: true });
@@ -415,6 +420,12 @@ test("worktree preparation is bounded before admission while queued Native TUI m
         setTimeout(() => reject(new Error("second worktree did not materialize after permit release")), 1_000)),
     ]), true);
     assert.deepEqual(preparationCalls, ["s1", "s2"]);
+    // The admitted session constructs its provider after re-proving its own worktree, which is not
+    // ordered against the queued session's materialization. Wait for that construction instead of
+    // assuming it already happened, so the count below measures admission and nothing else.
+    for (let attempt = 0; attempt < 500 && constructions === 0; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
     assert.equal(constructions, 1, "the second provider remains behind process admission");
 
     manager.cancel("s2");

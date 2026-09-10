@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -2603,4 +2603,428 @@ test("a running session discards its own finished worktrees despite the per-sess
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("post-merge cleanup keeps the worktree the running session still selects", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-selected-cleanup-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_selected_cleanup", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "running", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const merged = await manager.requestWorktree("s_selected_cleanup", { baseRef: "HEAD", branch: "fix/merged-work" });
+    // Exactly the post-merge state routine cleanup runs in: clean, fully pushed, nothing to lose.
+    execFileSync("git", ["-C", merged.worktree.path, "push", "-u", "origin", merged.worktree.branch]);
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, merged.worktree.path);
+
+    const providerOwner = "runner:provider:1:selected";
+    assert.equal(store.acquireWorktreeLease("s_selected_cleanup", providerOwner), true);
+    const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
+    activeEntries.set("s_selected_cleanup", {
+      sessionId: "s_selected_cleanup",
+      context: { kind: "native" },
+      cwd: merged.worktree.path,
+      worktree: { path: merged.worktree.path, branch: merged.worktree.branch },
+      worktreeLeaseOwner: providerOwner,
+    });
+
+    // The agent performing its own post-merge cleanup asks for the worktree it is running in.
+    await assert.rejects(
+      manager.discardWorktree("s_selected_cleanup", merged.worktree.path),
+      /worktree retained: the worktree is still active in a provider process/,
+      "the managed API reports the deferral instead of removing the session's own worktree",
+    );
+    assert.equal(existsSync(merged.worktree.path), true, "the directory survives the refused cleanup");
+    const retained = store.readMeta("s_selected_cleanup");
+    assert.equal(retained?.worktreePath, merged.worktree.path, "the durable selection is left intact");
+    assert.equal(retained?.worktrees?.some((item) => item.path === merged.worktree.path), true,
+      "and so is the worktree's attribution record");
+
+    // Once the provider that selected it is gone, the same inactive clean pushed tree discards.
+    activeEntries.delete("s_selected_cleanup");
+    store.releaseWorktreeLease("s_selected_cleanup", providerOwner);
+    await manager.discardWorktree("s_selected_cleanup", merged.worktree.path);
+    assert.equal(existsSync(merged.worktree.path), false);
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, null,
+      "the managed path clears the selection with the directory, leaving no dangling reference");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a worktree removed between turns fails the resume instead of spawning a provider in it", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-resume-removed-wt-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const prompts: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async (text: string) => { prompts.push(text); return "end_turn" as const; },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    const spec = {
+      sessionId: "s_removed_resume", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    assert.equal(await manager.start(spec), true);
+    const worktreePath = store.readMeta(spec.sessionId)?.worktreePath;
+    assert.ok(worktreePath);
+    manager.prompt(spec.sessionId, "first");
+    await waitForCondition(() => prompts.length === 1, "the first turn never reached the provider");
+    manager.stop(spec.sessionId);
+    await waitForCondition(() => !(manager as unknown as { active: Map<string, unknown> }).active.has(spec.sessionId),
+      "the provider never released the session");
+
+    // The bypass this guards: a raw Git removal of a session-linked worktree between turns.
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", worktreePath]);
+    assert.equal(existsSync(worktreePath), false);
+
+    const before = launchedCwds.length;
+    manager.prompt(spec.sessionId, "second");
+    await waitForCondition(
+      () => messages.some((message) => message.payload?.kind === "error" &&
+        /could not be verified before provider launch/.test(message.payload.message ?? "")),
+      "the resume never reported the invalid worktree",
+    );
+    assert.equal(launchedCwds.length, before, "no provider process was created for the removed worktree");
+    assert.deepEqual(prompts, ["first"], "and the resumed turn never reached a provider");
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed"), true,
+      "the affected session fails with a durable status");
+    const meta = store.readMeta(spec.sessionId);
+    assert.equal(meta?.worktreePath, worktreePath,
+      "the selection is retained rather than silently falling back to the primary workspace");
+    assert.equal(launchedCwds.includes(repo), false, "the primary repository was never used as a substitute cwd");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("queued app-server recovery refuses to relaunch into a removed worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-recovery-removed-wt-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    store.create({
+      sessionId: "s_recovery_wt", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "recovery",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    const selected = await manager.requestWorktree("s_recovery_wt", { baseRef: "HEAD", branch: "fix/recovery-removed" });
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", selected.worktree.path]);
+
+    const internals = manager as unknown as {
+      recoveryQueues: Map<string, unknown[]>;
+      recoverQueuedAppServer: (sessionId: string) => Promise<void>;
+    };
+    const queued = [{ id: "q1", text: "held", images: [], queuedAt: 1 }];
+    internals.recoveryQueues.set("s_recovery_wt", queued);
+    await internals.recoverQueuedAppServer("s_recovery_wt");
+
+    assert.deepEqual(launchedCwds, [], "recovery never spawned a provider in the removed worktree");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /could not be verified before provider launch/.test(message.payload.message ?? "")), true,
+      "recovery reported the invalid worktree state");
+    assert.equal(internals.recoveryQueues.get("s_recovery_wt"), queued, "the queued prompts stay held");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /queued prompt\(s\) remain held/.test(message.payload.message ?? "")), true,
+      "and the session is told they were not lost");
+    assert.equal(store.readMeta("s_recovery_wt")?.worktreePath, selected.worktree.path,
+      "the selection is retained rather than silently falling back to the primary workspace");
+    // The refusal happens before any lease is taken, and the caller's ordinary unwind gives the
+    // session lock back, so another runner can still pick this session up.
+    assert.equal(store.readWorktreeLease("s_recovery_wt"), null, "no worktree lease was left held");
+    assert.equal(store.acquireLock("s_recovery_wt", "another-runner"), true, "the session lock was released");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a launch refused by worktree verification retains the tree it could not identify", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-refused-launch-retain-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => null,
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const worktreePath = join(root, "materialized");
+    // Materialization publishes the worktree to the Native TUI, shells, and Files before capacity
+    // admission resolves. Reproduce a user who used that window: a different branch and an
+    // uncommitted edit, both made in a tree this launch created and would otherwise reap.
+    (manager as unknown as { createSessionWorktree: (...args: unknown[]) => Promise<unknown> })
+      .createSessionWorktree = async () => {
+        execFileSync("git", ["-C", repo, "worktree", "add", "-b", "agent/s_refused_retain", worktreePath]);
+        execFileSync("git", ["-C", worktreePath, "switch", "-c", "user/kept-work"]);
+        writeFileSync(join(worktreePath, "uncommitted.txt"), "work the user has not pushed\n");
+        return { path: worktreePath, branch: "agent/s_refused_retain" };
+      };
+
+    const started = await manager.start({
+      sessionId: "s_refused_retain", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    });
+    assert.equal(started, false, "the launch fails closed on the drifted branch");
+    assert.deepEqual(launchedCwds, [], "and never reaches provider construction");
+    assert.equal(existsSync(worktreePath), true, "the unverifiable worktree is retained, not reaped");
+    assert.equal(existsSync(join(worktreePath, "uncommitted.txt")), true, "so the user's uncommitted work survives");
+    assert.equal(store.readMeta("s_refused_retain")?.worktreePath, worktreePath,
+      "and the selection still names the tree the error is about");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a non-host execution target verifies its host worktree before the adapter is reached", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-target-worktree-verify-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    store.create({
+      sessionId: "s_container_wt", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "target",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    const selected = await manager.requestWorktree("s_container_wt", { baseRef: "HEAD", branch: "fix/container-target" });
+    // A container target bind-mounts this exact host directory into the guest, so the local tree is
+    // as load-bearing there as it is for a host launch.
+    store.patchMeta("s_container_wt", {
+      executionTarget: {
+        id: "runner:container:test", runnerId: "runner", kind: "container",
+        workspaceStrategy: "worktree", adapter: "container",
+        boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+      },
+    });
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", selected.worktree.path]);
+
+    const internals = manager as unknown as {
+      recoveryQueues: Map<string, unknown[]>;
+      recoverQueuedAppServer: (sessionId: string) => Promise<void>;
+    };
+    internals.recoveryQueues.set("s_container_wt", [{ id: "q1", text: "held", images: [], queuedAt: 1 }]);
+    await internals.recoverQueuedAppServer("s_container_wt");
+
+    assert.deepEqual(launchedCwds, [], "no driver was constructed for the removed mount source");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /could not be verified before provider launch/.test(message.payload.message ?? "")), true,
+      "the worktree is proved before any adapter-specific preparation runs");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("conversation fork refuses to spawn its temporary provider in a removed worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-fork-removed-wt-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const, forkConversation: async () => "forked-thread",
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    store.create({
+      sessionId: "s_fork_source", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "fork source",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      turnCount: 1, seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const selected = await manager.requestWorktree("s_fork_source", { baseRef: "HEAD", branch: "fix/fork-source" });
+    const head = execFileSync("git", ["-C", selected.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const tree = execFileSync("git", ["-C", selected.worktree.path, "rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
+    store.patchMeta("s_fork_source", {
+      forkPoints: { "1": { tree, baseCommit: head, agentTurnId: "turn-1", eventSeq: 1 } },
+    });
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", selected.worktree.path]);
+
+    const forked = await manager.forkConversation("s_fork_source", "s_fork_target", 1, "Forked");
+    assert.equal(forked.ok, false);
+    assert.match(forked.error ?? "", /source worktree could not be verified before fork/);
+    assert.deepEqual(launchedCwds, [], "the temporary provider was never constructed");
+    assert.equal(store.has("s_fork_target"), false, "and no target session row was published");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a legacy row without a recorded branch still fails closed when its worktree switches", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-legacy-branch-verify-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    // Metadata predating worktreeBranch: only worktreePath, on the runner's deterministic legacy
+    // name for this session. Absence is not permission to skip the identity check.
+    const legacy = await createWorktree(repo, "s_legacy_branch", { dataDir });
+    assert.equal(legacy.branch, "agent/s_legacy_branch");
+    store.create({
+      sessionId: "s_legacy_branch", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: legacy.path, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "legacy",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    assert.equal(store.readMeta("s_legacy_branch")?.worktreeBranch, undefined);
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    execFileSync("git", ["-C", legacy.path, "switch", "-c", "operator/other-work"]);
+
+    const internals = manager as unknown as {
+      recoveryQueues: Map<string, unknown[]>;
+      recoverQueuedAppServer: (sessionId: string) => Promise<void>;
+    };
+    internals.recoveryQueues.set("s_legacy_branch", [{ id: "q1", text: "held", images: [], queuedAt: 1 }]);
+    await internals.recoverQueuedAppServer("s_legacy_branch");
+
+    assert.deepEqual(launchedCwds, [], "a switched legacy worktree never reaches a provider");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /instead of agent\/s_legacy_branch/.test(message.payload.message ?? "")), true,
+      "and the error names the identity the legacy row implies");
+
+    // An owner-hashed runner derives the prefixed name only for a WSL owner root. Switching a
+    // native legacy tree to that form is still a switch, not an alternative spelling of itself.
+    (manager as unknown as { runnerOwnerHash?: string }).runnerOwnerHash = "f".repeat(64);
+    const ownerBranch = `agent/${"f".repeat(16)}/s_legacy_branch`;
+    execFileSync("git", ["-C", legacy.path, "switch", "-c", ownerBranch]);
+    internals.recoveryQueues.set("s_legacy_branch", [{ id: "q2", text: "held", images: [], queuedAt: 2 }]);
+    await internals.recoverQueuedAppServer("s_legacy_branch");
+    assert.deepEqual(launchedCwds, [], "the owner-prefixed form is not accepted for a native row");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      message.payload.message?.includes(`now on branch ${ownerBranch} instead of agent/s_legacy_branch`)), true,
+      "and the refusal names the one branch the path's creation mode implies");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the derived session worktree branch follows the root that created the path", () => {
+  const hash = "a".repeat(64);
+  const wsl = { kind: "wsl" as const, distro: "Ubuntu" };
+  const native = { kind: "native" as const };
+  const prefixed = `agent/${"a".repeat(16)}/s1`;
+  assert.equal(
+    sessionWorktreeBranch("s1", `/home/me/.agent-manager/runner-instances/${hash}/worktrees/repo/s1`, wsl, hash),
+    prefixed, "an owner-instance root carries the hash prefix, exactly as createWorktree names it");
+  assert.equal(
+    sessionWorktreeBranch("s1", "/home/me/.agent-manager/worktrees/repo/s1", wsl, hash),
+    "agent/s1", "a pre-attestation legacy root keeps the plain name even on an owner-hashed runner");
+  assert.equal(
+    sessionWorktreeBranch("s1", "/home/me/.agent-manager/worktrees/repo/s1", wsl, undefined),
+    "agent/s1", "and so does a runner with no owner hash at all");
+  assert.equal(
+    sessionWorktreeBranch("s1", `/data/runners/wollipog/worktrees/repo/s1`, native, hash),
+    "agent/s1", "a native worktree is never owner-prefixed, whatever the runner's hash");
+  // A HOME that itself contains the legacy segment must not demote a real owner-rooted path: the
+  // owner root is matched positively rather than by ruling the legacy root out.
+  assert.equal(
+    sessionWorktreeBranch(
+      "s1",
+      `/home/.agent-manager/worktrees/me/.agent-manager/runner-instances/${hash}/worktrees/repo/s1`,
+      wsl,
+      hash,
+    ),
+    prefixed, "an owner root under an unusual HOME is still owner-rooted");
+  assert.equal(
+    sessionWorktreeBranch("s1", `/home/me/.agent-manager/runner-instances/${"b".repeat(64)}/worktrees/repo/s1`, wsl, hash),
+    "agent/s1", "another owner's root is not this runner's, so no prefix is claimed for it");
 });
