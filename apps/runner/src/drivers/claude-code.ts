@@ -426,9 +426,13 @@ export class ClaudeCodeDriver implements Driver {
   /** Provider message ids that produced text deltas this turn, so an assistant record can be told
    * apart from a synthetic one by whether its own text ever reached the timeline. */
   private readonly turnStreamedMessageIds = new Set<string>();
-  /** A text delta this turn reached the timeline without a usable provider message id. An
-   * id-less assistant record can then only be the record for that delta, never an unshown one. */
-  private turnStreamedWithoutId = false;
+  /** Text this turn delivered as deltas that carried no usable provider message id. Such a record
+   * cannot be matched by id, so it is matched by its own words instead: an id-less assistant record
+   * whose text is part of this was shown, and one whose text is not — a synthetic failure that
+   * happens to follow anonymous output — was not. Bounded; past the bound an id-less record is
+   * treated as shown, which risks terseness rather than showing the reader the same text twice. */
+  private turnAnonymousShownText = "";
+  private turnAnonymousShownOverflow = false;
   /** Provider account of why the active turn produced no output, kept for the durable receipt the
    * session manager writes after `prompt()` resolves. */
   private turnErrorText: string | null = null;
@@ -704,7 +708,8 @@ export class ClaudeCodeDriver implements Driver {
     this.turnShownText = "";
     this.turnUnshownText = "";
     this.turnStreamedMessageIds.clear();
-    this.turnStreamedWithoutId = false;
+    this.turnAnonymousShownText = "";
+    this.turnAnonymousShownOverflow = false;
     this.turnErrorText = null;
     const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
     if (capabilityError) {
@@ -2114,7 +2119,9 @@ export class ClaudeCodeDriver implements Driver {
             if (!parentId) {
               this.streamedAgentResponse = true;
               if (providerMessageId) this.turnStreamedMessageIds.add(providerMessageId);
-              else this.turnStreamedWithoutId = true;
+              else if (this.turnAnonymousShownText.length + d.text.length <= ANONYMOUS_SHOWN_MAX) {
+                this.turnAnonymousShownText += d.text;
+              } else this.turnAnonymousShownOverflow = true;
             }
           } else if (d?.type === "thinking_delta" && d.thinking) {
             this.cb.onEvent({ kind: "agent_thought", text: d.thinking, ...(messageId ? { messageId } : {}), ...pp });
@@ -2141,7 +2148,9 @@ export class ClaudeCodeDriver implements Driver {
             .map((b) => String(b.text)).join("").trim();
           if (text) {
             const id = typeof msg.message?.id === "string" ? msg.message.id : "";
-            const shown = id ? this.turnStreamedMessageIds.has(id) : this.turnStreamedWithoutId;
+            const shown = id
+              ? this.turnStreamedMessageIds.has(id)
+              : this.turnAnonymousShownOverflow || this.turnAnonymousShownText.includes(text);
             if (shown) this.turnShownText = this.turnShownText ? `${this.turnShownText}\n${text}` : text;
             else this.turnUnshownText = this.turnUnshownText ? `${this.turnUnshownText}\n${text}` : text;
           }
@@ -2319,6 +2328,9 @@ function firstString(value: Record<string, Json> | null, keys: string[]): string
   for (const key of keys) if (typeof value[key] === "string" && value[key]) return value[key] as string;
   return undefined;
 }
+
+/** Bound on retained anonymous streamed text; only a provider omitting message ids reaches it. */
+const ANONYMOUS_SHOWN_MAX = 64 * 1024;
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "…" : s;

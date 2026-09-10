@@ -3624,6 +3624,20 @@ test("Claude does not repeat assistant text that already streamed, and keeps the
   assert.doesNotMatch(anonymousError.message, /visible answer/);
   assert.match(anonymousError.message, /error_during_execution/);
 
+  // ...but a *different* id-less record after anonymous output is a synthetic failure, not a second
+  // copy of what streamed. Losing it here would lose both the explanation and the retry signal.
+  const anonymousThenSynthetic = makeHarness();
+  anonymousThenSynthetic.feed({ type: "stream_event", event: { type: "message_start", message: {} } });
+  anonymousThenSynthetic.feed({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial answer" } } });
+  anonymousThenSynthetic.feed({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "text", text: "partial answer" }] } });
+  anonymousThenSynthetic.feed({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: OAUTH_REFUSAL }] } });
+  assert.equal(anonymousThenSynthetic.feed({ type: "result", subtype: "error_during_execution", usage: {} }), "refusal");
+  assert.equal(
+    (anonymousThenSynthetic.events.filter((event) => event.kind === "error")[0] as { message: string }).message,
+    OAUTH_REFUSAL,
+  );
+  assert.equal(anonymousThenSynthetic.driver.lastTurnError(), OAUTH_REFUSAL);
+
   // A subagent's failed result is its parent's business, not a session-level error.
   const nested = makeHarness();
   nested.feed({ type: "result", subtype: "success", is_error: true, result: "nested", parent_tool_use_id: "task-1", usage: {} });
