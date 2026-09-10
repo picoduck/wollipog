@@ -15,6 +15,7 @@ import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
+import { loadComposerDraft } from "../composer-drafts.js";
 import { FeedbackContext, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -237,6 +238,34 @@ test("a fallback recovery hands the same provider a fresh conversation", async (
       handoff: { agentId: "codex", config: { model: "gpt-5.6-sol", effort: "high" } },
     }]);
     assert.deepEqual(fixture.navigated, ["s_fresh"]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a fallback recovery keeps both the seeded context and the unsent prompt", async () => {
+  const fixture = await mount(
+    { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "handoff", retainedPrompt: true },
+    (async () => ({
+      ...session("s_both", undefined),
+      handoffDraft: { text: "Checkpoint handoff. Historical context follows.", images: [], disclosure: "bounded" },
+      retainedPrompt: { text: "Now scan every changed file.", images: [] },
+    })) as never,
+  );
+  try {
+    const action = fixture.banner()!.querySelector("button") as HTMLButtonElement;
+    await act(async () => { action.click(); });
+    await flushAsyncWork(5);
+    const staged = (await loadComposerDraft("s_both"))!;
+    assert.ok(staged, "the recovered session receives a composer draft");
+    // Dropping either would break a promise the confirmation just made: the fresh thread is seeded
+    // with the checkpoint dialogue, and the user's own unsent request is still there to send.
+    assert.match(staged.text, /Historical context follows/);
+    assert.match(staged.text, /Now scan every changed file\./);
+    assert.ok(
+      staged.text.indexOf("Historical context") < staged.text.indexOf("Now scan"),
+      "context leads so the retained prompt reads as the instruction",
+    );
   } finally {
     await fixture.unmount();
   }

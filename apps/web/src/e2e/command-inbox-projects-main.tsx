@@ -517,7 +517,7 @@ if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handof
     { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "Summarized the release notes.", final: true } },
     { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "user_message", text: "Now scan every changed file.", final: true } },
-    { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "error", message: "Invalid 'input[675].arguments': string too long. Expected a string with maximum length 1048576, but got a string with length 1426210 instead." } },
+    { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "error", message: "The agent provider rejected this conversation's stored history: the recorded tool call at history position 675 cannot be resent. Its arguments field is 1,426,210 characters, over the provider's limit of 1,048,576." } },
     { id: 6, sessionId: "session-alpha", seq: 6, ts: 6, payload: { kind: "provider_history_quarantined", reason: "oversized_tool_call", itemIndex: 675, recoveryTurn: 1,
       recovery: SCENARIO === "history-quarantine-handoff" ? "handoff" : "fork" } },
   ]);

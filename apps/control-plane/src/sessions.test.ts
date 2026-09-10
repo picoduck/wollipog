@@ -9408,10 +9408,24 @@ test("a quarantined provider conversation refuses prompts and provider commands"
   assert.match(compacted.error ?? "", /quarantined/);
   assert.equal(hub.sentToRunner.length, 0, "nothing is delivered to the poisoned conversation");
 
-  // The runner clearing the quarantine restores ordinary submission.
+});
+
+test("a snapshot that omits the additive quarantine field never clears the stored guard", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id, status: "idle",
+    historyQuarantine: { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork" },
+  })]);
+  assert.ok(db.getSession(id)?.historyQuarantine);
+
+  // Registration snapshots are built with a null protocol version, and a pre-v126 runner never
+  // sends the field at all. Neither may make a poisoned conversation promptable again.
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle" })]);
-  assert.equal(db.getSession(id)?.historyQuarantine, undefined);
-  assert.equal(svc.prompt(id, "now it works").ok, true);
+  assert.deepEqual(db.getSession(id)?.historyQuarantine, {
+    reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork",
+  });
+  assert.equal(svc.prompt(id, "still blocked").status, 409);
 });
 
 test("an unrecognized stored quarantine is dropped rather than surfaced", () => {

@@ -2811,12 +2811,19 @@ function SessionDetailLoaded({
             }
           : undefined,
       );
-      // The retained prompt is the user's own unsent text and wins the composer; a handoff draft
-      // is context the user is meant to review before sending, so it only fills an empty composer.
-      const draft = recovered.retainedPrompt ?? recovered.handoffDraft;
-      if (draft) {
-        stageComposerDraftHandoff(recovered.id, draft.text, draft.images, instanceScope);
-        await saveComposerDraft(recovered.id, draft.text, draft.images, instanceScope);
+      // Both matter and there is one composer. The handoff draft is what seeds a fresh thread with
+      // the checkpoint dialogue, so it must lead; the retained prompt is the user's own unsent
+      // request, so it follows as the actual instruction. Dropping either would break a promise the
+      // confirmation just made.
+      const context = recovered.handoffDraft;
+      const retained = recovered.retainedPrompt;
+      const text = context && retained?.text
+        ? `${context.text}\n\nYour unsent message follows.\n\n${retained.text}`
+        : context?.text ?? retained?.text ?? "";
+      const images = [...(context?.images ?? []), ...(retained?.images ?? [])];
+      if (text || images.length) {
+        stageComposerDraftHandoff(recovered.id, text, images, instanceScope);
+        await saveComposerDraft(recovered.id, text, images, instanceScope);
       }
       if (viewGenerationRef.current === generation) navigate({ name: "session", id: recovered.id });
     } catch (cause) {

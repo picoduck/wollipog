@@ -682,6 +682,10 @@ export function providerAuthenticationReceiptCode(
  * being silently discarded. */
 const SESSION_EVENT_WIRE_POLICIES = {
   agent_response_completed: { minProtocol: 87, legacy: "omit" },
+  // A pre-v126 control plane classifies session events exhaustively; an unknown kind fails its
+  // whole transcript projection. The quarantine is already carried by the session's own state, so
+  // omitting the marker costs an older peer nothing it can act on.
+  provider_history_quarantined: { minProtocol: 126, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
   minProtocol: number;
   legacy: "omit";

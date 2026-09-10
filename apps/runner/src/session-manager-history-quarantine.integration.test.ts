@@ -18,6 +18,7 @@ import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-histor
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { createWorkspaceReference } from "./session-files.js";
 import { createWorktree } from "./worktree.js";
 
 const REJECTION: PoisonedProviderHistory = {
@@ -281,6 +282,63 @@ test("the quarantine survives a runner restart, so a resumed session never re-su
   }
 });
 
+test("an explicit restart that keeps the Codex thread keeps its quarantine", async () => {
+  const fixture = await setup();
+  const state: StubState = { callbacks: [], prompts: [], launches: 0, forks: [] };
+  const manager = new SessionManager(
+    () => {}, () => {}, fixture.store, "runner", undefined, stubFactory(state), fixture.root,
+  );
+  try {
+    manager.prompt(fixture.sessionId, "the turn that fails");
+    await waitFor(() => state.prompts.length === 1, "the first turn reaches the provider");
+    state.callbacks[0]!.onProviderHistoryUnrecoverable!(REJECTION);
+    await settled(fixture.store, fixture.sessionId);
+    await manager.stop(fixture.sessionId);
+
+    // Restart rebuilds SessionMeta from the launch spec. For app-server it preserves the durable
+    // thread, so it must preserve the block with it — otherwise Restart is a way back into the
+    // poisoned conversation.
+    state.prompts.length = 0;
+    await manager.start({
+      sessionId: fixture.sessionId, agentId: "codex-native", workspaceId: "workspace",
+      workspacePath: fixture.repo, command: "codex", args: [], env: {},
+      useWorktree: false, driver: "codex-app-server",
+    });
+
+    const restarted = fixture.store.readMeta(fixture.sessionId)!;
+    assert.equal(restarted.agentSessionId, "thread-poisoned", "the same provider thread is resumed");
+    assert.equal(restarted.providerHistoryBlock?.recoveryTurn, 2, "so the quarantine must survive");
+    assert.equal(manager.prompt(fixture.sessionId, "after restart"), false);
+    await waitFor(() => true, "settled");
+    assert.deepEqual(state.prompts, [], "no turn reaches the poisoned thread after restart");
+  } finally {
+    manager.shutdownAll();
+    fixture.cleanup();
+  }
+});
+
+test("a quarantined session refuses a worktree switch that would strand its recovery", async () => {
+  const fixture = await setup();
+  const state: StubState = { callbacks: [], prompts: [], launches: 0, forks: [] };
+  const manager = new SessionManager(
+    () => {}, () => {}, fixture.store, "runner", undefined, stubFactory(state), fixture.root,
+  );
+  try {
+    manager.prompt(fixture.sessionId, "the turn that fails");
+    await waitFor(() => state.prompts.length === 1, "the first turn reaches the provider");
+    state.callbacks[0]!.onProviderHistoryUnrecoverable!(REJECTION);
+    await settled(fixture.store, fixture.sessionId);
+
+    await assert.rejects(
+      manager.selectWorktree(fixture.sessionId, fixture.worktree.path),
+      /quarantined/,
+    );
+  } finally {
+    manager.shutdownAll();
+    fixture.cleanup();
+  }
+});
+
 test("recovery forks the provider at the safe checkpoint and carries its exact files and unsent prompt", async () => {
   const fixture = await setup();
   const state: StubState = { callbacks: [], prompts: [], launches: 0, forks: [] };
@@ -309,6 +367,7 @@ test("recovery forks the provider at the safe checkpoint and carries its exact f
     assert.equal(recovered.ok, true, recovered.error);
     assert.deepEqual(state.forks, [{ turnId: "turn-2", cwd: fixture.store.readMeta("s_recovered")!.worktreePath! }]);
     assert.deepEqual(recovered.retainedPrompt, { text: "keep this for me", images: [] });
+
 
     const child = fixture.store.readMeta("s_recovered")!;
     assert.equal(child.providerHistoryBlock, undefined, "the fork excludes the invalid item");
@@ -392,6 +451,42 @@ test("a fork that is poisoned again recovers through a fresh same-provider threa
     // The handoff is a bounded, redacted projection of the visible dialogue only.
     assert.match(fresh.handoffDraft!.text, /Do the safe work/);
     assert.doesNotMatch(fresh.handoffDraft!.text, /thread-poisoned|poisoned it/);
+  } finally {
+    manager.shutdownAll();
+    fixture.cleanup();
+  }
+});
+
+test("a retained workspace reference is dropped rather than handed to a different worktree", async () => {
+  const fixture = await setup();
+  const state: StubState = { callbacks: [], prompts: [], launches: 0, forks: [] };
+  const manager = new SessionManager(
+    () => {}, () => {}, fixture.store, "runner", undefined, stubFactory(state), fixture.root,
+  );
+  try {
+    manager.prompt(fixture.sessionId, "the turn that fails");
+    await waitFor(() => state.prompts.length === 1, "the first turn reaches the provider");
+    state.callbacks[0]!.onProviderHistoryUnrecoverable!(REJECTION);
+    await settled(fixture.store, fixture.sessionId);
+
+    // A reference's rootFingerprint binds it to the source worktree's canonical path and inode;
+    // recovery creates a different worktree, so sending it in the child would fail resolution.
+    const reference = await createWorkspaceReference(
+      { kind: "native" }, fixture.worktree.path, { path: "untracked.txt" },
+    );
+    const block = fixture.store.readMeta(fixture.sessionId)!.providerHistoryBlock!;
+    fixture.store.patchMeta(fixture.sessionId, {
+      providerHistoryBlock: { ...block, retry: { text: "explain @untracked.txt", images: [reference] } },
+    });
+
+    const recovered = await manager.forkConversation(
+      fixture.sessionId, "s_recovered_ref", 2, "Recovered", false, undefined, true,
+    );
+    assert.equal(recovered.ok, true, recovered.error);
+    assert.deepEqual(recovered.retainedPrompt!.images, [], "the untransferable reference is dropped");
+    assert.match(recovered.retainedPrompt!.text, /explain @untracked\.txt/, "the user's own words survive");
+    assert.match(recovered.retainedPrompt!.text, /Workspace file references were removed/,
+      "and the draft says so rather than silently losing the attachment");
   } finally {
     manager.shutdownAll();
     fixture.cleanup();

@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
+
+/** A peer that needs no additive session-event projection at all. It moves whenever a new event
+ * kind gets an older-peer omission policy, so these tests name the boundary instead of a literal:
+ * v87 stopped being an exact peer when the v126 quarantine marker gained one. */
+const CURRENT_PEER = PROTOCOL_VERSION;
 import {
   appendFileSync,
   closeSync,
@@ -132,17 +138,17 @@ test("v86 wire projection omits response completions while keeping dense live an
     assert.equal(store.snapshots(86)[0]?.seq, 2);
     assert.equal(store.snapshots(86, true)[0]?.seq, 3,
       "buffered messages retain the exact local high-water until socket send");
-    assert.equal(store.snapshots(87)[0]?.seq, 3);
+    assert.equal(store.snapshots(CURRENT_PEER)[0]?.seq, 3);
     assert.equal(store.snapshots(86)[0]?.historyEpoch, 1);
     assert.equal(store.snapshots(86, true)[0]?.historyEpoch, 0);
-    assert.equal(store.snapshots(87)[0]?.historyEpoch, 0);
+    assert.equal(store.snapshots(CURRENT_PEER)[0]?.historyEpoch, 0);
     assert.deepEqual(store.projectEventForProtocol("s_abc", first, 86), first);
     assert.equal(store.projectEventForProtocol("s_abc", completion, 86), null);
     assert.deepEqual(store.projectEventForProtocol("s_abc", second, 86), {
       ...second,
       seq: 2,
     });
-    assert.deepEqual(store.projectEventForProtocol("s_abc", completion, 87), completion);
+    assert.deepEqual(store.projectEventForProtocol("s_abc", completion, CURRENT_PEER), completion);
 
     let refreshCount = 0;
     const refresh = (store as any).refreshEventProjectionIndex.bind(store);
@@ -159,7 +165,7 @@ test("v86 wire projection omits response completions while keeping dense live an
     assert.deepEqual(store.readEventsForProtocol("s_abc", 1, 86).map((event) => event.seq), [2]);
     assert.deepEqual(store.readEventsForProtocol("s_abc", 99, 86), [],
       "legacy hydration preserves the empty result for a stale cursor beyond the projected tail");
-    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, 87).map((event) => event.seq), [1, 2, 3]);
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, CURRENT_PEER).map((event) => event.seq), [1, 2, 3]);
 
     refreshCount = 0;
     const projectionIndexPath = join(root, "s_abc", "events.idx");
@@ -217,7 +223,7 @@ test("v86 wire projection omits response completions while keeping dense live an
   }
 });
 
-test("registration keeps history neutral until one negotiated v86 or v87 generation is published", () => {
+test("registration keeps history neutral until one negotiated legacy or current generation is published", () => {
   const { store, root } = tmpStore();
   try {
     store.create(meta());
@@ -225,7 +231,7 @@ test("registration keeps history neutral until one negotiated v86 or v87 generat
     store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002);
     store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003);
 
-    const exact = store.snapshots(87, true)[0]!;
+    const exact = store.snapshots(CURRENT_PEER, true)[0]!;
     const historyTail = (store as any).historyTail.bind(store);
     let historyTailCalls = 0;
     (store as any).historyTail = (...args: unknown[]) => {
@@ -240,21 +246,21 @@ test("registration keeps history neutral until one negotiated v86 or v87 generat
     assert.deepEqual(reconnectRegister, firstRegister, "reconnect does not fabricate another generation");
 
     const v86 = store.projectSnapshotForProtocol(exact, 86);
-    const v87 = store.projectSnapshotForProtocol(exact, 87);
+    const currentGeneration = store.projectSnapshotForProtocol(exact, CURRENT_PEER);
     assert.deepEqual([v86.seq, v86.historyEpoch], [2, 1]);
-    assert.deepEqual([v87.seq, v87.historyEpoch], [3, 0]);
+    assert.deepEqual([currentGeneration.seq, currentGeneration.historyEpoch], [3, 0]);
     assert.deepEqual(store.projectSnapshotForProtocol(exact, 86), v86,
       "a v86 reconnect republishes the same negotiated generation");
-    assert.deepEqual(store.projectSnapshotForProtocol(exact, 87), v87,
-      "a v87 reconnect republishes the same negotiated generation");
+    assert.deepEqual(store.projectSnapshotForProtocol(exact, CURRENT_PEER), currentGeneration,
+      "a current-peer reconnect republishes the same negotiated generation");
 
     const legacyPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, 86);
-    const currentPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, 87);
+    const currentPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, CURRENT_PEER);
     assert.equal(legacyPage.ok, true);
     assert.equal(currentPage.ok, true);
     if (legacyPage.ok && currentPage.ok) {
       assert.equal(legacyPage.page.logEpoch, v86.historyEpoch);
-      assert.equal(currentPage.page.logEpoch, v87.historyEpoch);
+      assert.equal(currentPage.page.logEpoch, currentGeneration.historyEpoch);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -332,7 +338,7 @@ test("projected snapshot corruption fallback never advertises an exact local tai
     const legacy = store.snapshots(86)[0]!;
     assert.deepEqual([legacy.seq, legacy.historyEpoch], [0, 1],
       "legacy fallback remains in its dense sequence space");
-    const current = store.snapshots(87)[0]!;
+    const current = store.snapshots(CURRENT_PEER)[0]!;
     assert.deepEqual([current.seq, current.historyEpoch], [3, 0],
       "an exact current peer may retain the metadata high-water");
   } finally {
@@ -361,10 +367,10 @@ test("peer protocol changes fence dense sequence spaces with distinct wire epoch
     store.create(meta());
     store.resetEvents("s_abc");
     assert.equal(store.snapshots(86)[0]?.historyEpoch, 3);
-    assert.equal(store.snapshots(87)[0]?.historyEpoch, 2);
+    assert.equal(store.snapshots(CURRENT_PEER)[0]?.historyEpoch, 2);
 
     const legacy = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, 86);
-    const current = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, 87);
+    const current = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, CURRENT_PEER);
     assert.equal(legacy.ok, true);
     assert.equal(current.ok, true);
     if (legacy.ok && current.ok) {

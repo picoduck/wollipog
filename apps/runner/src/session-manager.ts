@@ -1174,6 +1174,12 @@ export class SessionManager {
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      // The recovery checkpoint is attributed to the worktree it was taken in, and a quarantined
+      // session can never complete the provider rebind that a switch requires. Allowing the switch
+      // would leave the advertised recovery pointing at a worktree the fork then refuses.
+      if (meta.providerHistoryBlock) {
+        throw new Error("this session's provider conversation is quarantined — recover it before changing worktrees");
+      }
       const worktree = this.attributedWorktrees(meta)
         .find((item) => sameWorktreePath(meta.context, item.path, path));
       if (!worktree) throw new Error("worktree is not linked to this session");
@@ -2578,6 +2584,12 @@ export class SessionManager {
       lastTurnBaseTree: prior?.lastTurnBaseTree,
       turnCount: prior?.turnCount ?? 0,
       forkPoints: prior?.forkPoints ?? {},
+      // A quarantine is a property of the provider conversation, not of this process. Restart
+      // preserves the app-server thread (priorResumeId), so it must preserve the block with it, or
+      // Restart silently becomes a way to resume the poisoned thread and fail again. A restart that
+      // does NOT carry the thread forward starts a clean conversation and correctly drops it.
+      providerHistoryBlock: priorResumeId ? prior?.providerHistoryBlock : undefined,
+      providerHistoryRecoveryOf: priorResumeId ? prior?.providerHistoryRecoveryOf : undefined,
       checkpointWorktreeIds: prior?.checkpointWorktreeIds,
       // Sessions (re)started on this build never carry the old add -A residue forward — and the
       // flag stops the startup migration from ever clearing a user's deliberate staging.
@@ -5053,6 +5065,31 @@ export class SessionManager {
     return this.makeSteeringResult(operation.request, "rejected", reason, { message });
   }
 
+  /** A quarantined conversation can never drain its FIFO, so a prompt handed back by a steering
+   * promotion must be settled here rather than parked forever. Retain its text if nothing has been
+   * retained yet, exactly like a prompt attempted after the quarantine. Returns true when the
+   * prompt was absorbed and must not be requeued. */
+  private absorbQuarantinedPrompt(sessionId: string, prompt: QueuedPrompt): boolean {
+    const block = this.store.readMeta(sessionId)?.providerHistoryBlock;
+    if (!block) return false;
+    if (!block.retry && !prompt.sessionCommand) {
+      this.store.patchMeta(sessionId, {
+        providerHistoryBlock: {
+          ...block,
+          retry: {
+            text: prompt.text,
+            images: prompt.images,
+            ...(prompt.slashCommand ? { slashCommand: prompt.slashCommand } : {}),
+            ...(prompt.config ? { config: prompt.config } : {}),
+          },
+        },
+      });
+      this.store.flush(sessionId);
+    }
+    this.failQueuedPrompt(prompt, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
+    return true;
+  }
+
   private convertDirectSteeringToQueue(operation: SteeringOperation): string | null {
     const { request } = operation;
     const entry = this.active.get(request.sessionId);
@@ -5063,6 +5100,8 @@ export class SessionManager {
         ? this.recoveryQueueCapacityView(request.sessionId, queue)
         : undefined;
     if (!queue || !capacity || !this.queueCanAccept(capacity, request.text ?? "", request.images ?? [])) return null;
+    // Converting into a quarantined session's FIFO would strand the submission; reject it instead.
+    if (this.store.readMeta(request.sessionId)?.providerHistoryBlock) return null;
     const id = randomUUID();
     this.insertQueuedPrompt(request.sessionId, queue, {
       id,
@@ -5086,6 +5125,11 @@ export class SessionManager {
     }
     if (operation.cancelRequested) {
       source.durable?.failed("queued command was cancelled during steering promotion", "COMMAND_CANCELLED");
+      operation.source = undefined;
+      if (entry) this.emitQueue(operation.request.sessionId);
+      return;
+    }
+    if (this.absorbQuarantinedPrompt(operation.request.sessionId, source)) {
       operation.source = undefined;
       if (entry) this.emitQueue(operation.request.sessionId);
       return;
@@ -7144,8 +7188,20 @@ export class SessionManager {
     let providerStateJournaled = false;
     // Hand the source's unsent prompt to the caller so the recovered session can offer it as a
     // composer draft. It stays a draft: neither the runner nor the control plane submits it.
+    //
+    // Workspace references cannot travel. Their rootFingerprint binds them to the source worktree's
+    // canonical path and inode, and recovery creates a different worktree, so sending them in the
+    // child would fail resolution. Drop them and say so rather than handing over a draft that
+    // cannot be sent; the same rule is why buildConversationHandoff refuses them outright.
+    const retainedImages = quarantine?.retry?.images ?? [];
+    const portableImages = retainedImages.filter((image) => !isWorkspaceReference(image));
     const retainedPrompt = recovery && quarantine?.retry
-      ? { text: quarantine.retry.text, images: quarantine.retry.images }
+      ? {
+          text: portableImages.length === retainedImages.length
+            ? quarantine.retry.text
+            : `${quarantine.retry.text}\n\n[Workspace file references were removed: they belong to the quarantined session's worktree. Re-attach them here.]`,
+          images: portableImages,
+        }
       : undefined;
     // Provenance is only true of a session created to recover a quarantine. An ordinary fork of a
     // recovered session inherits its history, not its rescue, so the spread must not carry it: a

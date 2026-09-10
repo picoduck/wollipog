@@ -842,7 +842,15 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(completion, 87), completion);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), false);
+
+  // A pre-v126 control plane classifies session events exhaustively, so an unknown kind would fail
+  // its whole transcript projection. The quarantine marker is omitted for those peers.
+  const quarantined = { kind: "provider_history_quarantined", reason: "oversized_tool_call" } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(quarantined, 125), null);
+  assert.equal(projectSessionEventPayloadForProtocol(quarantined, undefined), null);
+  assert.equal(projectSessionEventPayloadForProtocol(quarantined, 126), quarantined);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(126), false);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

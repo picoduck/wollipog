@@ -36,6 +36,24 @@ function boundedCount(match: RegExpMatchArray | null): number | undefined {
   return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
+/**
+ * A bounded, constructed description of the rejection. The provider's own message is never
+ * relayed once it matches: a future server version could append an argument excerpt, request
+ * metadata, or a thread id to the same error, and the transcript is a durable, shareable surface.
+ * Only the structural facts this module already extracted are rendered.
+ */
+export function poisonedProviderHistoryMessage(detail: PoisonedProviderHistory): string {
+  const where = detail.itemIndex === undefined
+    ? "a recorded tool call"
+    : `the recorded tool call at history position ${detail.itemIndex}`;
+  const size = detail.length !== undefined && detail.limit !== undefined
+    ? ` Its ${detail.field} field is ${detail.length.toLocaleString("en-US")} characters, over the provider's limit of ${detail.limit.toLocaleString("en-US")}.`
+    : detail.length !== undefined
+      ? ` Its ${detail.field} field is ${detail.length.toLocaleString("en-US")} characters, over the provider's limit.`
+      : ` Its ${detail.field} field is over the provider's length limit.`;
+  return `The agent provider rejected this conversation's stored history: ${where} cannot be resent.${size}`;
+}
+
 export function classifyPoisonedProviderHistory(message: unknown): PoisonedProviderHistory | null {
   if (typeof message !== "string" || !message) return null;
   const path = HISTORY_ARGUMENTS_PATH.exec(message);
