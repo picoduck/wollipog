@@ -131,7 +131,7 @@ function SteeringReceiptCard({
   const pendingAction = pendingActions?.get(attempt.submissionId);
   const actionPending = attempt.resolution?.state === "pending" || pendingAction !== undefined;
   const recoverable = attempt.state === "uncertain" && attempt.resolution?.state !== "applied";
-  const dismissibleRejection = attempt.state === "rejected";
+  const dismissibleRejection = status === "rejected";
   const dismissibleQueuedAgain = attempt.resolution?.state === "applied" &&
     attempt.resolution.action === "queue_again";
   const durableDetail = detail ?? (dismissibleQueuedAgain
@@ -208,10 +208,10 @@ export function SteeringReceipts({
   const [clearingQueuedAgain, setClearingQueuedAgain] = useState(false);
   const receipts = deriveSteeringReceipts(attempts, timelineItems, activeTurnId, historyPartial);
   if (!receipts.length) return null;
-  const rejected = receipts.filter(({ attempt }) => attempt.state === "rejected");
+  const rejected = receipts.filter(({ status }) => status === "rejected");
   const queuedAgain = receipts.filter(({ status }) => status === "queued_again");
-  const ungrouped = receipts.filter(({ attempt, status }) =>
-    !(rejected.length > 1 && attempt.state === "rejected") &&
+  const ungrouped = receipts.filter(({ status }) =>
+    !(rejected.length > 1 && status === "rejected") &&
     !(queuedAgain.length > 1 && status === "queued_again")
   );
   const clearableRejected = rejected.filter(({ attempt }) =>

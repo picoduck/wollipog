@@ -367,6 +367,27 @@ test("multiple completed Queue Again receipts collapse into one bounded group", 
   container.remove();
 });
 
+test("a late Queue Again resolution is grouped only by its completed receipt status", () => {
+  const html = renderToStaticMarkup(<SteeringReceipts
+    attempts={[
+      attempt("rejected-a", "rejected"),
+      attempt("rejected-b", "rejected"),
+      attempt("hybrid", "rejected", {
+        resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-hybrid" },
+      }),
+      attempt("queued", "uncertain", {
+        resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-ordinary" },
+      }),
+    ]}
+    timelineItems={[]}
+    onQueueAgain={() => {}}
+    onDismiss={() => {}}
+  />);
+  assert.match(html, /2 Rejected Receipts/);
+  assert.match(html, /2 Completed Receipts/);
+  assert.doesNotMatch(html, /3 Rejected Receipts/);
+});
+
 test("applied dismissals stay absent after authoritative session state refreshes", () => {
   const rejected = attempt("dismissed-rejection", "rejected", {
     resolution: { action: "dismiss", state: "applied" },

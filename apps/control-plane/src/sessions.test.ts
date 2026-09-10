@@ -3280,6 +3280,55 @@ test("canonical queued user history retires only its exact Queue Again receipt",
   assert.equal(hub.sessionChangedByIdCalls.includes(id), true);
 });
 
+test("hydrated canonical queue delivery retires Queue Again receipts in both history protocols", async () => {
+  for (const indexed of [true, false]) {
+    const { db, hub, svc } = makeHarness();
+    if (!indexed) db.registerRunner(runnerMeta(), Date.now(), 53);
+    const id = "s_box1";
+    const suffix = indexed ? "indexed" : "legacy";
+    hub.requestHandler = (message) => indexed ? {
+      type: "session_history_page_result",
+      requestId: message.requestId,
+      sessionId: id,
+      ok: true,
+      events: [{ seq: 1, ts: 100, payload: {
+        kind: "user_message", text: "delivered", turnId: `queue-hydrated-${suffix}`,
+      } }],
+      page: { logEpoch: 7, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
+    } : {
+      type: "session_history_result",
+      requestId: message.requestId,
+      sessionId: id,
+      ok: true,
+      events: [{ seq: 1, ts: 100, payload: {
+        kind: "user_message", text: "delivered", turnId: `queue-hydrated-${suffix}`,
+      } }],
+    };
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      seq: 1,
+      historyEpoch: indexed ? 7 : undefined,
+    })]);
+    db.createSteeringAttempt({
+      requestId: `steer-hydrated-${suffix}`, sessionId: id,
+      submissionId: `submission-hydrated-${suffix}`, turnId: `turn-${suffix}`,
+      source: "direct", requestSha256: "3".repeat(64), text: "later", now: 1,
+    });
+    db.markSteeringAttemptUncertain(`steer-hydrated-${suffix}`, 2);
+    db.stageSteeringResolution(
+      id, `submission-hydrated-${suffix}`, "queue_again", `resolve-hydrated-${suffix}`, 3,
+    );
+    db.recordSteeringResolutionResult(RUNNER_ID, {
+      type: "resolve_steering_attempt_result", requestId: `resolve-hydrated-${suffix}`,
+      sessionId: id, submissionId: `submission-hydrated-${suffix}`,
+      action: "queue_again", applied: true, queuedPromptId: `queue-hydrated-${suffix}`,
+    }, 4);
+    await svc.hydrateHistory(id);
+
+    assert.equal(db.getSession(id)?.steeringAttempts, undefined, suffix);
+    assert.ok(hub.sessionChangedByIdCalls.includes(id), suffix);
+  }
+});
+
 test("prompt fails 404 for an unknown session", () => {
   const { svc } = makeHarness();
   const res = svc.prompt("does-not-exist", "hi");

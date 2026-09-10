@@ -492,6 +492,16 @@ test("Queue Again receipts retire only from exact canonical queue identity and d
     queuedPromptId: "queue-exact",
   }, 4)?.resolution, { action: "queue_again", state: "applied", queuedPromptId: "queue-exact" });
 
+  const lateOriginalResult = db.recordSteeringResult("runner-1", {
+    type: "steer_session_result", requestId: "steer-queue-again-db", sessionId: "sess-1",
+    submissionId: "submission-queue-again-db", turnId: "turn-1",
+    disposition: "converted_to_queue", reason: "stale_turn", queuedPromptId: "queue-original-late",
+  }, 4);
+  assert.equal(lateOriginalResult?.queuedPromptId, "queue-original-late");
+  assert.deepEqual(lateOriginalResult?.resolution, {
+    action: "queue_again", state: "applied", queuedPromptId: "queue-exact",
+  }, "a late original receipt cannot overwrite the Queue Again delivery identity");
+
   assert.equal(db.recordSteeringQueueSnapshot("sess-1", [], 5), true);
   assert.equal(db.listSteeringAttempts("sess-1").length, 1,
     "queue disappearance can mean cancellation and cannot retire the receipt");
@@ -504,8 +514,8 @@ test("Queue Again receipts retire only from exact canonical queue identity and d
 
   const durable = db.findSteeringAttemptBySubmission("sess-1", "submission-queue-again-db")?.attempt;
   assert.deepEqual(durable?.resolution, {
-    action: "queue_again", state: "applied", queuedPromptId: "queue-exact",
-  }, "retirement hides the receipt without rewriting the recovery operation");
+    action: "queue_again", state: "applied",
+  }, "retirement hides the receipt and discards its no-longer-needed queue identity");
 });
 
 test("manual Queue Again receipt dismissal is durable without staging a runner command", () => {
@@ -535,9 +545,7 @@ test("manual Queue Again receipt dismissal is durable without staging a runner c
       "sess-1", "submission-dismiss-queue-again", "dismiss", "acknowledge-only", 6,
     );
     assert.equal(dismissed.kind, "staged");
-    assert.deepEqual(dismissed.attempt?.resolution, {
-      action: "queue_again", state: "applied", queuedPromptId: "queue-still-live",
-    });
+    assert.deepEqual(dismissed.attempt?.resolution, { action: "queue_again", state: "applied" });
     assert.deepEqual(db.pendingSteeringResolutionMessages("runner-1"), []);
     assert.deepEqual(db.listSteeringAttempts("sess-1"), []);
     db.close();
@@ -546,9 +554,7 @@ test("manual Queue Again receipt dismissal is durable without staging a runner c
     assert.deepEqual(db.listSteeringAttempts("sess-1"), [], "dismissal survives a database restart");
     assert.deepEqual(db.findSteeringAttemptBySubmission(
       "sess-1", "submission-dismiss-queue-again",
-    )?.attempt.resolution, {
-      action: "queue_again", state: "applied", queuedPromptId: "queue-still-live",
-    });
+    )?.attempt.resolution, { action: "queue_again", state: "applied" });
   } finally {
     db?.close();
     rmSync(root, { recursive: true, force: true });
