@@ -180,6 +180,75 @@ test("an oversized historical tool call quarantines the conversation and refuses
   }
 });
 
+test("a refused prompt leaves none of a delivered prompt's traces", async () => {
+  const fixture = await setup();
+  const state: StubState = { callbacks: [], prompts: [], launches: 0, forks: [] };
+  const manager = new SessionManager(
+    () => {}, () => {}, fixture.store, "runner", undefined, stubFactory(state), fixture.root,
+  );
+  try {
+    manager.prompt(fixture.sessionId, "the turn that fails");
+    await waitFor(() => state.prompts.length === 1, "the first turn reaches the provider");
+    state.callbacks[0]!.onProviderHistoryUnrecoverable!(REJECTION);
+    await settled(fixture.store, fixture.sessionId);
+    // An untitled session is the case where a *delivered* prompt would rename it.
+    fixture.store.patchMeta(fixture.sessionId, { title: "Untitled session", titleSource: "generated" });
+
+    assert.equal(manager.prompt(fixture.sessionId, "Name this session after me"), false);
+    assert.equal(
+      fixture.store.readMeta(fixture.sessionId)!.title,
+      "Untitled session",
+      "a prompt that was never delivered must not rename the session",
+    );
+  } finally {
+    manager.shutdownAll();
+    fixture.cleanup();
+  }
+});
+
+test("prompts already queued when the quarantine fires are settled, and the first is kept unsent", async () => {
+  const fixture = await setup();
+  const state: StubState = { callbacks: [], prompts: [], launches: 0, forks: [] };
+  const manager = new SessionManager(
+    () => {}, () => {}, fixture.store, "runner", undefined, stubFactory(state), fixture.root,
+  );
+  try {
+    // Hold the turn open so the follow-ups pile into the FIFO instead of running.
+    let releaseTurn: (() => void) | undefined;
+    state.prompts.length = 0;
+    const held = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    const factoryState = state;
+    manager.prompt(fixture.sessionId, "the turn that fails");
+    await waitFor(() => factoryState.prompts.length === 1, "the first turn reaches the provider");
+    manager.prompt(fixture.sessionId, "queued before the quarantine");
+    manager.prompt(fixture.sessionId, "queued second");
+    await waitFor(
+      () => (manager as unknown as { active: Map<string, { queue: unknown[] }> })
+        .active.get(fixture.sessionId)!.queue.length === 2,
+      "both follow-ups are queued behind the running turn",
+    );
+
+    state.callbacks[0]!.onProviderHistoryUnrecoverable!(REJECTION);
+    releaseTurn?.();
+    await held;
+    await settled(fixture.store, fixture.sessionId);
+
+    const block = fixture.store.readMeta(fixture.sessionId)!.providerHistoryBlock!;
+    assert.equal(block.retry?.text, "queued before the quarantine",
+      "the oldest undelivered prompt is retained rather than discarded");
+    assert.deepEqual(
+      (manager as unknown as { active: Map<string, { queue: unknown[] }> })
+        .active.get(fixture.sessionId)?.queue ?? [],
+      [],
+      "a FIFO that can never drain is not left parked",
+    );
+    assert.deepEqual(state.prompts, ["the turn that fails"], "no queued prompt reaches the provider");
+  } finally {
+    manager.shutdownAll();
+    fixture.cleanup();
+  }
+});
+
 test("the quarantine survives a runner restart, so a resumed session never re-submits", async () => {
   const fixture = await setup();
   const first: StubState = { callbacks: [], prompts: [], launches: 0, forks: [] };
@@ -245,6 +314,15 @@ test("recovery forks the provider at the safe checkpoint and carries its exact f
     assert.equal(child.providerHistoryBlock, undefined, "the fork excludes the invalid item");
     assert.deepEqual(child.providerHistoryRecoveryOf, { fromSessionId: fixture.sessionId, mode: "fork" });
     assert.equal(child.agentSessionId, "thread-recovered");
+
+    // An ordinary fork of the recovered session inherits its history, not its rescue: carrying the
+    // provenance would make a later unrelated quarantine there skip the cheaper native fork.
+    fixture.store.patchMeta("s_recovered", {
+      forkPoints: { "2": { agentTurnId: "turn-2", tree: fixture.tree, baseCommit: fixture.baseCommit, eventSeq: 3 } },
+    });
+    const ordinaryChild = await manager.forkConversation("s_recovered", "s_grandchild", 2, "Grandchild");
+    assert.equal(ordinaryChild.ok, true, ordinaryChild.error);
+    assert.equal(fixture.store.readMeta("s_grandchild")!.providerHistoryRecoveryOf, undefined);
 
     // Committed, staged, modified, and untracked state all arrive in the recovered worktree.
     const childPath = child.worktreePath!;

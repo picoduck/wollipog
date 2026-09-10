@@ -4105,6 +4105,32 @@ export class SessionManager {
       durable?.failed(`a ${operation} is in progress`, "COMMAND_CANCELLED");
       return false;
     }
+    // A quarantined provider conversation rejects every submission before inference, including an
+    // automatic continuation and `/compact`. Refuse before anything else in this method, so a turn
+    // that is never delivered also leaves none of a delivered turn's traces: no retitle, no
+    // adoption authorization, no user event. Retain the attempt so its text is not lost.
+    const quarantined = this.store.readMeta(sessionId);
+    if (quarantined?.providerHistoryBlock) {
+      if (!syntheticRecovery && !quarantined.providerHistoryBlock.retry) {
+        this.store.patchMeta(sessionId, {
+          providerHistoryBlock: {
+            ...quarantined.providerHistoryBlock,
+            retry: {
+              text,
+              images,
+              ...(slashCommand ? { slashCommand } : {}),
+              ...(config ? { config } : {}),
+            },
+          },
+        });
+        // The retained draft is the proof that the turn was preserved instead of delivered.
+        this.store.flush(sessionId);
+      }
+      this.emitEvent(sessionId, { kind: "error", message: PROVIDER_HISTORY_QUARANTINE_GUIDANCE });
+      this.emitStatus(sessionId, quarantined.status === "stopped" ? "stopped" : "idle");
+      durable?.failed(PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
+      return false;
+    }
     if (!syntheticRecovery) {
       const meta = this.store.readMeta(sessionId);
       if (meta && isAdoptedSession(meta) && meta.adoptedBackgroundRecoveryAuthorized !== true) {
@@ -4127,30 +4153,6 @@ export class SessionManager {
     }
 
     const persistedMeta = this.store.readMeta(sessionId);
-    // A quarantined provider conversation rejects every submission before inference, including an
-    // automatic continuation and `/compact`. Refuse here rather than at the provider so no turn is
-    // ever recorded as delivered, and retain the first attempt so its text is not lost.
-    if (persistedMeta?.providerHistoryBlock) {
-      if (!syntheticRecovery && !persistedMeta.providerHistoryBlock.retry) {
-        this.store.patchMeta(sessionId, {
-          providerHistoryBlock: {
-            ...persistedMeta.providerHistoryBlock,
-            retry: {
-              text,
-              images,
-              ...(slashCommand ? { slashCommand } : {}),
-              ...(config ? { config } : {}),
-            },
-          },
-        });
-        // The retained draft is the proof that the turn was preserved instead of delivered.
-        this.store.flush(sessionId);
-      }
-      this.emitEvent(sessionId, { kind: "error", message: PROVIDER_HISTORY_QUARANTINE_GUIDANCE });
-      this.emitStatus(sessionId, persistedMeta.status === "stopped" ? "stopped" : "idle");
-      durable?.failed(PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
-      return false;
-    }
     const durableAuthenticationBlock = !!persistedMeta?.providerAuthBlock;
     const projectedAuthenticationBlock = isProviderAuthenticationBlock(persistedMeta?.pendingApproval);
     if ((durableAuthenticationBlock || projectedAuthenticationBlock) && syntheticRecovery) return false;
@@ -7145,9 +7147,12 @@ export class SessionManager {
     const retainedPrompt = recovery && quarantine?.retry
       ? { text: quarantine.retry.text, images: quarantine.retry.images }
       : undefined;
+    // Provenance is only true of a session created to recover a quarantine. An ordinary fork of a
+    // recovered session inherits its history, not its rescue, so the spread must not carry it: a
+    // later unrelated quarantine there deserves the cheaper native fork.
     const recoveryProvenance = recovery
       ? { providerHistoryRecoveryOf: { fromSessionId: sourceSessionId, mode: handoff ? "handoff" as const : "fork" as const } }
-      : {};
+      : { providerHistoryRecoveryOf: undefined };
     try {
       if (handoff) {
         const sourceEvents = this.store.readEvents(sourceSessionId);
@@ -9540,6 +9545,13 @@ export class SessionManager {
     const recovery = recoveryTurn === undefined
       ? undefined
       : this.providerHistoryRecoveryMode(meta, recoveryTurn);
+    const entry = this.active.get(sessionId);
+    // Prompts already queued when the quarantine fires are exactly as undelivered as one attempted
+    // afterwards, and this FIFO can never drain. Settle them all, but keep the first ordinary
+    // prompt's text so recovery carries it forward; a manual provider command is a receipt, not a
+    // composer draft, so it is only settled.
+    const stranded = entry?.queue.splice(0) ?? [];
+    const retained = stranded.find((prompt) => !prompt.sessionCommand);
     this.store.patchMeta(sessionId, {
       providerHistoryBlock: {
         version: 1,
@@ -9553,12 +9565,19 @@ export class SessionManager {
         },
         ...(recoveryTurn === undefined ? {} : { recoveryTurn }),
         ...(recovery === undefined ? {} : { recovery }),
+        ...(retained ? {
+          retry: {
+            text: retained.text,
+            images: retained.images,
+            ...(retained.slashCommand ? { slashCommand: retained.slashCommand } : {}),
+            ...(retained.config ? { config: retained.config } : {}),
+          },
+        } : {}),
       },
     });
     // Durable before observable: a crash here must not leave a transcript claiming a quarantine
-    // that the store would not re-enforce on restart.
+    // that the store would not re-enforce on restart, or drop a prompt it promised to retain.
     this.store.flush(sessionId);
-    const entry = this.active.get(sessionId);
     if (entry) entry.historyQuarantined = true;
     this.emitEvent(sessionId, {
       kind: "provider_history_quarantined",
@@ -9567,10 +9586,10 @@ export class SessionManager {
       ...(recoveryTurn === undefined ? {} : { recoveryTurn }),
       ...(recovery === undefined ? {} : { recovery }),
     });
-    for (const queued of entry?.queue.splice(0) ?? []) {
+    for (const queued of stranded) {
       this.failQueuedPrompt(queued, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
     }
-    if (entry) this.emitQueue(sessionId);
+    if (stranded.length) this.emitQueue(sessionId);
   }
 
   /** The newest completed turn whose conversation checkpoint is still forkable from the session's
