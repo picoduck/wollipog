@@ -85,6 +85,7 @@ test("the Windows runner deploys and removes a managed skill through real WSL", 
 
   const removed = await reconcileWslSkills({ dataDir: root, ownerHash, agents: [agent], desired: [], allowRemovals: true });
   assert.equal(removed.error, undefined);
-  assert.equal(removed.removedLinks.some((entry) => entry.path.endsWith(`.codex/skills/${name}`)), true);
+  assert.equal(removed.removedLinks.some((entry) =>
+    entry.path === `~/.codex/skills/${name} (WSL ${distro})`), true);
   assert.equal((await wslExec(["sh", "-c", "test ! -e \"$HOME/.codex/skills/$1\" && printf removed", "sh", name])).trim(), "removed");
 });
