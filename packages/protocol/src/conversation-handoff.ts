@@ -7,10 +7,21 @@ export interface ConversationHandoffDraft {
   disclosure: string;
 }
 
-export function handoffDestinationError(agent: AgentDefinition | undefined, sourceDriver: string, config: SessionConfig): string | null {
+/**
+ * `allowSameProvider` exists for one caller: recovering a quarantined conversation whose provider
+ * history the provider itself rejects. There a native fork is not an alternative — the point of the
+ * handoff is a *fresh* thread on the same provider, seeded only by the bounded sanitized draft.
+ * Ordinary handoffs keep requiring a different provider so the same-provider fork stays preferred.
+ */
+export function handoffDestinationError(
+  agent: AgentDefinition | undefined,
+  sourceDriver: string,
+  config: SessionConfig,
+  options: { allowSameProvider?: boolean } = {},
+): string | null {
   if (!agent || agent.available === false) return "The destination agent is unavailable.";
   if (agent.driver !== "claude-code" && agent.driver !== "codex-app-server") return "This destination does not support checkpoint handoffs.";
-  if (agent.driver === sourceDriver) return "Choose a different agent provider, or use a native fork.";
+  if (agent.driver === sourceDriver && !options.allowSameProvider) return "Choose a different agent provider, or use a native fork.";
   if (agent.authStatus !== "authenticated") return "The destination agent must authenticate independently before handoff.";
   const capabilities = agent.capabilities;
   const model = capabilities?.models.find((item) => item.id === config.model && !item.hidden);

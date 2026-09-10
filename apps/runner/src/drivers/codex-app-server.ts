@@ -37,6 +37,7 @@ import type {
   DriverSteerResult,
   StopReason,
 } from "./driver.js";
+import { classifyPoisonedProviderHistory } from "./poisoned-provider-history.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
@@ -1395,8 +1396,15 @@ export class CodexAppServerDriver implements Driver {
     }
     if (!message || this.emittedErrors.has(message)) return;
     this.emittedErrors.add(message);
-    if (isProviderAuthenticationFailure(message)) this.signalAuthenticationFailure();
-    else this.cb.onEvent({ kind: "error", message });
+    if (isProviderAuthenticationFailure(message)) {
+      this.signalAuthenticationFailure();
+      return;
+    }
+    // The rejection itself belongs in the transcript: it is the user-visible evidence for the
+    // quarantine, and it reports only the offending item's position and measured length.
+    this.cb.onEvent({ kind: "error", message });
+    const poisoned = classifyPoisonedProviderHistory(message);
+    if (poisoned) this.cb.onProviderHistoryUnrecoverable?.(poisoned);
   }
 
   private signalAuthenticationFailure(): void {

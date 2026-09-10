@@ -3096,6 +3096,51 @@ textarea {
     white-space: normal;
   }
 }
+
+/* A quarantined conversation is a dead end, not a transient warning: the banner has to carry
+   enough prose to explain why retrying cannot work, so it stacks copy above its action. */
+.quarantine-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 12%, var(--bg-elev));
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.quarantine-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.quarantine-copy p { margin: 0; color: var(--text-dim); }
+.quarantine-copy code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.quarantine-title { font-weight: 600; }
+.quarantine-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+@media (max-width: 600px) {
+  .quarantine-banner {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .quarantine-actions .btn {
+    min-height: 44px;
+    white-space: normal;
+    width: 100%;
+  }
+}
+
 .steering-receipts {
   display: grid;
   gap: 6px;
@@ -10729,6 +10774,10 @@ body.shell-dock-dragging * {
 }
 .tl-checkpoint.restored .checkpoint-label {
   color: var(--teal);
+}
+.tl-checkpoint.quarantine .checkpoint-label {
+  color: var(--warning-on-tint, var(--warning));
+  font-weight: 600;
 }
 
 /* --------- Cmd+K search palette ---------- */

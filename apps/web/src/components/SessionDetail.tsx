@@ -2264,9 +2264,13 @@ function SessionDetailLoaded({
   // A guardrail pause (cost budget / tool-call limit) must be resolved via the Continue/Stop card,
   // not bypassed by sending a prompt.
   const policyPaused = isPolicyApproval(session.pendingApproval);
-  const canPrompt = runnerOnline && !terminal && !policyPaused;
+  // A quarantined provider conversation rejects every submission before the model runs, so the
+  // composer must not invite retries that cannot succeed.
+  const historyQuarantine = session.historyQuarantine;
+  const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine;
   const composerPlaceholder = terminal ? `Session is ${session.status}.`
     : !runnerOnline ? "Runner is offline."
+    : historyQuarantine ? "Conversation quarantined. Recover this session to continue."
     : policyPaused ? "Session is paused by guardrails. Review the pending decision to continue."
     : "Do anything";
   const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
@@ -2758,6 +2762,78 @@ function SessionDetailLoaded({
     },
     [api, busy, confirm, mode, navigate, session?.driver, sessionId, showToast],
   );
+
+  /**
+   * Recovery for a quarantined conversation. It never repairs the poisoned thread — that is
+   * impossible — and never deletes it: the original session, its transcript, and its provider
+   * thread stay exactly as they are. What it creates is a usable conversation from the last
+   * checkpoint known to precede the invalid item, with that checkpoint's files, plus any prompt
+   * the session retained unsent while quarantined.
+   */
+  const onRecoverQuarantinedConversation = useCallback(async () => {
+    const quarantine = session.historyQuarantine;
+    if (!quarantine || quarantine.recoveryTurn === undefined || busy || forkInFlightRef.current) return;
+    const handoff = quarantine.recovery === "handoff";
+    if (handoff && !session.agentId) {
+      setError("This session has no agent on its runner, so a fresh conversation cannot be started for it.");
+      return;
+    }
+    if (!await confirm({
+      title: `Recover this session from turn ${quarantine.recoveryTurn}?`,
+      message: handoff
+        ? `A new session starts a fresh provider conversation seeded with a bounded, redacted summary of the visible dialogue through turn ${quarantine.recoveryTurn}, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`
+        : `A new session forks the provider conversation at turn ${quarantine.recoveryTurn}, which excludes the rejected item, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`,
+      confirmLabel: "Recover Session",
+    })) return;
+    const releaseFork = acquireSessionFork(sessionId);
+    if (!releaseFork) {
+      const message = "A conversation fork is already in progress for this session. Wait for it to appear on the Board.";
+      setError(message);
+      if (mode === "preview") showToast(message, { tone: "error" });
+      return;
+    }
+    const generation = viewGenerationRef.current;
+    forkInFlightRef.current = true;
+    setBusy(true);
+    let releaseOnFinish = true;
+    try {
+      const recovered = await api.recoverQuarantinedConversation(
+        sessionId,
+        quarantine.recoveryTurn,
+        handoff
+          ? {
+              agentId: session.agentId!,
+              config: {
+                ...(session.model ? { model: session.model } : {}),
+                ...(session.effort ? { effort: session.effort } : {}),
+                ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}),
+              },
+            }
+          : undefined,
+      );
+      // The retained prompt is the user's own unsent text and wins the composer; a handoff draft
+      // is context the user is meant to review before sending, so it only fills an empty composer.
+      const draft = recovered.retainedPrompt ?? recovered.handoffDraft;
+      if (draft) {
+        stageComposerDraftHandoff(recovered.id, draft.text, draft.images, instanceScope);
+        await saveComposerDraft(recovered.id, draft.text, draft.images, instanceScope);
+      }
+      if (viewGenerationRef.current === generation) navigate({ name: "session", id: recovered.id });
+    } catch (cause) {
+      const ambiguous = ambiguousForkError(cause);
+      if (ambiguous) releaseOnFinish = false;
+      if (viewGenerationRef.current === generation) {
+        const message = (ambiguous ?? cause as Error).message;
+        setError(message);
+        if (mode === "preview") showToast(message, { tone: "error" });
+      }
+    } finally {
+      if (releaseOnFinish) releaseFork();
+      forkInFlightRef.current = false;
+      setBusy(false);
+    }
+  }, [api, busy, confirm, instanceScope, mode, navigate, session.agentId, session.effort,
+    session.historyQuarantine, session.model, session.permissionMode, sessionId, showToast]);
 
   const queuedEditReconciliation = queuedEdit && queuedEditRecovered
     ? reconcileQueuedEditRecovery(
@@ -4302,6 +4378,37 @@ function SessionDetailLoaded({
                   : ""}
             </span>
             {error && <div className="composer-error" role="alert">{error}</div>}
+            {historyQuarantine && (
+              <div className="quarantine-banner" role="status" aria-label="Conversation Quarantined">
+                <div className="quarantine-copy">
+                  <span className="quarantine-title">Conversation Quarantined</span>
+                  <p>
+                    The agent provider rejects an item stored in this conversation&rsquo;s own history, so
+                    prompts fail before the model runs. Sending again or <code>/compact</code> cannot
+                    repair it — both resend the same history.
+                  </p>
+                  <p>
+                    {historyQuarantine.recoveryTurn === undefined
+                      ? "There is no earlier checkpoint to recover from. Your files are unchanged in this session's worktree; start a new session to continue the work."
+                      : `Recovering continues from the checkpoint after turn ${historyQuarantine.recoveryTurn} in a new session with the same files. This session stays here, unchanged, for inspection.`}
+                    {historyQuarantine.retainedPrompt ? " Your last message was kept unsent and moves to the recovered session's composer." : ""}
+                  </p>
+                </div>
+                {historyQuarantine.recoveryTurn !== undefined && (
+                  <div className="quarantine-actions">
+                    <button
+                      type="button"
+                      className="btn primary sm"
+                      disabled={busy || !runnerOnline}
+                      title={runnerOnline ? undefined : "Runner is offline."}
+                      onClick={() => void onRecoverQuarantinedConversation()}
+                    >
+                      Recover Session
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             {retitleFeedback && (
               <div
                 ref={retitleReceiptRef}

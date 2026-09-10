@@ -9382,6 +9382,48 @@ function snapshot(over: Partial<SessionSnapshot> = {}): SessionSnapshot {
   };
 }
 
+test("a quarantined provider conversation refuses prompts and provider commands", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id, status: "idle",
+    historyQuarantine: { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork" },
+  })]);
+  assert.deepEqual(db.getSession(id)?.historyQuarantine, {
+    reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork",
+  });
+  hub.sentToRunner.length = 0;
+
+  const retried = svc.prompt(id, "try again");
+  assert.equal(retried.ok, false);
+  assert.equal(retried.status, 409);
+  assert.match(retried.error ?? "", /quarantined/);
+
+  // `/compact` arrives through the provider-command lane and is refused for the same reason.
+  const compacted = svc.invokeSessionCommand(id, {
+    submissionId: "sub-compact", providerCommandId: "compact", catalogRevision: "rev-1", argumentText: "",
+  });
+  assert.equal(compacted.ok, false);
+  assert.equal(compacted.status, 409);
+  assert.match(compacted.error ?? "", /quarantined/);
+  assert.equal(hub.sentToRunner.length, 0, "nothing is delivered to the poisoned conversation");
+
+  // The runner clearing the quarantine restores ordinary submission.
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle" })]);
+  assert.equal(db.getSession(id)?.historyQuarantine, undefined);
+  assert.equal(svc.prompt(id, "now it works").ok, true);
+});
+
+test("an unrecognized stored quarantine is dropped rather than surfaced", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle" })]);
+  db.raw().prepare("UPDATE sessions SET history_quarantine=? WHERE id=?")
+    .run(JSON.stringify({ reason: "something_else", detectedAt: 5 }), id);
+  assert.equal(db.getSession(id)?.historyQuarantine, undefined);
+  assert.equal(svc.prompt(id, "unaffected").ok, true);
+});
+
 test("hydrateRunnerSessions inserts a session the cache never had (box is source of truth)", () => {
   const { db, hub, svc } = makeHarness();
 

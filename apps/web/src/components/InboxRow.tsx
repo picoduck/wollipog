@@ -11,7 +11,7 @@ import {
 import { branchStateLabel, displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
-import { BackgroundWorkBadge } from "./common.js";
+import { BackgroundWorkBadge, quarantinedStatusMeta } from "./common.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { AttentionRequests } from "./AttentionRequests.js";
 import type { View } from "../navigation.js";
@@ -69,7 +69,7 @@ function InboxRowInner({
     ? { label: "Stopping", className: "st-running", busy: true }
     : stopFailed
       ? { label: "Stop Failed", className: "st-failed", busy: false }
-      : statusMeta(session.status);
+      : quarantinedStatusMeta(session.status, session.historyQuarantine) ?? statusMeta(session.status);
   const attention = sessionAttentionStatus(session);
   const snoozedAttention = reminder?.state === "pending" ? snoozedSessionAttentionReason(session) : null;
   const extraSnoozedAttention = snoozedAttention?.kind === "orphaned_background_work" ||

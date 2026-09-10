@@ -3740,9 +3740,31 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   const sourceAgent = db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === source.agentId);
   const handoff = (req.body as { handoff?: { agentId: string; config: SessionConfig } })?.handoff;
   const destination = handoff ? db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === handoff.agentId) : undefined;
+  // Recovering a quarantined conversation is the one fork whose destination may be the same
+  // provider: the invalid item is excluded by a new thread, not by a different vendor. Validate the
+  // request against the session's own durable quarantine so the allowance cannot be borrowed by an
+  // ordinary fork; the runner revalidates it again against its authoritative copy.
+  const recovery = (req.body as { recovery?: boolean })?.recovery === true;
+  const quarantine = source.historyQuarantine;
+  if (recovery) {
+    if (!quarantine) return reply.code(409).send({ error: "this session's provider conversation is not quarantined" });
+    if (quarantine.recoveryTurn === undefined) {
+      return reply.code(409).send({ error: "this quarantined conversation has no safe checkpoint to recover from" });
+    }
+    if (turn !== quarantine.recoveryTurn) {
+      return reply.code(409).send({ error: "recovery must start from the quarantined session's recorded safe checkpoint" });
+    }
+    if ((quarantine.recovery === "handoff") !== !!handoff) {
+      return reply.code(409).send({ error: `this quarantined conversation recovers by ${quarantine.recovery ?? "fork"}` });
+    }
+    const unsupported = runnerCapabilityError(source.runnerId, "providerHistoryQuarantine", "Quarantine recovery");
+    if (unsupported) return reply.code(409).send({ error: unsupported });
+  } else if (quarantine) {
+    return reply.code(409).send({ error: "this session's provider conversation is quarantined — use its recovery action" });
+  }
   if (handoff) {
     if (!handoff.config || typeof handoff.config !== "object" || Array.isArray(handoff.config)) return reply.code(400).send({ error: "handoff config is required" });
-    const error = handoffDestinationError(destination, source.driver, handoff.config);
+    const error = handoffDestinationError(destination, source.driver, handoff.config, { allowSameProvider: recovery });
     if (error) return reply.code(409).send({ error });
     const unsupported = runnerCapabilityError(source.runnerId, "conversationHandoff", "Checkpoint handoffs");
     if (unsupported) return reply.code(409).send({ error: unsupported });
@@ -3773,8 +3795,9 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
         sourceSessionId: sourceId,
         targetSessionId,
         turn,
-        title: `${source.title} (${handoff ? "handoff" : "fork"})`.slice(0, 120),
+        title: `${source.title} (${recovery ? "recovered" : handoff ? "handoff" : "fork"})`.slice(0, 120),
         ...(handoff ? { handoff } : {}),
+        ...(recovery ? { recovery: true as const } : {}),
         ...(deferHistory ? { deferHistory: true } : {}),
       },
       150_000,
@@ -3814,7 +3837,12 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
     db.setHydratedSeq(targetSessionId, highWater);
     hub.sessionChangedById(session.id);
     if (deferHistory) void svc.hydrateHistory(targetSessionId);
-    return reply.code(201).send({ ...db.getSession(targetSessionId), ...(handoff ? { handoffDraft: res.handoffDraft } : {}) });
+    return reply.code(201).send({
+      ...db.getSession(targetSessionId),
+      ...(handoff ? { handoffDraft: res.handoffDraft } : {}),
+      // The source's unsent prompt travels to the client as a composer draft only.
+      ...(res.retainedPrompt ? { retainedPrompt: res.retainedPrompt } : {}),
+    });
   } catch (err) {
     const timedOut = isRunnerRequestTimeoutError(err);
     const cleanupTargetSessionId = providerForkCleanupTarget(targetSessionId, forkCreatedOnRunner, timedOut);

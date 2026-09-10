@@ -57,6 +57,7 @@ import {
   type BackgroundNotificationReceiptView,
   type BackgroundWorkState,
   type BackgroundWorkTracking,
+  type ProviderHistoryQuarantineView,
   type ChildSessionAttentionOwner,
   type ManagedBackgroundJobSnapshot,
   type ManagedBackgroundJobView,
@@ -454,6 +455,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_updated_at TEXT,
   background_work_state TEXT,
   background_work_tracking TEXT,
+  history_quarantine TEXT,
   status         TEXT NOT NULL DEFAULT 'queued',
   board_column   TEXT,
   run_id         TEXT,
@@ -2062,6 +2064,7 @@ interface SessionRow {
   provider_updated_at: string | null;
   background_work_state: string | null;
   background_work_tracking: string | null;
+  history_quarantine: string | null;
   status: string;
   board_column: string | null;
   run_id: string | null;
@@ -4059,6 +4062,9 @@ export class ControlPlaneDb {
       "provider_updated_at TEXT",
       "background_work_state TEXT",
       "background_work_tracking TEXT",
+      // Protocol v126: bounded, content-free projection of a runner-owned provider-history
+      // quarantine. Runner-authoritative, so it is overwritten on every snapshot.
+      "history_quarantine TEXT",
       // Secret-free ACP MCP environment references and explicit directory selections.
       "acp_session_context TEXT",
       // Protocol v60 immutable launch placement. NULL identifies legacy sessions.
@@ -9964,10 +9970,10 @@ export class ControlPlaneDb {
     try {
       this.stmt(
          `INSERT INTO sessions
-           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, status, use_worktree, worktree_path, workspace_path, archived,
+           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, history_quarantine, status, use_worktree, worktree_path, workspace_path, archived,
              driver, model, resolved_model, effort, service_tier, permission_mode, agent_capabilities, preview, pending_approval, input_tokens, output_tokens, context_tokens_used, context_window, cost_usd,
               acp_session_context, created_at, updated_at, last_event_at, hydrated_seq, runner_history_epoch, runner_history_tail_seq, adopted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       )
       .run(
         snap.id,
@@ -9981,6 +9987,7 @@ export class ControlPlaneDb {
         snap.providerUpdatedAt ?? null,
         backgroundWorkStateForStorage(snap.backgroundWorkState),
         snap.backgroundWorkTracking ?? null,
+        snap.historyQuarantine ? JSON.stringify(snap.historyQuarantine) : null,
         snap.status,
         snap.useWorktree ? 1 : 0,
         snap.worktreePath,
@@ -10152,7 +10159,7 @@ export class ControlPlaneDb {
         );
       }
       this.stmt(
-        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
+        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
             model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
             acp_session_context=COALESCE(?, acp_session_context),
             updated_at=? WHERE id=?`,
@@ -10165,6 +10172,7 @@ export class ControlPlaneDb {
         snap.providerUpdatedAt ?? null,
         backgroundWorkStateForStorage(snap.backgroundWorkState),
         snap.backgroundWorkTracking ?? null,
+        snap.historyQuarantine ? JSON.stringify(snap.historyQuarantine) : null,
         snap.preview,
         pendingJson,
         snap.worktreePath,
@@ -14142,6 +14150,10 @@ export class ControlPlaneDb {
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: parseBackgroundWorkState(row.background_work_state),
       backgroundWorkTracking: parseBackgroundWorkTracking(row.background_work_tracking),
+      ...(() => {
+        const historyQuarantine = parseHistoryQuarantine(row.history_quarantine);
+        return historyQuarantine ? { historyQuarantine } : {};
+      })(),
       ...(() => {
         const backgroundDeliveries = this.listBackgroundDeliveries(row.id, status);
         return backgroundDeliveries.length ? { backgroundDeliveries } : {};
@@ -18597,6 +18609,32 @@ function backgroundWorkStateForStorage(raw: BackgroundWorkState | undefined): st
 
 function parseBackgroundWorkTracking(raw: string | null): BackgroundWorkTracking | undefined {
   return raw === "managed" || raw === "untracked" ? raw : undefined;
+}
+
+/** Revalidate the stored quarantine rather than trusting the row. It is a bounded, content-free
+ * record, so anything unrecognized is dropped instead of being surfaced to a dashboard. */
+function parseHistoryQuarantine(raw: string | null): ProviderHistoryQuarantineView | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const value = parsed as Partial<ProviderHistoryQuarantineView>;
+  if (value.reason !== "oversized_tool_call" || !Number.isFinite(value.detectedAt)) return undefined;
+  const recoveryTurn = Number.isInteger(value.recoveryTurn) && value.recoveryTurn! > 0 ? value.recoveryTurn : undefined;
+  const recovery = recoveryTurn !== undefined && (value.recovery === "fork" || value.recovery === "handoff")
+    ? value.recovery
+    : undefined;
+  return {
+    reason: value.reason,
+    detectedAt: value.detectedAt as number,
+    ...(recoveryTurn === undefined ? {} : { recoveryTurn }),
+    ...(recovery === undefined ? {} : { recovery }),
+    ...(value.retainedPrompt === true ? { retainedPrompt: true } : {}),
+  };
 }
 
 function validBackgroundIdentity(value: unknown): value is string {

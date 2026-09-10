@@ -169,6 +169,12 @@ import {
   type SessionTitleGenerator,
 } from "./session-title-generator.js";
 
+/** A quarantined provider conversation rejects every submission before inference runs, so the
+ * control plane refuses one here rather than recording a delivery the provider will never accept.
+ * The same check exists on the runner, which owns the authoritative quarantine. */
+const QUARANTINED_CONVERSATION_ERROR =
+  "this conversation was quarantined — retrying and /compact cannot repair the provider's stored history; recover the session to continue";
+
 type Logger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
 
 export const EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS = 30_000;
@@ -3135,6 +3141,7 @@ export class SessionsService {
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
+    if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     // A guardrail pause must be resolved (Continue / Stop) via approve(), not bypassed by sending a
     // new prompt — otherwise the next turn runs without the user acknowledging the breach.
     if (session.pendingApproval?.kind === "cost_budget") {
@@ -3598,6 +3605,8 @@ export class SessionsService {
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
+    // `/compact` arrives through this lane; compaction is inference over the same stored history.
+    if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     if (session.pendingApproval?.kind === "cost_budget") {
       return fail("cost budget reached — choose Continue or Stop before invoking a provider command", 409);
     }

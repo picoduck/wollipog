@@ -14,6 +14,7 @@
  */
 
 import { buildConversationHandoff, handoffDestinationError, type ConversationHandoffDraft } from "@wollipog/protocol";
+import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
 import type {
   AgentCapabilities,
   AgentContext,
@@ -30,6 +31,7 @@ import type {
   PromptImage,
   PromptImageInput,
   PromptImageReference,
+  ProviderHistoryRecoveryMode,
   WorkspaceReference,
   QueuedPromptDraft,
   QueuedPromptEditFailureReason,
@@ -440,6 +442,10 @@ interface ActiveSession {
   /** A provider credential failure cancelled the current turn. Existing FIFO work stays held until
    * a new user prompt explicitly asks the runner to revalidate the exact installation. */
   authenticationBlocked?: boolean;
+  /** The provider rejected its own stored conversation history. Unlike an authentication block
+   * this never clears in place: the FIFO stops draining permanently and the session can only be
+   * continued by recovering it into a new conversation. */
+  historyQuarantined?: boolean;
   /** A validated worktree selection made after this process launched. The current turn keeps its
    * original OS cwd, then the drain resumes the same conversation inside the selected worktree
    * before admitting another turn. */
@@ -553,6 +559,14 @@ function titleFromPrompt(text: string): string {
 
 /** Refresh a held lock well within its stale window so a long turn never looks abandoned. */
 const LOCK_REFRESH_MS = 20_000;
+
+/** Static guidance for a quarantined conversation. It names no provider text, no prompt content
+ * and no thread identifier, so it is safe on every surface that shows a rejected submission. */
+const PROVIDER_HISTORY_QUARANTINE_GUIDANCE =
+  "This conversation was quarantined: the agent provider rejects an item stored in its own " +
+  "conversation history, so every prompt is refused before the model runs. Retrying and /compact " +
+  "cannot repair it, because both resend the same history. This prompt was not submitted. " +
+  "Recover the session to continue from the last safe checkpoint in a new conversation.";
 const HISTORY_MAINTENANCE_MS = 5 * 60 * 1_000;
 const WORKTREE_PR_RECONCILIATION_MS = 5 * 60 * 1_000;
 
@@ -1793,7 +1807,8 @@ export class SessionManager {
       // A durable provider-auth block is authoritative across process restart. Read-only
       // background discovery may still run, but it must not submit an unattended recovery turn.
       reconciled = this.reconcileDeliveredBackgroundContinuations(reconciled);
-      const automatic = !reconciled.providerAuthBlock && automaticClaudeRecoveryAllowed(reconciled);
+      const automatic = !reconciled.providerAuthBlock && !reconciled.providerHistoryBlock &&
+        automaticClaudeRecoveryAllowed(reconciled);
       if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork) {
         this.scheduleOrphanRecovery(m.sessionId);
       } else if (reconciled.status !== "stopped") {
@@ -3397,6 +3412,11 @@ export class SessionManager {
           if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
           this.onProviderAuthenticationFailure(sessionId, meta);
         },
+        onProviderHistoryUnrecoverable: (detail) => {
+          const live = this.active.get(sessionId);
+          if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
+          this.quarantineProviderHistory(sessionId, detail);
+        },
         onSubscriptionUsage: (update) => {
           if (meta.agentId) {
             this.onSubscriptionUsageUpdate?.(meta.agentId, meta.driver, meta.context, update);
@@ -3528,6 +3548,7 @@ export class SessionManager {
       queue: [],
       permissionOptionKinds: new Map(),
       ...(meta.providerAuthBlock ? { authenticationBlocked: true } : {}),
+      ...(meta.providerHistoryBlock ? { historyQuarantined: true } : {}),
       steerFenceIds: new Set(
         [...retainedPromotions.values()]
           .filter((operation) => !operation.settled)
@@ -4106,6 +4127,30 @@ export class SessionManager {
     }
 
     const persistedMeta = this.store.readMeta(sessionId);
+    // A quarantined provider conversation rejects every submission before inference, including an
+    // automatic continuation and `/compact`. Refuse here rather than at the provider so no turn is
+    // ever recorded as delivered, and retain the first attempt so its text is not lost.
+    if (persistedMeta?.providerHistoryBlock) {
+      if (!syntheticRecovery && !persistedMeta.providerHistoryBlock.retry) {
+        this.store.patchMeta(sessionId, {
+          providerHistoryBlock: {
+            ...persistedMeta.providerHistoryBlock,
+            retry: {
+              text,
+              images,
+              ...(slashCommand ? { slashCommand } : {}),
+              ...(config ? { config } : {}),
+            },
+          },
+        });
+        // The retained draft is the proof that the turn was preserved instead of delivered.
+        this.store.flush(sessionId);
+      }
+      this.emitEvent(sessionId, { kind: "error", message: PROVIDER_HISTORY_QUARANTINE_GUIDANCE });
+      this.emitStatus(sessionId, persistedMeta.status === "stopped" ? "stopped" : "idle");
+      durable?.failed(PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
+      return false;
+    }
     const durableAuthenticationBlock = !!persistedMeta?.providerAuthBlock;
     const projectedAuthenticationBlock = isProviderAuthenticationBlock(persistedMeta?.pendingApproval);
     if ((durableAuthenticationBlock || projectedAuthenticationBlock) && syntheticRecovery) return false;
@@ -4284,6 +4329,12 @@ export class SessionManager {
     }
     if (entry.authenticationBlocked) {
       lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+      return false;
+    }
+    // `/compact` reaches the provider through this lane. Compaction is inference over the stored
+    // history, so a quarantined conversation rejects it exactly like an ordinary prompt.
+    if (entry.historyQuarantined) {
+      lifecycle.failed(PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
       return false;
     }
     if (entry.historyIntegrityFailure) {
@@ -5831,6 +5882,7 @@ export class SessionManager {
     entry.running = true;
     try {
       while (this.active.has(sessionId) && entry.queue.length && !entry.authenticationBlocked &&
+          !entry.historyQuarantined &&
           this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) {
         if (this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry)) break;
         const next = entry.queue.shift()!;
@@ -5901,7 +5953,7 @@ export class SessionManager {
           entry.activeTurnConfig = undefined;
         }
         if (entry.pendingWorktreeRebind) break;
-        if (entry.authenticationBlocked) break;
+        if (entry.authenticationBlocked || entry.historyQuarantined) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
           if (this.active.get(sessionId) !== entry) break;
@@ -5948,6 +6000,7 @@ export class SessionManager {
       !this.closing.has(sessionId) &&
       !this.deleting.has(sessionId) &&
       !entry.authenticationBlocked &&
+      !entry.historyQuarantined &&
       !entry.historyIntegrityFailure &&
       !entry.governanceTripped &&
       !this.queueHeld(entry) &&
@@ -6973,7 +7026,11 @@ export class SessionManager {
     }
   }
 
-  /** Fork a provider conversation without changing the source session. */
+  /** Fork a provider conversation without changing the source session.
+   *
+   * `recovery` marks the one case where the source conversation is already unusable: its provider
+   * rejects its own stored history. Only then may the destination be the same provider, because a
+   * fresh thread — not a different vendor — is what excludes the invalid item. */
   async forkConversation(
     sourceSessionId: string,
     targetSessionId: string,
@@ -6981,7 +7038,8 @@ export class SessionManager {
     title: string,
     deferHistory = false,
     handoff?: { agent: AgentDefinition; config: SessionConfig },
-  ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]>; handoffDraft?: ConversationHandoffDraft }> {
+    recovery = false,
+  ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]>; handoffDraft?: ConversationHandoffDraft; retainedPrompt?: { text: string; images: PromptImageInput[] } }> {
     const source = this.store.readMeta(sourceSessionId);
     if (!source) return { ok: false, error: "source session not found on this box" };
     try {
@@ -6992,10 +7050,25 @@ export class SessionManager {
     if (this.executionIsolation.mode === "bwrap" && source.context.kind === "wsl") {
       return { ok: false, error: "Direct WSL conversation fork remains unavailable until target-local fd-safe state copy is supported" };
     }
+    const quarantine = source.providerHistoryBlock;
+    if (recovery) {
+      if (!quarantine) return { ok: false, error: "this session's provider conversation is not quarantined" };
+      if (quarantine.recoveryTurn === undefined) {
+        return { ok: false, error: "this quarantined conversation has no safe checkpoint to recover from" };
+      }
+      if (turn !== quarantine.recoveryTurn) {
+        return { ok: false, error: "recovery must start from the quarantined session's recorded safe checkpoint" };
+      }
+      if ((quarantine.recovery === "handoff") !== !!handoff) {
+        return { ok: false, error: `this quarantined conversation recovers by ${quarantine.recovery ?? "fork"}` };
+      }
+    } else if (quarantine) {
+      return { ok: false, error: "this session's provider conversation is quarantined — use its recovery action" };
+    }
     const supportsFork = providerSupportsConversationFork(source.driver, source.capabilities);
     if (!supportsFork && !handoff) return { ok: false, error: "this provider session does not support conversation fork" };
     if (handoff) {
-      const error = handoffDestinationError(handoff.agent, source.driver, handoff.config);
+      const error = handoffDestinationError(handoff.agent, source.driver, handoff.config, { allowSameProvider: recovery });
       if (error) return { ok: false, error };
       if (JSON.stringify(handoff.agent.context ?? { kind: "native" }) !== JSON.stringify(source.context) ||
           source.executionTarget && source.executionTarget.adapter !== "host") return { ok: false, error: "handoff requires the same host execution context" };
@@ -7067,6 +7140,14 @@ export class SessionManager {
     let worktree: WorktreeHandle | null = null;
     let forkedThreadId: string | null = null;
     let providerStateJournaled = false;
+    // Hand the source's unsent prompt to the caller so the recovered session can offer it as a
+    // composer draft. It stays a draft: neither the runner nor the control plane submits it.
+    const retainedPrompt = recovery && quarantine?.retry
+      ? { text: quarantine.retry.text, images: quarantine.retry.images }
+      : undefined;
+    const recoveryProvenance = recovery
+      ? { providerHistoryRecoveryOf: { fromSessionId: sourceSessionId, mode: handoff ? "handoff" as const : "fork" as const } }
+      : {};
     try {
       if (handoff) {
         const sourceEvents = this.store.readEvents(sourceSessionId);
@@ -7096,12 +7177,13 @@ export class SessionManager {
           turnCount: 0, seq: 0, createdAt: now, updatedAt: now,
           providerStateVersion: source.context.kind === "wsl" ? 3 : 2,
           ...(this.runnerOwnerHash ? { checkpointRefVersion: 2 as const } : {}),
+          ...recoveryProvenance,
         };
         this.store.create(target);
         this.store.appendEvent(targetSessionId, { kind: "conversation_forked", sourceSessionId, turn,
           handoff: { sourceAgent: source.agentId ?? source.driver, destinationAgent: handoff.agent.id, disclosure: handoffDraft.disclosure } }, now);
         this.store.flush(targetSessionId);
-        return { ok: true, snapshot: this.snapshot(this.store.readMeta(targetSessionId)!), events: this.store.readEvents(targetSessionId), handoffDraft };
+        return { ok: true, snapshot: this.snapshot(this.store.readMeta(targetSessionId)!), events: this.store.readEvents(targetSessionId), handoffDraft, ...(retainedPrompt ? { retainedPrompt } : {}) };
       }
       if (this.executionIsolation.mode === "bwrap" &&
           source.providerStateVersion !== (source.context.kind === "wsl" ? 3 : 2)) {
@@ -7222,6 +7304,10 @@ export class SessionManager {
         providerCredentialIdentityId: undefined,
         providerAuthBlock: undefined,
         providerAuthRetryAttemptedRecoveryId: undefined,
+        // The fork's history stops at the checkpoint, so the source's quarantine is not inherited.
+        // Its provenance is, so a fork poisoned again escalates to a fresh thread.
+        providerHistoryBlock: undefined,
+        ...recoveryProvenance,
         sessionSlashCommands: undefined,
         sessionSlashCommandProvenance: undefined,
         env: {},
@@ -7268,6 +7354,7 @@ export class SessionManager {
         ok: true,
         snapshot,
         ...(deferHistory ? {} : { events: this.store.readEvents(targetSessionId) }),
+        ...(retainedPrompt ? { retainedPrompt } : {}),
       };
     } catch (err) {
       if (forkedThreadId && client?.archiveSession) {
@@ -9435,6 +9522,84 @@ export class SessionManager {
     });
     if (current.agentId) this.onAgentAuthUpdate?.(current.agentId, { status: "authenticated" });
     return true;
+  }
+
+  /**
+   * The provider rejected an item already stored in its own conversation history, so this thread
+   * can never accept another turn: retrying, continuing, and `/compact` all resend the same
+   * history and fail identically before inference runs. Retire the conversation durably and stop
+   * the FIFO instead of returning the session to Awaiting Prompt with a composer that invites
+   * submissions which cannot succeed.
+   *
+   * Nothing here deletes or rewrites the transcript or the provider thread; both stay inspectable.
+   */
+  private quarantineProviderHistory(sessionId: string, detail: PoisonedProviderHistory): void {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || meta.providerHistoryBlock) return;
+    const recoveryTurn = this.latestConversationForkTurn(meta);
+    const recovery = recoveryTurn === undefined
+      ? undefined
+      : this.providerHistoryRecoveryMode(meta, recoveryTurn);
+    this.store.patchMeta(sessionId, {
+      providerHistoryBlock: {
+        version: 1,
+        reason: detail.reason,
+        detectedAt: Date.now(),
+        detail: {
+          ...(detail.itemIndex === undefined ? {} : { itemIndex: detail.itemIndex }),
+          field: detail.field,
+          ...(detail.limit === undefined ? {} : { limit: detail.limit }),
+          ...(detail.length === undefined ? {} : { length: detail.length }),
+        },
+        ...(recoveryTurn === undefined ? {} : { recoveryTurn }),
+        ...(recovery === undefined ? {} : { recovery }),
+      },
+    });
+    // Durable before observable: a crash here must not leave a transcript claiming a quarantine
+    // that the store would not re-enforce on restart.
+    this.store.flush(sessionId);
+    const entry = this.active.get(sessionId);
+    if (entry) entry.historyQuarantined = true;
+    this.emitEvent(sessionId, {
+      kind: "provider_history_quarantined",
+      reason: detail.reason,
+      ...(detail.itemIndex === undefined ? {} : { itemIndex: detail.itemIndex }),
+      ...(recoveryTurn === undefined ? {} : { recoveryTurn }),
+      ...(recovery === undefined ? {} : { recovery }),
+    });
+    for (const queued of entry?.queue.splice(0) ?? []) {
+      this.failQueuedPrompt(queued, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
+    }
+    if (entry) this.emitQueue(sessionId);
+  }
+
+  /** The newest completed turn whose conversation checkpoint is still forkable from the session's
+   * current worktree. A refused turn never records one, so the newest recorded checkpoint is the
+   * last provider state known to predate the rejection. */
+  private latestConversationForkTurn(meta: SessionMeta): number | undefined {
+    const active = meta.worktreePath ? this.attributedWorktreeForPath(meta, meta.worktreePath) : undefined;
+    const unambiguous = this.attributedWorktrees(meta).length === 1;
+    let latest: number | undefined;
+    for (const [key, point] of Object.entries(meta.forkPoints ?? {})) {
+      const turn = Number(key);
+      if (!Number.isInteger(turn) || turn < 1 || !point.agentTurnId || !point.tree) continue;
+      // Mirror forkConversation's attribution rules so an offered recovery turn cannot be one the
+      // fork itself would reject.
+      if (point.worktreeId ? point.worktreeId !== active?.id : !unambiguous) continue;
+      if (latest === undefined || turn > latest) latest = turn;
+    }
+    return latest;
+  }
+
+  private providerHistoryRecoveryMode(meta: SessionMeta, recoveryTurn: number): ProviderHistoryRecoveryMode {
+    // A provider fork copies history through the checkpoint. If this session is itself a fork
+    // recovery that got poisoned again, the invalid item predates that checkpoint and only a fresh
+    // thread can exclude it.
+    if (meta.providerHistoryRecoveryOf?.mode === "fork") return "handoff";
+    if (!providerSupportsConversationFork(meta.driver, meta.capabilities)) return "handoff";
+    // The Claude CLI can only fork its current transcript at the matching turn checkpoint.
+    if (meta.driver === "claude-code" && recoveryTurn !== meta.turnCount) return "handoff";
+    return "fork";
   }
 
   private blockedPromptAuthenticationGuidance(meta: SessionMeta): string {
