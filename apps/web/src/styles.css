@@ -10457,12 +10457,21 @@ body.shell-dock-dragging * {
 .transcript-status-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Contextual actions sit BEFORE the cost in the end-packed trailing track: they claim no free
    space of their own, so they group beside the cost rather than crowding the centered follow
-   control, and hiding them leaves the cost exactly where it was. */
+   control, and hiding them leaves the cost exactly where it was.
+
+   The lopsided `flex-shrink` is the query-independent safety net. The container query below is what
+   normally keeps a cramped pane legible, but it is inert wherever size container queries are
+   missing, and the strip must not answer that by starving the cost — a permanent seat — to feed an
+   optional hint. Weighted 100 to 1, the hint gives up essentially all of the shrink and clips
+   inside its own box before the cost loses a pixel; only once the hint is fully crushed does the
+   cost begin to ellipsise, which is what it is styled to do. In an engine with container queries
+   this never engages: past the cutoff the hint is already display:none. */
 .transcript-status-actions {
   display: flex;
-  flex: none;
+  flex: 0 100 auto;
   align-items: center;
   min-width: 0;
+  overflow: hidden;
 }
 .transcript-status-actions:empty { display: none; }
 /* A cramped pane cannot hold all three tracks. The cost is a permanent seat and truncates rather

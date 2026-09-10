@@ -106,6 +106,10 @@ test("live-follow status owns a reserved transcript strip with a compact centere
   // A pane too narrow for all three tracks sheds the optional hint, never the cost. The cutoff has
   // to be font-relative: the labels are rem, so a px-only cutoff goes inactive exactly where an
   // enlarged root font needs it most.
+  // The query-independent safety net: where the cutoff cannot run, the hint must lose its width
+  // before the cost loses any.
+  assert.match(css, /\.transcript-status-actions\s*\{[^}]*flex:\s*0 100 auto;[^}]*overflow:\s*hidden;/,
+    "the optional hint absorbs the trailing track's shrink so the permanent cost keeps its width");
   assert.match(css, /@container transcript-pane \(max-width: \d+px\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
     "a plain-length cutoff retires the trailing actions in every engine with size container queries");
   assert.match(css, /@container transcript-pane \(max-width: calc\([^)]*rem[^)]*\)\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,

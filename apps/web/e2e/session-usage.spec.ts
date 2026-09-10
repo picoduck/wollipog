@@ -365,6 +365,46 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
       needed: button.scrollWidth,
     }));
     expect(legible.visible).toBeGreaterThanOrEqual(legible.needed - 0.5);
+
+    // 580px sits between the cutoff calibrated on "Paused" (~556px) and the one budgeted for the
+    // widest label (590px), so this is what actually fails if the budget regresses to the narrower
+    // figure — the 600px pane above is inside neither cutoff and would pass either way.
+    await page.goto("/session-usage-e2e.html?width=580&height=780&cost=12345.67");
+    await expect(page.locator(".follow-tail-chip")).toBeVisible();
+    await expect(page.locator(".transcript-status-actions")).toBeHidden();
+  });
+
+  test("the cost outlasts the hint even where the container-query cutoff cannot run", async ({ page }) => {
+    // Size container queries are missing on some engines this project still targets
+    // (docs/vite-8-compatibility.md names Firefox 104; they arrived in Firefox 110), and the cutoff
+    // is inert there. Neutralising it stands in for that engine: the trailing track's lopsided
+    // flex-shrink has to keep the permanent cost readable by crushing the optional hint instead.
+    await page.setViewportSize({ width: 1280, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=440&height=780&cost=12345.67");
+    await page.addStyleTag({
+      content: "@container transcript-pane (max-width: 99999px) { .transcript-status-actions { display: flex !important; } }",
+    });
+    await expect(page.locator(".follow-tail-chip")).toBeVisible();
+    await page.mouse.move(220, 300);
+    await page.mouse.wheel(0, -900);
+    await expect(page.locator(".follow-tail-chip")).toContainText("Follow Live Output");
+
+    const geometry = await page.locator(".transcript-status-strip").evaluate((strip) => {
+      const button = strip.querySelector(".transcript-status-usage .session-cost-button") as HTMLElement;
+      const actions = strip.querySelector(".transcript-status-actions") as HTMLElement;
+      return {
+        hintWidth: actions.getBoundingClientRect().width,
+        hintNatural: actions.scrollWidth,
+        costVisible: button.getBoundingClientRect().width,
+        costNeeded: button.scrollWidth,
+        overflows: strip.scrollWidth > strip.clientWidth,
+      };
+    });
+    // The hint is still in the layout, but it gave up its width first: it renders far narrower than
+    // it wants, while the cost keeps essentially all of its own.
+    expect(geometry.hintWidth).toBeLessThan(geometry.hintNatural / 2);
+    expect(geometry.costVisible).toBeGreaterThanOrEqual(geometry.costNeeded - 0.5);
+    expect(geometry.overflows).toBe(false);
   });
 
   test("an unpriced ledger keeps the placeholder and names itself in the popover", async ({ page }) => {
