@@ -10,11 +10,43 @@ test("reduces an indexed-item rejection to a normalized, content-free shape", ()
     ),
     // "Expected a string with maximum length" matches three allowlisted phrases; they are retained
     // in the module's own list order, never the order the provider happened to use.
-    { path: "input[N].arguments", phrases: ["string too long", "maximum length", "expected a string"], numbers: [675, 1048576, 1426210] },
+    { path: "input[N].arguments", phrases: ["string too long", "maximum length", "expected a string"], numbers: [1048576, 1426210] },
   );
   assert.deepEqual(
     providerRejectionShape("Invalid 'input[3].content[0].image_url': unsupported value 'x'"),
-    { path: "input[N].content[N].image_url", phrases: ["unsupported value"], numbers: [3, 0] },
+    { path: "input[N].content[N].image_url", phrases: ["unsupported value"], numbers: [] },
+  );
+});
+
+test("an unrecognized field name is named as a placeholder, never reproduced", () => {
+  // Restricting characters and length does not make a segment content-free: a secret made of word
+  // characters would pass such a filter unchanged. Only a fixed vocabulary is safe.
+  const shape = providerRejectionShape("Invalid 'input[0].sk_live_SUPERSECRET123': must be")!;
+  assert.deepEqual(shape, { path: "input[N].<field>", phrases: ["must be"], numbers: [] });
+  assert.doesNotMatch(JSON.stringify(shape), /SUPERSECRET|sk_live/);
+
+  // Structure is still recorded: depth and the recognized segments around it survive.
+  assert.equal(
+    providerRejectionShape("Invalid 'input[2].content[0].hunter2': is required")!.path,
+    "input[N].content[N].<field>",
+  );
+});
+
+test("numbers survive only where a recognized measurement introduces them", () => {
+  // Provider prose echoing numeric user content must not be persisted.
+  assert.deepEqual(
+    providerRejectionShape("Invalid 'input[0].content': unsupported value '4111111111111111'")!.numbers,
+    [],
+  );
+  assert.deepEqual(
+    providerRejectionShape("Invalid 'input[0].arguments': string too long. maximum length 1048576")!.numbers,
+    [1048576],
+  );
+  assert.deepEqual(
+    providerRejectionShape(
+      "Invalid 'input[9].arguments': exceeds limit 500 and my phone is 5551234567",
+    )!.numbers,
+    [500],
   );
 });
 
@@ -27,8 +59,8 @@ test("never retains provider prose, values, or identifiers", () => {
   for (const secret of ["sk-secret", "apiKey", "thr_private", "delete production", "user said"]) {
     assert.doesNotMatch(rendered, new RegExp(secret), secret);
   }
-  // Only the path, the allowlisted phrase, and the index survive.
-  assert.deepEqual(shape, { path: "input[N].arguments", phrases: ["is not allowed"], numbers: [9] });
+  // Only the known field name and the allowlisted phrase survive.
+  assert.deepEqual(shape, { path: "input[N].arguments", phrases: ["is not allowed"], numbers: [] });
 });
 
 test("ignores every rejection that does not name an indexed request item", () => {
@@ -55,11 +87,13 @@ test("bounds what it retains from a hostile message", () => {
   // A path cannot grow without limit either: segments and their length are capped by the grammar.
   const deep = providerRejectionShape(`Invalid 'input[1]${".a".repeat(40)}': must be`)!;
   assert.ok(deep.path.split(".").length <= 9, `path depth is bounded, got ${deep.path}`);
+  assert.doesNotMatch(deep.path, /\.a(\.|$)/, "unrecognized segments are placeholders, not copies");
 });
 
 test("the same shape from two different messages is one piece of evidence", () => {
   const first = providerRejectionShape("Invalid 'input[675].arguments': string too long. maximum length 1048576")!;
   const second = providerRejectionShape("Invalid 'input[12].arguments': string too long. maximum length 2000")!;
+  assert.deepEqual([first.numbers, second.numbers], [[1048576], [2000]]);
   assert.equal(
     providerRejectionShapeKey("codex-app-server", first),
     providerRejectionShapeKey("codex-app-server", second),

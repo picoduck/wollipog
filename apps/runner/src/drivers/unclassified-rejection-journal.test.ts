@@ -36,21 +36,51 @@ test("repeats are counted, not appended, and survive a restart", () => {
   }
 });
 
+test("unrecognized field names cannot flood the journal with distinct shapes", () => {
+  const dir = root();
+  try {
+    const journal = new UnclassifiedRejectionJournal(dir);
+    for (let index = 0; index < 200; index += 1) {
+      journal.record("codex-app-server", shape(`Invalid 'input[1].secret_${index}': must be`));
+    }
+    // Redacting unrecognized segments bounds the shape space itself: 200 distinct attacker-chosen
+    // names are one observation, not 200 rows.
+    assert.deepEqual(journal.list().map((entry) => [entry.path, entry.count]), [["input[N].<field>", 200]]);
+    assert.equal(journal.overflowCount(), 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("retention is bounded and the bound is recorded rather than hidden", () => {
   const dir = root();
   try {
     const journal = new UnclassifiedRejectionJournal(dir);
-    for (let index = 0; index < 80; index += 1) {
-      journal.record("codex-app-server", shape(`Invalid 'input[1].field_${index}': must be`));
-    }
+    // Distinct shapes come from real structure: recognized field names and nesting depth. The
+    // path grammar caps depth, so depth alone cannot generate them indefinitely.
+    const fields = [
+      "arguments", "content", "name", "role", "type", "text", "id", "url", "data", "detail",
+      "status", "summary", "output", "input", "tools", "metadata", "refusal", "reasoning",
+      "parameters", "function", "call_id", "file_id", "instructions", "messages", "annotations",
+      "tool_calls", "tool_choice", "image_url", "file_url", "file_data", "output_text",
+      "input_audio", "encrypted_content",
+    ];
+    const shapes = fields.flatMap((field) => [
+      shape(`Invalid 'input[1].${field}': must be`),
+      shape(`Invalid 'input[1].content.${field}': must be`),
+    ]);
+    const distinct = new Set(shapes.map((entry) => entry.path)).size;
+    assert.ok(distinct > 64, `the fixture must exceed the cap, got ${distinct}`);
+    for (const entry of shapes) journal.record("codex-app-server", entry);
+
     assert.equal(journal.list().length, 64, "distinct shapes are capped");
-    assert.equal(journal.overflowCount(), 16, "shapes the cap rejected are still counted");
+    assert.equal(journal.overflowCount(), distinct - 64, "shapes the cap rejected are still counted");
 
     // An already-known shape is still counted once the journal is full.
-    const before = journal.list().find((entry) => entry.path === "input[N].field_0")!.count;
-    journal.record("codex-app-server", shape("Invalid 'input[7].field_0': must be"));
-    const after = journal.list().find((entry) => entry.path === "input[N].field_0")!.count;
-    assert.equal(after, before + 1);
+    const known = journal.list()[0]!;
+    const before = known.count;
+    journal.record("codex-app-server", { path: known.path, phrases: known.phrases, numbers: known.numbers });
+    assert.equal(journal.list().find((entry) => entry.path === known.path)!.count, before + 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

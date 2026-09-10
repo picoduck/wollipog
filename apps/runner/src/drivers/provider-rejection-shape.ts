@@ -2,9 +2,11 @@
  * Reduce a provider request-validation rejection to a content-free structural shape, so an
  * unrecognized one can be evidenced later without retaining anything the provider said.
  *
- * The safety property is compositional, not filtering: the result is *built* from tokens this
- * module recognizes, and everything else in the message is discarded. A denylist would have to
- * anticipate every way content can appear; an allowlist cannot leak what it never copies.
+ * The safety property is compositional, not filtering: every part of the result is either a literal
+ * this module already contained — a known field name, a phrase from a fixed list — or a number
+ * introduced by a recognized measurement. Nothing is reproduced merely because it looked
+ * structural. A denylist would have to anticipate every way content can appear; a vocabulary
+ * cannot emit a word it does not already know.
  *
  * Scope is deliberately narrow. Only a rejection naming an indexed item in the request's own input
  * — the shape of "something in your stored conversation is unacceptable" — produces a shape at all.
@@ -37,8 +39,33 @@ const RECOGNIZED_PHRASES = [
   "too large",
 ] as const;
 
-/** An indexed item in the request input, with its field path. Segments are schema identifiers. */
+/** An indexed item in the request input, with its field path. */
 const INDEXED_ITEM_PATH = /\binput\[(?:\d{1,10})\](?:\[\d{1,10}\]|\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,8}/;
+
+/**
+ * Field names this module will name in its output. Everything else becomes `<field>`.
+ *
+ * Restricting a segment's characters and length does NOT make it content-free: a secret made of
+ * word characters passes such a filter unchanged. Only a fixed vocabulary does, so a segment is
+ * either one this module already knew about or it is not reproduced at all.
+ */
+const RECOGNIZED_FIELDS = new Set([
+  "annotations", "arguments", "call_id", "content", "data", "detail", "encrypted_content",
+  "file_data", "file_id", "file_url", "function", "id", "image_url", "input", "input_audio",
+  "instructions", "messages", "metadata", "name", "output", "output_text", "parameters",
+  "reasoning", "refusal", "role", "status", "summary", "text", "tool_calls", "tool_choice",
+  "tools", "type", "url",
+]);
+const REDACTED_FIELD = "<field>";
+
+/**
+ * Numbers are retained only where a recognized measurement introduces them. A whole-message scan
+ * would copy any digits the provider happened to echo back — an account number quoted inside a
+ * rejected value is still user content, however structural the surrounding error looks.
+ */
+const MEASURED_NUMBER =
+  /\b(?:maximum|minimum|max|min|at most|at least|exceeds?|exceeded|length|limit|characters|bytes|tokens|items)\b[^0-9]{0,20}?(\d{1,15})\b/gi;
+
 const MAX_NUMBERS = 4;
 const MAX_PHRASES = 6;
 
@@ -61,13 +88,23 @@ export function providerRejectionShape(message: unknown): ProviderRejectionShape
   const path = INDEXED_ITEM_PATH.exec(message)?.[0];
   if (!path) return null;
 
-  const normalized = path.replace(/\[\d+\]/g, "[N]");
+  const normalized = path
+    .replace(/\[\d+\]/g, "[N]")
+    .split(".")
+    // A segment carries its own indices (`content[N]`), so the name is checked apart from them and
+    // the structure is preserved either way.
+    .map((segment, index) => {
+      if (index === 0) return segment;
+      const parsed = /^([A-Za-z_][A-Za-z0-9_]*)((?:\[N\])*)$/.exec(segment);
+      if (!parsed) return REDACTED_FIELD;
+      return (RECOGNIZED_FIELDS.has(parsed[1]!) ? parsed[1]! : REDACTED_FIELD) + parsed[2]!;
+    })
+    .join(".");
   const lowered = message.toLowerCase();
   const phrases = RECOGNIZED_PHRASES.filter((phrase) => lowered.includes(phrase)).slice(0, MAX_PHRASES);
   const numbers: number[] = [];
-  for (const match of message.matchAll(/\b(\d{1,15})\b/g)) {
+  for (const match of message.matchAll(MEASURED_NUMBER)) {
     const value = Number(match[1]);
-    // Indices already live in the path; keeping them again would only add noise.
     if (!Number.isSafeInteger(value) || numbers.includes(value)) continue;
     numbers.push(value);
     if (numbers.length >= MAX_NUMBERS) break;
