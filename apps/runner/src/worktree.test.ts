@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -2995,4 +2995,36 @@ test("a legacy row without a recorded branch still fails closed when its worktre
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the derived session worktree branch follows the root that created the path", () => {
+  const hash = "a".repeat(64);
+  const wsl = { kind: "wsl" as const, distro: "Ubuntu" };
+  const native = { kind: "native" as const };
+  const prefixed = `agent/${"a".repeat(16)}/s1`;
+  assert.equal(
+    sessionWorktreeBranch("s1", `/home/me/.agent-manager/runner-instances/${hash}/worktrees/repo/s1`, wsl, hash),
+    prefixed, "an owner-instance root carries the hash prefix, exactly as createWorktree names it");
+  assert.equal(
+    sessionWorktreeBranch("s1", "/home/me/.agent-manager/worktrees/repo/s1", wsl, hash),
+    "agent/s1", "a pre-attestation legacy root keeps the plain name even on an owner-hashed runner");
+  assert.equal(
+    sessionWorktreeBranch("s1", "/home/me/.agent-manager/worktrees/repo/s1", wsl, undefined),
+    "agent/s1", "and so does a runner with no owner hash at all");
+  assert.equal(
+    sessionWorktreeBranch("s1", `/data/runners/wollipog/worktrees/repo/s1`, native, hash),
+    "agent/s1", "a native worktree is never owner-prefixed, whatever the runner's hash");
+  // A HOME that itself contains the legacy segment must not demote a real owner-rooted path: the
+  // owner root is matched positively rather than by ruling the legacy root out.
+  assert.equal(
+    sessionWorktreeBranch(
+      "s1",
+      `/home/.agent-manager/worktrees/me/.agent-manager/runner-instances/${hash}/worktrees/repo/s1`,
+      wsl,
+      hash,
+    ),
+    prefixed, "an owner root under an unusual HOME is still owner-rooted");
+  assert.equal(
+    sessionWorktreeBranch("s1", `/home/me/.agent-manager/runner-instances/${"b".repeat(64)}/worktrees/repo/s1`, wsl, hash),
+    "agent/s1", "another owner's root is not this runner's, so no prefix is claimed for it");
 });

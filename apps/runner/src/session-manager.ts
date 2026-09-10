@@ -133,6 +133,7 @@ import {
   createWorktreeFromTree,
   captureTurnDiff,
   discardWorktreeIfSafe,
+  sessionWorktreeBranch,
   isGitRepo,
   nativeRepositoryPathIsUnavailable,
   removeRequestedWorktreeBoundary,
@@ -3354,13 +3355,8 @@ export class SessionManager {
     path: string,
     branch: string | undefined,
   ): Promise<string | null> {
-    // A pre-attestation WSL worktree lives under the legacy home root and keeps the unprefixed
-    // name even on an owner-hashed runner; `createWorktree` reuses it under exactly that branch.
-    const ownerRooted = meta.context.kind === "wsl" && !!this.runnerOwnerHash &&
-      !path.includes("/.agent-manager/worktrees/");
-    const expected = branch ?? (ownerRooted
-      ? `agent/${this.runnerOwnerHash!.slice(0, 16)}/${meta.sessionId}`
-      : `agent/${meta.sessionId}`);
+    const expected = branch ??
+      sessionWorktreeBranch(meta.sessionId, path, meta.context, this.runnerOwnerHash);
     try {
       const verified = await attachRequestedWorktree(meta.repoPath, meta.sessionId, path, {
         context: meta.context,
