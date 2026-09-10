@@ -5,7 +5,9 @@ async function expectUnclipped(badge: Locator) {
   expect(await badge.evaluate((element) => {
     const box = element.getBoundingClientRect();
     const range = document.createRange();
-    range.selectNodeContents(element.querySelector('span[aria-hidden="true"]:last-child')!);
+    const visibleLabels = [...element.querySelectorAll<HTMLElement>('span[aria-hidden="true"]')]
+      .filter((candidate) => candidate.getClientRects().length > 0);
+    range.selectNodeContents(visibleLabels[visibleLabels.length - 1]!);
     const text = range.getBoundingClientRect();
     let contained = text.left >= box.left && text.right <= box.right + 0.5;
     for (let parent = element.parentElement; parent; parent = parent.parentElement) {
@@ -58,49 +60,35 @@ for (const width of [320, 390, 700, 1280]) {
       await page.evaluate((backgroundWorkState) => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { backgroundWorkState });
       }, state);
-      // #784: the badge now competes for the ordinary status row. It wins that row wherever it
-      // fits in it; where the label cannot fit beside the action controls at all — a 320px phone
-      // showing Fork, Share, More Actions and the disclosure — it is disclosed rather than clipped,
-      // wrapped, or given a line of its own. Its live region announces it either way.
-      const badgeFits = await badge.evaluate((element) => {
-        const statuses = element.closest<HTMLElement>(".session-header-statuses")!;
-        const wasHidden = element.hidden;
-        element.hidden = false;
-        const width = element.getBoundingClientRect().width;
-        element.hidden = wasHidden;
-        return width <= statuses.getBoundingClientRect().width + 0.5;
-      });
+      // #825: every active background-work state has a one-word phone label, so the authoritative
+      // badge keeps the ordinary row even at the 320px floor. It is never clipped or given a line
+      // of its own, and its live region retains the complete descriptive name.
       await expect(header.locator(`.sr-only [aria-label="Background Work: ${label}"]`)).toHaveCount(1);
       const statusOverflow = header.locator(".session-status-overflow-trigger");
       if (width === 390) await expect(statusOverflow).toBeVisible();
-      if (badgeFits) {
-        await expect(badge).toHaveAccessibleName(`Background Work: ${label}`);
-        await expectUnclipped(badge);
-        await badge.focus();
-        await badge.press("Enter");
-        // Wait through deferred focus restoration, not merely the click's synchronous render.
-        await page.evaluate(() => new Promise<void>((resolve) => {
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-        }));
-        await expect(badge).toBeFocused();
-        await expect(page.getByRole("complementary", { name: "Background Work", exact: true })).toBeVisible();
-        await page.getByRole("button", { name: "Close Panel", exact: true }).click();
-        await badge.click();
-        await expect(badge).toBeFocused();
-        await expect(page.getByRole("complementary", { name: "Background Work", exact: true })).toBeVisible();
-        await page.getByRole("button", { name: "Close Panel", exact: true }).click();
-        // Background work shares the lifecycle badge's line instead of taking one above it.
-        expect(await badge.evaluate((element) => {
-          const statuses = document.querySelector(".session-header-statuses")!;
-          const lifecycle = statuses.querySelector('[aria-label^="Activity:"]') as HTMLElement | null;
-          if (!statuses.contains(element)) return false;
-          return !lifecycle || lifecycle.hidden || Math.abs(
-            lifecycle.getBoundingClientRect().y - element.getBoundingClientRect().y) <= 0.5;
-        })).toBe(true);
-      } else {
-        await expect(badge).toBeHidden();
-        await expect(statusOverflow).toBeVisible();
-      }
+      await expect(badge).toHaveAccessibleName(`Background Work: ${label}`);
+      await expectUnclipped(badge);
+      await badge.focus();
+      await badge.press("Enter");
+      // Wait through deferred focus restoration, not merely the click's synchronous render.
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }));
+      await expect(badge).toBeFocused();
+      await expect(page.getByRole("complementary", { name: "Background Work", exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Close Panel", exact: true }).click();
+      await badge.click();
+      await expect(badge).toBeFocused();
+      await expect(page.getByRole("complementary", { name: "Background Work", exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Close Panel", exact: true }).click();
+      // Background work shares the lifecycle badge's line instead of taking one above it.
+      expect(await badge.evaluate((element) => {
+        const statuses = document.querySelector(".session-header-statuses")!;
+        const lifecycle = statuses.querySelector('[aria-label^="Activity:"]') as HTMLElement | null;
+        if (!statuses.contains(element)) return false;
+        return !lifecycle || lifecycle.hidden || Math.abs(
+          lifecycle.getBoundingClientRect().y - element.getBoundingClientRect().y) <= 0.5;
+      })).toBe(true);
       await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toHaveCount(1);
       await expect(header.locator('[aria-label="Changes: No Changes"]')).toHaveCount(1);
       await expect(header.getByRole("button", { name: "Share", exact: true })).toBeVisible();
