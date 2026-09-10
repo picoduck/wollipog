@@ -1300,7 +1300,7 @@ export function InboxView({
                 rightPanel={rightPanel}
                 onOpenTerminal={onOpenTerminal}
                 pinnedOpen={pinnedOpen}
-                focusComposer={focusComposerSessionId === surfaceSessionId}
+                composerFocusIntent={focusComposerSessionId === surfaceSessionId ? "reply" : undefined}
                 onComposerFocusConsumed={onComposerFocusConsumed}
                 onBack={onCollapse}
                 onExpand={() => expand(surfaceSessionId)}

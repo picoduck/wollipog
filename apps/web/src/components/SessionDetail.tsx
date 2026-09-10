@@ -427,7 +427,7 @@ export type SessionDetailProps = {
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
   pinnedOpen: boolean;
-  focusComposer?: boolean;
+  composerFocusIntent?: "message" | "reply";
   onComposerFocusConsumed?: () => void;
   onBack?: () => void;
   onExpand?: () => void;
@@ -565,7 +565,7 @@ function SessionDetailLoaded({
   rightPanel,
   onOpenTerminal,
   pinnedOpen,
-  focusComposer,
+  composerFocusIntent,
   onComposerFocusConsumed,
   mode = "expanded",
   onBack,
@@ -891,8 +891,8 @@ function SessionDetailLoaded({
     expectedText: string;
   } | null>(null);
   const [hydrationCommitRevision, setHydrationCommitRevision] = useState(0);
-  const focusComposerRequestedRef = useRef(focusComposer);
-  focusComposerRequestedRef.current = focusComposer;
+  const focusComposerRequestedRef = useRef(composerFocusIntent !== undefined);
+  focusComposerRequestedRef.current = composerFocusIntent !== undefined;
 
   const composerFocusKey = `${instanceScope}\u0000${sessionId}`;
 
@@ -1068,13 +1068,14 @@ function SessionDetailLoaded({
   }, [mode, sessionId, attentionTarget]);
 
   useEffect(() => {
-    if (!focusComposer) return;
+    if (composerFocusIntent !== "message") return;
     const frame = window.requestAnimationFrame(() => {
       focusComposerAtDraftEnd();
       onComposerFocusConsumed?.();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [focusComposer, focusComposerAtDraftEnd, onComposerFocusConsumed, sessionId]);
+  }, [composerFocusIntent, focusComposerAtDraftEnd, onComposerFocusConsumed, sessionId]);
+
   const sessionCaps = resolveCaps(runner, session);
   const effectiveModel = optimisticModel ?? session?.model;
   const selectedModelSupportsImages = modelSupportsImages(sessionCaps, effectiveModel);
@@ -2357,6 +2358,19 @@ function SessionDetailLoaded({
     answerModeFocusRequestRef.current = "answer";
     setAnswerModeRequestId(pendingQuestion.requestId);
   }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+
+  useLayoutEffect(() => {
+    if (composerFocusIntent !== "reply") return;
+    // An Inbox Reply request is contextual: a pending question owns it before the ordinary
+    // composer does. Resolve that ownership during the expansion commit so the very next bare key
+    // cannot escape to the global shortcut layer while focus is waiting on an animation frame.
+    enterAnswerMode();
+    // Acknowledge only after InboxView's expansion frame records the new surface. Clearing the
+    // request in this layout commit would cancel that frame; its replacement sees an ordinary
+    // expansion and moves focus back to the reader.
+    const frame = window.requestAnimationFrame(() => onComposerFocusConsumed?.());
+    return () => window.cancelAnimationFrame(frame);
+  }, [composerFocusIntent, enterAnswerMode, onComposerFocusConsumed, sessionId]);
 
   useLayoutEffect(() => {
     const liveRequestId = pendingQuestion?.requestId ?? null;
