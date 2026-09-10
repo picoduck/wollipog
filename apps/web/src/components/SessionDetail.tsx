@@ -5651,7 +5651,7 @@ function ComposerPlusMenu({
         <>
           <div className="plus-backdrop" onClick={() => popover.close(true)} />
           <div
-            className="plus-pop"
+            className="plus-pop composer-plus-pop"
             id={popover.panelId}
             ref={popover.panelRef}
             role="dialog"
@@ -5712,9 +5712,10 @@ function ComposerPlusMenu({
             <div className="plus-section">Guardrails</div>
             <GuardrailInput
               prefix="$"
+              label="Recurring Cost Threshold"
               step="0.5"
               value={session.costBudgetUsd}
-              hint="pause + ask when spend reaches this"
+              hint="Pauses when spend reaches this amount. Continue advances the next threshold by another equal allowance."
               onCommit={(v) => onApply({ costBudgetUsd: v })}
             />
             <CheckpointsInput
@@ -5724,12 +5725,13 @@ function ComposerPlusMenu({
             />
             <GuardrailInput
               prefix="#"
+              label="Tool-Call Threshold"
               step="1"
               integer
               value={session.maxToolCalls}
               hint={
-                "pause + ask after N tool calls" +
-                (session.maxToolCalls != null && session.toolCallCount != null ? ` · ${session.toolCallCount} used` : "")
+                "Pauses after this many tool calls." +
+                (session.maxToolCalls != null && session.toolCallCount != null ? ` ${session.toolCallCount} used.` : "")
               }
               onCommit={(v) => onApply({ maxToolCalls: v })}
             />
@@ -5755,6 +5757,8 @@ function CheckpointsInput({
 }) {
   const live = (value ?? []).join(", ");
   const [draft, setDraft] = useState<string | null>(null);
+  const inputId = useId();
+  const descriptionId = useId();
   const commit = () => {
     if (draft === null) return;
     const list = draft.split(/[\s,]+/).map(Number).filter((usd) => Number.isFinite(usd) && usd > 0);
@@ -5763,19 +5767,25 @@ function CheckpointsInput({
   };
   return (
     <div className="plus-budget">
-      <span className="plus-budget-prefix">$…</span>
+      <span className="plus-budget-prefix" aria-hidden="true">$…</span>
       <input
+        id={inputId}
         type="text"
         inputMode="decimal"
         placeholder="none"
-        aria-label="Cost Checkpoints"
+        aria-describedby={descriptionId}
         value={draft ?? live}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={commit}
         onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }}
       />
-      <span className="plus-budget-hint">
-        {"pause + ask once at each amount"}{approvedUsd != null ? ` · approved through $${approvedUsd.toFixed(2)}` : ""}
+      <span className="plus-budget-copy">
+        <label className="plus-budget-label" htmlFor={inputId}>Cost Checkpoints</label>
+        <span className="plus-budget-hint" id={descriptionId}>
+          Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again.
+          Checkpoints at or above the recurring cost threshold do not pause separately.
+          {approvedUsd != null ? ` Approved through $${approvedUsd.toFixed(2)}.` : ""}
+        </span>
       </span>
     </div>
   );
@@ -5790,6 +5800,7 @@ function CheckpointsInput({
  */
 function GuardrailInput({
   prefix,
+  label,
   step,
   integer,
   value,
@@ -5797,6 +5808,7 @@ function GuardrailInput({
   onCommit,
 }: {
   prefix: string;
+  label: string;
   step: string;
   integer?: boolean;
   value: number | null | undefined;
@@ -5804,11 +5816,15 @@ function GuardrailInput({
   onCommit: (v: number) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null); // null = not editing
+  const inputId = useId();
+  const descriptionId = useId();
   return (
     <div className="plus-budget">
-      <span className="plus-budget-prefix">{prefix}</span>
+      <span className="plus-budget-prefix" aria-hidden="true">{prefix}</span>
       <input
+        id={inputId}
         type="number"
+        aria-describedby={descriptionId}
         min="0"
         step={step}
         placeholder="∞"
@@ -5826,7 +5842,10 @@ function GuardrailInput({
           onCommit(Number.isFinite(v) && v > 0 ? (integer ? Math.floor(v) : v) : 0);
         }}
       />
-      <span className="plus-budget-hint">{hint}</span>
+      <span className="plus-budget-copy">
+        <label className="plus-budget-label" htmlFor={inputId}>{label}</label>
+        <span className="plus-budget-hint" id={descriptionId}>{hint}</span>
+      </span>
     </div>
   );
 }
