@@ -217,6 +217,71 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   container.remove();
 });
 
+test("a window the provider never measured is marked absent, not shown as a value", async () => {
+  const now = Date.now();
+  const bucket = (id: string, measured: boolean) => ({
+    id,
+    label: id === "five_hour" ? "Five-Hour Window" : "Weekly — All Models",
+    ...(measured ? { usedPercent: 40, remainingPercent: 60 } : {}),
+    resetsAt: now + 90 * 60_000,
+    status: "available" as const,
+  });
+  const subscription: SubscriptionUsageResponse = {
+    staleAfterMs: 600_000,
+    generatedAt: now,
+    sources: [{
+      sourceId: "b".repeat(32),
+      runnerId: "runner-1",
+      agentId: "claude",
+      provider: "claude",
+      state: "available",
+      fetchedAt: now,
+      freshness: "fresh",
+      runnerStatus: "online",
+      runnerName: "Build Machine",
+      agentName: "Claude Code",
+      buckets: [bucket("five_hour", false), bucket("seven_day", true)],
+    }],
+  };
+  const client = {
+    ...api,
+    usage: async () => response([]),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    subscriptionUsage: async () => subscription,
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+  });
+  await act(async () => {
+    await settleLoad();
+    await Promise.resolve();
+  });
+
+  const buckets = [...container.querySelectorAll(".subscription-bucket")];
+  assert.equal(buckets.length, 2);
+  const [unmeasured, measured] = buckets as HTMLElement[];
+  assert.ok(unmeasured?.className.includes("unmeasured"), "the unmeasured window is distinguishable");
+  assert.ok(!measured?.className.includes("unmeasured"));
+
+  // The old bold "Allowance Reported" put a non-value where every sibling shows a percentage.
+  assert.doesNotMatch(container.textContent ?? "", /Allowance Reported/);
+  // The dash is decorative; the meaning reaches assistive technology as text, not as visual weight.
+  assert.equal(unmeasured?.querySelector("[aria-hidden=\"true\"]")?.textContent, "—");
+  assert.equal(unmeasured?.querySelector(".sr-only")?.textContent, "Utilization Not Reported");
+  // The reset time is what that window does have to say, so it takes the prominent slot.
+  assert.match(unmeasured?.querySelector("dd strong")?.textContent ?? "", /Resets in 2 hours/);
+  // A measured window is untouched: the percentage keeps the prominent slot.
+  assert.equal(measured?.querySelector("dd strong")?.textContent, "60% Remaining");
+  assert.equal(measured?.querySelector(".sr-only"), null);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
 test("an unsplit response from an older plane is shown honestly and the window comes from the response", async () => {
   const day = Date.UTC(2026, 0, 2);
   const unsplit: UsageAggregationResponse = {

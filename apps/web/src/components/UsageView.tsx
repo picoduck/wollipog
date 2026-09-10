@@ -382,21 +382,36 @@ export function UsageView() {
                       const remaining = remainingFor(bucket);
                       const warning = bucket.status === "warning";
                       const exhausted = bucket.status === "exhausted" || remaining === 0;
+                      // A window the provider never measured must not put a non-value where every
+                      // sibling shows a percentage, or it reads as a figure that failed to parse.
+                      // The dash marks the measurement as absent and the reset time — the only
+                      // fact there is — takes the prominent slot instead.
+                      const measured = remaining !== undefined;
+                      const resetTitle = bucket.resetsAt ? new Date(bucket.resetsAt).toLocaleString() : "";
+                      const resetText = bucket.resetsAt
+                        ? `${subscriptionResetLabel(bucket.resetsAt, subscriptionNow)} · ${resetTitle}`
+                        : "";
                       return (
-                        <div className={`subscription-bucket ${exhausted ? "exhausted" : warning ? "warning" : ""}`} key={bucket.id}>
+                        <div
+                          className={`subscription-bucket ${exhausted ? "exhausted" : warning ? "warning" : ""}${measured ? "" : " unmeasured"}`}
+                          key={bucket.id}
+                        >
                           <dt>{bucket.label}</dt>
                           <dd>
-                            {remaining === undefined ? (
-                              <strong>Allowance Reported</strong>
-                            ) : (
+                            {measured ? (
                               <><strong>{Math.round(remaining)}% Remaining</strong><span>{Math.round(bucket.usedPercent ?? 100 - remaining)}% Used</span></>
+                            ) : (
+                              <span className="subscription-unmeasured">
+                                <span aria-hidden="true">—</span>
+                                <span className="sr-only">Utilization Not Reported</span>
+                              </span>
                             )}
                             {exhausted && <span className="subscription-warning">⛔ Exhausted</span>}
                             {!exhausted && warning && <span className="subscription-warning">⚠ Approaching Limit</span>}
                             {bucket.resetsAt && (
-                              <span title={new Date(bucket.resetsAt).toLocaleString()}>
-                                {subscriptionResetLabel(bucket.resetsAt, subscriptionNow)} · {new Date(bucket.resetsAt).toLocaleString()}
-                              </span>
+                              measured
+                                ? <span title={resetTitle}>{resetText}</span>
+                                : <strong title={resetTitle}>{resetText}</strong>
                             )}
                           </dd>
                         </div>
