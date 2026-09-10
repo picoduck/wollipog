@@ -11,6 +11,9 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
+import { INBOX_COLLAPSED_THREADS_KEY } from "../inbox.js";
+import { saveKeySet } from "../pins.js";
+import { loadSeen, saveSeen } from "../sessions-seen.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -505,7 +508,8 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
     });
   });
 
-  assert.deepEqual(rowTitles(container), ["Session orphaned", "Session watchdog", "Session failed", "Session input", "Session unsnoozed"]);
+  // The session waiting on input leads (#896 orders urgency before recency); the rest keep recency.
+  assert.deepEqual(rowTitles(container), ["Session input", "Session orphaned", "Session watchdog", "Session failed", "Session unsnoozed"]);
   assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 5 Sessions");
   assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 6 Sessions");
   assert.match(container.textContent ?? "", /Background Work Orphaned/);
@@ -515,7 +519,7 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
 
   await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
   assert.deepEqual(rowTitles(container), [
-    "Session omitted", "Session ordinary", "Session orphaned", "Session watchdog", "Session failed", "Session input",
+    "Session input", "Session omitted", "Session ordinary", "Session orphaned", "Session watchdog", "Session failed",
   ]);
 
   await act(async () => { (container.querySelector('[title="Active"]') as HTMLButtonElement).click(); });
@@ -1353,6 +1357,200 @@ test("a cancelled press and a source-landed release click both leave the next ba
  * — leaves entries behind here, and the store's one-minute stall clock leaks with them, which is
  * what turned an assertion failure into a multi-minute stall.
  */
+test("InboxView threads a family under its parent and t, Shift+T, p, and the arrows drive it (#896)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-test",
+    runtimeKey: "inbox-thread-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  const approval = { requestId: "ask", title: "Delete the old file?", options: [] };
+  await act(async () => {
+    socket.push(snapshot([
+      session("Lone", 40),
+      session("Parent", 30, { status: "running" }),
+      session("Waiting", 20, { status: "input_required", pendingApproval: approval, parentSessionId: "Parent" }),
+      session("Done", 10, { status: "completed", parentSessionId: "Parent" }),
+    ]));
+  });
+  // The family leads: its blocked child outranks the newer, settled lone session, and the parent
+  // is first inside its thread with the children indented under it.
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Waiting", "Session Done", "Session Lone"]);
+  const shells = () => [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")];
+  assert.deepEqual(shells().map((shell) => shell.className.includes("thread-child")), [false, true, true, false]);
+  assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input");
+  assert.match(container.querySelector(".inbox-thread-family")?.className ?? "", /waiting/);
+  const selectedTitle = () =>
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')?.textContent ?? null;
+  const press = async (key: string, shiftKey = false) => {
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }));
+    });
+  };
+  container.querySelector<HTMLElement>(".inbox-list")!.focus();
+  assert.equal(selectedTitle(), "Session Parent");
+
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"], "a collapsed parent's children leave the list");
+  assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-expanded"), "false");
+  assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input",
+    "the rollup still says a child is waiting while the thread is collapsed");
+  assert.equal(container.querySelector(".inbox-order-update"), null, "hidden children are not a pending reorder");
+  await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 45) }); });
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"], "collapse survives a live update");
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Waiting", "Session Done", "Session Lone"]);
+
+  await press("j");
+  assert.equal(selectedTitle(), "Session Waiting");
+  await press("p");
+  assert.equal(selectedTitle(), "Session Parent", "p selects the parent without collapsing");
+  assert.equal(rowTitles(container).length, 4);
+  await press("j");
+  await press("t");
+  assert.equal(selectedTitle(), "Session Parent", "t from a child collapses its thread and lands on the parent");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
+  await press("T", true);
+  assert.equal(rowTitles(container).length, 4, "Shift+T expands every thread while any is collapsed");
+  await press("T", true);
+  assert.equal(rowTitles(container).length, 2, "Shift+T collapses every thread once all are expanded");
+
+  await press("ArrowRight");
+  assert.equal(rowTitles(container).length, 4, "Right expands a collapsed parent");
+  await press("ArrowRight");
+  assert.equal(selectedTitle(), "Session Waiting", "Right on an expanded parent selects its first child");
+  await press("ArrowLeft");
+  assert.equal(selectedTitle(), "Session Parent", "Left on a child selects the parent");
+  await press("ArrowLeft");
+  assert.equal(rowTitles(container).length, 2, "Left on an expanded parent collapses it");
+
+  // The chevron and the family chip are the pointer path and never select the row.
+  await press("j");
+  assert.equal(selectedTitle(), "Session Lone");
+  await act(async () => { container.querySelector<HTMLButtonElement>(".inbox-thread-toggle")!.click(); });
+  assert.equal(rowTitles(container).length, 4);
+  assert.equal(selectedTitle(), "Session Lone");
+  await act(async () => { container.querySelector<HTMLElement>(".inbox-thread-family")!.click(); });
+  assert.equal(rowTitles(container).length, 2);
+  assert.equal(selectedTitle(), "Session Lone");
+});
+
+test("InboxView keeps a hidden selection on its nearest visible ancestor and Shift+T reaches hidden parents (#896)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  // Collapse state persists per instance, and the previous test left a thread collapsed.
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set());
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-repair-test",
+    runtimeKey: "inbox-thread-repair-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([
+      session("Parent", 30, { status: "running" }),
+      session("Child", 20, { status: "running", parentSessionId: "Parent" }),
+      session("Grandchild", 10, { status: "running", parentSessionId: "Child" }),
+      session("Lone", 5),
+    ]));
+  });
+  const selectedTitle = () =>
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')?.textContent ?? null;
+  const press = async (key: string, shiftKey = false) => {
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }));
+    });
+  };
+  container.querySelector<HTMLElement>(".inbox-list")!.focus();
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
+
+  // Shift+T collapses the root AND the inner parent; the second press must reopen both.
+  await press("T", true);
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
+  await press("T", true);
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
+
+  // An outside change hides the selected row inside a collapsed thread: the selection lands on
+  // the nearest visible ancestor instead of vanishing.
+  await press("j"); await press("j"); await press("j");
+  assert.equal(selectedTitle(), "Session Lone");
+  // t on the inner parent would toggle ITS thread; climb to the root and collapse from there.
+  await press("k"); await press("k"); await press("k"); await press("t");
+  assert.equal(selectedTitle(), "Session Parent");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
+  await press("j");
+  assert.equal(selectedTitle(), "Session Lone");
+  const previewTitle = () => container.querySelector<HTMLElement>(".session-preview-title")?.textContent ?? null;
+  assert.equal(previewTitle(), "Session Lone");
+  await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 5, { parentSessionId: "Parent" }) }); });
+  assert.deepEqual(rowTitles(container), ["Session Parent"]);
+  assert.equal(selectedTitle(), "Session Parent", "the hidden selection surfaces on its collapsed parent");
+  assert.equal(previewTitle(), "Session Parent", "the preview and its actions follow the same projected row");
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
+  assert.equal(selectedTitle(), "Session Lone", "expanding restores the persisted selection");
+  assert.equal(previewTitle(), "Session Lone");
+});
+
+test("an expanded child inside a collapsed thread is the session marked seen, not its projected parent (#896)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set(["Parent"]));
+  saveSeen({});
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-seen-test",
+    runtimeKey: "inbox-thread-seen-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  // A deep link opened the child while its parent's thread is collapsed: the list projects the
+  // selection onto the parent, but the reader is looking at the child.
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView expandedSessionId="Lone" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([
+      session("Parent", 30, { status: "running" }),
+      session("Lone", 20, { status: "running", parentSessionId: "Parent" }),
+    ]));
+  });
+  assert.equal(container.querySelector(".session-preview-title")?.textContent ?? container.textContent?.includes("Session Lone"), true);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_700)); });
+  const seen = loadSeen();
+  assert.ok("Lone" in seen, "the opened child is marked seen");
+  assert.ok(!("Parent" in seen), "the projected parent is not marked seen in its place");
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set());
+});
+
 test("every mounted root is torn down before the next test starts", () => {
   assert.deepEqual(mountedRoots, [], "a previous test left a React root mounted");
   assert.equal(

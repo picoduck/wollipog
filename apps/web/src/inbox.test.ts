@@ -28,6 +28,9 @@ import {
   nextInboxSplitKey,
   repairInboxSelection,
   repairInboxSelectionAfterSnapshot,
+  inboxThreadChildrenLabel,
+  inboxUrgency,
+  threadInboxRows,
   repairInboxSelectionForHeldOrder,
   reconcileInboxItems,
   reconcileInboxOrder,
@@ -297,8 +300,112 @@ test("split counts include blocked sessions and every split uses inbox card orde
   for (const split of [splits[0]!, splits.find(({ key: candidate }) => candidate === key)!]) {
     assert.equal(split.count, 3);
     assert.equal(split.blockedCount, 1);
-    assert.deepEqual(split.sessions.map(({ id }) => id), ["pinned", "new", "blocked"]);
+    // Pinned first, then the session waiting on a decision ahead of the one merely running (#896).
+    assert.deepEqual(split.sessions.map(({ id }) => id), ["pinned", "blocked", "new"]);
   }
+});
+
+test("sortInboxSessions puts urgency before recency: stalled and blocked, blocked, running, settled", () => {
+  const sorted = sortInboxSessions([
+    session("settled-new", { status: "completed", lastEventAt: 50 }),
+    session("running", { status: "running", lastEventAt: 40 }),
+    session("blocked", { status: "input_required", lastEventAt: 30 }),
+    session("stalled-blocked", { status: "input_required", lastEventAt: 20 }),
+    session("blocked-newer", { status: "input_required", lastEventAt: 35 }),
+    session("pinned-settled", { status: "idle", lastEventAt: 1 }),
+  ], new Set(["pinned-settled"]), new Set(["stalled-blocked", "running"]));
+  assert.deepEqual(sorted.map(({ id }) => id),
+    ["pinned-settled", "stalled-blocked", "blocked-newer", "blocked", "running", "settled-new"]);
+  assert.equal(inboxUrgency(session("s", { status: "running" }), new Set(["s"])), 1, "a stalled RUNNING session is not blocked");
+});
+
+test("sortInboxSessions keeps a family together, placed by its strongest member, parent first", () => {
+  const sorted = sortInboxSessions([
+    session("lone-newest", { status: "running", lastEventAt: 100 }),
+    session("parent", { status: "running", lastEventAt: 10 }),
+    session("child-quiet", { status: "completed", lastEventAt: 5, parentSessionId: "parent" }),
+    session("child-waiting", { status: "input_required", lastEventAt: 8, parentSessionId: "parent" }),
+    session("grandchild", { status: "running", lastEventAt: 9, parentSessionId: "child-quiet" }),
+    session("orphan-child", { status: "running", lastEventAt: 50, parentSessionId: "absent-parent" }),
+    session("self-parent", { status: "idle", lastEventAt: 60, parentSessionId: "self-parent" }),
+  ]);
+  assert.deepEqual(sorted.map(({ id }) => id), [
+    // The family's strongest member is a blocked child, so the whole thread leads the running rows.
+    "parent", "child-waiting", "child-quiet", "grandchild",
+    "lone-newest", "orphan-child", "self-parent",
+  ]);
+  const pinnedChild = sortInboxSessions([
+    session("lone", { status: "input_required", lastEventAt: 100 }),
+    session("parent", { status: "idle", lastEventAt: 1 }),
+    session("child", { status: "idle", lastEventAt: 2, parentSessionId: "parent" }),
+  ], new Set(["child"]));
+  assert.deepEqual(pinnedChild.map(({ id }) => id), ["parent", "child", "lone"], "a pinned child pins its family");
+});
+
+test("threadInboxRows nests children under a present parent and drops a collapsed parent's descendants", () => {
+  const rows = [
+    { session: session("parent", { status: "running" }) },
+    { session: session("a", { status: "input_required", parentSessionId: "parent", title: "Child A" }) },
+    { session: session("b", { status: "completed", parentSessionId: "parent", title: "Child B" }) },
+    { session: session("b1", { status: "running", parentSessionId: "b", title: "Grandchild" }) },
+    { session: session("lone", { status: "idle" }) },
+    { session: session("orphan", { status: "idle", parentSessionId: "absent" }) },
+  ];
+  const expanded = threadInboxRows(rows, new Set(), new Set(["a"]));
+  assert.deepEqual(expanded.map((row) => [row.session.id, row.thread.depth, row.thread.parentId, row.thread.last]), [
+    ["parent", 0, null, false],
+    ["a", 1, "parent", false],
+    ["b", 1, "parent", true],
+    ["b1", 1, "b", true],
+    ["lone", 0, null, false],
+    ["orphan", 0, null, false],
+  ]);
+  const parent = expanded[0]!.thread;
+  assert.equal(parent.collapsed, false);
+  assert.deepEqual(parent.children, { count: 2, waiting: 1, children: [
+    { id: "a", title: "Child A", state: "stalled" }, { id: "b", title: "Child B", state: "done" },
+  ] });
+  assert.equal(inboxThreadChildrenLabel(parent.children!), "2 Children · 1 Awaiting Input");
+  assert.equal(expanded[2]!.thread.children?.count, 1, "a child with children carries its own rollup");
+  assert.equal(expanded[4]!.thread.children, null);
+
+  const collapsed = threadInboxRows(rows, new Set(["parent"]));
+  assert.deepEqual(collapsed.map((row) => row.session.id), ["parent", "lone", "orphan"]);
+  assert.equal(collapsed[0]!.thread.collapsed, true);
+  assert.equal(collapsed[0]!.thread.children?.count, 2, "the rollup survives collapse");
+  const inner = threadInboxRows(rows, new Set(["b"]));
+  assert.deepEqual(inner.map((row) => row.session.id), ["parent", "a", "b", "lone", "orphan"]);
+  assert.equal(inner[2]!.thread.last, true);
+
+  // A held browsing order that listed a child before its parent still threads it under the parent.
+  const held = threadInboxRows([rows[1]!, rows[0]!, rows[4]!], new Set());
+  assert.deepEqual(held.map((row) => row.session.id), ["parent", "a", "lone"]);
+  assert.deepEqual(threadInboxRows([], new Set()), []);
+});
+
+test("a parent cycle and a child placed ahead of its parent both keep every session", () => {
+  // Two sessions naming each other as parent have no root; they must not vanish from every split.
+  const cycle = [session("a", { parentSessionId: "b" }), session("b", { parentSessionId: "a" }), session("c")];
+  assert.deepEqual(sortInboxSessions(cycle).map(({ id }) => id).sort(), ["a", "b", "c"]);
+  const threadedCycle = threadInboxRows(cycle.map((s) => ({ session: s })), new Set());
+  assert.deepEqual(threadedCycle.map((row) => row.session.id).sort(), ["a", "b", "c"]);
+  assert.equal(threadedCycle.length, 3, "no member is emitted twice");
+  // A fired reminder (or a held browsing order) can put a child ahead of its parent: the whole
+  // family takes that earlier slot rather than sinking to the parent's.
+  const ahead = threadInboxRows([
+    { session: session("child", { parentSessionId: "parent" }) },
+    { session: session("other") },
+    { session: session("parent") },
+  ], new Set());
+  assert.deepEqual(ahead.map((row) => [row.session.id, row.thread.depth]), [["parent", 0], ["child", 1], ["other", 0]]);
+});
+
+test("the family chip label leads with the count and follows with the most pressing fact", () => {
+  const child = (state: "blocked" | "stalled" | "running" | "done" | "idle") => ({ id: state, title: state, state });
+  assert.equal(inboxThreadChildrenLabel({ count: 1, waiting: 0, children: [child("running")] }), "1 Child · 1 Running");
+  assert.equal(inboxThreadChildrenLabel({ count: 3, waiting: 0, children: [child("done"), child("done"), child("done")] }), "3 Children · 3 Completed");
+  assert.equal(inboxThreadChildrenLabel({ count: 2, waiting: 0, children: [child("done"), child("idle")] }), "2 Children");
+  assert.equal(inboxThreadChildrenLabel({ count: 2, waiting: 2, children: [child("blocked"), child("stalled")] }), "2 Children · 2 Awaiting Input");
 });
 
 test("split counts keep stalled sessions separate from blocked sessions", () => {

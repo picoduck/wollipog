@@ -29,11 +29,12 @@ same keyboard helper because one hook instance cannot safely own every repeated 
 
 ## Session-detail ownership
 
-The Inbox grid retains its active-descendant selection and project-switching Tab shortcut. F2
-focuses the selected row's request disclosure; only that row's request controls are tabbable.
-Inside the disclosure, Tab/Shift+Tab use native traversal. Escape closes an open disclosure and
-returns focus to its summary; a subsequent Escape is available to the shell. Global palette,
-help, navigation, and focus-zone shortcuts remain available without invoking Inbox row actions.
+The Inbox grid retains its active-descendant selection and project-switching Tab shortcut. A row
+carries no tabbable controls of its own: F2 opens the selected session with its highest-priority
+pending request focused, and a parent row's thread chevron is a pointer target whose keyboard
+equivalent is T on the grid (Shift+T for every thread, P to select a child's parent, and the Left
+and Right arrows as the conventional secondary path). Global palette, help, navigation, and
+focus-zone shortcuts remain available without invoking Inbox row actions.
 
 `SessionDetailLoaded` remains the coordinator for the single send/fork busy gate, composer-draft
 hydration and flush, view-generation fencing, fork leasing, timeline recovery, and the one shared

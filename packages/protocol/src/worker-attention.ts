@@ -29,6 +29,29 @@ export function addPendingRequest(current: PendingApproval | null | undefined, n
     request.requestId !== next.requestId && (single.ownerToolUseId || request.ownerToolUseId)), single])!;
 }
 
+/**
+ * How much of the session a request blocks, as a rank the list can order by. Lower is more urgent:
+ * a request that stops the whole session (a restart to recover from, a sign-in, a guardrail pause)
+ * outranks a question, which outranks a single tool's permission. Arrival order breaks ties, so
+ * two requests of one rank keep the oldest first.
+ */
+export function attentionRequestRank(request: Pick<PendingApproval, "kind" | "recoveryReason">): number {
+  if (request.kind === "question" && request.recoveryReason === "provider_restart") return 0;
+  if (request.kind === "authentication") return 1;
+  if (request.kind === "cost_budget" || request.kind === "cost_checkpoint" || request.kind === "cost_unpriced" ||
+      request.kind === "daily_budget" || request.kind === "max_tool_calls") return 2;
+  if (request.kind === "question") return 3;
+  return 4;
+}
+
+/** The flattened requests in priority order: rank first, then arrival, which is the array order. */
+export function prioritizedPendingRequests(pending: PendingApproval | null | undefined): PendingApproval[] {
+  return pendingRequests(pending)
+    .map((request, index) => ({ request, index }))
+    .sort((left, right) => attentionRequestRank(left.request) - attentionRequestRank(right.request) || left.index - right.index)
+    .map(({ request }) => request);
+}
+
 export function removePendingRequest(current: PendingApproval | null | undefined, requestId: string): PendingApproval | null {
   return packRequests(pendingRequests(current).filter((request) => request.requestId !== requestId));
 }

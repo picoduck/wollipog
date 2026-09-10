@@ -9152,10 +9152,96 @@ body.shell-dock-dragging * {
   pointer-events: none;
 }
 .inbox-row-primary-cell { display: block; min-width: 0; }
-.attention-requests { margin: 4px 8px; font-size: var(--text-sm); }
-.attention-requests > summary { width: fit-content; cursor: pointer; color: var(--text-dim); }
-.attention-requests-picker { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0; }
-.attention-requests-picker > button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* ---- Threads (#896): a parent and its children as one unit, the children indented under a spine.
+   Every row is still ONE card: a collapsed parent's children leave the row list rather than hiding
+   inside a taller row, so the virtualizer's per-shape estimate still holds for every row. ---- */
+/* The chevron sits in the card's leading padding, beside the sender's icon, and the parent card
+   opens up that much room for it. Vertically it is centred on line one: the padding plus half the
+   sender line's 16px icon. */
+.inbox-row-shell.thread-parent .inbox-row { padding-left: calc(var(--inbox-row-pad-x) + 18px); }
+.inbox-thread-toggle {
+  position: absolute;
+  top: calc(var(--inbox-row-pad-y) + 1px);
+  left: calc(var(--inbox-row-pad-x) - 3px);
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  color: var(--text-faint);
+  background: transparent;
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+.inbox-thread-toggle > span { display: inline-block; transition: transform var(--dur-fast) var(--ease-out); }
+.inbox-thread-toggle[aria-expanded="true"] > span { transform: rotate(90deg); }
+.inbox-thread-toggle:hover { color: var(--text); background: var(--bg-elev-3); }
+.inbox-thread-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* A phone gets a 32px hit area around the same 18px glyph. */
+@media (pointer: coarse) {
+  .inbox-thread-toggle { top: calc(var(--inbox-row-pad-y) - 6px); left: calc(var(--inbox-row-pad-x) - 10px); width: 32px; height: 32px; }
+}
+/* Children indent under a 2px spine drawn per row: each child row carries the vertical segment for
+   its own height (margins included, so consecutive segments join) and a horizontal tick into its
+   card; the last child's segment stops at the tick. The rows are absolutely positioned by the
+   virtualizer, which is why the spine cannot be one element on a wrapper. */
+.inbox-row-shell.thread-child { margin-left: 26px; }
+.inbox-row-shell.thread-child::after,
+.inbox-row-shell.thread-child .inbox-row-primary-cell::before {
+  position: absolute;
+  background: var(--border-strong);
+  content: "";
+  pointer-events: none;
+}
+.inbox-row-shell.thread-child::after { top: -4px; bottom: -4px; left: -15px; width: 2px; }
+.inbox-row-shell.thread-child.thread-last::after { bottom: 50%; }
+.inbox-row-shell.thread-child .inbox-row-primary-cell::before { top: 50%; left: -15px; width: 11px; height: 2px; }
+/* The stalled rail keeps its place at the card's own left edge inside the indent. */
+.inbox-row-shell.thread-child.stalled::before { left: 0; }
+/* The family chip on a parent's title line: dots first, then the rollup. It is sized to the pills
+   it shares a card with, and it never grows the card. */
+.inbox-thread-family {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  max-width: 50%;
+  padding: 0 7px 0 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--text-dim);
+  background: var(--bg-elev-3);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+/* A Board card's meta line has the room the list's title line does not. */
+.card-meta .inbox-thread-family { max-width: 100%; }
+.inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
+.inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
+.inbox-thread-dots { display: inline-flex; flex: none; gap: 3px; }
+.inbox-thread-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--border-strong); }
+.inbox-thread-dot.running { background: var(--teal); }
+.inbox-thread-dot.blocked { background: var(--accent-2); }
+.inbox-thread-dot.done { background: var(--green); }
+.inbox-thread-dot.stalled { background: var(--red); }
+/* The count on a per-kind attention pill: "Answer Required 2". */
+.inbox-status-pill-count {
+  display: inline-flex;
+  min-width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  line-height: 14px;
+}
 .inbox-row {
   display: grid;
   width: 100%;
@@ -9515,6 +9601,14 @@ body.shell-dock-dragging * {
      dissolving the box puts the sender and the Git line back at their own grid areas instead of
      stacking line one on top of itself for a paint. */
   .inbox-row-lead { display: contents; }
+  /* A phone has no width for a 26px indent or the chip's words: the spine narrows and the family
+     chip keeps only its dots, which still say how many children and which of them wait (#896). */
+  .inbox-row-shell.thread-child { margin-left: 14px; }
+  .inbox-row-shell.thread-child::after,
+  .inbox-row-shell.thread-child .inbox-row-primary-cell::before { left: -9px; }
+  .inbox-row-shell.thread-child .inbox-row-primary-cell::before { width: 6px; }
+  .inbox-thread-family { gap: 0; padding-right: 5px; }
+  .inbox-thread-family-text { display: none; }
   /* The badge is on line three here, so line two is the title and the strip again and needs no
      floor of its own. Left at 20px it would add a pixel to every phone card. */
   .inbox-row-copy { min-height: auto; }
