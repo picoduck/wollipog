@@ -3698,14 +3698,17 @@ textarea {
   color: var(--red-on-strong-tint);
 }
 .plus-budget {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: 20px 68px minmax(0, 1fr);
+  align-items: start;
+  column-gap: 6px;
   padding: 2px 8px 8px;
 }
 .plus-budget-prefix {
   color: var(--text-faint);
   font-size: 13px;
+  line-height: 29px;
+  text-align: center;
 }
 .plus-budget input {
   width: 68px;
@@ -3716,9 +3719,22 @@ textarea {
   color: var(--text);
   font-size: 12.5px;
 }
+.plus-budget-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.plus-budget-label {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
 .plus-budget-hint {
   font-size: 11px;
   color: var(--text-faint);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 /* ---------------------------- Broad polish sweep ------------------------- */
@@ -3805,6 +3821,9 @@ textarea,
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   padding: 6px;
+}
+.plus-pop.composer-plus-pop {
+  width: min(360px, calc(100vw - 32px));
 }
 .plus-section {
   font-size: 10.5px;
