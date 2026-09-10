@@ -238,17 +238,24 @@ test("a session with an unknown context window still shows its cost", async () =
   await view.cleanup();
 });
 
-test("Codex App Server usage names the complete-turn protocol boundary", async () => {
+test("Codex App Server protocol details stay behind a compact info disclosure", async () => {
   const view = await mount(session({ driver: "codex-app-server" }), {
     sessionId: "s1",
     totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59 }),
     byModel: [],
   });
   await view.open();
+  const disclosure = view.popover()!.querySelector(".session-usage-info")!;
+  const button = disclosure.querySelector("button")!;
+  const detail = disclosure.querySelector(".session-usage-info-detail")!;
+  assert.equal(button.getAttribute("aria-label"), "About Codex App Server Usage");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  assert.equal(button.getAttribute("aria-controls"), detail.id);
   assert.match(
-    view.popover()!.textContent ?? "",
+    detail.textContent ?? "",
     /before protocol v127 is incomplete because it includes only the final model response.*v127\+ counts every response/s,
   );
+  assert.equal(view.popover()!.querySelector("p")?.textContent?.includes("protocol v127"), false);
   await view.cleanup();
 });
 

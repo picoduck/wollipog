@@ -66,7 +66,10 @@ test("desktop: the cost control opens Session Usage with cumulative tokens and t
   await expect(usage).toContainText("gpt-5.5-codex-mini");
   await expect(usage).toContainText("$0.16");
   await expect(usage).not.toContainText("Not Priced");
-  await expect(usage).toContainText("Historical Codex App Server usage written by runners before protocol v127 is incomplete");
+  const protocolInfo = usage.getByRole("button", { name: "About Codex App Server Usage" });
+  const protocolDetail = usage.locator(".session-usage-info-detail");
+  await expect(protocolInfo).toBeVisible();
+  await expect(protocolDetail).toBeHidden();
   const pricingSource = usage.getByRole("link", { name: "Estimated API Costs" });
   await expect(pricingSource).toHaveAttribute(
     "href",
@@ -77,6 +80,9 @@ test("desktop: the cost control opens Session Usage with cumulative tokens and t
   await expect(usage).not.toContainText("Capacity");
   await expect(usage).not.toContainText("Remaining");
   await page.screenshot({ path: `${SHOT}/desktop-session-usage.png` });
+  await protocolInfo.hover();
+  await expect(protocolDetail).toBeVisible();
+  await expect(protocolDetail).toContainText("before protocol v127 is incomplete");
 
   await page.keyboard.press("Escape");
   await expect(usage).toHaveCount(0);
@@ -214,7 +220,16 @@ test("mobile: the strip trails the cost alone, and it opens Session Usage", asyn
   await expect(usage).toBeVisible();
   await expect(usage).toContainText("Input");
   await expect(usage).toContainText("Output");
-  await expect(usage).toContainText("Protocol v127+ counts every response in each turn");
+  const protocolInfo = usage.getByRole("button", { name: "About Codex App Server Usage" });
+  const protocolDetail = usage.locator(".session-usage-info-detail");
+  await expect(protocolDetail).toBeHidden();
+  await protocolInfo.click();
+  await expect(protocolDetail).toBeVisible();
+  await expect(protocolDetail).toContainText("Protocol v127+ counts every response in each turn");
+  await page.screenshot({ path: `${SHOT}/mobile-session-usage-info.png` });
+  await protocolInfo.click();
+  await page.mouse.move(0, 0);
+  await expect(protocolDetail).toBeHidden();
   await expect(usage.getByRole("link", { name: "Estimated API Costs" })).toBeVisible();
   await expect(usage).not.toContainText("raw.githubusercontent.com");
   const usageBox = (await usage.boundingBox())!;
