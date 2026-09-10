@@ -305,6 +305,20 @@ test("an unknown target agent is reported as unsupported", async () => {
   }
 });
 
+test("legacy array-shaped target collections reject malformed entries without throwing", async () => {
+  const roots = makeRoots();
+  try {
+    const malformed = entry("alpha", []) as unknown as ReturnType<typeof entry>;
+    (malformed as unknown as { targets: unknown[] }).targets = [null, { agentId: 42 },
+      { agentId: claudeAgent.id, invocation: "invalid" }];
+    const result = await reconcile(roots, [malformed]);
+    assert.equal(result.deployed[0]?.error, "invalid skill targets");
+    assert.deepEqual(result.deployed[0]?.links, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("a desired skill with zero targets retains its canonical link while harness links are removed", async () => {
   const roots = makeRoots();
   try {
@@ -338,6 +352,29 @@ test("an exclusively WSL-targeted skill materializes without creating native lin
       detail: "this target reconciles inside its WSL distribution",
     }]);
     assert.equal(existsSync(join(skillsStoreRoot(roots.dataDir), "alpha", result.deployed[0]!.digest)), true);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("WSL placeholders distinguish unsafe distributions from unsupported drivers", async () => {
+  const roots = makeRoots();
+  try {
+    const unsafe: AgentDefinition = {
+      ...codexAgent, id: "unsafe-wsl", context: { kind: "wsl", distro: "../Ubuntu" },
+    };
+    const unsupported: AgentDefinition = {
+      ...codexAgent, id: "unsupported-wsl", driver: "acp", context: { kind: "wsl", distro: "Ubuntu" },
+    };
+    const result = await reconcile(roots, [entry("alpha", [
+      { agentId: unsafe.id, invocation: "agent" },
+      { agentId: unsupported.id, invocation: "agent" },
+    ])], { agents: [unsafe, unsupported] });
+    const links = new Map(result.deployed[0]!.links.map((link) => [link.agentId, link]));
+    assert.equal(links.get(unsafe.id)?.status, "unsupported");
+    assert.equal(links.get(unsafe.id)?.detail, "this agent's WSL distribution name is invalid or unsafe");
+    assert.equal(links.get(unsupported.id)?.status, "unsupported");
+    assert.equal(links.get(unsupported.id)?.detail, "this agent's driver does not support managed skills");
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }

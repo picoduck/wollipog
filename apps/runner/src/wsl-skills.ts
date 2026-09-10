@@ -7,6 +7,7 @@ import type {
 } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import { SKILL_DIRS, skillsStoreRoot, type ReconcileSkillEntry, type ReconcileSkillsResult } from "./skills.js";
+import { validWslDistroName } from "./wsl-context.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
 
 const OWNER = /^[0-9a-f]{64}$/u;
@@ -48,6 +49,7 @@ interface HelperOutput {
   unmanaged?: unknown;
   removedLinks?: unknown;
   error?: unknown;
+  warnings?: unknown;
 }
 
 export interface ReconcileWslSkillsOptions {
@@ -63,9 +65,6 @@ export interface ReconcileWslSkillsOptions {
 }
 
 const clean = (value: unknown) => String(value).replace(/[\p{Cc}\p{Cf}]+/gu, " ").trim().slice(0, 500);
-const safeDistro = (value: string) => value.length > 0 && value.length <= 256 && value === value.trim() &&
-  !/[\\/:*?"<>|\p{Cc}\p{Cf}]/u.test(value) && !value.endsWith(".");
-
 function wslBindings(agents: AgentDefinition[], distro: string) {
   return agents.flatMap((agent) => {
     const relDir = SKILL_DIRS[agent.driver ?? "acp"];
@@ -95,10 +94,16 @@ async function translatedStoreRoot(dataDir: string, distro: string, run: Run): P
   return path;
 }
 
-function parseOutput(value: HelperOutput, knownAgents: ReadonlySet<string>): ReconcileSkillsResult {
+function parseOutput(value: HelperOutput, knownAgents: ReadonlySet<string>, log?: (message: string) => void): ReconcileSkillsResult {
   if (typeof value.error === "string") throw new Error(clean(value.error));
   if (!Array.isArray(value.deployed) || !Array.isArray(value.unmanaged) || !Array.isArray(value.removedLinks) ||
       value.deployed.length > 4096 || value.unmanaged.length > 4096 || value.removedLinks.length > 4096) throw new Error();
+  if (value.warnings !== undefined && (!Array.isArray(value.warnings) || value.warnings.length > 16 ||
+      value.warnings.some((warning) => typeof warning !== "string"))) throw new Error();
+  for (const warning of value.warnings ?? []) {
+    const message = clean(warning);
+    if (message) log?.(`WSL skill helper: ${message}`);
+  }
   const deployed: DeployedSkillState[] = value.deployed.map((item) => {
     const row = item as DeployedSkillState;
     if (!row || !NAME.test(row.name) || !DIGEST.test(row.digest) || !Array.isArray(row.links) || row.links.length > 4096) throw new Error();
@@ -128,7 +133,9 @@ function failedForDistro(distro: string, desired: ReconcileSkillEntry[], agentId
   detail: string): ReconcileSkillsResult {
   return {
     deployed: desired.flatMap((entry) => {
-      const targets = entry.targets.filter((target) => agentIds.has(target.agentId));
+      const targets = Array.isArray(entry.targets)
+        ? entry.targets.filter((target) => target && typeof target.agentId === "string" && agentIds.has(target.agentId))
+        : [];
       return targets.length ? [{ name: String(entry.name), digest: String(entry.versionDigest),
         links: targets.map((target) => ({ agentId: target.agentId, status: "error" as const,
           detail: `Skill deployment is unavailable inside WSL distro ${distro}.` })), error: detail }] : [];
@@ -159,7 +166,7 @@ export async function reconcileWslSkills(options: ReconcileWslSkillsOptions): Pr
   if (!OWNER.test(options.ownerHash)) throw new Error("WSL skills require an attested owner hash");
   const run = options.run ?? runContextCommand;
   const distros = [...new Set(options.agents.flatMap((agent) =>
-    agent.context?.kind === "wsl" && safeDistro(agent.context.distro) ? [agent.context.distro] : []))];
+    agent.context?.kind === "wsl" && validWslDistroName(agent.context.distro) ? [agent.context.distro] : []))];
   const results: ReconcileSkillsResult[] = [];
   for (const distro of distros) {
     const bindings = wslBindings(options.agents, distro);
@@ -193,7 +200,7 @@ export async function reconcileWslSkills(options: ReconcileWslSkillsOptions): Pr
         stdin: JSON.stringify({ ownerHash: options.ownerHash, distro, storeRoot, bindings, skills,
           allowRemovals: options.allowRemovals === true }),
       });
-      const parsed = parseOutput(JSON.parse(response.stdout) as HelperOutput, agentIds);
+      const parsed = parseOutput(JSON.parse(response.stdout) as HelperOutput, agentIds, options.log);
       results.push(rejected.length
         ? mergeResults([parsed, { deployed: rejected, unmanaged: [], removedLinks: [] }])
         : parsed);
@@ -214,7 +221,7 @@ export function mergeWslSkillsResult(
 ): ReconcileSkillsResult {
   const wslAgents = new Set(agents.flatMap((agent) => {
     const context = agent.context;
-    return agent.id !== "conductor" && context?.kind === "wsl" && safeDistro(context.distro) &&
+    return agent.id !== "conductor" && context?.kind === "wsl" && validWslDistroName(context.distro) &&
       SKILL_DIRS[agent.driver ?? "acp"] ? [agent.id] : [];
   }));
   const rows = new Map(native.deployed.map((row) => [row.name, {
