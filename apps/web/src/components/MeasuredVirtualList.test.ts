@@ -45,9 +45,6 @@ test("logical index fallback survives key churn and clamps to the nearest surviv
 test("late row measurements retain TanStack positional scroll semantics", () => {
   const base = {
     scrollOffset: 500,
-    scrollAdjustments: 0,
-    measured: true,
-    scrollDirection: "forward" as const,
     anchorPending: false,
   };
   assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400 }), true,
@@ -56,12 +53,10 @@ test("late row measurements retain TanStack positional scroll semantics", () => 
     "a late overscanned row below the viewport must not move the reader");
   assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, anchorPending: true }), false,
     "the explicit logical anchor owns corrections while it is pending");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, scrollDirection: "backward" }), true,
-    "an old-width measured row above the viewport compensates while the reader moves backward");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, measured: false, scrollDirection: "backward" }), true,
-    "a first measurement above the viewport still corrects its estimate");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 540, scrollAdjustments: 50 }), true,
-    "TanStack's accumulated batch adjustments extend the effective viewport offset");
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 500 }), false,
+    "a row beginning at the viewport boundary does not need compensation");
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 540, scrollOffset: 550 }), true,
+    "the public offset includes earlier adjustments in the same measurement batch");
 });
 
 test("width invalidation rebuilds estimates before restoring mounted DOM heights", () => {
