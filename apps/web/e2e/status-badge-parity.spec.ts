@@ -10,9 +10,9 @@ import { expect, test, type Page } from "@playwright/test";
  *    lifecycle badge, and never takes a line of its own — the header is exactly as tall while a job
  *    is running as it is when none is. When the row cannot hold everything, the passive change
  *    status moves into the `+N` disclosure and background work keeps the row.
- *  - GEOMETRY. The responsive background-work label is the same height, type size, weight, vertical padding
- *    and dot size as the lifecycle badge beside it — including "Running" itself — in the header,
- *    and the same size as the card's Running pill in the Sessions list.
+ *  - GEOMETRY. The responsive background-work label is the same height, type size, weight,
+ *    vertical padding and dot size as the lifecycle badge beside it — including "Running" itself
+ *    — in the header, and the same size as the card's Running pill in the Sessions list.
  *
  * Geometry is read with every measured badge temporarily un-hidden, because the narrow widths are
  * exactly where the row hides one: a size regression on a `display: none` badge would otherwise
@@ -151,7 +151,16 @@ for (const width of WIDTHS) {
     await openSession(page);
     const badge = page.locator(".session-header-statuses > .background-work-badge");
     await expect(badge).toHaveCount(1);
-    if (width <= 390) await expect(badge).toContainText("External Job");
+    const wideLabel = badge.locator(".background-work-label-wide");
+    const narrowLabel = badge.locator(".background-work-label-narrow");
+    if (width <= 390) {
+      await expect(narrowLabel).toBeVisible();
+      await expect(narrowLabel).toHaveText("External Job");
+      await expect(wideLabel).toBeHidden();
+    } else {
+      await expect(wideLabel).toBeVisible();
+      await expect(narrowLabel).toBeHidden();
+    }
     // The accessible name survives whether or not the row had room to paint the badge.
     await expect(page.locator(`.detail-head .sr-only [aria-label="${BACKGROUND_LABEL}"]`))
       .toHaveCount(1);
@@ -283,17 +292,20 @@ test("remeasuring the row keeps focus on the badge it keeps", async ({ page }) =
   await expect(badge).toBeFocused();
 });
 
-test("a badge that loses the row hands focus to the disclosure that now holds it", async ({ page }) => {
-  await loadInbox(page, 390);
+test("a badge that loses the row hands focus to the existing disclosure", async ({ page }) => {
+  await loadInbox(page, 600);
   await openSession(page);
-  const badge = page.locator(".session-header-statuses > .background-work-badge");
+  const badge = page.locator(
+    '.session-header-statuses > .session-status-indicators > [aria-label="Attention: Approval Required"]',
+  );
+  await expect(page.locator(".session-status-overflow-trigger")).toBeVisible();
   await expect(badge).toBeVisible();
   await badge.focus();
   await expect(badge).toBeFocused();
 
-  // 320px cannot hold the badge, so it moves into the disclosure — and focus goes with it rather
-  // than falling to <body>, where the next Tab would restart from the top of the document.
-  await page.setViewportSize({ width: 320, height: 900 });
+  // At 390px the higher-priority lifecycle and background-work badges displace Attention into the
+  // disclosure — and focus goes with it rather than falling to <body>.
+  await page.setViewportSize({ width: 390, height: 900 });
   await expect(badge).toBeHidden();
   await expect(page.locator(".session-status-overflow-trigger")).toBeFocused();
 });
@@ -304,11 +316,14 @@ test("the first overflow hands focus to the disclosure once it exists", async ({
   await loadInbox(page, 768);
   await openSession(page);
   await expect(page.locator(".session-status-overflow-trigger")).toHaveCount(0);
-  const badge = page.locator(".session-header-statuses > .background-work-badge");
+  const badge = page.locator(
+    '.session-header-statuses > .session-status-indicators > [aria-label="Attention: Approval Required"]',
+  );
+  await expect(badge).toBeVisible();
   await badge.focus();
   await expect(badge).toBeFocused();
 
-  await page.setViewportSize({ width: 320, height: 900 });
+  await page.setViewportSize({ width: 390, height: 900 });
   await expect(badge).toBeHidden();
   await expect(page.locator(".session-status-overflow-trigger")).toBeFocused();
 });

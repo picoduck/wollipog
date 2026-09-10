@@ -5,7 +5,9 @@ async function expectUnclipped(badge: Locator) {
   expect(await badge.evaluate((element) => {
     const box = element.getBoundingClientRect();
     const range = document.createRange();
-    range.selectNodeContents(element.querySelector('span[aria-hidden="true"]:last-child')!);
+    const visibleLabels = [...element.querySelectorAll<HTMLElement>('span[aria-hidden="true"]')]
+      .filter((candidate) => candidate.getClientRects().length > 0);
+    range.selectNodeContents(visibleLabels[visibleLabels.length - 1]!);
     const text = range.getBoundingClientRect();
     let contained = text.left >= box.left && text.right <= box.right + 0.5;
     for (let parent = element.parentElement; parent; parent = parent.parentElement) {
