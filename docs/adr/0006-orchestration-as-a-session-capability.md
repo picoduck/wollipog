@@ -29,12 +29,13 @@ may manage descendant worktrees; ordinary credentials retain only their own work
 The CLI `session archive` and MCP `archive_session` reuse stop-before-archive and retain history.
 Agent credentials cannot unarchive sessions. Human device authority is unchanged.
 
-Agent-created children receive finite guardrails before their initial prompt can execute.
-An unbounded parent defaults each child to the parent Project's human-managed child allowances,
-or $5 and 500 tool calls when no Project override exists. An agent caller may explicitly request
-larger finite values or pass zero to inherit no limit when the parent itself is unbounded. Project settings and the human-only
+Agent-created children receive their effective guardrails before their initial prompt can execute.
+An explicit creation value takes precedence over the parent Project's human-managed child allowance,
+and a finite parent's remaining allowance is always the ceiling. When none of those sources supplies
+a cost or tool-call limit, that dimension remains unlimited; an agent caller may also pass zero to
+request no limit when the parent itself is unbounded. Project settings and the human-only
 `PATCH /api/projects/:id` surface accept `childSessionDefaults` with a positive finite
-`costBudgetUsd` and a positive integer `maxToolCalls`; null restores the installation fallback.
+`costBudgetUsd` and a positive integer `maxToolCalls`; null removes the Project defaults.
 The parent's Project supplies these defaults even when the child is filed elsewhere.
 A bounded parent divides its
 remaining, unreserved allowance across its remaining spawn slots; explicit child limits can narrow

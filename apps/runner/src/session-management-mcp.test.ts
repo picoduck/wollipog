@@ -593,6 +593,8 @@ test("create_session -> POST /api/sessions with prompt riding create and config.
     config: { model: "opus", permissionMode: "acceptEdits" },
   });
   assert.equal(resultJson(result).session.id, "s_new");
+  assert.equal(resultJson(result).session.costBudgetUsd, null);
+  assert.equal(resultJson(result).session.maxToolCalls, null);
 });
 
 test("create_session polls an exact pending spawn approval until it can create the child", async () => {
@@ -631,8 +633,9 @@ test("create_session arms budgets before the initial prompt can execute", async 
   assert.equal(resultJson(result).session.maxToolCalls, 40);
   assert.equal(resultJson(result).session.parentSessionId, SELF_ID);
   const description = TOOLS.find((tool) => tool.name === "create_session")!.description;
-  assert.match(description, /\$5 and 500 tool calls/);
+  assert.match(description, /Omitted cost and tool-call limits remain unlimited/);
   assert.match(description, /explicit 0 opts out/);
+  assert.match(description, /value or null \(none\)/);
 });
 
 test("prompt_session -> POST /api/sessions/:id/prompt {text}", async () => {

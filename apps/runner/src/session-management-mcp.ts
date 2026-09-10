@@ -991,7 +991,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a child session. An unbounded parent defaults omitted limits to $5 and 500 tool calls; explicit 0 opts out, while finite parent ceilings always bound children. The result reports effective guardrails. Subject to session permissions and governance policies.",
+      "Start a child session. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports each effective guardrail as a value or null (none). Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {

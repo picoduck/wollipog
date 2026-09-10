@@ -80,9 +80,11 @@ Claude Code launches also receive an additive `wollipog` stdio MCP configuration
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.
 
-Agent-created children of an unbounded parent default to a $5 cost budget and 500 tool calls. The
-creator may request larger finite values or pass zero for no cost/tool limit; a finite parent's
-remaining ceiling still bounds every child at creation. `maxChildSessions` defaults to four
+Agent-created children do not receive invented cost or tool-call limits. Explicit creation values
+take precedence over the parent Project's child defaults, and a finite parent's remaining ceiling
+still bounds every child at creation. If none of those sources supplies a limit, the child remains
+unlimited for that dimension; explicit zero also requests no limit when the parent is unbounded.
+Creation results report the effective limits, including `null` for none. `maxChildSessions` defaults to four
 concurrent live children and accepts zero through 64. Completed, failed, stopped, and archived
 children release live slots, while their lifetime usage reservations remain charged to a finite
 parent. Live cost/tool edits require delivery to an online current runner and fail closed rather

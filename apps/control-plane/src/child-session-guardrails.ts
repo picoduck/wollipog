@@ -1,8 +1,5 @@
 import type { ChildSessionDefaults, SessionConfig, SessionView } from "@wollipog/protocol";
 
-/** Finite fallback allowances for an agent-created session whose parent has no ceiling. */
-export const DEFAULT_CHILD_COST_BUDGET_USD = 5;
-export const DEFAULT_CHILD_MAX_TOOL_CALLS = 500;
 export const DEFAULT_CHILD_SPAWN_CAP = 4;
 
 export function childSessionDefaultsError(value: unknown): string | null {
@@ -18,9 +15,8 @@ export function childSessionDefaultsError(value: unknown): string | null {
   return null;
 }
 
-/** Divide a finite parent's remaining capacity over live spawn slots. An unbounded parent uses
- * finite defaults only when the caller omits a field; explicit positive values replace the
- * default and explicit zero opts out. A finite parent always remains the hard ceiling. */
+/** Resolve caller and Project defaults, then divide a finite parent's remaining capacity over
+ * live spawn slots as the hard ceiling. Without any of those sources, the dimension is unlimited. */
 export function childSessionGuardrails(
   parent: Pick<SessionView, "costBudgetUsd" | "costUsd" | "maxToolCalls" | "toolCallCount">,
   requested: SessionConfig | undefined,
@@ -52,12 +48,14 @@ export function childSessionGuardrails(
   if ((costRemaining != null && requestedCost === 0) || (toolsRemaining != null && requestedTools === 0)) {
     return { error: "a child cannot clear a finite parent guardrail" };
   }
+  const preferredCost = requestedCost === 0 ? undefined : requestedCost ?? defaults?.costBudgetUsd;
+  const preferredTools = requestedTools === 0 ? undefined : requestedTools ?? defaults?.maxToolCalls;
   const costBudgetUsd = costRemaining == null
-    ? requestedCost === 0 ? undefined : requestedCost ?? defaults?.costBudgetUsd ?? DEFAULT_CHILD_COST_BUDGET_USD
-    : Math.min(requestedCost ?? costRemaining, costRemaining);
+    ? preferredCost
+    : Math.min(preferredCost ?? costRemaining, costRemaining);
   const maxToolCalls = toolsRemaining == null
-    ? requestedTools === 0 ? undefined : requestedTools ?? defaults?.maxToolCalls ?? DEFAULT_CHILD_MAX_TOOL_CALLS
-    : Math.min(requestedTools ?? toolsRemaining, toolsRemaining);
+    ? preferredTools
+    : Math.min(preferredTools ?? toolsRemaining, toolsRemaining);
   const { costBudgetUsd: _requestedCost, maxToolCalls: _requestedTools, ...otherRequested } = requested ?? {};
   return {
     config: {

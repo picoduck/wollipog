@@ -20,7 +20,7 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
     const cost = section.getByLabel("Child Cost Limit (USD)");
     const tools = section.getByLabel("Child Tool-Call Limit");
     const save = section.getByRole("button", { name: "Save Child Defaults" });
-    const reset = section.getByRole("button", { name: "Use Installation Defaults" });
+    const reset = section.getByRole("button", { name: "Remove Child Defaults" });
     await cost.fill("2.5");
     await tools.fill("30");
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.failNextProjectUpdate());
@@ -54,8 +54,8 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
       .toEqual({ costBudgetUsd: 2.5, maxToolCalls: 30 });
     await reset.click();
     await expect(page.getByRole("alert")).toHaveCount(0);
-    await expect(cost).toHaveValue("5");
-    await expect(tools).toHaveValue("500");
+    await expect(cost).toHaveValue("");
+    await expect(tools).toHaveValue("");
     await expect(reset).toBeDisabled();
   });
 
@@ -82,7 +82,7 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
     await expect(section.getByLabel("Child Cost Limit (USD)")).toHaveValue("2.5");
     await expect(section.getByLabel("Child Tool-Call Limit")).toHaveValue("30");
     await section.getByRole("button", { name: "Save Child Defaults" }).click();
-    await expect(section.getByRole("button", { name: "Use Installation Defaults" })).toBeEnabled();
+    await expect(section.getByRole("button", { name: "Remove Child Defaults" })).toBeEnabled();
     await section.screenshot({ path: testInfo.outputPath("after.png") });
     await page.reload();
     await page.getByRole("tab", { name: /Alpha/ }).hover();
@@ -90,9 +90,9 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
     await page.getByRole("menuitem", { name: /Manage Project/ }).click();
     await expect(section.getByLabel("Child Cost Limit (USD)")).toHaveValue("2.5");
     await expect(section.getByLabel("Child Tool-Call Limit")).toHaveValue("30");
-    await section.getByRole("button", { name: "Use Installation Defaults" }).click();
-    await expect(section.getByLabel("Child Cost Limit (USD)")).toHaveValue("5");
-    await expect(section.getByLabel("Child Tool-Call Limit")).toHaveValue("500");
+    await section.getByRole("button", { name: "Remove Child Defaults" }).click();
+    await expect(section.getByLabel("Child Cost Limit (USD)")).toHaveValue("");
+    await expect(section.getByLabel("Child Tool-Call Limit")).toHaveValue("");
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha",
       { childSessionDefaults: { costBudgetUsd: 0.005, maxToolCalls: 10 } }));
     await expect(section.getByLabel("Child Cost Limit (USD)")).toHaveValue("0.005");

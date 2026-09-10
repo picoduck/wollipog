@@ -769,7 +769,8 @@ test("session spawn policy parks the exact child request and creates only after 
     const created = create();
     assert.equal(created.ok, true, created.error);
     assert.equal(created.data!.parentSessionId, parent.id);
-    assert.equal(created.data!.costBudgetUsd, 5);
+    assert.equal(created.data!.costBudgetUsd, null);
+    assert.equal(created.data!.maxToolCalls, null);
     assert.equal(db.childSessionAllocations(parent.id).count, 1);
     assert.equal(create().status, 428, "a second child requires a fresh approval");
   } finally {
@@ -864,21 +865,21 @@ test("terminal or archived children free live slots while lifetime spend reserva
     assert.deepEqual({ ...db.childSessionAllocations(parent.id) }, {
       count: 4,
       liveCount: 0,
-      costBudgetUsd: 20,
-      maxToolCalls: 2_000,
+      costBudgetUsd: 0,
+      maxToolCalls: 0,
     });
 
     const fifth = svc.createSession(request, undefined, undefined, false, false, false, {
       parentSessionId: parent.id,
     });
     assert.ok(fifth.ok, fifth.error);
-    assert.equal(fifth.data!.costBudgetUsd, 5);
-    assert.equal(fifth.data!.maxToolCalls, 500);
+    assert.equal(fifth.data!.costBudgetUsd, null);
+    assert.equal(fifth.data!.maxToolCalls, null);
     assert.deepEqual({ ...db.childSessionAllocations(parent.id) }, {
       count: 5,
       liveCount: 1,
-      costBudgetUsd: 25,
-      maxToolCalls: 2_500,
+      costBudgetUsd: 0,
+      maxToolCalls: 0,
     });
   } finally { db.close(); }
 });
@@ -1032,8 +1033,8 @@ for (const kind of ["run", "workflow"] as const) {
       assert.ok(created.ok, created.error);
       for (const child of created.data!.sessions) {
         assert.equal(child.parentSessionId, parent.id);
-        assert.equal(child.costBudgetUsd, 5);
-        assert.equal(child.maxToolCalls, 500);
+        assert.equal(child.costBudgetUsd, null);
+        assert.equal(child.maxToolCalls, null);
       }
       assert.equal(db.childSessionAllocations(parent.id).count, 2);
     } finally { db.close(); }
