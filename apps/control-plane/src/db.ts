@@ -11350,12 +11350,13 @@ export class ControlPlaneDb {
     now: number,
   ): void {
     this.stmt(
-      `UPDATE sessions SET model=?, resolved_model=?, effort=?, permission_mode=?, context_window=?, updated_at=?
+      `UPDATE sessions SET model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, context_window=?, updated_at=?
        WHERE id=?`,
     ).run(
       config.model ?? null,
       resolvedModel,
       config.effort ?? null,
+      config.serviceTier ?? null,
       config.permissionMode ?? null,
       contextWindow,
       now,

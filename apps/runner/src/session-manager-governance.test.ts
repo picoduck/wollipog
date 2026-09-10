@@ -301,6 +301,24 @@ test("re-arm never emits an idle status while an untripped turn is still running
   }
 });
 
+test("live threshold synchronization preserves an unrelated turn-interruption hold", () => {
+  const h = harness({});
+  try {
+    h.entry.activeTurnId = "turn-live";
+    assert.equal(h.sm.interruptTurn("s_governance", "turn-live"), "applied");
+    assert.equal(h.entry.interruptRequested, true);
+    assert.equal(h.entry.holdQueuedPromptsAfterInterrupt, true);
+
+    h.sm.rearmGovernance("s_governance", { costBudgetUsd: 10 });
+
+    assert.equal(h.store.readMeta("s_governance")!.config.costBudgetUsd, 10);
+    assert.equal(h.entry.interruptRequested, true);
+    assert.equal(h.entry.holdQueuedPromptsAfterInterrupt, true);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("held queued prompts resume only after a valid re-arm", async () => {
   const h = harness({ maxToolCalls: 1 });
   try {

@@ -2290,7 +2290,7 @@ export interface PendingApproval {
   governancePolicyId?: string;
   /** Absolute deadline for a policy hook ask. Absence means wait indefinitely. */
   expiresAt?: number;
-  /** v125: content-free runner evidence for a runner-owned threshold cancellation. It lets
+  /** v129: content-free runner evidence for a runner-owned threshold cancellation. It lets
    * Continue synchronize a cleared or changed control-plane rule instead of assuming the stale
    * runner threshold is still authoritative. */
   runnerGuardrail?: {

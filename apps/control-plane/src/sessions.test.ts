@@ -11362,6 +11362,7 @@ test("unparked live guardrail edits synchronize explicit values and clears or ro
   assert.equal(db.getSession(id)!.costBudgetUsd, null);
   assert.equal(db.getSession(id)!.maxToolCalls, null);
 
+  db.raw().prepare("UPDATE sessions SET service_tier=? WHERE id=?").run("fast", id);
   hub.deliver = false;
   const failed = svc.setConfig(id, {
     model: "opus",
@@ -11374,6 +11375,7 @@ test("unparked live guardrail edits synchronize explicit values and clears or ro
   assert.equal(rolledBack.model, "sonnet");
   assert.equal(rolledBack.resolvedModel, "claude-sonnet-resolved");
   assert.equal(rolledBack.contextWindow, 200_000);
+  assert.equal(rolledBack.serviceTier, "fast");
   assert.equal(rolledBack.maxToolCalls, null);
   assert.equal(rolledBack.maxChildSessions, 3);
 });

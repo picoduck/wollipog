@@ -7622,7 +7622,10 @@ export class SessionManager {
     this.store.patchMeta(sessionId, { config: merged });
     const entry = this.active.get(sessionId);
     if (!entry) return;
-    if (!holdFor) {
+    // A threshold-bearing message is also used for ordinary live config synchronization. Only a
+    // real governance Continue may release a separate Stop-Turn interrupt hold; otherwise a budget
+    // edit could silently resume FIFO work the user deliberately paused.
+    if (!holdFor && entry.governanceTripped) {
       entry.interruptRequested = false;
       this.setInterruptQueueHold(sessionId, entry, false);
     }
