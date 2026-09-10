@@ -14,6 +14,7 @@ MAX_COMPACTION_RECORDS = 4096
 RENAME_EXCHANGE = 2
 DRIVER_DIRS = {"claude-code": ".claude/skills", "codex": ".codex/skills", "codex-app-server": ".codex/skills"}
 COMPACTION = re.compile(r"^\.mutable-home\.compact-([0-9a-f-]{36})-([0-9a-f]{64})-([0-9a-f]{32})$")
+CLEANUP_MARKER = ".cleanup-ready.json"
 diagnostics = []
 
 def fail(message):
@@ -155,7 +156,7 @@ def process_alive(pid):
 
 def cleanup_compactions(root, lock):
     try:
-        _, _, canonical = read_lease_chain(lock, True)
+        canonical_tip, _, canonical = read_lease_chain(lock, True)
         names = [name for name in sorted(os.listdir(root)) if COMPACTION.fullmatch(name)]
     except: return
     for name in names[:MAX_COMPACTION_SIBLINGS]:
@@ -168,26 +169,62 @@ def cleanup_compactions(root, lock):
             candidate = child_dir(root, name)
             entries = sorted(os.listdir(candidate))
             if not entries or len(entries) > MAX_COMPACTION_RECORDS: continue
+            marker = None
+            if CLEANUP_MARKER in entries:
+                marker_fd = os.open(CLEANUP_MARKER, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=candidate)
+                try:
+                    marker_info = os.fstat(marker_fd)
+                    if (not stat.S_ISREG(marker_info.st_mode) or marker_info.st_uid != os.geteuid() or
+                        stat.S_IMODE(marker_info.st_mode) != 0o600 or marker_info.st_nlink != 1 or
+                        marker_info.st_size > 4096): fail("unverified compaction cleanup marker")
+                    marker = json.loads(os.read(marker_fd, marker_info.st_size + 1).decode("utf-8"))
+                finally: os.close(marker_fd)
+                entries.remove(CLEANUP_MARKER)
             for entry in entries:
                 record = os.stat(entry, dir_fd=candidate, follow_symlinks=False)
                 if (not stat.S_ISREG(record.st_mode) or record.st_uid != os.geteuid() or
                     stat.S_IMODE(record.st_mode) != 0o600 or record.st_nlink != 1):
                     fail("unverified compaction journal")
-            abandoned, abandoned_hash = read_lease_chain(candidate)
             lease_id, proof_hash = match.group(1), match.group(2)
             canonical_record = canonical.get(lease_id)
-            if (abandoned["leaseId"] != lease_id or canonical_record is None or
-                proof_hash not in (abandoned_hash, canonical_record[0])):
-                fail("unverified compaction journal")
-            expected = canonical_record[1]
-            if any(abandoned.get(key) != expected.get(key) for key in
-                ("leaseId", "state", "ownerHash", "hostname", "pid", "provider", "createdAt")):
-                fail("unverified compaction journal")
+            if canonical_record is None: fail("unverified compaction journal")
+            if marker is not None:
+                if marker != {"version": 1, "name": name, "leaseId": lease_id, "proofHash": proof_hash,
+                    "ownerHash": canonical_tip["ownerHash"]}:
+                    fail("unverified compaction cleanup marker")
+                for entry in entries:
+                    value, _ = read_lease_record(candidate, entry)
+                    if entry == "lease.json":
+                        valid_name = value.get("version") == 1
+                    elif entry == "lease-%s.json" % value["leaseId"]:
+                        valid_name = (value.get("version") == 2 and value.get("state") == "active" and
+                            value.get("previousLeaseId") is None and value.get("previousRecordHash") is None)
+                    else:
+                        valid_name = (value.get("version") == 2 and value.get("previousLeaseId") is not None and
+                            entry == "next-%s.json" % value["previousLeaseId"])
+                    if not valid_name: fail("unverified compaction journal")
+            else:
+                abandoned, abandoned_hash = read_lease_chain(candidate)
+                if (abandoned["leaseId"] != lease_id or proof_hash not in
+                    (abandoned_hash, canonical_record[0])):
+                    fail("unverified compaction journal")
+                expected = canonical_record[1]
+                if any(abandoned.get(key) != expected.get(key) for key in
+                    ("leaseId", "state", "ownerHash", "hostname", "pid", "provider", "createdAt")):
+                    fail("unverified compaction journal")
+                marker_value = json.dumps({"version": 1, "name": name, "leaseId": lease_id,
+                    "proofHash": proof_hash, "ownerHash": canonical_tip["ownerHash"]}, separators=(",", ":")).encode()
+                marker_fd = os.open(CLEANUP_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600, dir_fd=candidate)
+                try: write_all(marker_fd, marker_value); os.fsync(marker_fd)
+                finally: os.close(marker_fd)
+                os.fsync(candidate)
             opened = os.fstat(candidate)
             named = os.stat(name, dir_fd=root, follow_symlinks=False)
             if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
                 fail("compaction journal changed during cleanup")
             for entry in entries: os.unlink(entry, dir_fd=candidate)
+            os.unlink(CLEANUP_MARKER, dir_fd=candidate)
             os.fsync(candidate)
             named = os.stat(name, dir_fd=root, follow_symlinks=False)
             if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):

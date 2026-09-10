@@ -135,7 +135,6 @@ function validReconcileTargets(value: unknown): value is SkillSyncEntry["targets
     target !== null && typeof target === "object" &&
     typeof (target as { agentId?: unknown }).agentId === "string" &&
     (target as { agentId: string }).agentId.length > 0 &&
-    (target as { agentId: string }).agentId.length <= 256 &&
     !/[\p{Cc}\p{Cf}]/u.test((target as { agentId: string }).agentId) &&
     ((target as { invocation?: unknown }).invocation === "agent" ||
       (target as { invocation?: unknown }).invocation === "manual"));

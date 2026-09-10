@@ -299,6 +299,31 @@ test("deferred compaction cleanup is retried while foreign lookalikes remain unt
   assert.deepEqual(compactionSiblings(home).sort(), [fakeBase, foreignSymlink.split("/").at(-1)!].sort());
 });
 
+test("a crash partway through verified cleanup is safely resumable", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-partial-cleanup-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await fillLeaseJournal(home, store);
+  const interruptedCleanup = instrumentHelper(
+    "            for entry in entries: os.unlink(entry, dir_fd=candidate)\n            os.unlink(CLEANUP_MARKER, dir_fd=candidate)",
+    "            for index, entry in enumerate(entries):\n                os.unlink(entry, dir_fd=candidate)\n                if index == 0: os._exit(88)\n            os.unlink(CLEANUP_MARKER, dir_fd=candidate)",
+  );
+  const interrupted = await invoke(home, specification, interruptedCleanup);
+  assert.equal(interrupted.status, 88);
+  const [sibling] = compactionSiblings(home);
+  assert.ok(sibling);
+  const remaining = readdirSync(join(home, ".agent-manager", "provider-home-leases-v1", sibling));
+  assert.ok(remaining.includes(".cleanup-ready.json"));
+  assert.ok(remaining.length > 1, "the crash leaves a marked partial journal");
+
+  const recovered = await invoke(home, specification);
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.deepEqual(compactionSiblings(home), []);
+});
+
 test("unavailable atomic exchange preserves the append-only journal and emits a bounded diagnostic", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-unavailable-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

@@ -380,6 +380,37 @@ test("WSL placeholders distinguish unsafe distributions from unsupported drivers
   }
 });
 
+test("a malformed missing WSL distro is reported without collapsing native reconciliation", async () => {
+  const roots = makeRoots();
+  try {
+    const malformed = {
+      ...codexAgent, id: "malformed-wsl", context: { kind: "wsl" },
+    } as unknown as AgentDefinition;
+    const result = await reconcile(roots, [entry("alpha", [
+      { agentId: malformed.id, invocation: "agent" },
+    ])], { agents: [malformed] });
+    assert.equal(result.deployed[0]?.links[0]?.status, "unsupported");
+    assert.equal(result.deployed[0]?.links[0]?.detail,
+      "this agent's WSL distribution name is invalid or unsafe");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy target validation does not impose a new agent ID length limit", async () => {
+  const roots = makeRoots();
+  try {
+    const longId = "agent-".padEnd(300, "x");
+    const longAgent = { ...codexAgent, id: longId };
+    const result = await reconcile(roots, [entry("alpha", [
+      { agentId: longId, invocation: "agent" },
+    ])], { agents: [longAgent] });
+    assert.equal(result.deployed[0]?.links[0]?.status, "linked");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("shrinking desired removes managed links but keeps store content; foreign entries survive", async () => {
   const roots = makeRoots();
   try {
