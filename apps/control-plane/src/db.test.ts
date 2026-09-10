@@ -1547,7 +1547,7 @@ test("getAgentLaunch returns command/args/env/driver/context/version", () => {
   assert.equal(db.getAgentLaunch("nope", "acp-agent"), null);
 });
 
-test("Direct WSL safe-launcher attestation round-trips only from a v124 runner", () => {
+test("Direct WSL safe-launcher attestation round-trips only from a v124+ runner", () => {
   const db = ControlPlaneDb.open(":memory:");
   const safe = {
     ...claudeAgent(),

@@ -5712,7 +5712,7 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
 }
 
 /** Codex-style "+" menu in the composer: Attach Image, Plan mode, and the cost budget. */
-function ComposerPlusMenu({
+export function ComposerPlusMenu({
   session,
   planActive,
   planSupported,
@@ -5875,6 +5875,17 @@ function ComposerPlusMenu({
               }
               onCommit={(v) => onApply({ maxToolCalls: v })}
             />
+            <GuardrailInput
+              prefix="↳"
+              label="Live Child Limit"
+              step="1"
+              integer
+              value={session.maxChildSessions}
+              placeholder="4"
+              max="64"
+              hint="Live Child Limit · concurrent sessions · 0 pauses new children"
+              onCommit={(v) => onApply({ maxChildSessions: v })}
+            />
           </div>
         </>
       )}
@@ -5936,7 +5947,8 @@ function CheckpointsInput({
  * WebSocket echo (or another dashboard's change) can't remount the input mid-edit and discard
  * typing; unfocused, it tracks the live value. Typos (badInput like "1e", or sub-1 values for
  * integer fields that would floor into the clear sentinel) are a no-op + display resync — only a
- * deliberate empty/0 clears. Commits 0 to mean "clear" (the CP maps ≤0 to unlimited).
+ * deliberate empty/0 reaches the caller. Spend/tool callers treat that as clear; the live-child
+ * caller treats it as pausing new child admission.
  */
 function GuardrailInput({
   prefix,
@@ -5944,6 +5956,8 @@ function GuardrailInput({
   step,
   integer,
   value,
+  placeholder = "∞",
+  max,
   hint,
   onCommit,
 }: {
@@ -5952,6 +5966,8 @@ function GuardrailInput({
   step: string;
   integer?: boolean;
   value: number | null | undefined;
+  placeholder?: string;
+  max?: string;
   hint: string;
   onCommit: (v: number) => void;
 }) {
@@ -5966,15 +5982,17 @@ function GuardrailInput({
         type="number"
         aria-describedby={descriptionId}
         min="0"
+        max={max}
         step={step}
-        placeholder="∞"
+        placeholder={placeholder}
         value={draft ?? (value ?? "")}
         onFocus={(e) => setDraft(e.target.value)}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={(e) => {
           if (draft === null) return;
           const v = parseFloat(draft);
-          if (e.target.validity.badInput || (integer && Number.isFinite(v) && v > 0 && v < 1)) {
+          if (e.target.validity.badInput || e.target.validity.rangeOverflow ||
+              (integer && Number.isFinite(v) && v > 0 && v < 1)) {
             setDraft(null); // typo — resync to the live value, don't clear an armed limit
             return;
           }

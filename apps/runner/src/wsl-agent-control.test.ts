@@ -152,6 +152,7 @@ test("broker authenticates exact MCP session and exposes only the Orchestrator t
   const response = JSON.parse(payloads.join("").trim());
   const names = response.result.tools.map((tool: { name: string }) => tool.name);
   assert.ok(names.includes("create_session"));
-  assert.equal(names.includes("set_guardrails"), false);
+  assert.ok(names.includes("set_guardrails"));
+  assert.ok(names.includes("restart_session"));
   dispose();
 });

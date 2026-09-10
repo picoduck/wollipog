@@ -9812,12 +9812,24 @@ export class ControlPlaneDb {
     `).get(targetId, ancestorId));
   }
 
-  childSessionAllocations(parentSessionId: string): { count: number; costBudgetUsd: number; maxToolCalls: number } {
+  childSessionAllocations(parentSessionId: string): {
+    /** Lifetime creations remain the stable ordinal and deletion-resistant accounting fence. */
+    count: number;
+    /** Only nonterminal, unarchived children occupy the concurrent admission cap. */
+    liveCount: number;
+    costBudgetUsd: number;
+    maxToolCalls: number;
+  } {
     return this.stmt(
       `SELECT child_spawn_count AS count, child_cost_reserved_usd AS costBudgetUsd,
-              child_tool_calls_reserved AS maxToolCalls
+              child_tool_calls_reserved AS maxToolCalls,
+              (SELECT COUNT(*) FROM sessions child
+                WHERE child.parent_session_id=? AND child.archived=0
+                  AND child.status NOT IN ('completed','failed','stopped')) AS liveCount
        FROM sessions WHERE id=?`,
-    ).get(parentSessionId) as unknown as { count: number; costBudgetUsd: number; maxToolCalls: number };
+    ).get(parentSessionId, parentSessionId) as unknown as {
+      count: number; liveCount: number; costBudgetUsd: number; maxToolCalls: number;
+    };
   }
 
   sessionHasIndividualOwner(sessionId: string): boolean {
@@ -10115,7 +10127,7 @@ export class ControlPlaneDb {
     let keepPolicyPause = false;
     try {
       const cur = existing?.pending_approval ? (JSON.parse(existing.pending_approval) as PendingApproval) : null;
-      keepPolicyPause = isPolicyApproval(cur) && !isTerminal(snap.status);
+      keepPolicyPause = pendingRequests(cur).some((request) => isPolicyApproval(request)) && !isTerminal(snap.status);
     } catch {
       /* malformed cached approval — fall through to the snapshot */
     }
@@ -11267,6 +11279,12 @@ export class ControlPlaneDb {
   updateSessionMaxToolCalls(id: string, max: number | null, now: number, step = max): void {
     this.stmt("UPDATE sessions SET max_tool_calls=?, max_tool_calls_step=?, updated_at=? WHERE id=?")
       .run(max, step, now, id);
+  }
+
+  /** Concurrent directly-created child limit. Zero pauses new child/restart admission; null
+   * restores the installation fallback when an atomic config delivery rolls back. */
+  updateSessionMaxChildSessions(id: string, max: number | null, now: number): void {
+    this.stmt("UPDATE sessions SET max_child_sessions=?, updated_at=? WHERE id=?").run(max, now, id);
   }
 
   /** Advance the absolute cost threshold by its original fixed allowance window. */

@@ -1161,6 +1161,13 @@ app.register(async (instance) => {
       case "session_runtime_updated":
         svc.applySessionRuntimeUpdate(runnerId!, msg.snapshot);
         break;
+      case "governance_tripped":
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "governanceTripReporting")) {
+          app.log.warn(`runner ${runnerId} sent a governance trip without negotiated support`);
+          break;
+        }
+        svc.onGovernanceTripped(runnerId!, msg);
+        break;
       case "session_event":
         svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined);
         break;

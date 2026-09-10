@@ -355,7 +355,9 @@
 // 128: provider-history quarantine. A conversation whose stored history the provider rejects
 //      before inference is durably marked unusable, stops accepting prompts and compaction, and
 //      exposes a bounded, content-free recovery coordinate instead.
-export const PROTOCOL_VERSION = 128;
+// 129: runners report an exact runner-owned governance trip so the control plane can always
+//      materialize the Continue / Stop decision that holds the runner queue.
+export const PROTOCOL_VERSION = 129;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -537,6 +539,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   controlPlaneQueueHold: 105,
   /** v106 runners enforce the control-plane-priced cumulative cost during the active turn. */
   pricedSessionCost: 106,
+  /** v129 runners report the exact threshold that cancelled a turn. */
+  governanceTripReporting: 129,
   /** v107 runners durably resume non-secret structured-question answers after process loss. */
   resumableQuestionAnswers: 107,
   sessionWorktrees: 101,
@@ -1187,7 +1191,8 @@ export interface NativeTuiAccountingBoundary {
 
 /** Resolved per-session knobs (model / reasoning effort / service tier / approval preset). */
 export interface SessionConfig {
-  /** Control-plane-owned lifetime cap on directly created child sessions. Default: four. */
+  /** Control-plane-owned concurrent live-child cap. Terminal or archived children do not occupy
+   * a slot, but their already-reserved usage remains part of parent ceiling accounting. */
   maxChildSessions?: number;
   model?: string;
   effort?: string;
@@ -2285,6 +2290,15 @@ export interface PendingApproval {
   governancePolicyId?: string;
   /** Absolute deadline for a policy hook ask. Absence means wait indefinitely. */
   expiresAt?: number;
+  /** v125: content-free runner evidence for a runner-owned threshold cancellation. It lets
+   * Continue synchronize a cleared or changed control-plane rule instead of assuming the stale
+   * runner threshold is still authoritative. */
+  runnerGuardrail?: {
+    tripId: string;
+    kind: RunnerGuardrailKind;
+    threshold: number;
+    observed: number;
+  };
 }
 
 export type GovernanceActorKind = "human" | "agent" | "policy" | "system";
@@ -4759,6 +4773,18 @@ export interface SessionRuntimeUpdatedMessage {
   snapshot: SessionSnapshot;
 }
 
+/** A runner-owned threshold cancelled the active turn and is holding its queue. This notice is
+ * replay-safe and contains no provider content; the control plane owns the durable decision card. */
+export interface GovernanceTrippedMessage {
+  type: "governance_tripped";
+  sessionId: string;
+  /** Runner-process occurrence id. Reconnect replays retain it; a later crossing gets a new id. */
+  tripId: string;
+  kind: RunnerGuardrailKind;
+  threshold: number;
+  observed: number;
+}
+
 /** Runner streams a normalized session event. In Phase 2 the runner owns the per-session `seq`
  * (and `ts`) so its on-disk log and every dashboard's cache agree; older runners omit them and the
  * control plane allocates a seq itself. */
@@ -5051,6 +5077,7 @@ export type RunnerToControlPlane =
   | PolicyHookCredentialMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
+  | GovernanceTrippedMessage
   | SessionEventMessage
   | SessionHistoryResultMessage
   | SessionHistoryPageResultMessage

@@ -156,6 +156,42 @@ test("runner cancels once at the distinct tool threshold and ignores duplicate f
   }
 });
 
+test("runner reconnect replay pins the original trip identity, threshold, and observation", () => {
+  const h = harness({ maxToolCalls: 2 });
+  try {
+    for (const toolCallId of ["one", "two"]) {
+      (h.sm as any).onDriverEvent("s_governance", {
+        kind: "tool_call", toolCallId, title: "Tool", status: "pending",
+      });
+    }
+    const first = h.sent.find((message) => message.type === "governance_tripped");
+    assert.ok(first && first.type === "governance_tripped");
+    h.store.patchMeta("s_governance", { config: { maxToolCalls: 50 } });
+    h.entry.toolCallIds.add("later");
+    h.sm.reportGovernanceTrips();
+    const replay = h.sent.filter((message) => message.type === "governance_tripped").at(-1)!;
+    assert.deepEqual(replay, first, "reconnect does not reread changed metadata for an old crossing");
+  } finally { h.cleanup(); }
+});
+
+test("explicit null re-arm clears runner metadata and delivers a prompt queued behind a real trip", async () => {
+  const h = harness({ costBudgetUsd: 5, maxToolCalls: 1 });
+  try {
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: "one", title: "Tool", status: "pending",
+    });
+    assert.equal(h.entry.governanceTripped, "max_tool_calls");
+    h.entry.running = false;
+    h.entry.queue.push({ id: "queued", text: "next", images: [] });
+    h.sm.rearmGovernance("s_governance", { costBudgetUsd: null, maxToolCalls: null });
+    for (let i = 0; i < 20 && h.prompts() === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.prompts(), 1);
+    assert.deepEqual(h.store.readMeta("s_governance")!.config, {});
+    assert.equal(h.entry.governanceTripped, undefined);
+    assert.equal(h.entry.governanceTrip, undefined);
+  } finally { h.cleanup(); }
+});
+
 test("runner cost gate uses authoritative parentless usage and re-arm clears the hold", () => {
   const h = harness({ costBudgetUsd: 5 });
   try {
