@@ -658,6 +658,7 @@ function normalizedConfig(config: SessionConfig | undefined): SessionConfig {
   return {
     ...(config?.model ? { model: config.model } : {}),
     ...(config?.effort ? { effort: config.effort } : {}),
+    ...(config?.serviceTier ? { serviceTier: config.serviceTier } : {}),
     ...(config?.permissionMode ? { permissionMode: config.permissionMode } : {}),
     ...(config?.costBudgetUsd != null ? { costBudgetUsd: config.costBudgetUsd } : {}),
     ...(config?.maxToolCalls != null ? { maxToolCalls: config.maxToolCalls } : {}),
@@ -3481,6 +3482,15 @@ export class SessionManager {
           const current = this.store.readMeta(sessionId);
           if (!current || current.resolvedModel === model) return;
           this.store.patchMeta(sessionId, { resolvedModel: model });
+          const updated = this.store.readMeta(sessionId);
+          if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        },
+        onServiceTierResolved: (serviceTier) => {
+          const current = this.store.readMeta(sessionId);
+          if (!current || (current.config.serviceTier ?? null) === serviceTier) return;
+          this.store.patchMeta(sessionId, {
+            config: { ...current.config, serviceTier: serviceTier ?? undefined },
+          });
           const updated = this.store.readMeta(sessionId);
           if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
         },

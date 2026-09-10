@@ -64,7 +64,7 @@ import {
   queuedPromptsWithControls,
   shouldShowOptimisticPrompt,
 } from "./PendingPromptBubbles.js";
-import { ApprovalsControl, ModelEffortControl } from "./ComposerControls.js";
+import { ApprovalsControl, ModelEffortControl, ServiceTierControl } from "./ComposerControls.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
 import { deriveGitPresentation } from "../pinned-summary.js";
@@ -4670,6 +4670,12 @@ function SessionDetailLoaded({
                     transcript status strip — the otherwise-empty center of the composer bar. */}
                 {!isMobile && <SessionUsageControl session={session} className="cbar-usage" />}
                 <div className="cbar-right">
+                  <ServiceTierControl
+                    session={session}
+                    apply={applyConfig}
+                    pendingModel={() => pendingConfig.current.model}
+                    pendingServiceTier={() => pendingConfig.current.serviceTier}
+                  />
                   <ModelEffortControl
                     session={session}
                     apply={applyConfig}

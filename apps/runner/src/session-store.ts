@@ -2700,6 +2700,10 @@ export function metaToSnapshot(
     controlPlaneProtocolVersion >= NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION
     ? m.sessionSlashCommands
     : undefined;
+  const config = controlPlaneProtocolVersion != null &&
+    controlPlaneProtocolVersion >= RUNNER_CAPABILITY_MIN_PROTOCOL.codexServiceTiers
+    ? m.config
+    : (({ serviceTier: _serviceTier, ...legacyConfig }) => legacyConfig)(m.config);
   const nativeCapabilities: SessionCapabilityOverlay | undefined =
     nativeElicitation !== undefined || nativeSlashCommands !== undefined
       ? {
@@ -2723,7 +2727,7 @@ export function metaToSnapshot(
     executionTarget: m.executionTarget,
     executionHandoff: m.executionHandoff,
     workspacePath: m.repoPath, // the box's launch dir — lets the CP restart ad-hoc/box-owned sessions
-    config: m.config,
+    config,
     resolvedModel: m.resolvedModel,
     acpSessionContext: m.acpSessionOverrides,
     // ACP owns complete per-session controls. Native drivers publish only the elicitation overlay;

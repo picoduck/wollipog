@@ -545,6 +545,13 @@ test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command
   assert.equal(snap.resolvedModel, "claude-opus-5[1m]");
 });
 
+test("v126 snapshots publish service tier while older control planes receive no unknown config key", () => {
+  const current = metaToSnapshot(meta({ config: { model: "gpt", effort: "high", serviceTier: "fast" } }), 126);
+  assert.equal(current.config.serviceTier, "fast");
+  const legacy = metaToSnapshot(meta({ config: { model: "gpt", effort: "high", serviceTier: "fast" } }), 125);
+  assert.deepEqual(legacy.config, { model: "gpt", effort: "high" });
+});
+
 test("v82 snapshots expose bounded background delivery facts without runner-private context", () => {
   assert.equal(
     metaToSnapshot(meta({ backgroundJobs: undefined }), 82).backgroundJobs,

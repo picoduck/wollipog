@@ -6,6 +6,7 @@ import type {
   SessionConfig,
   SessionView,
 } from "@wollipog/protocol";
+import { runnerSupportsProtocol } from "@wollipog/protocol";
 import {
   permissionModeDescription,
   permissionModeEmptyLabel,
@@ -30,7 +31,7 @@ import {
 import { useStoreSelector } from "../store.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { Modal } from "./common.js";
-import { InfoIcon, ShieldIcon } from "./Icons.js";
+import { InfoIcon, ServiceTierIcon, ShieldIcon } from "./Icons.js";
 
 type Apply = (patch: Partial<SessionConfig>) => void;
 
@@ -174,7 +175,7 @@ export function ModelEffortMenuChoices({
               key={model.id}
               checked={model.id === modelVal}
               title={model.description}
-              onSelect={() => apply({ model: model.id, effort: "" })}
+              onSelect={() => apply({ model: model.id, effort: "", serviceTier: "" })}
             >
               {model.displayName ?? model.id}
             </MenuRadioOption>
@@ -204,6 +205,7 @@ export function ModelEffortMenuChoices({
                 apply({
                   model: option.id,
                   effort: contextWindowOptionAcceptsEffort(option, effort, agentEffortLevels) ? effort : "",
+                  serviceTier: "",
                 });
               }}
             >
@@ -270,6 +272,109 @@ export function ModelEffortControl(
         pendingEffort={pendingEffort}
         apply={apply}
       />}
+    </BarMenu>
+  );
+}
+
+interface ServiceTierChoice {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export function serviceTierChoices(
+  capabilities: AgentCapabilities | undefined,
+  modelId: string | null | undefined,
+  selectedTier: string | null | undefined,
+): { choices: ServiceTierChoice[]; selected: ServiceTierChoice } | null {
+  const exactModel = modelId && modelId !== "default"
+    ? capabilities?.models.find((candidate) => candidate.id === modelId)
+    : undefined;
+  const model = modelId && modelId !== "default"
+    ? exactModel
+    : capabilities?.models.find((candidate) => candidate.default && !candidate.hidden)
+      ?? capabilities?.models.find((candidate) => !candidate.hidden);
+  if (!model?.serviceTiers?.length) return null;
+  const choices: ServiceTierChoice[] = [
+    { id: "default", name: "Standard", description: "Standard response speed. Applies to the next turn." },
+    ...model.serviceTiers
+      .filter((tier) => tier.id !== "default")
+      .map((tier) => ({
+        id: tier.id,
+        name: tier.name,
+        description: `${tier.description ? `${tier.description} ` : ""}Applies to the next turn.`,
+      })),
+  ];
+  const preferred = selectedTier || model.defaultServiceTier || "default";
+  return { choices, selected: choices.find((choice) => choice.id === preferred) ?? choices[0]! };
+}
+
+export function ServiceTierMenuChoices({ state, apply, close }: {
+  state: NonNullable<ReturnType<typeof serviceTierChoices>>;
+  apply: Apply;
+  close: () => void;
+}) {
+  return (
+    <div role="group" aria-label="Service Tier">
+      <div className="plus-section" role="presentation">Service Tier</div>
+      {state.choices.map((choice) => (
+        <MenuRadioOption
+          key={choice.id}
+          checked={choice.id === state.selected.id}
+          title={choice.description}
+          onSelect={() => {
+            apply({ serviceTier: choice.id });
+            close();
+          }}
+        >
+          <span className="cbar-service-tier-option">
+            <span className="cbar-service-tier-name">
+              {choice.id.toLowerCase() === "fast" && <ServiceTierIcon size={13} />}
+              {choice.name}
+            </span>
+            <span className="cbar-service-tier-description">{choice.description}</span>
+          </span>
+        </MenuRadioOption>
+      ))}
+    </div>
+  );
+}
+
+/** Separate from reasoning effort: this is a model/account-advertised Codex scheduling tier. */
+export function ServiceTierControl({
+  session,
+  apply,
+  pendingModel,
+  pendingServiceTier,
+}: {
+  session: SessionView;
+  apply: Apply;
+  pendingModel?: () => string | undefined;
+  pendingServiceTier?: () => string | undefined;
+}) {
+  const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
+  const capabilities = resolveEffectiveCaps(runner, session);
+  const state = session.driver === "codex-app-server" && runnerSupportsProtocol(runner?.protocolVersion, "codexServiceTiers")
+    ? serviceTierChoices(
+        capabilities,
+        pendingModel?.() ?? session.model,
+        pendingServiceTier?.() ?? session.serviceTier,
+      )
+    : null;
+  if (!state) return null;
+  const fast = state.selected.id.toLowerCase() === "fast";
+  return (
+    <BarMenu
+      align="right"
+      label={(
+        <span className={`cbar-service-tier${fast ? " fast" : ""}`}>
+          {fast && <ServiceTierIcon size={13} />}
+          {state.selected.name}
+        </span>
+      )}
+      title={`Service Tier: ${state.selected.name}. Applies to the next turn.`}
+    >
+      {(close) => <ServiceTierMenuChoices state={state} apply={apply} close={close} />}
     </BarMenu>
   );
 }

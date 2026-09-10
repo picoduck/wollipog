@@ -490,6 +490,20 @@ export function capabilityConfigError(
       return "effort " + JSON.stringify(config.effort) + " is not supported by this agent installation";
     }
   }
+  if (config.serviceTier) {
+    const selectedModel = config.model
+      ? capabilities.models.find((model) => model.id === config.model)
+      : capabilities.models.find((model) => model.default && !model.hidden)
+        ?? capabilities.models.find((model) => !model.hidden);
+    const serviceTiers = selectedModel?.serviceTiers ?? [];
+    if (!serviceTiers.length) {
+      return "service tier selection is not supported by this model or agent installation";
+    }
+    if (config.serviceTier !== "default" && config.serviceTier !== selectedModel?.defaultServiceTier &&
+        !serviceTiers.some((tier) => tier.id === config.serviceTier)) {
+      return `service tier ${JSON.stringify(config.serviceTier)} is not supported by this model`;
+    }
+  }
   if (config.permissionMode && !(capabilities.permissionModes ?? []).includes(config.permissionMode)) {
     return `permission mode ${JSON.stringify(config.permissionMode)} is not supported by this agent installation`;
   }
@@ -555,6 +569,26 @@ function claudeCatalogFamily(value: string): string | null {
 const EFFORT_FALLBACK_ORDER = ["high", "medium", "low", "xhigh", "max", "minimal"] as const;
 
 export type EffectiveModelEffort = { model: string; effort: string };
+
+/** Resolve a model-specific Codex service tier. Unsupported or stale persisted values heal to
+ * the advertised default; callers validate explicit input first. `default` is Standard speed. */
+export function resolveEffectiveServiceTier(
+  config: Pick<SessionConfig, "model" | "serviceTier">,
+  capabilities: AgentCapabilities | undefined,
+  driver: AgentDriverKind,
+): string | undefined {
+  if (driver !== "codex-app-server" || !capabilities?.models.length) return undefined;
+  const model = config.model
+    ? capabilities.models.find((candidate) => candidate.id === config.model)
+    : capabilities.models.find((candidate) => candidate.default && !candidate.hidden)
+      ?? capabilities.models.find((candidate) => !candidate.hidden);
+  if (!model?.serviceTiers?.length) return undefined;
+  const requested = config.serviceTier || model.defaultServiceTier || "default";
+  return requested === "default" || requested === model.defaultServiceTier ||
+    model.serviceTiers.some((tier) => tier.id === requested)
+    ? requested
+    : model.defaultServiceTier || "default";
+}
 
 /** Resolve provider defaults into an explicit, capability-compatible pair without relying on discovery order. */
 export function resolveEffectiveModelEffort(
@@ -2773,6 +2807,21 @@ export class SessionsService {
       if (resolved.error) return fail(resolved.error, 409);
       if (resolved.value) Object.assign(requestedConfig, resolved.value);
     }
+    const supportsServiceTiers = runnerSupportsProtocol(
+      this.db.getRunner(req.runnerId)?.protocolVersion,
+      "codexServiceTiers",
+    );
+    if (requestedConfig.serviceTier && launch.driver !== "codex-app-server") {
+      return fail("service tier selection is supported only by Codex app-server sessions", 409);
+    }
+    if (requestedConfig.serviceTier && !supportsServiceTiers) {
+      return this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection")!;
+    }
+    const serviceTier = supportsServiceTiers
+      ? resolveEffectiveServiceTier(requestedConfig, agentCapabilities, launch.driver)
+      : undefined;
+    if (serviceTier) requestedConfig.serviceTier = serviceTier;
+    else delete requestedConfig.serviceTier;
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
     if (requestedConfig.permissionMode === "orchestrator") {
       if (req.launchSurface === "native_tui") {
@@ -3122,7 +3171,10 @@ export class SessionsService {
     if (!snapshotCommand) {
       if (effectiveConfig) {
         const explicitConfigError = capabilityConfigError(
-          claudeModelConfigForValidation(effectiveConfig, agentCapabilities, session.driver), agentCapabilities,
+          claudeModelConfigForValidation({
+            ...effectiveConfig,
+            model: effectiveConfig.model ?? session.model ?? undefined,
+          }, agentCapabilities, session.driver), agentCapabilities,
         );
         if (explicitConfigError) return fail(explicitConfigError, 409);
       }
@@ -3132,6 +3184,23 @@ export class SessionsService {
       }, agentCapabilities, session.driver);
       if (resolved.error) return fail(resolved.error, 409);
       if (resolved.value) resolvedEffectiveConfig = { ...effectiveConfig, ...resolved.value };
+      const supportsServiceTiers = runnerSupportsProtocol(
+        this.db.getRunner(session.runnerId)?.protocolVersion,
+        "codexServiceTiers",
+      );
+      if (effectiveConfig?.serviceTier && session.driver !== "codex-app-server") {
+        return fail("service tier selection is supported only by Codex app-server sessions", 409);
+      }
+      if (effectiveConfig?.serviceTier && !supportsServiceTiers) {
+        return this.capabilityFailure(session.runnerId, "codexServiceTiers", "Codex Service Tier selection")!;
+      }
+      const serviceTier = supportsServiceTiers
+        ? resolveEffectiveServiceTier({
+            model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
+            serviceTier: effectiveConfig?.serviceTier ?? (effectiveConfig?.model ? undefined : session.serviceTier ?? undefined),
+          }, agentCapabilities, session.driver)
+        : undefined;
+      resolvedEffectiveConfig = { ...resolvedEffectiveConfig, serviceTier };
     }
     const validationConfig = resolvedEffectiveConfig
       ? claudeModelConfigForValidation(resolvedEffectiveConfig, agentCapabilities, session.driver)
@@ -3152,11 +3221,13 @@ export class SessionsService {
     const mergedConfig = snapshotCommand ? {
       model: effectiveConfig?.model,
       effort: effectiveConfig?.effort,
+      serviceTier: effectiveConfig?.serviceTier,
       permissionMode: effectiveConfig?.permissionMode,
     } : normalizeClaudePersistedConfig(
       {
         model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
         effort: resolvedEffectiveConfig?.effort ?? session.effort ?? undefined,
+        serviceTier: resolvedEffectiveConfig?.serviceTier,
         permissionMode: effectiveConfig?.permissionMode ?? session.permissionMode ?? undefined,
       },
       agentCapabilities,
@@ -3191,6 +3262,7 @@ export class SessionsService {
       config: {
         model: mergedConfig.model ?? undefined,
         effort: mergedConfig.effort ?? undefined,
+        ...(mergedConfig.serviceTier ? { serviceTier: mergedConfig.serviceTier } : {}),
         permissionMode: mergedConfig.permissionMode ?? undefined,
         ...(effectiveCostBudgetUsd != null ? { costBudgetUsd: effectiveCostBudgetUsd } : {}),
         ...(effectiveMaxToolCalls != null ? { maxToolCalls: effectiveMaxToolCalls } : {}),
@@ -3204,6 +3276,7 @@ export class SessionsService {
       effectiveConfig ||
       mergedConfig.model !== (session.model ?? undefined) ||
       mergedConfig.effort !== (session.effort ?? undefined) ||
+      mergedConfig.serviceTier !== (session.serviceTier ?? undefined) ||
       mergedConfig.permissionMode !== (session.permissionMode ?? undefined)
     ) {
       this.db.updateSessionConfig(
@@ -3340,7 +3413,10 @@ export class SessionsService {
           : undefined,
     );
     const explicitConfigError = capabilityConfigError(
-      claudeModelConfigForValidation(config, agentCapabilities, session.driver), agentCapabilities,
+      claudeModelConfigForValidation({
+        ...config,
+        model: config.model ?? session.model ?? undefined,
+      }, agentCapabilities, session.driver), agentCapabilities,
     );
     if (explicitConfigError) return fail(explicitConfigError, 409);
     const resolvedModelEffort = resolveEffectiveModelEffort({
@@ -3349,12 +3425,30 @@ export class SessionsService {
     }, agentCapabilities, session.driver);
     if (resolvedModelEffort.error) return fail(resolvedModelEffort.error, 409);
     if (resolvedModelEffort.value) config = { ...config, ...resolvedModelEffort.value };
+    const supportsServiceTiers = runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "codexServiceTiers",
+    );
+    if (config.serviceTier && session.driver !== "codex-app-server") {
+      return fail("service tier selection is supported only by Codex app-server sessions", 409);
+    }
+    if (config.serviceTier && !supportsServiceTiers) {
+      return this.capabilityFailure(session.runnerId, "codexServiceTiers", "Codex Service Tier selection")!;
+    }
+    const serviceTier = supportsServiceTiers
+      ? resolveEffectiveServiceTier({
+          model: config.model ?? session.model ?? undefined,
+          serviceTier: config.serviceTier ?? (config.model ? undefined : session.serviceTier ?? undefined),
+        }, agentCapabilities, session.driver)
+      : undefined;
+    config = { ...config, serviceTier };
     const validationConfig = claudeModelConfigForValidation(config, agentCapabilities, session.driver);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
     if (configCapabilityError) return fail(configCapabilityError, 409);
     const merged = normalizeClaudePersistedConfig({
       model: config.model ?? session.model ?? undefined,
       effort: config.effort ?? session.effort ?? undefined,
+      serviceTier,
       permissionMode: config.permissionMode ?? session.permissionMode ?? undefined,
     }, agentCapabilities, session.agentId, session.driver);
     this.db.updateSessionConfig(sessionId, merged, Date.now());
@@ -3405,6 +3499,7 @@ export class SessionsService {
           this.db.updateSessionConfig(sessionId, {
             model: session.model ?? undefined,
             effort: session.effort ?? undefined,
+            serviceTier: session.serviceTier ?? undefined,
             permissionMode: session.permissionMode ?? undefined,
           }, now);
           if (config.costBudgetUsd !== undefined) {
@@ -3801,6 +3896,7 @@ export class SessionsService {
     const configSnapshot: SessionConfig = {
       ...(session.model ? { model: session.model } : {}),
       ...(session.effort ? { effort: session.effort } : {}),
+      ...(session.serviceTier ? { serviceTier: session.serviceTier } : {}),
       ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}),
       ...(session.costBudgetUsd != null ? { costBudgetUsd: session.costBudgetUsd } : {}),
       ...(session.maxToolCalls != null ? { maxToolCalls: session.maxToolCalls } : {}),
@@ -4300,8 +4396,23 @@ export class SessionsService {
       if (capabilityFailure) return capabilityFailure;
     }
 
-
     const now = Date.now();
+    const serviceTier = runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "codexServiceTiers",
+    ) ? resolveEffectiveServiceTier({
+        model: session.model ?? undefined,
+        serviceTier: session.serviceTier ?? undefined,
+      }, launch.capabilities, launch.driver)
+      : undefined;
+    if (serviceTier !== (session.serviceTier ?? undefined)) {
+      this.db.updateSessionConfig(sessionId, {
+        model: session.model ?? undefined,
+        effort: session.effort ?? undefined,
+        serviceTier,
+        permissionMode: session.permissionMode ?? undefined,
+      }, now);
+    }
     const restartLaunchId = hasStopIntent ? randomUUID() : undefined;
     const spec: SessionLaunchSpec = {
       sessionId,
@@ -4328,6 +4439,7 @@ export class SessionsService {
       config: {
         model: session.model ?? undefined,
         effort: session.effort ?? undefined,
+        serviceTier,
         permissionMode: session.permissionMode ?? undefined,
         costBudgetUsd: session.costBudgetUsd ?? undefined,
         maxToolCalls: session.maxToolCalls ?? undefined,
@@ -5086,6 +5198,7 @@ export class SessionsService {
     const config: SessionConfig = {
       ...(parent.model ? { model: parent.model } : {}),
       ...(parent.effort ? { effort: parent.effort } : {}),
+      ...(parent.serviceTier ? { serviceTier: parent.serviceTier } : {}),
       ...(parent.permissionMode ? { permissionMode: parent.permissionMode } : {}),
     };
     const activeParentLocation = parent.projectLocationId
@@ -6381,6 +6494,13 @@ export class SessionsService {
       const launch = this.db.getAgentLaunch(req.runnerId, agentId);
       const configCapabilityError = capabilityConfigError(req.config, launch?.capabilities);
       if (configCapabilityError) return fail(`${agentId}: ${configCapabilityError}`, 409);
+      if (req.config?.serviceTier && launch?.driver !== "codex-app-server") {
+        return fail(`${agentId}: service tier selection is supported only by Codex app-server sessions`, 409);
+      }
+      if (req.config?.serviceTier) {
+        const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection");
+        if (unsupported) return unsupported;
+      }
       if (launch) resolved.push({ agentId, launch });
       else unknown.push(agentId);
     }

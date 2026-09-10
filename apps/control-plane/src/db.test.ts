@@ -2190,14 +2190,14 @@ test("updateSessionStatus clears pending approval when leaving input_required", 
 test("updateSessionConfig persists changes and sessionView shows them", () => {
   const db = withRunner();
   db.createSession(
-    newSession({ config: { model: "opus", effort: "low", permissionMode: "plan" } }),
+    newSession({ config: { model: "opus", effort: "low", serviceTier: "fast", permissionMode: "plan" } }),
   );
   db.raw().prepare("UPDATE sessions SET resolved_model=?, context_window=? WHERE id=?")
     .run("claude-opus-5[1m]", 1_000_000, "sess-1");
 
   db.updateSessionConfig(
     "sess-1",
-    { model: "sonnet", effort: "high", permissionMode: "default" },
+    { model: "sonnet", effort: "high", serviceTier: "flex", permissionMode: "default" },
     5000,
   );
   const v = db.getSession("sess-1")!;
@@ -2205,6 +2205,7 @@ test("updateSessionConfig persists changes and sessionView shows them", () => {
   assert.equal(v.resolvedModel, null);
   assert.equal(v.contextWindow, undefined, "the served window belonged to the previous model");
   assert.equal(v.effort, "high");
+  assert.equal(v.serviceTier, "flex");
   assert.equal(v.permissionMode, "default");
   assert.equal(v.updatedAt, 5000);
 
@@ -2212,7 +2213,7 @@ test("updateSessionConfig persists changes and sessionView shows them", () => {
     .run("claude-sonnet-5", 1_000_000, "sess-1");
   db.updateSessionConfig(
     "sess-1",
-    { model: "sonnet", effort: "low", permissionMode: "default" },
+    { model: "sonnet", effort: "low", serviceTier: "default", permissionMode: "default" },
     5200,
   );
   assert.equal(db.getSession("sess-1")?.resolvedModel, "claude-sonnet-5");
@@ -2223,6 +2224,7 @@ test("updateSessionConfig persists changes and sessionView shows them", () => {
   const v2 = db.getSession("sess-1")!;
   assert.equal(v2.model, "haiku");
   assert.equal(v2.effort, null);
+  assert.equal(v2.serviceTier, null);
   assert.equal(v2.permissionMode, null);
 });
 

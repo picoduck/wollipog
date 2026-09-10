@@ -89,6 +89,11 @@ const LIVE_PAGE = {
         { reasoningEffort: "low", description: "Fast" },
         { reasoningEffort: "high", description: "Deep" },
       ],
+      serviceTiers: [
+        { id: "fast", name: "Fast", description: "Faster responses that use more credits." },
+        { id: "flex", name: "Flex", description: "Lower-priority processing." },
+      ],
+      defaultServiceTier: "fast",
       inputModalities: ["text", "image"],
     },
     {
@@ -123,10 +128,27 @@ test("parseCodexAppServerModels: preserves defaults, hidden state, efforts, and 
     hidden: false,
     efforts: ["low", "high"],
     defaultEffort: "medium",
+    serviceTiers: [
+      { id: "fast", name: "Fast", description: "Faster responses that use more credits." },
+      { id: "flex", name: "Flex", description: "Lower-priority processing." },
+    ],
+    defaultServiceTier: "fast",
     inputModalities: ["text", "image"],
   });
   assert.equal(models[1]!.hidden, true);
   assert.deepEqual(models[1]!.inputModalities, ["text"]);
+});
+
+test("parseCodexAppServerModels: uses legacy additionalSpeedTiers only when structured tiers are absent", () => {
+  const [legacy, current] = parseCodexAppServerModels({ data: [
+    { ...LIVE_PAGE.data[0], id: "legacy", serviceTiers: [], additionalSpeedTiers: ["fast", "batch_mode", "fast"] },
+    { ...LIVE_PAGE.data[0], id: "current", additionalSpeedTiers: ["legacy-fast"] },
+  ] });
+  assert.deepEqual(legacy?.serviceTiers, [
+    { id: "fast", name: "Fast" },
+    { id: "batch_mode", name: "Batch Mode" },
+  ]);
+  assert.deepEqual(current?.serviceTiers, LIVE_PAGE.data[0]!.serviceTiers);
 });
 
 test("collectCodexAppServerModels follows pagination, dedupes ids, and rejects cursor loops", async () => {

@@ -14,6 +14,7 @@
 
 import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
+  type AgentCapabilities,
   type AgentQuestion,
   type AuthoritativeSubagentLifecycle,
   type PlanEntry,
@@ -88,6 +89,24 @@ const SANDBOX_TYPE: Record<string, string> = {
 };
 /** Interactive "ask" modes map straight to the AskForApproval string. */
 const ASK_MODES = new Set(["on-request", "untrusted", "on-failure"]);
+
+function configuredServiceTier(
+  config: SessionConfig,
+  capabilities?: AgentCapabilities,
+): { serviceTier?: string } {
+  if (!config.serviceTier) return {};
+  const exactModel = config.model && config.model !== "default"
+    ? capabilities?.models.find((candidate) => candidate.id === config.model)
+    : undefined;
+  const model = config.model && config.model !== "default"
+    ? exactModel
+    : capabilities?.models.find((candidate) => candidate.default && !candidate.hidden)
+      ?? capabilities?.models.find((candidate) => !candidate.hidden);
+  if (!model?.serviceTiers?.length) return {};
+  return config.serviceTier === "default" || model.serviceTiers.some((tier) => tier.id === config.serviceTier)
+    ? { serviceTier: config.serviceTier }
+    : {};
+}
 
 function normalizedCodexItemId(value: unknown): string | undefined {
   if (typeof value === "string" && value) return value;
@@ -179,12 +198,14 @@ export function buildCodexTurnParams(
   threadId: string | null,
   cwd: string,
   input: Json[],
+  capabilities?: AgentCapabilities,
 ): Json {
   const mode = cfg.permissionMode || AUTO_REVIEW_MODE;
   if (mode === "orchestrator") {
     return { threadId, input, approvalPolicy: "never", sandboxPolicy: { type: "readOnly" }, cwd,
       ...(cfg.model && cfg.model !== "default" ? { model: cfg.model } : {}),
-      ...(cfg.effort ? { effort: cfg.effort } : {}) };
+      ...(cfg.effort ? { effort: cfg.effort } : {}),
+      ...configuredServiceTier(cfg, capabilities) };
   }
   const autoReview = mode === AUTO_REVIEW_MODE;
   const askMode = ASK_MODES.has(mode)
@@ -203,6 +224,7 @@ export function buildCodexTurnParams(
   if (autoReview) params.approvalsReviewer = "auto_review";
   if (cfg.model && cfg.model !== "default") params.model = cfg.model;
   if (cfg.effort) params.effort = cfg.effort;
+  Object.assign(params, configuredServiceTier(cfg, capabilities));
   return params;
 }
 
@@ -361,7 +383,12 @@ export class CodexAppServerDriver implements Driver {
 
   async forkSession(lastTurnId: string, cwd: string): Promise<string> {
     if (!this.peer || !this.threadId) throw new Error("Codex app-server thread is not ready to fork");
-    const res = await this.peer.request<Json>("thread/fork", { threadId: this.threadId, lastTurnId, cwd });
+    const res = await this.peer.request<Json>("thread/fork", {
+      threadId: this.threadId,
+      lastTurnId,
+      cwd,
+      ...configuredServiceTier(this.config, this.opts.capabilities),
+    });
     const id = res?.thread?.id;
     if (typeof id !== "string" || !id) throw new Error("Codex fork did not return a thread id");
     return id;
@@ -374,6 +401,11 @@ export class CodexAppServerDriver implements Driver {
 
   setConfig(config: SessionConfig): void {
     this.config = config;
+  }
+
+  private reconcileServiceTier(serviceTier: string | null): void {
+    this.config = { ...this.config, serviceTier: serviceTier ?? undefined };
+    this.cb.onServiceTierResolved?.(serviceTier);
   }
 
   private emitProviderStderr(text: string): void {
@@ -523,9 +555,15 @@ export class CodexAppServerDriver implements Driver {
             true,
           );
         }
-        res = await this.peer!.request<Json>("thread/resume", { threadId: resumeId });
+        res = await this.peer!.request<Json>("thread/resume", {
+          threadId: resumeId,
+          ...configuredServiceTier(this.config, this.opts.capabilities),
+        });
       } else {
-        res = await this.peer!.request<Json>("thread/start", { cwd });
+        res = await this.peer!.request<Json>("thread/start", {
+          cwd,
+          ...configuredServiceTier(this.config, this.opts.capabilities),
+        });
       }
     } catch (err) {
       if (err instanceof CodexAppServerResumeError) throw err;
@@ -545,6 +583,8 @@ export class CodexAppServerDriver implements Driver {
       );
     }
     this.threadId = actualId;
+    if (typeof res?.serviceTier === "string" && res.serviceTier) this.reconcileServiceTier(res.serviceTier);
+    else if (res?.serviceTier === null) this.reconcileServiceTier(null);
     return actualId;
   }
 
@@ -600,7 +640,7 @@ export class CodexAppServerDriver implements Driver {
       const base = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
       const input: Json[] = base || !staged.inputs.length ? [{ type: "text", text: base }] : [];
       input.push(...staged.inputs);
-      const params = buildCodexTurnParams(this.config, this.threadId, this.cwd, input);
+      const params = buildCodexTurnParams(this.config, this.threadId, this.cwd, input, this.opts.capabilities);
 
       this.peer!.request("turn/start", params).then((response: Json) => {
         // Notifications may precede the response, including completion or a later turn.
@@ -1153,6 +1193,12 @@ export class CodexAppServerDriver implements Driver {
       }
       this.pendingTurnUsage = null;
       this.turnUsageClosed = false;
+    });
+    peer.onNotification("thread/settings/updated", (p: Json) => {
+      if (p?.threadId !== this.threadId) return;
+      const serviceTier = p?.threadSettings?.serviceTier;
+      if (typeof serviceTier === "string" && serviceTier) this.reconcileServiceTier(serviceTier);
+      else if (serviceTier === null) this.reconcileServiceTier(null);
     });
     peer.onNotification("thread/tokenUsage/updated", (p: Json) => {
       // Prefer the per-turn field. The total is cumulative across a resumed thread and adding it

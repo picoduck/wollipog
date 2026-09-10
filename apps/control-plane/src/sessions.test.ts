@@ -54,6 +54,7 @@ import {
   defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
   resolveEffectiveModelEffort,
+  resolveEffectiveServiceTier,
   sessionBlocksConversationFork,
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
@@ -120,6 +121,36 @@ test("capability config validation rejects unverified effort and permission mode
   };
   assert.equal(capabilityConfigError({ model: "legacy", effort: "minimal" }, perModelCaps), null);
   assert.match(capabilityConfigError({ model: "legacy", effort: "low" }, perModelCaps)!, /effort/);
+});
+
+test("Codex service tiers validate and resolve against the selected model independently of effort", () => {
+  const caps = {
+    models: [
+      {
+        id: "gpt-fast",
+        default: true,
+        efforts: ["low", "high"],
+        serviceTiers: [
+          { id: "fast", name: "Fast" },
+          { id: "flex", name: "Flex" },
+        ],
+        defaultServiceTier: "fast",
+      },
+      { id: "gpt-standard", efforts: ["medium"] },
+    ],
+    effortLevels: ["low", "medium", "high"], slashCommands: [], supportsImages: true,
+    supportsApprovals: true,
+  };
+  assert.equal(capabilityConfigError({ model: "gpt-fast", effort: "high", serviceTier: "flex" }, caps), null);
+  assert.match(capabilityConfigError({ model: "gpt-fast", serviceTier: "priority" }, caps)!, /service tier/);
+  assert.match(capabilityConfigError({ model: "gpt-standard", serviceTier: "fast" }, caps)!, /not supported/);
+  assert.equal(resolveEffectiveServiceTier({ model: "gpt-fast" }, caps, "codex-app-server"), "fast",
+    "an older session inherits the provider-advertised default");
+  assert.equal(resolveEffectiveServiceTier({ model: "gpt-fast", serviceTier: "flex" }, caps, "codex-app-server"), "flex");
+  assert.equal(resolveEffectiveServiceTier({ model: "gpt-fast", serviceTier: "stale" }, caps, "codex-app-server"), "fast",
+    "a persisted tier removed by discovery heals to the provider default");
+  assert.equal(resolveEffectiveServiceTier({ model: "gpt-standard", serviceTier: "fast" }, caps, "codex-app-server"), undefined);
+  assert.equal(resolveEffectiveServiceTier({ model: "gpt-fast", serviceTier: "fast" }, caps, "claude-code"), undefined);
 });
 
 test("persisted Claude config normalization drops stale knobs for every agent", () => {
@@ -1672,6 +1703,48 @@ test("prompt images fail closed against a pre-v56 runner", () => {
   assert.match(result.error ?? "", /requires protocol v56/);
   assert.equal(db.listSessions().length, 0);
   assert.equal(hub.sentToRunner.length, 0);
+});
+
+test("Codex service tiers fail closed on explicit pre-v126 input while implicit provider defaults stay compatible", () => {
+  const { db, hub, svc } = makeHarness();
+  const meta = runnerMeta();
+  const codex = meta.agents.find((agent) => agent.id === CODEX_APP_AGENT_ID)!;
+  const tiered = codex.capabilities!.models.find((model) => model.id === "image-model")!;
+  tiered.serviceTiers = [{ id: "fast", name: "Fast" }];
+  tiered.defaultServiceTier = "fast";
+  db.registerRunner(meta, Date.now(), 125);
+
+  const explicit = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+    config: { model: "image-model", serviceTier: "fast" },
+  });
+  assert.equal(explicit.status, 409);
+  assert.match(explicit.error ?? "", /requires protocol v126/);
+  assert.equal(db.listSessions().length, 0);
+
+  const legacy = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+    config: { model: "image-model" },
+  });
+  assert.equal(legacy.ok, true, legacy.error);
+  assert.equal(legacy.data!.serviceTier, null);
+  const legacyLaunch = hub.sentOfType("start_session").at(-1)!;
+  assert.equal(legacyLaunch.spec.config.serviceTier, undefined);
+  assert.equal(svc.setConfig(legacy.data!.id, { serviceTier: "fast" }).status, 409);
+  assert.equal(svc.prompt(legacy.data!.id, "fast please", [], undefined, { serviceTier: "fast" }).status, 409);
+
+  db.registerRunner(meta, Date.now(), 126);
+  const current = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
+    config: { model: "image-model" },
+  });
+  assert.equal(current.ok, true, current.error);
+  assert.equal(current.data!.serviceTier, "fast");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.serviceTier, "fast");
+  assert.ok(svc.setConfig(current.data!.id, { effort: "high" }).ok);
+  assert.equal(db.getSession(current.data!.id)!.serviceTier, "fast", "effort changes preserve the tier");
+  assert.ok(svc.setConfig(current.data!.id, { serviceTier: "default" }).ok);
+  assert.equal(db.getSession(current.data!.id)!.effort, "high", "tier changes preserve reasoning effort");
 });
 
 test("workspace references fail closed against a pre-v106 runner", () => {
