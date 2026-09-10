@@ -1484,6 +1484,7 @@ test("canonical link mutations require the provider-home lease even without a ha
     const canonicalPath = join(roots.home, ".agents", "skills", "alpha");
     const blocked = await reconcile(roots, [alpha], {
       agents: [],
+      allowRemovals: false,
       acquireProviderHomeLease: () => {
         assert.equal(existsSync(canonicalPath), false);
         throw new Error("foreign owner");

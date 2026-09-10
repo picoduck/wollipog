@@ -170,16 +170,28 @@ export async function reconcileWslSkills(options: ReconcileWslSkillsOptions): Pr
         bootstrap(distro, options.ownerHash, run),
         options.storeRoot ? options.storeRoot(distro) : translatedStoreRoot(options.dataDir, distro, run),
       ]);
+      const rejected: DeployedSkillState[] = [];
       const skills = options.desired.flatMap((entry) => {
-        const targets = entry.targets.filter((target) => agentIds.has(target.agentId));
-        return targets.length ? [{ name: entry.name, versionDigest: entry.versionDigest, targets }] : [];
+        const targets = Array.isArray(entry.targets)
+          ? entry.targets.filter((target) => target && typeof target.agentId === "string" && agentIds.has(target.agentId))
+          : [];
+        if (!targets.length) return [];
+        if (!NAME.test(String(entry.name)) || !DIGEST.test(String(entry.versionDigest))) {
+          rejected.push({ name: String(entry.name), digest: String(entry.versionDigest), links: [],
+            error: "invalid WSL skill manifest" });
+          return [];
+        }
+        return [{ name: entry.name, versionDigest: entry.versionDigest, targets }];
       });
       const response = await run({ kind: "wsl", distro }, "python3", [helper], {
         cwd: "/", timeoutMs: 60_000, maxBuffer: 4 * 1024 * 1024,
         stdin: JSON.stringify({ ownerHash: options.ownerHash, distro, storeRoot, bindings, skills,
           allowRemovals: options.allowRemovals === true }),
       });
-      results.push(parseOutput(JSON.parse(response.stdout) as HelperOutput, agentIds));
+      const parsed = parseOutput(JSON.parse(response.stdout) as HelperOutput, agentIds);
+      results.push(rejected.length
+        ? mergeResults([parsed, { deployed: rejected, unmanaged: [], removedLinks: [] }])
+        : parsed);
     } catch (error) {
       const detail = `WSL skill reconciliation failed in ${distro}.`;
       options.log?.(`${detail} ${clean(error)}`);

@@ -1251,7 +1251,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
 
   const leaseNeeded = allowRemovals ||
     prepared.some(({ entry, invalid, materializationError }) => !invalid && !materializationError &&
-      entry.targets.some((target) => agentBinding.has(target.agentId)));
+      !(entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))));
   if (leaseNeeded && options.acquireProviderHomeLease) {
     try {
       options.acquireProviderHomeLease();

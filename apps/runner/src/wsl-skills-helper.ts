@@ -1,10 +1,11 @@
 /** Fixed in-distro filesystem adapter. JSON carries only validated desired state and store paths;
  * no payload value is evaluated as Python or shell source. */
 export const WSL_SKILLS_HELPER = String.raw`#!/usr/bin/env python3
-import datetime, json, os, re, stat, sys, uuid
+import datetime, hashlib, json, os, re, stat, sys, uuid
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
+LEASE_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 MAX_ENTRIES = 256
 MAX_MD = 65536
 DRIVER_DIRS = {"claude-code": ".claude/skills", "codex": ".codex/skills", "codex-app-server": ".codex/skills"}
@@ -46,6 +47,99 @@ def bounded_json():
     if len(raw) > 4 * 1024 * 1024: fail("request too large")
     return json.loads(raw.decode("utf-8"))
 
+def lease_value(owner, state, previous=None):
+    return {"version": 2, "state": state, "ownerHash": owner, "leaseId": str(uuid.uuid4()),
+        "previousLeaseId": previous[0] if previous else None, "previousRecordHash": previous[1] if previous else None,
+        "pid": os.getpid(), "hostname": os.uname().nodename, "provider": "wsl-skills",
+        "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+
+def lease_bytes(value):
+    return json.dumps(value, separators=(",", ":")).encode() + b"\n"
+
+def read_lease_record(lock, name):
+    marker = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=lock)
+    try:
+        info = os.fstat(marker)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096: fail("provider home lease is unsafe")
+        raw = os.read(marker, info.st_size + 1)
+        value = json.loads(raw.decode("utf-8"))
+    finally: os.close(marker)
+    if not isinstance(value, dict) or not DIGEST.fullmatch(value.get("ownerHash", "")): fail("provider home lease is invalid")
+    lease_id = value.get("leaseId", "")
+    if (not isinstance(lease_id, str) or not LEASE_ID.fullmatch(lease_id) or
+        not isinstance(value.get("pid"), int) or isinstance(value.get("pid"), bool) or value["pid"] <= 0 or value["pid"] > 9007199254740991 or
+        not isinstance(value.get("hostname"), str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", value.get("provider", "")) or
+        not isinstance(value.get("createdAt"), str)): fail("provider home lease is invalid")
+    if value.get("version") == 1:
+        pass
+    elif value.get("version") == 2 and value.get("state") in ("active", "released"):
+        previous_id, previous_hash = value.get("previousLeaseId"), value.get("previousRecordHash")
+        if previous_id is not None and (not isinstance(previous_id, str) or not LEASE_ID.fullmatch(previous_id)):
+            fail("provider home lease is invalid")
+        if previous_hash is not None and not DIGEST.fullmatch(previous_hash): fail("provider home lease is invalid")
+    else: fail("provider home lease is invalid")
+    return value, hashlib.sha256(raw).hexdigest()
+
+def read_lease_chain(lock):
+    entries = sorted(os.listdir(lock))
+    if not entries: fail("provider home lease is incomplete")
+    if "lease.json" in entries:
+        marker = "lease.json"
+        value, record_hash = read_lease_record(lock, marker)
+        if value.get("version") != 1: fail("provider home lease is incomplete or foreign")
+    else:
+        genesis = [name for name in entries if re.fullmatch(r"lease-([0-9a-f-]+)\.json", name)]
+        if len(genesis) != 1: fail("provider home lease is incomplete or foreign")
+        marker = genesis[0]
+        value, record_hash = read_lease_record(lock, marker)
+        if (value.get("version") != 2 or value.get("state") != "active" or value.get("previousLeaseId") is not None or
+            value.get("previousRecordHash") is not None or marker != "lease-%s.json" % value["leaseId"]):
+            fail("provider home lease is incomplete or foreign")
+    consumed, seen = {marker}, set()
+    while True:
+        if value["leaseId"] in seen: fail("provider home lease is incomplete or foreign")
+        seen.add(value["leaseId"])
+        next_marker = "next-%s.json" % value["leaseId"]
+        if next_marker not in entries: break
+        successor, successor_hash = read_lease_record(lock, next_marker)
+        if (successor.get("version") != 2 or successor.get("previousLeaseId") != value["leaseId"] or
+            successor.get("previousRecordHash") != record_hash): fail("provider home lease is incomplete or foreign")
+        if successor["state"] == "released" and (value.get("version") != 2 or value.get("state") != "active" or
+            any(successor[key] != value[key] for key in ("ownerHash", "hostname", "pid", "provider"))):
+            fail("provider home lease is incomplete or foreign")
+        if successor["state"] == "active" and (value.get("version") == 1 or value.get("state") == "active") and (
+            successor["ownerHash"] != value["ownerHash"] or successor["hostname"] != value["hostname"]):
+            fail("provider home lease is incomplete or foreign")
+        consumed.add(next_marker)
+        value, record_hash = successor, successor_hash
+    if len(consumed) != len(entries): fail("provider home lease is incomplete or foreign")
+    return value, record_hash
+
+def write_all(fd, value):
+    sent = 0
+    while sent < len(value): sent += os.write(fd, value[sent:])
+
+def publish_lease(root, lock, target, value):
+    raw = lease_bytes(value)
+    temp = ".provider-home-lease-%s.tmp" % uuid.uuid4()
+    marker = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)
+    try:
+        write_all(marker, raw); os.fsync(marker)
+    finally: os.close(marker)
+    try:
+        os.link(temp, target, src_dir_fd=root, dst_dir_fd=lock, follow_symlinks=False)
+        os.fsync(lock)
+    finally:
+        try: os.unlink(temp, dir_fd=root)
+        except FileNotFoundError: pass
+    return hashlib.sha256(raw).hexdigest()
+
+def process_alive(pid):
+    try: os.kill(pid, 0); return True
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    except: return True
+
 def acquire_lease(home_fd, owner):
     root = walk_dir(home_fd, ".agent-manager/provider-home-leases-v1", True)
     try:
@@ -53,43 +147,51 @@ def acquire_lease(home_fd, owner):
             os.mkdir("mutable-home.lock", 0o700, dir_fd=root)
             lock = child_dir(root, "mutable-home.lock")
             try:
-                # Emit the legacy v1 schema the native lease registry still accepts. The helper
-                # remains durably owner-bound without placing foreign entries in the shared lock.
-                value = json.dumps({"version": 1, "ownerHash": owner, "leaseId": str(uuid.uuid4()),
-                    "pid": os.getpid(), "hostname": os.uname().nodename, "provider": "wsl-skills",
-                    "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}, separators=(",", ":")).encode() + b"\n"
-                marker = os.open("lease.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=lock)
-                try:
-                    sent = 0
-                    while sent < len(value): sent += os.write(marker, value[sent:])
-                    os.fsync(marker)
-                finally: os.close(marker)
-                os.fsync(lock)
-            finally: os.close(lock)
-            os.fsync(root)
+                value = lease_value(owner, "active")
+                publish_lease(root, lock, "lease-%s.json" % value["leaseId"], value)
+                os.fsync(root)
+                return root, lock, value["leaseId"]
+            except:
+                os.close(lock)
+                try: os.rmdir("mutable-home.lock", dir_fd=root)
+                except: pass
+                raise
         except FileExistsError:
             lock = child_dir(root, "mutable-home.lock")
             try:
-                entries = os.listdir(lock)
-                if entries != ["lease.json"]: fail("provider home lease is incomplete or foreign")
-                marker = os.open("lease.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=lock)
-                try:
-                    info = os.fstat(marker)
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
-                        fail("provider home lease is unsafe")
-                    value = json.loads(os.read(marker, info.st_size + 1).decode("utf-8"))
-                finally: os.close(marker)
-                if not isinstance(value, dict): fail("provider home lease is invalid")
-                try: lease_id = uuid.UUID(value.get("leaseId", ""))
-                except: fail("provider home lease is invalid")
-                if (value.get("version") != 1 or not DIGEST.match(value.get("ownerHash", "")) or
-                    str(lease_id) != value.get("leaseId") or not isinstance(value.get("pid"), int) or value["pid"] <= 0 or
-                    not isinstance(value.get("hostname"), str) or value.get("provider") != "wsl-skills" or
-                    not isinstance(value.get("createdAt"), str)):
-                    fail("provider home lease is invalid")
-                if value["ownerHash"] != owner: fail("provider home is leased by another runner owner")
-            finally: os.close(lock)
-    finally: os.close(root)
+                existing, existing_hash = read_lease_chain(lock)
+                if not (existing.get("version") == 2 and existing.get("state") == "released"):
+                    if existing["hostname"] != os.uname().nodename: fail("provider home is leased by another host")
+                    if process_alive(existing["pid"]): fail("provider home is already in use")
+                    if existing["ownerHash"] != owner: fail("provider home is leased by another runner owner")
+                confirmed, confirmed_hash = read_lease_chain(lock)
+                if confirmed["leaseId"] != existing["leaseId"] or confirmed_hash != existing_hash:
+                    fail("provider home lease changed during recovery")
+                value = lease_value(owner, "active", (confirmed["leaseId"], confirmed_hash))
+                try: publish_lease(root, lock, "next-%s.json" % confirmed["leaseId"], value)
+                except FileExistsError: fail("provider home lease changed during recovery")
+                published, _ = read_lease_chain(lock)
+                if published.get("state") != "active" or published["leaseId"] != value["leaseId"]:
+                    fail("provider home lease changed during recovery")
+                return root, lock, value["leaseId"]
+            except:
+                os.close(lock); raise
+    except:
+        os.close(root); raise
+
+def release_lease(lease):
+    root, lock, lease_id = lease
+    try:
+        current, current_hash = read_lease_chain(lock)
+        if current.get("version") != 2 or current.get("state") != "active" or current["leaseId"] != lease_id:
+            fail("provider home lease changed before release")
+        released = dict(current)
+        released.update({"state": "released", "leaseId": str(uuid.uuid4()), "previousLeaseId": current["leaseId"],
+            "previousRecordHash": current_hash, "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+        try: publish_lease(root, lock, "next-%s.json" % current["leaseId"], released)
+        except FileExistsError: fail("provider home lease changed before release")
+    finally:
+        os.close(lock); os.close(root)
 
 def load_owned(state_fd):
     try: fd = os.open("links.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=state_fd)
@@ -108,7 +210,7 @@ def save_owned(state_fd, owned):
     value = json.dumps({"version": 1, "links": sorted(owned)}, separators=(",", ":")).encode()
     temp = ".links-%s.tmp" % uuid.uuid4().hex
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=state_fd)
-    try: os.write(fd, value); os.fsync(fd)
+    try: write_all(fd, value); os.fsync(fd)
     finally: os.close(fd)
     os.rename(temp, "links.json", src_dir_fd=state_fd, dst_dir_fd=state_fd)
     os.fsync(state_fd)
@@ -134,7 +236,7 @@ def prune_owned(home_fd, owned):
                 info = os.stat(shape[1], dir_fd=parent, follow_symlinks=False)
                 if not stat.S_ISLNK(info.st_mode): owned.discard(relative)
             finally: os.close(parent)
-        except: owned.discard(relative)
+        except: pass
 
 def validated_bindings(value):
     if not isinstance(value, list) or len(value) > 256: fail("invalid WSL skill bindings")
@@ -162,8 +264,9 @@ def link_probe(parent_fd, name, store_root, canonical=None, owned=False):
 
 def ensure_link(home_fd, relative, target, store_root, canonical, owned):
     parent_rel, name = relative.rsplit("/", 1)
-    parent = walk_dir(home_fd, parent_rel, True)
+    parent = None
     try:
+        parent = walk_dir(home_fd, parent_rel, True)
         kind, resolved = link_probe(parent, name, store_root, canonical, relative in owned)
         if kind == "occupied": return (False, "conflict", "an unmanaged file or directory already exists at ~/" + relative)
         if kind == "foreign": return (False, "conflict", "an unmanaged symlink already exists at ~/" + relative)
@@ -183,7 +286,8 @@ def ensure_link(home_fd, relative, target, store_root, canonical, owned):
         owned.add(relative); return (True, None, None)
     except Exception as error:
         return (False, "error", "could not create the skill link at ~/%s: %s" % (relative, str(error)))
-    finally: os.close(parent)
+    finally:
+        if parent is not None: os.close(parent)
 
 def unlink_owned(home_fd, relative, store_root, canonical, owned, direct_store=False):
     parent_rel, name = relative.rsplit("/", 1)
@@ -257,17 +361,20 @@ def reconcile(spec):
     store_fd, store_root = open_root(spec.get("storeRoot", ""))
     if store_root != spec.get("storeRoot"): fail("store root is not canonical")
     state = walk_dir(home_fd, ".agent-manager/runner-instances/%s/skills" % owner, True)
+    lease = None
     try:
-        acquire_lease(home_fd, owner)
         owned = load_owned(state)
+        skills = spec.get("skills", [])
+        if not isinstance(skills, list) or len(skills) > 4096: fail("invalid WSL skill manifest")
+        needs_lease = bool(skills or owned)
+        if needs_lease: lease = acquire_lease(home_fd, owner)
         prune_owned(home_fd, owned)
         bindings = validated_bindings(spec.get("bindings", []))
         canonical_dir = home + "/.agents/skills"
         deployed, removals = [], []
         canonical_keep = set()
-        harness_keep = {}
-        for binding in bindings.values(): harness_keep.setdefault(binding["relDir"], set())
-        for skill in spec.get("skills", []):
+        harness_keep = {relative: set() for relative in set(DRIVER_DIRS.values())}
+        for skill in skills:
             name, digest = skill.get("name"), skill.get("versionDigest")
             row = {"name": str(name), "digest": str(digest), "links": []}
             if not isinstance(name, str) or not NAME.match(name) or not isinstance(digest, str) or not DIGEST.match(digest):
@@ -356,7 +463,7 @@ def reconcile(spec):
                     canonical = canonical_dir + "/" + parts[2]
                 if remove and unlink_owned(home_fd, relative, store_root, canonical, owned, direct):
                     removals.append({"path": "WSL %s: ~/%s" % (spec["distro"], relative), "reason": "No longer in the desired skill list."})
-        save_owned(state, owned)
+        if needs_lease: save_owned(state, owned)
         unmanaged = []
         cache = {}
         for binding in bindings.values():
@@ -369,6 +476,7 @@ def reconcile(spec):
                 unmanaged.append(row)
         return {"deployed": deployed, "unmanaged": unmanaged, "removedLinks": removals}
     finally:
+        if lease is not None: release_lease(lease)
         os.close(state); os.close(store_fd); os.close(home_fd)
 
 try:

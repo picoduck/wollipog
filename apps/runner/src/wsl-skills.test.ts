@@ -67,3 +67,22 @@ test("native placeholders are replaced by authoritative WSL link state", () => {
   ]);
   assert.equal(merged.unmanaged.length, 1);
 });
+
+test("an invalid WSL skill row does not collapse valid distro results", async () => {
+  const result = await reconcileWslSkills({
+    dataDir: "C:\\data", ownerHash, agents,
+    desired: [
+      { name: "broken", versionDigest: "invalid", targets: [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }] },
+      { name: "review", versionDigest: digest, targets: [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }] },
+    ],
+    storeRoot: async () => "/mnt/c/data/skills/store",
+    run: async (_context, _command, args) => args[0] === "-c"
+      ? { stdout: "/home/me/.agent-manager/helper.py\n", stderr: "" }
+      : { stdout: JSON.stringify({ deployed: [{ name: "review", digest, links: [
+        { agentId: "codex-wsl-Ubuntu", status: "linked" },
+      ] }], unmanaged: [], removedLinks: [] }), stderr: "" },
+  });
+  assert.equal(result.deployed.find((row) => row.name === "review")?.links[0]?.status, "linked");
+  assert.equal(result.deployed.find((row) => row.name === "broken")?.error, "invalid WSL skill manifest");
+  assert.equal(result.error, undefined);
+});

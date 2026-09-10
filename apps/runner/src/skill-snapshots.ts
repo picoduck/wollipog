@@ -155,15 +155,19 @@ export class MachineSkillSnapshots {
       }
       for (const distro of this.wslDistros()) {
         if (found.length >= 64) break;
-        const home = (this.options.wslHome ?? resolveWslHomeUnc)(distro);
-        if (!home) continue;
-        const remaining = 64 - found.length;
-        const candidates = (this.options.windowsList ?? listWindowsSkillCandidates)(home, this.wslDirectories(distro))
-          .slice(0, remaining)
-          .map((entry): MachineSkillCandidate => ({ id: randomUUID(), ...entry, context: { kind: "wsl", distro } }));
-        for (const candidate of candidates) {
-          found.push(candidate);
-          this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000, home });
+        try {
+          const home = (this.options.wslHome ?? resolveWslHomeUnc)(distro);
+          if (!home) continue;
+          const remaining = 64 - found.length;
+          const candidates = (this.options.windowsList ?? listWindowsSkillCandidates)(home, this.wslDirectories(distro))
+            .slice(0, remaining)
+            .map((entry): MachineSkillCandidate => ({ id: randomUUID(), ...entry, context: { kind: "wsl", distro } }));
+          for (const candidate of candidates) {
+            found.push(candidate);
+            this.candidates.set(candidate.id, { candidate, expires: this.now() + 600_000, home });
+          }
+        } catch {
+          // One stopped, wedged, or malformed distro must not hide native or other WSL candidates.
         }
       }
       while (this.candidates.size > 256) this.candidates.delete(this.candidates.keys().next().value!);

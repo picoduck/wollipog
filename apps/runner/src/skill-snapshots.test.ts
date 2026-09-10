@@ -156,6 +156,22 @@ test("the Windows adapter discovers and reads WSL candidates without exposing UN
   assert.match(read.snapshot?.files[0]?.content ?? "", /wsl\.localhost/u);
 });
 
+test("a failed WSL source does not hide native Windows candidates", () => {
+  const wslAgent: AgentDefinition = { id: "codex-wsl-Ubuntu", name: "Codex WSL", command: "codex",
+    args: [], env: {}, driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } };
+  const snapshots = new MachineSkillSnapshots({
+    home: "C:\\Users\\runner", agents: () => [agents[0]!, wslAgent], platform: "win32",
+    wslHome: () => "\\\\wsl.localhost\\Ubuntu\\home\\runner",
+    windowsList: (home) => {
+      if (home.startsWith("\\\\wsl")) throw new Error("wedged distro");
+      return [{ name: "native-review", sourceDirectory: ".codex/skills", generation: "a".repeat(64) }];
+    },
+  });
+  const listed = snapshots.handle(message);
+  assert.equal(listed.error, undefined);
+  assert.deepEqual(listed.candidates?.map((candidate) => candidate.name), ["native-review"]);
+});
+
 test("machine discovery keeps separate hard raw and useful-entry bounds", { skip: process.platform !== "linux" }, (t) => {
   const home = mkdtempSync(join(tmpdir(), "skill-snapshot-bounds-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));

@@ -370,13 +370,15 @@ Properties:
   directory. A fixed Python adapter runs inside each named distribution and creates its canonical
   and harness links using descriptor-relative, no-follow operations; the canonical link targets
   the same store through WSL's mounted native path. A durable owner marker partitions adapter state
-  and uses the native provider-home lease record format, so a standalone in-distribution runner can
-  recognize it instead of treating the lock directory as corrupt. Another runner owner is refused
-  for the same provider home. After re-onboarding changes that owner identity, an operator must first
-  prove that no runner or provider process uses the WSL home, quarantine
-  `.agent-manager/provider-home-leases-v1/mutable-home.lock`, and retry. WSL failures are reported
-  per target and never fall back to mutating the distribution through host path APIs. Standalone
-  WSL runners report Linux and use the ordinary Linux reconciler.
+  uses the native provider-home v2 lease journal, and publishes an explicit released successor
+  before exiting. A standalone in-distribution runner can therefore take an orderly cross-owner
+  handoff instead of treating the lock directory as corrupt; a live or uncleanly terminated foreign
+  owner still fails closed. After an unclean re-onboarding transition, an operator must first prove
+  that no runner or provider process uses the WSL home, quarantine
+  `.agent-manager/provider-home-leases-v1/mutable-home.lock`, and retry. Idle read-only passes do not
+  claim the lease. WSL failures are reported per target and never fall back to mutating the
+  distribution through host path APIs. Standalone WSL runners report Linux and use the ordinary
+  Linux reconciler.
 
 ### Per-harness materialization and invocation policy
 
