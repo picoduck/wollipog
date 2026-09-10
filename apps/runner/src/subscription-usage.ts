@@ -304,6 +304,9 @@ export function normalizeClaudeRateLimits(
       // key the same way, so comparing the raw key would silently miss any id past the bound —
       // suppressing the top-level bucket while never folding its status into the window.
       const id = stringValue(rawId, 96);
+      // Distinct raw keys can bound to the same id. The first one read owns it: letting a later
+      // key overwrite would fuse two windows, and both would match a bounded `limitingId`.
+      if (id !== undefined && unifiedIds.has(id)) continue;
       // A unified window carries no status of its own; the limiting window's status is the
       // top-level one, so fold it in rather than reporting that window as plainly available.
       const isLimiting = id !== undefined && id === limitingId;
@@ -390,7 +393,8 @@ function mergeObservedBucket(
 
 /** Hold the snapshot inside the control plane's bucket bound, which it enforces by rejecting the
  * whole update. Buckets the update did not report are dropped first: retaining an old bucket at the
- * cost of a currently reported window is how a source loses the windows the user actually needs. */
+ * cost of a currently reported window is how a source loses the windows the user actually needs.
+ * Claude only — Codex keeps the plain truncation it had before Claude gained sparse windows. */
 function boundBuckets(ordered: SubscriptionUsageBucket[], reported: Set<string>): SubscriptionUsageBucket[] {
   if (ordered.length <= MAX_PROVIDER_BUCKETS) return ordered;
   const excess = ordered.length - MAX_PROVIDER_BUCKETS;
@@ -424,7 +428,9 @@ function mergeSnapshot(
   return {
     ...priorWithoutDetail,
     ...update,
-    buckets: boundBuckets([...buckets.values()], new Set(update.buckets.map((bucket) => bucket.id))),
+    buckets: mergeMode === "claude-notification"
+      ? boundBuckets([...buckets.values()], new Set(update.buckets.map((bucket) => bucket.id)))
+      : [...buckets.values()].slice(0, MAX_PROVIDER_BUCKETS),
     ...(update.credits || prior.credits ? { credits: { ...prior.credits, ...update.credits } } : {}),
     ...(spendControls.size > 0 ? { spendControls: [...spendControls.values()] } : {}),
   };

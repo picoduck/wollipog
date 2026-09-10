@@ -896,3 +896,48 @@ test("a limiting window id past the control-plane bound still receives its statu
     "a rejected window must not read as merely approaching its limit",
   );
 });
+
+test("a Codex source keeps the plain bucket truncation it had before Claude gained windows", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const limits = (entries: Array<[string, number]>) => Object.fromEntries(entries.map(([id, usedPercent]) =>
+    [id, { limitId: id, primary: { usedPercent }, secondary: { usedPercent } }]));
+  const observe = (payload: unknown) =>
+    manager.observe("codex", "codex-app-server", { kind: "native" }, { provider: "codex", kind: "sparse", payload });
+  observe({ rateLimitsByLimitId: limits(
+    Array.from({ length: 32 }, (_, index) => [`old${index}`, 10] as [string, number])) });
+  assert.equal(manager.inventory()[0]?.buckets.length, 64);
+  now = OBSERVED_AT + 60_000;
+  observe({ rateLimitsByLimitId: limits([["new", 50]]) });
+  const ids = manager.inventory()[0]?.buckets.map((bucket) => bucket.id) ?? [];
+  assert.equal(ids.length, 64);
+  assert.ok(ids.includes("old31:primary"), "reported-priority eviction is a Claude rule, not a Codex one");
+  assert.ok(!ids.includes("new:primary"));
+});
+
+test("Claude window ids that collide once bounded do not fuse into a hybrid window", () => {
+  const shared = "x".repeat(96);
+  const snapshot = normalizeClaudeRateLimits(rateLimitEvent({
+    status: "rejected",
+    rateLimitType: `${shared}A`,
+    unifiedWindows: {
+      [`${shared}A`]: { utilization: 0.1, resetsAt: FIVE_HOUR_RESET },
+      [`${shared}B`]: { utilization: 0.9, resetsAt: WEEK_RESET },
+    },
+  }), base, OBSERVED_AT);
+  assert.ok(snapshot);
+  assert.equal(snapshot.buckets.length, 1);
+  assert.equal(snapshot.buckets[0]?.status, "exhausted");
+  assert.equal(
+    snapshot.buckets[0]?.usedPercent,
+    10,
+    "the limiting window keeps its own utilization instead of a colliding window's",
+  );
+  assert.equal(snapshot.buckets[0]?.resetsAt, FIVE_HOUR_RESET * 1_000);
+});
