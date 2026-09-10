@@ -660,6 +660,7 @@ CREATE TABLE IF NOT EXISTS session_steering_attempts (
   resolution_action TEXT CHECK (resolution_action IN ('queue_again','dismiss')),
   resolution_request_id TEXT,
   resolution_receipt_json TEXT,
+  resolution_queued_prompt_id TEXT,
   resolution_requested_at INTEGER,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,
@@ -667,6 +668,7 @@ CREATE TABLE IF NOT EXISTS session_steering_attempts (
   resolved_at      INTEGER,
   queue_revision_at_create INTEGER NOT NULL DEFAULT 0,
   queue_absent_at  INTEGER,
+  receipt_dismissed_at INTEGER,
   compacted_at     INTEGER,
   UNIQUE (session_id, submission_id),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -2176,6 +2178,7 @@ interface SteeringAttemptRow {
   resolution_action: "queue_again" | "dismiss" | null;
   resolution_request_id: string | null;
   resolution_receipt_json: string | null;
+  resolution_queued_prompt_id: string | null;
   resolution_requested_at: number | null;
   created_at: number;
   updated_at: number;
@@ -2183,6 +2186,7 @@ interface SteeringAttemptRow {
   resolved_at: number | null;
   queue_revision_at_create: number;
   queue_absent_at: number | null;
+  receipt_dismissed_at: number | null;
   compacted_at: number | null;
 }
 
@@ -3466,7 +3470,9 @@ export class ControlPlaneDb {
       "resolution_action TEXT CHECK (resolution_action IN ('queue_again','dismiss'))",
       "resolution_request_id TEXT",
       "resolution_receipt_json TEXT",
+      "resolution_queued_prompt_id TEXT",
       "resolution_requested_at INTEGER",
+      "receipt_dismissed_at INTEGER",
     ]) {
       try {
         db.exec(`ALTER TABLE session_steering_attempts ADD COLUMN ${column}`);
@@ -3474,6 +3480,18 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
+    db.exec(
+      `UPDATE session_steering_attempts
+       SET resolution_queued_prompt_id=json_extract(
+         CASE WHEN json_valid(resolution_receipt_json) THEN resolution_receipt_json ELSE '{}' END,
+         '$.queuedPromptId'
+       )
+       WHERE resolution_action='queue_again' AND resolution_queued_prompt_id IS NULL
+         AND json_type(
+           CASE WHEN json_valid(resolution_receipt_json) THEN resolution_receipt_json ELSE '{}' END,
+           '$.queuedPromptId'
+         )='text'`,
+    );
     // Poller liveness is separate from the optional human approval deadline. A pre-column open
     // row gets one full grace horizon after upgrade: its sidecar could have polled moments before
     // this process reopened the database, and creation time cannot prove abandonment.
@@ -12622,6 +12640,7 @@ export class ControlPlaneDb {
       }
     }
     const resolutionReceipt = parseJson<ResolveSteeringAttemptResultMessage>(row.resolution_receipt_json);
+    const resolutionQueuedPromptId = resolutionReceipt?.queuedPromptId ?? row.resolution_queued_prompt_id;
     return {
       submissionId: row.submission_id,
       turnId: row.turn_id,
@@ -12636,12 +12655,23 @@ export class ControlPlaneDb {
         resolution: {
           action: row.resolution_action,
           state: row.resolved_at === null ? "pending" as const : "applied" as const,
-          ...(resolutionReceipt?.queuedPromptId ? { queuedPromptId: resolutionReceipt.queuedPromptId } : {}),
+          ...(resolutionQueuedPromptId ? { queuedPromptId: resolutionQueuedPromptId } : {}),
         },
       } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  private hasCanonicalQueuedPromptDelivery(sessionId: string, queuedPromptId: string): boolean {
+    const safePayload = "CASE WHEN json_valid(payload) THEN payload ELSE '{}' END";
+    return this.stmt(
+      `SELECT 1 FROM session_events
+       WHERE session_id=? AND kind='user_message'
+         AND json_extract(${safePayload},'$.turnId')=?
+         AND COALESCE(json_extract(${safePayload},'$.deliveryIntent'),'')<>'steer'
+       LIMIT 1`,
+    ).get(sessionId, queuedPromptId) !== undefined;
   }
 
   createSteeringAttempt(input: CreateSteeringAttemptInput): CreateSteeringAttemptResult {
@@ -12759,6 +12789,22 @@ export class ControlPlaneDb {
       if (!row) {
         this.db.exec("COMMIT");
         return { kind: "not_found" };
+      }
+      // Queue Again is already runner-authoritative. A later Dismiss is only a durable
+      // acknowledgement of its terminal receipt: never replace or replay the immutable recovery
+      // operation, and never send a cancellation to the runner-owned queue.
+      if (action === "dismiss" && row.resolution_action === "queue_again" && row.resolved_at !== null) {
+        this.stmt(
+          `UPDATE session_steering_attempts
+           SET receipt_dismissed_at=COALESCE(receipt_dismissed_at,?),
+             resolution_receipt_json=NULL,resolution_queued_prompt_id=NULL,
+             updated_at=MAX(updated_at,?)
+           WHERE request_id=?`,
+        ).run(now, now, row.request_id);
+        const dismissed = this.stmt("SELECT * FROM session_steering_attempts WHERE request_id=?")
+          .get(row.request_id) as unknown as SteeringAttemptRow;
+        this.db.exec("COMMIT");
+        return { kind: "staged", requestId, attempt: this.steeringAttemptView(dismissed) };
       }
       if (row.resolution_action) {
         if (row.resolution_action !== action) {
@@ -12883,9 +12929,20 @@ export class ControlPlaneDb {
       }
       if (result.applied) {
         this.stmt(
-          `UPDATE session_steering_attempts SET resolution_receipt_json=?,resolved_at=?,updated_at=?
+          `UPDATE session_steering_attempts SET resolution_receipt_json=?,
+           resolution_queued_prompt_id=COALESCE(?,resolution_queued_prompt_id),resolved_at=?,updated_at=?
            WHERE request_id=? AND resolved_at IS NULL`,
-        ).run(JSON.stringify(result), now, now, row.request_id);
+        ).run(JSON.stringify(result), result.queuedPromptId ?? null, now, now, row.request_id);
+        if (result.action === "queue_again" && result.queuedPromptId &&
+            this.hasCanonicalQueuedPromptDelivery(result.sessionId, result.queuedPromptId)) {
+          this.stmt(
+            `UPDATE session_steering_attempts
+             SET receipt_dismissed_at=COALESCE(receipt_dismissed_at,?),
+               resolution_receipt_json=NULL,resolution_queued_prompt_id=NULL,
+               updated_at=MAX(updated_at,?)
+             WHERE request_id=? AND resolved_at IS NOT NULL`,
+          ).run(now, now, row.request_id);
+        }
       } else {
         this.stmt(
           `UPDATE session_steering_attempts SET resolution_receipt_json=?,updated_at=? WHERE request_id=?`,
@@ -12906,7 +12963,7 @@ export class ControlPlaneDb {
       ? Math.max(1, Math.min(MAX_PROJECTED_STEERING_ATTEMPTS, limit))
       : MAX_PROJECTED_STEERING_ATTEMPTS;
     const rows = this.stmt(
-      `SELECT * FROM session_steering_attempts WHERE session_id=?
+      `SELECT * FROM session_steering_attempts WHERE session_id=? AND receipt_dismissed_at IS NULL
        ORDER BY CASE
          WHEN disposition='pending' OR (disposition='uncertain' AND resolved_at IS NULL) THEN 0
          ELSE 1 END,
@@ -13066,6 +13123,25 @@ export class ControlPlaneDb {
          AND compacted_at IS NULL
          AND (disposition='pending' OR (disposition='uncertain' AND receipt_json IS NULL))`,
     ).run(now, now, sessionId, submissionId, turnId);
+    return Number(updated.changes) > 0;
+  }
+
+  /** An ordinary canonical user message whose runner turn id equals the Queue Again id proves
+   * that exact queued prompt was delivered. Merely disappearing from a queue snapshot is not
+   * sufficient: it may have been cancelled, and bounded transcript history may omit delivery. */
+  retireQueuedAgainSteeringReceiptFromUserMessage(
+    sessionId: string,
+    queuedPromptId: string,
+    now: number,
+  ): boolean {
+    const updated = this.stmt(
+      `UPDATE session_steering_attempts
+       SET receipt_dismissed_at=COALESCE(receipt_dismissed_at,?),
+         resolution_receipt_json=NULL,resolution_queued_prompt_id=NULL,
+         updated_at=MAX(updated_at,?)
+       WHERE session_id=? AND resolution_action='queue_again' AND resolved_at IS NOT NULL
+         AND receipt_dismissed_at IS NULL AND resolution_queued_prompt_id=?`,
+    ).run(now, now, sessionId, queuedPromptId);
     return Number(updated.changes) > 0;
   }
 
@@ -13837,7 +13913,11 @@ export class ControlPlaneDb {
       compacted = this.stmt(
         `UPDATE session_steering_attempts SET text_snapshot=NULL,images_json=NULL,config_json=NULL,
          receipt_json=NULL,resolution_receipt_json=NULL,resolution_request_id=NULL,
-         queued_prompt_id=NULL,compacted_at=? WHERE request_id IN (${placeholders})`,
+         queued_prompt_id=NULL,
+         resolution_queued_prompt_id=CASE
+           WHEN resolution_action='queue_again' AND receipt_dismissed_at IS NULL THEN resolution_queued_prompt_id
+           ELSE NULL
+         END,compacted_at=? WHERE request_id IN (${placeholders})`,
       ).run(now, ...requestIds);
       for (const { artifact_id: artifactId } of ownedArtifacts) {
         const deleted = this.stmt(

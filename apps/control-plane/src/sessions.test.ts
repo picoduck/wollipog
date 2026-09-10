@@ -2940,7 +2940,12 @@ test("uncertain steering resolution is correlated, idempotent, conflict-safe, an
   assert.equal((await svc.resolveSteeringAttempt(id, "submission-resolve", "queue_again")).ok, true);
   assert.equal(hub.sentOfType("resolve_steering_attempt").length, 1,
     "applied retries are local and do not require an online runner");
-  assert.equal((await svc.resolveSteeringAttempt(id, "submission-resolve", "dismiss")).status, 409);
+  const dismissedReceipt = await svc.resolveSteeringAttempt(id, "submission-resolve", "dismiss");
+  assert.equal(dismissedReceipt.ok, true, dismissedReceipt.error);
+  assert.equal(hub.sentOfType("resolve_steering_attempt").length, 1,
+    "dismissing a completed receipt cannot cancel or otherwise mutate its queued prompt");
+  assert.equal(db.getSession(id)?.steeringAttempts, undefined,
+    "the acknowledgement is removed from authoritative projections");
 });
 
 test("rejected steering receipt dismissal is durable and does not depend on runner state", async () => {
@@ -3392,6 +3397,122 @@ test("runner-owned steered user history resolves a lost receipt and suppresses r
   });
   assert.equal(db.getSession(id)?.steeringAttempts?.[0]?.state, "accepted");
   assert.equal(hub.sessionChangedByIdCalls.includes(id), true);
+});
+
+test("canonical queued user history retires only its exact Queue Again receipt", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.createSteeringAttempt({
+    requestId: "steer-queue-history", sessionId: id, submissionId: "submission-queue-history",
+    turnId: "turn-original", source: "direct", requestSha256: "4".repeat(64), text: "later", now: 1,
+  });
+  db.markSteeringAttemptUncertain("steer-queue-history", 2);
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "resolve_steering_attempt");
+    return {
+      type: "resolve_steering_attempt_result", requestId: message.requestId, sessionId: id,
+      submissionId: "submission-queue-history", action: "queue_again", applied: true,
+      queuedPromptId: "queue-history-exact",
+    };
+  };
+  assert.equal((await svc.resolveSteeringAttempt(id, "submission-queue-history", "queue_again")).ok, true);
+
+  assert.equal(svc.onSessionQueue(RUNNER_ID, id, [], false), true);
+  assert.equal(db.getSession(id)?.steeringAttempts?.length, 1,
+    "an empty queue alone does not prove delivery");
+  svc.onSessionEvent(id, {
+    kind: "user_message", text: "same text is insufficient", turnId: "queue-history-other",
+  });
+  assert.equal(db.getSession(id)?.steeringAttempts?.length, 1);
+  svc.onSessionEvent(id, {
+    kind: "user_message", text: "in-turn steering is not queue delivery",
+    turnId: "queue-history-exact", deliveryIntent: "steer", submissionId: "another-submission",
+  });
+  assert.equal(db.getSession(id)?.steeringAttempts?.length, 1);
+  svc.onSessionEvent(id, {
+    kind: "user_message", text: "authoritative canonical delivery", turnId: "queue-history-exact",
+  });
+  assert.equal(db.getSession(id)?.steeringAttempts, undefined);
+  assert.equal(hub.sessionChangedByIdCalls.includes(id), true);
+});
+
+test("hydrated canonical queue delivery retires Queue Again receipts in both history protocols", async () => {
+  for (const indexed of [true, false]) {
+    const { db, hub, svc } = makeHarness();
+    if (!indexed) db.registerRunner(runnerMeta(), Date.now(), 53);
+    const id = "s_box1";
+    const suffix = indexed ? "indexed" : "legacy";
+    hub.requestHandler = (message) => indexed ? {
+      type: "session_history_page_result",
+      requestId: message.requestId,
+      sessionId: id,
+      ok: true,
+      events: [
+        { seq: 1, ts: 100, payload: {
+          kind: "user_message", text: "delivered", turnId: `queue-hydrated-${suffix}`,
+        } },
+        { seq: 2, ts: 101, payload: {
+          kind: "user_message", text: "delivered first", turnId: `queue-before-result-${suffix}`,
+        } },
+      ],
+      page: { logEpoch: 7, throughSeq: 2, nextAfterSeq: 2, hasMore: false },
+    } : {
+      type: "session_history_result",
+      requestId: message.requestId,
+      sessionId: id,
+      ok: true,
+      events: [
+        { seq: 1, ts: 100, payload: {
+          kind: "user_message", text: "delivered", turnId: `queue-hydrated-${suffix}`,
+        } },
+        { seq: 2, ts: 101, payload: {
+          kind: "user_message", text: "delivered first", turnId: `queue-before-result-${suffix}`,
+        } },
+      ],
+    };
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      seq: 2,
+      historyEpoch: indexed ? 7 : undefined,
+    })]);
+    db.createSteeringAttempt({
+      requestId: `steer-hydrated-${suffix}`, sessionId: id,
+      submissionId: `submission-hydrated-${suffix}`, turnId: `turn-${suffix}`,
+      source: "direct", requestSha256: "3".repeat(64), text: "later", now: 1,
+    });
+    db.markSteeringAttemptUncertain(`steer-hydrated-${suffix}`, 2);
+    db.stageSteeringResolution(
+      id, `submission-hydrated-${suffix}`, "queue_again", `resolve-hydrated-${suffix}`, 3,
+    );
+    db.recordSteeringResolutionResult(RUNNER_ID, {
+      type: "resolve_steering_attempt_result", requestId: `resolve-hydrated-${suffix}`,
+      sessionId: id, submissionId: `submission-hydrated-${suffix}`,
+      action: "queue_again", applied: true, queuedPromptId: `queue-hydrated-${suffix}`,
+    }, 4);
+    db.createSteeringAttempt({
+      requestId: `steer-before-result-${suffix}`, sessionId: id,
+      submissionId: `submission-before-result-${suffix}`, turnId: `turn-before-result-${suffix}`,
+      source: "direct", requestSha256: "2".repeat(64), text: "later still", now: 5,
+    });
+    db.markSteeringAttemptUncertain(`steer-before-result-${suffix}`, 6);
+    await svc.hydrateHistory(id);
+
+    assert.equal(db.getSession(id)?.steeringAttempts?.length, 1, suffix);
+    assert.ok(hub.sessionChangedByIdCalls.includes(id), suffix);
+    hub.requestHandler = (message) => ({
+      type: "resolve_steering_attempt_result",
+      requestId: message.requestId,
+      sessionId: id,
+      submissionId: `submission-before-result-${suffix}`,
+      action: "queue_again",
+      applied: true,
+      queuedPromptId: `queue-before-result-${suffix}`,
+    });
+    assert.equal((await svc.resolveSteeringAttempt(
+      id, `submission-before-result-${suffix}`, "queue_again",
+    )).ok, true, suffix);
+    assert.equal(db.getSession(id)?.steeringAttempts, undefined,
+      `${suffix}: delayed result self-heals against already hydrated delivery evidence`);
+  }
 });
 
 test("prompt fails 404 for an unknown session", () => {

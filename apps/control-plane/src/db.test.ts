@@ -475,6 +475,146 @@ test("steering resolution results validate and correlate before resolving recove
   assert.equal(db.steeringRecoveryAdmissionCount("sess-1"), 0);
 });
 
+test("Queue Again receipts retire only from exact canonical queue identity and dismiss locally", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.createSteeringAttempt({
+    requestId: "steer-queue-again-db", sessionId: "sess-1", submissionId: "submission-queue-again-db",
+    turnId: "turn-1", source: "direct", requestSha256: "6".repeat(64), text: "recover", now: 1,
+  });
+  db.markSteeringAttemptUncertain("steer-queue-again-db", 2);
+  assert.equal(db.stageSteeringResolution(
+    "sess-1", "submission-queue-again-db", "queue_again", "resolve-queue-again-db", 3,
+  ).kind, "staged");
+  assert.deepEqual(db.recordSteeringResolutionResult("runner-1", {
+    type: "resolve_steering_attempt_result", requestId: "resolve-queue-again-db", sessionId: "sess-1",
+    submissionId: "submission-queue-again-db", action: "queue_again", applied: true,
+    queuedPromptId: "queue-exact",
+  }, 4)?.resolution, { action: "queue_again", state: "applied", queuedPromptId: "queue-exact" });
+
+  const lateOriginalResult = db.recordSteeringResult("runner-1", {
+    type: "steer_session_result", requestId: "steer-queue-again-db", sessionId: "sess-1",
+    submissionId: "submission-queue-again-db", turnId: "turn-1",
+    disposition: "converted_to_queue", reason: "stale_turn", queuedPromptId: "queue-original-late",
+  }, 4);
+  assert.equal(lateOriginalResult?.queuedPromptId, "queue-original-late");
+  assert.deepEqual(lateOriginalResult?.resolution, {
+    action: "queue_again", state: "applied", queuedPromptId: "queue-exact",
+  }, "a late original receipt cannot overwrite the Queue Again delivery identity");
+
+  assert.equal(db.recordSteeringQueueSnapshot("sess-1", [], 5), true);
+  assert.equal(db.listSteeringAttempts("sess-1").length, 1,
+    "queue disappearance can mean cancellation and cannot retire the receipt");
+  assert.equal(db.retireQueuedAgainSteeringReceiptFromUserMessage("sess-1", "queue-other", 6), false);
+  assert.equal(db.listSteeringAttempts("sess-1").length, 1);
+  assert.equal(db.retireQueuedAgainSteeringReceiptFromUserMessage("sess-1", "queue-exact", 7), true);
+  assert.deepEqual(db.listSteeringAttempts("sess-1"), []);
+  assert.equal(db.retireQueuedAgainSteeringReceiptFromUserMessage("sess-1", "queue-exact", 8), false,
+    "retirement is idempotent");
+
+  const durable = db.findSteeringAttemptBySubmission("sess-1", "submission-queue-again-db")?.attempt;
+  assert.deepEqual(durable?.resolution, {
+    action: "queue_again", state: "applied",
+  }, "retirement hides the receipt and discards its no-longer-needed queue identity");
+});
+
+test("manual Queue Again receipt dismissal is durable without staging a runner command", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-queue-again-dismiss-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    db.createSteeringAttempt({
+      requestId: "steer-dismiss-queue-again", sessionId: "sess-1",
+      submissionId: "submission-dismiss-queue-again", turnId: "turn-1", source: "direct",
+      requestSha256: "5".repeat(64), text: "recover", now: 2,
+    });
+    db.markSteeringAttemptUncertain("steer-dismiss-queue-again", 3);
+    db.stageSteeringResolution(
+      "sess-1", "submission-dismiss-queue-again", "queue_again", "resolve-dismiss-queue-again", 4,
+    );
+    db.recordSteeringResolutionResult("runner-1", {
+      type: "resolve_steering_attempt_result", requestId: "resolve-dismiss-queue-again",
+      sessionId: "sess-1", submissionId: "submission-dismiss-queue-again", action: "queue_again",
+      applied: true, queuedPromptId: "queue-still-live",
+    }, 5);
+
+    const dismissed = db.stageSteeringResolution(
+      "sess-1", "submission-dismiss-queue-again", "dismiss", "acknowledge-only", 6,
+    );
+    assert.equal(dismissed.kind, "staged");
+    assert.deepEqual(dismissed.attempt?.resolution, { action: "queue_again", state: "applied" });
+    assert.deepEqual(db.pendingSteeringResolutionMessages("runner-1"), []);
+    assert.deepEqual(db.listSteeringAttempts("sess-1"), []);
+    db.close();
+
+    db = ControlPlaneDb.open(path);
+    assert.deepEqual(db.listSteeringAttempts("sess-1"), [], "dismissal survives a database restart");
+    assert.deepEqual(db.findSteeringAttemptBySubmission(
+      "sess-1", "submission-dismiss-queue-again",
+    )?.attempt.resolution, { action: "queue_again", state: "applied" });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy Queue Again receipt identities migrate safely, including malformed receipt JSON", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-queue-again-migration-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    for (const [suffix, now] of [["valid", 2], ["malformed", 10]] as const) {
+      db.createSteeringAttempt({
+        requestId: `steer-migration-${suffix}`, sessionId: "sess-1",
+        submissionId: `submission-migration-${suffix}`, turnId: `turn-${suffix}`,
+        source: "direct", requestSha256: (suffix === "valid" ? "1" : "0").repeat(64),
+        text: "recover", now,
+      });
+      db.markSteeringAttemptUncertain(`steer-migration-${suffix}`, now + 1);
+      db.stageSteeringResolution(
+        "sess-1", `submission-migration-${suffix}`, "queue_again", `resolve-migration-${suffix}`, now + 2,
+      );
+    }
+    db.recordSteeringResolutionResult("runner-1", {
+      type: "resolve_steering_attempt_result", requestId: "resolve-migration-valid",
+      sessionId: "sess-1", submissionId: "submission-migration-valid",
+      action: "queue_again", applied: true, queuedPromptId: "queue-migrated",
+    }, 5);
+    db.raw().prepare(
+      `UPDATE session_steering_attempts
+       SET resolution_receipt_json='not json',resolved_at=13
+       WHERE request_id='steer-migration-malformed'`,
+    ).run();
+    db.close();
+    db = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE session_steering_attempts DROP COLUMN resolution_queued_prompt_id");
+    legacy.close();
+
+    assert.doesNotThrow(() => { db = ControlPlaneDb.open(path); },
+      "malformed legacy JSON must not make database startup fail");
+    assert.equal(db!.findSteeringAttemptBySubmission(
+      "sess-1", "submission-migration-valid",
+    )?.attempt.resolution?.queuedPromptId, "queue-migrated");
+    assert.equal(db!.retireQueuedAgainSteeringReceiptFromUserMessage(
+      "sess-1", "queue-migrated", 20,
+    ), true, "the backfilled identity remains eligible for exact retirement");
+    assert.deepEqual(db!.findSteeringAttemptBySubmission(
+      "sess-1", "submission-migration-malformed",
+    )?.attempt.resolution, { action: "queue_again", state: "applied" });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rejected steering receipts can be durably acknowledged without a runner round trip", () => {
   const db = withRunner();
   db.createSession(newSession());

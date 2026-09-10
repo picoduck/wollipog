@@ -3102,6 +3102,7 @@ textarea {
   margin-bottom: 8px;
 }
 .steering-receipt {
+  position: relative;
   display: grid;
   gap: 6px;
   padding: 8px 10px;
@@ -3110,6 +3111,24 @@ textarea {
   border-radius: var(--radius-sm);
   color: var(--text-dim);
   font-size: var(--text-sm);
+}
+.steering-receipt[data-dismissible="true"] { padding-inline-end: 38px; }
+.steering-receipt-dismiss {
+  position: absolute;
+  inset-block-start: 3px;
+  inset-inline-end: 3px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--text-faint);
+}
+.steering-receipt-dismiss svg { width: 14px; height: 14px; }
+.steering-receipt-dismiss:disabled,
+.steering-receipt-dismiss:disabled:hover {
+  background: transparent;
+  color: var(--text-faint);
+  cursor: wait;
+  opacity: 0.45;
 }
 .steering-receipt[data-status="uncertain"] {
   border-color: color-mix(in srgb, var(--amber) 42%, var(--border));
@@ -3167,6 +3186,9 @@ textarea {
   color: var(--text-dim);
   font-size: var(--text-sm);
   overflow: hidden;
+}
+.steering-terminal-receipts[data-terminal-status="queued_again"] {
+  border-color: color-mix(in srgb, var(--green) 30%, var(--border));
 }
 .steering-terminal-controls {
   display: flex;

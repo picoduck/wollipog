@@ -6884,6 +6884,26 @@ export class SessionsService {
     }
   }
 
+  /** Canonical user-message identity is durable delivery evidence whether it arrives live or
+   * through either history protocol. Steering evidence reconciles a locally uncertain direct
+   * attempt; an ordinary turn retires only the Queue Again receipt with that exact queue id. */
+  private reconcileSteeringFromUserMessage(
+    sessionId: string,
+    payload: SessionEventPayload,
+    now: number,
+  ): boolean {
+    if (payload.kind !== "user_message" || typeof payload.turnId !== "string") return false;
+    if (payload.deliveryIntent === "steer" && typeof payload.submissionId === "string") {
+      return this.db.resolveSteeringAttemptFromUserMessage(
+        sessionId, payload.submissionId, payload.turnId, now,
+      );
+    }
+    if (payload.deliveryIntent !== "steer") {
+      return this.db.retireQueuedAgainSteeringReceiptFromUserMessage(sessionId, payload.turnId, now);
+    }
+    return false;
+  }
+
   /** Mirror transport-health provenance for both live ingestion and history hydration without
    * duplicating the same durable transition when a reconnect replays an already-audited event. */
   private recordPolicyTransportAudit(
@@ -6998,15 +7018,7 @@ export class SessionsService {
         throw error;
       }
     }
-    const steeringEvidence = payload.kind === "user_message" && payload.deliveryIntent === "steer" &&
-      typeof payload.submissionId === "string" && typeof payload.turnId === "string"
-      ? { submissionId: payload.submissionId, turnId: payload.turnId }
-      : null;
-    const reconciledSteering = steeringEvidence
-      ? this.db.resolveSteeringAttemptFromUserMessage(
-        sessionId, steeringEvidence.submissionId, steeringEvidence.turnId, now,
-      )
-      : false;
+    const reconciledSteering = this.reconcileSteeringFromUserMessage(sessionId, payload, now);
     const commandEvidence = payload.kind === "user_message" ? payload.commandInvocation : undefined;
     const reconciledCommand = commandEvidence
       ? this.db.resolveSessionCommandInvocationFromUserMessage(
@@ -7737,6 +7749,7 @@ export class SessionsService {
           return;
         }
         let projectedBackgroundDelivery = false;
+        let projectedSteering = false;
         for (let i = 0; i < applied.events.length; i++) {
           const event = applied.events[i]!;
           const answered = event.payload.kind === "question_request" &&
@@ -7744,6 +7757,7 @@ export class SessionsService {
           this.hub.sessionEvent(event, { suppressReminderWake: answered });
           trailingAsk = this.updateTrailingAsk(trailingAsk, applied.events[i]!.payload);
           const payload = applied.events[i]!.payload;
+          if (this.reconcileSteeringFromUserMessage(sessionId, payload, event.ts)) projectedSteering = true;
           if (payload.kind === "background_continuation_delivered") projectedBackgroundDelivery = true;
           if (payload.kind === "policy_transport") {
             this.recordPolicyTransportAudit(session, payload, applied.events[i]!.ts);
@@ -7753,7 +7767,7 @@ export class SessionsService {
           const attribution = this.restoreQuestionPolicyAttribution(event);
           if (attribution) this.hub.sessionEvent(attribution);
         }
-        if (projectedBackgroundDelivery) this.hub.sessionChangedById(sessionId);
+        if (projectedBackgroundDelivery || projectedSteering) this.hub.sessionChangedById(sessionId);
         afterSeq = page.nextAfterSeq;
         if (!page.hasMore) break;
       }
@@ -7786,6 +7800,7 @@ export class SessionsService {
       // card and the ask is unanswerable. Usage events are deliberately NOT accrued here
       // (snapshots carry authoritative totals; accruing hydrated token_usage double-counts).
       let trailingAsk: PendingApproval | null = null;
+      let projectedSteering = false;
       for (const e of [...res.events].sort((a, b) => a.seq - b.seq)) {
         if (e.seq <= this.db.getHydratedSeq(sessionId)) continue;
         const prepared = this.externalizeEventOrOriginal(sessionId, e.payload, e.ts);
@@ -7806,6 +7821,7 @@ export class SessionsService {
         this.hub.sessionEvent(ev, { suppressReminderWake: attribution !== null });
         if (attribution) this.hub.sessionEvent(attribution);
         trailingAsk = this.updateTrailingAsk(trailingAsk, ev.payload);
+        if (this.reconcileSteeringFromUserMessage(sessionId, ev.payload, ev.ts)) projectedSteering = true;
         if (ev.payload.kind === "background_continuation_delivered") {
           this.hub.sessionChangedById(sessionId);
         }
@@ -7813,6 +7829,7 @@ export class SessionsService {
           this.recordPolicyTransportAudit(session, ev.payload, ev.ts);
         }
       }
+      if (projectedSteering) this.hub.sessionChangedById(sessionId);
       // Park the recovered ask ONLY when the session is really waiting on it: status is owned
       // by the un-gapped session_status channel (input_required there = the runner is parked),
       // and an existing card (a fresher live ask, a policy pause, a snapshot-carried card)
