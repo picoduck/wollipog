@@ -147,7 +147,7 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreVerticalIcon, PlusIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, InfoIcon, MicIcon, MoreVerticalIcon, PlusIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -5910,7 +5910,9 @@ function CheckpointsInput({
   const live = (value ?? []).join(", ");
   const [draft, setDraft] = useState<string | null>(null);
   const inputId = useId();
-  const descriptionId = useId();
+  const hint = `Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again. ` +
+    `Checkpoints at or above the recurring cost threshold do not pause separately.` +
+    (approvedUsd != null ? ` Approved through $${approvedUsd.toFixed(2)}.` : "");
   const commit = () => {
     if (draft === null) return;
     const list = draft.split(/[\s,]+/).map(Number).filter((usd) => Number.isFinite(usd) && usd > 0);
@@ -5925,18 +5927,15 @@ function CheckpointsInput({
         type="text"
         inputMode="decimal"
         placeholder="none"
-        aria-describedby={descriptionId}
         value={draft ?? live}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={commit}
         onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }}
       />
       <span className="plus-budget-copy">
-        <label className="plus-budget-label" htmlFor={inputId}>Cost Checkpoints</label>
-        <span className="plus-budget-hint" id={descriptionId}>
-          Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again.
-          Checkpoints at or above the recurring cost threshold do not pause separately.
-          {approvedUsd != null ? ` Approved through $${approvedUsd.toFixed(2)}.` : ""}
+        <span className="plus-budget-label-row">
+          <label className="plus-budget-label" htmlFor={inputId}>Cost Checkpoints</label>
+          <GuardrailHelp label="Cost Checkpoints" hint={hint} />
         </span>
       </span>
     </div>
@@ -5977,14 +5976,12 @@ function GuardrailInput({
 }) {
   const [draft, setDraft] = useState<string | null>(null); // null = not editing
   const inputId = useId();
-  const descriptionId = useId();
   return (
     <div className="plus-budget">
       <span className="plus-budget-prefix" aria-hidden="true">{prefix}</span>
       <input
         id={inputId}
         type="number"
-        aria-describedby={descriptionId}
         min="0"
         max={max}
         step={step}
@@ -6009,10 +6006,48 @@ function GuardrailInput({
         }}
       />
       <span className="plus-budget-copy">
-        <label className="plus-budget-label" htmlFor={inputId}>{label}</label>
-        <span className="plus-budget-hint" id={descriptionId}>{hint}</span>
+        <span className="plus-budget-label-row">
+          <label className="plus-budget-label" htmlFor={inputId}>{label}</label>
+          <GuardrailHelp label={label} hint={hint} />
+        </span>
       </span>
     </div>
+  );
+}
+
+/** Compact, keyboard-dismissible disclosure for guardrail guidance that would otherwise dominate the menu. */
+function GuardrailHelp({ label, hint }: { label: string; hint: string }) {
+  const [open, setOpen] = useState(false);
+  const popoverId = useId();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  return (
+    <span
+      className={`plus-budget-help${open ? " is-open" : ""}`}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !open) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        buttonRef.current?.focus();
+      }}
+    >
+      <button
+        ref={buttonRef}
+        className="plus-budget-info"
+        type="button"
+        aria-label={`About ${label}`}
+        aria-expanded={open}
+        aria-controls={popoverId}
+        title={`About ${label}`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <InfoIcon size={13} />
+      </button>
+      {open && <span className="plus-budget-help-popover" id={popoverId} role="note">{hint}</span>}
+    </span>
   );
 }
 

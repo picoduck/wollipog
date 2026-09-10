@@ -25,7 +25,18 @@ test("the Composer exposes and saves the live-child limit at desktop and mobile 
   await expect(input).toBeVisible();
   await expect(input).toHaveValue("6");
   await expect(input).toHaveAttribute("max", "64");
-  await expect(page.locator(".plus-menu")).toContainText("Live Child Limit");
+  const menu = page.locator(".plus-menu");
+  await expect(menu).toContainText("Live Child Limit");
+  await expect(menu).not.toContainText("Pauses when spend reaches this amount");
+  await expect(menu.getByRole("button", { name: /^About / })).toHaveCount(4);
+  const costHelp = menu.getByRole("button", { name: "About Recurring Cost Threshold" });
+  await costHelp.click();
+  await expect(costHelp).toHaveAttribute("aria-expanded", "true");
+  await expect(menu.locator(".plus-budget-help-popover")).toContainText("Pauses when spend reaches this amount");
+  await costHelp.press("Escape");
+  await expect(costHelp).toHaveAttribute("aria-expanded", "false");
+  await expect(menu.locator(".plus-budget-help-popover")).toHaveCount(0);
+  await expect(input).toBeVisible();
   await page.screenshot({ path: `${SHOT}/desktop.png` });
 
   await input.fill("9");

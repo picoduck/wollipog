@@ -72,6 +72,20 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
     assert.equal(input.placeholder, "4");
     assert.equal(input.max, "64");
     assert.match(container.textContent ?? "", /Live Child Limit/);
+    assert.doesNotMatch(container.textContent ?? "", /Pauses when spend reaches this amount/,
+      "verbose guardrail guidance stays out of the compact menu by default");
+    const costHelp = container.querySelector<HTMLButtonElement>('[aria-label="About Recurring Cost Threshold"]');
+    assert.ok(costHelp, "each guardrail exposes its guidance through an info control");
+    assert.equal(costHelp.getAttribute("aria-expanded"), "false");
+    await act(async () => fireDomEvent.click(costHelp));
+    assert.equal(costHelp.getAttribute("aria-expanded"), "true");
+    assert.match(container.textContent ?? "", /Pauses when spend reaches this amount/);
+    const helpPopover = container.querySelector<HTMLElement>(".plus-budget-help-popover");
+    assert.ok(helpPopover);
+    assert.equal(costHelp.getAttribute("aria-controls"), helpPopover.id);
+    await act(async () => fireDomEvent.keyDown(costHelp, { key: "Escape" }));
+    assert.equal(costHelp.getAttribute("aria-expanded"), "false");
+    assert.doesNotMatch(container.textContent ?? "", /Pauses when spend reaches this amount/);
     await act(async () => {
       input.focus();
     });
