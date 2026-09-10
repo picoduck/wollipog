@@ -339,6 +339,34 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
     expect((await readStrip(page)).overflows).toBe(false);
   });
 
+  test("the widest follow-state label still leaves the cost legible just above the cutoff", async ({ page }) => {
+    // `previewing` renders "Previewing, Follow Live Output" — about 20px wider than the "Paused"
+    // the other specs produce — and it is what the cutoff has to be budgeted against. Reaching that
+    // state needs a semantic-navigation reveal the usage fixture does not model, and the property
+    // under test is the label's WIDTH, so the spec substitutes the text directly.
+    await page.setViewportSize({ width: 1280, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=600&height=780&cost=12345.67");
+    await expect(page.locator(".follow-tail-chip")).toBeVisible();
+    await page.mouse.move(300, 300);
+    await page.mouse.wheel(0, -900);
+    await expect(page.locator(".follow-tail-chip")).toContainText("Follow Live Output");
+
+    const paused = await page.locator(".follow-tail-chip").evaluate((chip) => chip.getBoundingClientRect().width);
+    await page.locator(".follow-tail-chip span").first().evaluate((label) => { label.textContent = "Previewing"; });
+    const previewing = await page.locator(".follow-tail-chip").evaluate((chip) => chip.getBoundingClientRect().width);
+    // Guard the premise: if the states ever converge, this spec stops testing anything.
+    expect(previewing).toBeGreaterThan(paused + 10);
+
+    // Above the cutoff the hint is still offered, and the widest centre control must not push the
+    // cost below its own width. Calibrated on "Paused" this had ~2px of margin at 561px.
+    await expect(page.locator(".transcript-status-actions")).toBeVisible();
+    const legible = await page.locator(".transcript-status-usage .session-cost-button").evaluate((button) => ({
+      visible: button.getBoundingClientRect().width,
+      needed: button.scrollWidth,
+    }));
+    expect(legible.visible).toBeGreaterThanOrEqual(legible.needed - 0.5);
+  });
+
   test("an unpriced ledger keeps the placeholder and names itself in the popover", async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 820 });
     await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=none");

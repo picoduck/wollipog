@@ -106,8 +106,10 @@ test("live-follow status owns a reserved transcript strip with a compact centere
   // A pane too narrow for all three tracks sheds the optional hint, never the cost. The cutoff has
   // to be font-relative: the labels are rem, so a px-only cutoff goes inactive exactly where an
   // enlarged root font needs it most.
+  assert.match(css, /@container transcript-pane \(max-width: \d+px\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
+    "a plain-length cutoff retires the trailing actions in every engine with size container queries");
   assert.match(css, /@container transcript-pane \(max-width: calc\([^)]*rem[^)]*\)\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
-    "the trailing actions retire on a width threshold that scales with the text-size preference");
+    "and a font-relative cutoff retires them earlier when the reader has raised their text size");
   assert.match(css, /\.follow-tail-control\s*\{[^}]*grid-column:\s*2;[^}]*display:\s*inline-flex;[^}]*gap:\s*8px;[^}]*justify-self:\s*center;/,
     "cluster items sit at the standard inter-control gap — no flexible spacers or space-between");
   assert.doesNotMatch(css.match(/\.follow-tail-control\s*\{[^}]*\}/)?.[0] ?? "", /1fr|space-between/,

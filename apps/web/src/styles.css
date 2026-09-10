@@ -10471,13 +10471,22 @@ body.shell-dock-dragging * {
    few pixels — or to nothing — while the hint kept its full width (#893).
 
    The threshold is the width at which the strip stops fitting, split into the part that scales
-   with the reader's text-size preference and the part that does not. Fixed: the paused
-   follow-state control (~238px; its type is px, so it does not grow) plus the strip's 44px of
-   padding and column gaps. Scaling: each symmetric 1fr track carries the hint with its gap (~65px)
-   and a wide cost (~61px) at a 16px root, and both use rem type, so the pair is ~16rem. A fixed
-   560px cutoff was inactive at a 561px pane with a 24px or 32px root, where the doubled labels put
-   the cost back below its own scrollWidth — the exact inversion this rule exists to prevent. */
-@container transcript-pane (max-width: calc(300px + 16rem)) {
+   with the reader's text-size preference and the part that does not. Fixed: the follow-state
+   control in its WIDEST state plus the strip's 44px of padding and column gaps. That state is
+   `previewing` ("Previewing, Follow Live Output" plus its keycap), which measures ~258px against
+   ~238px for `paused` — calibrating on `paused` left barely 2px of margin, less than the spread
+   between font stacks. Scaling: each symmetric 1fr track carries the hint with its gap (~65px) and
+   a wide cost (~61px) at a 16px root, and both use rem type, so the pair is ~16rem. A fixed 560px
+   cutoff was inactive at a 561px pane with a 24px or 32px root, where the doubled labels put the
+   cost back below its own scrollWidth — the exact inversion this rule exists to prevent.
+
+   Two rules rather than one calc(): the plain length parses in every engine that supports size
+   container queries at all, while the calc() refinement, which an older engine may drop as
+   invalid, only ever retires the hint EARLIER. Whichever survives, the cost keeps its seat. */
+@container transcript-pane (max-width: 590px) {
+  .transcript-status-actions { display: none; }
+}
+@container transcript-pane (max-width: calc(330px + 16rem)) {
   .transcript-status-actions { display: none; }
 }
 /* One compact centered cluster — pager hints sit at the standard inter-control gap directly
