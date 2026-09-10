@@ -2782,3 +2782,152 @@ test("queued app-server recovery refuses to relaunch into a removed worktree", {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a launch refused by worktree verification retains the tree it could not identify", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-refused-launch-retain-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => null,
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const worktreePath = join(root, "materialized");
+    // Materialization publishes the worktree to the Native TUI, shells, and Files before capacity
+    // admission resolves. Reproduce a user who used that window: a different branch and an
+    // uncommitted edit, both made in a tree this launch created and would otherwise reap.
+    (manager as unknown as { createSessionWorktree: (...args: unknown[]) => Promise<unknown> })
+      .createSessionWorktree = async () => {
+        execFileSync("git", ["-C", repo, "worktree", "add", "-b", "agent/s_refused_retain", worktreePath]);
+        execFileSync("git", ["-C", worktreePath, "switch", "-c", "user/kept-work"]);
+        writeFileSync(join(worktreePath, "uncommitted.txt"), "work the user has not pushed\n");
+        return { path: worktreePath, branch: "agent/s_refused_retain" };
+      };
+
+    const started = await manager.start({
+      sessionId: "s_refused_retain", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    });
+    assert.equal(started, false, "the launch fails closed on the drifted branch");
+    assert.deepEqual(launchedCwds, [], "and never reaches provider construction");
+    assert.equal(existsSync(worktreePath), true, "the unverifiable worktree is retained, not reaped");
+    assert.equal(existsSync(join(worktreePath, "uncommitted.txt")), true, "so the user's uncommitted work survives");
+    assert.equal(store.readMeta("s_refused_retain")?.worktreePath, worktreePath,
+      "and the selection still names the tree the error is about");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a non-host execution target verifies its host worktree before the adapter is reached", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-target-worktree-verify-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    store.create({
+      sessionId: "s_container_wt", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "target",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    const selected = await manager.requestWorktree("s_container_wt", { baseRef: "HEAD", branch: "fix/container-target" });
+    // A container target bind-mounts this exact host directory into the guest, so the local tree is
+    // as load-bearing there as it is for a host launch.
+    store.patchMeta("s_container_wt", {
+      executionTarget: {
+        id: "runner:container:test", runnerId: "runner", kind: "container",
+        workspaceStrategy: "worktree", adapter: "container",
+        boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+      },
+    });
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", selected.worktree.path]);
+
+    const internals = manager as unknown as {
+      recoveryQueues: Map<string, unknown[]>;
+      recoverQueuedAppServer: (sessionId: string) => Promise<void>;
+    };
+    internals.recoveryQueues.set("s_container_wt", [{ id: "q1", text: "held", images: [], queuedAt: 1 }]);
+    await internals.recoverQueuedAppServer("s_container_wt");
+
+    assert.deepEqual(launchedCwds, [], "no driver was constructed for the removed mount source");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /could not be verified before provider launch/.test(message.payload.message ?? "")), true,
+      "the worktree is proved before any adapter-specific preparation runs");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("conversation fork refuses to spawn its temporary provider in a removed worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-fork-removed-wt-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const, forkConversation: async () => "forked-thread",
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    store.create({
+      sessionId: "s_fork_source", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "fork source",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      turnCount: 1, seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const selected = await manager.requestWorktree("s_fork_source", { baseRef: "HEAD", branch: "fix/fork-source" });
+    const head = execFileSync("git", ["-C", selected.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const tree = execFileSync("git", ["-C", selected.worktree.path, "rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
+    store.patchMeta("s_fork_source", {
+      forkPoints: { "1": { tree, baseCommit: head, agentTurnId: "turn-1", eventSeq: 1 } },
+    });
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", selected.worktree.path]);
+
+    const forked = await manager.forkConversation("s_fork_source", "s_fork_target", 1, "Forked");
+    assert.equal(forked.ok, false);
+    assert.match(forked.error ?? "", /source worktree could not be verified before fork/);
+    assert.deepEqual(launchedCwds, [], "the temporary provider was never constructed");
+    assert.equal(store.has("s_fork_target"), false, "and no target session row was published");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

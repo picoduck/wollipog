@@ -63,11 +63,15 @@ reconciliation, not a failed cleanup.
 
 Because a worktree can still disappear outside Wollipog, every launch that carries a persisted
 worktree re-proves it immediately before the provider process is created — start, resume, worktree
-rebind, and queued app-server recovery alike. The path must still be registered with the session's
-repository, healthy, on the recorded branch, and inside the permitted boundary. A worktree that is
-missing, unregistered, unhealthy, moved, or branch-drifted fails that one session with a durable
-error naming the invalid path; the runner never substitutes the primary workspace, and no worktree
-lease, provider-home lease, or provider process is taken before the check runs.
+rebind, and queued app-server recovery alike, and on every execution target, since container
+placements bind-mount that same host directory and cloud placements snapshot it. A conversation
+fork re-proves the source worktree before constructing its temporary provider. The path must still
+be registered with the session's repository, healthy, on the recorded branch, and inside the
+permitted boundary. A worktree that is missing, unregistered, unhealthy, moved, or branch-drifted
+fails that one session with a durable error naming the invalid path; the runner never substitutes
+the primary workspace, and no worktree lease, provider-home lease, or provider process is taken
+before the check runs. A launch refused this way retains the worktree rather than reaping it: a
+tree whose identity the runner just declined to confirm may hold work the session never made.
 
 Claude Code launches also receive an additive `wollipog` stdio MCP configuration. Both adapters
 execute the existing manager tool table, including bounded output projection and `wait_session`, so

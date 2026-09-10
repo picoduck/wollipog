@@ -774,6 +774,10 @@ export class SessionManager {
    * a fast replacement finishing so an older continuation can still identify that replacement. */
   private readonly latestLaunchGenerations = new Map<string, number>();
   private nextLaunchGeneration = 0;
+  /** Generation whose launch was refused because its persisted worktree failed verification. A
+   * tree we just refused to identify is not proven to be this launch's own garbage, so start()
+   * must retain it instead of force-reaping whatever now sits at that path. */
+  private readonly worktreeVerificationRefusals = new Map<string, number>();
   /** Ephemeral approval timers. Only durations leave the runner; request/session ids never do. */
   private readonly approvalStarted = new Map<string, number>();
   private readonly cleanupJournal: WorktreeCleanupJournal;
@@ -2947,8 +2951,14 @@ export class SessionManager {
         durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
         return false;
       }
+      // A verification refusal proves the opposite of ownership: the path is missing, unregistered,
+      // or now holds a different branch, so it may hold work this launch never made. Materialization
+      // already opened it to the Native TUI, shells, and Files. Retain it and leave the selection
+      // pointing at it, so the reported error is about a tree the user can still inspect.
+      const unverified = this.worktreeVerificationRefusals.get(spec.sessionId) === launchGeneration;
+      this.worktreeVerificationRefusals.delete(spec.sessionId);
       // The session never started; if WE just created its worktree, it's garbage — reap it.
-      if (worktree && worktreeOwnedByLaunch && !deleted) {
+      if (worktree && worktreeOwnedByLaunch && !deleted && !unverified) {
         const cleanup = launchWorktreeCleanup();
         this.cleanupJournal.add(cleanup);
         this.store.patchMeta(spec.sessionId, { worktreePath: null });
@@ -2989,6 +2999,7 @@ export class SessionManager {
 
   private beginLaunchGeneration(sessionId: string): number {
     this.cancelWorktreePreparationWait(sessionId);
+    this.worktreeVerificationRefusals.delete(sessionId);
     const generation = ++this.nextLaunchGeneration;
     this.launchGenerations.set(sessionId, generation);
     this.latestLaunchGenerations.set(sessionId, generation);
@@ -3323,37 +3334,56 @@ export class SessionManager {
     }
   }
 
-  /** Re-prove a persisted worktree selection immediately before provider construction: still
-   * registered with this session's repository, still healthy, still on the recorded branch, and
-   * still inside the permitted worktree boundary. A refusal fails only this session and never falls
-   * back to the primary workspace; it happens before the worktree lease, the provider-home lease,
-   * and driver construction, so the caller's ordinary `!launched` unwind settles admission, the
-   * session lock, and any durable prompt lifecycle. */
-  private async verifySelectedWorktreeBeforeLaunch(
+  /** Re-prove a persisted worktree coordinate: still registered with this session's repository,
+   * still healthy, still inside the permitted boundary, and still on `branch` when the session
+   * recorded one. Returns the reason it failed, or null when the path is exactly what was recorded.
+   *
+   * Every execution target is checked, not only `host`: container targets bind-mount this same
+   * host directory into the guest and cloud targets snapshot it, so a path that disappeared or was
+   * recreated locally is a wrong-bytes problem there too, not a remote-only concern.
+   *
+   * `branch` is the session's recorded `worktreeBranch` and may legitimately be absent on a row
+   * that predates it or was adopted. Absent means unknown, never `agent/<sessionId>`: a worktree
+   * can carry any branch the operator gave it, and inventing an identity here would fail a launch
+   * over a name the runner made up rather than one it ever stored. */
+  private async persistedWorktreeFailure(
     meta: SessionMeta,
-    worktree: WorktreeHandle,
-    launchGeneration: number,
-  ): Promise<boolean> {
-    // Only host execution keeps the worktree on the runner's own filesystem. Container and cloud
-    // targets resolve their working directory inside the remote environment, where a local Git
-    // registration check would prove nothing about the directory the provider actually receives.
-    if (meta.executionTarget && meta.executionTarget.adapter !== "host") return true;
-    let detail: string;
+    path: string,
+    branch: string | undefined,
+  ): Promise<string | null> {
     try {
-      const verified = await attachRequestedWorktree(meta.repoPath, meta.sessionId, worktree.path, {
+      const verified = await attachRequestedWorktree(meta.repoPath, meta.sessionId, path, {
         context: meta.context,
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
         // This exact coordinate was already located and validated by the create/attach operation
         // that persisted it, so it is not new caller input. Git registration with this repository,
         // worktree health, and branch identity are all still re-proved.
-        allowedProjectPaths: [worktree.path],
+        allowedProjectPaths: [path],
       });
-      if (verified.branch === worktree.branch) return true;
-      detail = `it is now on branch ${verified.branch} instead of the recorded ${worktree.branch}`;
+      return !branch || verified.branch === branch
+        ? null
+        : `it is now on branch ${verified.branch} instead of the recorded ${branch}`;
     } catch (error) {
-      detail = errText(error);
+      return errText(error);
     }
+  }
+
+  /** Re-prove the persisted worktree selection immediately before provider construction. A refusal
+   * fails only this session and never falls back to the primary workspace; it happens before the
+   * worktree lease, the provider-home lease, and driver construction, so the caller's ordinary
+   * `!launched` unwind settles admission, the session lock, and any durable prompt lifecycle. */
+  private async verifySelectedWorktreeBeforeLaunch(
+    meta: SessionMeta,
+    worktree: WorktreeHandle,
+    launchGeneration: number,
+  ): Promise<boolean> {
+    const detail = await this.persistedWorktreeFailure(meta, worktree.path, meta.worktreeBranch);
+    if (!detail) return true;
+    // Whatever now occupies that path is not provably this launch's own materialization, so the
+    // initial-start cleanup must not force-remove it. Record the refusal before reporting: a stop
+    // arriving in the window below still has to reach the retention decision.
+    this.worktreeVerificationRefusals.set(meta.sessionId, launchGeneration);
     // Verification awaits Git. A restart or stop can take the session over inside that window, and
     // the replacement may legitimately own this same worktree — report only while this launch is
     // still the live one, exactly as the rest of the launch path does after every await.
@@ -7339,6 +7369,15 @@ export class SessionManager {
         if (updated && (priorCapabilities !== source.capabilities ||
             priorSessionSlashCommands !== source.sessionSlashCommands)) {
           this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        }
+        // The temporary provider is a real spawn into the source session's persisted worktree, so
+        // it needs the same proof a launch does: the tree can have been removed since the session
+        // last ran, and fork must not create a process in a directory that is no longer it.
+        const unverified = await this.persistedWorktreeFailure(
+          source, source.worktreePath, source.worktreeBranch,
+        );
+        if (unverified) {
+          return { ok: false, error: `source worktree could not be verified before fork: ${unverified}` };
         }
         const isolation = await this.resolveLaunchIsolation(source, source.worktreePath);
         this.providerHomeLeases?.acquire({
