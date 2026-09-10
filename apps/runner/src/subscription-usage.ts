@@ -297,12 +297,17 @@ export function normalizeClaudeRateLimits(
     const limitingId = stringValue(info.rateLimitType ?? info.rate_limit_type, 96);
     const unified = record(info.unifiedWindows ?? info.unified_windows);
     const unifiedIds = new Set<string>();
-    for (const [id, value] of Object.entries(unified ?? {}).slice(0, MAX_PROVIDER_BUCKETS)) {
+    for (const [rawId, value] of Object.entries(unified ?? {}).slice(0, MAX_PROVIDER_BUCKETS)) {
       const window = record(value);
       if (!window) continue;
+      // Compare sanitized ids. `limitingId` is already bounded, and `claudeWindow` bounds the raw
+      // key the same way, so comparing the raw key would silently miss any id past the bound —
+      // suppressing the top-level bucket while never folding its status into the window.
+      const id = stringValue(rawId, 96);
       // A unified window carries no status of its own; the limiting window's status is the
       // top-level one, so fold it in rather than reporting that window as plainly available.
-      const bucket = claudeWindow(id, id === limitingId ? { ...window, status: info.status } : window, fetchedAt);
+      const isLimiting = id !== undefined && id === limitingId;
+      const bucket = claudeWindow(rawId, isLimiting ? { ...window, status: info.status } : window, fetchedAt);
       if (!bucket) continue;
       unifiedIds.add(bucket.id);
       claimed.add(bucket.id);
@@ -383,17 +388,32 @@ function mergeObservedBucket(
   return { ...prior, ...update };
 }
 
+/** Hold the snapshot inside the control plane's bucket bound, which it enforces by rejecting the
+ * whole update. Buckets the update did not report are dropped first: retaining an old bucket at the
+ * cost of a currently reported window is how a source loses the windows the user actually needs. */
+function boundBuckets(ordered: SubscriptionUsageBucket[], reported: Set<string>): SubscriptionUsageBucket[] {
+  if (ordered.length <= MAX_PROVIDER_BUCKETS) return ordered;
+  const excess = ordered.length - MAX_PROVIDER_BUCKETS;
+  const dropped = new Set<string>();
+  for (let index = ordered.length - 1; index >= 0 && dropped.size < excess; index -= 1) {
+    const candidate = ordered[index];
+    if (candidate && !reported.has(candidate.id)) dropped.add(candidate.id);
+  }
+  return ordered.filter((bucket) => !dropped.has(bucket.id)).slice(0, MAX_PROVIDER_BUCKETS);
+}
+
 function mergeSnapshot(
   prior: SubscriptionUsageSnapshot | undefined,
   update: SubscriptionUsageSnapshot,
-  /** `notification` is an unordered provider event; `authoritative` is a probe result we read. */
-  provenance: "notification" | "authoritative",
+  /** Only Claude notifications are both unordered and carry the per-window semantics the ordering
+   * rules rely on. Codex probes and Codex push updates keep the plain pre-existing merge. */
+  mergeMode: "claude-notification" | "plain",
 ): SubscriptionUsageSnapshot {
   if (!prior || prior.provider !== update.provider) return update;
   // Sparse notifications can be delayed behind a manual read. Never let an older provider
   // observation replace fields from a newer authoritative snapshot.
   if (update.fetchedAt < prior.fetchedAt) return prior;
-  const merge = provenance === "authoritative" ? mergeBucket : mergeObservedBucket;
+  const merge = mergeMode === "claude-notification" ? mergeObservedBucket : mergeBucket;
   const buckets = new Map(prior.buckets.map((bucket) => [bucket.id, bucket]));
   for (const bucket of update.buckets) buckets.set(bucket.id, merge(buckets.get(bucket.id), bucket));
   const spendControls = new Map((prior.spendControls ?? []).map((item) => [item.id, item]));
@@ -404,7 +424,7 @@ function mergeSnapshot(
   return {
     ...priorWithoutDetail,
     ...update,
-    buckets: [...buckets.values()].slice(0, MAX_PROVIDER_BUCKETS),
+    buckets: boundBuckets([...buckets.values()], new Set(update.buckets.map((bucket) => bucket.id))),
     ...(update.credits || prior.credits ? { credits: { ...prior.credits, ...update.credits } } : {}),
     ...(spendControls.size > 0 ? { spendControls: [...spendControls.values()] } : {}),
   };
@@ -678,7 +698,8 @@ export class SubscriptionUsageManager {
       return prior ?? null;
     }
     this.lastEvent.set(sourceId, { signature, observedAt: normalized.fetchedAt });
-    const explained = this.explainMissingUtilization(mergeSnapshot(prior, normalized, "notification"));
+    const explained = this.explainMissingUtilization(
+      mergeSnapshot(prior, normalized, provider === "claude" ? "claude-notification" : "plain"));
     if (explained === prior) return prior;
     this.snapshots.set(sourceId, explained);
     this.options.publish(explained);
@@ -797,7 +818,7 @@ export class SubscriptionUsageManager {
         const merged = mergeSnapshot(this.snapshots.get(source.sourceId), {
           ...normalized,
           ...(result.plan && !normalized.plan ? { plan: result.plan } : {}),
-        }, "authoritative");
+        }, "plain");
         this.snapshots.set(source.sourceId, merged);
         this.options.publish(merged);
         return;

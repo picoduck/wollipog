@@ -825,3 +825,74 @@ test("Claude execution contexts stay separate sources and a manual refresh start
   assert.equal(probes, 0, "Claude sources are never probed; a refresh cannot start a turn");
   assert.equal(JSON.stringify(manager.inventory()), before, "a refresh leaves Claude sources untouched");
 });
+
+test("a Codex push update is merged plainly, exactly as before Claude gained ordering rules", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const observe = (usedPercent: number) =>
+    manager.observe("codex", "codex-app-server", { kind: "native" }, {
+      provider: "codex",
+      kind: "sparse",
+      payload: { rateLimits: { limitId: "codex", primary: { usedPercent, resetsAt: FIVE_HOUR_RESET } } },
+    });
+  observe(80);
+  now = OBSERVED_AT + 60_000;
+  observe(60);
+  // The ordering rules were derived from Claude's per-window contract. Codex keeps the merge it
+  // had before this PR rather than inheriting a premise nothing verified for it.
+  assert.equal(manager.inventory()[0]?.buckets[0]?.usedPercent, 60);
+});
+
+test("newly reported Claude windows are never evicted by buckets already stored", () => {
+  let now = OBSERVED_AT;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => {},
+    now: () => now,
+  });
+  const observe = (payload: unknown) =>
+    manager.observe("claude", "claude-code", { kind: "native" }, { provider: "claude", kind: "sparse", payload });
+  observe({
+    rate_limits: Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [`legacy${index}`, { used_percentage: 5 }])),
+  });
+  assert.equal(manager.inventory()[0]?.buckets.length, 64);
+  now = OBSERVED_AT + 60_000;
+  observe(rateLimitEvent({
+    status: "allowed",
+    rateLimitType: "five_hour",
+    unifiedWindows: {
+      five_hour: { utilization: 0.83, resetsAt: FIVE_HOUR_RESET },
+      seven_day: { utilization: 0.4, resetsAt: WEEK_RESET },
+    },
+  }));
+  const buckets = manager.inventory()[0]?.buckets ?? [];
+  assert.equal(buckets.length, 64, "the control plane's bound still holds");
+  assert.equal(buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent, 83);
+  assert.equal(buckets.find((bucket) => bucket.id === "seven_day")?.usedPercent, 40);
+});
+
+test("a limiting window id past the control-plane bound still receives its status", () => {
+  const longId = "w".repeat(100);
+  const snapshot = normalizeClaudeRateLimits(rateLimitEvent({
+    status: "rejected",
+    rateLimitType: longId,
+    unifiedWindows: { [longId]: { utilization: 0.99, resetsAt: FIVE_HOUR_RESET } },
+  }), base, OBSERVED_AT);
+  assert.ok(snapshot);
+  assert.equal(snapshot.buckets.length, 1, "the truncated key is the same window, not a second one");
+  assert.equal(snapshot.buckets[0]?.id.length, 96);
+  assert.equal(
+    snapshot.buckets[0]?.status,
+    "exhausted",
+    "a rejected window must not read as merely approaching its limit",
+  );
+});
