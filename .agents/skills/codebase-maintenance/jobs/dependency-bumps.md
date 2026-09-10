@@ -20,9 +20,21 @@ would actually require.
   the toolchain installed, and the fallback would have discarded all three of its findings.)
 - For each candidate, read the changelog or release notes between the installed and latest version
   and identify breaking changes concretely, rather than inferring risk from the version number.
+  This step is also advisory discovery, not just risk assessment: for every outdated runtime
+  dependency, check the upstream repository's own advisories
+  (`gh api repos/<owner>/<repo>/security-advisories`) and read the release notes for "security".
+  A clean `pnpm audit` is not evidence that a package has no advisory — it sees only the GitHub
+  and npm advisory databases, and a repository-scoped advisory can be absent from both. On
+  2026-09-09 `fastify` sat one patch behind four high-severity advisories with `pnpm audit`
+  reporting zero at every severity and no Dependabot alert; the release notes were the only
+  signal.
 
 Cross-check against Dependabot: `gh pr list --label dependencies --state open`. A dependency with an
-open Dependabot PR is already tracked and must not be reported again.
+open Dependabot PR is already tracked and must not be reported again. The converse does not hold:
+an absent Dependabot PR is not evidence that a dependency is current. Compare the open PR count per
+ecosystem against `open-pull-requests-limit` in `.github/dependabot.yml`; a queue sitting at its
+limit is indistinguishable from a broken updater, and the run that found the `fastify` gap found
+nine outdated packages with no PR while the npm queue held exactly five.
 
 ## Gate
 
