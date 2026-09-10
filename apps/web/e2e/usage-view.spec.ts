@@ -116,9 +116,28 @@ test("Claude subscription cards show used and remaining allowance per window (#2
   // A build that reports resets but no utilization says so, instead of reading as a source that
   // has not answered yet.
   const resetOnly = cards.filter({ hasText: "Claude Code (Ubuntu)" }).first();
-  await expect(resetOnly).toContainText("Allowance Reported");
   await expect(resetOnly).toContainText("without utilization percentages");
   await expect(resetOnly).not.toContainText("after the first provider response");
+
+  // #872: the unmeasured window marks its missing percentage rather than putting a non-value
+  // where every sibling shows one, and its reset time becomes the prominent fact instead.
+  const unmeasured = resetOnly.locator(".subscription-bucket.unmeasured");
+  await expect(unmeasured).toHaveCount(2);
+  await expect(resetOnly).not.toContainText("Allowance Reported");
+  await expect(unmeasured.first().locator(".subscription-unmeasured")).toHaveText("—Utilization Not Reported");
+  await expect(unmeasured.first().locator("dd strong")).toContainText("Resets in");
+
+  // A status-only warning is still unmeasured, and its promoted reset keeps the warning colour:
+  // the size rule is declared before the status rules so only weight and size come from it.
+  const warned = unmeasured.nth(1);
+  await expect(warned).toHaveClass(/warning/);
+  await expect(warned).toContainText("Approaching Limit");
+  const warnColour = await warned.locator("dd strong").evaluate((el) => getComputedStyle(el).color);
+  const plainColour = await unmeasured.first().locator("dd strong").evaluate((el) => getComputedStyle(el).color);
+  expect(warnColour).not.toBe(plainColour);
+  // A measured window is untouched: its percentage keeps the prominent slot.
+  await expect(buckets.nth(0)).not.toHaveClass(/unmeasured/);
+  await expect(buckets.nth(0).locator("dd strong").first()).toHaveText("17% Remaining");
 
   // A source that answered without allowance headers gets its own explanation.
   const noHeaders = cards.filter({ hasText: "Claude Code (Debian)" }).first();

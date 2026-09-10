@@ -146,6 +146,9 @@ const subscription: SubscriptionUsageResponse = {
       buckets: [
         { id: "five_hour", label: "Five-Hour Window",
           resetsAt: SUBSCRIPTION_NOW + 3 * 3_600_000 + 12 * 60_000, status: "available" },
+        // A status-only `allowed_warning` event: no utilization, but the provider still warned.
+        { id: "seven_day", label: "Weekly — All Models",
+          resetsAt: SUBSCRIPTION_NOW + 5 * DAY, status: "warning" },
       ],
     },
     {
