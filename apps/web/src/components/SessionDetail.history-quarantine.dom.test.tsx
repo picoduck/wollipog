@@ -62,7 +62,7 @@ const runner = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 126,
+  protocolVersion: 128,
 } as RunnerView;
 
 function session(id: string, quarantine: SessionView["historyQuarantine"]): SessionView {

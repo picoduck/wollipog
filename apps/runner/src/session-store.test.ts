@@ -15,7 +15,7 @@ function wireEpoch(localEpoch: number, peer: number): number {
 
 /** A peer that needs no additive session-event projection at all. It moves whenever a new event
  * kind gets an older-peer omission policy, so these tests name the boundary instead of a literal:
- * v87 stopped being an exact peer when the v126 quarantine marker gained one. */
+ * It moves only when a policy is added, which is a migration in its own right. */
 const CURRENT_PEER = PROTOCOL_VERSION;
 import {
   appendFileSync,
@@ -376,11 +376,14 @@ test("every distinct wire projection gets its own dense sequence space", () => {
   const { store, root } = tmpStore();
   try {
     store.create(meta());
-    // v86 omits two event kinds, v87-v125 omits one, v126+ omits none. Three projections number
-    // the same log three different ways, so a control plane that hydrated through one and
-    // reconnects through another must be forced to resync rather than reuse its cursors.
-    const epochs = [86, 87, CURRENT_PEER].map((peer) => store.snapshots(peer)[0]!.historyEpoch);
-    assert.equal(new Set(epochs).size, 3, `distinct epochs per projection, got ${epochs.join(",")}`);
+    // One omission policy means two projections, and they must never share an epoch: a control
+    // plane that hydrated through one and reconnects through the other has to resync rather than
+    // reuse cursors whose sequence numbers now name different events.
+    const epochs = [86, CURRENT_PEER].map((peer) => store.snapshots(peer)[0]!.historyEpoch);
+    assert.equal(new Set(epochs).size, epochs.length, `distinct epochs per projection, got ${epochs.join(",")}`);
+    // The encoding is also stable: adding a policy would renumber these into values that collide
+    // with the ones peers already stored, so it needs an explicit migration fence.
+    assert.deepEqual(epochs, [1, 0]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

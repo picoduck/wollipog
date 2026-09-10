@@ -978,6 +978,12 @@ export class SessionManager {
     if (!latest || !this.sessionCanOpen(meta.sessionId)) {
       throw new Error("session disappeared while its requested worktree was activating");
     }
+    // The capture above is awaited, so a live provider can quarantine its history inside that
+    // window. Recheck against the fresh metadata before mutating worktreePath, or the switch lands
+    // anyway and strands the recovery checkpoint on the previous worktree.
+    if (latest.providerHistoryBlock) {
+      throw new Error("this session's provider conversation is quarantined — recover it before changing worktrees");
+    }
     const live = this.active.get(meta.sessionId);
     if (live && !sameWorktreePath(live.context, live.cwd, worktree.path)) {
       this.captureAgentSessionId(meta.sessionId, live.client);
@@ -9637,13 +9643,6 @@ export class SessionManager {
     // that the store would not re-enforce on restart, or drop a prompt it promised to retain.
     this.store.flush(sessionId);
     if (entry) entry.historyQuarantined = true;
-    this.emitEvent(sessionId, {
-      kind: "provider_history_quarantined",
-      reason: detail.reason,
-      ...(detail.itemIndex === undefined ? {} : { itemIndex: detail.itemIndex }),
-      ...(recoveryTurn === undefined ? {} : { recoveryTurn }),
-      ...(recovery === undefined ? {} : { recovery }),
-    });
     for (const queued of stranded) {
       this.failQueuedPrompt(queued, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
     }

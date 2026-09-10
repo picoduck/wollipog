@@ -1618,20 +1618,6 @@ const TimelineRow = memo(function TimelineRow({
           <span className="checkpoint-line" />
         </div>
       );
-    // The composer banner carries the full explanation and the action; this marker only records
-    // where the conversation ended, so the transcript does not say the same thing twice.
-    case "provider_history_quarantined":
-      return (
-        <div className="tl-checkpoint quarantine" title="The provider rejected this conversation's stored history.">
-          <span className="checkpoint-line" />
-          <span className="checkpoint-label">
-            {item.recoveryTurn === undefined
-              ? "conversation quarantined — no earlier checkpoint to recover from"
-              : `conversation quarantined — recovery starts from turn ${item.recoveryTurn}`}
-          </span>
-          <span className="checkpoint-line" />
-        </div>
-      );
     case "user_message":
       return (
         <div className="tl-row user">

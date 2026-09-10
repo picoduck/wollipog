@@ -216,9 +216,6 @@ function publicMessages(
       case "checkpoint_restored":
       case "conversation_checkpoint":
       case "conversation_forked":
-      // Operational session state, not dialogue. It is content-free, but a shared transcript is a
-      // record of the conversation, not of this box's provider incidents.
-      case "provider_history_quarantined":
       case "token_usage":
         mergeableAssistantIndex = null;
         mergeableAssistantMessageId = undefined;

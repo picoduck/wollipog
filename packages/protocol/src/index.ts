@@ -680,12 +680,22 @@ export function providerAuthenticationReceiptCode(
 /** Additive event kinds that have an explicit older-peer wire policy. Kinds absent from this
  * table are sent unchanged: an unreviewed event must fail closed at an older consumer rather than
  * being silently discarded. */
+/**
+ * Additive event kinds that older peers must not receive.
+ *
+ * ADDING A SECOND ENTRY IS A MIGRATION, NOT A ONE-LINE CHANGE. The count of entries is the base of
+ * the projected-history-epoch encoding (`localEpoch * VARIANTS + variant`), so changing it renumbers
+ * every peer's epoch — and the new numbering collides with the old one rather than sorting above it.
+ * With one policy, local epoch 0 published 1 to a legacy peer; with two, local epoch 0 publishes 1
+ * to a mid-range peer whose projection differs, and a control plane comparing epochs across the
+ * upgrade sees equality and retains cached rows whose sequence numbers now name different events.
+ * A second entry therefore needs an explicit format-generation fence that forces a resync.
+ *
+ * Prefer carrying additive state on the session snapshot, which is version-gated per field and
+ * needs no sequence space at all.
+ */
 const SESSION_EVENT_WIRE_POLICIES = {
   agent_response_completed: { minProtocol: 87, legacy: "omit" },
-  // A pre-v126 control plane classifies session events exhaustively; an unknown kind fails its
-  // whole transcript projection. The quarantine is already carried by the session's own state, so
-  // omitting the marker costs an older peer nothing it can act on.
-  provider_history_quarantined: { minProtocol: 126, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
   minProtocol: number;
   legacy: "omit";
@@ -2970,18 +2980,6 @@ export type SessionEventPayload =
   | { kind: "conversation_checkpoint"; turn: number }
   | { kind: "conversation_forked"; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
   | {
-      /** The provider-owned conversation was quarantined: its stored history contains an item the
-       * provider rejects, so no further turn can be submitted to it. Content-free by construction —
-       * the offending value is never projected. */
-      kind: "provider_history_quarantined";
-      reason: "oversized_tool_call";
-      /** Position of the rejected item in the provider's serialized history, when reported. */
-      itemIndex?: number;
-      /** Completed turn whose checkpoint precedes the invalid item; absent when none exists. */
-      recoveryTurn?: number;
-      recovery?: ProviderHistoryRecoveryMode;
-    }
-  | {
       kind: "token_usage";
       /** Provider-reported input count. Anthropic reports the uncached portion only; Codex reports
        * the total inclusive of `cachedInputTokens`. The control plane normalizes per driver. */
@@ -3761,7 +3759,7 @@ export interface SessionView {
   /** Canonical provider activity timestamp from stable ACP session_info_update; presentation-only. */
   providerUpdatedAt?: string;
   /** Set when the provider conversation is quarantined; ordinary prompts and `/compact` cannot
-   * reach it and clients must offer recovery instead. Omitted by pre-v126 control planes. */
+   * reach it and clients must offer recovery instead. Omitted by pre-v128 control planes. */
   historyQuarantine?: ProviderHistoryQuarantineView;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
@@ -3915,7 +3913,7 @@ export interface SessionSnapshot {
   /** Set when the provider conversation is quarantined. Runner-authoritative and durable, so a
    * reconnecting control plane never re-offers submission into a poisoned thread.
    *
-   * Three-valued on purpose. `undefined` means this snapshot carries no information — a pre-v126
+   * Three-valued on purpose. `undefined` means this snapshot carries no information — a pre-v128
    * peer, or a registration snapshot built before version negotiation — and must never overwrite
    * what the control plane already stored. Explicit `null` is a v126 runner stating there is no
    * quarantine, which is what lets a restart onto a fresh provider conversation clear the guard. */
@@ -5465,7 +5463,7 @@ export interface ForkSessionMessage {
    * the new session through session_history_page after materializing its snapshot. */
   deferHistory?: boolean;
   handoff?: { agentId: string; config: SessionConfig };
-  /** v126: recover a quarantined provider conversation. The runner revalidates the source's
+  /** v128: recover a quarantined provider conversation. The runner revalidates the source's
    * durable quarantine and its recovery turn, and only then accepts a same-provider handoff. */
   recovery?: true;
 }
@@ -5478,7 +5476,7 @@ export interface ForkResultMessage {
   snapshot?: SessionSnapshot;
   events?: { seq: number; ts: number; payload: SessionEventPayload }[];
   handoffDraft?: import("./conversation-handoff.js").ConversationHandoffDraft;
-  /** v126: a prompt the source retained unsent while quarantined, handed to the recovered session
+  /** v128: a prompt the source retained unsent while quarantined, handed to the recovered session
    * as a composer draft. It is never submitted by the runner or the control plane. */
   retainedPrompt?: { text: string; images: PromptImageInput[] };
 }

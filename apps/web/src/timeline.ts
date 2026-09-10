@@ -186,8 +186,7 @@ export type TimelineItem =
   | { kind: "checkpoint"; id: number; turn: number }
   | { kind: "checkpoint_restored"; id: number; turn: number }
   | { kind: "conversation_checkpoint"; id: number; turn: number }
-  | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
-  | { kind: "provider_history_quarantined"; id: number; recoveryTurn?: number };
+  | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } };
 
 type AgentTextItem = Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
 const streamingTimelineItems = new WeakSet<AgentTextItem>();
@@ -1026,14 +1025,6 @@ export class TimelineBuilder {
       case "conversation_forked":
         this.breakText();
         this.markDirty(this.items.push({ kind: "conversation_forked", id: ev.seq, sourceSessionId: p.sourceSessionId, turn: p.turn, ...(p.handoff ? { handoff: p.handoff } : {}) }) - 1);
-        break;
-      case "provider_history_quarantined":
-        this.breakText();
-        // The item's position and measured sizes stay on the runner: the transcript states what
-        // the user can act on, which is that this conversation is finished and where recovery
-        // starts.
-        this.markDirty(this.items.push({ kind: "provider_history_quarantined", id: ev.seq,
-          ...(p.recoveryTurn === undefined ? {} : { recoveryTurn: p.recoveryTurn }) }) - 1);
         break;
       case "error":
         this.breakText();

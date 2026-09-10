@@ -518,8 +518,6 @@ if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handof
     { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "user_message", text: "Now scan every changed file.", final: true } },
     { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "error", message: "The agent provider rejected this conversation's stored history: the recorded tool call at history position 675 cannot be resent. Its arguments field is 1,426,210 characters, over the provider's limit of 1,048,576." } },
-    { id: 6, sessionId: "session-alpha", seq: 6, ts: 6, payload: { kind: "provider_history_quarantined", reason: "oversized_tool_call", itemIndex: 675, recoveryTurn: 1,
-      recovery: SCENARIO === "history-quarantine-handoff" ? "handoff" : "fork" } },
   ]);
 }
 if (SCENARIO === "conversation-handoff") {

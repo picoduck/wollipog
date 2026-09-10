@@ -844,29 +844,15 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(completion, 87), completion);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), false);
 
-  // A pre-v126 control plane classifies session events exhaustively, so an unknown kind would fail
-  // its whole transcript projection. The quarantine marker is omitted for those peers.
-  const quarantined = { kind: "provider_history_quarantined", reason: "oversized_tool_call" } as const;
-  assert.equal(projectSessionEventPayloadForProtocol(quarantined, 125), null);
-  assert.equal(projectSessionEventPayloadForProtocol(quarantined, undefined), null);
-  assert.equal(projectSessionEventPayloadForProtocol(quarantined, 126), quarantined);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), true);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(126), false);
-
-  // Each distinct omission set is its own dense sequence space. A peer that omits two event kinds
-  // numbers a log differently from one omitting a single kind, so they must not share a variant —
-  // otherwise a reconnect at a different version reuses cursors that now name different events.
-  assert.equal(sessionEventWireProjectionVariant(86), 2);
-  assert.equal(sessionEventWireProjectionVariant(undefined), 2);
-  assert.equal(sessionEventWireProjectionVariant(87), 1);
-  assert.equal(sessionEventWireProjectionVariant(125), 1);
-  assert.equal(sessionEventWireProjectionVariant(126), 0);
-  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 3);
-  assert.equal(
-    new Set([86, 87, 126].map(sessionEventWireProjectionVariant)).size, 3,
-    "every reachable projection is distinguishable",
-  );
+  // The variant is the count of unmet policies, so it stays a dense index as policies are added.
+  // It is also the base of the projected-epoch encoding: a second policy renumbers every peer's
+  // epoch into values that collide with the current ones, which is why adding one is a migration.
+  assert.equal(sessionEventWireProjectionVariant(86), 1);
+  assert.equal(sessionEventWireProjectionVariant(undefined), 1);
+  assert.equal(sessionEventWireProjectionVariant(87), 0);
+  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 2);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

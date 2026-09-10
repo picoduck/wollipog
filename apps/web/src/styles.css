@@ -10775,10 +10775,6 @@ body.shell-dock-dragging * {
 .tl-checkpoint.restored .checkpoint-label {
   color: var(--teal);
 }
-.tl-checkpoint.quarantine .checkpoint-label {
-  color: var(--warning-on-tint, var(--warning));
-  font-weight: 600;
-}
 
 /* --------- Cmd+K search palette ---------- */
 .palette-backdrop {

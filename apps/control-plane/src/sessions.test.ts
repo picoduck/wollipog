@@ -9419,7 +9419,7 @@ test("a snapshot that omits the additive quarantine field never clears the store
   })]);
   assert.ok(db.getSession(id)?.historyQuarantine);
 
-  // Registration snapshots are built with a null protocol version, and a pre-v126 runner never
+  // Registration snapshots are built with a null protocol version, and a pre-v128 runner never
   // sends the field at all. Neither may make a poisoned conversation promptable again.
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle" })]);
   assert.deepEqual(db.getSession(id)?.historyQuarantine, {

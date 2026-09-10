@@ -1,5 +1,5 @@
 /**
- * Provider-history quarantine (protocol v126). When the provider rejects an item already stored in
+ * Provider-history quarantine (protocol v128). When the provider rejects an item already stored in
  * its own conversation history, no local action repairs that thread: retrying, continuing, and
  * `/compact` all resend the same history and fail identically before inference runs. These tests
  * pin the whole loop — detect, quarantine durably, refuse further submissions while preserving the
@@ -14,7 +14,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentDefinition, AgentDriverKind, RunnerToControlPlane } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
-import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
+import {
+  poisonedProviderHistoryMessage,
+  type PoisonedProviderHistory,
+} from "./drivers/poisoned-provider-history.js";
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
@@ -136,7 +139,9 @@ test("an oversized historical tool call quarantines the conversation and refuses
     manager.prompt(fixture.sessionId, "the turn that fails");
     await waitFor(() => state.prompts.length === 1, "the first turn reaches the provider");
 
-    // The provider rejected its own stored history: the driver reports the structure only.
+    // The provider rejected its own stored history. Mirror the driver exactly: it puts its
+    // constructed, content-free rejection in the transcript, then signals.
+    state.callbacks[0]!.onEvent({ kind: "error", message: poisonedProviderHistoryMessage(REJECTION) });
     state.callbacks[0]!.onProviderHistoryUnrecoverable!(REJECTION);
 
     const blocked = fixture.store.readMeta(fixture.sessionId)!.providerHistoryBlock!;
@@ -147,13 +152,11 @@ test("an oversized historical tool call quarantines the conversation and refuses
     assert.equal(blocked.recovery, "fork");
     assert.equal(blocked.retry, undefined, "nothing is retained before a prompt is attempted");
 
-    const quarantined = fixture.store.readEvents(fixture.sessionId)
-      .filter((event) => event.payload.kind === "provider_history_quarantined");
-    assert.equal(quarantined.length, 1, "the transcript durably explains the quarantine");
-    assert.deepEqual(quarantined[0]!.payload, {
-      kind: "provider_history_quarantined", reason: "oversized_tool_call", itemIndex: 675,
-      recoveryTurn: 2, recovery: "fork",
-    });
+    // The driver's constructed rejection marks the point in the transcript; the recovery coordinate
+    // lives on the session's own durable state, which needs no wire sequence space of its own.
+    const rejection = fixture.store.readEvents(fixture.sessionId).filter((event) =>
+      event.payload.kind === "error" && /rejected this conversation's stored history/.test(event.payload.message));
+    assert.equal(rejection.length, 1, "the transcript durably records why the conversation ended");
 
     // An ordinary retry, a Continue, and /compact are all rejected before the provider is touched,
     // and the first attempt survives as an unsent draft.
