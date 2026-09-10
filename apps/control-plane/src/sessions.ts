@@ -3536,12 +3536,12 @@ export class SessionsService {
     if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
     if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
     const rollback = () => {
-      this.db.updateSessionConfig(sessionId, {
+      this.db.restoreSessionConfig(sessionId, {
         model: session.model ?? undefined,
         effort: session.effort ?? undefined,
         serviceTier: session.serviceTier ?? undefined,
         permissionMode: session.permissionMode ?? undefined,
-      }, now);
+      }, session.resolvedModel ?? null, session.contextWindow ?? null, now);
       if (config.costBudgetUsd !== undefined) {
         this.db.updateSessionCostBudget(sessionId, session.costBudgetUsd ?? null, now, session.costBudgetStepUsd ?? null);
       }
@@ -3565,7 +3565,7 @@ export class SessionsService {
     // the freshly evaluated rule. Persist first for one authoritative computed snapshot, but roll
     // the whole config request back if that live runner cannot receive it.
     const runner = this.db.getRunner(session.runnerId);
-    if (!isTerminal(session.status) && (thresholdChanged || parkedGuardrail) &&
+    if (!isTerminal(session.status) && (thresholdChanged || (guardrailChanged && parkedGuardrail)) &&
         runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
       const sent = this.hub.sendToRunner(session.runnerId, {
         type: "rearm_governance",

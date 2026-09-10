@@ -9564,17 +9564,20 @@ export class SessionManager {
   ): void {
     entry.governanceTripped = tripped;
     const threshold = tripped === "cost_budget" ? meta.config.costBudgetUsd : meta.config.maxToolCalls;
-    if (threshold == null) return;
-    entry.governanceTrip = {
-      tripId: randomUUID(),
-      kind: tripped,
-      threshold,
-      observed: tripped === "cost_budget" ? meta.costUsd : entry.toolCallIds?.size ?? 0,
-    };
-    this.reportGovernanceTrip(sessionId, entry);
-    const detail = tripped === "cost_budget"
-      ? `Runner governance paused this turn at the $${meta.config.costBudgetUsd!.toFixed(2)} cost threshold.`
-      : `Runner governance paused this turn at ${meta.config.maxToolCalls} distinct tool calls.`;
+    if (threshold != null) {
+      entry.governanceTrip = {
+        tripId: randomUUID(),
+        kind: tripped,
+        threshold,
+        observed: tripped === "cost_budget" ? meta.costUsd : entry.toolCallIds?.size ?? 0,
+      };
+      this.reportGovernanceTrip(sessionId, entry);
+    }
+    const detail = threshold == null
+      ? `Runner governance paused this turn after crossing a ${tripped === "cost_budget" ? "cost" : "tool-call"} threshold.`
+      : tripped === "cost_budget"
+        ? `Runner governance paused this turn at the $${threshold.toFixed(2)} cost threshold.`
+        : `Runner governance paused this turn at ${threshold} distinct tool calls.`;
     if (!this.emitEvent(sessionId, { kind: "stderr", text: `${detail} Continue or stop from the approval card.` })) {
       return;
     }

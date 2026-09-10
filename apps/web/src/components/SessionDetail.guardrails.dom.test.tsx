@@ -48,7 +48,7 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
   await act(async () => {
     root.render(<ComposerPlusMenu
       session={{ costBudgetUsd: null, costCheckpointsUsd: null, maxToolCalls: null,
-        maxChildSessions: 6 } as SessionView}
+        maxChildSessions: undefined } as SessionView}
       planActive={false}
       planSupported={false}
       onTogglePlan={() => {}}
@@ -64,9 +64,20 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
     await act(async () => fireDomEvent.click(trigger));
     const input = container.querySelector<HTMLInputElement>('[aria-label="Live Child Limit"]');
     assert.ok(input, "the Composer menu includes a labelled live-child control");
-    assert.equal(input.value, "6");
+    assert.equal(input.value, "");
+    assert.equal(input.placeholder, "4");
     assert.equal(input.max, "64");
     assert.match(container.textContent ?? "", /Live Child Limit/);
+    await act(async () => {
+      input.focus();
+    });
+    // Opening the menu focuses the first cost input; moving focus here may commit its empty clear.
+    // Isolate this assertion to the live-child field's own blur behavior.
+    applied.length = 0;
+    await act(async () => {
+      input.dispatchEvent(new domWindow.FocusEvent("focusout", { bubbles: true }) as unknown as Event);
+    });
+    assert.deepEqual(applied, [], "leaving an untouched default field does not pause child admission");
     await act(async () => {
       input.focus();
       fireDomEvent.change(input, { target: { value: "9" } });

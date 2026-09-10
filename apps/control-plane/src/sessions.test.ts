@@ -11345,6 +11345,8 @@ test("setConfig persists a tool-call limit in its own column and clears on 0", (
 test("unparked live guardrail edits synchronize explicit values and clears or roll back atomically", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { config: { model: "sonnet", maxChildSessions: 3 } });
+  db.raw().prepare("UPDATE sessions SET resolved_model=?, context_window=? WHERE id=?")
+    .run("claude-sonnet-resolved", 200_000, id);
   hub.sentToRunner.length = 0;
 
   assert.ok(svc.setConfig(id, { costBudgetUsd: 7, maxToolCalls: 12 }).ok);
@@ -11370,8 +11372,26 @@ test("unparked live guardrail edits synchronize explicit values and clears or ro
   assert.equal(failed.error, "runner is offline");
   const rolledBack = db.getSession(id)!;
   assert.equal(rolledBack.model, "sonnet");
+  assert.equal(rolledBack.resolvedModel, "claude-sonnet-resolved");
+  assert.equal(rolledBack.contextWindow, 200_000);
   assert.equal(rolledBack.maxToolCalls, null);
   assert.equal(rolledBack.maxChildSessions, 3);
+});
+
+test("a model-only edit never releases or round-trips an existing guardrail card", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { model: "sonnet" } });
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 1 }).ok);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 2 });
+  const requestId = db.getSession(id)!.pendingApproval!.requestId;
+  hub.sentToRunner.length = 0;
+
+  assert.ok(svc.setConfig(id, { model: "opus" }).ok);
+  assert.equal(hub.sentOfType("rearm_governance").length, 0);
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, requestId);
+  assert.equal(db.getSession(id)!.status, "input_required");
+  assert.equal(db.getSession(id)!.model, "opus");
 });
 
 test("runner trip reports create one replay-safe card and Continue honors changed or cleared rules", () => {
@@ -11403,6 +11423,20 @@ test("runner trip reports create one replay-safe card and Continue honors change
   });
   assert.equal(svc.governanceAudit(cleared).filter((entry) =>
     entry.requestId === runnerCard.requestId && entry.stage === "policy_decision").length, 1);
+
+  for (const refresh of [
+    () => svc.onSessionStatus(cleared, "idle"),
+    () => svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id: cleared, status: "idle", pendingApproval: null })]),
+    () => svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id: cleared, status: "idle", pendingApproval: null })),
+  ]) {
+    refresh();
+    assert.equal(db.getSession(cleared)!.status, "input_required");
+    assert.deepEqual(
+      pendingRequests(db.getSession(cleared)!.pendingApproval).map((request) => request.requestId),
+      ["permission-1", runnerCard.requestId],
+      "runner idle/status hydration preserves every request when a policy card is additional",
+    );
+  }
 
   hub.sentToRunner.length = 0;
   assert.ok(svc.approve(cleared, runnerCard.requestId, "continue").ok);

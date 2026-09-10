@@ -5883,6 +5883,7 @@ export function ComposerPlusMenu({
               value={session.maxChildSessions}
               placeholder="4"
               max="64"
+              emptyMeansNoop
               hint="Live Child Limit · concurrent sessions · 0 pauses new children"
               onCommit={(v) => onApply({ maxChildSessions: v })}
             />
@@ -5958,6 +5959,7 @@ function GuardrailInput({
   value,
   placeholder = "∞",
   max,
+  emptyMeansNoop,
   hint,
   onCommit,
 }: {
@@ -5968,6 +5970,8 @@ function GuardrailInput({
   value: number | null | undefined;
   placeholder?: string;
   max?: string;
+  /** This field has no clear sentinel: zero is meaningful, while an empty edit is a no-op. */
+  emptyMeansNoop?: boolean;
   hint: string;
   onCommit: (v: number) => void;
 }) {
@@ -5990,6 +5994,10 @@ function GuardrailInput({
         onChange={(e) => setDraft(e.target.value)}
         onBlur={(e) => {
           if (draft === null) return;
+          if (emptyMeansNoop && draft.trim() === "") {
+            setDraft(null);
+            return;
+          }
           const v = parseFloat(draft);
           if (e.target.validity.badInput || e.target.validity.rangeOverflow ||
               (integer && Number.isFinite(v) && v > 0 && v < 1)) {

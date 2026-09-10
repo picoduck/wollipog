@@ -11339,6 +11339,30 @@ export class ControlPlaneDb {
     ).run(model, model, model, config.effort ?? null, config.serviceTier ?? null, config.permissionMode ?? null, now, id);
   }
 
+  /** Restore the complete selected/provider model projection after an atomic live-config delivery
+   * fails. updateSessionConfig intentionally clears provider evidence on a forward model change,
+   * so applying only the old selected config cannot reconstruct these two fields. */
+  restoreSessionConfig(
+    id: string,
+    config: SessionConfig,
+    resolvedModel: string | null,
+    contextWindow: number | null,
+    now: number,
+  ): void {
+    this.stmt(
+      `UPDATE sessions SET model=?, resolved_model=?, effort=?, permission_mode=?, context_window=?, updated_at=?
+       WHERE id=?`,
+    ).run(
+      config.model ?? null,
+      resolvedModel,
+      config.effort ?? null,
+      config.permissionMode ?? null,
+      contextWindow,
+      now,
+      id,
+    );
+  }
+
   /** Accumulate a turn's token/cost usage into the session totals. */
   addSessionUsage(
     id: string,
