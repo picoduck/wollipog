@@ -55,6 +55,20 @@ unpushed, branch-drifted, and Git-unavailable worktrees are retained. The runner
 checks during startup and periodic reconciliation after a linked GitHub PR is definitively merged
 or closed; an unavailable forge keeps the durable open linkage unchanged.
 
+Discard is the only supported way to retire a runner-owned worktree. `git worktree remove` bypasses
+every check above and leaves the session selecting a path that no longer exists, so agent cleanup
+workflows must not use it for a session-linked path. A retained worktree is reported with the reason
+it was kept, including the tree the requesting session is itself running in; that is a deferral to
+reconciliation, not a failed cleanup.
+
+Because a worktree can still disappear outside Wollipog, every launch that carries a persisted
+worktree re-proves it immediately before the provider process is created — start, resume, worktree
+rebind, and queued app-server recovery alike. The path must still be registered with the session's
+repository, healthy, on the recorded branch, and inside the permitted boundary. A worktree that is
+missing, unregistered, unhealthy, moved, or branch-drifted fails that one session with a durable
+error naming the invalid path; the runner never substitutes the primary workspace, and no worktree
+lease, provider-home lease, or provider process is taken before the check runs.
+
 Claude Code launches also receive an additive `wollipog` stdio MCP configuration. Both adapters
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.

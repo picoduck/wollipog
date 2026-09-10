@@ -3323,6 +3323,49 @@ export class SessionManager {
     }
   }
 
+  /** Re-prove a persisted worktree selection immediately before provider construction: still
+   * registered with this session's repository, still healthy, still on the recorded branch, and
+   * still inside the permitted worktree boundary. A refusal fails only this session and never falls
+   * back to the primary workspace; it happens before the worktree lease, the provider-home lease,
+   * and driver construction, so the caller's ordinary `!launched` unwind settles admission, the
+   * session lock, and any durable prompt lifecycle. */
+  private async verifySelectedWorktreeBeforeLaunch(
+    meta: SessionMeta,
+    worktree: WorktreeHandle,
+    launchGeneration: number,
+  ): Promise<boolean> {
+    // Only host execution keeps the worktree on the runner's own filesystem. Container and cloud
+    // targets resolve their working directory inside the remote environment, where a local Git
+    // registration check would prove nothing about the directory the provider actually receives.
+    if (meta.executionTarget && meta.executionTarget.adapter !== "host") return true;
+    let detail: string;
+    try {
+      const verified = await attachRequestedWorktree(meta.repoPath, meta.sessionId, worktree.path, {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+        // This exact coordinate was already located and validated by the create/attach operation
+        // that persisted it, so it is not new caller input. Git registration with this repository,
+        // worktree health, and branch identity are all still re-proved.
+        allowedProjectPaths: [worktree.path],
+      });
+      if (verified.branch === worktree.branch) return true;
+      detail = `it is now on branch ${verified.branch} instead of the recorded ${worktree.branch}`;
+    } catch (error) {
+      detail = errText(error);
+    }
+    // Verification awaits Git. A restart or stop can take the session over inside that window, and
+    // the replacement may legitimately own this same worktree — report only while this launch is
+    // still the live one, exactly as the rest of the launch path does after every await.
+    if (!this.launchIsCurrent(meta.sessionId, launchGeneration) ||
+        this.store.readMeta(meta.sessionId)?.status === "stopped") return false;
+    const message = `the selected worktree could not be verified before provider launch: ${detail}` +
+      ` — restore ${worktree.path} or select another worktree for this session`;
+    this.emitEvent(meta.sessionId, { kind: "error", message });
+    this.emitStatus(meta.sessionId, "failed", message);
+    return false;
+  }
+
   private async launch(meta: SessionMeta, resumeId: string | undefined, launchGeneration: number): Promise<boolean> {
     const launchStarted = Date.now();
     const sessionId = meta.sessionId;
@@ -3341,6 +3384,15 @@ export class SessionManager {
       // This must precede discovery, authentication, provider-state migration, and worktree-boundary
       // preparation. Unsupported contexts fail without touching target-local paths or providers.
       this.assertHostIsolationContextSupported(meta);
+      // Every launch that carries a persisted worktree re-proves it here, immediately before any
+      // discovery, isolation binding, lease, or provider process exists. start() validates its own
+      // prior selection earlier, and worktree rebind validates the replacement it is about to
+      // launch into, but resume and queued app-server recovery previously trusted the stored
+      // worktreePath outright — so a tree removed between turns (a raw `git worktree remove`, an
+      // operator cleanup, a `git worktree move`) reached the provider spawn boundary as a missing
+      // working directory.
+      if (worktree &&
+          !(await this.verifySelectedWorktreeBeforeLaunch(meta, worktree, launchGeneration))) return false;
       const priorCapabilities = meta.capabilities;
       const priorSessionSlashCommands = meta.sessionSlashCommands;
       launchPreparation = await this.prepareLaunch?.(meta);

@@ -967,7 +967,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "discard_worktree",
-    description: "Permanently remove an inactive runner-owned worktree and branch only when they are clean and fully pushed. Subject to session permissions and governance policies.",
+    description: "Permanently remove an inactive runner-owned worktree and branch only when they are clean and fully pushed. Always use this instead of `git worktree remove` for a session-linked path: it retains a worktree that is still selected by a launching or live provider and reports why, and it keeps the session's durable worktree record consistent with the filesystem. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {

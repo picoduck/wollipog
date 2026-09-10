@@ -2604,3 +2604,181 @@ test("a running session discards its own finished worktrees despite the per-sess
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("post-merge cleanup keeps the worktree the running session still selects", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-selected-cleanup-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_selected_cleanup", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "running", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const merged = await manager.requestWorktree("s_selected_cleanup", { baseRef: "HEAD", branch: "fix/merged-work" });
+    // Exactly the post-merge state routine cleanup runs in: clean, fully pushed, nothing to lose.
+    execFileSync("git", ["-C", merged.worktree.path, "push", "-u", "origin", merged.worktree.branch]);
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, merged.worktree.path);
+
+    const providerOwner = "runner:provider:1:selected";
+    assert.equal(store.acquireWorktreeLease("s_selected_cleanup", providerOwner), true);
+    const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
+    activeEntries.set("s_selected_cleanup", {
+      sessionId: "s_selected_cleanup",
+      context: { kind: "native" },
+      cwd: merged.worktree.path,
+      worktree: { path: merged.worktree.path, branch: merged.worktree.branch },
+      worktreeLeaseOwner: providerOwner,
+    });
+
+    // The agent performing its own post-merge cleanup asks for the worktree it is running in.
+    await assert.rejects(
+      manager.discardWorktree("s_selected_cleanup", merged.worktree.path),
+      /worktree retained: the worktree is still active in a provider process/,
+      "the managed API reports the deferral instead of removing the session's own worktree",
+    );
+    assert.equal(existsSync(merged.worktree.path), true, "the directory survives the refused cleanup");
+    const retained = store.readMeta("s_selected_cleanup");
+    assert.equal(retained?.worktreePath, merged.worktree.path, "the durable selection is left intact");
+    assert.equal(retained?.worktrees?.some((item) => item.path === merged.worktree.path), true,
+      "and so is the worktree's attribution record");
+
+    // Once the provider that selected it is gone, the same inactive clean pushed tree discards.
+    activeEntries.delete("s_selected_cleanup");
+    store.releaseWorktreeLease("s_selected_cleanup", providerOwner);
+    await manager.discardWorktree("s_selected_cleanup", merged.worktree.path);
+    assert.equal(existsSync(merged.worktree.path), false);
+    assert.equal(store.readMeta("s_selected_cleanup")?.worktreePath, null,
+      "the managed path clears the selection with the directory, leaving no dangling reference");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a worktree removed between turns fails the resume instead of spawning a provider in it", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-resume-removed-wt-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const prompts: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async (text: string) => { prompts.push(text); return "end_turn" as const; },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    const spec = {
+      sessionId: "s_removed_resume", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    assert.equal(await manager.start(spec), true);
+    const worktreePath = store.readMeta(spec.sessionId)?.worktreePath;
+    assert.ok(worktreePath);
+    manager.prompt(spec.sessionId, "first");
+    await waitForCondition(() => prompts.length === 1, "the first turn never reached the provider");
+    manager.stop(spec.sessionId);
+    await waitForCondition(() => !(manager as unknown as { active: Map<string, unknown> }).active.has(spec.sessionId),
+      "the provider never released the session");
+
+    // The bypass this guards: a raw Git removal of a session-linked worktree between turns.
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", worktreePath]);
+    assert.equal(existsSync(worktreePath), false);
+
+    const before = launchedCwds.length;
+    manager.prompt(spec.sessionId, "second");
+    await waitForCondition(
+      () => messages.some((message) => message.payload?.kind === "error" &&
+        /could not be verified before provider launch/.test(message.payload.message ?? "")),
+      "the resume never reported the invalid worktree",
+    );
+    assert.equal(launchedCwds.length, before, "no provider process was created for the removed worktree");
+    assert.deepEqual(prompts, ["first"], "and the resumed turn never reached a provider");
+    assert.equal(messages.some((message) => message.type === "session_status" && message.status === "failed"), true,
+      "the affected session fails with a durable status");
+    const meta = store.readMeta(spec.sessionId);
+    assert.equal(meta?.worktreePath, worktreePath,
+      "the selection is retained rather than silently falling back to the primary workspace");
+    assert.equal(launchedCwds.includes(repo), false, "the primary repository was never used as a substitute cwd");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("queued app-server recovery refuses to relaunch into a removed worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-recovery-removed-wt-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: Array<{ type: string; status?: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-1",
+      };
+    };
+    store.create({
+      sessionId: "s_recovery_wt", agentId: "codex", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "codex-app-server", command: "codex", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: "thread-1", status: "idle", title: "recovery",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(
+      (message) => messages.push(message as never), () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1,
+    );
+    const selected = await manager.requestWorktree("s_recovery_wt", { baseRef: "HEAD", branch: "fix/recovery-removed" });
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", selected.worktree.path]);
+
+    const internals = manager as unknown as {
+      recoveryQueues: Map<string, unknown[]>;
+      recoverQueuedAppServer: (sessionId: string) => Promise<void>;
+    };
+    const queued = [{ id: "q1", text: "held", images: [], queuedAt: 1 }];
+    internals.recoveryQueues.set("s_recovery_wt", queued);
+    await internals.recoverQueuedAppServer("s_recovery_wt");
+
+    assert.deepEqual(launchedCwds, [], "recovery never spawned a provider in the removed worktree");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /could not be verified before provider launch/.test(message.payload.message ?? "")), true,
+      "recovery reported the invalid worktree state");
+    assert.equal(internals.recoveryQueues.get("s_recovery_wt"), queued, "the queued prompts stay held");
+    assert.equal(messages.some((message) => message.payload?.kind === "error" &&
+      /queued prompt\(s\) remain held/.test(message.payload.message ?? "")), true,
+      "and the session is told they were not lost");
+    assert.equal(store.readMeta("s_recovery_wt")?.worktreePath, selected.worktree.path,
+      "the selection is retained rather than silently falling back to the primary workspace");
+    // The refusal happens before any lease is taken, and the caller's ordinary unwind gives the
+    // session lock back, so another runner can still pick this session up.
+    assert.equal(store.readWorktreeLease("s_recovery_wt"), null, "no worktree lease was left held");
+    assert.equal(store.acquireLock("s_recovery_wt", "another-runner"), true, "the session lock was released");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
