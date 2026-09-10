@@ -1,0 +1,43 @@
+name: npm Advisory Health
+
+# Dependabot alerts and pnpm audit use the GitHub Advisory Database. This daily check also inspects
+# public advisories published only in each direct runtime dependency's source repository.
+on:
+  schedule:
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-advisory-health
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check npm Runtime Advisories
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check npm Runtime Advisories
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/check-npm-advisories.mjs \
+            --deferrals .github/npm-advisory-deferrals.json \
+            --summary "$GITHUB_STEP_SUMMARY"
