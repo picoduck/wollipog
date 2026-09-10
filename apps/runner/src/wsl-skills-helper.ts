@@ -14,7 +14,7 @@ MAX_COMPACTION_RECORDS = 4096
 RENAME_EXCHANGE = 2
 DRIVER_DIRS = {"claude-code": ".claude/skills", "codex": ".codex/skills", "codex-app-server": ".codex/skills"}
 COMPACTION = re.compile(r"^\.mutable-home\.compact-([0-9a-f-]{36})-([0-9a-f]{64})-([0-9a-f]{32})$")
-CLEANUP_MARKER = ".cleanup-ready.json"
+CLEANUP_PROOF = re.compile(r"^\.mutable-home\.cleanup-([0-9a-f]{32})\.json$")
 diagnostics = []
 
 def fail(message):
@@ -156,7 +156,7 @@ def process_alive(pid):
 
 def cleanup_compactions(root, lock):
     try:
-        canonical_tip, _, canonical = read_lease_chain(lock, True)
+        _, _, canonical = read_lease_chain(lock, True)
         names = [name for name in sorted(os.listdir(root)) if COMPACTION.fullmatch(name)]
     except: return
     for name in names[:MAX_COMPACTION_SIBLINGS]:
@@ -167,31 +167,36 @@ def cleanup_compactions(root, lock):
             if (not match or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or
                 stat.S_IMODE(info.st_mode) != 0o700): continue
             candidate = child_dir(root, name)
+            opened = os.fstat(candidate)
+            named = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                fail("compaction journal changed during cleanup")
             entries = sorted(os.listdir(candidate))
-            if not entries or len(entries) > MAX_COMPACTION_RECORDS: continue
-            marker = None
-            if CLEANUP_MARKER in entries:
-                marker_fd = os.open(CLEANUP_MARKER, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=candidate)
+            if len(entries) > MAX_COMPACTION_RECORDS: continue
+            lease_id, proof_hash, proof_token = match.group(1), match.group(2), match.group(3)
+            proof_name = ".mutable-home.cleanup-%s.json" % proof_token
+            proof = None
+            proof_identity = None
+            try:
+                proof_fd = os.open(proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
                 try:
-                    marker_info = os.fstat(marker_fd)
-                    if (not stat.S_ISREG(marker_info.st_mode) or marker_info.st_uid != os.geteuid() or
-                        stat.S_IMODE(marker_info.st_mode) != 0o600 or marker_info.st_nlink != 1 or
-                        marker_info.st_size > 4096): fail("unverified compaction cleanup marker")
-                    marker = json.loads(os.read(marker_fd, marker_info.st_size + 1).decode("utf-8"))
-                finally: os.close(marker_fd)
-                entries.remove(CLEANUP_MARKER)
+                    proof_info = os.fstat(proof_fd)
+                    if (not stat.S_ISREG(proof_info.st_mode) or proof_info.st_uid != os.geteuid() or
+                        stat.S_IMODE(proof_info.st_mode) != 0o600 or proof_info.st_nlink != 1 or
+                        proof_info.st_size > 4096): fail("unverified compaction cleanup proof")
+                    proof = json.loads(os.read(proof_fd, proof_info.st_size + 1).decode("utf-8"))
+                    proof_identity = (proof_info.st_dev, proof_info.st_ino)
+                finally: os.close(proof_fd)
+            except FileNotFoundError: pass
             for entry in entries:
                 record = os.stat(entry, dir_fd=candidate, follow_symlinks=False)
                 if (not stat.S_ISREG(record.st_mode) or record.st_uid != os.geteuid() or
                     stat.S_IMODE(record.st_mode) != 0o600 or record.st_nlink != 1):
                     fail("unverified compaction journal")
-            lease_id, proof_hash = match.group(1), match.group(2)
-            canonical_record = canonical.get(lease_id)
-            if canonical_record is None: fail("unverified compaction journal")
-            if marker is not None:
-                if marker != {"version": 1, "name": name, "leaseId": lease_id, "proofHash": proof_hash,
-                    "ownerHash": canonical_tip["ownerHash"]}:
-                    fail("unverified compaction cleanup marker")
+            expected_proof = {"version": 1, "name": name, "leaseId": lease_id, "proofHash": proof_hash,
+                "device": opened.st_dev, "inode": opened.st_ino}
+            if proof is not None:
+                if proof != expected_proof: fail("unverified compaction cleanup proof")
                 for entry in entries:
                     value, _ = read_lease_record(candidate, entry)
                     if entry == "lease.json":
@@ -204,6 +209,9 @@ def cleanup_compactions(root, lock):
                             entry == "next-%s.json" % value["previousLeaseId"])
                     if not valid_name: fail("unverified compaction journal")
             else:
+                if not entries: fail("unverified compaction journal")
+                canonical_record = canonical.get(lease_id)
+                if canonical_record is None: fail("unverified compaction journal")
                 abandoned, abandoned_hash = read_lease_chain(candidate)
                 if (abandoned["leaseId"] != lease_id or proof_hash not in
                     (abandoned_hash, canonical_record[0])):
@@ -212,19 +220,14 @@ def cleanup_compactions(root, lock):
                 if any(abandoned.get(key) != expected.get(key) for key in
                     ("leaseId", "state", "ownerHash", "hostname", "pid", "provider", "createdAt")):
                     fail("unverified compaction journal")
-                marker_value = json.dumps({"version": 1, "name": name, "leaseId": lease_id,
-                    "proofHash": proof_hash, "ownerHash": canonical_tip["ownerHash"]}, separators=(",", ":")).encode()
-                marker_fd = os.open(CLEANUP_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                    0o600, dir_fd=candidate)
-                try: write_all(marker_fd, marker_value); os.fsync(marker_fd)
-                finally: os.close(marker_fd)
-                os.fsync(candidate)
-            opened = os.fstat(candidate)
+                publish_lease(root, root, proof_name, expected_proof)
+                os.fsync(root)
+                proof_info = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+                proof_identity = (proof_info.st_dev, proof_info.st_ino)
             named = os.stat(name, dir_fd=root, follow_symlinks=False)
             if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
                 fail("compaction journal changed during cleanup")
             for entry in entries: os.unlink(entry, dir_fd=candidate)
-            os.unlink(CLEANUP_MARKER, dir_fd=candidate)
             os.fsync(candidate)
             named = os.stat(name, dir_fd=root, follow_symlinks=False)
             if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
@@ -232,9 +235,43 @@ def cleanup_compactions(root, lock):
             os.close(candidate); candidate = None
             os.rmdir(name, dir_fd=root)
             os.fsync(root)
+            proof_info = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+            if proof_identity != (proof_info.st_dev, proof_info.st_ino):
+                fail("compaction cleanup proof changed during cleanup")
+            os.unlink(proof_name, dir_fd=root)
+            os.fsync(root)
         except: pass
         finally:
             if candidate is not None: os.close(candidate)
+    try:
+        proof_names = [name for name in sorted(os.listdir(root)) if CLEANUP_PROOF.fullmatch(name)]
+    except: return
+    for proof_name in proof_names[:MAX_COMPACTION_SIBLINGS]:
+        proof_fd = None
+        try:
+            proof_fd = os.open(proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+            info = os.fstat(proof_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+                stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size > 4096): continue
+            proof = json.loads(os.read(proof_fd, info.st_size + 1).decode("utf-8"))
+            match = CLEANUP_PROOF.fullmatch(proof_name)
+            candidate_name = proof.get("name") if isinstance(proof, dict) else None
+            candidate_match = COMPACTION.fullmatch(candidate_name) if isinstance(candidate_name, str) else None
+            if (not match or not candidate_match or match.group(1) != candidate_match.group(3) or
+                proof.get("version") != 1 or proof.get("leaseId") != candidate_match.group(1) or
+                proof.get("proofHash") != candidate_match.group(2) or not isinstance(proof.get("device"), int) or
+                not isinstance(proof.get("inode"), int)): continue
+            try: os.stat(candidate_name, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+                if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
+                    fail("compaction cleanup proof changed during cleanup")
+                os.close(proof_fd); proof_fd = None
+                os.unlink(proof_name, dir_fd=root)
+                os.fsync(root)
+        except: pass
+        finally:
+            if proof_fd is not None: os.close(proof_fd)
 
 def acquire_lease(home_fd, owner):
     root = walk_dir(home_fd, ".agent-manager/provider-home-leases-v1", True)
