@@ -357,7 +357,10 @@
 //      exposes a bounded, content-free recovery coordinate instead.
 // 129: runners report an exact runner-owned governance trip so the control plane can always
 //      materialize the Continue / Stop decision that holds the runner queue.
-export const PROTOCOL_VERSION = 129;
+// 130: policy-hook terminal decisions become content-safe runner-owned session events. A
+//      correlated CP -> runner append fence orders the event before the hook response can release
+//      its exact tool call; pre-v130 peers retain audit-backed client synthesis.
+export const PROTOCOL_VERSION = 130;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -531,6 +534,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   wslAgentControlBridge: 123,
   /** Fresh discovery attests the no-follow target-local launcher required for Direct WSL. */
   wslSafeLauncher: 124,
+  /** Correlated runner-owned policy-hook decision events replace timestamp-based UI synthesis. */
+  nativePolicyHookEvents: 130,
   /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
   usageTokenBuckets: 103,
   /** v104 runners stamp the producing model on token_usage. */
@@ -687,19 +692,17 @@ export function providerAuthenticationReceiptCode(
 /**
  * Additive event kinds that older peers must not receive.
  *
- * ADDING A SECOND ENTRY IS A MIGRATION, NOT A ONE-LINE CHANGE. The count of entries is the base of
- * the projected-history-epoch encoding (`localEpoch * VARIANTS + variant`), so changing it renumbers
- * every peer's epoch — and the new numbering collides with the old one rather than sorting above it.
- * With one policy, local epoch 0 published 1 to a legacy peer; with two, local epoch 0 publishes 1
- * to a mid-range peer whose projection differs, and a control plane comparing epochs across the
- * upgrade sees equality and retains cached rows whose sequence numbers now name different events.
- * A second entry therefore needs an explicit format-generation fence that forces a resync.
+ * Adding an entry changes the projected-history-epoch encoding (`localEpoch * VARIANTS + variant`).
+ * Protocol v130 therefore reserves an offset before the three-way encoding. For the same or any
+ * later local epoch, every new-format value sorts above both values the one-policy format could
+ * have published, forcing a resync before a cached sequence number can name a different event.
  *
  * Prefer carrying additive state on the session snapshot, which is version-gated per field and
  * needs no sequence space at all.
  */
 const SESSION_EVENT_WIRE_POLICIES = {
   agent_response_completed: { minProtocol: 87, legacy: "omit" },
+  policy_hook_decision: { minProtocol: 130, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
   minProtocol: number;
   legacy: "omit";
@@ -728,6 +731,9 @@ export function sessionEventWireProjectionVariant(
 /** Total distinct projections, including the exact one. */
 export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
   Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
+
+/** Numeric fence between the retired two-way encoding and the v130 three-way encoding. */
+export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 2;
 
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
@@ -2971,6 +2977,7 @@ export type SessionEventPayload =
       /** Recovery can restore session-scoped hook elicitation only when v66 provisioning proved it. */
       restoresElicitation?: boolean;
     }
+  | PolicyHookDecisionEvent
   | ({ kind: "review_decision" } & ReviewDecision)
   | { kind: "permission_request"; requestId: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication"; ownerToolUseId?: string }
   | {
@@ -3024,6 +3031,19 @@ export interface SessionEvent {
   seq: number;
   ts: number;
   payload: SessionEventPayload;
+}
+
+/** Content-safe terminal policy-hook provenance. It deliberately excludes tool input, answers,
+ * policy predicates, and scope details; `toolCallId` is only the provider's opaque causal key. */
+export interface PolicyHookDecisionEvent {
+  kind: "policy_hook_decision";
+  auditId: string;
+  requestId: string;
+  stage: GovernanceAuditStage;
+  outcome: GovernanceAuditOutcome;
+  actor: GovernanceActor;
+  governancePolicyId?: string;
+  toolCallId: string;
 }
 
 /* ---------------------- Usage and cost aggregation ---------------------- */
@@ -4752,6 +4772,25 @@ export interface PolicyHookCredentialRegisteredMessage {
   error?: string;
 }
 
+/** Correlated causal append: the control plane waits for this runner-owned history write before
+ * returning a terminal PreToolUse response that can release the matching provider tool call. */
+export interface RecordPolicyHookDecisionMessage {
+  type: "record_policy_hook_decision";
+  requestId: string;
+  sessionId: string;
+  decision: Omit<PolicyHookDecisionEvent, "kind">;
+}
+
+export interface PolicyHookDecisionRecordedMessage {
+  type: "policy_hook_decision_recorded";
+  requestId: string;
+  sessionId: string;
+  auditId: string;
+  accepted: boolean;
+  eventSeq?: number;
+  error?: string;
+}
+
 /** Hash-only binding for one runner-minted, exact-session CLI/MCP credential. The plaintext stays
  * in a protected runner-local file and is never placed in argv or a durable command snapshot. */
 export interface AgentControlCredentialMessage {
@@ -5078,6 +5117,7 @@ export type RunnerToControlPlane =
   | SessionStatusMessage
   | StopSessionResultMessage
   | PolicyHookCredentialMessage
+  | PolicyHookDecisionRecordedMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
   | GovernanceTrippedMessage
@@ -6482,6 +6522,7 @@ export type ControlPlaneToRunner =
   | RegisteredMessage
   | RegisterRejectedMessage
   | PolicyHookCredentialRegisteredMessage
+  | RecordPolicyHookDecisionMessage
   | AgentControlCredentialRegisteredMessage
   | StartSessionMessage
   | PromptSessionMessage

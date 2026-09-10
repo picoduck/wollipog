@@ -715,9 +715,10 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
-  governanceAudit: (id: string, limit = 50) =>
-    req<{ entries: GovernanceAuditEntry[] }>(
-      `/api/sessions/${encodeURIComponent(id)}/governance-audit?limit=${limit}`,
+  governanceAudit: (id: string, limit = 50, before?: string) =>
+    req<{ entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean }>(
+      `/api/sessions/${encodeURIComponent(id)}/governance-audit?limit=${limit}` +
+        (before ? `&before=${encodeURIComponent(before)}` : ""),
     ),
 
   approvalQueue: () => req<{ items: ApprovalQueueItem[] }>("/api/governance/approval-queue"),

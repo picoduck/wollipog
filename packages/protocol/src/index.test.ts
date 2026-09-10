@@ -18,6 +18,7 @@ import {
   sessionNamingAgentFailureCode,
   sessionEventWireProjectionRequiredForProtocol,
   sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
   SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
@@ -147,8 +148,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 129", () => {
-  assert.equal(PROTOCOL_VERSION, 129);
+test("PROTOCOL_VERSION is 130", () => {
+  assert.equal(PROTOCOL_VERSION, 130);
   assert.equal(runnerSupportsProtocol(127, "providerHistoryQuarantine"), false);
   assert.equal(runnerSupportsProtocol(128, "providerHistoryQuarantine"), true);
   assert.equal(runnerSupportsProtocol(121, "contextWindowVariants"), false);
@@ -159,6 +160,8 @@ test("PROTOCOL_VERSION is 129", () => {
   assert.equal(runnerSupportsProtocol(124, "wslSafeLauncher"), true);
   assert.equal(runnerSupportsProtocol(128, "governanceTripReporting"), false);
   assert.equal(runnerSupportsProtocol(129, "governanceTripReporting"), true);
+  assert.equal(runnerSupportsProtocol(129, "nativePolicyHookEvents"), false);
+  assert.equal(runnerSupportsProtocol(130, "nativePolicyHookEvents"), true);
   assert.equal(runnerSupportsProtocol(112, "progressAwareSessionWorktrees"), false);
   assert.equal(runnerSupportsProtocol(113, "progressAwareSessionWorktrees"), true);
   assert.equal(runnerSupportsProtocol(113, "hostAdministration"), false);
@@ -846,15 +849,34 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(completion, 87), completion);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), false);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), true);
+  assert.equal(sessionEventWireProjectionVariant(86), 2);
+  assert.equal(sessionEventWireProjectionVariant(87), 1);
 
-  // The variant is the count of unmet policies, so it stays a dense index as policies are added.
-  // It is also the base of the projected-epoch encoding: a second policy renumbers every peer's
-  // epoch into values that collide with the current ones, which is why adding one is a migration.
-  assert.equal(sessionEventWireProjectionVariant(86), 1);
-  assert.equal(sessionEventWireProjectionVariant(undefined), 1);
-  assert.equal(sessionEventWireProjectionVariant(87), 0);
-  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 2);
+  const hookDecision = {
+    kind: "policy_hook_decision",
+    auditId: "audit-1",
+    requestId: "request-1",
+    stage: "resolution",
+    outcome: "allowed",
+    actor: { kind: "human" },
+    toolCallId: "tool-1",
+  } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 129), null);
+  assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 130), hookDecision);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(129), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(130), false);
+  assert.equal(sessionEventWireProjectionVariant(129), 1);
+  assert.equal(sessionEventWireProjectionVariant(130), 0);
+  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 3);
+
+  // The variant is the count of unmet policies, so it stays a dense index. The count is the
+  // projected-epoch radix, and the explicit offset fences the retired one-policy encoding.
+  assert.equal(sessionEventWireProjectionVariant(86), 2);
+  assert.equal(sessionEventWireProjectionVariant(undefined), 2);
+  assert.equal(sessionEventWireProjectionVariant(87), 1);
+  assert.equal(sessionEventWireProjectionVariant(130), 0);
+  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 2);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

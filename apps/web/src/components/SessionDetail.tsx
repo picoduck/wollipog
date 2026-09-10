@@ -2116,11 +2116,13 @@ function SessionDetailLoaded({
   // Governance outcomes are transcript context, not a persistent header: the decisions whose
   // request has no transcript row of its own are spliced in at their chronological position, and
   // the whole list stays reviewable in the side panel (a full-screen drawer on phones).
-  const governanceDecisions = useGovernanceAudit(
+  const governanceAudit = useGovernanceAudit(
     sessionId,
     `${session.updatedAt}:${session.pendingApproval?.requestId ?? ""}`,
     mode === "expanded",
+    evs?.[0]?.ts,
   );
+  const governanceDecisions = governanceAudit.decisions;
   const timelineItems = useGovernanceTimeline(
     items,
     governanceDecisions,
@@ -4937,6 +4939,10 @@ function SessionDetailLoaded({
           onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTarget : undefined}
           items={items}
           governanceDecisions={governanceDecisions}
+          governanceAvailable={governanceAudit.available}
+          governanceHasMore={governanceAudit.hasMore}
+          governanceLoadingOlder={governanceAudit.loadingOlder}
+          onLoadOlderGovernance={governanceAudit.loadOlder}
           parentTurnEventIds={backgroundParentTurnEventIds}
           onOpenParentTurn={revealBackgroundParentTurn}
           backgroundInventoryError={backgroundInventoryError}

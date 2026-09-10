@@ -37,7 +37,7 @@ import {
 import { ControlPlaneDb } from "./db.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
-import { Hub, RunnerRequestNotSentError, type RunnerRequestResult } from "./hub.js";
+import { Hub, RunnerRequestNotSentError, RunnerRequestTimeoutError, type RunnerRequestResult } from "./hub.js";
 import { agentDelegationAuthorizationError, type AgentPrincipal } from "./identity.js";
 import { pushDecision } from "./push-decision.js";
 import { SessionTitleGenerationError, type SessionTitleGenerator } from "./session-title-generator.js";
@@ -6334,6 +6334,196 @@ test("Claude policy hook defers on no match and durably resolves non-interactive
   );
 });
 
+test("current policy-hook peers fence terminal responses behind a content-safe runner receipt", async () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "deny-native-hook",
+      name: "Deny Native Hook",
+      effect: "deny",
+      priority: 100,
+      enabled: true,
+      scope: { toolName: "Read" },
+    }).ok);
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "record_policy_hook_decision");
+      return {
+        type: "policy_hook_decision_recorded",
+        requestId: message.requestId,
+        sessionId: message.sessionId,
+        auditId: message.decision.auditId,
+        accepted: true,
+        eventSeq: 7,
+      };
+    };
+    const request = {
+      hookEventName: "PreToolUse" as const,
+      providerSessionId: "provider-secret",
+      permissionMode: "plan",
+      toolUseId: "tool-native",
+      context: { toolName: "Read", path: "/repos/demo/secret.txt" },
+    };
+    const result = await svc.evaluatePolicyHookCausally(id, request, true);
+    assert.equal(result.data?.decision, "deny");
+    const append = hub.sentOfType("record_policy_hook_decision").at(-1)!;
+    assert.deepEqual(Object.keys(append.decision).sort(), [
+      "actor", "auditId", "governancePolicyId", "outcome", "requestId", "stage", "toolCallId",
+    ]);
+    assert.equal(append.decision.stage, "resolution");
+    assert.equal(append.decision.outcome, "denied");
+    assert.equal(append.decision.toolCallId, "tool-native");
+    assert.doesNotMatch(JSON.stringify(append), /provider-secret|secret\.txt/);
+
+    const sent = hub.sentToRunner.length;
+    db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.nativePolicyHookEvents - 1);
+    const legacy = await svc.evaluatePolicyHookCausally(id, { ...request, toolUseId: "tool-legacy" }, true);
+    assert.equal(legacy.data?.decision, "deny");
+    assert.equal(hub.sentToRunner.length, sent, "pre-v130 runners retain audit-backed synthesis without a new command");
+  } finally { db.close(); }
+});
+
+test("native hook receipt failures block normally without opening the sidecar transport circuit", async () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "allow-native-hook",
+      name: "Allow Native Hook",
+      effect: "allow",
+      priority: 100,
+      enabled: true,
+      scope: { toolName: "Read" },
+    }).ok);
+    const request = (toolUseId: string) => ({
+      hookEventName: "PreToolUse" as const,
+      providerSessionId: "provider-1",
+      permissionMode: "plan",
+      toolUseId,
+      context: { toolName: "Read" },
+    });
+    const failClosed = async (toolUseId: string) => {
+      const result = await svc.evaluatePolicyHookCausally(id, request(toolUseId), true);
+      assert.equal(result.ok, true);
+      assert.equal(result.status, 200);
+      assert.equal(result.data?.decision, "deny");
+      assert.match(result.data?.reason ?? "", /blocked fail-closed/);
+    };
+
+    let resolvedBeforeFailClosed: number | null | undefined;
+    hub.requestHandler = async (message) => {
+      if (message.type === "record_policy_hook_decision") {
+        resolvedBeforeFailClosed = db.getPolicyHookApproval(id, message.decision.requestId)?.resolvedAt;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return {
+        type: "policy_hook_decision_recorded",
+        requestId: message.type === "record_policy_hook_decision" ? message.requestId : "wrong-request",
+        sessionId: id,
+        auditId: message.type === "record_policy_hook_decision" ? message.decision.auditId : "wrong-audit",
+        accepted: false,
+        error: "append rejected",
+      };
+    };
+    await failClosed("tool-rejected");
+    const historyFailure = svc.governanceAudit(id).find((entry) =>
+      entry.actor.kind === "system" && entry.actor.id === "decision-history-unavailable");
+    assert.ok(historyFailure);
+    assert.equal(historyFailure.outcome, "denied");
+    assert.equal(db.policyHookDecisionAudit(id, historyFailure.requestId)?.auditId, historyFailure.auditId,
+      "the fail-closed resolution supersedes the prior policy allow");
+    assert.equal(db.getPolicyHookApproval(id, historyFailure.requestId)?.status, "denied");
+    assert.equal(typeof resolvedBeforeFailClosed, "number");
+    assert.equal(db.getPolicyHookApproval(id, historyFailure.requestId)?.resolvedAt, resolvedBeforeFailClosed,
+      "fail-closed conversion preserves the original terminal resolution time");
+    await failClosed("tool-rejected");
+    assert.equal(svc.governanceAudit(id).filter((entry) =>
+      entry.requestId === historyFailure.requestId &&
+      entry.actor.kind === "system" && entry.actor.id === "decision-history-unavailable").length, 1,
+    "a retried failed acknowledgement preserves one fail-closed audit row");
+
+    hub.requestHandler = (message) => ({
+      type: "policy_hook_decision_recorded",
+      requestId: message.type === "record_policy_hook_decision" ? message.requestId : "wrong-request",
+      sessionId: id,
+      auditId: "mismatched-audit",
+      accepted: true,
+      eventSeq: 1,
+    });
+    await failClosed("tool-mismatched");
+
+    hub.deliver = false;
+    await failClosed("tool-offline");
+
+    hub.deliver = true;
+    hub.requestHandler = () => { throw new RunnerRequestTimeoutError(); };
+    await failClosed("tool-timeout");
+  } finally { db.close(); }
+});
+
+test("native hook receipts cover human approval and expiry before their terminal polls return", async () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    for (const [toolName, askTimeout] of [["ApproveTool", undefined], ["ExpireTool", 1]] as const) {
+      assert.ok(svc.upsertGovernancePolicy({
+        policyId: `ask-${toolName}`,
+        name: `Ask ${toolName}`,
+        effect: "ask",
+        priority: 100,
+        enabled: true,
+        scope: { toolName },
+        ...(askTimeout ? { askTimeout } : {}),
+      }).ok);
+    }
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "record_policy_hook_decision");
+      return {
+        type: "policy_hook_decision_recorded",
+        requestId: message.requestId,
+        sessionId: message.sessionId,
+        auditId: message.decision.auditId,
+        accepted: true,
+        eventSeq: hub.sentOfType("record_policy_hook_decision").length,
+      };
+    };
+    const request = (toolName: string) => ({
+      hookEventName: "PreToolUse" as const,
+      providerSessionId: "provider-1",
+      permissionMode: "plan",
+      toolUseId: `tool-${toolName}`,
+      context: { toolName },
+    });
+
+    const approvalRequest = request("ApproveTool");
+    const asked = await svc.evaluatePolicyHookCausally(id, approvalRequest, true);
+    assert.equal(asked.data?.decision, "ask");
+    assert.ok(svc.approve(id, asked.data!.approvalRequestId!, "allow", { kind: "human", id: "device-1" }).ok);
+    const allowed = await svc.evaluatePolicyHookCausally(id, {
+      ...approvalRequest, approvalRequestId: asked.data!.approvalRequestId,
+    }, true);
+    assert.equal(allowed.data?.decision, "allow");
+
+    const expiryRequest = request("ExpireTool");
+    const expiring = await svc.evaluatePolicyHookCausally(id, expiryRequest, true);
+    assert.equal(expiring.data?.decision, "ask");
+    assert.equal(svc.reconcilePolicyHookTimeouts(Date.now() + 2_000, id), 1);
+    const expired = await svc.evaluatePolicyHookCausally(id, {
+      ...expiryRequest, approvalRequestId: expiring.data!.approvalRequestId,
+    }, true);
+    assert.equal(expired.data?.decision, "deny");
+
+    const decisions = hub.sentOfType("record_policy_hook_decision").map((message) => message.decision);
+    assert.deepEqual(decisions.map((decision) => [decision.outcome, decision.actor]), [
+      ["allowed", { kind: "human", id: "device-1" }],
+      ["timed_out", { kind: "system", id: "policy-ask-timeout" }],
+    ]);
+  } finally { db.close(); }
+});
+
 test("hook requests without a stable tool id still evaluate non-durable policy outcomes", () => {
   const { db, hub, svc } = makeHarness();
   const evaluate = (
@@ -6617,7 +6807,7 @@ test("hook asks are idempotent, serialize through one slot, and audit human and 
   assert.equal(svc.approve(id, second.approvalRequestId!, "allow").status, 409, "timeout wins a late click");
 });
 
-test("live hook polling heartbeats preserve an indefinite ask and abandonment terminates it", () => {
+test("live hook polling heartbeats preserve an indefinite ask and abandonment records a terminal event", async () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   db.updateSessionStatus(id, "running", Date.now());
@@ -6679,10 +6869,19 @@ test("live hook polling heartbeats preserve an indefinite ask and abandonment te
     entry.requestId === asked.approvalRequestId &&
     entry.outcome === "aborted" &&
     entry.actor.id === "policy-hook-abandoned"));
-  assert.equal(svc.evaluatePolicyHook(id, {
+  hub.requestHandler = (message) => ({
+    type: "policy_hook_decision_recorded",
+    requestId: message.type === "record_policy_hook_decision" ? message.requestId : "wrong-request",
+    sessionId: id,
+    auditId: message.type === "record_policy_hook_decision" ? message.decision.auditId : "wrong-audit",
+    accepted: true,
+    eventSeq: 1,
+  });
+  assert.equal((await svc.evaluatePolicyHookCausally(id, {
     ...request,
     approvalRequestId: asked.approvalRequestId,
-  }).data?.decision, "deny");
+  }, true)).data?.decision, "deny");
+  assert.equal(hub.sentOfType("record_policy_hook_decision").at(-1)?.decision.outcome, "aborted");
   assert.equal(svc.approve(id, asked.approvalRequestId!, "allow").status, 409);
 });
 

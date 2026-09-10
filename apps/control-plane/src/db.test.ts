@@ -4934,6 +4934,39 @@ test("governance audit is query-bounded, retention-bounded, and survives session
   assert.deepEqual(db.listGovernanceAudit("sess-1", 2), []);
 });
 
+test("governance audit cursor pages tied timestamps without crossing sessions", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.createSession(newSession({ id: "sess-2" }));
+  const append = (sessionId: string, requestId: string, timestamp: number) => db.appendGovernanceAudit({
+    requestId,
+    approvalKind: "policy_hook",
+    stage: "resolution",
+    outcome: "denied",
+    actor: { kind: "human", id: "device-1" },
+    scope: { sessionId, runnerId: "runner-1", workspaceId: "ws-1" },
+    timestamp,
+  });
+  const first = append("sess-1", "first", 1_000);
+  const second = append("sess-1", "second", 1_000);
+  const third = append("sess-1", "third", 1_000);
+  const foreign = append("sess-2", "foreign", 1_000);
+
+  assert.deepEqual(db.governanceAuditPage("sess-1", 2), {
+    entries: [second, third],
+    nextBefore: second.auditId,
+    hasMore: true,
+  });
+  assert.deepEqual(db.governanceAuditPage("sess-1", 2, second.auditId), {
+    entries: [first],
+    hasMore: false,
+  });
+  assert.equal(db.governanceAuditPage("sess-1", 2, foreign.auditId), null);
+  assert.deepEqual(db.listGovernanceAudit("sess-1", 2), [second, third], "legacy newest-N callers are unchanged");
+  assert.equal(db.policyHookDecisionAudit("sess-1", "second")?.auditId, second.auditId);
+  assert.equal(db.policyHookDecisionAudit("sess-1", "foreign"), null, "decision lookup is session-scoped");
+});
+
 test("governance policies persist ordered selectors/conditions and support update/delete", () => {
   const db = withRunner();
   const first = db.upsertGovernancePolicy({

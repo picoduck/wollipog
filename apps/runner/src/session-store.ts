@@ -39,6 +39,7 @@ import {
   projectSessionEventPayloadForProtocol,
   sessionEventWireProjectionRequiredForProtocol,
   sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
   SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
 } from "@wollipog/protocol";
 import type {
@@ -2034,10 +2035,14 @@ export class SessionStore {
     // must never share an epoch or a reconnect would reuse cursors that now name different events.
     const variant = sessionEventWireProjectionVariant(protocolVersion);
     if (!Number.isSafeInteger(localEpoch) || localEpoch < 0 ||
-        localEpoch > Math.floor((Number.MAX_SAFE_INTEGER - variant) / SESSION_EVENT_WIRE_PROJECTION_VARIANTS)) {
+        localEpoch > Math.floor(
+          (Number.MAX_SAFE_INTEGER - SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET - variant) /
+            SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
+        )) {
       throw new HistoryStoreError("history_corrupt", "session history epoch cannot be projected safely");
     }
-    return localEpoch * SESSION_EVENT_WIRE_PROJECTION_VARIANTS + variant;
+    return SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET +
+      localEpoch * SESSION_EVENT_WIRE_PROJECTION_VARIANTS + variant;
   }
 
   private projectEventsWithIndex(
@@ -2129,7 +2134,14 @@ export class SessionStore {
     try {
       if (!this.eventProjectionRequired(protocolVersion)) {
         const wireEpoch = request.logEpoch;
-        const localEpoch = wireEpoch === undefined ? undefined : Math.floor(wireEpoch / 2);
+        if (wireEpoch !== undefined && wireEpoch < SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET) {
+          throw new HistoryStoreError("history_epoch_changed", "session history projection format changed");
+        }
+        const localEpoch = wireEpoch === undefined ? undefined
+          : Math.floor(
+              (wireEpoch - SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET) /
+                SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
+            );
         if (localEpoch !== undefined && this.projectedHistoryEpoch(localEpoch, protocolVersion) !== wireEpoch) {
           throw new HistoryStoreError("history_epoch_changed", "session history projection changed during pagination");
         }

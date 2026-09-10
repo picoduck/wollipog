@@ -42,6 +42,7 @@ import type {
   RunView,
   PodView,
   ProjectView,
+  PolicyHookDecisionRecordedMessage,
   SessionEvent,
   SessionEventPayload,
   SessionHistoryResultMessage,
@@ -200,7 +201,8 @@ export type RunnerRequestResult =
   | SteerSessionResultMessage
   | GenerateSessionTitleResultMessage
   | SessionNamingCustomModelResultMessage
-  | SessionWorktreeResultMessage;
+  | SessionWorktreeResultMessage
+  | PolicyHookDecisionRecordedMessage;
 
 interface PendingRequest {
   runnerId: string;
