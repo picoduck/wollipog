@@ -470,13 +470,12 @@ export class CodexAppServerDriver implements Driver {
         else this.emitProviderStderr(s);
       }
     });
-    // JSON-RPC stdout may still contain a response or final notification when
-    // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
-    child.on("close", (code) => {
-      peer.dispose("codex app-server exited");
-      // A rejected feature probe can be replaced before its delayed close event arrives.
+    const finishChild = (code: number | null, reason: string, spawnError?: Error) => {
+      peer.dispose(reason);
+      // A rejected feature probe can be replaced before its delayed error/close event arrives.
       // Only the current launch may tear down session state or report an exit.
       if (this.peer !== peer && this.child !== child) return;
+      if (spawnError) this.emitProviderStderr(`spawn error: ${spawnError.message}`);
       // The persistent server is gone: drop our handles so a later prompt() fails fast
       // instead of parking a turn/start request that never settles.
       if (this.peer === peer) this.peer = null;
@@ -490,6 +489,16 @@ export class CodexAppServerDriver implements Driver {
         if (this.initializing) this.initializationExit = { code };
         else this.cb.onExit(code);
       }
+    };
+    // POSIX spawn failures are asynchronous `error` events and may never emit `close`. Without an
+    // explicit listener, one missing executable or cwd becomes a process-fatal uncaughtException.
+    child.on("error", (error: Error) => {
+      finishChild(null, `codex app-server spawn error: ${error.message}`, error);
+    });
+    // JSON-RPC stdout may still contain a response or final notification when
+    // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
+    child.on("close", (code) => {
+      finishChild(code, "codex app-server exited");
     });
 
     this.registerHandlers(peer);

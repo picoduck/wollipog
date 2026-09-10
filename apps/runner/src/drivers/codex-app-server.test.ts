@@ -112,6 +112,77 @@ test("app-server launch enables Default-mode questions before the subcommand", (
   assert.deepEqual(base, ["/opt/codex.js", "-c", "model=default"], "configured arguments remain immutable");
 });
 
+test("an asynchronous app-server spawn error rejects initialization without waiting for close", async () => {
+  const child = fakeAgentProcess();
+  const stderr: string[] = [];
+  const exits: Array<number | null> = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: [],
+    cwd: "/missing/worktree",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: (line) => stderr.push(line),
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: () => child,
+    kill: () => {},
+  });
+
+  const initializing = driver.initialize();
+  setImmediate(() => child.emit("error", new Error("spawn codex ENOENT")));
+  await assert.rejects(initializing, (error: unknown) => {
+    assert.match(String((error as { message?: unknown }).message), /spawn codex ENOENT/);
+    return true;
+  });
+  assert.deepEqual(stderr, ["spawn error: spawn codex ENOENT"]);
+  assert.deepEqual(exits, [null]);
+  assert.equal(driver.pid, undefined);
+  driver.dispose();
+});
+
+test("a close after an app-server spawn error does not report a duplicate exit", async () => {
+  const child = fakeAgentProcess();
+  const stderr: string[] = [];
+  const exits: Array<number | null> = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: [],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: (line) => stderr.push(line),
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: () => {
+      child.stdin.on("data", (chunk) => {
+        const message = JSON.parse(String(chunk).trim()) as { id?: number; method?: string };
+        if (message.method === "initialize") {
+          child.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "codex-test" } }) + "\n");
+        }
+      });
+      return child;
+    },
+    kill: () => {},
+  });
+
+  await driver.initialize();
+  child.emit("error", new Error("spawn codex ENOENT"));
+  child.emit("close", null);
+  await nextTask();
+
+  assert.deepEqual(stderr, ["spawn error: spawn codex ENOENT"]);
+  assert.deepEqual(exits, [null]);
+  assert.equal(driver.pid, undefined);
+  driver.dispose();
+});
+
 test("unsupported Default-mode question feature retries the unchanged app-server launch", async () => {
   const launches: string[][] = [];
   const stderr: string[] = [];
