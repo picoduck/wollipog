@@ -51,6 +51,14 @@ test("hook governance audit has distinct policy, human, timeout, and abandonment
     actor: { kind: "policy", id: "deny-shell" },
   }))?.label, "Blocked by Policy");
   assert.equal(governanceAuditPresentation(entry({ outcome: "denied" }))?.label, "Denied by You");
+  assert.deepEqual(governanceAuditPresentation(entry({
+    outcome: "denied",
+    actor: { kind: "system", id: "decision-history-unavailable" },
+  })), {
+    label: "Blocked Fail-Closed",
+    detail: "The tool was denied because its approval could not be completed safely.",
+    tone: "denied",
+  });
   assert.equal(governanceAuditPresentation(entry({
     outcome: "timed_out",
     actor: { kind: "system", id: "policy-ask-timeout" },

@@ -963,6 +963,27 @@ test("native policy-hook decisions render policy allows and abandoned approvals"
   assert.deepEqual(labels, ["Allowed by Policy", "Approval Aborted"]);
 });
 
+test("native policy-hook system denials identify the fail-closed safety boundary", () => {
+  const items = deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "tool-fail-closed", title: "Write", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-fail-closed",
+      requestId: "hook-fail-closed",
+      stage: "resolution",
+      outcome: "denied",
+      actor: { kind: "system", id: "decision-history-unavailable" },
+      toolCallId: "tool-fail-closed",
+    }),
+  ]);
+  const decision = items.find((item) => item.kind === "governance_decision");
+  assert.ok(decision?.kind === "governance_decision");
+  assert.equal(decision.decision.label, "Blocked Fail-Closed");
+  assert.equal(decision.decision.detail,
+    "The tool was denied because its approval could not be completed safely.");
+  assert.equal(decision.decision.decidedBy, "System · decision-history-unavailable");
+});
+
 test("exceptional automated review outcomes stay prominent and split allowed summaries", () => {
   const items = deriveTimeline([
     ev({

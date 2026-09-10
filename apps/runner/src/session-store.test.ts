@@ -455,6 +455,36 @@ test("peer protocol changes fence dense sequence spaces with distinct wire epoch
   }
 });
 
+test("current protocol pagination decodes projected epochs after multiple history resets", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.resetEvents("s_abc");
+    store.resetEvents("s_abc");
+    store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1002);
+
+    const first = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, PROTOCOL_VERSION);
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    assert.equal(first.page.logEpoch, 6);
+    assert.equal(first.page.hasMore, true);
+    const second = store.readEventPageForProtocol("s_abc", {
+      afterSeq: first.page.nextAfterSeq,
+      limit: 1,
+      logEpoch: first.page.logEpoch,
+      throughSeq: first.page.throughSeq,
+    }, PROTOCOL_VERSION);
+    assert.equal(second.ok, true);
+    if (second.ok) {
+      assert.deepEqual(second.events.map((event) => event.payload.kind), ["agent_message"]);
+      assert.equal(second.page.hasMore, false);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("resetEvents truncates the log + resets seq/preview but PRESERVES usage (for reprocess re-import)", () => {
   const { store, root } = tmpStore();
   try {

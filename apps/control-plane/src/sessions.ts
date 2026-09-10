@@ -1932,10 +1932,6 @@ export class SessionsService {
     input: unknown,
     hookCanPollDurableAsk = false,
   ): Promise<ServiceResult<PolicyHookEvaluationResponse>> {
-    const failClosed = (): ServiceResult<PolicyHookEvaluationResponse> => ok({
-      decision: "deny",
-      reason: "Policy decision history could not be recorded; the tool was blocked fail-closed.",
-    });
     const result = this.evaluatePolicyHook(sessionId, input, hookCanPollDurableAsk);
     if (!result.ok || !result.data ||
         (result.data.decision !== "allow" && result.data.decision !== "deny")) return result;
@@ -1952,6 +1948,47 @@ export class SessionsService {
 
     const requestId = policyHookRequestId(sessionId, parsed.value);
     const audit = this.db.policyHookDecisionAudit(sessionId, requestId);
+    const failClosed = (): ServiceResult<PolicyHookEvaluationResponse> => {
+      const approval = this.db.getPolicyHookApproval(sessionId, requestId);
+      const now = Date.now();
+      const deniedAudit: Omit<GovernanceAuditEntry, "auditId"> = audit
+        ? {
+            requestId,
+            approvalKind: "policy_hook",
+            stage: "resolution",
+            outcome: "denied",
+            actor: { kind: "system", id: "decision-history-unavailable" },
+            scope: audit.scope,
+            ...(audit.governancePolicyId ? { governancePolicyId: audit.governancePolicyId } : {}),
+            timestamp: now,
+          }
+        : this.governanceAuditRecord(
+            session,
+            {
+              requestId,
+              kind: "policy_hook",
+              ...(parsed.value.context ? { context: parsed.value.context } : {}),
+            },
+            "resolution",
+            "denied",
+            { kind: "system", id: "decision-history-unavailable" },
+            now,
+            approval?.governancePolicyId
+              ? { governancePolicyId: approval.governancePolicyId }
+              : {},
+          );
+      try {
+        this.db.failClosedPolicyHookDecision(sessionId, requestId, now, deniedAudit);
+      } catch (error) {
+        this.log.warn(`failed to persist policy-hook fail-closed resolution for ${sessionId}: ${
+          error instanceof Error ? error.message : "unknown database error"
+        }`);
+      }
+      return ok({
+        decision: "deny",
+        reason: "Policy decision history could not be recorded; the tool was blocked fail-closed.",
+      });
+    };
     if (!audit || audit.stage !== "resolution" ||
         !["allowed", "denied", "timed_out", "aborted"].includes(audit.outcome)) {
       return failClosed();

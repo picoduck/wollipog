@@ -11788,6 +11788,52 @@ export class ControlPlaneDb {
     }
   }
 
+  /** A native-history acknowledgement is part of the hook's safety boundary. If it cannot be
+   * proven, atomically replace even a previously allowed terminal result with a durable deny and
+   * one content-safe system resolution. Retries preserve both the original resolution time and
+   * the single fail-closed audit row. */
+  failClosedPolicyHookDecision(
+    sessionId: string,
+    requestId: string,
+    now: number,
+    audit: Omit<GovernanceAuditEntry, "auditId">,
+  ): PolicyHookApprovalRecord | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.getPolicyHookApproval(sessionId, requestId);
+      if (!existing) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      this.stmt(
+        `UPDATE policy_hook_approvals
+         SET status='denied', resolved_at=CASE WHEN status='denied' THEN resolved_at ELSE ? END
+         WHERE session_id=? AND request_id=?`,
+      ).run(now, sessionId, requestId);
+      this.stmt(
+        `UPDATE sessions
+         SET pending_approval=NULL,
+             status=CASE WHEN status='input_required' THEN ? ELSE status END,
+             updated_at=?
+         WHERE id=? AND json_extract(pending_approval, '$.requestId')=?`,
+      ).run(existing.resumeStatus ?? "running", now, sessionId, requestId);
+      const recorded = this.stmt(
+        `SELECT 1 FROM governance_audit
+         WHERE session_id=? AND request_id=? AND approval_kind='policy_hook'
+           AND stage='resolution' AND outcome='denied'
+           AND actor_kind='system' AND actor_id='decision-history-unavailable'
+         LIMIT 1`,
+      ).get(sessionId, requestId);
+      if (!recorded) this.appendGovernanceAudit(audit);
+      const denied = this.getPolicyHookApproval(sessionId, requestId)!;
+      this.db.exec("COMMIT");
+      return denied;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   appendGovernanceAudit(input: Omit<GovernanceAuditEntry, "auditId">): GovernanceAuditEntry {
     const entry: GovernanceAuditEntry = { ...input, auditId: randomUUID() };
     this.stmt(

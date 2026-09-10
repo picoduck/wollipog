@@ -120,6 +120,40 @@ test("policy-hook decisions wait for their exact buffered tool event and dedupli
   }
 });
 
+test("policy-hook causal and dedup indexes survive more than the bounded recovery scan in one turn", async () => {
+  const h = harness({});
+  try {
+    const decision = {
+      auditId: "audit-noisy-turn",
+      requestId: "policy-hook:s_governance:noisy-turn",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "policy", id: "allow-noisy" },
+      toolCallId: "tool-noisy-turn",
+    };
+    (h.sm as any).onDriverEvent("s_governance", {
+      kind: "tool_call", toolCallId: decision.toolCallId, title: "Read", status: "pending",
+    });
+    for (let index = 0; index < 501; index += 1) {
+      (h.sm as any).onDriverEvent("s_governance", { kind: "agent_message", text: `before-${index}` });
+    }
+    const recorded = await h.sm.recordPolicyHookDecision("s_governance", decision);
+    assert.equal(recorded.accepted, true, "the exact turn index retains an old matching tool call");
+    for (let index = 0; index < 501; index += 1) {
+      (h.sm as any).onDriverEvent("s_governance", { kind: "agent_message", text: `after-${index}` });
+    }
+    assert.deepEqual(
+      await h.sm.recordPolicyHookDecision("s_governance", decision),
+      recorded,
+      "the exact turn index deduplicates an acknowledgement after its event leaves the recovery scan",
+    );
+    assert.equal(h.store.readEvents("s_governance")
+      .filter((event) => event.payload.kind === "policy_hook_decision").length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("a policy-hook decision times out when its matching tool event never arrives", async () => {
   const h = harness({});
   try {

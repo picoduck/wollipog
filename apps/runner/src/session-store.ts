@@ -2129,7 +2129,8 @@ export class SessionStore {
     try {
       if (!this.eventProjectionRequired(protocolVersion)) {
         const wireEpoch = request.logEpoch;
-        const localEpoch = wireEpoch === undefined ? undefined : Math.floor(wireEpoch / 2);
+        const localEpoch = wireEpoch === undefined ? undefined
+          : Math.floor(wireEpoch / SESSION_EVENT_WIRE_PROJECTION_VARIANT_COUNT);
         if (localEpoch !== undefined && this.projectedHistoryEpoch(localEpoch, protocolVersion) !== wireEpoch) {
           throw new HistoryStoreError("history_epoch_changed", "session history projection changed during pagination");
         }

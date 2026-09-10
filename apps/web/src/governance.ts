@@ -53,6 +53,13 @@ export function governanceAuditPresentation(entry: GovernanceAuditEntry): Govern
   if (entry.outcome === "aborted") {
     return { label: "Approval Aborted", detail: "The approval ended before the tool could run.", tone: "denied" };
   }
+  if (entry.actor.kind === "system" && entry.outcome === "denied") {
+    return {
+      label: "Blocked Fail-Closed",
+      detail: "The tool was denied because its approval could not be completed safely.",
+      tone: "denied",
+    };
+  }
   if (entry.actor.kind === "policy" && entry.outcome === "allowed") {
     return { label: "Allowed by Policy", detail: "The matched policy allowed this tool.", tone: "allowed" };
   }

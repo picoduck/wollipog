@@ -411,6 +411,11 @@ interface ActiveSession {
   /** Distinct invocation ids are rebuilt once from the durable event log when a tool guardrail is
    * armed, then maintained in memory on normalized tool events. */
   toolCallIds?: Set<string>;
+  /** Exact tool ids and native policy decisions observed during this provider turn. These bounded
+   * indexes preserve the causal fence and acknowledgement idempotency even when a noisy turn has
+   * pushed the matching events beyond the durable recovery scan. */
+  policyHookToolCallIds?: Set<string>;
+  policyHookDecisionEvents?: Map<string, { payload: PolicyHookDecisionEvent; eventSeq: number }>;
   /** A runner-side threshold cancelled this turn. Queued prompts remain held until CP re-arms. */
   governanceTripped?: "cost_budget" | "max_tool_calls";
   /** Exact content-free crossing evidence. Pin every field in memory so a reconnect cannot report
@@ -6065,6 +6070,8 @@ export class SessionManager {
         // step so an interrupt received anywhere in pre-provider preparation cannot be erased.
         entry.cancelRequested = false;
         entry.interruptRequested = false;
+        entry.policyHookToolCallIds = new Set();
+        entry.policyHookDecisionEvents = new Map();
         if (next.config && !configsEqual(next.config, this.store.readMeta(sessionId)?.config)) {
           // Apply the config THIS prompt was sent with (see QueuedPrompt.config). Drivers pick
           // config up at turn start, so setting it here is exactly "this turn runs under it".
@@ -8983,6 +8990,14 @@ export class SessionManager {
       ...(typeof raw.governancePolicyId === "string" ? { governancePolicyId: raw.governancePolicyId } : {}),
       toolCallId: raw.toolCallId as string,
     };
+    const active = this.active.get(sessionId);
+    const activeExisting = active?.policyHookDecisionEvents?.get(auditId);
+    if (activeExisting) {
+      if (JSON.stringify(activeExisting.payload) !== JSON.stringify(payload)) {
+        return fail(auditId, "decision conflicts with the existing audit event");
+      }
+      return { accepted: true, auditId, eventSeq: activeExisting.eventSeq };
+    }
     const tail = this.store.logTailSeq(sessionId);
     const recent = this.store.readEvents(sessionId, Math.max(0, tail - 500));
     const existing = recent.find((event) =>
@@ -8993,7 +9008,7 @@ export class SessionManager {
       }
       return { accepted: true, auditId, eventSeq: existing.seq };
     }
-    const toolObserved = recent.some((event) =>
+    const toolObserved = active?.policyHookToolCallIds?.has(payload.toolCallId) || recent.some((event) =>
       event.payload.kind === "tool_call" && event.payload.toolCallId === payload.toolCallId);
     if (toolObserved) return this.appendPolicyHookDecision(sessionId, payload);
 
@@ -9028,6 +9043,15 @@ export class SessionManager {
     payload: PolicyHookDecisionEvent,
   ): { accepted: boolean; auditId: string; eventSeq?: number; error?: string } {
     const stored = this.emitEvent(sessionId, payload);
+    if (stored) {
+      const entry = this.active.get(sessionId);
+      if (entry) {
+        (entry.policyHookDecisionEvents ??= new Map()).set(payload.auditId, {
+          payload,
+          eventSeq: stored.seq,
+        });
+      }
+    }
     return stored
       ? { accepted: true, auditId: payload.auditId, eventSeq: stored.seq }
       : { accepted: false, auditId: payload.auditId, error: "decision history append failed" };
@@ -9730,6 +9754,7 @@ export class SessionManager {
       pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId);
     if (!this.emitEvent(sessionId, payload)) return;
     if (payload.kind === "tool_call") {
+      if (entry) (entry.policyHookToolCallIds ??= new Set()).add(payload.toolCallId);
       this.flushPolicyHookDecisionAfterToolCall(sessionId, payload.toolCallId);
     }
     if (managedAttentionResolution && entry) {

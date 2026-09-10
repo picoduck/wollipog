@@ -6420,6 +6420,18 @@ test("native hook receipt failures block normally without opening the sidecar tr
       error: "append rejected",
     });
     await failClosed("tool-rejected");
+    const historyFailure = svc.governanceAudit(id).find((entry) =>
+      entry.actor.kind === "system" && entry.actor.id === "decision-history-unavailable");
+    assert.ok(historyFailure);
+    assert.equal(historyFailure.outcome, "denied");
+    assert.equal(db.policyHookDecisionAudit(id, historyFailure.requestId)?.auditId, historyFailure.auditId,
+      "the fail-closed resolution supersedes the prior policy allow");
+    assert.equal(db.getPolicyHookApproval(id, historyFailure.requestId)?.status, "denied");
+    await failClosed("tool-rejected");
+    assert.equal(svc.governanceAudit(id).filter((entry) =>
+      entry.requestId === historyFailure.requestId &&
+      entry.actor.kind === "system" && entry.actor.id === "decision-history-unavailable").length, 1,
+    "a retried failed acknowledgement preserves one fail-closed audit row");
 
     hub.requestHandler = (message) => ({
       type: "policy_hook_decision_recorded",

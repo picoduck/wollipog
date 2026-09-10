@@ -252,6 +252,7 @@ function nativePolicyHookDecision(ev: SessionEvent): GovernanceDecision | null {
       : payload.actor.kind === "policy" ? "policy" : "denied";
   const label = payload.outcome === "timed_out" ? "Approval Timed Out"
     : payload.outcome === "aborted" ? "Approval Aborted"
+    : payload.actor.kind === "system" && payload.outcome === "denied" ? "Blocked Fail-Closed"
     : payload.outcome === "allowed"
       ? payload.actor.kind === "human" ? "Approved by You" : "Allowed by Policy"
       : payload.actor.kind === "human" ? "Denied by You" : "Blocked by Policy";
@@ -259,6 +260,8 @@ function nativePolicyHookDecision(ev: SessionEvent): GovernanceDecision | null {
     ? "The policy deadline expired, so the tool was denied."
     : payload.outcome === "aborted"
       ? "The approval ended before the tool could run."
+    : payload.actor.kind === "system" && payload.outcome === "denied"
+      ? "The tool was denied because its approval could not be completed safely."
     : payload.outcome === "allowed"
       ? payload.actor.kind === "human"
         ? "The suspended tool invocation resumed."
