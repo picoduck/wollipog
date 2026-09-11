@@ -38,6 +38,7 @@ import type {
   StopReason,
 } from "./driver.js";
 import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from "./poisoned-provider-history.js";
+import { providerRejectionShape } from "./provider-rejection-shape.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
@@ -1421,6 +1422,11 @@ export class CodexAppServerDriver implements Driver {
       return;
     }
     this.cb.onEvent({ kind: "error", message });
+    // Not a recognized poisoned-history rejection. If it still names an indexed item in the
+    // request, record its shape so a second classifier case can one day be evidenced rather than
+    // guessed at (#876). This is observation only; the error's handling is unchanged.
+    const shape = providerRejectionShape(message);
+    if (shape) this.cb.onUnclassifiedProviderRejection?.(shape);
   }
 
   private signalAuthenticationFailure(): void {
