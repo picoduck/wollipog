@@ -25,7 +25,7 @@ import {
 } from "../project-session-selection.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
-import { savedSessionPermissionMode } from "../session-preset-defaults.js";
+import { orchestratorUnavailableReason, savedSessionPermissionMode } from "../session-preset-defaults.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import {
   advancedAgentOptions,
@@ -47,7 +47,7 @@ import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
 import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
-import { SegmentedControl, Select } from "./ui/ChoiceControls.js";
+import { ChoiceCards, SegmentedControl } from "./ui/ChoiceControls.js";
 
 /**
  * New Session is intentionally minimal — pick where it runs (runner + agent + workspace) and go.
@@ -227,13 +227,21 @@ export function NewSessionDialog({
     agent?.wslAgentControl?.safeLauncherProtocolVersion === 1 &&
     runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher") &&
     runner?.runtime?.executionIsolation?.mode === "bwrap";
-  const orchestratorSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration") &&
-    agent?.capabilities?.permissionModes?.includes("orchestrator") &&
-    (orchestratorContext === "native" || directWslOrchestrator) &&
-    (!executionTarget || executionTarget.adapter === "host");
+  const hostExecutionTarget = !executionTarget || executionTarget.adapter === "host";
+  // Availability is DERIVED from the sentence that explains it, so the two cannot disagree. The
+  // preset card is rendered either way now — §11.3 — and a disabled card whose reason contradicted
+  // why it was disabled would be worse than the omission it replaced.
+  const orchestratorUnavailable = orchestratorUnavailableReason({
+    runnerSupportsOrchestration: runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration"),
+    agentOffersOrchestrator: agent?.capabilities?.permissionModes?.includes("orchestrator") ?? false,
+    contextKind: orchestratorContext,
+    directWslVerified: directWslOrchestrator,
+    hostExecutionTarget,
+  });
+  const orchestratorSupported = orchestratorUnavailable === undefined;
   const directWslRequiresSafeOrchestrator = orchestratorContext === "wsl" &&
     launchSurface !== "native_tui" && runner?.runtime?.executionIsolation?.mode === "bwrap" &&
-    (!executionTarget || executionTarget.adapter === "host");
+    hostExecutionTarget;
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
   const nativeTuiStartFenceSupported = runnerSupportsProtocol(
     runner?.protocolVersion,
@@ -244,7 +252,7 @@ export function NewSessionDialog({
     "sessionStartFencedShells",
     "Initial Native TUI launch",
   );
-  const nativeTuiHostTarget = !executionTarget || executionTarget.adapter === "host";
+  const nativeTuiHostTarget = hostExecutionTarget;
   const orchestratorTuiSupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorNativeTui");
   const orchestratorTuiHostContext = !orchestrator || (agent?.context?.kind ?? "native") === "native";
   const nativeTuiSupported = nativeTuiLaunchSupported && (!orchestrator || orchestratorTuiSupported) &&
@@ -770,21 +778,41 @@ export function NewSessionDialog({
 
           <div className="field">
             <span>Permission Preset</span>
-            <Select<"default" | "orchestrator"> label="Permission Preset" value={presetOverride}
-              onChange={setPresetOverride} options={[
-                { value: "default", label: !defaultsReady ? "Default (Not Loaded)"
-                  : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
-                  : "Harness Default" },
-                ...(orchestratorSupported ? [{ value: "orchestrator" as const, label: "Orchestrator" }] : []),
-              ]} />
+            {/* Cards rather than the shared Select: two options that each need a sentence is the
+                shape ChoiceCard exists for, and hiding them behind a trigger is what produced
+                #832's clipping — a 76px menu over 98px of touch targets, with half of one of only
+                two choices below the fold. Always visible, there is no menu to mis-measure. */}
+            <ChoiceCards<"default" | "orchestrator">
+              label="Permission Preset"
+              value={presetOverride}
+              onChange={setPresetOverride}
+              options={[
+                {
+                  value: "default",
+                  title: !defaultsReady ? "Default (Not Loaded)"
+                    : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
+                    : "Harness Default",
+                  description: "Use the approval behavior saved for this agent harness.",
+                },
+                {
+                  value: "orchestrator",
+                  title: "Orchestrator",
+                  description: "Manage child sessions without shell or file-write tools. Cannot change after creation.",
+                  // Rendered disabled rather than omitted. The list used to drop this option
+                  // entirely when unsupported, leaving a one-option control that could not say
+                  // whether the runner, the agent, the context or the target was the reason.
+                  disabled: !orchestratorSupported,
+                  disabledReason: orchestratorUnavailable,
+                },
+              ]}
+            />
             {!defaultsReady && (harnessDefaults?.error ? <>
               <span className="form-error">Could not load saved permission defaults. Retry before using Default.</span>
               <button type="button" className="btn ghost sm" onClick={() => setDefaultsRetry((value) => value + 1)}>Retry Defaults</button>
             </> : <span className="muted">Loading saved permission defaults…</span>)}
             {orchestrator && <>
-              <span className="muted">Manage child sessions without shell or file-write tools. This permission preset cannot change after creation.</span>
               {presetOverride === "default" && <span className="muted">Orchestrator is your saved Agent Harness default. Change it in Settings to use another default.</span>}
-              {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset requires a supported native host harness or verified Direct WSL bridge and runner. Choose a compatible target or change the saved default in Settings.</span>}
+              {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset is unavailable here. {orchestratorUnavailable} Choose a compatible target or change the saved default in Settings.</span>}
             </>}
             {directWslRequiresSafeOrchestrator && !orchestrator &&
               <span className="form-error">Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.</span>}

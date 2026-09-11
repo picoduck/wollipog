@@ -1,4 +1,12 @@
-import React, { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import React, {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { CheckIcon, ChevronDownIcon } from "../Icons.js";
 import {
   handleRovingChoiceKeyDown,
@@ -6,6 +14,7 @@ import {
   useAnchoredMenuStyle,
   useDismissiblePopover,
 } from "../interactions.js";
+import { MOBILE_BREAKPOINT_PX } from "../useIsMobile.js";
 
 /**
  * An always-open listbox owned by another control, such as an autocomplete textbox.
@@ -189,7 +198,9 @@ export function SegmentedControl<T extends string>({
         role="radiogroup"
         aria-label={label}
         aria-describedby={groupReason ? reasonId : undefined}
-        onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}
+        // See the note beside ChoiceCards' handler: disabled options stay in the arrow order so
+        // their reason is reachable without a mouse.
+        onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}
       >
         {options.map((option, index) => {
           const selected = option.value === value;
@@ -253,6 +264,19 @@ export interface ChoiceCardOption<T extends string> {
  * tell which was which until they clicked a second card and the first one either stayed on or
  * turned off. The role now says it, and so does the marker: a dot for one-of, a tick for many-of.
  */
+/*
+ * Arrows reach a DISABLED option; only activating it is refused.
+ *
+ * `handleRovingChoiceKeyDown` filters `aria-disabled` out of the roving set by default, and neither
+ * primitive opted out — so an option the comments above promise is "rendered, never hidden" was
+ * reachable by mouse and by nothing else. `rovingChoiceStop` never puts the tab stop on a disabled
+ * option either, which left the arrows as the only way in, and they skipped it.
+ *
+ * Including them is safe because the activation guard lives on the option: the handler clicks
+ * whatever it focuses, and each `onClick` below returns early when `option.disabled`. So focus
+ * moves, the screen reader announces the option and its reason, and nothing is selected — which is
+ * what the ARIA practices recommend for a radio that must explain why it is unavailable.
+ */
 export function ChoiceCards<T extends string>({
   options,
   value,
@@ -286,7 +310,7 @@ export function ChoiceCards<T extends string>({
       className={`ui-choice-cards${className ? ` ${className}` : ""}`}
       role={multiple ? "group" : "radiogroup"}
       aria-label={label}
-      onKeyDown={multiple ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio")}
+      onKeyDown={multiple ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}
     >
       {options.map((option, index) => {
         const selected = isSelected(option);
@@ -411,6 +435,104 @@ export function resetSelectPreviewRegistry(): void {
   livePreviews.length = 0;
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * How tall the open list ASKS to be
+ * ---------------------------------------------------------------------------------------------- */
+
+/**
+ * The touch target `styles.css` gives every `.ui-select-option` under {@link TOUCH_TARGET_MEDIA}.
+ *
+ * Duplicated from the stylesheet because CSS cannot export a number, which is exactly how the two
+ * drifted: the estimator below budgeted 34px for an option the stylesheet was rendering at 44px.
+ * The unit test asserts the arithmetic; the mobile E2E spec asserts the rendered list agrees.
+ */
+export const TOUCH_OPTION_MIN_HEIGHT_PX = 44;
+
+/**
+ * `.ui-select-list`'s own box: 4px of padding top and bottom, plus its 1px border on each edge.
+ *
+ * It counts because `box-sizing: border-box` is global, so the `max-height` the anchored-menu
+ * helper sets has to cover the chrome as well as the rows inside it. The old estimate budgeted 8px
+ * here and forgot the border — 2px of the 22px it was short.
+ */
+export const SELECT_LIST_CHROME_PX = 10;
+
+/** Past this the list scrolls on purpose: the options genuinely do not fit. */
+export const SELECT_MENU_MAX_HEIGHT_PX = 320;
+
+/** The compact per-option budgets, for a pointer the touch floor does not apply to. */
+const COMPACT_OPTION_HEIGHT_PX = 34;
+const DESCRIBED_OPTION_HEIGHT_PX = 52;
+
+/**
+ * The exact condition `styles.css` applies the 44px touch floor under.
+ *
+ * Kept character-for-character identical to the stylesheet's query, and built from the breakpoint
+ * constant the rest of the app already shares, so a change to one is a visible change to the other.
+ */
+export const TOUCH_TARGET_MEDIA =
+  `(max-width: ${MOBILE_BREAKPOINT_PX}px), (pointer: coarse), (hover: none)`;
+
+/**
+ * The open list's height REQUEST, which the anchored-menu helper turns into a `max-height`.
+ *
+ * A request below what the options actually render is not a shorter list — it is a clipped one.
+ * #832 hit that on the control least able to afford it: Permission Preset has two options, the
+ * estimator asked for `2 × 34 + 8 = 76px`, and the coarse-pointer stylesheet was drawing them at
+ * 44px each inside 10px of chrome. 98px of content in a 76px box scrolls, so half of one of only
+ * two choices sat below the fold on a phone.
+ *
+ * So the per-option budget is the MAXIMUM of the caller's estimate and the floor the stylesheet
+ * enforces for this pointer type — never a replacement for it, because a described option is
+ * already taller than the floor and clamping it down would clip two-line options on exactly the
+ * devices this exists to fix.
+ */
+export function selectMenuDesiredHeight(input: {
+  optionCount: number;
+  hasDescription: boolean;
+  /** A caller's row budget for content that may wrap. Raised to the touch floor, never lowered. */
+  estimatedOptionHeight?: number;
+  coarsePointer: boolean;
+}): number {
+  const estimated = input.estimatedOptionHeight
+    ?? (input.hasDescription ? DESCRIBED_OPTION_HEIGHT_PX : COMPACT_OPTION_HEIGHT_PX);
+  const perOption = input.coarsePointer
+    ? Math.max(estimated, TOUCH_OPTION_MIN_HEIGHT_PX)
+    : estimated;
+  // An empty list still renders its `emptyLabel` paragraph, so it gets a row rather than the chrome
+  // alone — the sliver a bare `optionCount` of 0 produced had nowhere to put the sentence that is
+  // the whole reason an empty list stays open.
+  const rows = Math.max(1, input.optionCount);
+  return Math.min(SELECT_MENU_MAX_HEIGHT_PX, rows * perOption + SELECT_LIST_CHROME_PX);
+}
+
+/**
+ * Whether the touch floor is live right now, tracked rather than sampled once.
+ *
+ * Rotating a tablet, docking a laptop, or merely dragging a window across 760px changes which rule
+ * the stylesheet applies, and a menu whose height was budgeted under the other one is this same
+ * clipping defect arriving a second way.
+ */
+function useCoarsePointer(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const mq = window.matchMedia(TOUCH_TARGET_MEDIA);
+      mq.addEventListener("change", onChange);
+      // `resize` as well as the query, for the reason `useIsMobile` subscribes to both: an emulated
+      // or automated viewport can deliver the resize before the MediaQueryList change event.
+      window.addEventListener("resize", onChange);
+      return () => {
+        mq.removeEventListener("change", onChange);
+        window.removeEventListener("resize", onChange);
+      };
+    },
+    () => window.matchMedia(TOUCH_TARGET_MEDIA).matches,
+    // Server-rendered markup has no pointer to ask about. The compact budget is the safe guess —
+    // it is what the desktop stylesheet renders — and the first client layout corrects it.
+    () => false,
+  );
+}
+
 /**
  * A popover list, for when the options are data rather than a fixed set.
  *
@@ -466,6 +588,7 @@ export function Select<T extends string>({
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  const coarsePointer = useCoarsePointer();
   const popover = useDismissiblePopover(open, setOpen, "ui-select");
   const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -550,11 +673,15 @@ export function Select<T extends string>({
   // when there is no room below. Hardcoding `top: 100%` put the list off-screen for any control in
   // the lower half of the viewport — which is most of them, since selects sit inside dialogs.
   const listStyle = useAnchoredMenuStyle(open, popover.triggerRef, {
-    // A described option is TWO lines, so budgeting one line for it asks for a list half the height
-    // of what it renders and scrolls a five-item picker that would have fitted. Still a request
-    // rather than a size — the helper clamps to the viewport and flips above the trigger.
-    desiredHeight: Math.min(320, Math.max(1, options.length)
-      * (estimatedOptionHeight ?? (options.some((option) => option.description) ? 52 : 34)) + 8),
+    // A described option is TWO lines, and a touch option is 44px whatever it contains, so the row
+    // budget answers to both. Still a request rather than a size — the helper clamps to the
+    // viewport and flips above the trigger.
+    desiredHeight: selectMenuDesiredHeight({
+      optionCount: options.length,
+      hasDescription: options.some((option) => option.description),
+      estimatedOptionHeight,
+      coarsePointer,
+    }),
     ...(menuWidth === undefined
       ? { matchTriggerWidth: true }
       : { desiredWidth: menuWidth, minTriggerWidth: true }),

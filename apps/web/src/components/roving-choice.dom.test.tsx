@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { ChoiceCards, SegmentedControl } from "./ui/ChoiceControls.js";
 
 const domWindow = new Window({ url: "http://localhost/usage" });
 for (const [name, value] of Object.entries({
@@ -117,4 +117,84 @@ test("a held arrow key does not queue a request per repeat", async () => {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 200)); });
   assert.deepEqual(loads, [365], "three key repeats must coalesce into the one range they ended on");
   unmount();
+});
+
+/**
+ * A disabled option must be REACHABLE, or "rendered, never hidden" is only true for people using a
+ * mouse.
+ *
+ * Both primitives say this in their comments — SegmentedControl's reads "`disabled` would remove it
+ * from the roving order, so a disabled option becomes invisible to keyboard users rather than
+ * explained to them" — and neither implemented it: `handleRovingChoiceKeyDown` filters out
+ * `aria-disabled` unless told otherwise, and neither caller told it otherwise. The stop never lands
+ * on a disabled option either, so the arrows were the ONLY way in and they skipped it.
+ *
+ * #832 made this load-bearing rather than theoretical. The Orchestrator preset used to be omitted
+ * when unsupported; it is now rendered with the reason it cannot be chosen, and a keyboard user who
+ * could not reach the card could not read the reason.
+ */
+test("arrow keys reach a disabled option so its reason can be read", () => {
+  const chosen: string[] = [];
+  const { host, unmount } = mount(
+    <ChoiceCards
+      label="Permission Preset"
+      value="default"
+      onChange={(value) => chosen.push(value)}
+      options={[
+        { value: "default", title: "Harness Default" },
+        { value: "orchestrator", title: "Orchestrator", disabled: true, disabledReason: "This runner is too old." },
+      ]}
+    />,
+  );
+  try {
+    const group = host.querySelector('[role="radiogroup"]')!;
+    const [first, second] = [...host.querySelectorAll<HTMLElement>('[role="radio"]')];
+    assert.ok(first && second);
+    act(() => first.focus());
+
+    press(first, "ArrowDown");
+    // `assert.equal` on two DOM NODES, not a boolean: happy-dom elements reference their window, so
+    // a failed comparison serialises the whole circular tree for the diff and the runner hangs for
+    // ~16s before dying with no message. Compare something primitive.
+    assert.equal(document.activeElement === second, true,
+      "the disabled option must be focusable by arrow, or its reason is unreadable without a mouse");
+
+    // Reachable is not selectable. Moving onto it must not choose it, and must not fire onChange —
+    // the handler clicks whatever it focuses, so the guard has to hold on the option itself.
+    assert.equal(second.getAttribute("aria-checked"), "false");
+    assert.deepEqual(chosen, []);
+    assert.equal(first.getAttribute("aria-checked"), "true", "the real selection is unchanged");
+
+    // And the reason is in the accessible name, so focusing the card announces it.
+    assert.match(second.textContent ?? "", /This runner is too old/);
+    assert.ok(group);
+  } finally {
+    unmount();
+  }
+});
+
+test("a segmented control reaches its disabled option too", () => {
+  // Same hole, same fix, stated separately because the two primitives call the handler themselves
+  // and a fix applied to one would silently leave the other behind.
+  const { host, unmount } = mount(
+    <SegmentedControl
+      label="Range"
+      value="day"
+      onChange={() => undefined}
+      options={[
+        { value: "day", label: "Day" },
+        { value: "year", label: "Year", disabled: true, disabledReason: "Requires a paid plan" },
+      ]}
+    />,
+  );
+  try {
+    const [first, second] = [...host.querySelectorAll<HTMLElement>('[role="radio"]')];
+    assert.ok(first && second);
+    act(() => first.focus());
+    press(first, "ArrowRight");
+    assert.equal(document.activeElement === second, true);
+    assert.equal(second.getAttribute("aria-checked"), "false");
+  } finally {
+    unmount();
+  }
 });
