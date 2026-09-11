@@ -805,6 +805,53 @@ test("provider failure after submission remains delivery-uncertain", async () =>
   }
 });
 
+test("provider command rejection after Stop Turn releases the preserved command FIFO", async () => {
+  const provider = deferred<"end_turn">();
+  const h = harness({ invokeGate: provider.promise });
+  try {
+    assert.equal(await h.start(), true);
+    const command = liveCommand(h.manager);
+    const interruptedReceipts: Receipt[] = [];
+    const interrupted = message(command.invocation, {
+      invocationId: "invocation-interrupted-rejection",
+      submissionId: "submission-interrupted-rejection",
+      argumentText: "running",
+    });
+    assert.equal(h.manager.invokeSessionCommand(
+      interrupted,
+      receiptLifecycle(interrupted.invocationId, interruptedReceipts),
+    ), true);
+    await waitFor(() => h.invoked.length === 1);
+
+    const queuedReceipts: Receipt[] = [];
+    const queued = message(command.invocation, {
+      invocationId: "invocation-after-interrupted-rejection",
+      submissionId: "submission-after-interrupted-rejection",
+      argumentText: "preserved",
+    });
+    assert.equal(h.manager.invokeSessionCommand(
+      queued,
+      receiptLifecycle(queued.invocationId, queuedReceipts),
+    ), true);
+    assert.equal(h.manager.interruptTurn("command-session"), "applied");
+
+    provider.reject(new Error("provider rejected after cancellation"));
+    await waitFor(() => h.invoked.length === 2, "the next command should leave the preserved FIFO");
+    await waitFor(() => queuedReceipts.at(-1)?.state === "uncertain");
+    assert.equal(interruptedReceipts.at(-1)?.state, "rejected");
+    assert.equal(interruptedReceipts.at(-1)?.code, "COMMAND_CANCELLED");
+    assert.deepEqual(queuedReceipts.map((receipt) => receipt.state), ["queued", "started", "uncertain"]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (h.manager as any).active.get("command-session");
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.deepEqual(entry.queue, []);
+    assert.equal(h.store.readEvents("command-session").filter((event) =>
+      event.payload.kind === "turn_interrupted").length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("a governance-cancelled provider command rejection settles idle and completed without an error", async () => {
   const provider = deferred<"end_turn">();
   const h = harness({ invokeGate: provider.promise });

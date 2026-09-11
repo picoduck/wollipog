@@ -515,6 +515,92 @@ test("turn-only interruption auto-resumes the exact FIFO after safe settlement f
   }
 });
 
+test("a terminal provider rejection after an accepted Stop Turn releases the FIFO", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-reject-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle" }));
+  let rejectFirst!: (reason: Error) => void;
+  const firstTurn = new Promise<"end_turn">((_resolve, reject) => { rejectFirst = reject; });
+  const ran: string[] = [];
+  const client = {
+    resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+    agentSessionId: () => "agent-1",
+    prompt: (text: string) => {
+      ran.push(text);
+      return text === "A" ? firstTurn : Promise.resolve("end_turn" as const);
+    },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (manager as any).active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  try {
+    manager.prompt("s_q", "A");
+    await waitFor(() => ran.length === 1);
+    manager.prompt("s_q", "B");
+    assert.equal(manager.interruptTurn("s_q"), "applied");
+    rejectFirst(new Error("provider rejected after cancellation"));
+    await waitFor(() => ran.length === 2, "the preserved prompt should run after rejection settles the turn");
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (manager as any).active.get("s_q");
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.deepEqual(entry.queue, []);
+    assert.deepEqual(ran, ["A", "B"]);
+    assert.equal(store.readEvents("s_q").filter((event) => event.payload.kind === "turn_interrupted").length, 1);
+    assert.equal(store.readEvents("s_q").some((event) => event.payload.kind === "error"), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("provider authentication remains the only hold after an interrupted turn settles", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-auth-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle" }));
+  let settleFirst!: (value: "cancelled") => void;
+  const firstTurn = new Promise<"cancelled">((resolve) => { settleFirst = resolve; });
+  const ran: string[] = [];
+  const client = {
+    resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+    agentSessionId: () => "agent-1",
+    prompt: (text: string) => {
+      ran.push(text);
+      return text === "A" ? firstTurn : Promise.resolve("end_turn" as const);
+    },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (manager as any).active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  try {
+    manager.prompt("s_q", "A");
+    await waitFor(() => ran.length === 1);
+    manager.prompt("s_q", "B");
+    assert.equal(manager.interruptTurn("s_q"), "applied");
+    // Authentication can be discovered while the provider is settling the cancelled turn.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (manager as any).active.get("s_q");
+    entry.authenticationBlocked = true;
+    settleFirst("cancelled");
+    await waitFor(() => entry.running === false);
+
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false, "the Stop Turn fence is settled");
+    assert.equal(entry.authenticationBlocked, true, "the independent authentication gate remains");
+    assert.deepEqual(ran, ["A"], "queued work still waits for authentication recovery");
+
+    manager.prompt("s_q", "C");
+    await waitFor(() => ran.length === 3, "a post-auth prompt releases the auth gate and drains the FIFO");
+    assert.deepEqual(ran, ["A", "B", "C"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("synthetic orphan recovery cannot overtake an interruption that has not settled", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-orphan-"));
   const store = new SessionStore(root);
@@ -580,15 +666,21 @@ test("a pre-provider configuration settlement releases the interruption fence an
     await waitFor(() => configStarted);
     manager.prompt("s_q", "C");
     manager.interruptTurn("s_q");
+    manager.rearmGovernance("s_q", {}, "control_plane");
     rejectConfig(new Error("model unavailable"));
-    await waitFor(() => ran.length === 1);
-    assert.deepEqual(ran, ["C"]);
+    await waitFor(() => (manager as any).active.get("s_q").running === false);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const entry = (manager as any).active.get("s_q");
     assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
-    assert.deepEqual(entry.queue, []);
+    assert.equal(entry.controlPlaneHold, true, "the independent hold survives config settlement");
+    assert.deepEqual(ran, [], "the config branch must not continue past the control-plane fence");
+    assert.deepEqual(entry.queue.map((queued: { text: string }) => queued.text), ["C"]);
     assert.equal(store.readEvents("s_q").filter((event) => event.payload.kind === "turn_interrupted").length, 1);
     assert.equal(store.readEvents("s_q").some((event) => event.payload.kind === "error"), false);
+    manager.rearmGovernance("s_q", {});
+    await waitFor(() => ran.length === 1);
+    assert.deepEqual(ran, ["C"]);
+    assert.deepEqual(entry.queue, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

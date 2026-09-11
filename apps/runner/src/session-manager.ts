@@ -6452,7 +6452,12 @@ export class SessionManager {
               this.failQueuedPrompt(next, "provider cancelled", "COMMAND_CANCELLED");
               entry.activeTurnId = undefined;
               this.settleTurnInterruption(sessionId, entry);
-              continue;
+              // Leave this drain generation before dispatching another entry. The loop-tail
+              // fences are below this pre-provider branch, so continuing here could skip a
+              // concurrent governance hold or worktree rebind. A fresh drain rechecks every
+              // admission fence once this generation releases its lock.
+              setImmediate(() => this.scheduleDrain(sessionId));
+              break;
             }
             if (!this.emitEvent(sessionId, { kind: "error", message: errText(error) }, next.durable)) {
               // Configuration runs before the dequeued provider-command lifecycle becomes the
@@ -7204,6 +7209,11 @@ export class SessionManager {
       }
       await this.recordConversationForkPoint(sessionId, entry, stop, postTurnTree);
       if (entry.historyIntegrityFailure) return;
+      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
+      // A provider result is the terminal turn boundary even when authentication or governance
+      // installs its own independent hold. Clear only the Stop Turn fence before those branches
+      // return; their distinct gates continue to block the FIFO.
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         const block = this.store.readMeta(sessionId)?.providerAuthBlock;
@@ -7220,11 +7230,9 @@ export class SessionManager {
         const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
         if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
       }
-      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
         this.emitStatus(sessionId, "idle");
-        this.settleTurnInterruption(sessionId, entry);
       } else if (entry.governanceTripped) {
         this.emitStatus(sessionId, "idle");
       } else if (stop === "cancelled") {
@@ -7233,9 +7241,6 @@ export class SessionManager {
       } else {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
         // or strand the existing FIFO: this was a normal completed turn, not a cancelled one.
-        if (entry.interruptRequested) {
-          this.settleTurnInterruption(sessionId, entry);
-        }
         this.emitStatus(sessionId, "idle");
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
@@ -7254,6 +7259,12 @@ export class SessionManager {
         durable?.uncertain("session stopped while provider execution was in progress");
         return;
       }
+      // An accepted Stop Turn followed by a terminal provider rejection is settled from the
+      // manager's perspective: there is no live promise left that can mutate this turn. Treat the
+      // rejection as the cancellation acknowledgement, while a synchronous cancel() throw is
+      // still rolled back by interruptTurn before reaching this path.
+      const interrupted = !entry.governanceTripped && entry.interruptRequested;
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       if (entry.governanceTripped) {
         this.emitStatus(sessionId, "idle");
         durable?.completed();
@@ -7262,6 +7273,12 @@ export class SessionManager {
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         durable?.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
+        return;
+      }
+      if (interrupted) {
+        this.emitEvent(sessionId, { kind: "turn_interrupted" });
+        this.emitStatus(sessionId, "idle");
+        durable?.failed(providerStopError("cancelled", entry.client), "COMMAND_CANCELLED");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
@@ -7533,6 +7550,8 @@ export class SessionManager {
         return;
       }
 
+      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         const block = this.store.readMeta(sessionId)?.providerAuthBlock;
@@ -7545,19 +7564,14 @@ export class SessionManager {
         return;
       }
 
-      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
         this.emitStatus(sessionId, "idle");
-        this.settleTurnInterruption(sessionId, entry);
       } else if (entry.governanceTripped) {
         this.emitStatus(sessionId, "idle");
       } else if (stop === "cancelled") {
         this.emitStatus(sessionId, "stopped");
       } else {
-        if (entry.interruptRequested) {
-          this.settleTurnInterruption(sessionId, entry);
-        }
         this.emitStatus(sessionId, "idle");
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
@@ -7571,6 +7585,8 @@ export class SessionManager {
         lifecycle.uncertain("session stopped while provider command execution was in progress");
         return;
       }
+      const interrupted = !entry.governanceTripped && entry.interruptRequested;
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       // Governance cancellation commonly rejects the provider promise. Match ordinary prompt
       // semantics: the policy turn is parked successfully at idle, not reported as a transport
       // failure whose retry could duplicate already-observed provider work.
@@ -7582,6 +7598,12 @@ export class SessionManager {
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         lifecycle.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
+        return;
+      }
+      if (interrupted) {
+        this.emitEvent(sessionId, { kind: "turn_interrupted" });
+        this.emitStatus(sessionId, "idle");
+        lifecycle.failed(providerStopError("cancelled", entry.client), "COMMAND_CANCELLED");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `session command failed: ${errText(error)}` });
