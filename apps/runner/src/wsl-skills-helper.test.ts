@@ -422,6 +422,38 @@ test("a later pass removes an orphaned two-link cleanup proof and its publicatio
     name.startsWith(".provider-home-lease-") && name.endsWith(".tmp")), false);
 });
 
+test("orphan cleanup pins the verified proof while preserving a replacement", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-orphan-proof-pinned-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await fillLeaseJournal(home, store);
+  const interruptedPublication = instrumentHelper(
+    "        os.fsync(lock)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+    "        os.fsync(lock)\n        if target.startswith(\".mutable-home.cleanup-\"): os._exit(90)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+  );
+  assert.equal((await invoke(home, specification, interruptedPublication)).status, 90);
+
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const [sibling] = compactionSiblings(home);
+  const [proofName] = readdirSync(leaseRoot).filter((name) => name.startsWith(".mutable-home.cleanup-"));
+  assert.ok(sibling);
+  assert.ok(proofName);
+  rmSync(join(leaseRoot, sibling), { recursive: true });
+  const replacedAfterNormalization = instrumentHelper(
+    "                verified = os.fstat(proof_fd)\n                named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)",
+    "                held = os.fstat(proof_fd)\n                if (held.st_dev, held.st_ino) != proof_identity: os._exit(91)\n                os.unlink(proof_name, dir_fd=root)\n                replacement = os.open(proof_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)\n                try: write_all(replacement, b\"foreign\")\n                finally: os.close(replacement)\n                verified = os.fstat(proof_fd)\n                named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)",
+  );
+
+  const result = await invoke(home, specification, replacedAfterNormalization);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(readFileSync(join(leaseRoot, proofName), "utf8"), "foreign");
+  assert.equal(readdirSync(leaseRoot).some((name) =>
+    name.startsWith(".provider-home-lease-") && name.endsWith(".tmp")), false);
+});
+
 test("cleanup-proof publication recovery fails closed for unaccounted aliases", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-proof-alias-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
