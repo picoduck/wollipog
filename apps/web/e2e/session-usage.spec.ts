@@ -365,7 +365,9 @@ test.describe("desktop: context and cost flank the live-output control", () => {
       needed: button.scrollWidth,
     }));
     expect(legibility.visible).toBeGreaterThanOrEqual(legibility.needed - 0.5);
-    expect((await readStrip(page)).overflows).toBe(false);
+    const geometry = await readStrip(page);
+    expect(geometry.meter!.left).toBeGreaterThanOrEqual(geometry.cluster!.left - 0.5);
+    expect(geometry.overflows).toBe(false);
   });
 
   test("the widest follow-state label still leaves the cost legible just above the cutoff", async ({ page }) => {
@@ -524,6 +526,35 @@ test("mobile: context and cost sit beside Live Output, and cost opens Session Us
   expect(usageBox.x + usageBox.width).toBeLessThanOrEqual(390);
   expect(await usage.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(await usage.evaluate((element) => element.clientWidth));
   await page.screenshot({ path: `${SHOT}/mobile-session-usage.png` });
+});
+
+test("mobile: widest status labels stay inside a 320px strip", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.goto("/session-usage-e2e.html?width=320&height=800&cost=12345.67");
+  await page.locator(".follow-tail-chip span").first().evaluate((label) => {
+    label.textContent = "Previewing · Follow Live Output";
+  });
+
+  const geometry = await page.locator(".transcript-status-strip").evaluate((strip) => {
+    const box = strip.getBoundingClientRect();
+    const cluster = strip.querySelector(".transcript-status-cluster")!.getBoundingClientRect();
+    const meter = strip.querySelector(".context-ring-button")!.getBoundingClientRect();
+    const cost = strip.querySelector(".transcript-status-usage") as HTMLElement;
+    const costBox = cost.getBoundingClientRect();
+    return {
+      strip: { left: box.left, right: box.right },
+      cluster: { left: cluster.left, right: cluster.right },
+      meter: { left: meter.left },
+      cost: { width: costBox.width, needed: cost.scrollWidth },
+      overflows: strip.scrollWidth > strip.clientWidth,
+    };
+  });
+
+  expect(geometry.cluster.left).toBeGreaterThanOrEqual(geometry.strip.left - 0.5);
+  expect(geometry.cluster.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
+  expect(geometry.meter.left).toBeGreaterThanOrEqual(geometry.cluster.left - 0.5);
+  expect(geometry.cost.width).toBeGreaterThan(0);
+  expect(geometry.overflows).toBe(false);
 });
 
 test("mobile light theme: the estimated cost source stays compact", async ({ page }) => {

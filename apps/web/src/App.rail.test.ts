@@ -78,6 +78,8 @@ test("live-follow status owns a reserved transcript strip with a compact centere
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
   assert.match(detail, /className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*className="follow-tail-control"[\s\S]*mode === "expanded" && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"/,
     "context usage, live output, and cost form one centered cluster ahead of trailing actions");
+  assert.match(detail, /mode === "preview" && \([\s\S]*className="transcript-status-context transcript-status-context-preview"[\s\S]*<TranscriptRecoveryStripEcho[\s\S]*className="transcript-status-cluster"/,
+    "preview recovery uses the leading grid seat without shifting the centered live-output group");
   assert.doesNotMatch(detail, /cbar-usage|className="composer-bar"[\s\S]*<SessionUsageControl/,
     "the composer bar hosts no session-cost control: session accounting is not a message control");
   // #781: the cost control remains distinct from the neighboring context meter.
@@ -90,11 +92,14 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "the reader status strip remains visually continuous with the transcript");
   assert.match(css, /\.transcript-status-cluster\s*\{[^}]*display:\s*inline-flex;[^}]*grid-column:\s*2;[^}]*justify-self:\s*center;[^}]*gap:\s*8px;/,
     "context usage and cost sit at the standard gap beside the centered live-output control");
-  assert.match(css, /\.transcript-status-context\s*\{[^}]*position:\s*relative;[^}]*flex:\s*0 0 44px;[^}]*justify-content:\s*flex-end;[^}]*width:\s*44px;/,
+  assert.match(css, /\.transcript-status-context\s*\{[^}]*position:\s*relative;[^}]*flex:\s*none;[^}]*justify-content:\s*flex-end;[^}]*width:\s*auto;[^}]*min-width:\s*44px;/,
     "the context seat stays adjacent while its compact recovery echo overlays toward free space");
-  assert.match(css, /\.transcript-status-context \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*width:\s*92px;/,
+  assert.match(css, /\.transcript-status-context \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*width:\s*80px;/,
     "the recovery echo may extend left without inserting a spacer between context and live output");
-  assert.match(css, /\.transcript-status-usage\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
+  assert.match(css, /\.transcript-status-context-preview\s*\{[^}]*grid-column:\s*1;[^}]*width:\s*100%;[^}]*overflow:\s*hidden;/);
+  assert.match(css, /\.transcript-status-context-preview \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*static;[^}]*width:\s*100%;[^}]*max-width:\s*100%;/,
+    "preview recovery stays bounded in the leading grid track while Live Output stays centered");
+  assert.match(css, /\.transcript-status-usage\s*\{[^}]*flex:\s*0 1 auto;[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
     "cost remains bounded when the centered cluster approaches the pane width");
   assert.match(css, /\.transcript-status-actions\s*\{[^}]*grid-column:\s*3;[^}]*justify-self:\s*end;[^}]*overflow:\s*hidden;/,
     "Reply guidance uses trailing slack without moving the centered cluster");

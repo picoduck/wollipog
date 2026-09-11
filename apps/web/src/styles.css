@@ -10531,11 +10531,11 @@ body.shell-dock-dragging * {
 .transcript-status-context {
   display: flex;
   position: relative;
-  flex: 0 0 44px;
+  flex: none;
   align-items: center;
   justify-content: flex-end;
-  width: 44px;
-  min-width: 0;
+  width: auto;
+  min-width: 44px;
   overflow: visible;
   color: var(--text-faint);
   font-size: 11px;
@@ -10551,12 +10551,25 @@ body.shell-dock-dragging * {
   position: absolute;
   top: 50%;
   right: 0;
-  width: 92px;
+  width: 80px;
   max-width: none;
   transform: translateY(-50%);
 }
+.transcript-status-context-preview {
+  grid-column: 1;
+  justify-self: stretch;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.transcript-status-context-preview .transcript-recovery-strip-echo {
+  position: static;
+  width: 100%;
+  max-width: 100%;
+  transform: none;
+}
 .transcript-status-usage {
-  flex: none;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   font-size: var(--text-xs);

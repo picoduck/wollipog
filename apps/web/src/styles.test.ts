@@ -299,8 +299,11 @@ test("the recovery pill is a permanently-sized in-flow slot, never an overlay", 
   // excluded: it overlays the fixed context seat inside an already reserved strip and therefore
   // cannot cover the scroller or change reader geometry.
   const positioned = declarationsOf(css, "position")
-    .filter(({ selector }) => selector.includes("transcript-recovery")
-      && !selector.includes("transcript-recovery-strip-echo"));
+    .filter(({ selector, value }) => selector.includes("transcript-recovery")
+      && !(selector === ".transcript-status-context .transcript-recovery-strip-echo"
+        && value === "absolute")
+      && !(selector === ".transcript-status-context-preview .transcript-recovery-strip-echo"
+        && value === "static"));
   assert.deepEqual(positioned, [],
     "recovery rules must stay in normal flow so the slot's height is the pill's real rendered height");
 
@@ -451,10 +454,10 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
 
   // The compact echo overlays toward free space from the context seat. Its fixed width leaves the
   // adjacent Live Output gap unchanged while the inner label still ellipsizes.
-  assert.match(soleRuleBody(".transcript-status-context"), /position:\s*relative;[\s\S]*flex:\s*0 0 44px;/,
+  assert.match(soleRuleBody(".transcript-status-context"), /position:\s*relative;[\s\S]*flex:\s*none;[\s\S]*min-width:\s*44px;/,
     "the strip reserves a stable context seat beside Live Output");
   assert.match(soleRuleBody(".transcript-status-context .transcript-recovery-strip-echo"),
-    /position:\s*absolute;[\s\S]*right:\s*0;[\s\S]*width:\s*92px;/,
+    /position:\s*absolute;[\s\S]*right:\s*0;[\s\S]*width:\s*80px;/,
     "the compact echo extends away from Live Output without changing cluster spacing");
   assert.match(soleRuleBody(".transcript-recovery-strip-echo > span:last-child"), /text-overflow:\s*ellipsis;/);
 });

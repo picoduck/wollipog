@@ -150,6 +150,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       expect(state.strip.top).toBeCloseTo(state.reader.bottom, 0);
       expect(state.strip.height).toBeLessThanOrEqual(37.5);
       expect(state.hasHorizontalOverflow).toBe(false);
+      expect(state.leading.left).toBeGreaterThanOrEqual(state.strip.left - 0.5);
       expect(state.leading.right).toBeLessThanOrEqual(state.follow.left + 0.5);
       expect(state.follow.left - state.leading.right).toBeLessThanOrEqual(8.5);
       expect(state.follow.right).toBeLessThanOrEqual(state.usage.left + 0.5);

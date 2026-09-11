@@ -4348,14 +4348,23 @@ function SessionDetailLoaded({
                 panes CSS collapses the slot and surfaces the echo inside the status strip. */}
             <TranscriptRecoveryNotice active={transcript.notice === "refreshing"} />
             <div className="transcript-status-strip" aria-label="Transcript Status">
+              {/* Preview has no usage indicators, so its compact recovery echo keeps the leading
+                  grid seat while the live-output group itself remains centered. */}
+              {mode === "preview" && (
+                <div className="transcript-status-context transcript-status-context-preview">
+                  <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
+                </div>
+              )}
               {/* Keep the two usage indicators beside the live-output control as one centered
                   status cluster on every viewport. The recovery echo may temporarily replace the
                   context meter in compact panes, but it owns the same leading seat. */}
               <div className="transcript-status-cluster">
-                <div className="transcript-status-context">
-                  {mode === "expanded" && <ContextWindowMeter session={session} />}
-                  <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
-                </div>
+                {mode === "expanded" && (
+                  <div className="transcript-status-context">
+                    <ContextWindowMeter session={session} />
+                    <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
+                  </div>
+                )}
                 {/* Page Up · follow-state control (with its resume keycap inside) · Page Down.
                     Preview pager hints stay directly beside the badge at the standard gap. */}
                 <div className="follow-tail-control">
