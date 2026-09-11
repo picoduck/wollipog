@@ -6238,11 +6238,13 @@ export class SessionManager {
         this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (!this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) return;
-    if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
-      await this.rebindSelectedWorktree(sessionId, entry);
-      return;
+    if (entry.pendingWorktreeRebind) {
+      if (this.worktreeRebindCanProceed(sessionId, entry)) {
+        await this.rebindSelectedWorktree(sessionId, entry);
+        return;
+      }
+      if (!this.promoteQueuedWorktreePrerequisite(sessionId, entry.queue)) return;
     }
-    if (entry.pendingWorktreeRebind && !entry.queue[0]?.syntheticRecovery) return;
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
       if (!this.emitEvent(sessionId, { kind: "error", message: "this session is being driven by another dashboard" })) {
         return;
@@ -6376,10 +6378,15 @@ export class SessionManager {
 
   private worktreeRebindCanProceed(sessionId: string, entry: ActiveSession): boolean {
     const meta = this.store.readMeta(sessionId);
+    // A refused one-shot orphan recovery is terminal: no live provider still owns these task ids,
+    // and billing safety deliberately forbids submitting the recovery prompt again. Keep the
+    // diagnostic metadata visible, but do not turn it into a permanent worktree/queue barrier.
+    const backgroundWorkBlocksRebind =
+      (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
+      !meta?.orphanedWork?.recoveryAttemptedAt;
     return !entry.running &&
       this.active.get(sessionId) === entry &&
-      !meta?.backgroundWorkState &&
-      !(meta?.pendingBackgroundTaskIds?.length) &&
+      !backgroundWorkBlocksRebind &&
       !this.rewinding.has(sessionId) &&
       !this.forking.has(sessionId) &&
       !this.loggingOut.has(sessionId) &&
@@ -6400,6 +6407,19 @@ export class SessionManager {
     if (entry?.pendingWorktreeRebind && !entry.running) {
       setImmediate(() => this.scheduleDrain(sessionId));
     }
+  }
+
+  /** A deferred rebind holds user work, but its runner-owned prerequisite must cross that barrier.
+   * Preserve ordinary FIFO order while moving only the continuation that can settle background
+   * ownership. A recovered answer already promoted above retains priority when an approval is open. */
+  private promoteQueuedWorktreePrerequisite(sessionId: string, queue: QueuedPrompt[]): boolean {
+    if (this.hasPendingApproval(sessionId)) {
+      return this.queuedPromptResolvesPendingQuestion(sessionId, queue[0]);
+    }
+    const index = queue.findIndex((prompt) => prompt.syntheticRecovery);
+    if (index < 0) return false;
+    if (index > 0) queue.unshift(queue.splice(index, 1)[0]!);
+    return true;
   }
 
   /** Retire an idle provider generation and resume its exact conversation in the newly selected
@@ -8745,10 +8765,15 @@ export class SessionManager {
     }
     if (entry.status !== "stopped") {
       this.restoreUnsubmittedPromotions(sessionId, entry);
-      if (pendingClaudeTaskIds.length > 0) {
+      if (recoverableClaudeWork) {
         this.emitEvent(sessionId, {
           kind: "error",
           message: `Claude provider exited with pending background work (${pendingClaudeTaskIds.join(", ")}); relaunching and resuming it automatically.`,
+        });
+      } else if (pendingClaudeTaskIds.length > 0) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `Claude provider exited with pending background work (${pendingClaudeTaskIds.join(", ")}); automatic recovery is unavailable because the provider conversation cannot be resumed.`,
         });
       }
       // Keep the entry installed until this append completes: if it is the first integrity

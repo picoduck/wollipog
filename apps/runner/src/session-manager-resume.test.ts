@@ -4468,6 +4468,44 @@ test("an idle Claude exit with pending work records the task ids and resumes rec
   }
 });
 
+test("an idle Claude exit without a resumable conversation reports that recovery is unavailable", async () => {
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-native",
+    command: "claude",
+    agentSessionId: null,
+    agentVersion: "2.1.268",
+  });
+  try {
+    await h.manager.start({
+      ...launchSpec(h.root),
+      driver: "claude-code",
+      agentId: "claude-native",
+      command: "claude",
+    });
+    h.store.patchMeta("resume-session", { agentSessionId: null });
+    const firstCallbacks = h.callbacks();
+    firstCallbacks.onBackgroundWork?.({
+      state: "orphaned",
+      pendingTaskIds: ["task-unresumable"],
+      observedTaskIds: ["task-unresumable"],
+      oldestPendingAt: 1,
+      reason: "process_exit",
+    });
+    firstCallbacks.onExit(0);
+    await tick();
+
+    const error = h.sent.find((message) => message.type === "session_event" &&
+      message.payload.kind === "error" && /task-unresumable/.test(message.payload.message));
+    assert.ok(error?.type === "session_event" && error.payload.kind === "error");
+    assert.match(error.payload.message, /automatic recovery is unavailable/);
+    assert.equal(h.launches.length, 1, "the runner cannot relaunch an unknown provider conversation");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("exec launches record fallback usage while failed initialization records launch failure", async () => {
   const h = harness(
     { driver: "codex", agentVersion: "0.63.0", agentSessionId: null },
