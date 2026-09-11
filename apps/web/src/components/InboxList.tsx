@@ -6,7 +6,7 @@ import type { InboxThreadPosition } from "../inbox.js";
 import { useStoreSelector } from "../store.js";
 import { InboxRow, type InboxRowProps } from "./InboxRow.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsTabletOrSmaller } from "./useIsMobile.js";
 
 /**
  * A collapsed inbox row, measured. TanStack corrects from the real height on first paint, so this
@@ -104,7 +104,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   // decides the cards' shape and the estimate the virtualizer positions unmeasured rows with, and
   // those two must never disagree: a list estimating 97px for rows that render at 73px puts a
   // restored scroll position most of a card out per row it has not measured yet.
-  const threeRow = useIsMobile();
+  const threeRow = useIsTabletOrSmaller();
   // The scroll container is BOTH the forwarded ref (InboxView restores scrollTop through it) and
   // the virtualizer's viewport.
   //

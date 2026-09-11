@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
 
+import { TABLET_BREAKPOINT_PX } from "../src/components/useIsMobile.js";
+
+/** At or below this width the card is #782's three-row stack; above it, #877's two-row card (#901). */
+const stacked = (width: number): boolean => width <= TABLET_BREAKPOINT_PX;
+
 /**
  * #664: the activity strip is the row's only irreplaceable signal, and it used to be the first
  * thing pushed out of the row. These tests measure geometry rather than reading text, because the
@@ -29,7 +34,7 @@ const VIEWPORT_HEIGHT = 1400;
 const useViewport = async (page: import("@playwright/test").Page, width: number, height = VIEWPORT_HEIGHT) => {
   await page.setViewportSize({ width, height });
   await expect(page.locator(".inbox-row").first().locator(":scope > *").first())
-    .toHaveClass(width <= 760 ? /inbox-row-sender/ : /inbox-row-lead/);
+    .toHaveClass(stacked(width) ? /inbox-row-sender/ : /inbox-row-lead/);
 };
 
 test.beforeEach(async ({ page }) => {
@@ -157,12 +162,14 @@ const measureRows = (nodes: Element[]) => nodes.map((node) => {
   };
 });
 
-// 770px is the first desktop pixel and 760px the last phone one: the two rules meet here, and a
-// layout that only works well clear of its own breakpoint fails at exactly one of these.
-const LAYOUT_WIDTHS = [390, 760, 770, 1000, 1400] as const;
+// 901px is the first two-row pixel and 900px the last stacked one: the two rules meet here, and a
+// layout that only works well clear of its own breakpoint fails at exactly one of these. 770px is
+// kept because it is where #877's three-column line one lost the branch name outright, and 390px
+// because a phone must keep the shape #782 gave it.
+const LAYOUT_WIDTHS = [390, 770, 900, 901, 1400] as const;
 
 for (const width of LAYOUT_WIDTHS) {
-  const phone = width <= 760;
+  const phone = stacked(width);
   const expectedRows = phone ? 3 : 2;
   test(`every card is exactly ${expectedRows} rows with an explicit Git state at ${width}px`, async ({ page }) => {
     await useViewport(page, width);
@@ -326,7 +333,7 @@ for (const width of [390, 770, 1000, 1400]) {
     expect(geometry.badgeWidth).toBeGreaterThan(20);
     expect(geometry.pillOverflowRight).toBeLessThanOrEqual(0.5);
     expect(geometry.badgeOverflowRight).toBeLessThanOrEqual(0.5);
-    if (width > 760) {
+    if (!stacked(width)) {
       // The branch shares line one with the sender and starts clear of it, rather than under it.
       expect(geometry.sameLineAsSender).toBe(true);
       expect(geometry.branchLeft).toBeGreaterThanOrEqual(geometry.senderRight);
@@ -370,7 +377,7 @@ const measureUnderSignalPressure = (page: import("@playwright/test").Page, count
     };
   }, count);
 
-for (const width of [770, 900, 1000, 1400]) {
+for (const width of [901, 1000, 1200, 1400]) {
   // Two more pills than the fixture's Running and Stalled: a card that also wants an attention pill
   // and a reminder. That is an ordinary busy session, not a contrived one.
   test(`a crowded signals column takes its width from the sender, not the branch, at ${width}px`, async ({ page }) => {
@@ -395,16 +402,20 @@ for (const width of [770, 900, 1000, 1400]) {
 test("the crowded extreme spends the sender completely before the branch gives up anything", async ({ page }) => {
   await useViewport(page, 1400);
   const roomy = await measureUnderSignalPressure(page, 4);
-  // A full-width desktop card has room for all of it; nothing has to yield.
-  expect(roomy.branchWidth).toBeGreaterThan(300);
+  // A full-width desktop card has room for all of it; nothing has to yield. Compared against the
+  // UNPRESSURED width rather than against 300px: the branch measures 341px here and about 329px on
+  // CI, so a bare floor near the real value spends most of its headroom on the renderer before it
+  // says anything about the layout.
+  const unpressured = await measureUnderSignalPressure(page, 0);
+  expect(roomy.branchWidth).toBeCloseTo(unpressured.branchWidth, 0);
   expect(roomy.senderClipped).toBe(false);
 
-  await useViewport(page, 770);
+  await useViewport(page, TABLET_BREAKPOINT_PX + 1);
   const tight = await measureUnderSignalPressure(page, 4);
-  // Just above the phone breakpoint there is genuinely not enough line for all three. The order is
-  // what is guaranteed: the sender is at zero before the Git line yields, the card does not change
-  // height, and nothing is drawn past the card's edge. Below this the Git line truncates further —
-  // that is the accepted cost of two rows at a near-phone width, not a collision.
+  // The narrowest width that still uses the two-row card. Below it the card stacks instead (#901),
+  // which is what stops the Git line being squeezed to nothing. Here the order is what is
+  // guaranteed: the sender is at zero before the Git line yields, the card does not change height,
+  // and nothing is drawn past the card's edge.
   // Spent, not exactly zero: how much of "Codex App Server · Alpha" fits before the pills push it
   // out depends on the renderer's font metrics, and sub-pixel is still spent.
   expect(tight.senderWidth).toBeLessThanOrEqual(1);
@@ -413,8 +424,9 @@ test("the crowded extreme spends the sender completely before the branch gives u
 });
 
 // The same priority with no signals pressure at all: a very long agent-and-project label must
-// ellipsize rather than push the branch off the line.
-for (const width of [770, 1400]) {
+// ellipsize rather than push the branch off the line. Both widths use the two-row card, which is the
+// only shape where the sender and the Git state share a line.
+for (const width of [901, 1400]) {
   test(`a long agent and project label yields line one to the branch at ${width}px`, async ({ page }) => {
     await useViewport(page, width);
     await page.evaluate(() => {
@@ -518,15 +530,38 @@ test("a reported default branch decides whether the base ref is worth showing", 
 // cards actually measure is only visible AFTER a scroll: the rows the reader has not reached yet
 // are positioned from it. Crossing the breakpoint mid-scroll exercises both, plus the measurement
 // epoch that has to invalidate one shape's cached sizes without losing the reader's place.
-test("crossing the breakpoint mid-scroll keeps the reader's row and the list's geometry", async ({ page }) => {
+test("crossing the breakpoint keeps the reader's row and the list's geometry", async ({ page }) => {
   // Short enough that eleven cards genuinely overflow the list in BOTH shapes.
   await useViewport(page, 1400, 800);
   const list = page.locator(".inbox-list");
   await expect(page.locator(".inbox-row").first()).toBeVisible();
 
   const anchorTitle = "Orphaned Background Work Beside a Branch";
-  await list.evaluate((node) => { node.scrollTop = node.scrollHeight; });
-  await expect(page.getByText(anchorTitle)).toBeVisible();
+
+  /**
+   * How far the reader's row sits OUTSIDE the list's visible band, in pixels; 0 while it is on
+   * screen.
+   *
+   * Not `toBeInViewport`, which demands any intersection at all. Crossing the breakpoint changes the
+   * card's height by about 21px, so a row that was already a few pixels above the fold can finish a
+   * few pixels below it — measured, the worst case here is 20px, against a card of roughly 94px. The
+   * promise the list makes is that your row does not go far, not that it never crosses an edge, and
+   * an assertion that cannot tell 20px from 800px is not testing the promise.
+   */
+  const anchorDisplacement = async (): Promise<number> => await page.evaluate((title) => {
+    const list = document.querySelector<HTMLElement>(".inbox-list")!;
+    const band = list.getBoundingClientRect();
+    const row = [...document.querySelectorAll<HTMLElement>(".inbox-row-title")]
+      .find((node) => node.textContent?.includes(title));
+    if (!row) return Number.POSITIVE_INFINITY;
+    const box = row.getBoundingClientRect();
+    if (box.bottom < band.top) return band.top - box.bottom;
+    if (box.top > band.bottom) return box.top - band.bottom;
+    return 0;
+  }, anchorTitle);
+
+  const cardHeight = async (): Promise<number> =>
+    await page.locator(".inbox-row").first().evaluate((row) => row.getBoundingClientRect().height);
 
   // Only CONSECUTIVE cards may be compared. The mounted set is deliberately not contiguous: the
   // range extractor pins the selected row wherever it is, so the distance from it to the visible
@@ -549,20 +584,50 @@ test("crossing the breakpoint mid-scroll keeps the reader's row and the list's g
     return { mounted: rows.length, overlap, gap };
   });
 
-  for (const width of [390, 1400, 760, 770]) {
-    await useViewport(page, width, 800);
-    // The row the reader was on stays on screen across the shape change, rather than the list
-    // jumping to wherever the old shape's estimates happened to put that scroll offset.
-    await expect(page.getByText(anchorTitle)).toBeInViewport();
+  // ONE crossing at a time, each starting from a fresh scroll to the reader's row.
+  //
+  // A single sequence of resizes chained end to end tests something else: four restores in a row,
+  // each starting from wherever the last one left off, and the drift accumulates until the failure
+  // names a width that did nothing wrong. What the list actually promises is that ONE crossing keeps
+  // the reader where they were, so that is what each case does.
+  for (const [from, to] of [
+    [1400, TABLET_BREAKPOINT_PX],
+    [TABLET_BREAKPOINT_PX, 1400],
+    [TABLET_BREAKPOINT_PX + 1, TABLET_BREAKPOINT_PX],
+    [390, 1400],
+    [1400, 390],
+  ] as const) {
+    await useViewport(page, from, 800);
+    // Scrolled through the LIST, not with `scrollIntoViewIfNeeded`: the anchor is the last of eleven
+    // virtualized cards, so before the list reaches it there is no element to scroll to and the
+    // locator waits for something that will never attach.
+    // Re-scrolled on every attempt, not once. The virtualizer's total height is built from estimates
+    // until the rows around the viewport measure themselves, so a single `scrollTop = scrollHeight`
+    // aims at a bottom that then moves further down as the content settles.
+    await expect
+      .poll(async () => {
+        await list.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+        return anchorDisplacement();
+      }, { message: `the reader's row before ${from} to ${to}` })
+      .toBe(0);
+
+    await useViewport(page, to, 800);
+    // Within one card of where it was. A card is the unit a reader notices: land inside one and the
+    // list looks like it held its place, land several away and it looks like it jumped.
+    await expect
+      .poll(anchorDisplacement, { message: `the reader's row across ${from} to ${to}` })
+      .toBeLessThanOrEqual(await cardHeight());
+
     // Polled on the predicate itself: a width change opens a new measurement epoch, and the
     // re-seeded rows settle over the next frame or two. What must never settle is an overlap or a
     // hole between consecutive cards.
     await expect.poll(async () => {
       const { mounted, overlap, gap } = await worstNeighbours();
       return { neighbours: mounted > 1, overlapping: overlap > 0.5, holed: gap >= 24 };
-    }, { message: `neighbouring cards at ${width}px` })
+    }, { message: `neighbouring cards across ${from} to ${to}` })
       .toEqual({ neighbours: true, overlapping: false, holed: false });
   }
+  await expect(list).toBeVisible();
 });
 
 // Round two of cross-model review, confirmed by measurement: the phone card's DOM order had moved.
@@ -592,7 +657,7 @@ for (const [width, expected] of [
       return seen;
     });
     const positions = reading.map((entry) => Number(entry.split("@")[1]));
-    if (width <= 760) {
+    if (stacked(width)) {
       // sender, then title, then Git state — #782's order, unchanged.
       expect(positions[0]).toBeLessThan(positions[1]!);
       expect(positions[1]).toBeLessThan(positions[2]!);
@@ -608,10 +673,13 @@ for (const [width, expected] of [
 // is `flex: none`. With the sender box squeezed to 0 the icon kept painting, 6px into the branch
 // name beside it. "The sender yields first" has to mean it disappears, not that it overlaps.
 test("a sender squeezed to nothing takes its icon with it instead of painting over the branch", async ({ page }) => {
-  await useViewport(page, 770);
+  // The narrowest two-row card, where line one is under the most pressure it ever sees.
+  await useViewport(page, TABLET_BREAKPOINT_PX + 1);
   const geometry = await page.locator(".inbox-row").first().evaluate((row) => {
     const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!;
-    for (let index = 0; index < 2; index += 1) {
+    // Four, not two: at the narrowest two-row width there is more line to spend than there was at
+    // 770px, and the premise of this test is that the sender really has been spent.
+    for (let index = 0; index < 4; index += 1) {
       const pill = document.createElement("span");
       pill.className = "inbox-status-pill blocked";
       pill.textContent = "Approval Required";
@@ -644,4 +712,42 @@ test("a sender squeezed to nothing takes its icon with it instead of painting ov
   // And nothing of the sender is painted there: the icon is clipped away with its box.
   expect(geometry.iconOwnsContestedPoint).toBe(false);
   expect(geometry.metaOwnsContestedPoint).toBe(true);
+});
+
+// #901's whole claim, asserted at the two widths that decide it. Below the tablet breakpoint the
+// card stacks, so the Git state owns a line and a crowded signals column cannot reach it; above it
+// the card is two rows and the Git state shares line one. The branch name has to survive both.
+for (const width of [TABLET_BREAKPOINT_PX, TABLET_BREAKPOINT_PX + 1]) {
+  test(`a crowded card keeps a readable branch name at ${width}px`, async ({ page }) => {
+    await useViewport(page, width);
+    const roomy = await measureUnderSignalPressure(page, 0);
+    // Four pills beyond the fixture's lifecycle pill and Stalled: a card showing an attention pill,
+    // an orphaned-background-work pill, a reminder, and one more at once. That is a crowded real
+    // card, and at 770px before this change it left 13px of branch text.
+    const crowded = await measureUnderSignalPressure(page, 4);
+
+    // Readable, expressed against the branch's own unpressured width rather than a pixel count, so
+    // the claim holds on any renderer: a crowded card keeps most of its branch name.
+    expect(crowded.branchWidth).toBeGreaterThan(roomy.branchWidth * 0.4);
+    // And the card is the same height crowded as uncrowded, so the virtualization estimate holds.
+    expect(Math.abs(crowded.height - roomy.height)).toBeLessThanOrEqual(0.5);
+    expect(crowded.signalsOverflowRight).toBeLessThanOrEqual(0.5);
+  });
+}
+
+// The stacked card is what the narrow widths fall back to, so it has to actually be the stacked one
+// — and the two-row card has to start exactly one pixel further out. This is the pair of widths the
+// stylesheet and useIsTabletOrSmaller() must agree about; tokens.test.ts pins that they do.
+test("the card changes shape across the tablet breakpoint and nowhere else nearby", async ({ page }) => {
+  for (const [width, expected] of [
+    [TABLET_BREAKPOINT_PX - 1, 3],
+    [TABLET_BREAKPOINT_PX, 3],
+    [TABLET_BREAKPOINT_PX + 1, 2],
+    [TABLET_BREAKPOINT_PX + 2, 2],
+  ] as const) {
+    await useViewport(page, width);
+    const tracks = await page.locator(".inbox-row").first().evaluate((row) =>
+      getComputedStyle(row).gridTemplateRows.split(" ").filter(Boolean).length);
+    expect(tracks, `${width}px`).toBe(expected);
+  }
 });

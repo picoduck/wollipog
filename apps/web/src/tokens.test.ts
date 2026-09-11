@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { MOBILE_BREAKPOINT_PX } from "./components/useIsMobile.js";
+import { MOBILE_BREAKPOINT_PX, TABLET_BREAKPOINT_PX } from "./components/useIsMobile.js";
 import { customProperties, mediaBlocks, topLevelRule } from "./css-rules.js";
 
 const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
@@ -118,6 +118,32 @@ test("every phone-designated media query uses the shared breakpoint", () => {
     assert.equal(widths[0], MOBILE_BREAKPOINT_PX,
       `${what} must use the shared phone breakpoint, or CSS and useIsMobile() disagree`);
   }
+});
+
+/**
+ * The Sessions list card's shape is chosen in TWO places — a media query here and
+ * `useIsTabletOrSmaller()` in the list — and the two must agree. When they disagree the card renders
+ * one shape while the virtualizer positions unmeasured rows with the other shape's estimate, which
+ * is a scroll that lands in the wrong place rather than anything visible in a screenshot (#901).
+ */
+test("the stacked-card media query uses the shared tablet breakpoint", () => {
+  assert.equal(only(scope(TOKENS), "--bp-tablet", "the token block"), `${TABLET_BREAKPOINT_PX}px`);
+
+  // `.inbox-row-lead` is the wrapper the stacked shape dissolves, so the block that dissolves it is
+  // the block that owns the shape.
+  const owning = mediaBlocks(css).filter((block) => block.containsSelector(".inbox-row-lead"));
+  assert.equal(owning.length, 1, "expected exactly one media block to dissolve the card's lead wrapper");
+  assert.deepEqual(owning[0]!.maxWidths, [TABLET_BREAKPOINT_PX],
+    "the stacked card must start at the shared tablet breakpoint, or CSS and " +
+    "useIsTabletOrSmaller() disagree about which shape the list is rendering");
+});
+
+test("the phone breakpoint is not what chooses the card's shape", () => {
+  // #901 moved the stack from the phone breakpoint to the tablet one. If they are ever set to the
+  // same number the distinction is gone and the regression is silent, so assert they differ.
+  assert.notEqual(MOBILE_BREAKPOINT_PX, TABLET_BREAKPOINT_PX,
+    "the card's density threshold and the phone threshold are different decisions");
+  assert.ok(TABLET_BREAKPOINT_PX > MOBILE_BREAKPOINT_PX, "a tablet is wider than a phone");
 });
 
 test("the token block declares every promised member of every scale", () => {
