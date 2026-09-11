@@ -583,9 +583,13 @@ export class AutomationsService {
   ): boolean {
     if (commands.some((command) => ["accepted", "started", "completed"].includes(command.state))) return false;
     if (!commands.some((command) => ["staged", "pending", "sent"].includes(command.state))) return false;
+    // No bound is shorter than the floor, so a plan younger than it is deliverable whatever the
+    // cadence — and answering from the age alone keeps `nextCronFire` off the five-second sweep,
+    // where a per-minute cron costs ~7ms per execution (~15ms outside UTC).
+    const age = now - Math.max(...commands.map((command) => command.createdAt));
+    if (age < MIN_DELIVERY_BOUND_MS) return false;
     const cadence = nextCronFire(schedule.cron, schedule.timezone, execution.scheduledFor) - execution.scheduledFor;
-    const bound = Math.min(MAX_DELIVERY_BOUND_MS, Math.max(MIN_DELIVERY_BOUND_MS, cadence));
-    return now - Math.max(...commands.map((command) => command.createdAt)) >= bound;
+    return age >= Math.min(MAX_DELIVERY_BOUND_MS, Math.max(MIN_DELIVERY_BOUND_MS, cadence));
   }
 
   /** The bound as the outbox sees it, for one command about to be sent. A command past it is left
