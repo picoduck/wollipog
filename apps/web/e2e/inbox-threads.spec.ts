@@ -132,6 +132,7 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
     const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!.getBoundingClientRect();
     const time = row.querySelector<HTMLElement>(".inbox-row-signals > time")!.getBoundingClientRect();
     const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!.getBoundingClientRect();
+    const icon = row.querySelector<HTMLElement>(".inbox-row-sender > :first-child")!.getBoundingClientRect();
     return {
       title: shell.querySelector(".inbox-row-title")!.textContent,
       left: Math.round(box.left),
@@ -142,21 +143,28 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
       signalsOverflowRight: signals.right - (box.right - parseFloat(style.paddingRight)),
       signalsOverflowLeft: (box.left + parseFloat(style.paddingLeft)) - signals.left,
       senderWidth: sender.width,
+      iconWidth: icon.width,
+      iconClipped: icon.right - sender.right,
+      senderOverlap: sender.right - signals.left,
     };
   }));
   // Every phone card measures the same, whatever its pills (#917), and indenting changes nothing.
   expect(new Set(geometry.map((row) => row.height)).size, JSON.stringify(geometry)).toBe(1);
   for (const row of geometry) expect(row.left - geometry[0]!.left).toBe(row.child ? 14 : 0);
   // The three-pill card (#603: Awaiting Input, Approval Required, Stalled) keeps its time on one
-  // line inside the card and still shows the sender's icon and the start of the agent name (#916).
-  // 390px cannot fit three taxonomy pills, the time, and a whole "Claude" beside the icon; the
-  // floor asserted here is the icon, its gap, and about four characters.
+  // line inside the card, and the sender is what yields, never the time or a pill (#916). How
+  // much of the agent's name survives depends on the font: about four characters with Segoe UI,
+  // one with CI's wider fallback face, so the assertion is relative (#ci-font-metrics): the icon
+  // is whole and the signals cluster never overlaps the sender.
   const three = geometry.find((row) => row.title?.startsWith("#603"))!;
   expect(three.pills).toBe(3);
   expect(three.timeHeight, "the relative time is on one line").toBeLessThanOrEqual(20);
   expect(three.signalsOverflowRight).toBeLessThanOrEqual(0.5);
   expect(three.signalsOverflowLeft).toBeLessThanOrEqual(0.5);
-  expect(three.senderWidth).toBeGreaterThanOrEqual(16 + 5 + 24);
+  expect(three.iconWidth).toBeGreaterThan(0);
+  expect(three.iconClipped).toBeLessThanOrEqual(0.5);
+  expect(three.senderOverlap).toBeLessThanOrEqual(0.5);
+  expect(three.senderWidth).toBeGreaterThan(three.iconWidth);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `${EVIDENCE}/phone-expanded.png`, fullPage: true });
 });
