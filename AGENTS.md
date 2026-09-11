@@ -42,8 +42,9 @@ branch first**, because that is what decides whether anything is required at all
   the aggregator, which carries that guard alongside its `always()` — so all of them skip and the
   required context never appears. Skipped is not pending: waiting will not help. Mark it ready for
   review, which re-triggers CI.
-- **No run at all.** A fork pull request waits for approval before any workflow starts. Get the run
-  approved rather than waiting on it.
+- **No run at all.** Waiting cannot resolve this, whatever the cause — a fork pull request awaiting
+  approval, a pull request GitHub cannot build a merge ref for, an explicit skip directive, and
+  others. Do not enumerate; find out why this pull request has no run and fix that.
 
 `Browser End-to-End Tests` is the long pole at roughly 20–30 minutes, and the merge group re-runs it,
 so expect that wait twice: once on the branch and once after enqueueing.
