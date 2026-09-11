@@ -106,8 +106,7 @@ export function PinnedSummary({
 
   return (
     <aside className="pinned-summary" aria-label="Pinned Summary">
-      {/* Keep identity and freshness here. Live status belongs to the Session header so the same
-          facts are not duplicated in two nearby surfaces. */}
+      {/* Keep session identity and freshness together at the top of the pinned summary. */}
       <div className="ps-section">
         <div className="ps-section-head">
           <span>Session</span>

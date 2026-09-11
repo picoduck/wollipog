@@ -71,14 +71,14 @@ test("only explicit attention reasons retain a snoozed session in Active", () =>
     "a legacy omitted pendingApproval is absence, not an attention condition");
 });
 
-test("snoozed attention uses the shared delivery-watchdog labels and explanations", () => {
+test("snoozed attention uses the shared delivery-watchdog presentation", () => {
   const cases = [
-    ["terminal_without_continuation", "Result Pending", /returning the result automatically.*No action is needed/s],
-    ["accepted_without_result", "Result Missing", /will not repeat.*Review the parent turn/s],
-    ["result_not_projected", "Transcript Delayed", /updating the transcript automatically.*No action is needed/s],
-    ["dashboard_observation_pending", "Notification Pending", /waiting for the dashboard confirmation.*No action is needed/s],
+    ["terminal_without_continuation", "Result Pending", "pending", /returning the result automatically.*No action is needed/s],
+    ["accepted_without_result", "Result Missing", "missing", /will not repeat.*Review the parent turn/s],
+    ["result_not_projected", "Transcript Delayed", "pending", /updating the transcript automatically.*No action is needed/s],
+    ["dashboard_observation_pending", "Notification Pending", "pending", /waiting for the dashboard confirmation.*No action is needed/s],
   ] as const;
-  for (const [watchdogState, label, description] of cases) {
+  for (const [watchdogState, label, severity, description] of cases) {
     const reason = snoozedSessionAttentionReason(session(watchdogState, "idle", {
       backgroundDeliveries: [{
         parentTurnId: "parent",
@@ -88,6 +88,8 @@ test("snoozed attention uses the shared delivery-watchdog labels and explanation
       }],
     }));
     assert.equal(reason?.label, label);
+    assert.equal(reason?.severity, severity);
+    assert.match(reason?.accessibleName ?? "", new RegExp(`^Background Work: ${label}\\.`));
     assert.match(reason?.description ?? "", description);
   }
 });

@@ -6,7 +6,12 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { formatReminderInstant } from "./reminder-schedule.js";
-import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAttentionDescription } from "./background-delivery-status.js";
+import {
+  BACKGROUND_DELIVERY_STATUS,
+  backgroundDeliveryAccessibleName,
+  backgroundDeliveryAttentionDescription,
+  type BackgroundDeliverySeverity,
+} from "./background-delivery-status.js";
 
 export type ReminderInboxMode = "ordinary" | "snoozed";
 
@@ -18,6 +23,8 @@ export type SnoozedAttentionReason =
     kind: "background_delivery_watchdog";
     label: string;
     description: string;
+    accessibleName: string;
+    severity: BackgroundDeliverySeverity;
     watchdogState: BackgroundDeliveryWatchdogState;
   };
 
@@ -53,11 +60,13 @@ export function snoozedSessionAttentionReason(session: SessionView): SnoozedAtte
   }
   const watchdogState = session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState;
   if (watchdogState) {
-    const label = BACKGROUND_DELIVERY_STATUS[watchdogState].label;
+    const status = BACKGROUND_DELIVERY_STATUS[watchdogState];
     return {
       kind: "background_delivery_watchdog",
-      label,
+      label: status.label,
       description: backgroundDeliveryAttentionDescription(watchdogState),
+      accessibleName: backgroundDeliveryAccessibleName(watchdogState),
+      severity: status.severity,
       watchdogState,
     };
   }

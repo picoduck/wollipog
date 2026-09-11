@@ -515,7 +515,10 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
   assert.match(container.textContent ?? "", /Background Work Orphaned/);
   assert.match(container.textContent ?? "", /Result Pending/);
   assert.ok(container.querySelector('[aria-label="Attention: Background Work Orphaned"]'));
-  assert.ok(container.querySelector('[aria-label="Attention: Result Pending"]'));
+  const watchdogPill = container.querySelector('[aria-label^="Background Work: Result Pending."]');
+  assert.ok(watchdogPill);
+  assert.ok(watchdogPill.classList.contains("background-delivery-pending"));
+  assert.equal(watchdogPill.classList.contains("blocked"), false);
 
   await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
   assert.deepEqual(rowTitles(container), [
@@ -526,6 +529,10 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
   await renderView("board");
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")));
   assert.ok(container.querySelector('.card [aria-label="Attention: Background Work Orphaned"]'));
+  const boardWatchdogPill = container.querySelector('.card [aria-label^="Background Work: Result Pending."]');
+  assert.ok(boardWatchdogPill);
+  assert.ok(boardWatchdogPill.classList.contains("background-delivery-pending"));
+  assert.equal(boardWatchdogPill.classList.contains("blocked"), false);
   assert.ok(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
 
   await act(async () => {
