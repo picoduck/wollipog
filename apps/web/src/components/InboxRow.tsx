@@ -311,8 +311,10 @@ function InboxRowInner({
             )}
             {pinned && <span className="inbox-pin-indicator" aria-label="Pinned Session">●</span>}
             {unread && <span className="inbox-unread-badge" aria-label="Unread Activity">1</span>}
-            <time dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}>
-              {relativeTime(lastActivityAt)}
+            {/* A phone shows the bare "15m": its signals line carries the sender too (#916). */}
+            <time dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}
+              title={threeRow ? relativeTime(lastActivityAt) : undefined}>
+              {relativeTime(lastActivityAt, threeRow)}
             </time>
           </span>
         </button>

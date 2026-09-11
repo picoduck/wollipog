@@ -11,6 +11,7 @@ import {
   resolvedModelLabel,
   sshErrorHint,
   titleCaseLabel,
+  relativeTime,
 } from "./format.js";
 
 test("effortLabel formats provider tokens for visible UI copy", () => {
@@ -121,4 +122,15 @@ test("sshErrorHint: auth/host/other failures get NO hint (avoid misleading on a 
   assert.equal(sshErrorHint("scp failed: No such file or directory"), null);
   assert.equal(sshErrorHint(null), null);
   assert.equal(sshErrorHint(""), null);
+});
+
+test("relativeTime's compact form drops the suffix for the phone card's signals line (#916)", () => {
+  const now = Date.now();
+  assert.equal(relativeTime(now - 15 * 60_000), "15m ago");
+  assert.equal(relativeTime(now - 15 * 60_000, true), "15m");
+  assert.equal(relativeTime(now - 3 * 3_600_000, true), "3h");
+  assert.equal(relativeTime(now - 2 * 86_400_000, true), "2d");
+  assert.equal(relativeTime(now - 20_000, true), "20s");
+  assert.equal(relativeTime(now - 1_000, true), "now");
+  assert.equal(relativeTime(null, true), "—");
 });
