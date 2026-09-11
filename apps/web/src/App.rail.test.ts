@@ -67,7 +67,7 @@ test("heartbeat activity feeds cards, preview, split/footer counts, and independ
 test("live-follow status owns a reserved transcript strip with a compact centered control cluster", () => {
   // Dogfooding IDEA-007/BUG-009 (2026-08-10): the pager hints flank the follow-state control
   // inside ONE centered cluster, and the resume keycap lives INSIDE the control.
-  assert.match(detail, /className="transcript-status-strip"[\s\S]*className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter session=\{session\} \/>[\s\S]*className="follow-tail-control"[\s\S]*label="Page Up"[\s\S]*className=\{`follow-tail-chip[\s\S]*className="follow-tail-kbd"[\s\S]*label="Page Down"/,
+  assert.match(detail, /className="transcript-status-strip"[\s\S]*className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>[\s\S]*className="follow-tail-control"[\s\S]*label="Page Up"[\s\S]*className=\{`follow-tail-chip[\s\S]*className="follow-tail-kbd"[\s\S]*label="Page Down"/,
     "Page Up, the follow-state control with its resume keycap, and Page Down form one cluster");
   assert.match(detail, /className="follow-tail-kbd"\s*aria-hidden="true"\s*data-shortcut-hint=\{shortcutDisplay\(mode === "preview" \? "inbox-follow-latest" : "session-reading-latest"\)\}/,
     "the in-control keycap is decorative; the control's tooltip carries the chord for assistive tech");
@@ -80,6 +80,10 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "context usage, live output, and cost form one centered cluster ahead of trailing actions");
   assert.match(detail, /\(mode === "preview" \|\| !hasContextWindow\) && \([\s\S]*className="transcript-status-context transcript-status-context-standalone"[\s\S]*<TranscriptRecoveryStripEcho[\s\S]*className="transcript-status-cluster"/,
     "recovery without a context meter uses the leading grid seat without shifting visible controls");
+  assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);[\s\S]*const hasContextWindow = contextWindow\.known;/,
+    "seat allocation consumes the shared capacity result");
+  assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>/g)?.length, 2,
+    "both meter placements consume the exact result used to allocate the status-strip seat");
   assert.doesNotMatch(detail, /cbar-usage|className="composer-bar"[\s\S]*<SessionUsageControl/,
     "the composer bar hosts no session-cost control: session accounting is not a message control");
   // #781: the cost control remains distinct from the neighboring context meter.
@@ -94,7 +98,7 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "context usage and cost sit at the standard gap beside the centered live-output control");
   assert.match(css, /\.transcript-status-context\s*\{[^}]*position:\s*relative;[^}]*flex:\s*none;[^}]*justify-content:\s*flex-end;[^}]*width:\s*auto;[^}]*min-width:\s*44px;/,
     "the context seat stays adjacent while its compact recovery echo overlays toward free space");
-  assert.match(css, /\.transcript-status-context \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*width:\s*100%;[^}]*max-width:\s*80px;/,
+  assert.match(css, /\.transcript-status-context \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*width:\s*min\(80px,\s*calc\(25cqw - 11px\)\);[^}]*max-width:\s*none;/,
     "the recovery echo may extend left without inserting a spacer between context and live output");
   assert.match(css, /\.transcript-status-context-standalone\s*\{[^}]*grid-column:\s*1;[^}]*width:\s*100%;[^}]*overflow:\s*hidden;/);
   assert.match(css, /\.transcript-status-context-standalone \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*static;[^}]*width:\s*100%;[^}]*max-width:\s*100%;/,

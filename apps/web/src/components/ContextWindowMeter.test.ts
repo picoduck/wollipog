@@ -28,6 +28,13 @@ test("the meter shares one anchored-popover implementation with the session-cost
     "dismissal and viewport placement live in the shared hook, not duplicated per control");
 });
 
+test("the meter consumes the capacity resolution that also allocates its status-strip seat", () => {
+  assert.match(meter, /resolution: ContextWindowCapacity/);
+  assert.match(meter, /const contextWindow = resolution\.capacity/);
+  assert.doesNotMatch(meter, /resolveCaps|useStoreSelector/,
+    "the meter cannot independently repeat or drift from SessionDetail's capacity decision");
+});
+
 test("the two controls stay visually distinct and their popovers stay separate", () => {
   assert.match(meter, /aria-label=\{`Context Window \$\{fill\.formatPct\} Used`\}/);
   assert.match(css, /\.context-ring-fill\s*\{/, "only the context control draws a ring");

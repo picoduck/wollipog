@@ -119,6 +119,7 @@ import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
+import { resolveContextWindowCapacity } from "../context-window-capacity.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
 import {
@@ -3123,10 +3124,8 @@ function SessionDetailLoaded({
   // The web registry owns app/provider identity, availability, collisions, and menu ranking. The
   // provider wire shape stays unchanged until IDEA-004C adds transport-specific execution modes.
   const agentCaps = resolveCaps(runner, session);
-  const contextModel = agentCaps?.models?.find((model) => model.id === session.model)
-    ?? agentCaps?.models?.find((model) => model.default);
-  const hasContextWindow = (session.contextWindow ?? 0) > 0
-    || (contextModel?.contextWindow ?? 0) > 0;
+  const contextWindow = resolveContextWindowCapacity(session, agentCaps?.models ?? []);
+  const hasContextWindow = contextWindow.known;
   // Plan mode is only safe where the driver actually advertises the `plan` approval mode (Claude).
   // Codex silently falls back to a writable sandbox for an unknown mode, so exposing it there would
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
@@ -4112,7 +4111,7 @@ function SessionDetailLoaded({
                 <span className="tag tag-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
               )}
               {session.workspaceName && <span className="tag tag-workspace">{session.workspaceName}</span>}
-              <ContextWindowMeter session={session} />
+              <ContextWindowMeter session={session} resolution={contextWindow} />
               <SessionUsageControl session={session} />
               {isHeartbeatBusy(session.status) && (
                 <ActivityStrip activity={activity} now={activityNow} />
@@ -4365,7 +4364,7 @@ function SessionDetailLoaded({
               <div className="transcript-status-cluster">
                 {mode === "expanded" && hasContextWindow && (
                   <div className="transcript-status-context">
-                    <ContextWindowMeter session={session} />
+                    <ContextWindowMeter session={session} resolution={contextWindow} />
                     <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
                   </div>
                 )}
