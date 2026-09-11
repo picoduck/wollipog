@@ -866,6 +866,53 @@ test("pre-provider interruption skips the interrupted turn and automatically res
   }
 });
 
+test("attachment failure after Stop Turn settles the fence and resumes the FIFO", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-attachment-failure-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle" }));
+  let rejectImages!: (reason: Error) => void;
+  const firstImages = new Promise<never>((_resolve, reject) => { rejectImages = reject; });
+  const ran: string[] = [];
+  const client = {
+    resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+    agentSessionId: () => "agent-1",
+    prompt: async (text: string) => { ran.push(text); return "end_turn" as const; },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const internals = manager as any;
+  internals.active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  let resolutionCalls = 0;
+  internals.resolvePromptImages = () => {
+    resolutionCalls += 1;
+    return resolutionCalls === 1 ? firstImages : Promise.resolve([]);
+  };
+  try {
+    manager.prompt("s_q", "A", [{
+      artifactId: "art_interrupted",
+      mimeType: "image/png",
+      sizeBytes: 3,
+      sha256: "a".repeat(64),
+    }]);
+    await waitFor(() => resolutionCalls === 1);
+    manager.prompt("s_q", "B");
+    assert.equal(manager.interruptTurn("s_q"), "applied");
+    rejectImages(new Error("referenced attachment changed"));
+    await waitFor(() => ran.length === 1, "the preserved FIFO should drain after resolver failure");
+
+    const entry = internals.active.get("s_q");
+    assert.deepEqual(ran, ["B"]);
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.equal(entry.interruptRequested, false);
+    assert.deepEqual(entry.queue, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a stale coordinated interrupt cannot cancel the next turn before provider submission", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-stale-interrupt-"));
   const store = new SessionStore(root);

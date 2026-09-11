@@ -6488,6 +6488,11 @@ export class SessionManager {
           this.failQueuedPrompt(next, `session queue drain failed: ${errText(error)}`, "INVALID_COMMAND");
           throw error;
         } finally {
+          // This is the universal manager-side turn boundary. Individual prompt/command paths
+          // settle earlier when they need to classify Interrupted, but a pre-provider resolver or
+          // checkpoint failure can return before those sites. Never leave its accepted Stop Turn
+          // fence attached to a drain generation that no longer owns a turn.
+          if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
           entry.currentDurable = undefined;
           entry.currentSessionCommand = undefined;
           entry.sessionCommandProviderStarted = false;
