@@ -124,13 +124,12 @@ test("sshErrorHint: auth/host/other failures get NO hint (avoid misleading on a 
   assert.equal(sshErrorHint(""), null);
 });
 
-test("relativeTime's compact form drops the suffix for the phone card's signals line (#916)", () => {
+test("relativeTime keeps one suffixed form for every surface (#934 moved the phone time, #916's compact form is gone)", () => {
   const now = Date.now();
   assert.equal(relativeTime(now - 15 * 60_000), "15m ago");
-  assert.equal(relativeTime(now - 15 * 60_000, true), "15m");
-  assert.equal(relativeTime(now - 3 * 3_600_000, true), "3h");
-  assert.equal(relativeTime(now - 2 * 86_400_000, true), "2d");
-  assert.equal(relativeTime(now - 20_000, true), "20s");
-  assert.equal(relativeTime(now - 1_000, true), "now");
-  assert.equal(relativeTime(null, true), "—");
+  assert.equal(relativeTime(now - 3 * 3_600_000), "3h ago");
+  assert.equal(relativeTime(now - 2 * 86_400_000), "2d ago");
+  assert.equal(relativeTime(now - 20_000), "20s ago");
+  assert.equal(relativeTime(now - 1_000), "just now");
+  assert.equal(relativeTime(null), "—");
 });

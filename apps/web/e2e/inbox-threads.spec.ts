@@ -38,6 +38,9 @@ test("a family sorts as one unit with the parent first, children indent under it
     "Queued Session",
     "Running Session",
   ]);
+  // The two-row desktop shape is untouched by #934: its time stays in the signals column.
+  await expect(page.locator(".inbox-row-signals > time")).toHaveCount(9);
+  await expect(page.locator(".inbox-row-meta > time")).toHaveCount(0);
   const parent = parentRow(page);
   await expect(parent.locator(".inbox-thread-toggle")).toHaveAttribute("aria-label", "Collapse Thread");
   await expect(parent.locator(".inbox-thread-family-text")).toHaveText("4 Children · 2 Awaiting Input");
@@ -113,6 +116,51 @@ test("t, Shift+T, p, and the arrows drive the thread, the chevron is the pointer
   expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);
 });
 
+/**
+ * Line one's geometry for every card, measured in the page.
+ *
+ * Self-contained on purpose: Playwright serialises this function, so it can call nothing from the
+ * module around it. Both font passes in the phone test below share it verbatim.
+ */
+const measureLineOne = (shells: Element[]) => shells.map((shell) => {
+    const row = shell.querySelector<HTMLElement>(".inbox-row")!;
+    const box = row.getBoundingClientRect();
+    const style = getComputedStyle(row);
+    const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!.getBoundingClientRect();
+    const time = row.querySelector<HTMLElement>("time")!;
+    const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!.getBoundingClientRect();
+    // The label is its own clip box: `.inbox-row-sender > span` carries the overflow and ellipsis.
+    const label = row.querySelector<HTMLElement>(".inbox-row-sender > span")!;
+    const labelBox = label.getBoundingClientRect();
+    // The agent's first word, measured as it is actually laid out rather than in assumed pixels:
+    // a Range over those characters reports their real advance width in whatever font rendered them.
+    const firstWord = (label.textContent ?? "").split(" ")[0] ?? "";
+    const range = document.createRange();
+    range.setStart(label.firstChild!, 0);
+    range.setEnd(label.firstChild!, firstWord.length);
+    const wordBox = range.getBoundingClientRect();
+    range.detach();
+    return {
+      title: shell.querySelector(".inbox-row-title")!.textContent,
+      left: Math.round(box.left),
+      height: Math.round(box.height),
+      child: shell.classList.contains("thread-child"),
+      pills: row.querySelectorAll(".inbox-status-pill").length,
+      timeCount: row.querySelectorAll("time").length,
+      timeOnLineThree: time.parentElement!.classList.contains("inbox-row-meta"),
+      timeText: time.textContent,
+      timeHeight: time.getBoundingClientRect().height,
+      timeOverflowRight: time.getBoundingClientRect().right - (box.right - parseFloat(style.paddingRight)),
+      signalsOverflowRight: signals.right - (box.right - parseFloat(style.paddingRight)),
+      signalsOverflowLeft: (box.left + parseFloat(style.paddingLeft)) - signals.left,
+      senderWidth: sender.width,
+      firstWord,
+      firstWordWidth: wordBox.width,
+      // Positive means the word is cut off by the label's clip box.
+      firstWordClipped: wordBox.right - labelBox.right,
+    };
+});
+
 test("a phone narrows the spine and keeps the family chip's dots", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openList(page);
@@ -125,50 +173,72 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   await expect(approval.locator(".inbox-status-pill.blocked")).toHaveCount(1);
   await expect(approval.locator(".inbox-status-pill.blocked")).toHaveAttribute("aria-label", "Attention: Answer Required, 3 Requests");
   await expect(approval.locator(".inbox-status-pill-count")).toHaveText("+2");
-  const geometry = await page.locator(".inbox-row-shell").evaluateAll((shells) => shells.map((shell) => {
-    const row = shell.querySelector<HTMLElement>(".inbox-row")!;
-    const box = row.getBoundingClientRect();
-    const style = getComputedStyle(row);
-    const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!.getBoundingClientRect();
-    const time = row.querySelector<HTMLElement>(".inbox-row-signals > time")!.getBoundingClientRect();
-    const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!.getBoundingClientRect();
-    const icon = row.querySelector<HTMLElement>(".inbox-row-sender > :first-child")!.getBoundingClientRect();
-    const name = row.querySelector<HTMLElement>(".inbox-row-sender > span")!.getBoundingClientRect();
-    return {
-      title: shell.querySelector(".inbox-row-title")!.textContent,
-      left: Math.round(box.left),
-      height: Math.round(box.height),
-      child: shell.classList.contains("thread-child"),
-      pills: row.querySelectorAll(".inbox-status-pill").length,
-      timeHeight: time.height,
-      signalsOverflowRight: signals.right - (box.right - parseFloat(style.paddingRight)),
-      signalsOverflowLeft: (box.left + parseFloat(style.paddingLeft)) - signals.left,
-      senderWidth: sender.width,
-      iconWidth: icon.width,
-      iconClipped: icon.right - sender.right,
-      senderOverlap: sender.right - signals.left,
-      // The agent name's visible width inside the sender's clip box: what survives of "Claude".
-      nameVisible: Math.max(0, Math.min(name.right, sender.right) - name.left),
-    };
-  }));
+  const geometry = await page.locator(".inbox-row-shell").evaluateAll(measureLineOne);
   // Every phone card measures the same, whatever its pills (#917), and indenting changes nothing.
   expect(new Set(geometry.map((row) => row.height)).size, JSON.stringify(geometry)).toBe(1);
   for (const row of geometry) expect(row.left - geometry[0]!.left).toBe(row.child ? 14 : 0);
-  // The three-pill card (#603: Awaiting Input, Approval Required, Stalled) keeps its time on one
-  // line inside the card, and the sender is what yields, never the time or a pill (#916). How
-  // much of the agent's name survives depends on the font: about four characters with Segoe UI,
-  // one with CI's wider fallback face, so the assertion is relative (#ci-font-metrics): the icon
-  // is whole and the signals cluster never overlaps the sender.
+  // The time moved to line three's trailing edge (#934), once per card and with its suffix back.
+  for (const row of geometry) {
+    expect(row.timeCount, "one time element per card").toBe(1);
+    expect(row.timeOnLineThree, `${row.title} keeps its time on line three`).toBe(true);
+    expect(row.timeText).toMatch(/ ago$|^just now$|^—$/);
+    expect(row.timeHeight, "the time is on one line").toBeLessThanOrEqual(20);
+    expect(row.timeOverflowRight).toBeLessThanOrEqual(0.5);
+  }
+  // With line one carrying only the sender and its pills, the three-pill card (#603: Awaiting
+  // Input, Approval Required, Stalled) shows the agent's whole first word beside the icon — the
+  // criterion #916 could not meet while the time sat on that line. Asserted against the word's
+  // own rendered width, so CI's wider fallback face cannot make it a pixel argument.
   const three = geometry.find((row) => row.title?.startsWith("#603"))!;
   expect(three.pills).toBe(3);
-  expect(three.timeHeight, "the relative time is on one line").toBeLessThanOrEqual(20);
+  expect(three.firstWord).toBe("Claude");
+  expect(three.firstWordWidth).toBeGreaterThan(0);
+  expect(three.firstWordClipped, `"${three.firstWord}" is clipped by ${three.firstWordClipped}px`)
+    .toBeLessThanOrEqual(0.5);
   expect(three.signalsOverflowRight).toBeLessThanOrEqual(0.5);
   expect(three.signalsOverflowLeft).toBeLessThanOrEqual(0.5);
-  expect(three.iconWidth).toBeGreaterThan(0);
-  expect(three.iconClipped).toBeLessThanOrEqual(0.5);
-  expect(three.senderOverlap).toBeLessThanOrEqual(0.5);
-  expect(three.senderWidth).toBeGreaterThan(three.iconWidth);
-  expect(three.nameVisible, "the start of the agent name is visible beside the icon").toBeGreaterThan(0);
+
+  /*
+   * The same card again in the WIDEST face these fixtures render in.
+   *
+   * The app asks for Segoe UI and falls back through system-ui to plain sans-serif, so the text's
+   * advance width depends on which faces the machine has: this box resolves it to Noto Sans, CI to
+   * DejaVu Sans, about 8% wider, which leaves line one several pixels tighter. That gap is how the
+   * first-word guarantee passed here and failed there (#934). Pinning the wide face makes the tight
+   * case deterministic on every machine instead of only on the unlucky one.
+   */
+  //
+  // The face has to be PROVEN present, not merely asked for: an unavailable family falls through
+  // to the ambient one, and the pass would then re-measure what it already measured and report the
+  // tight case as clear. The probe compares a string set in the candidate face against the same
+  // string set in a family that cannot exist; equal advance widths mean the candidate resolved to
+  // the same fallback, so it is not installed.
+  const wideFace = await page.evaluate(() => {
+    const widthIn = (family: string) => {
+      const probe = document.createElement("span");
+      probe.textContent = "Claude Code · Wollipog";
+      probe.style.cssText =
+        `position:absolute;visibility:hidden;white-space:nowrap;font-size:12px;font-family:${family}`;
+      document.body.append(probe);
+      const width = probe.getBoundingClientRect().width;
+      probe.remove();
+      return width;
+    };
+    const absent = widthIn('"a face no machine has, 8f3c1"');
+    return ["DejaVu Sans", "Liberation Sans"].find((face) => widthIn(`"${face}"`) !== absent) ?? null;
+  });
+  expect(wideFace, "no wide face to measure: install fonts-dejavu-core (CI renders in DejaVu Sans)")
+    .not.toBeNull();
+  await page.addStyleTag({
+    content: `.inbox-row, .inbox-row * { font-family: "${wideFace}" !important; }`,
+  });
+  const wide = await page.locator(".inbox-row-shell").evaluateAll(measureLineOne);
+  const wideThree = wide.find((row) => row.title?.startsWith("#603"))!;
+  expect(wideThree.firstWordWidth, `${wideFace} is at least as wide as the ambient face`)
+    .toBeGreaterThanOrEqual(three.firstWordWidth);
+  expect(wideThree.firstWordClipped, `"${wideThree.firstWord}" is clipped by ${wideThree.firstWordClipped}px in the wide face`)
+    .toBeLessThanOrEqual(0.5);
+  expect(wideThree.signalsOverflowRight).toBeLessThanOrEqual(0.5);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `${EVIDENCE}/phone-expanded.png`, fullPage: true });
 });
