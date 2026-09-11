@@ -6238,10 +6238,11 @@ export class SessionManager {
         this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (!this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) return;
-    if (entry.pendingWorktreeRebind) {
+    if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
       await this.rebindSelectedWorktree(sessionId, entry);
       return;
     }
+    if (entry.pendingWorktreeRebind && !entry.queue[0]?.syntheticRecovery) return;
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
       if (!this.emitEvent(sessionId, { kind: "error", message: "this session is being driven by another dashboard" })) {
         return;
@@ -6374,8 +6375,11 @@ export class SessionManager {
   }
 
   private worktreeRebindCanProceed(sessionId: string, entry: ActiveSession): boolean {
+    const meta = this.store.readMeta(sessionId);
     return !entry.running &&
       this.active.get(sessionId) === entry &&
+      !meta?.backgroundWorkState &&
+      !(meta?.pendingBackgroundTaskIds?.length) &&
       !this.rewinding.has(sessionId) &&
       !this.forking.has(sessionId) &&
       !this.loggingOut.has(sessionId) &&
@@ -8691,6 +8695,13 @@ export class SessionManager {
     this.releaseAdmission(sessionId);
     this.clearLock(sessionId);
     const meta = this.store.readMeta(sessionId);
+    const pendingClaudeTaskIds = meta?.driver === "claude-code" && entry.status !== "stopped"
+      ? [...new Set([
+          ...(meta.pendingBackgroundTaskIds ?? []),
+          ...(meta.orphanedWork?.pendingTaskIds ?? []),
+        ])].sort()
+      : [];
+    const recoverableClaudeWork = pendingClaudeTaskIds.length > 0 && !!meta?.agentSessionId;
     this.cancelApprovalTelemetry(sessionId);
     if (meta && entry.status !== "stopped") {
       this.emitTelemetry(meta, {
@@ -8734,6 +8745,12 @@ export class SessionManager {
     }
     if (entry.status !== "stopped") {
       this.restoreUnsubmittedPromotions(sessionId, entry);
+      if (pendingClaudeTaskIds.length > 0) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `Claude provider exited with pending background work (${pendingClaudeTaskIds.join(", ")}); relaunching and resuming it automatically.`,
+        });
+      }
       // Keep the entry installed until this append completes: if it is the first integrity
       // failure, failHistoryIntegrity must still own/cancel this session and its durable queue.
       if (!this.emitEvent(sessionId, { kind: "stderr", text: `agent process exited (code ${code})` })) {
@@ -8746,7 +8763,11 @@ export class SessionManager {
       const hadQueueProjection = queued.length > 0 || this.reservedPromotions(entry).size > 0;
       this.deleteActiveSession(sessionId, entry);
       if (hadQueueProjection) this.emitQueue(sessionId);
-      if (recoverableAppServer) {
+      if (recoverableClaudeWork) {
+        this.rejectQueued(queued, "Claude exited before queued command started");
+        this.emitStatus(sessionId, "idle", "Claude exited with pending background work; recovery is resuming automatically");
+        this.scheduleOrphanRecovery(sessionId);
+      } else if (recoverableAppServer) {
         // A crashed turn may already have reached turn/start, so never replay it. The entries
         // still in queue are provably unsubmitted and can safely continue after a fresh process
         // resumes the same durable thread.
@@ -9395,6 +9416,7 @@ export class SessionManager {
     if (updated?.orphanedWork && update.state === "orphaned" && automaticClaudeRecoveryAllowed(updated)) {
       this.scheduleOrphanRecovery(sessionId);
     }
+    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
   }
 
   private mergeDurableBackgroundJobs(
@@ -9761,6 +9783,7 @@ export class SessionManager {
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     if (this.queuedBackgroundJobIds(updated).length > 0) this.scheduleBackgroundContinuation(sessionId);
+    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
   }
 
   /** A legacy peer or a disconnected socket can make the durable delivery proof use the

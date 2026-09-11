@@ -4422,6 +4422,52 @@ test("a code-zero app-server exit still counts as unexpected persistent-process 
   }
 });
 
+test("an idle Claude exit with pending work records the task ids and resumes recovery", async () => {
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-native",
+    command: "claude",
+    agentSessionId: "claude-session",
+    agentVersion: "2.1.268",
+  });
+  try {
+    await h.manager.start({
+      ...launchSpec(h.root),
+      driver: "claude-code",
+      agentId: "claude-native",
+      command: "claude",
+    });
+    h.store.patchMeta("resume-session", { agentSessionId: "claude-session" });
+    const firstCallbacks = h.callbacks();
+    firstCallbacks.onBackgroundWork?.({
+      state: "orphaned",
+      pendingTaskIds: ["task-z", "task-a"],
+      observedTaskIds: ["task-z", "task-a"],
+      oldestPendingAt: 1,
+      reason: "process_exit",
+      jobs: [
+        { id: "task-z", launchType: "agent", startedAt: 1 },
+        { id: "task-a", launchType: "shell", startedAt: 2 },
+      ],
+    });
+    firstCallbacks.onExit(0);
+    for (let attempt = 0; attempt < 20 && h.prompts.length === 0; attempt++) await shortDelay();
+
+    assert.equal(h.launches.length, 2, "orphan recovery relaunches without another human prompt");
+    assert.match(h.prompts[0] ?? "", /Continue after runner restart/);
+    const error = h.sent.find((message) => message.type === "session_event" &&
+      message.payload.kind === "error" && /task-a, task-z/.test(message.payload.message));
+    assert.ok(error, "the durable error names every orphaned task id");
+    const crashes = h.sent.filter((message) =>
+      message.type === "driver_telemetry" && message.metric === "crash");
+    assert.equal(crashes.length, 1);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("exec launches record fallback usage while failed initialization records launch failure", async () => {
   const h = harness(
     { driver: "codex", agentVersion: "0.63.0", agentSessionId: null },

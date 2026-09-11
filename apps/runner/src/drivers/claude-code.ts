@@ -1167,10 +1167,16 @@ export class ClaudeCodeDriver implements Driver {
       this.persistentTransport = false;
       this.persistentFingerprint = null;
       if (this.disposed || this.intentionalPersistentStop) return;
-      if (this.pendingBackgroundTasks.size > 0) this.markOrphaned("process_exit");
+      const lostPendingWork = this.pendingBackgroundTasks.size > 0;
+      if (lostPendingWork) this.markOrphaned("process_exit");
       const turn = this.activePersistentTurn;
       if (turn && !turn.settled) {
         this.handlePersistentFailure(`persistent claude exited${code == null ? "" : ` with code ${code}`}`, turn);
+      } else if (lostPendingWork) {
+        // An idle persistent transport normally resumes lazily on the next prompt. Pending work is
+        // different: the dead process owned its notifications, so surface the loss to the manager
+        // as an unexpected exit and let durable orphan recovery relaunch immediately.
+        this.cb.onExit(code);
       }
       // An idle process may exit on its own. The next queued turn transparently resumes.
     });

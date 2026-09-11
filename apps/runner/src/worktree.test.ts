@@ -15,8 +15,8 @@ function haveGit(): boolean {
   try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
 }
 
-async function waitForCondition(predicate: () => boolean, message: string): Promise<void> {
-  for (let attempt = 0; attempt < 500; attempt++) {
+async function waitForCondition(predicate: () => boolean, message: string, attempts = 500): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     if (predicate()) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
@@ -1760,6 +1760,115 @@ test("an authentication hold defers worktree rebind and preserves its FIFO until
     await manager.delete(spec.sessionId);
   } finally {
     releasePrompt();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pending Claude background work defers rebind until its automatic continuation is recorded", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-background-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseFirst = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    const callbacksByLaunch: Array<{
+      onBackgroundWork?: (update: {
+        state: "running" | "orphaned" | null;
+        pendingTaskIds: string[];
+        jobs?: Array<{ id: string; launchType: "agent"; startedAt: number }>;
+        terminalJobs?: Array<{
+          id: string;
+          launchType: "agent";
+          startedAt: number;
+          status: "completed";
+          terminalAt: number;
+          continuationRequired: boolean;
+        }>;
+      }) => void;
+      onPromptAccepted?: () => void;
+      onEvent: (event: { kind: "agent_message"; text: string }) => void;
+    }> = [];
+    let firstStartedResolve!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { firstStartedResolve = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const factory = (
+      _driver: unknown,
+      launch: { cwd: string },
+      callbacks: (typeof callbacksByLaunch)[number],
+    ) => {
+      launchedCwds.push(launch.cwd);
+      callbacksByLaunch.push(callbacks);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async (text: string) => {
+          prompts.push({ cwd: launch.cwd, text });
+          if (text === "first") {
+            callbacks.onBackgroundWork?.({
+              state: "running",
+              pendingTaskIds: ["task-1"],
+              jobs: [{ id: "task-1", launchType: "agent", startedAt: 1 }],
+            });
+            firstStartedResolve();
+            await firstGate;
+          } else if (/Managed background jobs reached their terminal barrier/.test(text)) {
+            callbacks.onPromptAccepted?.();
+            callbacks.onEvent({ kind: "agent_message", text: "Background task completed." });
+          }
+          return "end_turn" as const;
+        },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_background_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "first");
+    await firstStarted;
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/background-rebind",
+    });
+    releaseFirst();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(launchedCwds, [repo], "the task-owning provider must stay alive after its turn ends");
+    assert.equal(store.readMeta(spec.sessionId)?.backgroundWorkState, "running");
+
+    callbacksByLaunch[0]!.onBackgroundWork?.({
+      state: null,
+      pendingTaskIds: [],
+      terminalJobs: [{
+        id: "task-1",
+        launchType: "agent",
+        startedAt: 1,
+        status: "completed",
+        terminalAt: 2,
+        continuationRequired: true,
+      }],
+    });
+    await waitForCondition(() => prompts.length === 2, "the background continuation was not submitted", 3_000);
+    await waitForCondition(() => launchedCwds.length === 2, "rebind did not resume after background delivery", 3_000);
+    assert.equal(prompts.length, 2);
+    assert.equal(prompts[1]!.cwd, repo, "the task notification is consumed by its owning provider");
+    assert.match(prompts[1]!.text, /Managed background jobs reached their terminal barrier/);
+    assert.equal(store.readEvents(spec.sessionId).some((event) =>
+      event.payload.kind === "agent_message" && event.payload.text === "Background task completed."), true);
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    releaseFirst();
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
