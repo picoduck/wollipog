@@ -230,11 +230,10 @@ test.describe("Answer Mode ownership", () => {
 });
 
 /**
- * #893: the desktop session cost shares mobile's seat — the trailing track of the transcript
- * status strip — instead of sitting in the middle of the composer bar between the permission and
- * model controls. These cases pin the layout contract across every label the control can render.
+ * Session accounting stays out of the message composer and joins context usage directly beside
+ * the live-output control. These cases pin that centered cluster across every cost label.
  */
-test.describe("desktop: the session cost occupies the status strip's trailing track", () => {
+test.describe("desktop: context and cost flank the live-output control", () => {
   /** Every shape `sessionCostLabel` can produce, widest to narrowest. */
   const LABELS = [
     { name: "a short priced", query: "", text: "$1.37" },
@@ -256,6 +255,7 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
       const follow = strip.querySelector(".follow-tail-chip")!.getBoundingClientRect();
       return {
         strip: { left: box.left, right: box.right, center: box.left + box.width / 2 },
+        cluster: rect(".transcript-status-cluster"),
         meter: rect(".context-ring-button"),
         follow: { left: follow.left, right: follow.right, center: follow.left + follow.width / 2 },
         actions: rect(".transcript-status-actions"),
@@ -265,7 +265,7 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
     });
 
   for (const label of LABELS) {
-    test(`${label.name} cost trails the follow control and leaves it centered`, async ({ page }) => {
+    test(`${label.name} cost stays beside the centered follow control`, async ({ page }) => {
       await page.setViewportSize({ width: 1200, height: 820 });
       await page.goto(`/session-usage-e2e.html?width=1180&height=780${label.query}`);
 
@@ -279,17 +279,16 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
       await expect(page.getByRole("button", { name: /^Session Usage: / })).toHaveCount(1);
 
       const geometry = await readStrip(page);
-      // The contextual Reply hint is present in this default (reader-active) state, so every
-      // assertion below is made with another trailing action sharing the track.
+      // The contextual Reply hint is present, but occupies only trailing slack outside the cluster.
       expect(geometry.actions!.width).toBeGreaterThan(0);
       expect(geometry.meter!.right).toBeLessThanOrEqual(geometry.follow.left + 0.5);
-      expect(geometry.follow.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
-      expect(geometry.actions!.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
-      expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
+      expect(geometry.follow.left - geometry.meter!.right).toBeLessThanOrEqual(8.5);
+      expect(geometry.follow.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
+      expect(geometry.cost!.left - geometry.follow.right).toBeLessThanOrEqual(8.5);
+      expect(geometry.cluster!.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
       expect(geometry.cost!.width).toBeGreaterThan(0);
       expect(geometry.overflows).toBe(false);
-      // The follow control stays optically centered no matter how wide the cost renders.
-      expect(Math.abs(geometry.follow.center - geometry.strip.center)).toBeLessThanOrEqual(1);
+      expect(Math.abs((geometry.cluster!.left + geometry.cluster!.right) / 2 - geometry.strip.center)).toBeLessThanOrEqual(1);
 
       await page.screenshot({ path: `${SHOT}/desktop-status-strip-${label.name.replace(/[^a-z]+/g, "-")}.png` });
     });
@@ -304,14 +303,15 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
     const withAction = await readStrip(page);
 
     // The Reply hint is offered only while the transcript owns focus; giving the composer focus
-    // retires it. The cost is anchored to the strip edge, so it must not shift by a pixel.
+    // retires it. Because it lives outside the cluster, the cost must not shift by a pixel.
     await page.locator(".composer-input").focus();
     await expect(reply).toHaveCount(0);
     const withoutAction = await readStrip(page);
 
     expect(withoutAction.cost!.left).toBeCloseTo(withAction.cost!.left, 1);
     expect(withoutAction.cost!.right).toBeCloseTo(withAction.cost!.right, 1);
-    expect(Math.abs(withoutAction.follow.center - withoutAction.strip.center)).toBeLessThanOrEqual(1);
+    expect(withoutAction.cluster!.left).toBeCloseTo(withAction.cluster!.left, 1);
+    expect(withoutAction.cluster!.right).toBeCloseTo(withAction.cluster!.right, 1);
 
     // And the cost stays operable while the composer holds focus.
     await page.getByRole("button", { name: /^Session Usage: / }).click();
@@ -321,7 +321,7 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
   test("a cramped desktop pane keeps the cost readable by retiring the Reply hint", async ({ page }) => {
     // A desktop session beside an open side panel: the viewport is well above the mobile
     // breakpoint, but the transcript pane itself is narrow. With follow paused the follow-state
-    // control roughly doubles, and the trailing track has to hold a wide cost as well.
+    // control roughly doubles while the centered cluster also holds both usage indicators.
     await page.setViewportSize({ width: 900, height: 820 });
     await page.goto("/session-usage-e2e.html?width=440&height=780&cost=12345.67");
     await expect(page.locator(".follow-tail-chip")).toBeVisible();
@@ -329,22 +329,20 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
     await page.mouse.wheel(0, -900);
     await expect(page.locator(".follow-tail-chip")).toContainText("Follow Live Output");
 
-    // The hint yields — its shortcut still works, and the cost is the permanent seat.
+    // The trailing hint yields — its shortcut still works, and every cluster item stays readable.
     await expect(page.locator(".transcript-status-actions")).toBeHidden();
     const cost = page.locator(".transcript-status-usage .session-cost-button");
     const legibility = await cost.evaluate((button) => ({
       visible: button.getBoundingClientRect().width,
       needed: button.scrollWidth,
     }));
-    // Before the trailing track was allowed to shed the hint, this collapsed to ~14px, and to
-    // literally zero at 400px, while the fixed-width hint kept every pixel it asked for.
     expect(legibility.visible).toBeGreaterThanOrEqual(legibility.needed - 0.5);
 
     const geometry = await readStrip(page);
+    expect(geometry.meter!.right).toBeLessThanOrEqual(geometry.follow.left + 0.5);
     expect(geometry.follow.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
-    expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
     expect(geometry.overflows).toBe(false);
-    expect(Math.abs(geometry.follow.center - geometry.strip.center)).toBeLessThanOrEqual(1);
+    expect(Math.abs((geometry.cluster!.left + geometry.cluster!.right) / 2 - geometry.strip.center)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: `${SHOT}/desktop-status-strip-cramped-pane.png` });
   });
 
@@ -405,11 +403,11 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
     await expect(page.locator(".transcript-status-actions")).toBeHidden();
   });
 
-  test("the cost outlasts the hint even where the container-query cutoff cannot run", async ({ page }) => {
+  test("the centered cluster cannot overlap Reply where the container-query cutoff cannot run", async ({ page }) => {
     // Size container queries are missing on some engines this project still targets
     // (docs/vite-8-compatibility.md names Firefox 104; they arrived in Firefox 110), and the cutoff
-    // is inert there. Neutralising it stands in for that engine: the trailing track's lopsided
-    // flex-shrink has to keep the permanent cost readable by crushing the optional hint instead.
+    // is inert there. Neutralising it stands in for that engine: the trailing grid cell must clip
+    // its optional hint without extending left across the centered status cluster.
     await page.setViewportSize({ width: 1280, height: 820 });
     await page.goto("/session-usage-e2e.html?width=440&height=780&cost=12345.67");
     await page.addStyleTag({
@@ -423,26 +421,21 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
     const geometry = await page.locator(".transcript-status-strip").evaluate((strip) => {
       const button = strip.querySelector(".transcript-status-usage .session-cost-button") as HTMLElement;
       const actions = strip.querySelector(".transcript-status-actions") as HTMLElement;
+      const cluster = strip.querySelector(".transcript-status-cluster") as HTMLElement;
       return {
-        hintWidth: actions.getBoundingClientRect().width,
-        hintNatural: actions.scrollWidth,
+        clusterRight: cluster.getBoundingClientRect().right,
+        actionsLeft: actions.getBoundingClientRect().left,
         costVisible: button.getBoundingClientRect().width,
         costNeeded: button.scrollWidth,
+        clusterVisible: cluster.getBoundingClientRect().width,
+        clusterNeeded: cluster.scrollWidth,
         overflows: strip.scrollWidth > strip.clientWidth,
       };
     });
-    // The hint is still in the layout, but it gave up its width first: it renders far narrower than
-    // it wants, while the cost keeps essentially all of its own. The contract is proportional
-    // rather than pixel-exact on purpose — this pane is deliberately at the edge of what the track
-    // can hold, and CI's Linux font stack renders these labels wider than a typical local one, so
-    // an exact-width assertion would encode one machine's metrics. What must hold everywhere is the
-    // ORDER of sacrifice: without the safety net the cost rendered 39% of what it needed at this
-    // width, and nothing at all at 400px, while the hint kept every pixel.
-    const hintFraction = geometry.hintWidth / geometry.hintNatural;
     const costFraction = geometry.costVisible / geometry.costNeeded;
-    expect(hintFraction).toBeLessThan(0.5);
     expect(costFraction).toBeGreaterThan(0.9);
-    expect(costFraction).toBeGreaterThan(hintFraction * 2);
+    expect(geometry.clusterVisible).toBeGreaterThanOrEqual(geometry.clusterNeeded - 0.5);
+    expect(geometry.clusterRight).toBeLessThanOrEqual(geometry.actionsLeft + 0.5);
     expect(geometry.overflows).toBe(false);
   });
 
@@ -455,11 +448,11 @@ test.describe("desktop: the session cost occupies the status strip's trailing tr
     const usage = page.locator(".session-usage-popover").first();
     await expect(usage).toContainText("Not Priced");
     // The ledger has now answered "unpriced": the strip still refuses to invent a $0.00, and the
-    // control has not moved out of the trailing track to make room for the open panel.
+    // control remains inside the centered cluster when the panel opens.
     await expect(cost).toHaveText("$\u2014");
     const geometry = await readStrip(page);
-    expect(geometry.actions!.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
-    expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
+    expect(geometry.follow.right).toBeLessThanOrEqual(geometry.cost!.left + 0.5);
+    expect(geometry.cluster!.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
     expect(geometry.overflows).toBe(false);
 
     // The popover opens from the strip's right edge and still fits the viewport.
@@ -481,7 +474,7 @@ test("mobile: the ring and per-turn usage stay reachable", async ({ page }) => {
   await page.screenshot({ path: `${SHOT}/mobile-turn-usage.png` });
 });
 
-test("mobile: the strip trails the cost alone, and it opens Session Usage", async ({ page }) => {
+test("mobile: context and cost sit beside Live Output, and cost opens Session Usage", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/session-usage-e2e.html?width=390&height=800");
 
@@ -489,19 +482,25 @@ test("mobile: the strip trails the cost alone, and it opens Session Usage", asyn
   const trailing = strip.locator(".transcript-status-usage");
   await expect(trailing).toBeVisible();
   await expect(trailing).toHaveText("$1.37");
-  // The reported regression: the trailing slot no longer repeats the context meter (#781).
+  // The cost remains its own control rather than repeating the context meter (#781).
   await expect(trailing).not.toContainText("context");
   await expect(strip.locator(".context-ring-button")).toBeVisible();
   await page.screenshot({ path: `${SHOT}/mobile-status-strip.png` });
 
-  // The cost, the ring, and the follow-output control share the strip without overlapping.
+  // Context and cost directly flank the follow-output control as one centered cluster.
+  const cluster = strip.locator(".transcript-status-cluster");
+  const clusterBox = (await cluster.boundingBox())!;
   const follow = strip.locator(".follow-tail-chip");
   const followBox = (await follow.boundingBox())!;
   const costBox = (await trailing.boundingBox())!;
   const ringBox = (await strip.locator(".context-ring-button").boundingBox())!;
   expect(ringBox.x + ringBox.width).toBeLessThanOrEqual(followBox.x + 1);
+  expect(followBox.x - (ringBox.x + ringBox.width)).toBeLessThanOrEqual(9);
   expect(followBox.x + followBox.width).toBeLessThanOrEqual(costBox.x + 1);
-  expect(costBox.x + costBox.width).toBeLessThanOrEqual(390);
+  expect(costBox.x - (followBox.x + followBox.width)).toBeLessThanOrEqual(9);
+  expect(Math.abs(clusterBox.x + clusterBox.width / 2 - 195)).toBeLessThanOrEqual(1);
+  expect(ringBox.x).toBeGreaterThan(8);
+  expect(costBox.x + costBox.width).toBeLessThan(382);
 
   await trailing.locator("button").click();
   const usage = page.locator(".session-usage-popover").first();

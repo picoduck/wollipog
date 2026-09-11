@@ -10519,18 +10519,24 @@ body.shell-dock-dragging * {
   padding: 6px 14px;
   background: var(--bg);
 }
+.transcript-status-cluster {
+  display: inline-flex;
+  grid-column: 2;
+  align-items: center;
+  justify-self: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+}
 .transcript-status-context {
   display: flex;
-  grid-column: 1;
+  position: relative;
+  flex: 0 0 44px;
   align-items: center;
   justify-content: flex-end;
-  justify-self: stretch;
-  width: 100%;
+  width: 44px;
   min-width: 0;
-  /* Fill the allocated track before sizing children. A shrink-to-fit end-aligned cell can exceed
-     its 1fr track under wider Linux system-font metrics, letting the compact recovery echo cross
-     the center control even though its own max-width is 100%. */
-  max-width: 100%;
+  overflow: visible;
   color: var(--text-faint);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -10541,20 +10547,16 @@ body.shell-dock-dragging * {
 .transcript-status-context .context-meter {
   flex: none;
 }
-.transcript-status-trailing {
-  display: flex;
-  grid-column: 3;
-  align-items: center;
-  align-self: stretch;
-  justify-self: stretch;
-  min-width: 0;
-  /* End-packed, so the cost keeps the strip's trailing edge — the seat it already holds on
-     mobile — and a transcript action that comes and goes cannot slide it (#893). */
-  justify-content: flex-end;
-  column-gap: 8px;
+.transcript-status-context .transcript-recovery-strip-echo {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: 92px;
+  max-width: none;
+  transform: translateY(-50%);
 }
 .transcript-status-usage {
-  justify-content: flex-end;
+  flex: none;
   min-width: 0;
   overflow: hidden;
   font-size: var(--text-xs);
@@ -10562,21 +10564,15 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .transcript-status-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* Contextual actions sit BEFORE the cost in the end-packed trailing track: they claim no free
-   space of their own, so they group beside the cost rather than crowding the centered follow
-   control, and hiding them leaves the cost exactly where it was.
-
-   The lopsided `flex-shrink` is the query-independent safety net. The container query below is what
-   normally keeps a cramped pane legible, but it is inert wherever size container queries are
-   missing, and the strip must not answer that by starving the cost — a permanent seat — to feed an
-   optional hint. Weighted 100 to 1, the hint gives up essentially all of the shrink and clips
-   inside its own box before the cost loses a pixel; only once the hint is fully crushed does the
-   cost begin to ellipsise, which is what it is styled to do. In an engine with container queries
-   this never engages: past the cutoff the hint is already display:none. */
+/* Contextual actions use only the trailing slack; they never participate in the centered cluster. */
 .transcript-status-actions {
   display: flex;
-  flex: 0 100 auto;
+  grid-column: 3;
   align-items: center;
+  justify-content: flex-end;
+  justify-self: end;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
 }
@@ -10613,18 +10609,15 @@ body.shell-dock-dragging * {
 @container transcript-pane (max-width: calc(330px + 16rem)) {
   .transcript-status-actions { display: none; }
 }
-/* One compact centered cluster — pager hints sit at the standard inter-control gap directly
-   beside the follow-state control instead of being pushed toward the strip edges. */
+/* Pager hints remain an inner group inside the centered status cluster. */
 .follow-tail-control {
-  grid-column: 2;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  justify-self: center;
   min-width: 0;
 }
 .follow-tail-chip {
-  grid-column: 2;
+  flex: none;
   position: static;
   padding: 5px 12px;
   border-radius: 999px;
@@ -10632,6 +10625,7 @@ body.shell-dock-dragging * {
   background: var(--bg-elev-2);
   color: var(--text);
   font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
   box-shadow: var(--shadow);
 }

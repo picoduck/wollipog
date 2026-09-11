@@ -62,7 +62,7 @@ test("a tall pane shows the in-flow pill and the pinned summary can never inters
 
   // In the tall pane the compact echo stays out of the strip.
   await expect(page.locator(".transcript-recovery-strip-echo")).toBeHidden();
-  // #893: the session cost lives in the strip's trailing track on desktop too, never the composer.
+  // Session cost lives beside the centered live-output control, never in the composer.
   await expect(page.locator(".transcript-status-usage")).toBeVisible();
   await expect(page.locator(".cbar-usage")).toHaveCount(0);
 });
@@ -91,8 +91,8 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
     await expect(page.locator(".follow-tail-chip")).toContainText("Following Live Output");
     await expect(usage).toBeVisible();
     await expect(page.locator(".cbar-usage")).toHaveCount(0);
-    // #781: the trailing cell is now the session-cost control, so its accessible name and tooltip
-    // live on the button that opens Session Usage, not on the wrapper the geometry is read from.
+    // #781: cost remains distinct from context, with its accessible name and tooltip on the
+    // button that opens Session Usage.
     const usageButton = usage.locator(".session-cost-button");
     await expect(usageButton).toHaveAttribute("aria-label", /^Session Usage: /);
     const usageDisclosure = await usageButton.evaluate((element) => ({
@@ -119,6 +119,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       const slotBox = rect(".transcript-recovery-slot");
       const reader = rect(".detail-reader");
       const stripBox = rect(".transcript-status-strip");
+      const cluster = rect(".transcript-status-cluster");
       const leading = rect(recoverySettled ? ".context-meter" : ".transcript-recovery-strip-echo");
       const follow = rect(".follow-tail-chip");
       const usage = rect(".transcript-status-usage");
@@ -128,6 +129,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       return {
         reader,
         strip: stripBox,
+        cluster,
         slot: slotBox,
         leading,
         follow,
@@ -149,9 +151,14 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       expect(state.strip.height).toBeLessThanOrEqual(37.5);
       expect(state.hasHorizontalOverflow).toBe(false);
       expect(state.leading.right).toBeLessThanOrEqual(state.follow.left + 0.5);
+      expect(state.follow.left - state.leading.right).toBeLessThanOrEqual(8.5);
       expect(state.follow.right).toBeLessThanOrEqual(state.usage.left + 0.5);
+      expect(state.usage.left - state.follow.right).toBeLessThanOrEqual(8.5);
       expect(state.usage.width).toBeGreaterThan(0);
       expect(state.usage.right).toBeLessThanOrEqual(state.strip.right + 0.5);
+      expect(Math.abs(
+        state.cluster.left + state.cluster.width / 2 - (state.strip.left + state.strip.width / 2),
+      )).toBeLessThanOrEqual(1);
       expect(Math.abs(state.composerLeft.top - state.composerRight.top)).toBeLessThanOrEqual(1);
       expect(state.composerBar.height).toBeLessThanOrEqual(46);
     }

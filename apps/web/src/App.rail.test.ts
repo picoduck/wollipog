@@ -67,7 +67,7 @@ test("heartbeat activity feeds cards, preview, split/footer counts, and independ
 test("live-follow status owns a reserved transcript strip with a compact centered control cluster", () => {
   // Dogfooding IDEA-007/BUG-009 (2026-08-10): the pager hints flank the follow-state control
   // inside ONE centered cluster, and the resume keycap lives INSIDE the control.
-  assert.match(detail, /className="transcript-status-strip"[\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter session=\{session\} \/>[\s\S]*className="follow-tail-control"[\s\S]*label="Page Up"[\s\S]*className=\{`follow-tail-chip[\s\S]*className="follow-tail-kbd"[\s\S]*label="Page Down"[\s\S]*className="transcript-status-trailing"/,
+  assert.match(detail, /className="transcript-status-strip"[\s\S]*className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter session=\{session\} \/>[\s\S]*className="follow-tail-control"[\s\S]*label="Page Up"[\s\S]*className=\{`follow-tail-chip[\s\S]*className="follow-tail-kbd"[\s\S]*label="Page Down"/,
     "Page Up, the follow-state control with its resume keycap, and Page Down form one cluster");
   assert.match(detail, /className="follow-tail-kbd"\s*aria-hidden="true"\s*data-shortcut-hint=\{shortcutDisplay\(mode === "preview" \? "inbox-follow-latest" : "session-reading-latest"\)\}/,
     "the in-control keycap is decorative; the control's tooltip carries the chord for assistive tech");
@@ -76,13 +76,11 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "Reply and transcript discovery hints must share the same component and keycap markup");
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
-  // #893: one seat for the session cost on every viewport — the strip's trailing track, AFTER the
-  // contextual actions so a hint that comes and go with the active pane cannot shift the figure.
-  assert.match(detail, /className="transcript-status-trailing"[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"[\s\S]*mode === "expanded" && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>/,
-    "expanded session cost occupies the strip's trailing track on every viewport, after the actions");
+  assert.match(detail, /className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*className="follow-tail-control"[\s\S]*mode === "expanded" && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"/,
+    "context usage, live output, and cost form one centered cluster ahead of trailing actions");
   assert.doesNotMatch(detail, /cbar-usage|className="composer-bar"[\s\S]*<SessionUsageControl/,
     "the composer bar hosts no session-cost control: session accounting is not a message control");
-  // #781: the trailing control is the cost alone — the context meter one cell over owns occupancy.
+  // #781: the cost control remains distinct from the neighboring context meter.
   assert.doesNotMatch(detail, /of \$\{[a-zA-Z]+\} context|sessionPreviewUsage/,
     "no combined context-and-cost summary may return to the status strip");
   assert.doesNotMatch(detail, /follow-live-shortcut/,
@@ -90,35 +88,31 @@ test("live-follow status owns a reserved transcript strip with a compact centere
   assert.match(css, /\.transcript-status-strip\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto\s*minmax\(0,\s*1fr\);[^}]*flex:\s*none;[^}]*min-height:\s*42px;[^}]*padding:\s*6px 14px;[^}]*background:\s*var\(--bg\);/);
   assert.doesNotMatch(css.match(/\.transcript-status-strip\s*\{[^}]*\}/)?.[0] ?? "", /border-top/,
     "the reader status strip remains visually continuous with the transcript");
-  assert.match(css, /\.transcript-status-context\s*\{[^}]*grid-column:\s*1;[^}]*justify-content:\s*flex-end;[^}]*justify-self:\s*stretch;[^}]*width:\s*100%;/,
-    "the leading status cell fills its grid track before font-dependent children are constrained");
-  assert.match(css, /\.transcript-status-trailing\s*\{[^}]*grid-column:\s*3;[^}]*justify-self:\s*stretch;/);
+  assert.match(css, /\.transcript-status-cluster\s*\{[^}]*display:\s*inline-flex;[^}]*grid-column:\s*2;[^}]*justify-self:\s*center;[^}]*gap:\s*8px;/,
+    "context usage and cost sit at the standard gap beside the centered live-output control");
+  assert.match(css, /\.transcript-status-context\s*\{[^}]*position:\s*relative;[^}]*flex:\s*0 0 44px;[^}]*justify-content:\s*flex-end;[^}]*width:\s*44px;/,
+    "the context seat stays adjacent while its compact recovery echo overlays toward free space");
+  assert.match(css, /\.transcript-status-context \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*width:\s*92px;/,
+    "the recovery echo may extend left without inserting a spacer between context and live output");
   assert.match(css, /\.transcript-status-usage\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
-    "mobile usage truncates inside the trailing track rather than overlapping the center");
-  assert.match(css, /\.transcript-status-trailing\s*\{[^}]*column-gap:\s*8px;/,
-    "the trailing track spaces its actions and the cost without a per-child padding");
-  assert.doesNotMatch(css.match(/\.transcript-status-actions\s*\{[^}]*\}/)?.[0] ?? "", /margin-left:\s*auto/,
-    "only the cost may claim the trailing track's free space, so it stays pinned to the strip edge");
-  assert.match(css, /\.transcript-status-trailing\s*\{[^}]*justify-content:\s*flex-end;/,
-    "the trailing track packs to the strip edge so the cost keeps its seat as actions come and go");
+    "cost remains bounded when the centered cluster approaches the pane width");
+  assert.match(css, /\.transcript-status-actions\s*\{[^}]*grid-column:\s*3;[^}]*justify-self:\s*end;[^}]*overflow:\s*hidden;/,
+    "Reply guidance uses trailing slack without moving the centered cluster");
   assert.doesNotMatch(css, /\.cbar-usage/,
     "the composer-bar cost styles retire with the control (#893)");
-  // A pane too narrow for all three tracks sheds the optional hint, never the cost. The cutoff has
-  // to be font-relative: the labels are rem, so a px-only cutoff goes inactive exactly where an
-  // enlarged root font needs it most.
-  // The query-independent safety net: where the cutoff cannot run, the hint must lose its width
-  // before the cost loses any.
-  assert.match(css, /\.transcript-status-actions\s*\{[^}]*flex:\s*0 100 auto;[^}]*overflow:\s*hidden;/,
-    "the optional hint absorbs the trailing track's shrink so the permanent cost keeps its width");
+  // A pane too narrow for all three tracks sheds the optional hint; engines without size queries
+  // still clip it inside its trailing grid track instead of allowing overlap with the cluster.
+  assert.match(css, /\.transcript-status-actions\s*\{[^}]*grid-column:\s*3;[^}]*width:\s*100%;[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden;/,
+    "the optional hint stays bounded by the trailing grid track");
   assert.match(css, /@container transcript-pane \(max-width: \d+px\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
     "a plain-length cutoff retires the trailing actions in every engine with size container queries");
   assert.match(css, /@container transcript-pane \(max-width: calc\([^)]*rem[^)]*\)\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
     "and a font-relative cutoff retires them earlier when the reader has raised their text size");
-  assert.match(css, /\.follow-tail-control\s*\{[^}]*grid-column:\s*2;[^}]*display:\s*inline-flex;[^}]*gap:\s*8px;[^}]*justify-self:\s*center;/,
-    "cluster items sit at the standard inter-control gap — no flexible spacers or space-between");
+  assert.match(css, /\.follow-tail-control\s*\{[^}]*display:\s*inline-flex;[^}]*gap:\s*8px;[^}]*min-width:\s*0;/,
+    "preview pager hints stay grouped immediately around the live-output control");
   assert.doesNotMatch(css.match(/\.follow-tail-control\s*\{[^}]*\}/)?.[0] ?? "", /1fr|space-between/,
     "no flexible tracks may push the pager hints toward the strip edges");
-  assert.match(css, /\.follow-tail-chip\s*\{[^}]*position:\s*static;/,
+  assert.match(css, /\.follow-tail-chip\s*\{[^}]*flex:\s*none;[^}]*position:\s*static;[^}]*white-space:\s*nowrap;/,
     "the live-follow control must participate in the strip layout instead of covering transcript content");
   assert.match(css, /\.shortcut-hint kbd,\s*\.follow-tail-kbd\s*\{[^}]*border:\s*1px solid var\(--border-strong\);[^}]*border-radius:\s*var\(--radius-xs\);[^}]*font:\s*9px "Cascadia Code", Consolas, monospace;/,
     "the in-control resume keycap shares the Reply keycap treatment");

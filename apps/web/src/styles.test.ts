@@ -295,11 +295,12 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
  * flip follow state.
  */
 test("the recovery pill is a permanently-sized in-flow slot, never an overlay", () => {
-  // No overlay remains: nothing in the recovery family may leave normal flow. An absolutely (or
-  // sticky/fixed) positioned pill floating over the scroller is exactly the covered-newest-row
-  // bug this slot replaced.
+  // The full recovery notice must remain in flow. The compact status-strip echo is deliberately
+  // excluded: it overlays the fixed context seat inside an already reserved strip and therefore
+  // cannot cover the scroller or change reader geometry.
   const positioned = declarationsOf(css, "position")
-    .filter(({ selector }) => selector.includes("transcript-recovery"));
+    .filter(({ selector }) => selector.includes("transcript-recovery")
+      && !selector.includes("transcript-recovery-strip-echo"));
   assert.deepEqual(positioned, [],
     "recovery rules must stay in normal flow so the slot's height is the pill's real rendered height");
 
@@ -448,12 +449,13 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
     `the summary hides at ${readerThreshold}px of reader or less, but the first non-compact ` +
     `pane leaves only ${readerAtModeSwitch}px — growing the pane would re-hide the card`);
 
-  // The compact echo truncates IN PLACE: its grid cell is pinned to its track and the echo to
-  // its cell, so a phone-width strip ellipsizes the label instead of pushing it off-screen.
-  assert.match(soleRuleBody(".transcript-status-context"), /max-width:\s*100%;/,
-    "the strip's leading cell must not outgrow its grid track");
-  assert.match(soleRuleBody(".transcript-recovery-strip-echo"), /max-width:\s*100%;/,
-    "the echo must not outgrow the strip's leading cell");
+  // The compact echo overlays toward free space from the context seat. Its fixed width leaves the
+  // adjacent Live Output gap unchanged while the inner label still ellipsizes.
+  assert.match(soleRuleBody(".transcript-status-context"), /position:\s*relative;[\s\S]*flex:\s*0 0 44px;/,
+    "the strip reserves a stable context seat beside Live Output");
+  assert.match(soleRuleBody(".transcript-status-context .transcript-recovery-strip-echo"),
+    /position:\s*absolute;[\s\S]*right:\s*0;[\s\S]*width:\s*92px;/,
+    "the compact echo extends away from Live Output without changing cluster spacing");
   assert.match(soleRuleBody(".transcript-recovery-strip-echo > span:last-child"), /text-overflow:\s*ellipsis;/);
 });
 
