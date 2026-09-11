@@ -63,7 +63,7 @@ for (const viewport of VIEWPORTS) {
       isMobile: viewport.touch,
     });
 
-    test("both permission presets are fully visible without opening anything", async ({ page }) => {
+    test("both presets are fully visible and nothing overflows the form", async ({ page }) => {
       await openDialog(page);
       const group = permissionPresets(page);
       const options = group.getByRole("radio");
@@ -93,6 +93,21 @@ for (const viewport of VIEWPORTS) {
       // symptom the issue reported.
       const groupOverflow = await overflow(group);
       expect(groupOverflow.vertical).toBeLessThanOrEqual(1);
+
+      // Horizontal reflow, asserted from the SAME page load rather than a second one. Both checks
+      // want this dialog at this viewport, so opening it twice bought nothing but wall clock — and
+      // the browser job has roughly 18 seconds of headroom against its 30-minute cap (#842).
+      const form = page.locator(".form");
+      const formBox = (await form.boundingBox())!;
+      for (const selector of [".ui-choice-card", ".ui-seg", ".ui-select-trigger", ".loc-pick"]) {
+        for (const control of await page.locator(selector).all()) {
+          if (!(await control.isVisible())) continue;
+          const box = (await control.boundingBox())!;
+          expect(box.x).toBeGreaterThanOrEqual(formBox.x - 1);
+          expect(box.x + box.width, `${selector} overflows the form`)
+            .toBeLessThanOrEqual(formBox.x + formBox.width + 1);
+        }
+      }
     });
 
     test("a two-option Select opens a list its own options fit inside", async ({ page }) => {
@@ -144,28 +159,6 @@ for (const viewport of VIEWPORTS) {
       await expect(list).toHaveCount(0);
     });
 
-    test("no choice control overflows the form horizontally", async ({ page }) => {
-      // 320 is the binding reflow width and 1280 the wide control; 390 lies between them and
-      // cannot fail while both pass.
-      test.skip(viewport.name === "phone", "bounded by the 320px and 1280px cases");
-      await openDialog(page);
-      const form = page.locator(".form");
-      const formBox = await form.boundingBox();
-      expect(formBox).not.toBeNull();
-
-      for (const selector of [".ui-choice-card", ".ui-seg", ".ui-select-trigger", ".loc-pick"]) {
-        for (const control of await page.locator(selector).all()) {
-          if (!(await control.isVisible())) continue;
-          const box = await control.boundingBox();
-          expect(box).not.toBeNull();
-          // Within the form's content width, at 320px as well as at 1280px. Reflow failures show up
-          // here as a control wider than the column it sits in.
-          expect(box!.x).toBeGreaterThanOrEqual(formBox!.x - 1);
-          expect(box!.x + box!.width, `${selector} overflows the form`)
-            .toBeLessThanOrEqual(formBox!.x + formBox!.width + 1);
-        }
-      }
-    });
   });
 }
 
