@@ -50,6 +50,7 @@ import type {
   SessionLaunchSpec,
   SessionSnapshot,
   SessionStatus,
+  SessionWorktreeIsolationNotice,
   SessionWorktreeProgressPhase,
   SessionWorktreeView,
   ResolveSteeringAttemptMessage,
@@ -145,6 +146,7 @@ import {
   sessionWorktreeBranch,
   isGitRepo,
   nativeRepositoryPathIsUnavailable,
+  pathWithin,
   removeRequestedWorktreeBoundary,
   removeWorktree,
   requestedWorktreeBoundary,
@@ -1243,7 +1245,11 @@ export class SessionManager {
   async attachWorktree(
     sessionId: string,
     path: string,
-  ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }> {
+  ): Promise<{
+    worktree: SessionWorktreeView;
+    snapshot: SessionSnapshot;
+    isolation: SessionWorktreeIsolationNotice;
+  }> {
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -1254,12 +1260,12 @@ export class SessionManager {
         context: meta.context,
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
-        // A running platform sandbox cannot gain a new external mount. Its pre-bound session
-        // directory remains attachable; provider isolation can use configured external Locations.
-        allowedProjectPaths: this.executionIsolation.mode === "provider"
-          ? this.configuredProjectPaths
-          : [],
+        // Platform isolation no longer narrows WHAT may be attached. A running sandbox still
+        // cannot gain a new external mount, so the result reports that the path becomes writable
+        // at the next launch instead of refusing a worktree the repository legitimately registers.
+        allowedProjectPaths: this.configuredProjectPaths,
       });
+      const isolation = await this.attachIsolationNotice(meta, attached.path);
       // Re-attaching an already-attributed runner-owned tree must never launder it into an
       // operator-owned record that session deletion would deliberately retain.
       const existing = this.attributedWorktrees(meta)
@@ -1285,8 +1291,34 @@ export class SessionManager {
       // that no longer exists — and the contract on the field is that absent means unknown.
       if (attachedDefaultBranch) worktree.defaultBranch = attachedDefaultBranch;
       else delete worktree.defaultBranch;
-      return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
+      return { worktree, snapshot: await this.activateWorktree(meta, worktree), isolation };
     });
+  }
+
+  /** State, never guess, what a platform sandbox does with a path attached mid-session. A bwrap or
+   * Seatbelt boundary is bound at launch: a live provider keeps the roots it was given, so a
+   * worktree outside them is readable but not writable until the relaunch that a worktree switch
+   * already schedules. With no live process, the next launch binds it before anything can write. */
+  private async attachIsolationNotice(
+    meta: SessionMeta,
+    path: string,
+  ): Promise<SessionWorktreeIsolationNotice> {
+    const platformIsolated = this.executionIsolation.mode === "bwrap" || this.executionIsolation.mode === "seatbelt";
+    // Direct WSL keeps the legacy boundary out of the launcher's hands entirely, so nothing here
+    // can narrow what that target already binds.
+    if (!platformIsolated || meta.context.kind === "wsl") {
+      return { writableNow: true, writableAtNextLaunch: true };
+    }
+    const live = this.active.get(meta.sessionId);
+    if (!live) return { writableNow: true, writableAtNextLaunch: true };
+    const boundary = await requestedWorktreeBoundary(meta.repoPath, meta.sessionId, {
+      context: meta.context,
+      dataDir: this.dataDir,
+      ownerHash: this.runnerOwnerHash,
+    }, false);
+    const writableNow = pathWithin(meta.context, path, boundary) ||
+      pathWithin(meta.context, path, live.cwd);
+    return { writableNow, writableAtNextLaunch: true };
   }
 
   /** Select one already-attributed worktree as the target for every session Git action. */
@@ -4171,11 +4203,18 @@ export class SessionManager {
     // needs the future requested-worktree boundary writable. Computing that legacy boundary would
     // itself reopen a mutable WSL HOME pathname before the target-local launcher can hold it.
     if (meta.context.kind === "wsl") return [];
-    return [await requestedWorktreeBoundary(meta.repoPath, meta.sessionId, {
+    const boundary = await requestedWorktreeBoundary(meta.repoPath, meta.sessionId, {
       context: meta.context,
       dataDir: this.dataDir,
       ownerHash: this.runnerOwnerHash,
-    }, false)];
+    }, false);
+    // An attached worktree is registered by this session's repository but may live anywhere, so
+    // the runner-owned boundary does not contain it. Bind the selected one explicitly: the sandbox
+    // cannot gain the mount later, which is exactly what attach reports as "next launch".
+    const selected = meta.worktreePath;
+    return selected && !pathWithin(meta.context, selected, boundary)
+      ? [boundary, selected]
+      : [boundary];
   }
 
   private async prepareCloudIsolation(

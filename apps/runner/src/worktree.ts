@@ -96,8 +96,9 @@ export interface SessionWorktreeHandle extends WorktreeHandle {
 }
 
 export interface RequestedWorktreeOptions extends WorktreeOptions {
-  /** Exact configured Project Location roots. Existing worktrees may only be attached from one of
-   * these roots (or from the runner-owned worktree root). */
+  /** Exact configured Project Location roots. An existing worktree may be attached when one of
+   * these roots contains the repository that registers it, when the worktree itself sits inside
+   * one of them, or when it sits inside the runner-owned worktree root. */
   allowedProjectPaths?: string[];
 }
 
@@ -495,7 +496,7 @@ function parseWorktreePorcelain(value: string): ListedWorktree[] {
   });
 }
 
-function pathWithin(context: AgentContext, candidate: string, root: string): boolean {
+export function pathWithin(context: AgentContext, candidate: string, root: string): boolean {
   if (sameWorktreePath(context, candidate, root)) return true;
   if (context.kind === "wsl") return candidate.startsWith(root.replace(/\/$/u, "") + "/");
   const normalizedCandidate = canonicalNativePath(candidate).replace(/\\/gu, "/");
@@ -505,8 +506,15 @@ function pathWithin(context: AgentContext, candidate: string, root: string): boo
     .startsWith((insensitive ? normalizedRoot.toLowerCase() : normalizedRoot) + "/");
 }
 
-/** Attach only a Git-registered linked worktree from the same repository and an operator-configured
- * location boundary. Merely existing on disk is insufficient. */
+/** Attach only a Git-registered linked worktree of the session's own repository. Merely existing on
+ * disk is insufficient — and so is living inside a configured Project Location, which is not what
+ * ties a worktree to a project. The repository's worktree list is that authoritative link, so the
+ * Location boundary is applied to the REPOSITORY rather than to the worktree's own directory: a
+ * worktree a configured project registers may live anywhere, which the common
+ * `../<repo>-worktrees/<slug>` layout beside the checkout routinely does. This never widens what a
+ * session may reach beyond its own repository's worktrees, because registration is still required.
+ * Callers re-verifying an already-attributed coordinate keep passing that exact path, and the
+ * runner-owned session boundary stays accepted on its own. */
 export async function attachRequestedWorktree(
   repoPath: string,
   sessionId: string,
@@ -515,10 +523,24 @@ export async function attachRequestedWorktree(
 ): Promise<SessionWorktreeHandle> {
   const context = options.context ?? nativeContext;
   const path = safeGitArgument(requestedPath, "worktree path");
+  const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
+  // Git documents the main worktree first, so this is the repository every listed entry belongs
+  // to. It is named in both refusals below: a caller has to be able to tell "this repository does
+  // not know that path" from "no Project Location covers this repository".
+  const repository = listed.find((entry) => entry.primary)?.path ?? repoPath;
+  if (!listed.some((entry) => sameWorktreePath(context, entry.path, path))) {
+    throw new Error(`worktree path is not registered by the repository it was matched against (${repository})`);
+  }
+  const allowedRoots = options.allowedProjectPaths ?? [];
   const runnerBoundary = await requestedWorktreeBoundary(repoPath, sessionId, options, false);
-  const allowed = [runnerBoundary, ...(options.allowedProjectPaths ?? [])];
-  if (!allowed.some((root) => pathWithin(context, path, root))) {
-    throw new Error("worktree path is outside the runner's configured Project Locations");
+  const registeringRepositoryIsConfigured = allowedRoots.some((root) =>
+    pathWithin(context, repository, root) || pathWithin(context, repoPath, root));
+  const pathIsInsideAnAllowedRoot = pathWithin(context, path, runnerBoundary) ||
+    allowedRoots.some((root) => pathWithin(context, path, root));
+  if (!registeringRepositoryIsConfigured && !pathIsInsideAnAllowedRoot) {
+    throw new Error(
+      `worktree path matched none of the runner's configured Project Locations: the repository that registers it (${repository}) is outside every configured Location`,
+    );
   }
   return registeredSessionWorktree(repoPath, path, options);
 }
@@ -536,8 +558,11 @@ export async function registeredSessionWorktree(
   const context = options.context ?? nativeContext;
   const path = safeGitArgument(requestedPath, "worktree path");
   const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
+  const repository = listed.find((entry) => entry.primary)?.path ?? repoPath;
   const match = listed.find((entry) => sameWorktreePath(context, entry.path, path));
-  if (!match) throw new Error("worktree path is not registered with the session repository");
+  if (!match) {
+    throw new Error(`worktree path is not registered by the repository it was matched against (${repository})`);
+  }
   if (match.primary) {
     throw new Error("the repository's primary workspace cannot be attached as a session worktree");
   }

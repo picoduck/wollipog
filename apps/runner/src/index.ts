@@ -1667,7 +1667,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             phase,
           })
         : undefined;
-      const operation: Promise<{ snapshot: SessionSnapshot; worktree?: SessionWorktreeView }> = msg.operation === "create"
+      const operation: Promise<{
+        snapshot: SessionSnapshot;
+        worktree?: SessionWorktreeView;
+        isolation?: import("@wollipog/protocol").SessionWorktreeIsolationNotice;
+      }> = msg.operation === "create"
         ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress)
         : msg.operation === "attach"
           ? sessions.attachWorktree(msg.sessionId, msg.path)
@@ -1685,6 +1689,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ok: true,
         snapshot: result.snapshot,
         ...(result.worktree ? { worktree: result.worktree } : {}),
+        ...(result.isolation ? { isolation: result.isolation } : {}),
       })).catch((error) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,

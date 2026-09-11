@@ -397,7 +397,7 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
   }
 });
 
-test("existing worktree attach requires both Git registration and an allowed Location", { skip: !haveGit() }, async () => {
+test("existing worktree attach requires Git registration by a configured Location's repository", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-attach-wt-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
@@ -428,14 +428,16 @@ test("existing worktree attach requires both Git registration and an allowed Loc
     });
     assert.equal(reattached.path, existing);
     setStatfsForTests();
+    // The repository is NOT inside the one configured Location here, and neither is `outside`, so
+    // nothing ties that path to a configured project.
     await assert.rejects(
       attachRequestedWorktree(repo, "s_attach", outside, { dataDir, allowedProjectPaths: [allowed] }),
-      /outside the runner's configured Project Locations/,
+      /matched none of the runner's configured Project Locations/,
     );
     const unregistered = join(allowed, "not-registered");
     await assert.rejects(
       attachRequestedWorktree(repo, "s_attach", unregistered, { dataDir, allowedProjectPaths: [allowed] }),
-      /not registered with the session repository/,
+      /not registered by the repository it was matched against/,
     );
     await assert.rejects(
       attachRequestedWorktree(repo, "s_attach", repo, { dataDir, allowedProjectPaths: [root] }),
@@ -443,6 +445,73 @@ test("existing worktree attach requires both Git registration and an allowed Loc
     );
   } finally {
     setStatfsForTests();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attach accepts a worktree the configured Location's repository registers outside every Location", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attach-external-wt-"));
+  const repo = join(root, "repo");
+  const other = join(root, "other-repo");
+  const dataDir = join(root, "data");
+  // The issue-workflow skill's fallback layout: beside the repository, inside no Project Location.
+  const beside = join(root, "repo-worktrees", "example");
+  const detached = join(root, "repo-worktrees", "detached");
+  const foreign = join(root, "other-repo-worktrees", "example");
+  try {
+    for (const path of [repo, other]) {
+      execFileSync("git", ["init", path]);
+      execFileSync("git", ["-C", path, "config", "user.email", "test@example.com"]);
+      execFileSync("git", ["-C", path, "config", "user.name", "Test"]);
+      execFileSync("git", ["-C", path, "commit", "--allow-empty", "-m", "base"]);
+    }
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/example", beside]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "--detach", detached]);
+    execFileSync("git", ["-C", other, "worktree", "add", "-b", "fix/foreign", foreign]);
+    const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+    // The repository IS the only configured Project Location; its worktree is not inside one.
+    const attached = await attachRequestedWorktree(repo, "s_external", beside, {
+      dataDir,
+      allowedProjectPaths: [repo],
+    });
+    assert.equal(attached.path, beside);
+    assert.equal(attached.branch, "fix/example");
+    assert.equal(attached.baseCommit, head);
+    assert.equal(attached.attached, true);
+
+    await assert.rejects(
+      attachRequestedWorktree(repo, "s_external", detached, { dataDir, allowedProjectPaths: [repo] }),
+      /detached worktree cannot be attached/,
+    );
+    await assert.rejects(
+      attachRequestedWorktree(repo, "s_external", repo, { dataDir, allowedProjectPaths: [repo] }),
+      /primary workspace cannot be attached/,
+    );
+    // Registration is what ties a path to a project, so a second configured repository's worktree
+    // stays out of reach: this session's repository does not register it.
+    const foreignRefusal = await attachRequestedWorktree(repo, "s_external", foreign, {
+      dataDir,
+      allowedProjectPaths: [repo, other],
+    }).then(() => undefined, (error: Error) => error.message);
+    assert.match(foreignRefusal ?? "", /not registered by the repository it was matched against/);
+    assert.ok(foreignRefusal?.includes("repo"), `refusal names the repository: ${foreignRefusal}`);
+
+    const absentRefusal = await attachRequestedWorktree(repo, "s_external", join(root, "repo-worktrees", "absent"), {
+      dataDir,
+      allowedProjectPaths: [repo],
+    }).then(() => undefined, (error: Error) => error.message);
+    assert.match(absentRefusal ?? "", /not registered by the repository it was matched against \(/);
+
+    // With no Project Location covering the repository, the refusal says so rather than implying
+    // the worktree itself is the problem.
+    const unconfigured = await attachRequestedWorktree(repo, "s_external", beside, {
+      dataDir,
+      allowedProjectPaths: [],
+    }).then(() => undefined, (error: Error) => error.message);
+    assert.match(unconfigured ?? "", /matched none of the runner's configured Project Locations/);
+    assert.ok(unconfigured?.includes("repo"), `refusal names the repository: ${unconfigured}`);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -517,6 +586,82 @@ test("session deletion removes its external worktree and durable store row", { s
     ).trim(), "");
     assert.throws(() => execFileSync("git", ["-C", handle.path, "status"], { stdio: "ignore" }));
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a session attaches a worktree beside its repository and states the isolation boundary", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-external-wt-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  // The reproduction from the issue: the repository is the only configured Project Location and
+  // the worktree lives beside it, in no Location at all.
+  const beside = join(root, "repo-worktrees", "example");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/example", beside]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_ext", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "external",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, dataDir, 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "deny" },
+    );
+    const internals = manager as unknown as {
+      configuredProjectPaths: string[];
+      active: Map<string, { sessionId: string; cwd: string; context: { kind: "native" } }>;
+      attachIsolationNotice(meta: unknown, path: string): Promise<unknown>;
+      requestedWorktreeIsolation(meta: unknown): Promise<string[]>;
+    };
+    internals.configuredProjectPaths = [repo];
+
+    const attached = await manager.attachWorktree("s_ext", beside);
+    assert.equal(attached.worktree.path, beside);
+    assert.equal(attached.worktree.branch, "fix/example");
+    assert.equal(attached.worktree.source, "attached");
+    assert.equal(attached.snapshot.worktreePath, beside);
+    assert.equal(attached.snapshot.useWorktree, true);
+    const listed = attached.snapshot.worktrees?.find((item) => item.path === beside);
+    assert.equal(listed?.branch, "fix/example");
+    assert.equal(listed?.source, "attached");
+    assert.equal(typeof listed?.baseCommit, "string");
+    assert.equal(store.readMeta("s_ext")?.worktreePath, beside);
+    assert.equal(store.readMeta("s_ext")?.worktreeBranch, "fix/example");
+    // The PR surface reads the same record, so it is no longer blind to this session.
+    await manager.linkWorktreePullRequest("s_ext", beside, "https://example.test/pull/9");
+    assert.equal(store.readMeta("s_ext")?.worktrees?.find((item) => item.path === beside)?.pullRequest?.url,
+      "https://example.test/pull/9");
+    // Nothing is running, so the next launch binds the path before anything can write to it.
+    assert.deepEqual(attached.isolation, { writableNow: true, writableAtNextLaunch: true });
+
+    // That next launch really does carry the external path into the writable boundary.
+    const boundary = await requestedWorktreeBoundary(repo, "s_ext", { dataDir }, false);
+    assert.deepEqual(await internals.requestedWorktreeIsolation(store.readMeta("s_ext")), [boundary, beside]);
+
+    // A live provider keeps the boundary it launched with, and the response says so rather than
+    // letting the agent meet it as a mid-turn write denial.
+    internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "native" } });
+    assert.deepEqual(await internals.attachIsolationNotice(store.readMeta("s_ext"), beside), {
+      writableNow: false,
+      writableAtNextLaunch: true,
+    });
+    internals.active.delete("s_ext");
+
+    await manager.delete("s_ext");
+    assert.equal(existsSync(beside), true, "an attached worktree is never runner-owned");
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/example"]);
+  } finally {
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });

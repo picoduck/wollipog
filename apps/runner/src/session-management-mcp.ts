@@ -201,6 +201,14 @@ function mapWorktreeResult(data: Json): Json {
       pullRequest: item.pullRequest ?? null,
     },
     session: data?.session == null ? null : mapSession(data.session),
+    // Attach under platform isolation: null when the runner does not report it. `writableNow:
+    // false` means the path is readable but not writable until this session relaunches, which a
+    // worktree switch schedules on its own — so the agent waits rather than treating a write
+    // denial as a broken attach.
+    isolation: data?.isolation == null ? null : {
+      writableNow: data.isolation.writableNow === true,
+      writableAtNextLaunch: data.isolation.writableAtNextLaunch === true,
+    },
   };
 }
 
@@ -927,7 +935,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "attach_worktree",
-    description: "Attach and select an existing registered worktree for a session. Subject to session permissions and governance policies.",
+    description: "Attach and select an existing worktree for a session. The path may live anywhere, including beside the checkout at ../<repo>-worktrees/<slug>, as long as the session repository registers it in `git worktree list`. Under platform isolation the result reports whether a live provider process can already write there, or whether that takes effect at the session's next launch. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -991,7 +999,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a child session. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports each effective guardrail as a value or null (none). Subject to session permissions and governance policies.",
+      "Start a child session. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports each effective guardrail as a value or null (none). Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1001,7 +1009,7 @@ export const TOOLS: McpTool[] = [
         workspaceId: { type: "string" },
         workspacePath: { type: "string", description: "Ad-hoc absolute directory instead of workspaceId" },
         title: { type: "string" },
-        useWorktree: { type: "boolean" },
+        useWorktree: { type: "boolean", description: "Defaults to true; pass false to run the child in place in the workspace directory" },
         model: { type: "string" },
         permissionMode: { type: "string", enum: [...WORKER_PERMISSION_MODES] },
         costBudgetUsd: { type: "number" },
@@ -1037,7 +1045,11 @@ export const TOOLS: McpTool[] = [
       if (typeof args.workspacePath === "string") body.workspacePath = args.workspacePath;
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.prompt === "string") body.prompt = args.prompt;
-      if (typeof args.useWorktree === "boolean") body.useWorktree = args.useWorktree;
+      // A child that starts in the primary checkout has no branch, so diff, checkpoint, review,
+      // and PR surfaces are blind to it. An agent asks for a worktree by default; only an explicit
+      // `useWorktree: false` keeps the in-place behavior. Human/UI-created sessions are unaffected
+      // — they post their own explicit value to the same route.
+      body.useWorktree = args.useWorktree !== false;
       if (Object.keys(config).length) body.config = config;
 
       const created = await createWithSpawnApproval(deps, "/api/sessions", body);
