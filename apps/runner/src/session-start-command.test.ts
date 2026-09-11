@@ -69,6 +69,9 @@ test("ordinary start_session exposes materialization before admission and provid
         context: { kind: "native" },
       } as SessionMeta,
     }),
+    targetError: (target) => target === "pending"
+      ? "the session's worktree is still being prepared — try again in a moment"
+      : !target ? "unknown session" : "invalid" in target ? target.invalid : null,
     resolveAgentTuiLaunch: () => ({ command: "codex", args: [] }),
     open: () => {
       tuiOpened = true;

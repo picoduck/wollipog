@@ -37,6 +37,9 @@ function harness(overrides: Partial<ShellOpenCommandDependencies> = {}) {
     sessionCanOpen: () => true,
     launchEpoch: () => 0,
     resolveTarget: () => ({ root: "/repo", context: { kind: "native" }, meta }),
+    targetError: (target) => target === "pending"
+      ? "the session's worktree is still being prepared — try again in a moment"
+      : !target ? "unknown session" : "invalid" in target ? target.invalid : null,
     resolveAgentTuiLaunch: () => ({ command: "codex", args: [] }),
     open: () => {
       opens++;
@@ -150,6 +153,22 @@ test("missing and pending shell targets fail with distinct messages without spaw
   await handleShellOpenCommand(command("shell"), pending.dependencies);
   assert.equal(pending.opens, 0);
   assert.match(pending.replies[0]?.error ?? "", /worktree is still being prepared/);
+
+  // A selected worktree that no longer verifies is neither missing nor pending: the session exists
+  // and its root is materialized, but it is not the tree the session recorded.
+  const invalid = harness({
+    resolveTarget: () => ({ invalid: "the session's worktree could not be verified: it is gone" }),
+  });
+  await handleShellOpenCommand(command("shell"), invalid.dependencies);
+  assert.equal(invalid.opens, 0, "no shell is spawned in an unverified worktree");
+  assert.match(invalid.replies[0]?.error ?? "", /could not be verified/);
+
+  const invalidTui = harness({
+    resolveTarget: () => ({ invalid: "the session's worktree could not be verified: it is gone" }),
+  });
+  await handleShellOpenCommand(command("agent_tui"), invalidTui.dependencies);
+  assert.equal(invalidTui.opens, 0, "and neither is a Native TUI");
+  assert.match(invalidTui.replies[0]?.error ?? "", /could not be verified/);
 });
 
 test("a cancellation at the synchronous Agent TUI spawn boundary prevents open", async () => {
