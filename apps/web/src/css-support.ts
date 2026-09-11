@@ -234,18 +234,25 @@ function withoutStrings(value: string): string {
   return value.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""');
 }
 
+/** Stands in for an escaped character: not a letter, digit, hyphen, or colon, so it starts nothing. */
+const ESCAPED = "\u0000";
+
 /**
- * Drop backslash escapes before scanning a selector.
+ * Blank backslash escapes before scanning a selector.
  *
  * An escaped character is part of an identifier, not syntax: `.foo\:new-token` is one class whose
- * name contains a colon, and reading that colon as a pseudo invented `:new-token` and would have
- * failed the guard on valid CSS. Removing the escape pair leaves `.foonew-token`, which is nonsense
- * as a selector but correct for this purpose — only the NAMES matter here, and no real pseudo is
- * lost. Escapes that encode a character by hex (`:\70 opover-open`) still are not resolved; that is
- * a documented miss, and the important part is that it produces nothing rather than something wrong.
+ * name contains a colon, and reading that colon as a pseudo invented `:new-token` — valid CSS the
+ * guard would have rejected.
+ *
+ * Blanked, not deleted. Deleting the pair was the first attempt and it merely moved the bug: for
+ * `:\hover`, which is a legal spelling of `:hover`, removing `\h` leaves `:over` and invents a
+ * pseudo called `over`. Substituting a character that cannot begin an identifier means an escaped
+ * name matches nothing at all, which is the right way to be incomplete — the scan produces nothing
+ * rather than something wrong. Hex escapes (`:\70 opover-open`) are still unresolved and likewise
+ * yield nothing.
  */
 function withoutEscapes(selector: string): string {
-  return selector.replace(/\\./g, "");
+  return selector.replace(/\\./g, ESCAPED);
 }
 
 /**

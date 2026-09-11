@@ -114,6 +114,16 @@ test("strings are data, so valid CSS is never rejected for what is inside them",
   assert.deepEqual(escaped.pseudos, [], "an escaped colon inside a class name is not a pseudo");
   const stillReal = stylesheetSurface(postcss.parse(".foo\\:x:hover { color: red }"));
   assert.deepEqual(stillReal.pseudos, ["hover"], "a real pseudo beside an escape is still seen");
+  // Escapes are blanked rather than deleted. Deleting them moved the bug instead of fixing it:
+  // `:\hover` is a legal spelling of `:hover`, and dropping `\h` left `:over` — a pseudo called
+  // `over`, absent from the allowlist, so valid CSS would have been rejected.
+  const escapedPseudo = stylesheetSurface(postcss.parse(":\\hover { color: red }"));
+  assert.deepEqual(escapedPseudo.pseudos, [],
+    "an escaped letter in a pseudo name must yield nothing, never a truncated name");
+  const hexEscaped = stylesheetSurface(postcss.parse(":\\70 opover-open { color: red }"));
+  assert.deepEqual(hexEscaped.pseudos, [], "an unresolved hex escape likewise yields nothing");
+  const ordinary = stylesheetSurface(postcss.parse(".a:hover::before { color: red }"));
+  assert.deepEqual(ordinary.pseudos, ["before", "hover"], "ordinary pseudos are unaffected");
   // And the scan still sees real grammar in a declaration that also contains a string.
   const mixed = stylesheetSurface(postcss.parse('.b { background: url("x.svg") var(--y) }'));
   assert.deepEqual(mixed.functions, ["url", "var"]);
