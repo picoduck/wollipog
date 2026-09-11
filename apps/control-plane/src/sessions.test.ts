@@ -918,6 +918,44 @@ test("agent-created children select a compatible parent Project Location and rej
   } finally { db.close(); }
 });
 
+test("agent-created ad-hoc children inherit a parent Project Location containing their path", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const project = db.createProject({ name: "Ad-Hoc Parent", scope });
+    const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      agentId: AGENT_ID,
+      projectId: project.id,
+      projectLocationId: location.id,
+    }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+
+    const compatible = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      workspacePath: `${WORKSPACE_PATH}/packages/core`,
+      agentId: AGENT_ID,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.ok(compatible.ok, compatible.error);
+    assert.equal(compatible.data!.workspaceId, null, "ad-hoc launch semantics remain unchanged");
+    assert.equal(compatible.data!.projectId, project.id);
+    assert.equal(compatible.data!.projectLocationId, location.id);
+
+    const incompatible = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      workspacePath: "/tmp/unrelated",
+      agentId: AGENT_ID,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(incompatible.status, 409);
+    assert.match(incompatible.error ?? "", /parent Project has no available Location/);
+  } finally { db.close(); }
+});
+
 test("agent-created sessions retain trusted parent attribution and reserve bounded child allowances", () => {
   const { db, svc, hub } = makeHarness();
   try {

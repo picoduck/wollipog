@@ -2593,14 +2593,18 @@ export class SessionsService {
     workspaceId: string | null,
     allowProjectWithoutLocation = false,
     parentSessionId?: string,
+    workspacePath?: string,
   ): ServiceResult<{ projectId?: string | null; projectLocationId?: string | null }> {
     const explicit = req.projectId !== undefined || req.projectLocationId !== undefined;
     if (!explicit && parentSessionId) {
       const parent = this.db.getSession(parentSessionId);
       if (!parent) return fail("parent session not found", 404);
       if (!parent.projectId) return ok({ projectId: null, projectLocationId: null });
-      const location = workspaceId
-        ? this.db.findProjectLocationForProject(parent.projectId, runnerId, workspaceId)
+      const assignmentWorkspaceId = workspaceId ?? (workspacePath
+        ? this.db.resolveImportedSessionLocation(runnerId, workspacePath).workspaceId
+        : null);
+      const location = assignmentWorkspaceId
+        ? this.db.findProjectLocationForProject(parent.projectId, runnerId, assignmentWorkspaceId)
         : null;
       if (!location || location.availability !== "available") {
         return fail("the parent Project has no available Location matching the selected runner and workspace", 409);
@@ -3078,7 +3082,7 @@ export class SessionsService {
     }
     const workspaceId = snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId);
     const requestedProject = this.requestedProjectAssignment(
-      req, req.runnerId, workspaceId, allowProjectWithoutLocation, parentSessionId,
+      req, req.runnerId, workspaceId, allowProjectWithoutLocation, parentSessionId, workspacePath,
     );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);

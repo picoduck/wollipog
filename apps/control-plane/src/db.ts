@@ -9895,7 +9895,10 @@ export class ControlPlaneDb {
       const location = this.projectLocation(projectLocationId);
       if (!location || location.projectId !== projectId) throw new Error("session project location does not belong to project");
       if (location.availability === "runner_removed") throw new Error("session project location is no longer available");
-      if (location.runnerId !== input.runnerId || location.workspaceId !== input.workspaceId) {
+      const targetWorkspaceId = input.workspaceId ?? (input.workspacePath
+        ? this.resolveImportedSessionLocation(input.runnerId, input.workspacePath).workspaceId
+        : null);
+      if (location.runnerId !== input.runnerId || location.workspaceId !== targetWorkspaceId) {
         throw new Error("session project location does not match runner/workspace");
       }
     }
