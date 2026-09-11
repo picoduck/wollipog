@@ -3123,6 +3123,10 @@ function SessionDetailLoaded({
   // The web registry owns app/provider identity, availability, collisions, and menu ranking. The
   // provider wire shape stays unchanged until IDEA-004C adds transport-specific execution modes.
   const agentCaps = resolveCaps(runner, session);
+  const contextModel = agentCaps?.models?.find((model) => model.id === session.model)
+    ?? agentCaps?.models?.find((model) => model.default);
+  const hasContextWindow = (session.contextWindow ?? 0) > 0
+    || (contextModel?.contextWindow ?? 0) > 0;
   // Plan mode is only safe where the driver actually advertises the `plan` approval mode (Claude).
   // Codex silently falls back to a writable sandbox for an unknown mode, so exposing it there would
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
@@ -4348,69 +4352,74 @@ function SessionDetailLoaded({
                 panes CSS collapses the slot and surfaces the echo inside the status strip. */}
             <TranscriptRecoveryNotice active={transcript.notice === "refreshing"} />
             <div className="transcript-status-strip" aria-label="Transcript Status">
-              <div className="transcript-status-context">
-                {mode === "expanded" && <ContextWindowMeter session={session} />}
-                <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
-              </div>
-              {/* One compact centered cluster: Page Up · follow-state control (with its resume
-                  keycap inside) · Page Down. The pager hints sit directly beside the badge at the
-                  standard inter-control gap instead of being distributed toward the strip edges
-                  (dogfooding IDEA-007/BUG-009, 2026-08-10). */}
-              <div className="follow-tail-control">
-                {mode === "preview" && !isMobile && (
-                  <ShortcutHint label="Page Up" shortcut={shortcutDisplay("inbox-page-up")} />
+              {/* Without a context meter, compact recovery uses the leading grid seat while the
+                  visible live-output/cost group itself remains centered. */}
+              {(mode === "preview" || !hasContextWindow) && (
+                <div className="transcript-status-context transcript-status-context-standalone">
+                  <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
+                </div>
+              )}
+              {/* Keep the two usage indicators beside the live-output control as one centered
+                  status cluster on every viewport. The recovery echo may temporarily replace the
+                  context meter in compact panes, but it owns the same leading seat. */}
+              <div className="transcript-status-cluster">
+                {mode === "expanded" && hasContextWindow && (
+                  <div className="transcript-status-context">
+                    <ContextWindowMeter session={session} />
+                    <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
+                  </div>
                 )}
-                <button
-                  className={`follow-tail-chip ${followTail.state}`}
-                  data-follow-tail-state={followTail.state}
-                  onClick={followTail.follow}
-                  aria-label={followTailControlLabel(followTail.state, followLabel)}
-                  title={followTailControlTooltip(
-                    followTail.state,
-                    !isMobile,
-                    shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest"),
+                {/* Page Up · follow-state control (with its resume keycap inside) · Page Down.
+                    Preview pager hints stay directly beside the badge at the standard gap. */}
+                <div className="follow-tail-control">
+                  {mode === "preview" && !isMobile && (
+                    <ShortcutHint label="Page Up" shortcut={shortcutDisplay("inbox-page-up")} />
                   )}
-                >
-                  <span aria-live="polite">{followLabel}</span>
-                  {!followTail.isFollowing && <span className="follow-tail-action">Follow Live Output</span>}
-                  {!isMobile && !followTail.isFollowing && (
-                    <kbd
-                      className="follow-tail-kbd"
-                      aria-hidden="true"
-                      data-shortcut-hint={shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
-                    >
-                      {shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
-                    </kbd>
-                  )}
-                </button>
-                {mode === "preview" && !isMobile && !followTail.isFollowing && (
-                  <ShortcutHint label="Page Down" shortcut={shortcutDisplay("inbox-page-down")} shortcutFirst />
-                )}
-              </div>
-              <div className="transcript-status-trailing">
-                {/* Contextual transcript actions take the slack on the cost's LEFT. They come and
-                    go with the active pane, so anchoring the cost to the strip's edge instead is
-                    what keeps the figure from sliding as the Reply hint appears (#893). */}
-                <div className="transcript-status-actions">
-                  {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
-                    <ShortcutHint
-                      label="Reply"
-                      shortcut={shortcutDisplay("session-reading-reply")}
-                      title={`Reply (${shortcutDisplay("session-reading-reply")})`}
-                      ariaLabel="Reply"
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={focusComposerAtDraftEnd}
-                    />
+                  <button
+                    className={`follow-tail-chip ${followTail.state}`}
+                    data-follow-tail-state={followTail.state}
+                    onClick={followTail.follow}
+                    aria-label={followTailControlLabel(followTail.state, followLabel)}
+                    title={followTailControlTooltip(
+                      followTail.state,
+                      !isMobile,
+                      shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest"),
+                    )}
+                  >
+                    <span aria-live="polite">{followLabel}</span>
+                    {!followTail.isFollowing && <span className="follow-tail-action">Follow Live Output</span>}
+                    {!isMobile && !followTail.isFollowing && (
+                      <kbd
+                        className="follow-tail-kbd"
+                        aria-hidden="true"
+                        data-shortcut-hint={shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
+                      >
+                        {shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
+                      </kbd>
+                    )}
+                  </button>
+                  {mode === "preview" && !isMobile && !followTail.isFollowing && (
+                    <ShortcutHint label="Page Down" shortcut={shortcutDisplay("inbox-page-down")} shortcutFirst />
                   )}
                 </div>
-                {/* Cost only (#781): the context meter one cell over already owns occupancy, and
-                    repeating "25k of 258k context" here made the trailing figure read as a second
-                    context indicator instead of what the session has spent. Desktop shares this
-                    seat with mobile (#893) — cumulative session accounting is session status, not
-                    a control over the message being sent, and it stays readable whether the
-                    transcript or the composer owns focus. */}
+                {/* Cost only (#781): the neighboring context meter owns occupancy, while this
+                    control owns cumulative session spend. Both stay adjacent to live output. */}
                 {mode === "expanded" && (
                   <SessionUsageControl session={session} className="transcript-status-usage" />
+                )}
+              </div>
+              {/* Contextual actions remain in the strip's trailing slack so appearing and
+                  disappearing Reply guidance cannot move the centered status cluster. */}
+              <div className="transcript-status-actions">
+                {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
+                  <ShortcutHint
+                    label="Reply"
+                    shortcut={shortcutDisplay("session-reading-reply")}
+                    title={`Reply (${shortcutDisplay("session-reading-reply")})`}
+                    ariaLabel="Reply"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={focusComposerAtDraftEnd}
+                  />
                 )}
               </div>
             </div>

@@ -199,6 +199,32 @@ test("a free session reports $0.00 once the ledger proves the provider priced it
   await view.cleanup();
 });
 
+test("a provider-reported free snapshot keeps a $0.00 heading while detail is pending", async () => {
+  const view = await mount(session({ costUsd: 0, costSource: "providerReported" }), null);
+
+  assert.equal(view.button()!.textContent, "$0.00");
+  await view.open();
+  const heading = view.popover()!.querySelector(".session-usage-head")!.textContent ?? "";
+  assert.match(heading, /\$0\.00/);
+  assert.doesNotMatch(heading, /Not Priced/);
+  await view.cleanup();
+});
+
+test("a provider-reported free snapshot keeps a $0.00 heading when detail fails", async () => {
+  const view = await mount(
+    session({ costUsd: 0, costSource: "providerReported" }),
+    new Error("usage endpoint unavailable"),
+  );
+
+  await view.open();
+  const popover = view.popover()!;
+  const heading = popover.querySelector(".session-usage-head")!.textContent ?? "";
+  assert.match(heading, /\$0\.00/);
+  assert.doesNotMatch(heading, /Not Priced/);
+  assert.match(popover.querySelector("[role=alert]")!.textContent ?? "", /usage endpoint unavailable/);
+  await view.cleanup();
+});
+
 test("a lagging ledger drives nothing in the panel, not just the token rows", async () => {
   // A previously provider-priced zero plus newer, not-yet-ledgered tokens: if any part of the
   // panel still read from this response, the session would claim to be free.
@@ -220,6 +246,7 @@ test("a lagging ledger drives nothing in the panel, not just the token rows", as
   assert.equal(rows["Total Processed"], "10k");
   assert.equal(view.button()!.textContent, "$—");
   // The rest of the rejected response is rejected too, so nothing on screen disagrees.
+  assert.match(popover.querySelector(".session-usage-head")!.textContent ?? "", /Not Priced/);
   assert.equal(popover.querySelector(".session-usage-models"), null);
   assert.doesNotMatch(popover.textContent ?? "", /stale-model|rate table|reported by the provider/);
   await view.cleanup();

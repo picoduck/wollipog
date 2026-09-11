@@ -295,11 +295,15 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
  * flip follow state.
  */
 test("the recovery pill is a permanently-sized in-flow slot, never an overlay", () => {
-  // No overlay remains: nothing in the recovery family may leave normal flow. An absolutely (or
-  // sticky/fixed) positioned pill floating over the scroller is exactly the covered-newest-row
-  // bug this slot replaced.
+  // The full recovery notice must remain in flow. The compact status-strip echo is deliberately
+  // excluded: it overlays the fixed context seat inside an already reserved strip and therefore
+  // cannot cover the scroller or change reader geometry.
   const positioned = declarationsOf(css, "position")
-    .filter(({ selector }) => selector.includes("transcript-recovery"));
+    .filter(({ selector, value }) => selector.includes("transcript-recovery")
+      && !(selector === ".transcript-status-context .transcript-recovery-strip-echo"
+        && value === "absolute")
+      && !(selector === ".transcript-status-context-standalone .transcript-recovery-strip-echo"
+        && value === "static"));
   assert.deepEqual(positioned, [],
     "recovery rules must stay in normal flow so the slot's height is the pill's real rendered height");
 
@@ -358,11 +362,11 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
     "compact mode must collapse the slot so the strip always fits");
   assert.match(compact![1]!, /\.transcript-recovery-strip-echo\s*\{\s*display:\s*inline-flex;\s*\}/,
     "compact mode must surface the in-strip echo in the slot's place");
-  // While recovery is active, the fixed-width context meter yields the leading cell: at phone
-  // widths it is wider than the whole track and would starve the echo to zero visible label.
+  // While recovery is active, the context meter yields visually while retaining the exact seat
+  // width so the centered cluster cannot shift as activity toggles.
   assert.match(compact![1]!,
-    /\.transcript-status-context:has\(> \.transcript-recovery-strip-echo\.active\) > \.context-meter\s*\{\s*display:\s*none;\s*\}/,
-    "the meter must yield to the active recovery echo in compact mode");
+    /\.transcript-status-context:has\(> \.transcript-recovery-strip-echo\.active\) > \.context-meter\s*\{\s*visibility:\s*hidden;\s*\}/,
+    "the meter must yield without resizing the active recovery echo's seat");
 
   // The echo's own activity toggle is visibility-only, like the pill's.
   assert.equal(soleRuleBody(".transcript-recovery-strip-echo:not(.active)"), "visibility: hidden;");
@@ -399,9 +403,9 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
   assert.deepEqual(
     phone.declarationsForSelector(
       ".session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter",
-    ).get("display"),
-    ["none"],
-    "the meter must yield to active recovery in a full-height phone Session too",
+    ).get("visibility"),
+    ["hidden"],
+    "the meter must yield without shifting a full-height phone Session",
   );
 
   // The pinned summary's containing block is the reader region — which the DOM tests pin as
@@ -448,12 +452,13 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
     `the summary hides at ${readerThreshold}px of reader or less, but the first non-compact ` +
     `pane leaves only ${readerAtModeSwitch}px — growing the pane would re-hide the card`);
 
-  // The compact echo truncates IN PLACE: its grid cell is pinned to its track and the echo to
-  // its cell, so a phone-width strip ellipsizes the label instead of pushing it off-screen.
-  assert.match(soleRuleBody(".transcript-status-context"), /max-width:\s*100%;/,
-    "the strip's leading cell must not outgrow its grid track");
-  assert.match(soleRuleBody(".transcript-recovery-strip-echo"), /max-width:\s*100%;/,
-    "the echo must not outgrow the strip's leading cell");
+  // The compact echo overlays toward free space from the context seat. Its fixed width leaves the
+  // adjacent Live Output gap unchanged while the inner label still ellipsizes.
+  assert.match(soleRuleBody(".transcript-status-context"), /position:\s*relative;[\s\S]*flex:\s*none;[\s\S]*min-width:\s*44px;/,
+    "the strip reserves a stable context seat beside Live Output");
+  assert.match(soleRuleBody(".transcript-status-context .transcript-recovery-strip-echo"),
+    /position:\s*absolute;[\s\S]*right:\s*0;[\s\S]*width:\s*100%;[\s\S]*max-width:\s*80px;/,
+    "the compact echo extends away from Live Output without changing cluster spacing");
   assert.match(soleRuleBody(".transcript-recovery-strip-echo > span:last-child"), /text-overflow:\s*ellipsis;/);
 });
 

@@ -78,11 +78,11 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
   const provenance = costProvenanceNote(loaded);
   const provenanceUrl = estimatedCostSourceUrl(loaded);
   const byModel = loaded?.byModel ?? [];
-  // A priced zero is an amount, not a gap: `priceUsage` keeps a provider-reported 0 as
-  // `providerReported`, so a free session reads `$0.00` and only a genuinely unpriced one is
-  // named as unpriced.
+  // A priced zero is an amount, not a gap. The shared label has already chosen between the
+  // current session snapshot and a caught-up ledger, so use that same provenance decision while
+  // detail is pending, failed, or stale instead of making the heading disagree with the control.
   const headCost = formatCost(totals.costUsd)
-    || (loaded && loaded.totals.costSource !== "unpriced" ? "$0.00" : "Not Priced");
+    || (label.priced ? "$0.00" : "Not Priced");
 
   return (
     <span className={`session-usage${popover.open ? " is-open" : ""}${className ? ` ${className}` : ""}`} ref={popover.rootRef}>

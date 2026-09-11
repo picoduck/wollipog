@@ -5,11 +5,10 @@ import { expect, test, type Page } from "@playwright/test";
 
 /**
  * #915: the transcript status strip retires its contextual actions below a hard-coded pane width.
- * That number is a budget — the follow-state control in its widest state, the strip's own padding
- * and gaps, and the hint-plus-cost pair in each of the two symmetric `1fr` tracks. Until now the
- * derivation lived only in a CSS comment, so retuning any of those controls moved the real budget
- * without moving the constant, and the failure was silent: a session cost squeezed below its own
- * width, not a red test.
+ * That number is a budget — the centered context/follow/cost cluster, the strip's own padding and
+ * gaps, and the hint in each of the two symmetric `1fr` tracks. Until now the derivation lived only
+ * in a CSS comment, so retuning any of those controls moved the real budget without moving the
+ * constant, and the failure was silent: a session cost squeezed below its own width, not a red test.
  *
  * Container queries cannot read custom properties, so the cutoff cannot be *composed* from the
  * values it depends on — it has to stay a literal. This spec closes the loop from the other end: it
@@ -80,10 +79,10 @@ function effectiveCutoff(cutoffs: readonly Cutoff[], rootPx: number): number {
 interface StripParts {
   /** Strip padding plus the two grid column gaps — fixed, in px. */
   readonly chrome: number;
-  /** The follow-state control in its widest state (`previewing`), in px. */
-  readonly followWidest: number;
-  /** Natural width of one trailing track's contents: hint + gap + a wide cost. */
-  readonly trailingPair: number;
+  /** Natural width of the centered context + widest follow-state + cost cluster. */
+  readonly centerWidest: number;
+  /** Natural width of the trailing contextual actions track. */
+  readonly trailingActions: number;
 }
 
 /**
@@ -105,7 +104,8 @@ async function measureParts(page: Page, rootPx: number): Promise<StripParts> {
 
   return page.locator(".transcript-status-strip").evaluate((strip) => {
     const stripStyle = getComputedStyle(strip);
-    const trailing = strip.querySelector(".transcript-status-trailing")!;
+    const cluster = strip.querySelector(".transcript-status-cluster") as HTMLElement;
+    const context = cluster.querySelector(".transcript-status-context") as HTMLElement;
     const chip = strip.querySelector(".follow-tail-chip") as HTMLElement;
     const stateLabel = chip.querySelector("span")!;
 
@@ -119,23 +119,27 @@ async function measureParts(page: Page, rootPx: number): Promise<StripParts> {
     }
 
     const actions = strip.querySelector(".transcript-status-actions") as HTMLElement;
+    const actionHint = actions.querySelector(".shortcut-hint") as HTMLElement;
     const cost = strip.querySelector(".transcript-status-usage .session-cost-button") as HTMLElement;
+    const clusterGap = parseFloat(getComputedStyle(cluster).columnGap);
     return {
       chrome: parseFloat(stripStyle.paddingLeft) + parseFloat(stripStyle.paddingRight)
         + parseFloat(stripStyle.columnGap) * 2,
-      followWidest,
       // `scrollWidth` is the width each wants, which is what the budget has to pay for — the
       // rendered width is already the result of the shrinking this rule exists to avoid.
-      trailingPair: actions.scrollWidth + parseFloat(getComputedStyle(trailing).columnGap) + cost.scrollWidth,
+      centerWidest: context.scrollWidth + followWidest + cost.scrollWidth + clusterGap * 2,
+      // The actions wrapper deliberately fills its grid track; the hint is the track's natural
+      // content width that the symmetric outer columns have to reserve.
+      trailingActions: actionHint.scrollWidth,
     };
   });
 }
 
 /** Pane width at which all three tracks fit at their natural widths. */
-function requiredWidth({ chrome, followWidest, trailingPair }: StripParts): number {
+function requiredWidth({ chrome, centerWidest, trailingActions }: StripParts): number {
   // The strip is `minmax(0,1fr) auto minmax(0,1fr)`: the two outer tracks are equal, so the trailing
   // track's needs are paid for twice.
-  return chrome + followWidest + trailingPair * 2;
+  return chrome + centerWidest + trailingActions * 2;
 }
 
 test.use({ reducedMotion: "reduce" });
@@ -161,8 +165,8 @@ for (const rootPx of [16, 24, 32]) {
     expect(
       declared,
       `the status-strip cutoff no longer covers the strip's own parts at a ${rootPx}px root.\n`
-      + `  measured: chrome ${parts.chrome}px + widest follow control ${parts.followWidest.toFixed(1)}px `
-      + `+ 2 x trailing pair ${parts.trailingPair}px = ${required.toFixed(1)}px required\n`
+      + `  measured: chrome ${parts.chrome}px + centered cluster ${parts.centerWidest.toFixed(1)}px `
+      + `+ 2 x trailing actions ${parts.trailingActions}px = ${required.toFixed(1)}px required\n`
       + `  declared: ${declared}px, from ${readCutoffs().map((c) => c.source).join(" and ")}\n`
       + "  Raise the cutoff in apps/web/src/styles.css to cover the new measurement.",
     ).toBeGreaterThanOrEqual(required);

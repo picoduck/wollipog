@@ -62,13 +62,13 @@ test("a tall pane shows the in-flow pill and the pinned summary can never inters
 
   // In the tall pane the compact echo stays out of the strip.
   await expect(page.locator(".transcript-recovery-strip-echo")).toBeHidden();
-  // #893: the session cost lives in the strip's trailing track on desktop too, never the composer.
+  // Session cost lives beside the centered live-output control, never in the composer.
   await expect(page.locator(".transcript-status-usage")).toBeVisible();
   await expect(page.locator(".cbar-usage")).toHaveCount(0);
 });
 
 test("full-height mobile Sessions keep recovery readable in the persistent strip without an empty band", async ({ page }) => {
-  const readGeometry = async (width: number, settled: boolean) => {
+  const readGeometry = async (width: number, settled: boolean, widestFollow = false) => {
     await page.setViewportSize({ width, height: 800 });
     await page.goto(`/recovery-notice-e2e.html?mode=expanded&height=640&width=${width}${settled ? "&settled=1" : ""}`);
     // Stress the three tracks with wider-than-default text metrics. GitHub's Linux fallback made
@@ -88,11 +88,18 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       await expect(page.locator(".context-meter")).toBeHidden();
       expect(await echo.locator("span").last().evaluate((label) => label.clientWidth)).toBeGreaterThan(0);
     }
-    await expect(page.locator(".follow-tail-chip")).toContainText("Following Live Output");
+    if (widestFollow) {
+      await page.locator(".follow-tail-chip span").first().evaluate((label) => {
+        label.textContent = "Previewing · Follow Live Output";
+      });
+    }
+    await expect(page.locator(".follow-tail-chip")).toContainText(
+      widestFollow ? "Previewing · Follow Live Output" : "Following Live Output",
+    );
     await expect(usage).toBeVisible();
     await expect(page.locator(".cbar-usage")).toHaveCount(0);
-    // #781: the trailing cell is now the session-cost control, so its accessible name and tooltip
-    // live on the button that opens Session Usage, not on the wrapper the geometry is read from.
+    // #781: cost remains distinct from context, with its accessible name and tooltip on the
+    // button that opens Session Usage.
     const usageButton = usage.locator(".session-cost-button");
     await expect(usageButton).toHaveAttribute("aria-label", /^Session Usage: /);
     const usageDisclosure = await usageButton.evaluate((element) => ({
@@ -119,6 +126,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       const slotBox = rect(".transcript-recovery-slot");
       const reader = rect(".detail-reader");
       const stripBox = rect(".transcript-status-strip");
+      const cluster = rect(".transcript-status-cluster");
       const leading = rect(recoverySettled ? ".context-meter" : ".transcript-recovery-strip-echo");
       const follow = rect(".follow-tail-chip");
       const usage = rect(".transcript-status-usage");
@@ -128,6 +136,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       return {
         reader,
         strip: stripBox,
+        cluster,
         slot: slotBox,
         leading,
         follow,
@@ -148,16 +157,26 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       expect(state.strip.top).toBeCloseTo(state.reader.bottom, 0);
       expect(state.strip.height).toBeLessThanOrEqual(37.5);
       expect(state.hasHorizontalOverflow).toBe(false);
+      expect(state.leading.left).toBeGreaterThanOrEqual(state.strip.left - 0.5);
       expect(state.leading.right).toBeLessThanOrEqual(state.follow.left + 0.5);
+      expect(state.follow.left - state.leading.right).toBeLessThanOrEqual(8.5);
       expect(state.follow.right).toBeLessThanOrEqual(state.usage.left + 0.5);
+      expect(state.usage.left - state.follow.right).toBeLessThanOrEqual(8.5);
       expect(state.usage.width).toBeGreaterThan(0);
       expect(state.usage.right).toBeLessThanOrEqual(state.strip.right + 0.5);
+      expect(Math.abs(
+        state.cluster.left + state.cluster.width / 2 - (state.strip.left + state.strip.width / 2),
+      )).toBeLessThanOrEqual(1);
       expect(Math.abs(state.composerLeft.top - state.composerRight.top)).toBeLessThanOrEqual(1);
       expect(state.composerBar.height).toBeLessThanOrEqual(46);
     }
     expect(active.reader.height).toBeCloseTo(inactive.reader.height, 0);
     expect(active.strip.top).toBeCloseTo(inactive.strip.top, 0);
+    expect(active.follow.left).toBeCloseTo(inactive.follow.left, 1);
   }
+
+  const widestActive = await readGeometry(320, false, true);
+  expect(widestActive.leading.left).toBeGreaterThanOrEqual(widestActive.strip.left - 0.5);
 });
 
 test("a compressed expanded pane hides the pinned summary instead of letting it cover the strip", async ({ page }) => {

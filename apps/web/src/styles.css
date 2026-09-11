@@ -10519,18 +10519,24 @@ body.shell-dock-dragging * {
   padding: 6px 14px;
   background: var(--bg);
 }
+.transcript-status-cluster {
+  display: inline-flex;
+  grid-column: 2;
+  align-items: center;
+  justify-self: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+}
 .transcript-status-context {
   display: flex;
-  grid-column: 1;
+  position: relative;
+  flex: none;
   align-items: center;
   justify-content: flex-end;
-  justify-self: stretch;
-  width: 100%;
-  min-width: 0;
-  /* Fill the allocated track before sizing children. A shrink-to-fit end-aligned cell can exceed
-     its 1fr track under wider Linux system-font metrics, letting the compact recovery echo cross
-     the center control even though its own max-width is 100%. */
-  max-width: 100%;
+  width: auto;
+  min-width: 44px;
+  overflow: visible;
   color: var(--text-faint);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -10541,20 +10547,29 @@ body.shell-dock-dragging * {
 .transcript-status-context .context-meter {
   flex: none;
 }
-.transcript-status-trailing {
-  display: flex;
-  grid-column: 3;
-  align-items: center;
-  align-self: stretch;
+.transcript-status-context .transcript-recovery-strip-echo {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: 100%;
+  max-width: 80px;
+  transform: translateY(-50%);
+}
+.transcript-status-context-standalone {
+  grid-column: 1;
   justify-self: stretch;
+  width: 100%;
   min-width: 0;
-  /* End-packed, so the cost keeps the strip's trailing edge — the seat it already holds on
-     mobile — and a transcript action that comes and goes cannot slide it (#893). */
-  justify-content: flex-end;
-  column-gap: 8px;
+  overflow: hidden;
+}
+.transcript-status-context-standalone .transcript-recovery-strip-echo {
+  position: static;
+  width: 100%;
+  max-width: 100%;
+  transform: none;
 }
 .transcript-status-usage {
-  justify-content: flex-end;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   font-size: var(--text-xs);
@@ -10562,21 +10577,15 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .transcript-status-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* Contextual actions sit BEFORE the cost in the end-packed trailing track: they claim no free
-   space of their own, so they group beside the cost rather than crowding the centered follow
-   control, and hiding them leaves the cost exactly where it was.
-
-   The lopsided `flex-shrink` is the query-independent safety net. The container query below is what
-   normally keeps a cramped pane legible, but it is inert wherever size container queries are
-   missing, and the strip must not answer that by starving the cost — a permanent seat — to feed an
-   optional hint. Weighted 100 to 1, the hint gives up essentially all of the shrink and clips
-   inside its own box before the cost loses a pixel; only once the hint is fully crushed does the
-   cost begin to ellipsise, which is what it is styled to do. In an engine with container queries
-   this never engages: past the cutoff the hint is already display:none. */
+/* Contextual actions use only the trailing slack; they never participate in the centered cluster. */
 .transcript-status-actions {
   display: flex;
-  flex: 0 100 auto;
+  grid-column: 3;
   align-items: center;
+  justify-content: flex-end;
+  justify-self: end;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
 }
@@ -10587,14 +10596,13 @@ body.shell-dock-dragging * {
    few pixels — or to nothing — while the hint kept its full width (#893).
 
    The threshold is the width at which the strip stops fitting, split into the part that scales
-   with the reader's text-size preference and the part that does not. Fixed: the follow-state
-   control in its WIDEST state plus the strip's 44px of padding and column gaps. That state is
-   `previewing` ("Previewing, Follow Live Output" plus its keycap), which measures ~258px against
-   ~238px for `paused` — calibrating on `paused` left barely 2px of margin, less than the spread
-   between font stacks. Scaling: each symmetric 1fr track carries the hint with its gap (~65px) and
-   a wide cost (~61px) at a 16px root, and both use rem type, so the pair is ~16rem. A fixed 560px
-   cutoff was inactive at a 561px pane with a 24px or 32px root, where the doubled labels put the
-   cost back below its own scrollWidth — the exact inversion this rule exists to prevent.
+   with the reader's text-size preference and the part that does not. The centered track carries
+   the context meter, the follow-state control in its WIDEST state, a wide cost, and their gaps;
+   each symmetric 1fr track must reserve the natural width of the Reply hint. The widest follow
+   state is `previewing` ("Previewing, Follow Live Output" plus its keycap), not the shorter
+   `paused` state. A fixed cutoff alone was inactive at wider panes with a 24px or 32px root, where
+   the enlarged labels could put the cost back below its own scrollWidth — the exact inversion this
+   rule exists to prevent.
 
    Two rules rather than one calc(): the plain length parses in every engine that supports size
    container queries at all, while the calc() refinement, which an older engine may drop as
@@ -10613,18 +10621,15 @@ body.shell-dock-dragging * {
 @container transcript-pane (max-width: calc(330px + 16rem)) {
   .transcript-status-actions { display: none; }
 }
-/* One compact centered cluster — pager hints sit at the standard inter-control gap directly
-   beside the follow-state control instead of being pushed toward the strip edges. */
+/* Pager hints remain an inner group inside the centered status cluster. */
 .follow-tail-control {
-  grid-column: 2;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  justify-self: center;
   min-width: 0;
 }
 .follow-tail-chip {
-  grid-column: 2;
+  flex: none;
   position: static;
   padding: 5px 12px;
   border-radius: 999px;
@@ -10632,6 +10637,7 @@ body.shell-dock-dragging * {
   background: var(--bg-elev-2);
   color: var(--text);
   font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
   box-shadow: var(--shadow);
 }
@@ -11482,7 +11488,7 @@ body.shell-dock-dragging * {
   .session-detail .transcript-recovery-slot { display: none; }
   .session-detail .transcript-recovery-strip-echo { display: inline-flex; }
   .session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter {
-    display: none;
+    visibility: hidden;
   }
 
   /* The floating pinned summary would cover the whole transcript — make it a normal block
@@ -11927,7 +11933,7 @@ body.shell-dock-dragging * {
      track at phone widths, which starved the shrinkable echo down to zero visible label. While
      recovery is ACTIVE the echo is the one thing this compact geometry exists to preserve —
      the meter yields until recovery completes. */
-  .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter { display: none; }
+  .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter { visibility: hidden; }
 }
 /* Inbox PREVIEW panes always use the compact presentation, whatever their height. A preview is
    a secondary, splitter-resizable reading surface: the pill band would permanently spend ~47px
