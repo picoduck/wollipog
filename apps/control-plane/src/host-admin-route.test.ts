@@ -36,7 +36,7 @@ function fixture(root: string, overrides: Partial<HostAdminRouteDeps> = {}): Hos
     databasePath,
     artifactStorePath,
     localCredentialPath: credentialPath,
-    runners: () => [{ runnerId: "dev-box", status: "online", version: "0.22.0", protocolVersion: PROTOCOL_VERSION }],
+    runners: () => [{ runnerId: "dev-box", status: "online", version: APP_RELEASE_VERSION, protocolVersion: PROTOCOL_VERSION }],
     pairedDeviceCount: () => 2,
     now: () => 61_000,
     ...overrides,
@@ -108,7 +108,7 @@ test("GET /api/admin/status returns operational facts for the loopback bootstrap
   assert.deepEqual(status.localCredential, { path: deps.localCredentialPath, safe: true, issues: [] });
   assert.deepEqual(status.runners, {
     registered: 1, online: 1,
-    items: [{ runnerId: "dev-box", status: "online", version: "0.22.0", protocolVersion: PROTOCOL_VERSION }],
+    items: [{ runnerId: "dev-box", status: "online", version: APP_RELEASE_VERSION, protocolVersion: PROTOCOL_VERSION }],
   });
   assert.deepEqual(status.devices, { paired: 2 });
   assert.deepEqual(status.warnings, []);
