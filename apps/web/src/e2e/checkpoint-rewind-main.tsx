@@ -10,8 +10,8 @@ function Fixture() {
       <section style={{ maxWidth: 760, margin: "0 auto" }}>
         <EventTimeline
           items={[
-            { kind: "checkpoint", id: 1, turn: 4 },
-            { kind: "user_message", id: 2, text: "Inspect the checkpoint controls." },
+            { kind: "user_message", id: 1, text: "Inspect the checkpoint controls." },
+            { kind: "checkpoint", id: 2, turn: 4 },
             { kind: "agent_message", id: 3, text: "The checkpoint is ready." },
           ]}
           onRewind={setRewoundTurn}

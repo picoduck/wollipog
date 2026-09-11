@@ -310,12 +310,12 @@ test("resolved question cards keep a concise summary and disclose complete rich 
 test("completed turn messages own compact rewind, fork, and handoff actions", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [
-      { kind: "checkpoint", id: 1, turn: 1 },
-      { kind: "user_message", id: 2, text: "First question" },
+      { kind: "user_message", id: 1, text: "First question" },
+      { kind: "checkpoint", id: 2, turn: 1 },
       { kind: "agent_message", id: 3, text: "First answer" },
       { kind: "conversation_checkpoint", id: 4, turn: 1 },
-      { kind: "checkpoint", id: 5, turn: 2 },
-      { kind: "user_message", id: 6, text: "Second question" },
+      { kind: "user_message", id: 5, text: "Second question" },
+      { kind: "checkpoint", id: 6, turn: 2 },
       { kind: "agent_message", id: 7, text: "Second answer" },
       { kind: "conversation_checkpoint", id: 8, turn: 2 },
     ],
@@ -346,17 +346,19 @@ test("completed turn messages own compact rewind, fork, and handoff actions", ()
 
 test("checkpoint projection maps only the owning canonical user message", () => {
   assert.deepEqual([...userRewindTurns([
-    { kind: "checkpoint", id: 1, turn: 1 },
-    { kind: "user_message", id: 2, text: "first" },
+    { kind: "user_message", id: 1, text: "first" },
+    { kind: "checkpoint", id: 2, turn: 1 },
     { kind: "conversation_checkpoint", id: 3, turn: 1 },
-    { kind: "checkpoint", id: 4, turn: 2 },
+    { kind: "user_message", id: 4, text: "second" },
     { kind: "user_message", id: 5, text: "steer", deliveryIntent: "steer" },
-    { kind: "user_message", id: 6, text: "second" },
+    { kind: "checkpoint", id: 6, turn: 2 },
     { kind: "error", id: 7, message: "cancelled" },
-    { kind: "checkpoint", id: 8, turn: 3 },
-    { kind: "conversation_checkpoint", id: 9, turn: 3 },
-    { kind: "user_message", id: 10, text: "must not borrow turn three" },
-  ])], [[2, 1], [6, 2]]);
+    { kind: "user_message", id: 8, text: "third after cancellation" },
+    { kind: "checkpoint", id: 9, turn: 3 },
+    { kind: "conversation_checkpoint", id: 10, turn: 3 },
+    { kind: "checkpoint", id: 11, turn: 4 },
+    { kind: "user_message", id: 12, text: "must not borrow an orphan checkpoint" },
+  ])], [[1, 1], [4, 2], [8, 3]]);
 });
 
 test("assistant fork-point projection ignores nested answers and cancelled turns", () => {

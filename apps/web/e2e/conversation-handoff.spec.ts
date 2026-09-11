@@ -16,7 +16,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await expect(page.locator(".tl-checkpoint.conversation")).not.toContainText("Hand Off");
     await page.screenshot({ path: test.info().outputPath("handoff-source.png") });
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(109));
-    const unavailable = page.getByLabel(/Hand Off After This Turn Unavailable:/);
+    const unavailable = page.getByLabel("Hand Off After This Turn Unavailable");
     await expect(unavailable).toBeVisible();
     await unavailable.click();
     await expect(page.locator(".tl-message-action-unavailable > [role=status]")).toContainText("Update the runner");

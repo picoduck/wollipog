@@ -93,15 +93,15 @@ export function assistantForkTurns(items: readonly TimelineItem[]): ReadonlyMap<
  * borrow an incomplete turn's checkpoint. */
 export function userRewindTurns(items: readonly TimelineItem[]): ReadonlyMap<number, number> {
   const turns = new Map<number, number>();
-  let pendingCheckpoint: number | undefined;
+  let pendingUserMessageId: number | undefined;
   for (const item of items) {
-    if (item.kind === "checkpoint") {
-      pendingCheckpoint = item.turn;
+    if (item.kind === "user_message" && item.deliveryIntent !== "steer") {
+      pendingUserMessageId = item.id;
+    } else if (item.kind === "checkpoint") {
+      if (pendingUserMessageId != null) turns.set(pendingUserMessageId, item.turn);
+      pendingUserMessageId = undefined;
     } else if (item.kind === "conversation_checkpoint") {
-      pendingCheckpoint = undefined;
-    } else if (item.kind === "user_message" && item.deliveryIntent !== "steer" && pendingCheckpoint != null) {
-      turns.set(item.id, pendingCheckpoint);
-      pendingCheckpoint = undefined;
+      pendingUserMessageId = undefined;
     }
   }
   return turns;
@@ -2246,7 +2246,7 @@ function MessageAction({ label, description, reason, onClick, children }: {
       <details className="tl-message-action-unavailable">
         <summary
           className="tl-message-icon"
-          aria-label={`${label} Unavailable: ${description} ${unavailableReason}`}
+          aria-label={`${label} Unavailable`}
           aria-describedby={descriptionId}
           title={`${description} ${unavailableReason}`}
         >
