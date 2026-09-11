@@ -17,3 +17,38 @@
   `.agents/skills/log-github-issue/SKILL.md` and `.github/ISSUE_REPORTING.md`.
 - Do not publish an issue until the user approves the exact sanitized repository, title, body, and
   labels. After publication, read the issue back and return its verified link.
+
+## Merge Queue and CI
+
+`main` is protected by the `main: merge queue` ruleset: squash merge method, linear history, and a
+pull request required. `gh pr merge <n> --squash` therefore does not merge — it enqueues, and GitHub
+re-runs the checks against a merge group before landing the commit. Never pass `--delete-branch`
+when enqueueing: the merge happens later, and deleting the branch early closes the pull request.
+
+Exactly one status check is required: **`Typecheck, Test & Sidecar Bundle`**. It is an aggregator —
+it reports only once the parallel jobs it summarises have finished, so it appears late, and until
+then `gh pr checks <n> --required` prints `no required checks reported`.
+
+That message is ambiguous, and only one of its readings means "keep waiting". **Check the base
+branch first**, because that is what decides whether anything is required at all:
+
+- **Into `main`, workflow running.** The aggregator is coming. The message means *pending*, never
+  passing, so it is not a green light — wait.
+- **Into any other branch.** The ruleset covers only the default branch, so no check is required
+  here and the message is permanent. CI still runs — `.github/workflows/ci.yml` has no branch filter
+  on `pull_request` — so jobs will appear and pass while `--required` stays empty forever. The job
+  list cannot tell you which case you are in; the base branch can.
+- **Draft pull request.** A run is created, but every job is guarded on `draft == false` — including
+  the aggregator, which carries that guard alongside its `always()` — so all of them skip and the
+  required context never appears. Skipped is not pending: waiting will not help. Mark it ready for
+  review, which re-triggers CI.
+- **No run at all.** Waiting cannot resolve this, whatever the cause — a fork pull request awaiting
+  approval, a pull request GitHub cannot build a merge ref for, an explicit skip directive, and
+  others. Do not enumerate; find out why this pull request has no run and fix that.
+
+`Browser End-to-End Tests` is the long pole at roughly 20–30 minutes, and the merge group re-runs it,
+so expect that wait twice: once on the branch and once after enqueueing.
+
+The `Platform Isolation` jobs are not required. A failure there does not block the merge, but it
+should be explained rather than ignored — check whether it reproduces on the base commit before
+attributing it to your change.
