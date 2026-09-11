@@ -73,6 +73,27 @@ upper bound like `toBeLessThanOrEqual(45)` is comfortable on CI for the same rea
 that will fail on a machine whose fonts render larger than yours. Neither direction is safe by
 default; both want room.
 
+### What it cannot see, and why you still have to think
+
+Two reviewers attacked this guard and between them walked through it nine ways. Seven are closed and
+pinned by tests. Two are not closable statically, and it is better to know that than to trust the
+green tick:
+
+- **A relative assertion with no headroom.** `expect(crowded.width).toBeGreaterThan(roomy.width * 0.4)`
+  where the true ratio is 0.42. Both sides are measurements, so it is relative by this guard's rule —
+  and it still failed on CI. It is statically identical to the same line with a true ratio of 0.9;
+  the only difference is the measured value, which exists at runtime. **This shape has broken CI
+  here once already.**
+- **A tight one-sided bound**, for the same reason.
+
+Both share a discriminator the scanner cannot reach: the margin between the asserted bound and the
+value actually observed. Closing them means checking at runtime — a helper that knows both numbers
+and fails when they sit too close together — which would catch everything above as a side effect.
+That is worth doing and is not what this file is.
+
+Until then: when you write any numeric bound on something text-derived, satisfy yourself that it has
+room, because nothing here will do it for you.
+
 ### Legitimate exceptions
 
 Some numbers really are fixed: a viewport width the test itself set, an SVG icon's box, a button

@@ -2,15 +2,43 @@
   "allowed": [
     {
       "id": "apps/web/e2e/command-inbox-projects.spec.ts|control.paddingTop - control.paddingBottom|toBe|2",
-      "reason": "The difference between two CSS paddings on one element. Both come from the stylesheet, so the difference is the same on every renderer."
+      "reason": "The difference between two CSS paddings on one element; both come from the stylesheet, so the difference is the same on every renderer."
+    },
+    {
+      "id": "apps/web/e2e/composer-image-picker.spec.ts|geometry.button.height|toEqual|30",
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents."
+    },
+    {
+      "id": "apps/web/e2e/composer-image-picker.spec.ts|geometry.button.width|toEqual|30",
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents."
+    },
+    {
+      "id": "apps/web/e2e/composer-image-picker.spec.ts|geometry.icon.height|toEqual|16",
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by the text beside it."
+    },
+    {
+      "id": "apps/web/e2e/composer-image-picker.spec.ts|geometry.icon.width|toEqual|16",
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by the text beside it."
+    },
+    {
+      "id": "apps/web/e2e/earlier-activity-mobile.spec.ts|reader.evaluate((element) => element.scrollTop)|toBe|320",
+      "reason": "A scroll offset the test set a line earlier, read back to prove it stuck. Not a rendered size."
     },
     {
       "id": "apps/web/e2e/machine-management.spec.ts|await page.evaluate(() => window.innerWidth)|toBe|1280",
-      "reason": "The viewport the test set, not a rendered size. A font stack cannot change how wide the window is."
+      "reason": "The viewport the test itself set, read back. A font stack cannot change how wide the window is."
     },
     {
       "id": "apps/web/e2e/permission-mode-layout.spec.ts|(await menu.boundingBox())!.width|toBe|390",
-      "reason": "The menu is laid out to the full width of the 390px viewport the test set, so this asserts it spans the window rather than that it is any particular size."
+      "reason": "The element is laid out to the full width of the viewport the test set, so this asserts it spans the window rather than that it is any particular size."
+    },
+    {
+      "id": "apps/web/e2e/remote-instances.spec.ts|page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio, })).height|toEqual|496",
+      "reason": "The viewport the test itself set, read back. A font stack cannot change how wide the window is."
+    },
+    {
+      "id": "apps/web/e2e/remote-instances.spec.ts|page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio, })).width|toEqual|819",
+      "reason": "The viewport the test itself set, read back. A font stack cannot change how wide the window is."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|geometry.project.width - geometry.projectButton.width|toBeCloseTo|24",
@@ -18,11 +46,11 @@
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActions.height|toBe|24",
-      "reason": "An icon button whose box is fixed by CSS rather than by its contents, so it does not move with the font stack."
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActions.width|toBe|24",
-      "reason": "An icon button whose box is fixed by CSS rather than by its contents, so it does not move with the font stack."
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActions.x + geometry.projectActions.width - geometry.projectActionsIcon.x - geometry.projectActionsIcon.width|toBeCloseTo|5",
@@ -38,19 +66,19 @@
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|metrics.forkIcon.height|toBe|15",
-      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by the text beside it."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|metrics.forkIcon.width|toBe|15",
-      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by the text beside it."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|metrics.moreActionsIcon.height|toBe|15",
-      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by the text beside it."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|metrics.moreActionsIcon.width|toBe|15",
-      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by the text beside it."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|metrics.share.x - metrics.fork.right|toBeCloseTo|7",
@@ -58,31 +86,35 @@
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|metrics.shareIcon.height|toBe|15",
-      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by the text beside it."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|metrics.shareIcon.width|toBe|15",
-      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by the text beside it."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|mobileBox?.width|toBe|390",
-      "reason": "The header spans the full width of the 390px viewport the test set, so this asserts it fills the window rather than that it is any particular size."
+      "reason": "The element is laid out to the full width of the viewport the test set, so this asserts it spans the window rather than that it is any particular size."
+    },
+    {
+      "id": "apps/web/e2e/settings-rows.spec.ts|page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio, })).height|toEqual|576",
+      "reason": "The viewport the test itself set, read back. A font stack cannot change how wide the window is."
+    },
+    {
+      "id": "apps/web/e2e/settings-rows.spec.ts|page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio, })).width|toEqual|1024",
+      "reason": "The viewport the test itself set, read back. A font stack cannot change how wide the window is."
     },
     {
       "id": "apps/web/e2e/skill-git-import.spec.ts|await page.evaluate(() => document.documentElement.scrollWidth)|toBe|320",
-      "reason": "The document must not scroll wider than the 320px viewport the test set. This is a containment claim about the window, not a size claim about text."
-    },
-    {
-      "id": "apps/web/e2e/skill-machine-versions.spec.ts|writes|toBe|2",
-      "reason": "Not a geometry value at all: a count of recorded writes. The scanner cannot tell from a bare identifier, so it is recorded here rather than silently excluded."
+      "reason": "The document must not scroll wider than the 320px viewport the test set. A containment claim about the window, not a size claim about text."
     },
     {
       "id": "apps/web/e2e/stop-turn.spec.ts|stopBox?.height|toBe|32",
-      "reason": "An icon button whose box is fixed by CSS rather than by its contents, so it does not move with the font stack."
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents."
     },
     {
       "id": "apps/web/e2e/stop-turn.spec.ts|stopBox?.width|toBe|32",
-      "reason": "An icon button whose box is fixed by CSS rather than by its contents, so it does not move with the font stack."
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents."
     }
   ]
 }
