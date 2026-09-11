@@ -29,7 +29,9 @@ Worktree commands default to `WOLLIPOG_SESSION_ID`; paired-device callers add `-
 Creation without `--base` fetches the repository's remote default branch. Use the returned path
 for file and Git commands in the current turn; a later provider launch resumes in the selection.
 Discard permanently removes only a runner-owned worktree that is not used by a live provider, is
-clean, and has no commits ahead of its upstream. It refuses attached, dirty, or unpushed trees.
+clean, and has no commits ahead of its upstream. A forge-verified merged head may replace an
+upstream deleted with the remote branch, but only when it exactly matches the local head. Discard
+refuses attached, dirty, arbitrary upstream-less, or unpushed trees.
 
 ## Retiring a Worktree
 

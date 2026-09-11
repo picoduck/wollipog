@@ -697,6 +697,10 @@ export async function worktreeHead(worktreePath: string, options: WorktreeOption
 }
 
 export type PullRequestLifecycleState = "open" | "merged" | "closed";
+export type PullRequestLifecycleProof = {
+  state: PullRequestLifecycleState;
+  headOid?: string;
+};
 type LinkedChangeRequest = {
   provider: ForgeProvider;
   host: string;
@@ -725,16 +729,27 @@ function linkedChangeRequest(value: string): LinkedChangeRequest | null {
 export function parseWorktreePullRequestState(
   raw: string,
   expectedUrl: string,
-): PullRequestLifecycleState | null {
+): PullRequestLifecycleProof | null {
   const expected = linkedChangeRequest(expectedUrl);
   if (!expected) return null;
   try {
-    const parsed = JSON.parse(raw) as { url?: unknown; web_url?: unknown; state?: unknown };
-    if ((expected.provider === "github" ? parsed.url : parsed.web_url) !== expectedUrl || typeof parsed.state !== "string") return null;
+    const parsed = JSON.parse(raw) as {
+      url?: unknown;
+      web_url?: unknown;
+      state?: unknown;
+      headRefOid?: unknown;
+      sha?: unknown;
+    };
+    const headOid = expected.provider === "github" ? parsed.headRefOid : parsed.sha;
+    if ((expected.provider === "github" ? parsed.url : parsed.web_url) !== expectedUrl ||
+        typeof parsed.state !== "string") return null;
+    const proof = typeof headOid === "string" && /^[a-f0-9]{40,64}$/iu.test(headOid)
+      ? { headOid: headOid.toLowerCase() }
+      : {};
     const state = parsed.state.toUpperCase();
-    if (state === "OPEN" || state === "OPENED") return "open";
-    if (state === "MERGED") return "merged";
-    if (state === "CLOSED") return "closed";
+    if (state === "OPEN" || state === "OPENED") return { state: "open", ...proof };
+    if (state === "MERGED") return { state: "merged", ...proof };
+    if (state === "CLOSED") return { state: "closed", ...proof };
     return null;
   } catch {
     return null;
@@ -747,7 +762,7 @@ export async function worktreePullRequestState(
   worktreePath: string,
   pullRequestUrl: string,
   options: WorktreeOptions & { provider?: ForgeProvider } = {},
-): Promise<PullRequestLifecycleState | null> {
+): Promise<PullRequestLifecycleProof | null> {
   const request = linkedChangeRequest(pullRequestUrl);
   if (!request || (request.provider === "gitlab" && options.provider !== "gitlab")) return null;
   try {
@@ -755,7 +770,7 @@ export async function worktreePullRequestState(
       options.context ?? nativeContext,
       request.provider === "github" ? "gh" : "glab",
       request.provider === "github"
-        ? ["pr", "view", pullRequestUrl, "--json", "url,state"]
+        ? ["pr", "view", pullRequestUrl, "--json", "url,state,headRefOid"]
         : [
           "api", `projects/${encodeURIComponent(request.project)}/merge_requests/${request.number}`,
           "--hostname", request.host,
@@ -783,7 +798,7 @@ export async function discardWorktreeIfSafe(
   repoPath: string,
   sessionId: string,
   handle: WorktreeHandle & { source: "legacy" | "created" },
-  options: WorktreeOptions = {},
+  options: WorktreeOptions & { verifiedMergedHead?: string } = {},
 ): Promise<SafeWorktreeDiscardResult> {
   const context = options.context ?? nativeContext;
   const branch = await validateBranch(context, repoPath, handle.branch);
@@ -837,18 +852,27 @@ export async function discardWorktreeIfSafe(
     }
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
 
+    let hasUpstream = true;
     try {
       await command(context, repoPath, ["rev-parse", "--verify", `${branch}@{upstream}`]);
     } catch {
-      return { removed: false, reason: "no_upstream" };
+      hasUpstream = false;
     }
-    const ahead = (await command(
-      context,
-      repoPath,
-      ["rev-list", "--count", `${branch}@{upstream}..${ref}`],
-    )).trim();
-    if (!/^\d+$/u.test(ahead)) return { removed: false, reason: "unavailable" };
-    if (ahead !== "0") return { removed: false, reason: "unpushed" };
+    if (hasUpstream) {
+      const ahead = (await command(
+        context,
+        repoPath,
+        ["rev-list", "--count", `${branch}@{upstream}..${ref}`],
+      )).trim();
+      if (!/^\d+$/u.test(ahead)) return { removed: false, reason: "unavailable" };
+      if (ahead !== "0") return { removed: false, reason: "unpushed" };
+    } else {
+      const mergedHead = options.verifiedMergedHead;
+      if (typeof mergedHead !== "string" || !/^[a-f0-9]{40,64}$/u.test(mergedHead)) {
+        return { removed: false, reason: "no_upstream" };
+      }
+      if (mergedHead !== head) return { removed: false, reason: "unpushed" };
+    }
 
     if (registered) {
       // Close the widest observable race before the non-force removal. Git independently rejects

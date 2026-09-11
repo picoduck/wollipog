@@ -53,10 +53,12 @@ resolves the remote default branch. Create, attach, and select return the select
 the already-running provider process keeps its original operating-system cwd, so it must use the
 returned path explicitly during that turn. A later resume or restart launches in the selection.
 Discard is intentionally fail-closed: it removes only an inactive runner-owned tree with a clean
-status and no commits ahead of its configured upstream. Attached, active, dirty, upstream-less,
+status and no commits ahead of its configured upstream. If a merged pull or merge request's remote
+branch has already been deleted, its forge-verified head OID can replace the missing upstream proof
+only when it exactly matches the local branch head. Attached, active, dirty, other upstream-less,
 unpushed, branch-drifted, and Git-unavailable worktrees are retained. The runner applies the same
-checks during startup and periodic reconciliation after a linked GitHub PR is definitively merged
-or closed; an unavailable forge keeps the durable open linkage unchanged.
+checks during startup and periodic reconciliation after a linked change request is definitively
+merged or closed; an unavailable forge keeps the durable open linkage unchanged.
 
 Discard is the only supported way to retire a runner-owned worktree. `git worktree remove` bypasses
 every check above and leaves the session selecting a path that no longer exists, so agent cleanup
