@@ -778,25 +778,203 @@ test("session spawn policy parks the exact child request and creates only after 
   }
 });
 
-test("children use their parent Project defaults even when filed elsewhere", () => {
+test("agent-created children inherit their parent Project assignment", () => {
   const { db, svc } = makeHarness();
   try {
     const owner = db.localIdentityContext();
     const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
-    const project = db.createProject({ name: "Parent Budget", scope });
+    const project = db.createProject({ name: "Parent Project", scope });
+    const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
     const defaults = { costBudgetUsd: 2.5, maxToolCalls: 30 };
     db.updateProject(project.id, { childSessionDefaults: defaults });
     const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
-    const parent = svc.createSession({ ...request, projectId: null }, undefined, scope).data!;
-    db.raw().prepare("UPDATE sessions SET project_id=? WHERE id=?").run(project.id, parent.id);
+    const parent = svc.createSession({
+      ...request,
+      projectId: project.id,
+      projectLocationId: location.id,
+    }, undefined, scope).data!;
     db.updateSessionStatus(parent.id, "running", Date.now());
-    const created = svc.createSession({ ...request, projectId: null }, undefined, undefined, false, false, false,
+    const created = svc.createSession(request, undefined, undefined, false, false, false,
       { parentSessionId: parent.id });
     assert.equal(created.ok, true, created.error);
     assert.equal(created.data!.costBudgetUsd, defaults.costBudgetUsd);
     assert.equal(created.data!.maxToolCalls, defaults.maxToolCalls);
     assert.equal(created.data!.parentSessionId, parent.id);
-    assert.equal(created.data!.projectId, null);
+    assert.equal(created.data!.projectId, project.id);
+    assert.equal(created.data!.projectLocationId, location.id);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: created.data!.id,
+      workspaceId: WORKSPACE_ID,
+      status: "running",
+    })]);
+    assert.equal(db.getSession(created.data!.id)!.projectId, project.id);
+    assert.equal(db.getSession(created.data!.id)!.projectLocationId, location.id);
+  } finally { db.close(); }
+});
+
+test("agent-created children preserve explicit overrides and No Project inheritance", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const parentProject = db.createProject({ name: "Parent Project", scope });
+    const parentLocation = db.addProjectLocation(
+      parentProject.id,
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
+    );
+    const otherProject = db.createProject({ name: "Explicit Project", scope });
+    const otherLocation = db.addProjectLocation(
+      otherProject.id,
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
+    );
+    const parent = svc.createSession({
+      ...request,
+      projectId: parentProject.id,
+      projectLocationId: parentLocation.id,
+    }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+
+    const explicitNoProject = svc.createSession({
+      ...request,
+      projectId: null,
+      projectLocationId: null,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.ok(explicitNoProject.ok, explicitNoProject.error);
+    assert.equal(explicitNoProject.data!.projectId, null);
+    assert.equal(explicitNoProject.data!.projectLocationId, null);
+
+    const explicitProject = svc.createSession({
+      ...request,
+      projectId: otherProject.id,
+      projectLocationId: otherLocation.id,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.ok(explicitProject.ok, explicitProject.error);
+    assert.equal(explicitProject.data!.projectId, otherProject.id);
+    assert.equal(explicitProject.data!.projectLocationId, otherLocation.id);
+
+    const noProjectParent = svc.createSession({
+      ...request,
+      projectId: null,
+      projectLocationId: null,
+    }, undefined, scope).data!;
+    db.updateSessionStatus(noProjectParent.id, "running", Date.now());
+    const inheritedNoProject = svc.createSession(
+      request,
+      undefined,
+      undefined,
+      false,
+      false,
+      false,
+      { parentSessionId: noProjectParent.id },
+    );
+    assert.ok(inheritedNoProject.ok, inheritedNoProject.error);
+    assert.equal(inheritedNoProject.data!.projectId, null);
+    assert.equal(inheritedNoProject.data!.projectLocationId, null);
+  } finally { db.close(); }
+});
+
+test("agent-created children select a compatible parent Project Location and reject missing ones", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const project = db.createProject({ name: "Single Location", scope });
+    const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const parent = svc.createSession({
+      ...request,
+      projectId: project.id,
+      projectLocationId: location.id,
+    }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const meta = runnerMeta();
+    meta.workspaces.push(
+      { id: "ws-2", name: "Compatible", path: "/repos/compatible" },
+      { id: "ws-3", name: "Incompatible", path: "/repos/incompatible" },
+    );
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const compatibleLocation = db.addProjectLocation(
+      project.id,
+      { runnerId: RUNNER_ID, workspaceId: "ws-2" },
+    );
+    const compatible = svc.createSession({
+      ...request,
+      workspaceId: "ws-2",
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.ok(compatible.ok, compatible.error);
+    assert.equal(compatible.data!.projectId, project.id);
+    assert.equal(compatible.data!.projectLocationId, compatibleLocation.id);
+    const before = db.listSessions().length;
+
+    const rejected = svc.createSession({
+      ...request,
+      workspaceId: "ws-3",
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(rejected.status, 409);
+    assert.match(rejected.error ?? "", /parent Project has no available Location/);
+    assert.equal(db.listSessions().length, before);
+    assert.equal(hub.sentOfType("start_session").some((message) => message.spec.workspaceId === "ws-3"), false);
+  } finally { db.close(); }
+});
+
+test("agent-created ad-hoc children inherit a parent Project Location containing their path", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const project = db.createProject({ name: "Ad-Hoc Parent", scope });
+    const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      agentId: AGENT_ID,
+      projectId: project.id,
+      projectLocationId: location.id,
+    }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+
+    const compatible = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      workspacePath: `${WORKSPACE_PATH}/packages/core`,
+      agentId: AGENT_ID,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.ok(compatible.ok, compatible.error);
+    assert.equal(compatible.data!.workspaceId, null, "ad-hoc launch semantics remain unchanged");
+    assert.equal(compatible.data!.projectId, project.id);
+    assert.equal(compatible.data!.projectLocationId, location.id);
+    svc.hydrateRunnerSessions(RUNNER_ID, [
+      snapshot({ id: parent.id, status: "running" }),
+      snapshot({
+        id: compatible.data!.id,
+        workspaceId: null,
+        workspacePath: `${WORKSPACE_PATH}/packages/core`,
+        status: "running",
+      }),
+    ]);
+    assert.equal(db.getSession(compatible.data!.id)!.projectId, project.id);
+    assert.equal(db.getSession(compatible.data!.id)!.projectLocationId, location.id);
+
+    const otherProject = db.createProject({ name: "Refiled Ad-Hoc Child", scope });
+    const otherLocation = db.addProjectLocation(
+      otherProject.id,
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
+    );
+    const refiled = svc.setProject(compatible.data!.id, otherProject.id);
+    assert.ok(refiled.ok, refiled.error);
+    assert.equal(refiled.data!.workspaceId, null, "re-filing does not change ad-hoc launch identity");
+    assert.equal(refiled.data!.projectId, otherProject.id);
+    assert.equal(refiled.data!.projectLocationId, otherLocation.id);
+
+    const incompatible = svc.createSession({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      workspacePath: "/tmp/unrelated",
+      agentId: AGENT_ID,
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+    assert.equal(incompatible.status, 409);
+    assert.match(incompatible.error ?? "", /parent Project has no available Location/);
   } finally { db.close(); }
 });
 
@@ -925,24 +1103,30 @@ test("a live owner can raise the concurrent child cap and restarts consume the s
 });
 
 for (const kind of ["run", "workflow"] as const) {
-  test(`agent-created ${kind} applies Project defaults and rejects malformed allowances`, () => {
+  test(`agent-created ${kind} inherits its parent Project and applies Project defaults`, () => {
     const { db, svc, hub } = makeHarness();
     try {
       const owner = db.localIdentityContext();
       const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
       const project = db.createProject({ name: "Parent Allowances", scope });
+      const location = db.addProjectLocation(project.id, { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID });
       db.updateProject(project.id, { childSessionDefaults: { costBudgetUsd: 2.5, maxToolCalls: 30 } });
-      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, projectId: null }, undefined, scope).data!;
-      db.raw().prepare("UPDATE sessions SET project_id=? WHERE id=?").run(project.id, parent.id);
+      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+        projectId: project.id, projectLocationId: location.id }, undefined, scope).data!;
       db.updateSessionStatus(parent.id, "running", Date.now());
       const create = (overrides: { costBudgetUsd?: number; maxToolCalls?: number; config?: { maxChildSessions: number } } = {}) => {
-        const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, projectId: null, task: "Build and review", ...overrides };
+        const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", ...overrides };
         return kind === "run"
           ? svc.createRun({ ...request, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
           : svc.createWorkflowRun({ ...request, workflowId: "builtin:build-review", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
             { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
       };
       const before = hub.sentOfType("start_session").length;
+      hub.online = false;
+      const offline = create();
+      assert.equal(offline.status, 409);
+      assert.match(offline.error ?? "", /runner .* is offline/);
+      hub.online = true;
       for (const invalid of [{ costBudgetUsd: -1 }, { maxToolCalls: -1 }, { maxToolCalls: 0.5 }, { config: { maxChildSessions: 65 } }]) {
         assert.equal(create(invalid).ok, false);
         assert.equal(db.listRuns().length, 0);
@@ -954,7 +1138,9 @@ for (const kind of ["run", "workflow"] as const) {
       for (const child of created.data!.sessions) {
         assert.equal(child.costBudgetUsd, 2.5);
         assert.equal(child.maxToolCalls, 30);
-        assert.equal(child.projectId, null, "defaults come from the parent even when the child is filed elsewhere");
+        assert.equal(child.projectId, project.id);
+        assert.equal(child.projectLocationId, location.id);
+        assert.deepEqual(db.sessionScope(child.id), scope);
         db.updateSessionStatus(child.id, "completed", Date.now());
       }
       const unlimited = create({ costBudgetUsd: 0, maxToolCalls: 0 });
