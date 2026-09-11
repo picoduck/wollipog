@@ -65,7 +65,26 @@ export interface Downlevelled extends FeatureBase {
   readonly evidence: string;
 }
 
-export type CssFeature = RequiresFloor | Downlevelled;
+/**
+ * A construct whose absence costs nothing anyone would notice.
+ *
+ * An engine that does not know a property simply drops the declaration, so the app stays correct
+ * and merely looks slightly plainer. Raising the compilation floor for one of these would be the
+ * opposite of the point: it would drop support for browsers that run the app perfectly well, in
+ * exchange for cosmetics. This class exists because an audit of the surface found exactly such a
+ * case, and treating it like the others would have pushed the floor to Safari 18.2 for scrollbar
+ * styling.
+ */
+export interface Degrades extends FeatureBase {
+  readonly kind: "degrades";
+  /** First supporting versions, recorded even though they do not bind, so the call can be re-judged. */
+  readonly support: SupportMatrix;
+  readonly source: string;
+  /** Exactly what a reader loses where it is unsupported. If that is not trivial, it is not this. */
+  readonly fallback: string;
+}
+
+export type CssFeature = RequiresFloor | Downlevelled | Degrades;
 
 /**
  * Every modern CSS construct the stylesheet is allowed to contain.
@@ -110,56 +129,135 @@ export const CSS_FEATURES: readonly CssFeature[] = [
       "Querying an ancestor's size is a layout-time question; no static rewrite can answer it, and "
       + "the media-query fallback measures the viewport rather than the container.",
   },
+  {
+    kind: "degrades",
+    id: "scrollbar-width / scrollbar-color",
+    detect: /\bscrollbar-(?:width|color)\s*:/i,
+    support: { chrome: [121, 0], edge: [121, 0], firefox: [64, 0], safari: [18, 2] },
+    source: "caniuse.com/mdn-css_properties_scrollbar-width, retrieved 2026-09-10",
+    fallback:
+      "The engine ignores the declaration and paints its own scrollbars. Nothing moves, nothing "
+      + "becomes unreachable, and the only difference is that the scrollbar is the platform's "
+      + "default rather than the app's thinner tinted one.",
+  },
 ];
 
 /**
- * Constructs that MUST be accounted for in `CSS_FEATURES` before they can ship.
+ * The CSS surface the stylesheet is allowed to use.
  *
- * This is the half that keeps the registry honest: anything matched here without an entry would
- * silently repeat exactly the drift this file exists to end.
+ * This is an ALLOWLIST, and that inversion is the whole design. The first version of this guard
+ * enumerated dangerous constructs instead, and review found hole after hole in it — `@scope(...)`
+ * in its compact parenthesised form, `position-area` and bare `anchor()`, `view-transition-name`
+ * and the `::view-transition-*` pseudo-elements. Every one was a real bypass, and finding three
+ * more would only have proved the approach wrong more slowly: a denylist has to predict what CSS
+ * will be invented, which is unbounded, while an allowlist is bounded by what this stylesheet
+ * actually contains.
  *
- * **The bound worth being explicit about:** this is a curated list of constructs, not a general
- * compatibility oracle. CSS adopted after it was last extended can still slip through — closing
- * that gap properly needs real compatibility metadata (a `caniuse-lite`-style dependency), which the
- * project does not currently carry. What this does guarantee is that the constructs known to matter
- * cannot regress, and that the list is the one obvious place to extend when a new one appears.
+ * So anything the stylesheet uses that is not named here fails the guard — including syntax nobody
+ * anticipated. The failure is not an accusation; it asks for one decision, recorded in
+ * `CSS_FEATURES`: does this break where it is unsupported (raise the floor), get compiled away, or
+ * degrade harmlessly?
  *
- * A match is not a verdict. The response to a failure is to add the right kind of entry —
- * `requires-floor` with support data, or `downlevelled` with evidence — not to delete the rule.
+ * **How this list was seeded, stated plainly:** it was generated from the shipping stylesheet, not
+ * audited property by property against compatibility data. Auditing all of it was out of proportion
+ * to the change; what was checked is every entry plausibly newer than the computed floor, which
+ * found exactly one thing — the `scrollbar-*` pair, now recorded as `degrades` below. The guarantee
+ * starts here: from this commit on, nothing joins the surface without someone looking at it.
  */
-export const ACCOUNTABLE_CONSTRUCTS: ReadonlyArray<{ id: string; detect: RegExp }> = [
-  { id: ":has()", detect: /:has\(/i },
-  { id: "color-mix()", detect: /color-mix\(/i },
-  { id: "@container size query", detect: /@container\s/i },
-  // Style queries are a separate feature from size queries, with a later floor, so they need their
-  // own accounting rather than riding on the size-query entry above.
-  { id: "@container style query", detect: /@container[^{]*\bstyle\(/i },
-  { id: "@layer", detect: /@layer[\s{]/i },
-  { id: "@property", detect: /@property\s/i },
-  { id: "@scope", detect: /@scope[\s{]/i },
-  { id: "@starting-style", detect: /@starting-style[\s{]/i },
-  { id: "@view-transition", detect: /@view-transition[\s{]/i },
-  { id: "@position-try", detect: /@position-try\s/i },
-  { id: "oklch()", detect: /\boklch\(/i },
-  { id: "oklab()", detect: /\boklab\(/i },
-  { id: "lch()", detect: /(?<![-\w])lch\(/i },
-  { id: "lab()", detect: /(?<![-\w])lab\(/i },
-  { id: "subgrid", detect: /\bsubgrid\b/i },
-  { id: "text-wrap", detect: /\btext-wrap\s*:/i },
-  { id: "text-box", detect: /\btext-box(?:-trim|-edge)?\s*:/i },
-  { id: "field-sizing", detect: /\bfield-sizing\s*:/i },
-  { id: "anchor positioning", detect: /\banchor-name\s*:|\bposition-anchor\s*:/i },
-  { id: "calc-size()", detect: /\bcalc-size\(/i },
-  { id: "interpolate-size", detect: /\binterpolate-size\s*:/i },
-  { id: "transition-behavior", detect: /\btransition-behavior\s*:/i },
-  { id: ":user-valid / :user-invalid", detect: /:user-(?:in)?valid\b/i },
-  { id: ":popover-open", detect: /:popover-open\b/i },
-  { id: "popover attribute styling", detect: /\[popover[\]=]/i },
-  { id: "scroll-driven animations", detect: /\b(?:animation|scroll|view)-timeline(?:-name|-axis)?\s*:/i },
-  { id: "@scroll-timeline", detect: /@scroll-timeline[\s{]/i },
-  { id: ":state()", detect: /:state\(/i },
-  { id: "CSS nesting", detect: /^\s*&/m },
-];
+export const CSS_SURFACE = {
+  atRules: [
+  "container", "font-face", "keyframes", "media",
+  ],
+  properties: [
+  "-webkit-box-orient", "-webkit-font-smoothing", "-webkit-line-clamp", "-webkit-mask-image",
+  "-webkit-overflow-scrolling", "accent-color", "align-content", "align-items", "align-self",
+  "animation", "animation-delay", "animation-duration", "animation-iteration-count",
+  "appearance", "backdrop-filter", "background", "background-clip", "background-position",
+  "background-size", "border", "border-bottom", "border-bottom-left-radius",
+  "border-bottom-right-radius", "border-bottom-width", "border-collapse", "border-color",
+  "border-inline-start", "border-inline-start-color", "border-left", "border-left-color",
+  "border-radius", "border-right", "border-style", "border-top", "border-top-color",
+  "border-top-left-radius", "border-top-right-radius", "bottom", "box-shadow", "box-sizing",
+  "clip", "clip-path", "color", "color-scheme", "column-gap", "contain", "container", "content",
+  "counter-increment", "counter-reset", "cursor", "display", "fill", "filter", "flex",
+  "flex-basis", "flex-direction", "flex-shrink", "flex-wrap", "font", "font-display",
+  "font-family", "font-size", "font-style", "font-variant-numeric", "font-weight", "gap",
+  "grid-area", "grid-auto-columns", "grid-auto-flow", "grid-column", "grid-row",
+  "grid-template-columns", "grid-template-rows", "height", "image-rendering", "inset",
+  "inset-block-start", "inset-inline-end", "inset-inline-start", "isolation", "justify-content",
+  "justify-items", "justify-self", "left", "letter-spacing", "line-height", "list-style",
+  "margin", "margin-bottom", "margin-inline-end", "margin-inline-start", "margin-left",
+  "margin-right", "margin-top", "mask-image", "max-height", "max-width", "min-height",
+  "min-inline-size", "min-width", "object-fit", "opacity", "order", "outline", "outline-offset",
+  "overflow", "overflow-anchor", "overflow-wrap", "overflow-x", "overflow-y",
+  "overscroll-behavior", "padding", "padding-block", "padding-bottom", "padding-inline",
+  "padding-inline-end", "padding-inline-start", "padding-left", "padding-right", "padding-top",
+  "place-content", "place-items", "pointer-events", "position", "resize", "right", "row-gap",
+  "scroll-behavior", "scroll-snap-align", "scroll-snap-type", "scrollbar-color",
+  "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width", "text-align",
+  "text-decoration", "text-overflow", "text-transform", "text-underline-offset", "top",
+  "touch-action", "transform", "transform-origin", "transition", "transition-duration",
+  "user-select", "vertical-align", "visibility", "white-space", "width", "word-break", "z-index",
+  ],
+  /** Pseudo-classes and pseudo-elements, without their leading colons. */
+  pseudos: [
+  "active", "after", "before", "disabled", "empty", "first-child", "first-of-type", "focus",
+  "focus-visible", "focus-within", "has", "hover", "is", "last-child", "not", "nth-child",
+  "root",
+  ],
+  /** Function names appearing in declaration values. */
+  functions: [
+  "attr", "blur", "brightness", "calc", "clamp", "color-mix", "conic-gradient", "counter",
+  "cubic-bezier", "env", "format", "inset", "linear-gradient", "max", "min", "minmax", "rect",
+  "repeat", "rgb", "rgba", "rotate", "scale", "scaley", "translatex", "translatey", "url", "var",
+  ],
+} as const;
+
+/** The CSS surface a parsed stylesheet actually uses, in the same shape as `CSS_SURFACE`. */
+export interface StylesheetSurface {
+  readonly atRules: string[];
+  readonly properties: string[];
+  readonly pseudos: string[];
+  readonly functions: string[];
+}
+
+/**
+ * Extract that surface from a parsed stylesheet.
+ *
+ * Everything is lower-cased, because CSS identifiers are case-insensitive and the allowlist would
+ * otherwise be defeated by spelling. Custom properties are skipped: their names ARE case-sensitive
+ * and they are the app's own, not platform surface. `postcss` is passed in rather than imported so
+ * this module stays dependency-free for the Vite config that imports it at build time.
+ */
+export function stylesheetSurface(root: {
+  walkAtRules(cb: (rule: { name: string }) => void): unknown;
+  walkDecls(cb: (decl: { prop: string; value: string }) => void): unknown;
+  walkRules(cb: (rule: { selector: string }) => void): unknown;
+}): StylesheetSurface {
+  const atRules = new Set<string>();
+  const properties = new Set<string>();
+  const pseudos = new Set<string>();
+  const functions = new Set<string>();
+  root.walkAtRules((rule) => atRules.add(rule.name.toLowerCase()));
+  root.walkDecls((decl) => {
+    if (!decl.prop.startsWith("--")) properties.add(decl.prop.toLowerCase());
+    for (const match of decl.value.matchAll(/(?<![-\w])([a-z][a-z0-9-]*)\(/gi)) {
+      functions.add(match[1]!.toLowerCase());
+    }
+  });
+  root.walkRules((rule) => {
+    for (const match of rule.selector.matchAll(/::?([a-z][a-z0-9-]*)/gi)) {
+      pseudos.add(match[1]!.toLowerCase());
+    }
+  });
+  const sorted = (set: Set<string>) => [...set].sort();
+  return {
+    atRules: sorted(atRules),
+    properties: sorted(properties),
+    pseudos: sorted(pseudos),
+    functions: sorted(functions),
+  };
+}
 
 function compare(a: readonly [number, number], b: readonly [number, number]): number {
   return a[0] !== b[0] ? a[0] - b[0] : a[1] - b[1];

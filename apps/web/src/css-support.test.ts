@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import postcss from "postcss";
 import {
-  ACCOUNTABLE_CONSTRUCTS,
   CSS_FEATURES,
+  CSS_SURFACE,
   ENGINES,
   floorSetting,
   formatTarget,
   requiredFloor,
+  stylesheetSurface,
   webviewTargets,
   type CssFeature,
 } from "./css-support.js";
@@ -17,17 +19,20 @@ import { WOLLIPOG_WEBVIEW_TARGETS } from "../vite.config.js";
 const raw = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 /** Comments quote example CSS, including features the stylesheet does not actually use. */
 const css = raw.replace(/\/\*[\s\S]*?\*\//g, "");
+const surface = stylesheetSurface(postcss.parse(css));
 
 const compatibilityDoc = readFileSync(
   fileURLToPath(new URL("../../../docs/vite-8-compatibility.md", import.meta.url)),
   "utf8",
 );
 
+const SURFACE_KINDS = ["atRules", "properties", "pseudos", "functions"] as const;
+
 /**
  * #914: the production bundle shipped CSS that its own declared browser floor could not parse, and
- * nothing noticed for as long as the two were maintained separately. These tests exist to make that
+ * nothing noticed for as long as the two were maintained separately. These tests make that
  * separation impossible — the floor is computed from the stylesheet's requirements, and the
- * stylesheet cannot acquire a requirement the registry has not accounted for.
+ * stylesheet cannot acquire a requirement nobody has looked at.
  */
 
 test("the build target is the registry's floor, not a separately maintained list", () => {
@@ -36,6 +41,36 @@ test("the build target is the registry's floor, not a separately maintained list
   // The drift this issue was filed for, pinned as a value: every one of these is above the floor
   // that used to be declared by hand (chrome107 / edge107 / firefox104 / safari16).
   assert.deepEqual(WOLLIPOG_WEBVIEW_TARGETS, ["chrome111", "edge111", "firefox121", "safari16.2"]);
+});
+
+test("the stylesheet uses no CSS outside the reviewed surface", () => {
+  // The guard, inverted. A denylist of dangerous constructs was tried first and review found hole
+  // after hole in it, because it has to predict what CSS will be invented. This asks the opposite
+  // question — is everything here something a human has already looked at? — which is bounded by
+  // the stylesheet and therefore answerable.
+  const unreviewed: string[] = [];
+  for (const kind of SURFACE_KINDS) {
+    const allowed = new Set<string>(CSS_SURFACE[kind]);
+    for (const name of surface[kind]) if (!allowed.has(name)) unreviewed.push(`${kind}: ${name}`);
+  }
+  assert.deepEqual(unreviewed, [],
+    "styles.css uses CSS that nobody has classified yet. This is not a rejection — decide which it "
+    + "is, add a CSS_FEATURES entry when the answer is not 'obviously old' (requires-floor raises "
+    + "the build floor, downlevelled records what rewrites it, degrades records what a reader loses "
+    + "without it), then add the name to CSS_SURFACE. Shipping it unreviewed is how the floor went "
+    + "stale in the first place.");
+});
+
+test("the reviewed surface contains nothing the stylesheet has stopped using", () => {
+  // Keeps the allowlist from silently becoming a museum: an entry nobody can reach is an entry
+  // nobody re-checks, and it would quietly re-permit whatever it names.
+  for (const kind of SURFACE_KINDS) {
+    const live = new Set<string>(surface[kind]);
+    const stale = CSS_SURFACE[kind].filter((name) => !live.has(name));
+    assert.deepEqual(stale, [],
+      `CSS_SURFACE.${kind} lists entries styles.css no longer uses: remove them, so the surface `
+      + "keeps describing the stylesheet rather than its history.");
+  }
 });
 
 test("every registered feature is actually used, so none inflates the floor for nothing", () => {
@@ -53,44 +88,17 @@ test("feature detectors are case-insensitive, as CSS identifiers are", () => {
   for (const feature of CSS_FEATURES) {
     assert.ok(feature.detect.flags.includes("i"), `${feature.id} detector must be case-insensitive`);
   }
-  for (const construct of ACCOUNTABLE_CONSTRUCTS) {
-    // Nesting is anchored on layout, not an identifier, so case cannot apply to it.
-    if (construct.id === "CSS nesting") continue;
-    assert.ok(construct.detect.flags.includes("i"),
-      `${construct.id} detector must be case-insensitive`);
-  }
-  const shouty = ":HAS(.x) { color: red }";
   const has = CSS_FEATURES.find((feature) => feature.id === ":has()")!;
-  assert.ok(has.detect.test(shouty), "an upper-case spelling must still count as used");
+  assert.ok(has.detect.test(":HAS(.x) { color: red }"),
+    "an upper-case spelling must still count as used");
 });
 
-test("a downlevelled construct is accounted for without raising the floor", () => {
-  // The classification the accountability message promises. Without it, a construct the build
-  // compiles away had no correct resolution: registering it would constrain the app on behalf of
-  // output no browser ever receives, and not registering it failed the suite.
-  const nesting: CssFeature = {
-    kind: "downlevelled",
-    id: "CSS nesting",
-    detect: /^\s*&/m,
-    by: "Lightning CSS, which flattens nested rules into ordinary selectors",
-    evidence: "synthetic fixture for this test",
-  };
-  assert.deepEqual(webviewTargets([...CSS_FEATURES, nesting]), webviewTargets(),
-    "a downlevelled entry must not move the floor");
-  assert.equal(floorSetting([...CSS_FEATURES, nesting]).length, floorSetting().length);
-});
-
-test("every accountable construct in the stylesheet is registered with support data", () => {
-  const registered = new Set(CSS_FEATURES.map((feature) => feature.id));
-  const unaccounted = ACCOUNTABLE_CONSTRUCTS
-    .filter((construct) => construct.detect.test(css))
-    .map((construct) => construct.id)
-    .filter((id) => !registered.has(id));
-  assert.deepEqual(unaccounted, [],
-    "styles.css uses CSS that no FEATURE_SUPPORT entry accounts for. Add an entry with its first "
-    + "supporting versions and a source, which raises the build floor in this same commit — or, if "
-    + "Lightning CSS compiles the feature away for the current floor, say so in the entry instead. "
-    + "Shipping it unaccounted for is how the floor silently went stale in the first place.");
+test("the surface extractor lower-cases, so spelling cannot defeat the allowlist", () => {
+  const shouty = stylesheetSurface(postcss.parse("@MEDIA screen { .A:HOVER { COLOR: RGB(0 0 0) } }"));
+  assert.deepEqual(shouty.atRules, ["media"]);
+  assert.deepEqual(shouty.properties, ["color"]);
+  assert.deepEqual(shouty.pseudos, ["hover"]);
+  assert.deepEqual(shouty.functions, ["rgb"]);
 });
 
 test("each entry carries the evidence its classification depends on", () => {
@@ -101,11 +109,27 @@ test("each entry carries the evidence its classification depends on", () => {
         + "the floor for output the browser never receives");
       assert.match(feature.source, /retrieved \d{4}-\d{2}-\d{2}/,
         `${feature.id} must cite where its support data came from and when, so it can be re-checked`);
-    } else {
+    } else if (feature.kind === "downlevelled") {
       assert.ok(feature.by.length > 10 && feature.evidence.length > 10,
         `${feature.id} claims the build compiles it away, which needs the rewriter and the evidence`);
+    } else {
+      assert.ok(feature.fallback.length > 40,
+        `${feature.id} claims its absence is harmless, which needs saying what a reader actually loses`);
+      assert.match(feature.source, /retrieved \d{4}-\d{2}-\d{2}/,
+        `${feature.id} must cite its support data even though it does not bind, so it can be re-judged`);
     }
   }
+});
+
+test("only breaking features move the floor", () => {
+  // `scrollbar-width` needs Chrome 121 and Safari 18.2 — above the computed floor — and is in the
+  // stylesheet today. It is classified `degrades`, so it must not drag the whole app's floor up to
+  // Safari 18.2 in exchange for scrollbar cosmetics. This is the assertion that keeps that true.
+  const scrollbars = CSS_FEATURES.find((feature) => feature.id.startsWith("scrollbar-"))!;
+  assert.equal(scrollbars.kind, "degrades");
+  assert.deepEqual(requiredFloor().safari, [16, 2],
+    "a gracefully-degrading feature must not raise the Safari floor");
+  assert.ok(floorSetting().every((feature) => feature.kind === "requires-floor"));
 });
 
 test("the floor takes the maximum across features, per engine independently", () => {
@@ -134,6 +158,18 @@ test("a newly registered feature raises the floor rather than being absorbed", (
   };
   assert.deepEqual(webviewTargets([...CSS_FEATURES, invented]),
     ["chrome200", "edge200", "firefox200", "safari20.1"]);
+});
+
+test("a downlevelled entry is accounted for without raising the floor", () => {
+  const nesting: CssFeature = {
+    kind: "downlevelled",
+    id: "CSS nesting",
+    detect: /^\s*&/im,
+    by: "Lightning CSS, which flattens nested rules into ordinary selectors",
+    evidence: "synthetic fixture for this test",
+  };
+  assert.deepEqual(webviewTargets([...CSS_FEATURES, nesting]), webviewTargets(),
+    "a downlevelled entry must not move the floor");
 });
 
 test("minor versions survive the target spelling", () => {

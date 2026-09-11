@@ -15,8 +15,19 @@ are included as well.
   These versions are **computed, not chosen** (#914): `apps/web/src/css-support.ts` records the
   non-downlevelable CSS features the stylesheet uses along with the first browser version that
   supports each, and `WOLLIPOG_WEBVIEW_TARGETS` is their maximum. Adopting a newer feature therefore
-  raises the floor in the same commit, and a unit test fails if the stylesheet uses anything the
-  registry does not account for.
+  raises the floor in the same commit.
+
+  What keeps that registry complete is an allowlist, not a watchlist. `CSS_SURFACE` names every
+  at-rule, property, pseudo, and function the stylesheet is allowed to contain, and a unit test
+  fails on anything outside it — including syntax nobody anticipated. A watchlist of known-risky
+  constructs was tried first and leaked repeatedly, because it has to predict what CSS will be
+  invented; the allowlist is bounded by what this stylesheet actually contains.
+
+  Not everything new raises the floor. Each feature is classified: `requires-floor` for what breaks
+  where it is unsupported, `downlevelled` for what the build compiles away, and `degrades` for what
+  an engine simply ignores at no real cost. `scrollbar-width` is the live example of the last —
+  it needs Chrome 121 and Safari 18.2, and treating it like the others would have pushed the whole
+  app's floor to Safari 18.2 in exchange for scrollbar cosmetics.
 
   The binding constraint differs per engine: `color-mix()` sets Chrome, Edge, and Safari; `:has()`
   sets Firefox, from a version well above what anything else needs. Safari's `.2` is load-bearing —
