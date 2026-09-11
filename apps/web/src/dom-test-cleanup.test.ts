@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 import { fileURLToPath } from "node:url";
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
@@ -66,9 +67,14 @@ function storeProviderDomTests(files: string[]): string[] {
  * that with a plain 30s `setInterval` and no `StoreProvider` anywhere near it (#899).
  *
  * Derived rather than listed, so a component that starts a timer tomorrow is covered without
- * anyone remembering this file. `setTimeout` is deliberately NOT matched: a one-shot timer settles
- * on its own and cannot hold the loop open indefinitely, and matching it would sweep in most of
- * the app for no benefit.
+ * anyone remembering this file. Two shapes hold the loop open: `setInterval`, and a `setTimeout`
+ * that reschedules ITSELF — which is what #690's own root cause was, so excluding timeouts
+ * outright would have missed the original bug. `AgentsPanel` does exactly that today.
+ *
+ * The self-rescheduling case is read from the AST, not matched as text, and the difference is not
+ * academic: `setTimeout(<identifier>,` matches eight modules here and only one of them
+ * reschedules. The other seven include `store.tsx` and `SessionDetail.tsx`, which are mounted all
+ * over the suite, so a text match would have demanded the hook in files that never needed it.
  *
  * KNOWN LIMIT, the same one the set above carries: this matches a test's OWN imports, so a test
  * that reaches a timer-owning module through a wrapper is not flagged. The honest fix when one
@@ -77,8 +83,34 @@ function storeProviderDomTests(files: string[]): string[] {
 function timerOwningModules(files: string[]): string[] {
   return files
     .filter((path) => !isTest(path) && !path.includes(`${SRC}e2e/`))
-    .filter((path) => /\bsetInterval\s*\(/u.test(readFileSync(path, "utf8")))
+    .filter((path) => {
+      const source = readFileSync(path, "utf8");
+      return /\bsetInterval\s*\(/u.test(source) || reschedulesItself(source, path);
+    })
     .map((path) => basename(path));
+}
+
+/** A `setTimeout(fn, …)` written INSIDE `fn`'s own body — a timer that never stops arming itself. */
+function reschedulesItself(source: string, path: string): boolean {
+  const tree = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true,
+    path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  let found = false;
+  const visit = (node: ts.Node, enclosing: string[]): void => {
+    let names = enclosing;
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+      names = [...enclosing, node.name.text];
+    } else if (ts.isFunctionDeclaration(node) && node.name) {
+      names = [...enclosing, node.name.text];
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "setTimeout") {
+      const callback = node.arguments[0];
+      if (callback && ts.isIdentifier(callback) && names.includes(callback.text)) found = true;
+    }
+    ts.forEachChild(node, (child) => visit(child, names));
+  };
+  visit(tree, []);
+  return found;
 }
 
 /**
@@ -95,7 +127,13 @@ function timerOwningModules(files: string[]): string[] {
  * trade the set above makes, and the same answer applies — when it lies, name the file here.
  */
 function hasWindowTeardown(source: string): boolean {
-  return source.includes("installDomTestCleanup(") || /\.close\(\)/u.test(source);
+  if (source.includes("installDomTestCleanup(")) return true;
+  // The close must be on THE WINDOW. A bare `/\.close\(\)/` would also accept a socket, a dialog
+  // or a mock closing itself and wave through a file that genuinely hangs — a guard green for the
+  // wrong reason, which is worse than no guard. Nothing does that today; this keeps it that way.
+  const binding = /^(?:const|let) (\w+) = new Window\(/mu.exec(source);
+  if (!binding) return false;
+  return new RegExp(`\\b${binding[1]}\\.(?:happyDOM\\.)?(?:close|abort)\\(`, "u").test(source);
 }
 
 /** Happy-dom tests that import one of those modules directly. */
@@ -130,6 +168,20 @@ test("every DOM test that mounts a timer-owning module installs the shared clean
     "the window, so a failing assertion cannot leave that timer rescheduling and hang the run " +
     "(#899). A close() on the window from an after hook satisfies this too.",
   );
+});
+
+/**
+ * The #899 guard passes trivially if its derivation stops finding candidates — a regex or a source
+ * refactor could empty the set and nothing would say so. This states the set is non-empty and
+ * still contains the file that motivated it, so the guard cannot go quiet without failing.
+ */
+test("the timer-owning derivation still finds the files it was built for", () => {
+  const files = sourceFiles(SRC);
+  assert.ok(timerOwningModules(files).includes("UsageView.tsx"),
+    "UsageView owns a setInterval; a derivation that misses it is protecting nothing");
+  assert.ok(timerOwningModules(files).includes("AgentsPanel.tsx"),
+    "AgentsPanel reschedules a setTimeout onto itself, the shape #690's own root cause had");
+  assert.ok(timerOwningDomTests(files).length > 0, "no candidate tests: the guard below is vacuous");
 });
 
 /**
