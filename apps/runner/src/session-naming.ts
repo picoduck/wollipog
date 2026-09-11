@@ -609,10 +609,13 @@ export class SessionNamingExecutor {
         : fail("provider_failed", failurePhase);
     } finally {
       this.active--;
-      await withinCleanupBudget((async () => {
-        await authorization?.cleanup().catch(() => {});
-        await neutral?.cleanup().catch(() => {});
-      })(), this.cleanupBudgetMs);
+      // Start both teardowns before waiting on either. Chaining them would let a stalled boundary
+      // cleanup keep the neutral directory's cleanup from ever being invoked — and now that the
+      // wait is bounded, that would leak the directory silently instead of hanging visibly.
+      await withinCleanupBudget(Promise.allSettled([
+        (async () => authorization?.cleanup())(),
+        (async () => neutral?.cleanup())(),
+      ]), this.cleanupBudgetMs);
     }
   }
 }

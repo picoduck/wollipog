@@ -379,12 +379,13 @@ export const SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS =
  * than the layer it supervises so an outer transport can never expire first:
  *
  *   preparation (<= 3s) + generation (>= 12s) = runner budget 15s
- *     -> control-plane runner request 16s
- *       -> control-plane supervision abort 17s
- *         -> desktop remote read budget 35s (apps/desktop/src-tauri/src/remote_transport.rs)
+ *     -> runner teardown allowance (<= 1s), inside the margin below rather than competing with it
+ *       -> control-plane runner request 17s
+ *         -> control-plane supervision abort 18s
+ *           -> desktop remote read budget 35s (apps/desktop/src-tauri/src/remote_transport.rs)
  *
- * Teardown after a successful generation is bounded separately by the cleanup budget below, so it
- * is covered by the transport margin rather than competing with it.
+ * A custom endpoint may be configured up to 30s, so its supervision worst case is 33s — still
+ * under the desktop read budget.
  *
  * The total stays bounded: the runner clamps any requested budget to the runner budget below.
  */

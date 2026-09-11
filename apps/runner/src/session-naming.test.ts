@@ -354,6 +354,21 @@ test("a stalled teardown cannot turn a generated title into a transport timeout"
   assert.equal(cleaned, 1, "teardown still runs; only waiting for it is bounded");
 });
 
+test("a stalled boundary teardown still lets the neutral directory be cleaned up", async () => {
+  let neutralCleaned = 0;
+  const executor = new SessionNamingExecutor({
+    cleanupBudgetMs: 25,
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: async () => { neutralCleaned += 1; } }),
+    // Direct WSL boundary teardown spawns `wsl.exe` with no timeout of its own, so this step can
+    // outlast the budget. Chaining the two would strand the directory for good.
+    authorize: async () => ({ cleanup: () => new Promise<void>(() => {}) }),
+    generate: async () => "Generated Before Boundary Stalled",
+  });
+  const result = await executor.execute(request(), claudeAgent(), {});
+  assert.equal(result.ok, true);
+  assert.equal(neutralCleaned, 1, "the directory is cleaned even though the boundary never settles");
+});
+
 test("executor preflight rejects before preparing a target-local naming directory", async () => {
   let prepared = 0;
   let generated = 0;
