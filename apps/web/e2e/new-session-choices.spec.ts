@@ -22,11 +22,26 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 /** The narrowest width WCAG 2.2 Reflow requires content to survive at. */
 const REFLOW_WIDTH = 320;
 
-/** A representative phone, and a desktop window for the same dialog. */
+/**
+ * Three viewports chosen to cover the touch floor's THREE activation paths, not three device sizes.
+ *
+ * `styles.css` applies the 44px floor under a comma-separated list:
+ *     @media (max-width: 760px), (pointer: coarse), (hover: none)
+ * so it is active if ANY of those matches. A narrow window with a mouse gets the floor just as a
+ * phone does, and `useCoarsePointer()` queries that same list — so the estimator raises its budget
+ * there too.
+ *
+ * The first version of this file had 390px and 320px both coarse, which tested the pointer path
+ * twice and the width path never. Making the reflow-minimum case a FINE pointer covers the width
+ * path at no extra cost, and keeps the WCAG reflow width where it belongs.
+ */
 const VIEWPORTS = [
-  { name: "phone", width: 390, height: 780, touch: true },
-  { name: "reflow-minimum", width: REFLOW_WIDTH, height: 640, touch: true },
-  { name: "desktop", width: 1280, height: 900, touch: false },
+  // The reported defect: a phone, where the pointer is what activates the floor.
+  { name: "phone", width: 390, height: 780, touch: true, floor: true },
+  // The WCAG reflow minimum with a MOUSE: the floor here comes from width alone.
+  { name: "reflow-minimum", width: REFLOW_WIDTH, height: 640, touch: false, floor: true },
+  // Wide and fine-pointered: no floor at all, so the compact budget must still be used.
+  { name: "desktop", width: 1280, height: 900, touch: false, floor: false },
 ] as const;
 
 async function openDialog(page: Page, query = "") {
@@ -111,11 +126,11 @@ for (const viewport of VIEWPORTS) {
     });
 
     test("a two-option Select opens a list its own options fit inside", async ({ page }) => {
-      // The 44px floor exists only under `(pointer: coarse)`, so on a desktop pointer this asserts
-      // nothing about the defect. Skipped rather than run vacuously: the browser job has under a
-      // minute of headroom against its 30-minute cap (#842), and a test that cannot fail is the
-      // first thing that should stop costing time.
-      test.skip(!viewport.touch, "the touch floor does not apply to a fine pointer");
+      // Skipped only where the floor genuinely does not apply — wide AND fine-pointered. Keyed on
+      // `floor` rather than `touch`: an earlier version skipped by `touch` and justified it as
+      // "coarse pointer only", which is false. The media query also fires on width, so that
+      // reasoning would have silently dropped every narrow fine-pointer case.
+      test.skip(!viewport.floor, "no touch floor applies at this width and pointer");
       // AC4, against the shared primitive rather than the one control that hit the defect. Every
       // other Select in the app — the archive filter, the agent-defaults rows, the colour-scheme
       // picker — shares this arithmetic, so the guard belongs on the primitive.
@@ -147,7 +162,7 @@ for (const viewport of VIEWPORTS) {
         const box = (await option.boundingBox())!;
         expect(box.y).toBeGreaterThanOrEqual(listBox.y - 1);
         expect(box.y + box.height).toBeLessThanOrEqual(listBox.y + listBox.height + 1);
-        if (viewport.touch) {
+        if (viewport.floor) {
           // The floor the estimator disagreed with. Asserted as a minimum, never an equality:
           // CI renders text ~3.5% smaller than a developer box, so only the CSS-declared bound is
           // stable across hosts.
@@ -163,9 +178,11 @@ for (const viewport of VIEWPORTS) {
 }
 
 test.describe("unavailable preset", () => {
-  // Viewport-independent: this is about the card being RENDERED with its reason at all, not about
-  // geometry, so one run covers it. It used to run once per viewport for no added signal.
-  test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
+  // One run, at the BINDING width rather than a comfortable one. Review caught that calling this
+  // "viewport-independent" was wrong: it asserts geometry, and a disabled card carries the longest
+  // content in the group — title, description AND reason — so 320px is where its extra wrapped
+  // lines would be clipped first. Running it at 390px would have passed while 320px broke.
+  test.use({ viewport: { width: REFLOW_WIDTH, height: 640 } });
 
   test("an unavailable preset is readable rather than hidden", async ({ page }) => {
     await openDialog(page, "?orchestrator=0");
