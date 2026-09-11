@@ -130,6 +130,39 @@ test("Machine settings rename the Machine and register a Workspace without creat
     .toEqual({ name: "repo", path: "C:\\Users\\misko\\repo" });
 });
 
+test("Machine settings explain live Runner Capacity and apply an authorized increase", async ({ page }) => {
+  await page.getByRole("button", { name: "Manage" }).click();
+  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  await expect(dialog.getByRole("heading", { name: "Runner Capacity" })).toBeVisible();
+  await expect(dialog.getByLabel("Runner Capacity Usage")).toContainText("12 Units");
+  await expect(dialog.getByText("12 of 16 Units Used · 3 Sessions Queued", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("list", { name: "Current Capacity Bottlenecks" }))
+    .toContainText("claude is using 4 of 4 provider slots · 3 Waiting");
+
+  await dialog.getByLabel("Runner Capacity", { exact: true }).fill("24");
+  await dialog.getByRole("button", { name: "Save Capacity" }).click();
+  await expect(dialog.getByText("12 of 24 Units Used · 3 Sessions Queued", { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("Runner Capacity Usage")).toContainText("12 Units");
+});
+
+test("ordinary members can inspect Runner Capacity but cannot change it", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?role=viewer");
+  await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+  await expect(page.getByLabel("System Details")).toContainText("12 of 16 Units Used");
+  await expect(page.getByRole("button", { name: "Manage" })).toHaveCount(0);
+});
+
+test("a Machine owner can change capacity without receiving organization-wide controls", async ({ page }) => {
+  await page.goto("/machine-management-e2e.html?role=machine-owner");
+  await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+  await page.getByRole("button", { name: "Manage" }).click();
+  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  await expect(dialog.getByLabel("Runner Capacity", { exact: true })).toBeEnabled();
+  await expect(dialog.getByRole("heading", { name: "Machine Details" })).toHaveCount(0);
+  await expect(dialog.getByRole("heading", { name: "Workspaces" })).toHaveCount(0);
+  await expect(dialog.getByRole("heading", { name: "Danger Zone" })).toHaveCount(0);
+});
+
 test("Machine settings expose deletion with an explicit history warning", async ({ page }) => {
   await page.getByRole("button", { name: "Manage" }).click();
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });

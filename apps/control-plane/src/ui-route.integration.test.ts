@@ -344,6 +344,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     now: Date.now(),
     expiresAt: Date.now() + 60_000,
   });
+  assert.deepEqual(seed.setMachineRunnerCapacity("runner-ui-route", 20, 0, Date.now()), {
+    ok: true,
+    configuration: { configuredUnits: 20, revision: 1 },
+  });
   const inferredParentLocation = seed.findProjectLocation("runner-ui-route", "workspace-1");
   assert.ok(inferredParentLocation);
   const parentProject = seed.getProject(inferredParentLocation.projectId);
@@ -545,7 +549,66 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       { ...sessionSnapshot("session-agent-parent"), status: "running" },
     ],
   }));
-  await runnerInbox.take((message) => message.type === "registered");
+  const registeredRunner = await runnerInbox.take((message) => message.type === "registered");
+  assert.deepEqual(registeredRunner.runnerCapacity, { configuredUnits: 20, revision: 1 },
+    "reconnect receives the durable control-plane capacity before orphaned work recovers");
+
+  const ordinaryCapacityChange = await fetch(`${httpBase}/api/runners/runner-ui-route/capacity`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${operatorToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ configuredUnits: 24, expectedRevision: 1 }),
+  });
+  assert.equal(ordinaryCapacityChange.status, 403, "an ordinary organization member cannot change capacity");
+  const ownerCapacityChange = await fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/capacity`,
+    ownerToken,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ configuredUnits: 24, expectedRevision: 1 }),
+    },
+  );
+  assert.equal(ownerCapacityChange.status, 200, await ownerCapacityChange.clone().text());
+  assert.deepEqual(await ownerCapacityChange.json(), {
+    capacity: { configuredUnits: 24, revision: 2 },
+  });
+  const liveCapacityChange = await runnerInbox.take((message) => message.type === "configure_runner_capacity");
+  assert.deepEqual(liveCapacityChange, {
+    type: "configure_runner_capacity",
+    configuredUnits: 24,
+    revision: 2,
+  }, "an online runner receives the authoritative revision without restarting");
+  runner.send(JSON.stringify({
+    type: "runner_capacity_status",
+    status: {
+      configuredUnits: 24,
+      revision: 2,
+      authority: "control_plane",
+      usedUnits: 12,
+      availableUnits: 12,
+      queuedSessions: 2,
+      blockers: [{
+        kind: "agent_quota",
+        description: "agent-1 is using 4 of 4 provider slots",
+        usedUnits: 4,
+        limitUnits: 4,
+        requiredUnits: 1,
+        waitingSessions: 2,
+        agentId: "agent-1",
+      }],
+    },
+  }));
+  const capacityView = await waitForValue(
+    async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
+      runners: Array<{ runnerId: string; capacity?: { usedUnits?: number; blockers?: Array<{ kind: string }> } }>;
+    }).runners.find((candidate) => candidate.runnerId === "runner-ui-route")?.capacity,
+    (capacity) => capacity?.usedUnits === 12,
+    "the runner capacity report in the authenticated Machine view",
+  );
+  assert.equal(capacityView?.blockers?.[0]?.kind, "agent_quota");
   runner.send(JSON.stringify({
     type: "agent_control_credential",
     sessionId: "session-agent-parent",

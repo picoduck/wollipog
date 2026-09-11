@@ -148,8 +148,10 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 131", () => {
-  assert.equal(PROTOCOL_VERSION, 131);
+test("PROTOCOL_VERSION is 132", () => {
+  assert.equal(PROTOCOL_VERSION, 132);
+  assert.equal(runnerSupportsProtocol(131, "machineRunnerCapacity"), false);
+  assert.equal(runnerSupportsProtocol(132, "machineRunnerCapacity"), true);
   assert.equal(runnerSupportsProtocol(127, "providerHistoryQuarantine"), false);
   assert.equal(runnerSupportsProtocol(128, "providerHistoryQuarantine"), true);
   assert.equal(runnerSupportsProtocol(121, "contextWindowVariants"), false);

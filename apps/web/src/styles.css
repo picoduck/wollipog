@@ -6696,6 +6696,19 @@ button.file-head.source-path-link {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.machine-capacity-summary {
+  color: var(--text) !important;
+  font-weight: 600;
+}
+.machine-capacity-blockers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
 .machine-danger-zone {
   align-items: flex-start;
 }

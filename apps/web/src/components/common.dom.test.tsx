@@ -354,6 +354,17 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
             kind: "question",
           },
         }} />
+        <SessionStatusIndicators session={{
+          status: "queued",
+          pendingApproval: null,
+          capacityWait: {
+            kind: "target_quota",
+            description: "Execution target cloud-a is using 2 of 2 slots",
+            usedUnits: 2,
+            limitUnits: 2,
+            requiredUnits: 1,
+          },
+        }} />
         <ChangeStatusBadge change={{
           kind: "ready_for_review",
           label: "Ready for Review",
@@ -375,6 +386,11 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
     assert.equal(container.querySelector('[aria-label="Activity: Running"]')?.textContent?.trim(), "Running");
     assert.equal(container.querySelector('[aria-label="Attention: Answer Required"]')?.textContent?.trim(), "Answer Required");
     assert.equal(container.querySelector('[aria-label="Health: Disconnected"]')?.textContent?.trim(), "Disconnected");
+    assert.equal(
+      container.querySelector('[aria-label="Queue Reason: Execution target cloud-a is using 2 of 2 slots"]')
+        ?.textContent?.trim(),
+      "Target Quota",
+    );
     assert.ok(container.querySelector('[role="group"][aria-label="Change Status"]'));
     assert.equal(container.querySelector('[aria-label="Changes: Ready for Review"]')?.textContent?.trim(), "Ready for Review");
     assert.equal(container.querySelector('[aria-label="Changes: Uncommitted Changes"]')?.textContent?.trim(), "Uncommitted Changes");

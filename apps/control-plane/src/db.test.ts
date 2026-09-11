@@ -1312,6 +1312,93 @@ test("runner runtime storage/admission diagnostics round-trip only for v32+", ()
   assert.equal(db.getRunner("runner-1")?.runtime, undefined, "an older runner cannot advertise v32 diagnostics");
 });
 
+test("Machine Runner Capacity is durable, conflict-safe, and re-established after reconnect", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-runner-capacity-"));
+  const location = join(temp, "control-plane.sqlite");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(meta({ runtime: {
+      dataDir: "C:/wollipog",
+      worktreeRoot: "C:/wollipog/worktrees",
+      maxConcurrentSessions: 16,
+    } }), 100, PROTOCOL_VERSION);
+    db.setMachineDisplayName("runner-1", "Build Machine");
+    const first = db.setMachineRunnerCapacity("runner-1", 24, 0, 110);
+    assert.deepEqual(first, { ok: true, configuration: { configuredUnits: 24, revision: 1 } });
+    assert.deepEqual(db.setMachineRunnerCapacity("runner-1", 32, 0, 111), {
+      ok: false,
+      configuration: { configuredUnits: 24, revision: 1 },
+    }, "a concurrent stale writer receives the current authoritative revision");
+    assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+      configuredUnits: 24,
+      revision: 1,
+      authority: "control_plane",
+      usedUnits: 20,
+      availableUnits: 4,
+      queuedSessions: 2,
+      blockers: [{
+        kind: "agent_quota",
+        description: "claude is using 4 of 4 provider slots",
+        usedUnits: 4,
+        limitUnits: 4,
+        requiredUnits: 1,
+        waitingSessions: 2,
+        agentId: "claude",
+      }],
+    }, 120), true);
+    assert.equal(db.getRunner("runner-1")?.capacity?.usedUnits, 20);
+    assert.equal(db.getRunner("runner-1")?.capacity?.blockers[0]?.kind, "agent_quota");
+    assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+      configuredUnits: 24,
+      revision: 1,
+      authority: "control_plane",
+      usedUnits: 20,
+      availableUnits: 4,
+      queuedSessions: 1,
+      blockers: [{
+        kind: "not-a-real-limit" as never,
+        description: "untrusted",
+        usedUnits: 1,
+        limitUnits: 1,
+        requiredUnits: 1,
+        waitingSessions: 1,
+      }],
+    }, 121), false, "runner-authored diagnostics accept only the closed blocker vocabulary");
+
+    db.setMachineDisplayName("runner-1", "");
+    assert.deepEqual(db.machineRunnerCapacityConfiguration("runner-1"), { configuredUnits: 24, revision: 1 },
+      "clearing an unrelated Machine name cannot erase its capacity setting");
+    db.close();
+    db = undefined;
+
+    db = ControlPlaneDb.open(location);
+    assert.deepEqual(db.machineRunnerCapacityConfiguration("runner-1"), { configuredUnits: 24, revision: 1 });
+    db.registerRunner(meta({ runtime: {
+      dataDir: "C:/wollipog",
+      worktreeRoot: "C:/wollipog/worktrees",
+      maxConcurrentSessions: 16,
+    } }), 200, PROTOCOL_VERSION);
+    assert.deepEqual(db.getRunner("runner-1")?.capacity, {
+      configuredUnits: 24,
+      revision: 1,
+      authority: "control_plane",
+    }, "re-registration keeps CP authority while waiting for a fresh live lease report");
+    assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+      configuredUnits: 16,
+      revision: 0,
+      authority: "runner_local",
+      usedUnits: 0,
+      availableUnits: 16,
+      queuedSessions: 0,
+      blockers: [],
+    }, 201), false, "a stale runner-local report cannot override the durable control-plane setting");
+  } finally {
+    db?.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("Codex app-server compatibility diagnostics round-trip and old rows may omit them", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(meta({
@@ -2303,6 +2390,32 @@ test("updateSessionStatus updates status and derived column", () => {
   v = db.getSession("sess-1")!;
   assert.equal(v.status, "completed");
   assert.equal(v.column, "done");
+});
+
+test("queued capacity reasons persist for discovery and clear on the next lifecycle state", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.updateSessionStatus("sess-1", "queued", 2_000);
+  db.setSessionCapacityWait("sess-1", {
+    kind: "runner_capacity",
+    description: "Runner Capacity is 16 of 16 units used; this session needs 2",
+    usedUnits: 16,
+    limitUnits: 16,
+    requiredUnits: 2,
+    agentId: "acp-agent",
+  });
+  assert.equal(db.getSession("sess-1")?.capacityWait?.requiredUnits, 2);
+  assert.equal(db.setSessionCapacityWait("sess-1", {
+    kind: "not-a-real-limit" as never,
+    description: "untrusted",
+    usedUnits: 1,
+    limitUnits: 1,
+    requiredUnits: 1,
+  }), false);
+  assert.equal(db.getSession("sess-1")?.capacityWait?.requiredUnits, 2,
+    "an invalid runner frame cannot overwrite the last valid queue reason");
+  db.updateSessionStatus("sess-1", "starting", 2_001);
+  assert.equal(db.getSession("sess-1")?.capacityWait, undefined);
 });
 
 test("updateSessionStatus clears pending approval when leaving input_required", () => {

@@ -90,6 +90,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type ResourceScope,
   type ReviewFindingsResponse,
   type RunnerProtocolCapability,
+  type RunnerCapacityBlocker,
   type SessionConfig,
   type SessionEventPayload,
   type SessionLaunchSpec,
@@ -6923,6 +6924,7 @@ export class SessionsService {
     worktreePath?: string | null,
     fromRunnerId?: string,
     controlPlaneLaunchId?: string,
+    capacityWait?: RunnerCapacityBlocker,
   ): void {
     const session = this.db.getSession(sessionId);
     if (!session) return;
@@ -6977,6 +6979,9 @@ export class SessionsService {
       this.abortPolicyHookApprovals(session, Date.now(), "provider-session-ended");
     }
     this.db.updateSessionStatus(sessionId, childAttention ? "input_required" : status, Date.now());
+    if (!childAttention && status === "queued" && capacityWait) {
+      this.db.setSessionCapacityWait(sessionId, capacityWait);
+    }
     // If the session ended while an approval was pending, clear the stale card.
     if (isTerminal(status) && session.pendingApproval) {
       this.db.setPendingApproval(sessionId, null);

@@ -86,6 +86,20 @@ test("archive search surfaces archive and every canonical lifecycle label indepe
     sessionArchiveSearchDetail(session({ archived: false, status: "queued" })),
     "Queued · Wollipog · Codex App Server",
   );
+  assert.equal(
+    sessionArchiveSearchDetail(session({
+      archived: false,
+      status: "queued",
+      capacityWait: {
+        kind: "agent_quota",
+        description: "codex is using 4 of 4 provider slots",
+        usedUnits: 4,
+        limitUnits: 4,
+        requiredUnits: 1,
+      },
+    })),
+    "Queued · codex is using 4 of 4 provider slots · Wollipog · Codex App Server",
+  );
 });
 
 test("archive search accepts the server lifecycle labels used for live reconciliation", () => {

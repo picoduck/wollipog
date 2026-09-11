@@ -229,6 +229,29 @@ test("a weighted acquire reclaims every global slot from a crashed process", () 
   }
 });
 
+test("capacity blockers identify the exact weighted, provider, target, and runner boundary", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-blockers-"));
+  try {
+    const gate = new BoxAdmission(root, 3);
+    assert.equal(gate.blocker({ sessionId: "heavy", agentId: "claude", weight: 4 })?.kind, "request_weight");
+
+    const target = { agentId: "codex", weight: 1, targetId: "cloud-a", targetLimit: 1 };
+    assert.equal(gate.acquire({ ...target, sessionId: "target-holder" }), true);
+    assert.equal(gate.blocker({ ...target, sessionId: "target-waiter" })?.kind, "target_quota");
+    gate.release("target-holder");
+
+    assert.equal(gate.acquire({ sessionId: "provider-holder", agentId: "claude", weight: 1, agentLimit: 1 }), true);
+    assert.equal(gate.blocker({ sessionId: "provider-waiter", agentId: "claude", weight: 1, agentLimit: 1 })?.kind,
+      "agent_quota");
+    assert.equal(gate.acquire({ sessionId: "global-holder", agentId: "codex", weight: 2 }), true);
+    assert.equal(gate.blocker({ sessionId: "global-waiter", agentId: "gemini", weight: 1 })?.kind,
+      "runner_capacity");
+    gate.releaseAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("box admission is FIFO and a queued launch can be cancelled", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-admission-"));
   try {
@@ -253,6 +276,57 @@ test("box admission is FIFO and a queued launch can be cancelled", async () => {
     gate.releaseAdmission("s1");
     assert.equal(await third, true, "the next non-cancelled waiter receives the released slot");
     assert.deepEqual([...gate.admitted], ["s3"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a live capacity increase drains waiters and a decrease preserves running leases", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-live-capacity-"));
+  try {
+    const sent: RunnerToControlPlane[] = [];
+    const store = new SessionStore(root);
+    for (const id of ["s1", "s2", "s3"]) store.create(meta(id));
+    const manager = new SessionManager(
+      (message) => sent.push(message), () => {}, store, "runner", undefined, undefined, undefined, 1,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gate = manager as any;
+    assert.equal(await gate.acquireAdmission("s1"), true);
+    const second = gate.acquireAdmission("s2") as Promise<boolean>;
+    assert.equal(store.readMeta("s2")?.capacityWait?.kind, "runner_capacity");
+
+    assert.equal(manager.configureCapacity({ configuredUnits: 2, revision: 1 }), true);
+    assert.equal(await second, true, "the new unit is reconsidered immediately without a restart");
+    assert.deepEqual([...gate.admitted].sort(), ["s1", "s2"]);
+    assert.deepEqual(manager.capacityState(), {
+      configuredUnits: 2,
+      revision: 1,
+      authority: "control_plane",
+      usedUnits: 2,
+      availableUnits: 0,
+      queuedSessions: 0,
+      blockers: [],
+    });
+
+    assert.equal(manager.configureCapacity({ configuredUnits: 1, revision: 2 }), true);
+    assert.equal(manager.capacityState().usedUnits, 2, "a decrease never evicts either existing lease");
+    assert.equal(manager.capacityState().availableUnits, 0);
+    assert.equal(manager.configureCapacity({ configuredUnits: 3, revision: 2 }), false,
+      "one revision cannot be replayed with different content");
+    const third = gate.acquireAdmission("s3") as Promise<boolean>;
+    assert.equal(store.readMeta("s3")?.capacityWait?.kind, "runner_capacity");
+    gate.releaseAdmission("s1");
+    assert.equal(await Promise.race([
+      third.then(() => "admitted"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("waiting"), 30)),
+    ]), "waiting", "the waiter stays parked until usage falls below the new ceiling");
+    gate.releaseAdmission("s2");
+    assert.equal(await third, true);
+    assert.ok(sent.some((message) => message.type === "runner_capacity_status" &&
+      message.status.configuredUnits === 1 && message.status.usedUnits === 2));
+    gate.releaseAdmission("s3");
+    manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -841,6 +915,8 @@ test("bounded bypass reserves capacity for an older heavyweight waiter", async (
       ninth.then(() => "admitted"),
       new Promise<string>((resolve) => setTimeout(() => resolve("reserved"), 30)),
     ]), "reserved", "after eight bypasses, new light work waits behind the older heavy request");
+    assert.equal(store.readMeta("light-8")?.capacityWait?.kind, "queue_order",
+      "a fitting request reports fairness, not a fabricated resource bottleneck");
     gate.releaseAdmission("blocker");
     assert.equal(await heavy, true);
     gate.releaseAdmission("heavy");

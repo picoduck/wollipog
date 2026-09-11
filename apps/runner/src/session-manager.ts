@@ -39,6 +39,9 @@ import type {
   QueuedPromptEditFailureReason,
   ReadQueuedPromptMessage,
   ReadQueuedPromptResultMessage,
+  RunnerCapacityBlocker,
+  RunnerCapacityConfiguration,
+  RunnerCapacityState,
   RunnerToControlPlane,
   SessionConfig,
   SessionCommandInvocationErrorCode,
@@ -848,9 +851,11 @@ export class SessionManager {
     bypasses: number;
     resolve: (admitted: boolean) => void;
   }> = [];
+  private readonly admissionWaitReasons = new Map<string, string>();
+  private lastCapacityState = "";
   /** Worktree preparation intentionally precedes process admission so an initial Native TUI can
    * materialize while the provider is capacity-queued. Bound those git subprocesses separately. */
-  private readonly worktreePreparationLimit: number;
+  private worktreePreparationLimit: number;
   private readonly worktreePreparationAdmission: BoxAdmission;
   private readonly worktreePreparations = new Set<number>();
   private readonly worktreePreparationKeys = new Map<number, string>();
@@ -900,7 +905,7 @@ export class SessionManager {
     private readonly resolveLaunch?: LaunchResolver,
     private readonly createDriver: typeof makeDriver = makeDriver,
     private readonly dataDir?: string,
-    private readonly maxConcurrentSessions = DEFAULT_MAX_CONCURRENT_SESSIONS,
+    private maxConcurrentSessions = DEFAULT_MAX_CONCURRENT_SESSIONS,
     private readonly onAgentAuthUpdate?: (
       agentId: string,
       update: { status?: "authenticated" | "unauthenticated"; capabilities?: AcpRuntimeCapabilities },
@@ -958,6 +963,59 @@ export class SessionManager {
       WORKTREE_PR_RECONCILIATION_MS,
     );
     this.worktreePullRequestReconcileTimer.unref?.();
+  }
+
+  private capacityRevision = 0;
+  private capacityAuthority: RunnerCapacityState["authority"] = "runner_local";
+
+  /** Apply only a monotonic control-plane configuration. Existing leases are never released. */
+  configureCapacity(configuration: RunnerCapacityConfiguration): boolean {
+    if (!Number.isInteger(configuration.configuredUnits) || configuration.configuredUnits < 1 ||
+        configuration.configuredUnits > 256 || !Number.isSafeInteger(configuration.revision) ||
+        configuration.revision < 1 || configuration.revision < this.capacityRevision) return false;
+    if (configuration.revision === this.capacityRevision) {
+      return configuration.configuredUnits === this.maxConcurrentSessions;
+    }
+    this.capacityRevision = configuration.revision;
+    this.capacityAuthority = "control_plane";
+    this.maxConcurrentSessions = configuration.configuredUnits;
+    this.worktreePreparationLimit = configuration.configuredUnits;
+    this.boxAdmission.setLimit(configuration.configuredUnits);
+    this.worktreePreparationAdmission.setLimit(configuration.configuredUnits);
+    this.drainAdmissionQueue();
+    this.drainWorktreePreparationQueue();
+    this.reportCapacity();
+    return true;
+  }
+
+  capacityState(): RunnerCapacityState {
+    const grouped = new Map<string, RunnerCapacityBlocker>();
+    for (const entry of this.admissionQueue) {
+      const blocker = this.capacityBlocker(entry.request);
+      const key = JSON.stringify([blocker.kind, blocker.agentId ?? null, blocker.targetId ?? null,
+        blocker.limitUnits, blocker.requiredUnits]);
+      const previous = grouped.get(key);
+      grouped.set(key, { ...blocker, waitingSessions: (previous?.waitingSessions ?? 0) + 1 });
+    }
+    const usedUnits = this.boxAdmission.usedCapacity();
+    return {
+      configuredUnits: this.maxConcurrentSessions,
+      revision: this.capacityRevision,
+      authority: this.capacityAuthority,
+      usedUnits,
+      availableUnits: Math.max(0, this.maxConcurrentSessions - usedUnits),
+      queuedSessions: this.admissionQueue.length,
+      blockers: [...grouped.values()],
+    };
+  }
+
+  reportCapacity(force = false): void {
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "machineRunnerCapacity")) return;
+    const status = this.capacityState();
+    const serialized = JSON.stringify(status);
+    if (!force && serialized === this.lastCapacityState) return;
+    this.lastCapacityState = serialized;
+    this.send({ type: "runner_capacity_status", status });
   }
 
   private checkpointOwnerHash(meta: Pick<SessionMeta, "checkpointRefVersion">): string | undefined {
@@ -3315,19 +3373,33 @@ export class SessionManager {
     const request = this.admissionRequest(sessionId);
     if (this.admissionQueue.length === 0 && this.boxAdmission.acquire(request)) {
       this.admitted.add(sessionId);
+      this.admissionWaitReasons.delete(sessionId);
+      this.reportCapacity();
       return Promise.resolve(true);
     }
-    const used = this.boxAdmission.usedCapacity();
-    const quota = request.agentLimit ? `; ${request.agentId} limit ${request.agentLimit}` : "";
-    const targetQuota = request.targetLimit ? `; target limit ${request.targetLimit}` : "";
-    this.emitStatus(
-      sessionId,
-      "queued",
-      `Waiting for runner capacity (${used}/${this.maxConcurrentSessions} units active; weight ${request.weight}${quota}${targetQuota})`,
-    );
     const waiting = new Promise<boolean>((resolve) => this.admissionQueue.push({ request, bypasses: 0, resolve }));
+    this.emitAdmissionWait(request);
     this.drainAdmissionQueue();
     return waiting;
+  }
+
+  private emitAdmissionWait(request: AdmissionRequest): void {
+    const blocker = this.capacityBlocker(request);
+    const serialized = JSON.stringify(blocker);
+    if (this.admissionWaitReasons.get(request.sessionId) === serialized) return;
+    this.admissionWaitReasons.set(request.sessionId, serialized);
+    this.emitStatus(request.sessionId, "queued", blocker.description, undefined, blocker);
+  }
+
+  private capacityBlocker(request: AdmissionRequest): RunnerCapacityBlocker {
+    return this.boxAdmission.blocker(request) ?? {
+      kind: "queue_order",
+      description: "Waiting behind older capacity requests",
+      usedUnits: this.boxAdmission.usedCapacity(),
+      limitUnits: this.maxConcurrentSessions,
+      requiredUnits: request.weight,
+      agentId: request.agentId,
+    };
   }
 
   private cancelAdmissionWait(sessionId: string): boolean {
@@ -3335,10 +3407,12 @@ export class SessionManager {
     if (index < 0) return false;
     const [entry] = this.admissionQueue.splice(index, 1);
     entry?.resolve(false);
+    this.admissionWaitReasons.delete(sessionId);
     if (this.admissionQueue.length === 0 && this.admissionRetryTimer) {
       clearTimeout(this.admissionRetryTimer);
       this.admissionRetryTimer = null;
     }
+    this.reportCapacity();
     return true;
   }
 
@@ -3361,6 +3435,7 @@ export class SessionManager {
         const meta = this.store.readMeta(sessionId);
         if (!meta || meta.status === "stopped") {
           this.admissionQueue.splice(index, 1);
+          this.admissionWaitReasons.delete(sessionId);
           next.resolve(false);
           continue;
         }
@@ -3369,6 +3444,7 @@ export class SessionManager {
           continue;
         }
         this.admissionQueue.splice(index, 1);
+        this.admissionWaitReasons.delete(sessionId);
         for (let prior = 0; prior < index; prior++) this.admissionQueue[prior]!.bypasses++;
         this.admitted.add(sessionId);
         next.resolve(true);
@@ -3376,6 +3452,8 @@ export class SessionManager {
         break;
       }
     }
+    for (const waiting of this.admissionQueue) this.emitAdmissionWait(waiting.request);
+    this.reportCapacity();
     if (this.admissionQueue.length > 0) this.scheduleAdmissionRetry();
   }
 
@@ -9030,6 +9108,7 @@ export class SessionManager {
     status: SessionStatus,
     detail?: string,
     worktreePath?: string | null,
+    capacityWait?: RunnerCapacityBlocker,
   ): void {
     const authMeta = this.store.readMeta(sessionId);
     // A durable block holds prompt admission even while its shared probe is silent or another
@@ -9047,12 +9126,15 @@ export class SessionManager {
     // Foreground idle does not end independently owned child callbacks. Keep their snapshot
     // actionable while the raw foreground status still reaches workflow/pod settlement consumers.
     const settled = projectedStatus !== "running" && projectedStatus !== "starting" && projectedStatus !== "input_required";
-    this.store.patchMeta(sessionId, settled ? { status: projectedStatus, pendingApproval: null } : { status: projectedStatus });
+    this.store.patchMeta(sessionId, settled
+      ? { status: projectedStatus, pendingApproval: null, capacityWait: status === "queued" ? capacityWait : undefined }
+      : { status: projectedStatus, capacityWait: status === "queued" ? capacityWait : undefined });
     this.send({
       type: "session_status",
       sessionId,
       status,
       detail,
+      capacityWait: status === "queued" ? capacityWait : undefined,
       worktreePath,
       controlPlaneLaunchId: this.store.readMeta(sessionId)?.controlPlaneLaunchId,
     });

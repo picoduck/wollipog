@@ -59,11 +59,12 @@ export function serverLifecycleLabel(status: SessionStatus): string {
 }
 
 export function sessionArchiveSearchDetail(
-  session: Pick<SessionView, "archived" | "status" | "projectName" | "workspaceName" | "agentName" | "driver" | "agentId">,
+  session: Pick<SessionView, "archived" | "status" | "projectName" | "workspaceName" | "agentName" | "driver" | "agentId" | "capacityWait">,
 ): string {
   return [
     session.archived ? "Archived" : null,
     canonicalLifecycleLabel(session.status),
+    session.status === "queued" ? session.capacityWait?.description : null,
     session.projectName ?? session.workspaceName,
     sessionAgentLabel(session.agentName, session.driver, session.agentId),
   ].filter(Boolean).join(" · ");
