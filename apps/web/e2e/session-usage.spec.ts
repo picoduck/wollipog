@@ -125,7 +125,7 @@ test("desktop: an unpriced session says so instead of showing $0.00", async ({ p
   await page.screenshot({ path: `${SHOT}/desktop-unpriced.png` });
 });
 
-test("desktop: a provider-reported free session shows $0.00 on first render", async ({ page }) => {
+test("desktop: a provider-reported free session stays $0.00 through its model detail", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=free");
 
@@ -135,7 +135,36 @@ test("desktop: a provider-reported free session shows $0.00 on first render", as
   await expect(cost).toHaveAttribute("aria-expanded", "false");
   await expect(page.locator(".session-usage-popover")).toHaveCount(0);
   await page.screenshot({ path: `${SHOT}/desktop-free-first-render.png` });
+
+  await cost.click();
+  const usage = page.locator(".session-usage-popover").first();
+  await expect(usage.locator(".session-usage-head > span")).toHaveText("$0.00");
+  await expect(usage).toContainText("Cost as reported by the provider.");
+  const modelCosts = usage.locator(".session-usage-model dl > div:last-child dd");
+  await expect(modelCosts).toHaveCount(2);
+  await expect(modelCosts).toHaveText(["$0.00", "$0.00"]);
+  await expect(usage).not.toContainText("$1.21");
+  await expect(usage).not.toContainText("$0.16");
+  await page.screenshot({ path: `${SHOT}/desktop-free-detail.png` });
 });
+
+for (const detailState of ["pending", "failed"] as const) {
+  test(`desktop: a provider-reported free heading stays $0.00 when detail is ${detailState}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 820 });
+    await page.goto(`/session-usage-e2e.html?width=1180&height=780&cost=free&usage-detail=${detailState}`);
+
+    await page.getByRole("button", { name: "Session Usage: $0.00" }).click();
+    const usage = page.locator(".session-usage-popover").first();
+    await expect(usage.locator(".session-usage-head > span")).toHaveText("$0.00");
+    await expect(usage.locator(".session-usage-models")).toHaveCount(0);
+    if (detailState === "failed") {
+      await expect(usage.getByRole("alert")).toHaveText("Usage detail unavailable");
+    } else {
+      await expect(usage.getByRole("alert")).toHaveCount(0);
+    }
+    await page.screenshot({ path: `${SHOT}/desktop-free-${detailState}.png` });
+  });
+}
 
 test("desktop: an unknown context window hides the ring and keeps the cost control", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
