@@ -1234,6 +1234,230 @@ test("an idle terminal notification preserves launch metadata and requests one c
   driver.dispose();
 });
 
+test("an idle provider-initiated turn records its reply instead of discarding every frame", async () => {
+  const child = fakeProcess();
+  const events: SessionEventPayload[] = [];
+  const stderr: string[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onEvent: (event) => events.push(event),
+      onStderr: (text) => stderr.push(text),
+    },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("launch background work");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    session_id: (driver as any).sessionId,
+    message: { role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "message_start", message: { id: "provider-turn" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Background reply" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "assistant",
+    message: { id: "provider-turn", content: [{ type: "tool_use", id: "provider-tool", name: "Bash", input: { command: "pwd" } }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "provider-tool", content: "done" }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "result", subtype: "success", usage: { input_tokens: 2, output_tokens: 3 },
+  }) + "\n");
+  await nextTask();
+
+  assert.equal(events.some((event) => event.kind === "agent_message" && event.text === "Background reply"), true);
+  assert.equal(events.some((event) => event.kind === "tool_call" && event.toolCallId === "provider-tool"), true);
+  assert.equal(events.some((event) => event.kind === "tool_call_update" && event.toolCallId === "provider-tool"), true);
+  assert.equal(events.some((event) => event.kind === "token_usage"), true);
+  assert.equal(stderr.some((text) => /outside an active Claude turn/.test(text)), false);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("a real prompt waits for an earlier provider-initiated turn and receives its own reply", async () => {
+  const child = fakeProcess();
+  const writes: string[] = [];
+  child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+  const events: SessionEventPayload[] = [];
+  const stderr: string[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onEvent: (event) => events.push(event),
+      onStderr: (text) => stderr.push(text),
+    },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("launch background work");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    session_id: (driver as any).sessionId,
+    message: { role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] },
+  }) + "\n");
+  await nextTask();
+  let realSettled = false;
+  const real = driver.prompt("the real prompt").then((reason) => {
+    realSettled = true;
+    return reason;
+  });
+  await nextTask();
+  assert.equal(writes.filter((write) => write.includes("\"type\":\"user\"")).length, 1);
+
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "message_start", message: { id: "provider-turn" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Provider reply" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await nextTask();
+  assert.equal(realSettled, false, "the provider result must not settle the queued real prompt");
+  assert.equal(writes.filter((write) => write.includes("\"type\":\"user\"")).length, 2);
+  assert.ok(writes.some((write) => write.includes("the real prompt")));
+
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "message_start", message: { id: "real-turn" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Real reply" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await real, "end_turn");
+  assert.deepEqual(
+    events.filter((event) => event.kind === "agent_message").map((event) => event.text),
+    ["Provider reply", "Real reply"],
+  );
+  assert.deepEqual(stderr, []);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("provider-initiated turns surface answerable approvals and structured questions", async () => {
+  const child = fakeProcess();
+  const writes: string[] = [];
+  child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+  const events: SessionEventPayload[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: { ...steeringCapabilities, permissionModes: ["default"] },
+      config: { permissionMode: "default" },
+    },
+    { ...noopCb, onEvent: (event) => events.push(event) },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("launch background work");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    session_id: (driver as any).sessionId,
+    message: { role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: "provider-approval",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "pwd" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: "provider-question",
+    request: {
+      subtype: "can_use_tool",
+      tool_name: "AskUserQuestion",
+      input: { questions: [{ question: "Continue?", header: "Choice", options: [{ label: "Yes", description: "Continue." }], multiSelect: false }] },
+    },
+  }) + "\n");
+  await nextTask();
+  assert.ok(events.some((event) => event.kind === "permission_request" && event.requestId === "provider-approval"));
+  assert.ok(events.some((event) => event.kind === "question_request" && event.requestId === "provider-question"));
+  assert.equal(driver.resolvePermission("provider-approval", "allow"), true);
+  assert.equal(driver.answerQuestion("provider-question", { "Continue?": "Yes" }), true);
+  await nextTask();
+  assert.ok(writes.some((write) => write.includes("provider-approval") && write.includes("control_response")));
+  assert.ok(writes.some((write) => write.includes("provider-question") && write.includes("answers")));
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await nextTask();
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("unattributable persistent turn frames emit structured errors without changing idle system handling", async () => {
+  const child = fakeProcess();
+  const events: SessionEventPayload[] = [];
+  const stderr: string[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onEvent: (event) => events.push(event),
+      onStderr: (text) => stderr.push(text),
+    },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const first = driver.prompt("establish transport");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await first, "end_turn");
+
+  child.stdout.write(JSON.stringify({ type: "assistant", message: { content: [] } }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "control_request",
+    request_id: "ownerless",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "pwd" } },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "system", subtype: "status", status: "idle" }) + "\n");
+  await nextTask();
+
+  const errors = events.filter((event) => event.kind === "error");
+  assert.equal(errors.length, 3);
+  assert.ok(errors.every((event) => /outside an active Claude turn/.test(event.message)));
+  assert.equal(driver.resolvePermission("ownerless", "allow"), false);
+  assert.deepEqual(stderr, []);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
 test("an idle persistent exit with pending work reaches the manager exit callback", async () => {
   const child = fakeProcess();
   const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];

@@ -86,8 +86,10 @@ interface PendingBackgroundTask {
 
 interface PersistentTurn {
   id: number;
+  origin: "runner" | "provider";
   promptText: string;
   images: PromptImage[];
+  done: Promise<StopReason>;
   resolve: (reason: StopReason) => void;
   settled: boolean;
   writeAcknowledged: boolean;
@@ -701,16 +703,6 @@ export class ClaudeCodeDriver implements Driver {
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
-    // Each turn names its own model: a turn that settles before any assistant record must not
-    // inherit the previous turn's, which after a model switch would misattribute it.
-    this.turnModel = null;
-    this.turnContextOccupancy = null;
-    this.turnShownText = "";
-    this.turnUnshownText = "";
-    this.turnStreamedMessageIds.clear();
-    this.turnAnonymousShownText = "";
-    this.turnAnonymousShownOverflow = false;
-    this.turnErrorText = null;
     const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
     if (capabilityError) {
       this.cb.onEvent({ kind: "error", message: capabilityError });
@@ -723,7 +715,25 @@ export class ClaudeCodeDriver implements Driver {
     if (this.persistentRequested && !this.persistentCircuitOpen) {
       return this.promptPersistent(text, images, slashCommand);
     }
+    this.resetTurnEventState();
     return this.promptOneShot(text, images, slashCommand);
+  }
+
+  /** Reset fields whose values belong to exactly one provider turn. This happens when a turn
+   * actually takes ownership of the stream, not when a runner prompt is queued behind an
+   * unsolicited provider turn. Resetting at queue time would erase the provider turn's model,
+   * completion, and duplicate-suppression state while its reply is still arriving. */
+  private resetTurnEventState(): void {
+    // Each turn names its own model: a turn that settles before any assistant record must not
+    // inherit the previous turn's, which after a model switch would misattribute it.
+    this.turnModel = null;
+    this.turnContextOccupancy = null;
+    this.turnShownText = "";
+    this.turnUnshownText = "";
+    this.turnStreamedMessageIds.clear();
+    this.turnAnonymousShownText = "";
+    this.turnAnonymousShownOverflow = false;
+    this.turnErrorText = null;
   }
 
   async steer({ submissionId, text, images = [], deadlineAt }: DriverSteerInput): Promise<DriverSteerResult> {
@@ -987,28 +997,65 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   private promptPersistent(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
-    if (this.activePersistentTurn) {
+    const activeTurn = this.activePersistentTurn;
+    if (activeTurn?.origin === "provider") {
+      // Claude can begin a turn itself after a background-task notification. Preserve FIFO at the
+      // provider boundary: only write this real prompt once that turn's own result has arrived.
+      return activeTurn.done.then(() => {
+        if (this.disposed || this.cancelled) return "cancelled";
+        return this.promptPersistent(text, images, slashCommand);
+      });
+    }
+    if (activeTurn) {
       this.cb.onEvent({ kind: "error", message: "Claude persistent transport received overlapping prompts." });
       return Promise.resolve("refusal");
     }
+    this.resetTurnEventState();
     this.clearIdleTimer();
     this.cancelled = false;
     this.pendingApprovals.clear();
     this.streamedAgentResponse = false;
     const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
-    return new Promise<StopReason>((resolve) => {
-      const turn: PersistentTurn = {
-        id: ++this.providerTurnSeq,
-        promptText,
-        images: images ?? [],
-        resolve,
-        settled: false,
-        writeAcknowledged: false,
-        launchAttempts: 0,
-      };
-      this.activePersistentTurn = turn;
-      this.startPersistentTurn(turn);
-    });
+    let resolveTurn!: (reason: StopReason) => void;
+    const done = new Promise<StopReason>((resolve) => { resolveTurn = resolve; });
+    const turn: PersistentTurn = {
+      id: ++this.providerTurnSeq,
+      origin: "runner",
+      promptText,
+      images: images ?? [],
+      done,
+      resolve: resolveTurn,
+      settled: false,
+      writeAcknowledged: false,
+      launchAttempts: 0,
+    };
+    this.activePersistentTurn = turn;
+    this.startPersistentTurn(turn);
+    return done;
+  }
+
+  /** Claim an unsolicited user frame and all following turn-bound frames until its result. */
+  private beginProviderInitiatedTurn(): PersistentTurn {
+    this.resetTurnEventState();
+    this.clearIdleTimer();
+    this.pendingApprovals.clear();
+    this.streamedAgentResponse = false;
+    let resolveTurn!: (reason: StopReason) => void;
+    const done = new Promise<StopReason>((resolve) => { resolveTurn = resolve; });
+    const turn: PersistentTurn = {
+      id: ++this.providerTurnSeq,
+      origin: "provider",
+      promptText: "",
+      images: [],
+      done,
+      resolve: resolveTurn,
+      settled: false,
+      // The provider already owns this input. It must never enter the runner prompt retry path.
+      writeAcknowledged: true,
+      launchAttempts: 0,
+    };
+    this.activePersistentTurn = turn;
+    return turn;
   }
 
   /** Launch (or reuse) the long-lived stream-json CLI and deliver exactly one queued turn. */
@@ -1205,13 +1252,21 @@ export class ClaudeCodeDriver implements Driver {
 
     if (this.acknowledgeClaudeSteer(msg)) return;
 
-    const turn = this.activePersistentTurn;
+    let turn = this.activePersistentTurn;
+    if (!turn && msg.type === "user") {
+      turn = this.beginProviderInitiatedTurn();
+    }
     if (!turn) {
       this.observeBackgroundLifecycle(msg);
       if (msg.type === "rate_limit_event") {
         this.cb.onSubscriptionUsage?.({ provider: "claude", kind: "sparse", payload: msg });
       } else if (msg.type !== "system") {
-        this.cb.onStderr(`ignored ${String(msg.type ?? "unknown")} outside an active Claude turn`);
+        const type = String(msg.type ?? "unknown");
+        if (type === "assistant" || type === "result" || type === "control_request" || type === "stream_event") {
+          this.cb.onEvent({ kind: "error", message: `Claude sent a ${type} frame outside an active Claude turn.` });
+        } else {
+          this.cb.onStderr(`ignored ${type} outside an active Claude turn`);
+        }
       }
       return;
     }
@@ -1641,6 +1696,19 @@ export class ClaudeCodeDriver implements Driver {
 
   private handlePersistentFailure(message: string, turn: PersistentTurn): void {
     if (turn.settled || this.activePersistentTurn !== turn) return;
+    if (turn.origin === "provider") {
+      this.cb.onEvent({
+        kind: "error",
+        message: `${message}; the provider-initiated turn ended before its terminal result`,
+      });
+      this.stopPersistentTransport(false, "process_exit");
+      if (!turn.settled && this.activePersistentTurn === turn) {
+        turn.settled = true;
+        this.activePersistentTurn = null;
+        turn.resolve("refusal");
+      }
+      return;
+    }
     // A failed write that was never acknowledged is the only safe automatic retry. Once
     // acknowledged, the CLI may already have persisted the message, so retrying could duplicate it.
     if (!turn.writeAcknowledged && turn.launchAttempts < 2) {
@@ -1842,6 +1910,7 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   cancel(): void {
+    this.cancelled = true;
     this.streamingMessageIds.clear();
     if (this.activePersistentTurn) {
       const turn = this.activePersistentTurn;
