@@ -59,6 +59,57 @@ test("job and delivery presentation keep current lifecycle separate from deliver
   assert.equal(backgroundJobDeliveryStage({ ...baseJob, assistantResultPersistedAt: 5_000 }), "Result Delivered");
 });
 
+test("every watchdog highlights its delivery and explains completion, recovery, and user action", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const cases = [
+    ["terminal_without_continuation", "Result Pending", /returning the result automatically/, /No action is needed/],
+    ["accepted_without_result", "Result Missing", /will not repeat an accepted step/, /send a follow-up prompt/],
+    ["result_not_projected", "Transcript Delayed", /updating the transcript automatically/, /No action is needed/],
+    ["dashboard_observation_pending", "Notification Pending", /waiting for the dashboard confirmation/, /No action is needed/],
+  ] as const;
+  try {
+    for (const [watchdogState, label, recovery, action] of cases) {
+      await act(async () => root.render(
+        <BackgroundWorkPanel
+          session={{
+            id: "session",
+            runnerId: "runner",
+            backgroundWorkTracking: "managed",
+            backgroundJobs: [],
+            backgroundDeliveries: [{
+              parentTurnId: "turn-1",
+              jobCount: 1,
+              terminalCount: 1,
+              watchdogState,
+            }],
+          } as unknown as SessionView}
+          runnerOnline
+          runnerProtocolVersion={PROTOCOL_VERSION}
+          parentTurnEventIds={new Map([["turn-1", 42]])}
+          onOpenParentTurn={() => undefined}
+        />,
+      ));
+      const highlighted = container.querySelector<HTMLElement>(".background-work-group-watchdog");
+      assert.equal(highlighted?.dataset["watchdogState"], watchdogState);
+      assert.equal(highlighted?.dataset["watchdogHighlighted"], "true");
+      const summary = highlighted?.querySelector<HTMLElement>(".background-delivery-summary");
+      assert.match(summary?.textContent ?? "", new RegExp(label));
+      assert.match(summary?.textContent ?? "", /Completed.*Still Pending.*Recovery.*Your Action/s);
+      assert.match(summary?.textContent ?? "", recovery);
+      assert.match(summary?.textContent ?? "", action);
+      const details = summary?.querySelector("details");
+      assert.equal(details?.open, false);
+      assert.equal(details?.querySelector("code")?.textContent, watchdogState);
+    }
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("the panel renders individual jobs, their parent barrier, durable times, and a transcript action", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

@@ -43,6 +43,7 @@ export function PinnedSummary({
   richGitSupported,
   items,
   onOpenReview,
+  onOpenBackgroundWork,
   onOpenSourceLocation,
 }: {
   session: SessionView;
@@ -52,6 +53,7 @@ export function PinnedSummary({
   richGitSupported: boolean;
   items: TimelineItem[];
   onOpenReview: () => void;
+  onOpenBackgroundWork?: () => void;
   onOpenSourceLocation: (location: SourceLocation) => void;
 }) {
   const { navigate } = useStoreActions();
@@ -130,6 +132,7 @@ export function PinnedSummary({
           <div className="ps-row is-static">
             <BackgroundDeliveryBadge
               state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
+              onOpen={onOpenBackgroundWork}
             />
           </div>
         )}

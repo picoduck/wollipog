@@ -513,9 +513,9 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
   assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 5 Sessions");
   assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 6 Sessions");
   assert.match(container.textContent ?? "", /Background Work Orphaned/);
-  assert.match(container.textContent ?? "", /Continuation Required/);
+  assert.match(container.textContent ?? "", /Result Pending/);
   assert.ok(container.querySelector('[aria-label="Attention: Background Work Orphaned"]'));
-  assert.ok(container.querySelector('[aria-label="Attention: Continuation Required"]'));
+  assert.ok(container.querySelector('[aria-label="Attention: Result Pending"]'));
 
   await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
   assert.deepEqual(rowTitles(container), [
