@@ -829,6 +829,109 @@ test("merged PR worktrees remain discardable after their remote branches are del
   }
 });
 
+test("legacy merged-worktree discard refreshes launch state and reports vanished records", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-legacy-discard-refresh-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_legacy_discard_refresh", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const launching = await manager.requestWorktree(
+      "s_legacy_discard_refresh",
+      { baseRef: "HEAD", branch: "fix/legacy-discard-launching" },
+    );
+    const vanished = await manager.requestWorktree(
+      "s_legacy_discard_refresh",
+      { baseRef: "HEAD", branch: "fix/legacy-discard-vanished" },
+    );
+    for (const [worktree, pullRequest] of [
+      [launching.worktree, "https://github.com/picoduck/wollipog/pull/720"],
+      [vanished.worktree, "https://github.com/picoduck/wollipog/pull/721"],
+    ] as const) {
+      execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
+      await manager.linkWorktreePullRequest("s_legacy_discard_refresh", worktree.path, pullRequest);
+      execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
+    }
+    const beforeLegacyPatch = store.readMeta("s_legacy_discard_refresh")!;
+    store.patchMeta("s_legacy_discard_refresh", {
+      status: "idle",
+      worktreePath: null,
+      worktreePending: false,
+      worktrees: beforeLegacyPatch.worktrees?.map((item) => ({
+        ...item,
+        pullRequest: item.pullRequest
+          ? { ...item.pullRequest, state: "merged" as const, headOid: undefined }
+          : undefined,
+      })),
+    });
+
+    const internals = manager as unknown as {
+      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged"; headOid: string }>;
+    };
+    const deferForgeResolution = (expectedPath: string) => {
+      let signalStarted!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      internals.resolveWorktreePullRequestState = async (path) => {
+        assert.equal(path, expectedPath);
+        const headOid = execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        signalStarted();
+        await gate;
+        return { state: "merged", headOid };
+      };
+      return { started, release };
+    };
+
+    const launchingResolution = deferForgeResolution(launching.worktree.path);
+    const launchingDiscard = manager.discardWorktree("s_legacy_discard_refresh", launching.worktree.path);
+    await launchingResolution.started;
+    store.patchMeta("s_legacy_discard_refresh", {
+      status: "starting",
+      worktreePath: launching.worktree.path,
+      worktreeBranch: launching.worktree.branch,
+      worktreePending: true,
+    });
+    launchingResolution.release();
+    await assert.rejects(launchingDiscard, /still being launched by a provider process/);
+    assert.equal(existsSync(launching.worktree.path), true,
+      "a launch recorded during forge verification keeps the merged worktree intact");
+    assert.equal(store.readMeta("s_legacy_discard_refresh")?.worktrees
+      ?.find((item) => item.path === launching.worktree.path)?.pullRequest?.headOid,
+      execFileSync("git", ["-C", launching.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      "the refreshed merge proof is retained while launch state blocks cleanup");
+
+    store.patchMeta("s_legacy_discard_refresh", {
+      status: "idle",
+      worktreePath: null,
+      worktreeBranch: undefined,
+      worktreePending: false,
+    });
+    const vanishedResolution = deferForgeResolution(vanished.worktree.path);
+    const vanishedDiscard = manager.discardWorktree("s_legacy_discard_refresh", vanished.worktree.path);
+    await vanishedResolution.started;
+    const beforeRemoval = store.readMeta("s_legacy_discard_refresh")!;
+    store.patchMeta("s_legacy_discard_refresh", {
+      worktrees: beforeRemoval.worktrees?.filter((item) => item.path !== vanished.worktree.path),
+    });
+    vanishedResolution.release();
+    await assert.rejects(vanishedDiscard, /worktree record was removed while checking forge state/);
+    assert.equal(existsSync(vanished.worktree.path), true,
+      "a vanished metadata record is not misreported as a filesystem removal");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("terminal PR cleanup waits until the provider releases its exact cwd", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-active-pr-worktree-"));
   const dataDir = join(root, "data");
