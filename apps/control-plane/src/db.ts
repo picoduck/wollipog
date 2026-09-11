@@ -18379,6 +18379,32 @@ export class ControlPlaneDb {
     return expired;
   }
 
+  /** Write off the commands of an execution that ran out its delivery bound. Same at-most-once
+   * split as `expireAutomationCommands`: staged and pending never left the control plane, while a
+   * `sent` attempt may be running on a runner we can no longer reach, so it settles `uncertain`. */
+  expireUndeliveredAutomationCommands(executionId: string, now: number): AutomationCommandRecord[] {
+    const rows = this.stmt(
+      `SELECT * FROM automation_commands WHERE execution_id=? AND state IN ('staged','pending','sent')
+       ORDER BY ordinal, command_id`,
+    ).all(executionId) as unknown as AutomationCommandRow[];
+    const expired: AutomationCommandRecord[] = [];
+    for (const row of rows) {
+      const accepted = row.state === "sent";
+      const applied = this.recordAutomationCommandReceipt({
+        commandId: row.command_id,
+        runnerId: row.runner_id,
+        state: accepted ? "uncertain" : "rejected",
+        revision: row.revision + 1,
+        error: `durable automation command '${row.command_id}' was not delivered to runner ` +
+          `'${row.runner_id}' within its delivery bound` +
+          (accepted ? "; the runner may already have accepted it, so it was not replayed" : ""),
+        now,
+      });
+      if (applied) expired.push(applied.command);
+    }
+    return expired;
+  }
+
   markAutomationCommandSent(
     commandId: string,
     requestId: string,

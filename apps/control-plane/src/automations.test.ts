@@ -1508,3 +1508,153 @@ test("workflow members receive stable distinct command and session ids", () => {
   ]);
   assert.equal(new Set(commands.map((command) => command.commandId)).size, 2);
 });
+
+test("a command that never reaches its runner settles the execution and releases the wait policy", () => {
+  const { db, service, online } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  assert.equal(service.tick(60_000), 1);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const command = db.listAutomationCommands(execution.executionId)[0]!;
+  assert.equal(command.state, "sent");
+  online.delete("runner-1");
+
+  let claimed = 0;
+  for (const minute of [2, 10, 20, 30]) claimed += service.tick(minute * 60_000);
+  assert.equal(claimed, 0);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "dispatching",
+    "the execution is still inside its delivery bound");
+
+  service.tick(31 * 60_000);
+  const settled = db.getAutomationExecution(execution.executionId)!;
+  assert.equal(settled.status, "failed", "an undeliverable execution gives up on the automation's cadence");
+  assert.equal(db.listAutomationCommands(execution.executionId)[0]?.state, "uncertain",
+    "a sent attempt may already be running on the unreachable runner, so it is never replayed");
+  assert.match(settled.error ?? "", new RegExp(command.commandId));
+  assert.match(settled.error ?? "", /runner-1/);
+
+  online.add("runner-1");
+  assert.equal(service.tick(32 * 60_000), 1, "the automation claims its next occurrence once the dead one settles");
+});
+
+test("a flush outside the tick cannot transmit a command past its delivery bound", () => {
+  // `receipt()` flushes for the whole runner after any advancing receipt, and runner registration
+  // does the same, so ordering the sweep ahead of the tick's own flush is not enough: the bound can
+  // elapse between the sweep and one of those flushes. A second automation on the same runner is
+  // what makes that flush happen without a tick.
+  const { db, service, online, delivered } = harness();
+  const stalled = service.create(baseSpec({ name: "Stalled" }), { kind: "human", id: "device" }, 0).data!;
+  const neighbour = service.create(baseSpec({ name: "Neighbour" }), { kind: "human", id: "device" }, 0).data!;
+  service.tick(60_000);
+  const execution = db.listAutomationExecutions(stalled.automationId)[0]!;
+  const command = execution.commands![0]!;
+  const first = delivered.find((message) =>
+    (message as { commandId?: string }).commandId === command.commandId) as { requestId: string };
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: command.commandId,
+    sessionId: command.sessionId, state: "started", revision: 2,
+  }, 60_100);
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_result", requestId: first.requestId, duplicate: false,
+    commandId: command.commandId, sessionId: command.sessionId, state: "failed", revision: 3,
+    code: "COMMAND_CANCELLED",
+    error: "provider refusal: Failed to refresh OAuth token: another Claude Code process is refreshing it",
+  }, 60_200);
+  const replacement = db.listAutomationCommands(execution.executionId)[1]!;
+  assert.equal(replacement.state, "pending");
+
+  const other = db.listAutomationExecutions(neighbour.automationId)[0]!;
+  const otherCommand = other.commands![0]!;
+  const before = delivered.length;
+
+  // No tick: an advancing receipt on the neighbour flushes the whole runner with the bound elapsed.
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: otherCommand.commandId,
+    sessionId: otherCommand.sessionId, state: "started", revision: 2,
+  }, 60_200 + 31 * 60_000);
+
+  const sent = delivered.slice(before).filter((message) =>
+    (message as { commandId?: string }).commandId === replacement.commandId);
+  assert.deepEqual(sent, [], "a direct flush must not transmit a command past its delivery bound");
+  assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "pending",
+    "and it must not be expired mid-flush either — the sweep owns that decision");
+});
+
+test("the delivery bound is decided before the outbox can transmit anything", () => {
+  // The outbox marks a command `sent` and writes it to the runner in one step. If the bound were
+  // judged after that, a reconnect at the bound would hand the runner a launch and release the
+  // `wait` policy in the same tick — two live sessions for the occurrence that was just written off.
+  const { db, service, online, delivered } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  service.tick(60_000);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const command = execution.commands![0]!;
+  const first = delivered[0] as { requestId: string };
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: command.commandId,
+    sessionId: command.sessionId, state: "started", revision: 2,
+  }, 60_100);
+  // A transiently refused launch leaves a replacement queued but not yet delivered.
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_result", requestId: first.requestId, duplicate: false,
+    commandId: command.commandId, sessionId: command.sessionId, state: "failed", revision: 3,
+    code: "COMMAND_CANCELLED",
+    error: "provider refusal: Failed to refresh OAuth token: another Claude Code process is refreshing it",
+  }, 60_200);
+  const replacement = db.listAutomationCommands(execution.executionId)[1]!;
+  assert.equal(replacement.state, "pending");
+  const sentBefore = delivered.filter((message) =>
+    (message as { type?: string }).type === "durable_session_command").length;
+
+  // The runner is reachable again exactly when the bound has elapsed.
+  online.delete("runner-1");
+  online.add("runner-1");
+  service.tick(60_200 + 31 * 60_000);
+
+  const settled = db.listAutomationCommands(execution.executionId);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "failed");
+  // Provably never transmitted, so the replacement is `rejected` rather than `uncertain` — and no
+  // durable command for this execution left the control plane on the tick that wrote it off.
+  assert.equal(settled[1]?.state, "rejected");
+  const replacementSends = delivered.slice(sentBefore).filter((message) =>
+    (message as { commandId?: string }).commandId === replacement.commandId);
+  assert.deepEqual(replacementSends, [], "the expired replacement must never reach a runner");
+});
+
+test("a transient-refusal replacement that never reaches its runner settles the execution", () => {
+  const { db, service, online, delivered } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  assert.equal(service.tick(60_000), 1);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const command = execution.commands![0]!;
+
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: command.commandId,
+    sessionId: command.sessionId, state: "started", revision: 2,
+  }, 60_100), true);
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_result", requestId: (delivered[0] as { requestId: string }).requestId,
+    duplicate: false, commandId: command.commandId, sessionId: command.sessionId, state: "failed",
+    revision: 3, code: "COMMAND_CANCELLED", error: TRANSIENT_REFUSAL,
+  }, 60_200), true);
+  const replacement = db.listAutomationCommands(execution.executionId)[1]!;
+  assert.equal(replacement.state, "pending");
+  online.delete("runner-1");
+
+  let claimed = 0;
+  for (const minute of [2, 10, 20, 31]) claimed += service.tick(minute * 60_000);
+  assert.equal(claimed, 0);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running",
+    "a queued replacement keeps its own full delivery bound");
+  assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "pending");
+
+  service.tick(32 * 60_000);
+  const settled = db.getAutomationExecution(execution.executionId)!;
+  assert.equal(settled.status, "failed");
+  assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "rejected",
+    "a replacement that was never sent is provably unaccepted");
+  assert.match(settled.error ?? "", new RegExp(replacement.commandId));
+  assert.match(settled.error ?? "", /runner-1/);
+
+  online.add("runner-1");
+  assert.equal(service.tick(33 * 60_000), 1);
+});
