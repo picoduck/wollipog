@@ -9628,11 +9628,15 @@ body.shell-dock-dragging * {
      floor of its own. Left at 20px it would add a pixel to every phone card. */
   .inbox-row-copy { min-height: auto; }
   /* A phone's first line has the sender and up to three pills side by side; the time moved to
-     line three in #934. The cluster still packs tighter than the desktop's, and the sender is
-     still what gives way, so the space the time left goes to the agent's name (#916). */
-  .inbox-row-signals { gap: 3px; }
-  .inbox-status-pill { padding: 0 5px; }
-  .inbox-row-sender { min-width: 0; gap: 5px; }
+     line three in #934. The sender is what gives way there, so every pixel the cluster does not
+     need is the agent's name: the card spends its densest line on spacing rather than on words.
+     These four values are what let "Claude" survive beside the icon on an indented three-pill card
+     at 390px in DejaVu Sans, the widest face the fixtures render in — the phone spec pins that face
+     and measures it, so the margin is checked rather than assumed (#934). */
+  .inbox-row { column-gap: 8px; }
+  .inbox-row-signals { gap: 2px; }
+  .inbox-status-pill { padding: 0 4px; }
+  .inbox-row-sender { min-width: 0; gap: 4px; }
   .inbox-row-base { display: none; }
   .inbox-row-meta { gap: 6px; }
   .inbox-row-activity { width: 58px; gap: 0; }

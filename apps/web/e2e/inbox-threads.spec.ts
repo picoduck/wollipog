@@ -116,19 +116,13 @@ test("t, Shift+T, p, and the arrows drive the thread, the chevron is the pointer
   expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);
 });
 
-test("a phone narrows the spine and keeps the family chip's dots", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await openList(page);
-  await expect(page.locator(".inbox-row").first().locator(":scope > *").first()).toHaveClass(/inbox-row-sender/);
-  await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
-  await expect(parentRow(page).locator(".inbox-thread-dot")).toHaveCount(4);
-  await expect(parentRow(page).locator(".inbox-thread-family-text")).toBeHidden();
-  // One compact attention pill on a phone: the top-priority kind and how many more requests.
-  const approval = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
-  await expect(approval.locator(".inbox-status-pill.blocked")).toHaveCount(1);
-  await expect(approval.locator(".inbox-status-pill.blocked")).toHaveAttribute("aria-label", "Attention: Answer Required, 3 Requests");
-  await expect(approval.locator(".inbox-status-pill-count")).toHaveText("+2");
-  const geometry = await page.locator(".inbox-row-shell").evaluateAll((shells) => shells.map((shell) => {
+/**
+ * Line one's geometry for every card, measured in the page.
+ *
+ * Self-contained on purpose: Playwright serialises this function, so it can call nothing from the
+ * module around it. Both font passes in the phone test below share it verbatim.
+ */
+const measureLineOne = (shells: Element[]) => shells.map((shell) => {
     const row = shell.querySelector<HTMLElement>(".inbox-row")!;
     const box = row.getBoundingClientRect();
     const style = getComputedStyle(row);
@@ -165,7 +159,21 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
       // Positive means the word is cut off by the label's clip box.
       firstWordClipped: wordBox.right - labelBox.right,
     };
-  }));
+});
+
+test("a phone narrows the spine and keeps the family chip's dots", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openList(page);
+  await expect(page.locator(".inbox-row").first().locator(":scope > *").first()).toHaveClass(/inbox-row-sender/);
+  await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
+  await expect(parentRow(page).locator(".inbox-thread-dot")).toHaveCount(4);
+  await expect(parentRow(page).locator(".inbox-thread-family-text")).toBeHidden();
+  // One compact attention pill on a phone: the top-priority kind and how many more requests.
+  const approval = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
+  await expect(approval.locator(".inbox-status-pill.blocked")).toHaveCount(1);
+  await expect(approval.locator(".inbox-status-pill.blocked")).toHaveAttribute("aria-label", "Attention: Answer Required, 3 Requests");
+  await expect(approval.locator(".inbox-status-pill-count")).toHaveText("+2");
+  const geometry = await page.locator(".inbox-row-shell").evaluateAll(measureLineOne);
   // Every phone card measures the same, whatever its pills (#917), and indenting changes nothing.
   expect(new Set(geometry.map((row) => row.height)).size, JSON.stringify(geometry)).toBe(1);
   for (const row of geometry) expect(row.left - geometry[0]!.left).toBe(row.child ? 14 : 0);
@@ -189,6 +197,26 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
     .toBeLessThanOrEqual(0.5);
   expect(three.signalsOverflowRight).toBeLessThanOrEqual(0.5);
   expect(three.signalsOverflowLeft).toBeLessThanOrEqual(0.5);
+
+  /*
+   * The same card again in the WIDEST face these fixtures render in.
+   *
+   * The app asks for Segoe UI and falls back through system-ui to plain sans-serif, so the text's
+   * advance width depends on which faces the machine has: this box resolves it to Noto Sans, CI to
+   * DejaVu Sans, about 8% wider, which leaves line one several pixels tighter. That gap is how the
+   * first-word guarantee passed here and failed there (#934). Pinning the wide face makes the tight
+   * case deterministic on every machine instead of only on the unlucky one.
+   */
+  await page.addStyleTag({
+    content: '.inbox-row, .inbox-row * { font-family: "DejaVu Sans", "Liberation Sans", sans-serif !important; }',
+  });
+  const wide = await page.locator(".inbox-row-shell").evaluateAll(measureLineOne);
+  const wideThree = wide.find((row) => row.title?.startsWith("#603"))!;
+  expect(wideThree.firstWordWidth, "the pinned face is at least as wide as the ambient one")
+    .toBeGreaterThanOrEqual(three.firstWordWidth);
+  expect(wideThree.firstWordClipped, `"${wideThree.firstWord}" is clipped by ${wideThree.firstWordClipped}px in the wide face`)
+    .toBeLessThanOrEqual(0.5);
+  expect(wideThree.signalsOverflowRight).toBeLessThanOrEqual(0.5);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `${EVIDENCE}/phone-expanded.png`, fullPage: true });
 });
