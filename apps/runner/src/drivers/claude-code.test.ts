@@ -1238,7 +1238,7 @@ test("an idle provider-initiated turn records its reply instead of discarding ev
   const child = fakeProcess();
   const events: SessionEventPayload[] = [];
   const stderr: string[] = [];
-  const lifecycle: string[] = [];
+  const lifecycle: Array<[string, string]> = [];
   const driver = new ClaudeCodeDriver(
     {
       ...baseOpts,
@@ -1250,7 +1250,7 @@ test("an idle provider-initiated turn records its reply instead of discarding ev
       ...noopCb,
       onEvent: (event) => events.push(event),
       onStderr: (text) => stderr.push(text),
-      onProviderInitiatedTurn: (state) => lifecycle.push(state),
+      onProviderInitiatedTurn: (state, turnId) => lifecycle.push([state, turnId]),
     },
     { spawn: () => child, kill: () => {} } as any,
   );
@@ -1290,9 +1290,74 @@ test("an idle provider-initiated turn records its reply instead of discarding ev
   assert.equal(events.some((event) => event.kind === "tool_call_update" && event.toolCallId === "provider-tool"), true);
   assert.equal(events.some((event) => event.kind === "token_usage"), true);
   assert.equal(stderr.some((text) => /outside an active Claude turn/.test(text)), false);
-  assert.deepEqual(lifecycle, ["started", "settled"]);
+  assert.deepEqual(lifecycle, [["started", "provider:2"], ["settled", "provider:2"]]);
   driver.dispose();
   child.emit("close", 0);
+});
+
+test("a runner error survives a provider turn beginning in the same stdout chunk", async () => {
+  const child = fakeProcess();
+  const lifecycle: string[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    { ...noopCb, onProviderInitiatedTurn: (state) => lifecycle.push(state) },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const turn = driver.prompt("fail before background completion");
+  await nextTask();
+  child.stdout.write(
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "Specific runner failure",
+      usage: {},
+    }) + "\n" + JSON.stringify({
+      type: "user",
+      session_id: (driver as any).sessionId,
+      message: { role: "user", content: [{ type: "text", text: "<task-notification>done</task-notification>" }] },
+    }) + "\n",
+  );
+
+  assert.equal(await turn, "refusal");
+  assert.equal(driver.lastTurnError(), "Specific runner failure");
+  assert.deepEqual(lifecycle, ["started"]);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("a trailing provider user frame cannot start a lifecycle after disposal", async () => {
+  const child = fakeProcess();
+  const lifecycle: string[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    { ...noopCb, onProviderInitiatedTurn: (state) => lifecycle.push(state) },
+    { spawn: () => child, kill: () => {}, trackKill: () => {} } as any,
+  );
+  const turn = driver.prompt("establish the transport");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    session_id: (driver as any).sessionId,
+    message: { role: "user", content: [{ type: "text", text: "trailing" }] },
+  }));
+
+  driver.dispose();
+  child.emit("close", 0);
+  await nextTask();
+  assert.deepEqual(lifecycle, []);
 });
 
 test("a real prompt waits for an earlier provider-initiated turn and receives its own reply", async () => {

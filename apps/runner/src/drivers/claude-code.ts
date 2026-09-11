@@ -438,6 +438,10 @@ export class ClaudeCodeDriver implements Driver {
   /** Provider account of why the active turn produced no output, kept for the durable receipt the
    * session manager writes after `prompt()` resolves. */
   private turnErrorText: string | null = null;
+  /** Error captured at a runner-owned settlement boundary. An unsolicited provider turn may begin
+   * in the same stdout chunk before the runner promise resumes, so the next turn's accumulator
+   * cannot be the durable receipt's only source. */
+  private settledRunnerTurnErrorText: string | null = null;
   private persistentBuffer: BoundedNdjsonBuffer | null = null;
   /** Monotonic across persistent and one-shot transports so late lifecycle events cannot alias a
    * turn from the transport used before a circuit fallback. */
@@ -533,7 +537,7 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   lastTurnError(): string | null {
-    return this.turnErrorText;
+    return this.settledRunnerTurnErrorText ?? this.turnErrorText;
   }
 
   setConfig(config: SessionConfig): void {
@@ -703,8 +707,10 @@ export class ClaudeCodeDriver implements Driver {
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
+    this.settledRunnerTurnErrorText = null;
     const capabilityError = claudeCapabilityError(this.config, images ?? [], this.opts.capabilities);
     if (capabilityError) {
+      this.settledRunnerTurnErrorText = capabilityError;
       this.cb.onEvent({ kind: "error", message: capabilityError });
       return Promise.resolve("refusal");
     }
@@ -901,6 +907,7 @@ export class ClaudeCodeDriver implements Driver {
         // that omit system/init. Refused/cancelled turns rely on init alone.
         if (r !== "refusal" && r !== "cancelled") this.markSessionEstablished();
         if (r !== "refusal" && r !== "cancelled") this.settleUnverifiedBackgroundTasks();
+        this.settledRunnerTurnErrorText = this.turnErrorText;
         resolve(r);
       };
 
@@ -1055,7 +1062,7 @@ export class ClaudeCodeDriver implements Driver {
       launchAttempts: 0,
     };
     this.activePersistentTurn = turn;
-    this.cb.onProviderInitiatedTurn?.("started");
+    this.cb.onProviderInitiatedTurn?.("started", `provider:${turn.id}`);
     return turn;
   }
 
@@ -1252,6 +1259,7 @@ export class ClaudeCodeDriver implements Driver {
     }
 
     if (this.acknowledgeClaudeSteer(msg)) return;
+    if (this.disposed) return;
 
     let turn = this.activePersistentTurn;
     if (!turn && msg.type === "user") {
@@ -1287,6 +1295,7 @@ export class ClaudeCodeDriver implements Driver {
     if (reason !== "cancelled") this.preparedBaseArgs();
     if (reason !== "refusal" && reason !== "cancelled") this.markSessionEstablished();
     if (reason !== "refusal" && reason !== "cancelled") this.settleUnverifiedBackgroundTasks();
+    if (turn.origin === "runner") this.settledRunnerTurnErrorText = this.turnErrorText;
     this.settlePersistentTurn(turn, reason);
     // Claude may have committed this result just before consuming a concurrently written steer as
     // its next input turn. The absent replay receipt makes that unknowable. Retire this process so
@@ -1309,7 +1318,7 @@ export class ClaudeCodeDriver implements Driver {
     if (turn.settled || this.activePersistentTurn !== turn) return false;
     turn.settled = true;
     this.activePersistentTurn = null;
-    if (turn.origin === "provider") this.cb.onProviderInitiatedTurn?.("settled");
+    if (turn.origin === "provider") this.cb.onProviderInitiatedTurn?.("settled", `provider:${turn.id}`);
     turn.resolve(reason);
     return true;
   }
