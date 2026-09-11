@@ -393,6 +393,9 @@ interface ActiveSession {
   steeringAvailable?: boolean;
   /** A prompt turn is in flight (the agent session can only run one at a time). */
   running: boolean;
+  /** Claude began a provider-owned turn while the runner queue was idle. Kept separate from
+   * `running`, whose ownership includes the queue drain and its process-wide lock. */
+  providerInitiatedTurnActive?: boolean;
   /** A cancel arrived before the agent process existed (during the pre-prompt turn snapshot) —
    * the driver-level cancel has nothing to kill there, so the next turn start honors this flag. */
   cancelRequested?: boolean;
@@ -3731,6 +3734,9 @@ export class SessionManager {
           if (!live.currentBackgroundJobIds?.length) return;
           live.backgroundPromptAccepted = true;
           this.markBackgroundContinuationAccepted(sessionId, live.currentBackgroundJobIds);
+        },
+        onProviderInitiatedTurn: (state) => {
+          this.onProviderInitiatedTurn(sessionId, client, state);
         },
         onSessionEstablished: (providerSessionId) => {
           const live = this.active.get(sessionId);
@@ -10022,6 +10028,19 @@ export class SessionManager {
   /** Persist/relay first, then enforce against the same normalized event stream every dashboard
    * sees. Cancellation is best-effort at the first observable threshold event; the tripped flag
    * keeps the session idle and holds its queue until an explicit v47 re-arm arrives. */
+  private onProviderInitiatedTurn(
+    sessionId: string,
+    client: Driver,
+    state: "started" | "settled",
+  ): void {
+    const live = this.active.get(sessionId);
+    if (live?.client !== client) return;
+    live.providerInitiatedTurnActive = state === "started";
+    // A queued runner prompt owns status through its normal drain. When no drain exists, this
+    // callback is the only lifecycle boundary that can clear an answered provider-owned ask.
+    if (!live.running) this.emitStatus(sessionId, state === "started" ? "running" : "idle");
+  }
+
   private onDriverEvent(sessionId: string, payload: SessionEventPayload): void {
     const entry = this.active.get(sessionId);
     if (entry?.historyIntegrityFailure) return;
@@ -10052,7 +10071,7 @@ export class SessionManager {
         if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
     }
-    if (!entry || !entry.running || entry.governanceTripped) return;
+    if (!entry || (!entry.running && !entry.providerInitiatedTurnActive) || entry.governanceTripped) return;
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
 

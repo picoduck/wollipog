@@ -109,6 +109,9 @@ export interface DriverCallbacks {
   onBackgroundWork?: (update: DriverBackgroundWorkUpdate) => void;
   /** Exact provider input acknowledgement for the currently active prompt. */
   onPromptAccepted?: () => void;
+  /** A persistent provider began or settled a turn without a runner prompt owning it. The session
+   * manager uses this to keep status, approvals, and governance aligned with the live turn. */
+  onProviderInitiatedTurn?: (state: "started" | "settled") => void;
   /** The provider proved that its resumable conversation coordinate exists. Drivers must not
    * emit this for a locally minted id until provider initialization confirms it. */
   onSessionEstablished?: (providerSessionId: string) => void;

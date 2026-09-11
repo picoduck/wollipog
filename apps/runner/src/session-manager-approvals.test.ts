@@ -90,6 +90,62 @@ test("delivered approval emits exactly one permission_resolved and flips box met
   }
 });
 
+test("provider-initiated turn settlement restores idle after an answered approval", () => {
+  const { sm, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started");
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "provider-ask",
+      title: "Bash: pwd",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Reject", kind: "reject_once" },
+      ],
+    });
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+    sm.resolvePermission("s_perm", "provider-ask", "allow");
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled");
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("provider-initiated turns enforce governance without claiming the runner queue drain", () => {
+  const { sm, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    let cancellations = 0;
+    entry.client.cancel = () => { cancellations += 1; };
+    store.patchMeta("s_perm", { config: { maxToolCalls: 1 } });
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started");
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "tool_call",
+      toolCallId: "provider-tool",
+      title: "Bash",
+      toolKind: "execute",
+      status: "in_progress",
+    });
+
+    assert.equal(entry.running, false);
+    assert.equal(entry.providerInitiatedTurnActive, true);
+    assert.equal(cancellations, 1);
+    assert.equal(entry.governanceTripped, "max_tool_calls");
+  } finally {
+    cleanup();
+  }
+});
+
 test("approval turnaround telemetry contains duration and dimensions, never session/request content", () => {
   const { sm, sent, cleanup } = makeHarness(true);
   try {

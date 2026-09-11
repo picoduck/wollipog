@@ -1238,6 +1238,7 @@ test("an idle provider-initiated turn records its reply instead of discarding ev
   const child = fakeProcess();
   const events: SessionEventPayload[] = [];
   const stderr: string[] = [];
+  const lifecycle: string[] = [];
   const driver = new ClaudeCodeDriver(
     {
       ...baseOpts,
@@ -1249,6 +1250,7 @@ test("an idle provider-initiated turn records its reply instead of discarding ev
       ...noopCb,
       onEvent: (event) => events.push(event),
       onStderr: (text) => stderr.push(text),
+      onProviderInitiatedTurn: (state) => lifecycle.push(state),
     },
     { spawn: () => child, kill: () => {} } as any,
   );
@@ -1288,6 +1290,7 @@ test("an idle provider-initiated turn records its reply instead of discarding ev
   assert.equal(events.some((event) => event.kind === "tool_call_update" && event.toolCallId === "provider-tool"), true);
   assert.equal(events.some((event) => event.kind === "token_usage"), true);
   assert.equal(stderr.some((text) => /outside an active Claude turn/.test(text)), false);
+  assert.deepEqual(lifecycle, ["started", "settled"]);
   driver.dispose();
   child.emit("close", 0);
 });

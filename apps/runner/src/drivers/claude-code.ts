@@ -1055,6 +1055,7 @@ export class ClaudeCodeDriver implements Driver {
       launchAttempts: 0,
     };
     this.activePersistentTurn = turn;
+    this.cb.onProviderInitiatedTurn?.("started");
     return turn;
   }
 
@@ -1282,13 +1283,11 @@ export class ClaudeCodeDriver implements Driver {
       turn.id,
       "Claude provider turn closed before steering acknowledgement",
     );
-    turn.settled = true;
-    this.activePersistentTurn = null;
     this.pendingApprovals.clear();
     if (reason !== "cancelled") this.preparedBaseArgs();
     if (reason !== "refusal" && reason !== "cancelled") this.markSessionEstablished();
     if (reason !== "refusal" && reason !== "cancelled") this.settleUnverifiedBackgroundTasks();
-    turn.resolve(reason);
+    this.settlePersistentTurn(turn, reason);
     // Claude may have committed this result just before consuming a concurrently written steer as
     // its next input turn. The absent replay receipt makes that unknowable. Retire this process so
     // a possible unowned turn can never alias the next Wollipog prompt's events or result.
@@ -1302,6 +1301,17 @@ export class ClaudeCodeDriver implements Driver {
     } else {
       this.armIdleEviction();
     }
+  }
+
+  /** Retire one exact turn owner and wake its waiter. Provider-owned turns have no public prompt
+   * promise, so their callback is the manager's only authoritative settlement boundary. */
+  private settlePersistentTurn(turn: PersistentTurn, reason: StopReason): boolean {
+    if (turn.settled || this.activePersistentTurn !== turn) return false;
+    turn.settled = true;
+    this.activePersistentTurn = null;
+    if (turn.origin === "provider") this.cb.onProviderInitiatedTurn?.("settled");
+    turn.resolve(reason);
+    return true;
   }
 
   private acknowledgeClaudeSteer(msg: Json): boolean {
@@ -1702,11 +1712,7 @@ export class ClaudeCodeDriver implements Driver {
         message: `${message}; the provider-initiated turn ended before its terminal result`,
       });
       this.stopPersistentTransport(false, "process_exit");
-      if (!turn.settled && this.activePersistentTurn === turn) {
-        turn.settled = true;
-        this.activePersistentTurn = null;
-        turn.resolve("refusal");
-      }
+      this.settlePersistentTurn(turn, "refusal");
       return;
     }
     // A failed write that was never acknowledged is the only safe automatic retry. Once
@@ -1724,11 +1730,7 @@ export class ClaudeCodeDriver implements Driver {
         message: `${message}; the acknowledged prompt was not replayed, and the next distinct prompt will restart and resume once`,
       });
       this.stopPersistentTransport(false);
-      if (!turn.settled && this.activePersistentTurn === turn) {
-        turn.settled = true;
-        this.activePersistentTurn = null;
-        turn.resolve("refusal");
-      }
+      this.settlePersistentTurn(turn, "refusal");
       return;
     }
     this.openPersistentCircuit(`${message}; persistent mode disabled for this session`, turn);
@@ -1739,11 +1741,7 @@ export class ClaudeCodeDriver implements Driver {
     if (this.opts.capabilities?.supportsSteering === true) this.cb.onSteeringAvailability?.(false);
     this.cb.onEvent({ kind: "error", message });
     this.stopPersistentTransport(false, "process_exit");
-    if (!turn.settled && this.activePersistentTurn === turn) {
-      turn.settled = true;
-      this.activePersistentTurn = null;
-      turn.resolve("refusal");
-    }
+    this.settlePersistentTurn(turn, "refusal");
   }
 
   private stopPersistentTransport(
@@ -1768,9 +1766,7 @@ export class ClaudeCodeDriver implements Driver {
     this.persistentGeneration += 1;
     if (cancelActive && this.activePersistentTurn && !this.activePersistentTurn.settled) {
       const turn = this.activePersistentTurn;
-      turn.settled = true;
-      this.activePersistentTurn = null;
-      turn.resolve("cancelled");
+      this.settlePersistentTurn(turn, "cancelled");
     }
     if (child) {
       this.retiringPersistentChild = child;
@@ -1914,9 +1910,7 @@ export class ClaudeCodeDriver implements Driver {
     this.streamingMessageIds.clear();
     if (this.activePersistentTurn) {
       const turn = this.activePersistentTurn;
-      this.activePersistentTurn = null;
-      turn.settled = true;
-      turn.resolve("cancelled");
+      this.settlePersistentTurn(turn, "cancelled");
       this.stopPersistentTransport(true, undefined, true);
       return;
     }
@@ -1991,9 +1985,7 @@ export class ClaudeCodeDriver implements Driver {
     this.unacknowledgedSteerMessages.clear();
     this.activeOneShotTurnId = null;
     if (this.activePersistentTurn && !this.activePersistentTurn.settled) {
-      this.activePersistentTurn.settled = true;
-      this.activePersistentTurn.resolve("cancelled");
-      this.activePersistentTurn = null;
+      this.settlePersistentTurn(this.activePersistentTurn, "cancelled");
     }
     this.clearIdleTimer();
     this.clearPendingTimer();
