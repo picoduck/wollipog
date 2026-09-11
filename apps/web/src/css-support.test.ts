@@ -4,8 +4,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   ACCOUNTABLE_CONSTRUCTS,
+  CSS_FEATURES,
   ENGINES,
-  FEATURE_SUPPORT,
+  floorSetting,
   formatTarget,
   requiredFloor,
   webviewTargets,
@@ -31,22 +32,56 @@ const compatibilityDoc = readFileSync(
 
 test("the build target is the registry's floor, not a separately maintained list", () => {
   assert.deepEqual(WOLLIPOG_WEBVIEW_TARGETS, webviewTargets(),
-    "vite.config.ts must derive its target from FEATURE_SUPPORT rather than restate one");
+    "vite.config.ts must derive its target from CSS_FEATURES rather than restate one");
   // The drift this issue was filed for, pinned as a value: every one of these is above the floor
   // that used to be declared by hand (chrome107 / edge107 / firefox104 / safari16).
   assert.deepEqual(WOLLIPOG_WEBVIEW_TARGETS, ["chrome111", "edge111", "firefox121", "safari16.2"]);
 });
 
 test("every registered feature is actually used, so none inflates the floor for nothing", () => {
-  for (const feature of FEATURE_SUPPORT) {
+  for (const feature of CSS_FEATURES) {
     assert.ok(feature.detect.test(css),
-      `${feature.id} is in FEATURE_SUPPORT but no longer appears in styles.css. Remove it — a `
+      `${feature.id} is in CSS_FEATURES but no longer appears in styles.css. Remove it — a `
       + "feature the app does not use must not hold the browser floor up.");
   }
 });
 
+test("feature detectors are case-insensitive, as CSS identifiers are", () => {
+  // `:HAS(` is the same selector as `:has(`. A case-sensitive detector would miss it entirely —
+  // and would then report the entry as unused, inviting a maintainer to delete the one holding the
+  // Firefox floor up and leaving the suite green on a floor that cannot run the stylesheet.
+  for (const feature of CSS_FEATURES) {
+    assert.ok(feature.detect.flags.includes("i"), `${feature.id} detector must be case-insensitive`);
+  }
+  for (const construct of ACCOUNTABLE_CONSTRUCTS) {
+    // Nesting is anchored on layout, not an identifier, so case cannot apply to it.
+    if (construct.id === "CSS nesting") continue;
+    assert.ok(construct.detect.flags.includes("i"),
+      `${construct.id} detector must be case-insensitive`);
+  }
+  const shouty = ":HAS(.x) { color: red }";
+  const has = CSS_FEATURES.find((feature) => feature.id === ":has()")!;
+  assert.ok(has.detect.test(shouty), "an upper-case spelling must still count as used");
+});
+
+test("a downlevelled construct is accounted for without raising the floor", () => {
+  // The classification the accountability message promises. Without it, a construct the build
+  // compiles away had no correct resolution: registering it would constrain the app on behalf of
+  // output no browser ever receives, and not registering it failed the suite.
+  const nesting: CssFeature = {
+    kind: "downlevelled",
+    id: "CSS nesting",
+    detect: /^\s*&/m,
+    by: "Lightning CSS, which flattens nested rules into ordinary selectors",
+    evidence: "synthetic fixture for this test",
+  };
+  assert.deepEqual(webviewTargets([...CSS_FEATURES, nesting]), webviewTargets(),
+    "a downlevelled entry must not move the floor");
+  assert.equal(floorSetting([...CSS_FEATURES, nesting]).length, floorSetting().length);
+});
+
 test("every accountable construct in the stylesheet is registered with support data", () => {
-  const registered = new Set(FEATURE_SUPPORT.map((feature) => feature.id));
+  const registered = new Set(CSS_FEATURES.map((feature) => feature.id));
   const unaccounted = ACCOUNTABLE_CONSTRUCTS
     .filter((construct) => construct.detect.test(css))
     .map((construct) => construct.id)
@@ -58,13 +93,18 @@ test("every accountable construct in the stylesheet is registered with support d
     + "Shipping it unaccounted for is how the floor silently went stale in the first place.");
 });
 
-test("each registered feature records why it cannot simply be compiled for an older engine", () => {
-  for (const feature of FEATURE_SUPPORT) {
-    assert.ok(feature.whyNotDownlevelable.length > 40,
-      `${feature.id} must explain why no compiler can rewrite it; a downlevelable feature raises `
-      + "the floor for output the browser never receives");
-    assert.match(feature.source, /retrieved \d{4}-\d{2}-\d{2}/,
-      `${feature.id} must cite where its support data came from and when, so it can be re-checked`);
+test("each entry carries the evidence its classification depends on", () => {
+  for (const feature of CSS_FEATURES) {
+    if (feature.kind === "requires-floor") {
+      assert.ok(feature.whyNotDownlevelable.length > 40,
+        `${feature.id} must explain why no compiler can rewrite it; a downlevelable feature raises `
+        + "the floor for output the browser never receives");
+      assert.match(feature.source, /retrieved \d{4}-\d{2}-\d{2}/,
+        `${feature.id} must cite where its support data came from and when, so it can be re-checked`);
+    } else {
+      assert.ok(feature.by.length > 10 && feature.evidence.length > 10,
+        `${feature.id} claims the build compiles it away, which needs the rewriter and the evidence`);
+    }
   }
 });
 
@@ -78,20 +118,21 @@ test("the floor takes the maximum across features, per engine independently", ()
   assert.deepEqual(floor.safari, [16, 2], "color-mix() is the binding constraint on Safari");
 
   for (const engine of ENGINES) {
-    const highest = Math.max(...FEATURE_SUPPORT.map((feature) => feature.support[engine][0]));
+    const highest = Math.max(...floorSetting().map((feature) => feature.support[engine][0]));
     assert.equal(floor[engine][0], highest);
   }
 });
 
 test("a newly registered feature raises the floor rather than being absorbed", () => {
   const invented: CssFeature = {
+    kind: "requires-floor",
     id: "invented",
-    detect: /never-matches/,
+    detect: /never-matches/i,
     support: { chrome: [200, 0], edge: [200, 0], firefox: [200, 0], safari: [20, 1] },
     source: "synthetic fixture, retrieved 2026-09-10",
     whyNotDownlevelable: "Fixture proving the floor tracks the registry rather than a fixed list.",
   };
-  assert.deepEqual(webviewTargets([...FEATURE_SUPPORT, invented]),
+  assert.deepEqual(webviewTargets([...CSS_FEATURES, invented]),
     ["chrome200", "edge200", "firefox200", "safari20.1"]);
 });
 
