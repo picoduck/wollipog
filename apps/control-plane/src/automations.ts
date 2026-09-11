@@ -348,6 +348,7 @@ export class AutomationsService {
 
   recover(now = Date.now()): number {
     const failed = this.db.failInterruptedAutomationExecutions(now);
+    this.expireUndeliverableExecutions(now);
     this.resumeReceiptedExecutions(now);
     this.processPendingTriggerInvocations(now);
     this.commandOutbox.recover(now);
@@ -494,6 +495,7 @@ export class AutomationsService {
 
   tick(now = Date.now()): number {
     this.db.compactAutomationTriggerInvocations(now);
+    this.expireUndeliverableExecutions(now);
     this.resumeReceiptedExecutions(now);
     this.processPendingTriggerInvocations(now);
     this.commandOutbox.flush(now);
@@ -585,17 +587,43 @@ export class AutomationsService {
     return now - Math.max(...commands.map((command) => command.createdAt)) >= bound;
   }
 
+  /**
+   * Write off executions whose plan never reached a runner, before the outbox can transmit any of
+   * it. Ordering is the whole point: the outbox marks a command `sent` and writes it to the runner
+   * in the same step, so expiring afterwards would hand a launch to the runner and simultaneously
+   * release the `wait` policy for the next occurrence — two live sessions for an automation whose
+   * policy exists to prevent exactly that. Deciding here, before any flush, makes the two mutually
+   * exclusive: an expired command is terminal and no longer due, and a command the flush sends is
+   * one this sweep has already judged still deliverable.
+   */
+  private expireUndeliverableExecutions(now: number): void {
+    for (const candidate of this.db.activeAutomationExecutions()) {
+      if (candidate.deliveryMode !== "receipted_v53") continue;
+      const commands = this.db.listAutomationCommands(candidate.executionId);
+      if (!commands.length) continue;
+      const schedule = this.executionSchedule(candidate);
+      if (!schedule) continue;
+      let overdue: boolean;
+      try {
+        overdue = this.undeliverable(candidate, schedule, commands, now);
+      } catch (error) {
+        // A stored cron this build can no longer parse must not take the scheduler down with it.
+        this.log.warn(`automation '${candidate.automationId}' delivery bound skipped: ${(error as Error).message}`);
+        continue;
+      }
+      if (!overdue) continue;
+      this.db.expireUndeliveredAutomationCommands(candidate.executionId, now);
+      this.reconcileExecution(candidate.executionId, now);
+    }
+  }
+
   private reconcileExecution(executionId: string, now: number): void {
     const execution = this.db.getAutomationExecution(executionId);
     if (!execution || execution.deliveryMode !== "receipted_v53" ||
         !["dispatching", "running"].includes(execution.status)) return;
-    let commands = this.db.listAutomationCommands(executionId);
+    const commands = this.db.listAutomationCommands(executionId);
     if (!commands.length) return;
     const schedule = this.executionSchedule(execution);
-    if (schedule && this.undeliverable(execution, schedule, commands, now)) {
-      this.db.expireUndeliveredAutomationCommands(executionId, now);
-      commands = this.db.listAutomationCommands(executionId);
-    }
     // A superseded command was replaced by a live retry; the replacement carries the verdict.
     const failed = commands.find((command) =>
       (command.state === "rejected" || command.state === "uncertain") && command.supersededBy === undefined);
