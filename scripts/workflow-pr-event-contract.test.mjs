@@ -233,6 +233,24 @@ test("the required CI check aggregates parallel jobs that each own a time budget
       `browser: --shard=i/${denominator} against ${shards.length} matrix legs runs the wrong fraction of the suite`);
   }
 
+  // `exclude` removes a leg that the shard list still declares, so counting declared values is not
+  // counting scheduled ones:
+  //
+  //     matrix:
+  //       shard: [1, 2, 3, 4]
+  //       exclude: [{ shard: 4 }]
+  //
+  // Three legs run, each passes, the aggregator is green, and a quarter of the suite never executed
+  // — the same silent shape the denominator check above exists to prevent, arriving by a different
+  // door. `include` is rejected with it: it can add a leg whose shard value the denominator does not
+  // cover, and neither key has a legitimate use for a plain numeric split.
+  const matrixBlock = byId.browser.match(/^      matrix:\r?\n((?:        .*\r?\n?)*)/m);
+  assert.ok(matrixBlock, "browser: the shard matrix must be declared under `matrix:`");
+  const matrixKeys = [...matrixBlock[1].matchAll(/^        ([A-Za-z-]+):/gm)].map((match) => match[1]);
+  assert.deepEqual(matrixKeys, ["shard"],
+    "browser: the shard matrix takes no other keys — `exclude` silently drops legs the shard list " +
+    "still declares, and `include` can add one the --shard denominator does not cover");
+
   assert.match(byId.browser, /^      fail-fast: false$/m,
     "browser: without this, one failing test cancels the sibling shards and the aggregator below " +
     "reports those cancellations as budget hits");
