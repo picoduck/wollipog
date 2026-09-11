@@ -592,6 +592,12 @@ export class AutomationsService {
    * alone rather than expired here: mutating inside the flush loop would reorder the very decision
    * this exists to sequence, and the sweep settles it on the next pass. */
   private commandStillDeliverable(row: AutomationCommandRecord, now: number): boolean {
+    // Settle the ordinary case without touching the database or the cron parser. The bound is
+    // measured from the execution's newest command, which is at least as new as this row, so a row
+    // younger than the floor cannot be past any bound. Every healthy flush takes this exit, which
+    // matters: `nextCronFire` costs ~7ms for `* * * * *` (~15ms outside UTC), and a hundred of
+    // those inside a synchronous flush would stall the control plane for over a second.
+    if (now - row.createdAt < MIN_DELIVERY_BOUND_MS) return true;
     const execution = this.db.getAutomationExecution(row.executionId);
     if (!execution || execution.deliveryMode !== "receipted_v53") return true;
     const schedule = this.executionSchedule(execution);
