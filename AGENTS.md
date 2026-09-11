@@ -27,8 +27,19 @@ when enqueueing: the merge happens later, and deleting the branch early closes t
 
 Exactly one status check is required: **`Typecheck, Test & Sidecar Bundle`**. It is an aggregator —
 it reports only once the parallel jobs it summarises have finished, so it appears late. While those
-jobs run, `gh pr checks <n> --required` prints `no required checks reported`, which means *pending*,
-not passing. Treat that string as "keep waiting", never as a green light.
+jobs run, `gh pr checks <n> --required` prints `no required checks reported`. On a PR into `main`
+with a run in progress that means *pending*, not passing, so it is never a green light.
+
+That string is ambiguous, though, and the other readings mean "waiting will not help":
+
+- The ruleset applies only to the default branch. A PR into any other branch — a release branch, for
+  example — has no required checks at all, so the message is permanent and no aggregator will ever
+  appear.
+- A workflow that never started prints it too, including while a fork PR waits for approval to run.
+
+So confirm which case you are in with plain `gh pr checks <n>` before waiting. Jobs listed as
+`pending` mean the aggregator is coming. An empty list means it is not, and the base branch and
+workflow state are what to check next.
 
 `Browser End-to-End Tests` is the long pole at roughly 20–30 minutes, and the merge group re-runs it,
 so expect that wait twice: once on the branch and once after enqueueing.
