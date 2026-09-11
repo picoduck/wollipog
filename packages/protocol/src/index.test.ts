@@ -10,6 +10,11 @@ import {
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
   PROTOCOL_VERSION,
+  SESSION_NAMING_GENERATION_BUDGET_MS,
+  SESSION_NAMING_PREPARATION_BUDGET_MS,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
+  SESSION_NAMING_TRANSPORT_MARGIN_MS,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
   providerAuthenticationReceiptCode,
@@ -228,6 +233,23 @@ test("worktree create deadlines preserve transport and error-reporting order", (
     "the client receives a server-side timeout before its own abort fires");
   assert.ok(SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS < 300_000,
     "Node fetch's default transport deadline must not preempt the client signal");
+});
+
+test("session naming budgets account for preparation and stay ordered outermost-last", () => {
+  assert.ok(SESSION_NAMING_GENERATION_BUDGET_MS > 5_000,
+    "provider generation alone must outlast the old five-second total budget");
+  assert.equal(SESSION_NAMING_PREPARATION_BUDGET_MS + SESSION_NAMING_GENERATION_BUDGET_MS,
+    SESSION_NAMING_RUNNER_BUDGET_MS,
+    "preparation is charged explicitly rather than taken out of the generation allowance");
+  const runnerRequestMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_TRANSPORT_MARGIN_MS;
+  const supervisionMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS;
+  assert.ok(runnerRequestMs > SESSION_NAMING_RUNNER_BUDGET_MS,
+    "the runner reports its own timeout before the control plane gives up on the round trip");
+  assert.ok(supervisionMs > runnerRequestMs,
+    "the control-plane abort must not preempt its own runner request deadline");
+  // The desktop transport grants 35s and the runner clamps naming to 15s: the chain stays bounded.
+  assert.ok(SESSION_NAMING_RUNNER_BUDGET_MS <= 15_000, "the runner rejects budgets above 15s");
+  assert.ok(supervisionMs < 35_000, "the desktop naming read budget must outlast the whole chain");
 });
 
 test("v99 queued prompt editing messages preserve opaque revisions and attachments", () => {

@@ -371,6 +371,28 @@ export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 export const SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS = 4 * 60_000;
 export const SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS =
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS + 30_000;
+
+/**
+ * Session naming deadline chain, innermost first. Preparation (neutral directory, provider
+ * authentication, process start) is budgeted separately from generation so its normal variance
+ * cannot silently consume the provider's allowance, and every enclosing layer is strictly larger
+ * than the layer it supervises so an outer transport can never expire first:
+ *
+ *   preparation (<= 3s) + generation (>= 12s) = runner budget 15s
+ *     -> control-plane runner request 16s
+ *       -> control-plane supervision abort 17s
+ *         -> desktop remote read budget 35s (apps/desktop/src-tauri/src/remote_transport.rs)
+ *
+ * The total stays bounded: the runner clamps any requested budget to the runner budget below.
+ */
+export const SESSION_NAMING_PREPARATION_BUDGET_MS = 3_000;
+export const SESSION_NAMING_GENERATION_BUDGET_MS = 12_000;
+export const SESSION_NAMING_RUNNER_BUDGET_MS =
+  SESSION_NAMING_PREPARATION_BUDGET_MS + SESSION_NAMING_GENERATION_BUDGET_MS;
+/** Extra time the control plane waits on the runner round trip beyond the runner's own budget. */
+export const SESSION_NAMING_TRANSPORT_MARGIN_MS = 1_000;
+/** Extra time the control plane's own abort timer allows beyond that runner request deadline. */
+export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
 export type { ConversationHandoffDraft } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
