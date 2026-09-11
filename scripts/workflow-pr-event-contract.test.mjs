@@ -211,6 +211,31 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     assert.doesNotMatch(byId[id], /^    needs:/m, `${id}: the work jobs run in parallel, not chained`);
   }
   assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
+
+  // The browser suite is sharded across matrix legs, and the leg COUNT is written twice: once as the
+  // matrix list, once as the denominator of --shard. GitHub cannot read a matrix's length from
+  // inside the job, so nothing but this assertion keeps them together.
+  //
+  // The failure it guards is silent in the worst way. A matrix of three against `--shard=i/4` runs
+  // three quarters of the suite and reports every shard green; nobody sees the missing quarter,
+  // because a shard that was never scheduled cannot fail. (The opposite mismatch is loud — shard 4
+  // of 3 is an error — which is exactly why it is not the one to worry about.)
+  const shardList = byId.browser.match(/^        shard: \[([^\]]+)\]$/m);
+  assert.ok(shardList, "browser: the suite must be sharded across a matrix, or it is one long job again");
+  const shards = shardList[1].split(",").map((value) => Number(value.trim()));
+  assert.deepEqual(shards, shards.map((_, index) => index + 1),
+    "browser: shards must be numbered 1..N with no gaps, because --shard=i/N means the i-th of N");
+  const denominators = [...byId.browser.matchAll(/--shard=\$\{\{ matrix\.shard \}\}\/(\d+)/g)]
+    .map((match) => Number(match[1]));
+  assert.ok(denominators.length > 0, "browser: the sharded run must pass --shard=<leg>/<count>");
+  for (const denominator of denominators) {
+    assert.equal(denominator, shards.length,
+      `browser: --shard=i/${denominator} against ${shards.length} matrix legs runs the wrong fraction of the suite`);
+  }
+
+  assert.match(byId.browser, /^      fail-fast: false$/m,
+    "browser: without this, one failing test cancels the sibling shards and the aggregator below " +
+    "reports those cancellations as budget hits");
   assert.doesNotMatch(byId.checks, /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
     "the browser suites must not share the unit-test job's budget");
   assert.match(byId.checks, /^      - name: Unit Tests$/m);
@@ -329,9 +354,13 @@ test("CI validates production builds and caches the pinned Playwright browser", 
     /^      - name: Validate Web Production Build\r?\n        run: pnpm --filter @wollipog\/web build$/m,
     "CI must exercise the web production build",
   );
+  // The production pass is guarded to one shard, so the `run:` no longer follows its `name:` line
+  // directly. The guard itself is asserted rather than merely tolerated: `if: false`, or a guard
+  // naming a shard the matrix does not contain, would skip this step on every leg and leave the
+  // assertion above still matching a step that never executes.
   assert.match(
     ci,
-    /^      - name: Rendered Production Browser Smoke\r?\n        run: pnpm test:e2e:production$/m,
+    /^      - name: Rendered Production Browser Smoke\r?\n        if: matrix\.shard == 1\r?\n        run: pnpm test:e2e:production$/m,
     "CI must render the built Timeline and Settings fixtures through the production preview server",
   );
   assert.match(
