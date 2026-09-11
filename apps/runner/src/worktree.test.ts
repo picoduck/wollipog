@@ -516,6 +516,43 @@ test("attach accepts a worktree the configured Location's repository registers o
   }
 });
 
+test("attach refuses a registered path whose tree is now a different repository", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attach-foreign-tree-"));
+  const repo = join(root, "repo");
+  const other = join(root, "other-repo");
+  const dataDir = join(root, "data");
+  const beside = join(root, "repo-worktrees", "example");
+  try {
+    for (const path of [repo, other]) {
+      execFileSync("git", ["init", path]);
+      execFileSync("git", ["-C", path, "config", "user.email", "test@example.com"]);
+      execFileSync("git", ["-C", path, "config", "user.name", "Test"]);
+      execFileSync("git", ["-C", path, "commit", "--allow-empty", "-m", "base"]);
+    }
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/example", beside]);
+
+    // The registration in `repo` outlives the directory it names. Git keeps reporting the path with
+    // the branch and head it recorded, and a work-tree health check at that path still passes —
+    // because a DIFFERENT repository is there now. Accepting it would hand the session a repository
+    // its own never registered, and bind it writable at the next launch.
+    rmSync(beside, { recursive: true, force: true });
+    symlinkSync(other, beside);
+    assert.match(
+      execFileSync("git", ["-C", repo, "worktree", "list", "--porcelain"], { encoding: "utf8" }),
+      /fix\/example/,
+      "the stale registration is still advertised by the repository",
+    );
+
+    const refusal = await attachRequestedWorktree(repo, "s_foreign_tree", beside, {
+      dataDir,
+      allowedProjectPaths: [repo],
+    }).then(() => undefined, (error: Error) => error.message);
+    assert.match(refusal ?? "", /belongs to a different repository than the session/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("already-removed worktree cleanup succeeds even when creation capacity preflight fails", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wt-low-disk-cleanup-"));
   const repo = join(root, "repo");
@@ -619,7 +656,8 @@ test("a session attaches a worktree beside its repository and states the isolati
     );
     const internals = manager as unknown as {
       configuredProjectPaths: string[];
-      active: Map<string, { sessionId: string; cwd: string; context: { kind: "native" } }>;
+      active: Map<string, { sessionId: string; cwd: string; context: { kind: "native" | "wsl" } }>;
+      executionIsolation: { mode: string; network: string };
       attachIsolationNotice(meta: unknown, path: string): Promise<unknown>;
       requestedWorktreeIsolation(meta: unknown): Promise<string[]>;
     };
@@ -655,6 +693,26 @@ test("a session attaches a worktree beside its repository and states the isolati
       writableNow: false,
       writableAtNextLaunch: true,
     });
+
+    // Direct WSL read-only-binds `/` and makes only the launch cwd writable, and it never carries
+    // the requested-worktree boundary, so a live WSL session must not be told it can already write
+    // here — an agent that believed it would meet permission failures instead.
+    const wslMeta = { ...store.readMeta("s_ext"), context: { kind: "wsl" } };
+    internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "wsl" } });
+    assert.deepEqual(await internals.attachIsolationNotice(wslMeta, beside), {
+      writableNow: false,
+      writableAtNextLaunch: true,
+    });
+
+    // Seatbelt grants the native temporary directory outright, so a worktree under it is writable
+    // already and reporting otherwise would send the agent into a pointless relaunch.
+    internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "native" } });
+    internals.executionIsolation = { mode: "seatbelt", network: "deny" };
+    assert.deepEqual(await internals.attachIsolationNotice(store.readMeta("s_ext"), beside), {
+      writableNow: true,
+      writableAtNextLaunch: true,
+    });
+    internals.executionIsolation = { mode: "bwrap", network: "deny" };
     internals.active.delete("s_ext");
 
     await manager.delete("s_ext");

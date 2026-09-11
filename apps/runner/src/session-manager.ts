@@ -71,6 +71,7 @@ import {
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type {
@@ -1303,22 +1304,38 @@ export class SessionManager {
     meta: SessionMeta,
     path: string,
   ): Promise<SessionWorktreeIsolationNotice> {
-    const platformIsolated = this.executionIsolation.mode === "bwrap" || this.executionIsolation.mode === "seatbelt";
-    // Direct WSL keeps the legacy boundary out of the launcher's hands entirely, so nothing here
-    // can narrow what that target already binds.
-    if (!platformIsolated || meta.context.kind === "wsl") {
-      return { writableNow: true, writableAtNextLaunch: true };
-    }
+    const mode = this.executionIsolation.mode;
+    const platformIsolated = mode === "bwrap" || mode === "seatbelt";
+    if (!platformIsolated) return { writableNow: true, writableAtNextLaunch: true };
     const live = this.active.get(meta.sessionId);
+    // With nothing running there is no sandbox to be outside of: the runner performs the session's
+    // Git actions on the host itself.
     if (!live) return { writableNow: true, writableAtNextLaunch: true };
+    // The next launch chdirs into the selected worktree, and every sandbox binds its own cwd
+    // writable, so the attached path is always writable then — that is what makes "next launch" a
+    // real remedy rather than a hope.
+    const writableAtNextLaunch = true;
+    // Direct WSL gets no requested-worktree boundary at all (`requestedWorktreeIsolation` returns
+    // no roots for it), and the target-local launcher read-only-binds `/` with only the launch cwd
+    // writable. Claiming otherwise would have an agent attempt edits this turn and collect
+    // permission failures, which is worse than saying plainly that it must wait for the relaunch.
+    if (meta.context.kind === "wsl") {
+      return { writableNow: pathWithin(meta.context, path, live.cwd), writableAtNextLaunch };
+    }
     const boundary = await requestedWorktreeBoundary(meta.repoPath, meta.sessionId, {
       context: meta.context,
       dataDir: this.dataDir,
       ownerHash: this.runnerOwnerHash,
     }, false);
-    const writableNow = pathWithin(meta.context, path, boundary) ||
-      pathWithin(meta.context, path, live.cwd);
-    return { writableNow, writableAtNextLaunch: true };
+    const writableRoots = [boundary, live.cwd];
+    // Seatbelt grants the runner state directory and the native temporary directory outright
+    // (`buildSeatbeltProfile`), so a worktree under either is already writable and must not be
+    // reported as blocked.
+    if (mode === "seatbelt") writableRoots.push(this.stateDir, tmpdir());
+    return {
+      writableNow: writableRoots.some((root) => pathWithin(meta.context, path, root)),
+      writableAtNextLaunch,
+    };
   }
 
   /** Select one already-attributed worktree as the target for every session Git action. */

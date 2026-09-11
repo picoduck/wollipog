@@ -569,6 +569,19 @@ export async function registeredSessionWorktree(
   if (!match.branch || !match.head) throw new Error("a detached worktree cannot be attached to a session");
   const healthy = (await command(context, match.path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
   if (!healthy) throw new Error("registered worktree is not healthy");
+  // Registration proves only that the repository once recorded this path, and the health check
+  // proves only that *some* work tree is there now. A stale or tampered record whose directory has
+  // since become — or come to symlink to — a different repository would otherwise be accepted, and
+  // bound writable at the next launch, handing the session a repository it never had. Registration
+  // is what bounds reach here, so compare the repository each side actually resolves to rather than
+  // trusting the path that named it.
+  const [attachedRepository, sessionRepository] = await Promise.all([
+    command(context, match.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    command(context, repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+  ]);
+  if (!sameWorktreePath(context, attachedRepository.trim(), sessionRepository.trim())) {
+    throw new Error(`registered worktree belongs to a different repository than the session (${repository})`);
+  }
   return {
     path: match.path,
     branch: match.branch,
