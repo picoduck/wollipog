@@ -235,6 +235,20 @@ function withoutStrings(value: string): string {
 }
 
 /**
+ * Drop backslash escapes before scanning a selector.
+ *
+ * An escaped character is part of an identifier, not syntax: `.foo\:new-token` is one class whose
+ * name contains a colon, and reading that colon as a pseudo invented `:new-token` and would have
+ * failed the guard on valid CSS. Removing the escape pair leaves `.foonew-token`, which is nonsense
+ * as a selector but correct for this purpose — only the NAMES matter here, and no real pseudo is
+ * lost. Escapes that encode a character by hex (`:\70 opover-open`) still are not resolved; that is
+ * a documented miss, and the important part is that it produces nothing rather than something wrong.
+ */
+function withoutEscapes(selector: string): string {
+  return selector.replace(/\\./g, "");
+}
+
+/**
  * Extract that surface from a parsed stylesheet.
  *
  * Everything is lower-cased, because CSS identifiers are case-insensitive and the allowlist would
@@ -273,8 +287,9 @@ export function stylesheetSurface(root: {
     }
   });
   root.walkRules((rule) => {
-    // Attribute values are data too: `[data-state="x:new-token"]` is not a pseudo-class.
-    for (const match of withoutStrings(rule.selector).matchAll(/::?([a-z][a-z0-9-]*)/gi)) {
+    // Attribute values are data too: `[data-state="x:new-token"]` is not a pseudo-class, and nor is
+    // the colon inside an escaped class name.
+    for (const match of withoutEscapes(withoutStrings(rule.selector)).matchAll(/::?([a-z][a-z0-9-]*)/gi)) {
       pseudos.add(match[1]!.toLowerCase());
     }
   });

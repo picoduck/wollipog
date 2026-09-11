@@ -109,6 +109,11 @@ test("strings are data, so valid CSS is never rejected for what is inside them",
   assert.deepEqual(urls.functions, ["url"], "a filename containing parentheses is not a function");
   const attrs = stylesheetSurface(postcss.parse('[data-state="x:new-token"] { color: red }'));
   assert.deepEqual(attrs.pseudos, [], "an attribute value containing a colon is not a pseudo");
+  // An escaped colon is part of the class NAME — Tailwind-style `.md\:hidden` is the familiar shape.
+  const escaped = stylesheetSurface(postcss.parse(".foo\\:new-token { color: red }"));
+  assert.deepEqual(escaped.pseudos, [], "an escaped colon inside a class name is not a pseudo");
+  const stillReal = stylesheetSurface(postcss.parse(".foo\\:x:hover { color: red }"));
+  assert.deepEqual(stillReal.pseudos, ["hover"], "a real pseudo beside an escape is still seen");
   // And the scan still sees real grammar in a declaration that also contains a string.
   const mixed = stylesheetSurface(postcss.parse('.b { background: url("x.svg") var(--y) }'));
   assert.deepEqual(mixed.functions, ["url", "var"]);
