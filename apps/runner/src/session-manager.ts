@@ -400,6 +400,15 @@ interface ActiveSession {
   steeringAvailable?: boolean;
   /** A prompt turn is in flight (the agent session can only run one at a time). */
   running: boolean;
+  /** Claude began a provider-owned turn while the runner queue was idle. Kept separate from
+   * `running`, whose ownership includes the queue drain and its process-wide lock. */
+  providerInitiatedTurnActive?: boolean;
+  /** Opaque coordinate published to the control plane so a provider-owned turn can use the same
+   * stale-safe Stop contract without aliasing a queued runner prompt id. */
+  providerInitiatedTurnId?: string;
+  /** Requests opened by the provider-owned turn. Settlement clears only these, preserving cards
+   * owned by authentication recovery, governance, or a recovered structured question. */
+  providerInitiatedRequestIds?: Set<string>;
   /** A cancel arrived before the agent process existed (during the pre-prompt turn snapshot) —
    * the driver-level cancel has nothing to kill there, so the next turn start honors this flag. */
   cancelRequested?: boolean;
@@ -3869,6 +3878,9 @@ export class SessionManager {
           live.backgroundPromptAccepted = true;
           this.markBackgroundContinuationAccepted(sessionId, live.currentBackgroundJobIds);
         },
+        onProviderInitiatedTurn: (state, turnId) => {
+          this.onProviderInitiatedTurn(sessionId, client, state, turnId);
+        },
         onSessionEstablished: (providerSessionId) => {
           const live = this.active.get(sessionId);
           if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
@@ -5989,7 +6001,9 @@ export class SessionManager {
         };
       }),
       ...(entry && this.queueHeld(entry) ? { held: true } : {}),
-      ...(entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
+      ...(entry?.providerInitiatedTurnActive && entry.providerInitiatedTurnId
+        ? { activeTurnId: entry.providerInitiatedTurnId }
+        : entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
     });
   }
 
@@ -7995,7 +8009,10 @@ export class SessionManager {
     this.setInterruptQueueHold(sessionId, entry, false);
     // Driver-level cancel only reaches a live agent process; during the pre-prompt turn snapshot
     // there is none yet, so also flag the entry — runPrompt honors it before spawning.
-    entry.cancelRequested = true;
+    // An idle provider-owned turn already has a live process for cancel() to settle, but it does
+    // not own the runner queue drain. Do not leave a pre-launch fence that would discard the next
+    // explicit prompt after that unsolicited turn is gone.
+    entry.cancelRequested = entry.running;
     entry.client.cancel();
   }
 
@@ -8008,11 +8025,13 @@ export class SessionManager {
     // The control plane rejects queued/starting sessions; a skewed or raced direct message is a
     // safe no-op until an in-process turn actually exists.
     if (!entry) return "session_not_found";
-    if (!entry.running || entry.cancelRequested || entry.governanceTripped) return "turn_not_running";
+    const providerTurnId = entry.providerInitiatedTurnActive ? entry.providerInitiatedTurnId : undefined;
+    const currentTurnId = providerTurnId ?? (entry.running ? entry.activeTurnId : undefined);
+    if (!currentTurnId || entry.cancelRequested || entry.governanceTripped) return "turn_not_running";
     if (entry.interruptRequested) return "already_requested";
     // A delayed request for the previous turn must never cancel a newly dequeued prompt. Missing
     // coordinates preserve the pre-marker v71 behavior for rolling control-plane upgrades.
-    if (turnId !== undefined && entry.activeTurnId !== turnId) return "stale_turn";
+    if (turnId !== undefined && currentTurnId !== turnId) return "stale_turn";
     this.cancelApprovalTelemetry(sessionId);
     entry.interruptRequested = true;
     this.setInterruptQueueHold(sessionId, entry, true);
@@ -8037,7 +8056,8 @@ export class SessionManager {
 
     const entry = this.active.get(sessionId);
     const budgetUsd = updated.config.costBudgetUsd;
-    if (!entry?.running || entry.governanceTripped || !budgetUsd || costUsd < budgetUsd) return;
+    if (!entry || (!entry.running && !entry.providerInitiatedTurnActive) || entry.governanceTripped ||
+        !budgetUsd || costUsd < budgetUsd) return;
     this.tripGovernance(sessionId, entry, updated, "cost_budget");
   }
 
@@ -10167,12 +10187,51 @@ export class SessionManager {
     }
   }
 
+  private onProviderInitiatedTurn(
+    sessionId: string,
+    client: Driver,
+    state: "started" | "settled",
+    turnId: string,
+  ): void {
+    const live = this.active.get(sessionId);
+    if (live?.client !== client) return;
+    if (state === "started") {
+      live.providerInitiatedTurnActive = true;
+      live.providerInitiatedTurnId = turnId;
+      live.providerInitiatedRequestIds = new Set();
+    } else {
+      if (live.providerInitiatedTurnId !== turnId) return;
+      live.providerInitiatedTurnActive = false;
+      live.providerInitiatedTurnId = undefined;
+      let pendingApproval = this.store.readMeta(sessionId)?.pendingApproval;
+      for (const requestId of live.providerInitiatedRequestIds ?? []) {
+        pendingApproval = removePendingRequest(pendingApproval, requestId);
+      }
+      live.providerInitiatedRequestIds = undefined;
+      this.store.patchMeta(sessionId, { pendingApproval });
+    }
+    this.emitQueue(sessionId);
+    // A queued runner prompt owns status through its normal drain. When no drain exists, this
+    // callback is the only lifecycle boundary that can clear an answered provider-owned ask.
+    if (!live.running) {
+      const pending = this.store.readMeta(sessionId)?.pendingApproval;
+      if (state === "settled" && live.interruptRequested) {
+        this.emitEvent(sessionId, { kind: "turn_interrupted" });
+      }
+      this.emitStatus(sessionId, pending ? "input_required" : state === "started" ? "running" : "idle");
+    }
+  }
+
   /** Persist/relay first, then enforce against the same normalized event stream every dashboard
    * sees. Cancellation is best-effort at the first observable threshold event; the tripped flag
    * keeps the session idle and holds its queue until an explicit v47 re-arm arrives. */
   private onDriverEvent(sessionId: string, payload: SessionEventPayload): void {
     const entry = this.active.get(sessionId);
     if (entry?.historyIntegrityFailure) return;
+    if (entry?.providerInitiatedTurnActive &&
+        (payload.kind === "permission_request" || payload.kind === "question_request")) {
+      entry.providerInitiatedRequestIds?.add(payload.requestId);
+    }
     const managedAttentionResolution = (payload.kind === "permission_resolved" || payload.kind === "question_resolved") &&
       pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId);
     if (!this.emitEvent(sessionId, payload)) return;
@@ -10182,7 +10241,7 @@ export class SessionManager {
     }
     if (managedAttentionResolution && entry) {
       this.emitStatus(sessionId, this.store.readMeta(sessionId)?.pendingApproval
-        ? "input_required" : entry.running ? "running" : "idle");
+        ? "input_required" : entry.running || entry.providerInitiatedTurnActive ? "running" : "idle");
     }
     if (entry?.currentBackgroundJobIds?.length && payload.kind === "agent_message" &&
         !payload.parentToolUseId) {
@@ -10200,7 +10259,7 @@ export class SessionManager {
         if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
     }
-    if (!entry || !entry.running || entry.governanceTripped) return;
+    if (!entry || (!entry.running && !entry.providerInitiatedTurnActive) || entry.governanceTripped) return;
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
 
