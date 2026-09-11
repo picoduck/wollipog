@@ -3710,8 +3710,8 @@ async function runSessionWorktreeRequest(
     if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "worktree operation failed" });
     db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
     if (request.operation !== "create") worktreeCreates.invalidateSession(sessionId);
-    // v132+ runners say whether a live platform sandbox can already write to an attached path.
-    // A pre-v132 runner omits it, and the field stays absent rather than being guessed here.
+    // v133+ runners say whether a live platform sandbox can already write to an attached path.
+    // A pre-v133 runner omits it, and the field stays absent rather than being guessed here.
     return { worktree: res.worktree, session: db.getSession(sessionId), ...(res.isolation ? { isolation: res.isolation } : {}) };
   } catch (error) {
     return reply.code(502).send({ error: (error as Error).message });

@@ -5737,12 +5737,12 @@ export interface SessionWorktreeProgressMessage {
 }
 
 /**
- * Protocol v132: what platform isolation makes of a freshly attached worktree path.
+ * Protocol v133: what platform isolation makes of a freshly attached worktree path.
  *
  * A bwrap/Seatbelt boundary is bound at launch and cannot gain a mount afterwards, so attaching a
  * worktree outside the boundary a live provider already holds leaves that path readable but not
  * writable until the session relaunches. This states that instead of letting the agent discover it
- * as a permission error mid-turn. Absent means unknown: either a pre-v132 runner, or an operation
+ * as a permission error mid-turn. Absent means unknown: either a pre-v133 runner, or an operation
  * other than attach.
  */
 export interface SessionWorktreeIsolationNotice {
@@ -5762,7 +5762,7 @@ export interface SessionWorktreeResultMessage {
   error?: string;
   worktree?: SessionWorktreeView;
   snapshot?: SessionSnapshot;
-  /** Protocol v132+, attach only. */
+  /** Protocol v133+, attach only. */
   isolation?: SessionWorktreeIsolationNotice;
 }
 
