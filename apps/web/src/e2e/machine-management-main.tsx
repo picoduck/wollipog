@@ -11,9 +11,10 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import "../styles.css";
 
-const identityRole = new URLSearchParams(window.location.search).get("role") === "viewer"
+const requestedRole = new URLSearchParams(window.location.search).get("role");
+const identityRole = requestedRole === "viewer"
   ? "viewer" as const
-  : "owner" as const;
+  : requestedRole === "machine-owner" ? "operator" as const : "owner" as const;
 
 let runner: RunnerView | null = {
   runnerId: "native-t14s",
@@ -26,8 +27,26 @@ let runner: RunnerView | null = {
   workspaces: [{ id: "home", name: "Home", path: "C:\\Users\\misko" }],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 63,
+  protocolVersion: 132,
   agentsRefreshed: true,
+  canManage: identityRole !== "viewer",
+  capacity: {
+    configuredUnits: 16,
+    revision: 2,
+    authority: "control_plane",
+    usedUnits: 12,
+    availableUnits: 4,
+    queuedSessions: 3,
+    blockers: [{
+      kind: "agent_quota",
+      description: "claude is using 4 of 4 provider slots",
+      usedUnits: 4,
+      limitUnits: 4,
+      requiredUnits: 1,
+      waitingSessions: 3,
+      agentId: "claude",
+    }],
+  },
 };
 let socket: FixtureSocket | null = null;
 let lastRegisteredWorkspace: { name: string; path: string } | null = null;
@@ -128,6 +147,18 @@ const client = {
     runner.displayName = body.displayName;
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { ok: true as const };
+  },
+  updateMachineCapacity: async (_runnerId: string, body: { configuredUnits: number; expectedRevision: number }) => {
+    if (!runner?.capacity) throw new Error("runner not found");
+    if (body.expectedRevision !== runner.capacity.revision) throw new Error("Runner Capacity changed in another client");
+    runner.capacity = {
+      ...runner.capacity,
+      configuredUnits: body.configuredUnits,
+      revision: body.expectedRevision + 1,
+      availableUnits: Math.max(0, body.configuredUnits - (runner.capacity.usedUnits ?? 0)),
+    };
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { capacity: { configuredUnits: runner.capacity.configuredUnits, revision: runner.capacity.revision } };
   },
   listDirectory: async (_runnerId: string, path: string) => {
     if (!path) {

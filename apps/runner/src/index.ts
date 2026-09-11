@@ -1232,6 +1232,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      if (msg.runnerCapacity && runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) {
+        if (sessions.configureCapacity(msg.runnerCapacity)) {
+          metadata.runtime!.maxConcurrentSessions = msg.runnerCapacity.configuredUnits;
+        }
+      }
       log(`registered (heartbeat every ${msg.heartbeatIntervalMs}ms)`);
       if (ws) startHeartbeat(ws, msg.heartbeatIntervalMs);
       flushOutbox();
@@ -1256,6 +1261,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // dead), but OURS survived the socket blip — re-report every non-empty queue or those
       // prompts stay invisible and uncancelable until the queue next changes.
       sessions.reportQueues();
+      sessions.reportCapacity(true);
       sessions.reportGovernanceTrips();
       sessions.recoverAllOrphanedWork();
       for (const receipt of durableCommands.recentUpdates()) sendDurableUpdate(receipt);
@@ -1692,6 +1698,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "rediscover":
       log("rediscover requested");
       void runDiscovery(true);
+      break;
+    case "configure_runner_capacity":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) break;
+      if (sessions.configureCapacity(msg)) {
+        metadata.runtime!.maxConcurrentSessions = msg.configuredUnits;
+        log(`Runner Capacity updated to ${msg.configuredUnits} units (revision ${msg.revision})`);
+      }
       break;
     case "refresh_subscription_usage":
       if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) {

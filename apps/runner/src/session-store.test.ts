@@ -700,6 +700,19 @@ test("v126 snapshots publish service tier while older control planes receive no 
   assert.deepEqual(legacy.config, { model: "gpt", effort: "high" });
 });
 
+test("v132 snapshots preserve a precise capacity wait reason while older peers receive no unknown field", () => {
+  const capacityWait = {
+    kind: "target_quota" as const,
+    description: "Execution target cloud-a is using 2 of 2 slots",
+    usedUnits: 2,
+    limitUnits: 2,
+    requiredUnits: 1,
+    targetId: "cloud-a",
+  };
+  assert.equal(metaToSnapshot(meta({ status: "queued", capacityWait }), 131).capacityWait, undefined);
+  assert.deepEqual(metaToSnapshot(meta({ status: "queued", capacityWait }), 132).capacityWait, capacityWait);
+});
+
 test("v82 snapshots expose bounded background delivery facts without runner-private context", () => {
   assert.equal(
     metaToSnapshot(meta({ backgroundJobs: undefined }), 82).backgroundJobs,

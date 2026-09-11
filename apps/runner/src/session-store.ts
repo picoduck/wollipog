@@ -36,6 +36,7 @@ import { TextDecoder } from "node:util";
 import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  runnerSupportsProtocol,
   projectSessionEventPayloadForProtocol,
   sessionEventWireProjectionRequiredForProtocol,
   sessionEventWireProjectionVariant,
@@ -56,6 +57,7 @@ import type {
   PromptImageInput,
   ProviderHistoryQuarantineView,
   ProviderHistoryRecoveryMode,
+  RunnerCapacityBlocker,
   SessionConfig,
   AcpSessionContextConfig,
   SessionEventPayload,
@@ -109,6 +111,8 @@ export interface SessionMeta {
   /** Last live ACP handshake; determines whether the persisted id can resume after process loss. */
   acpCapabilities?: AcpRuntimeCapabilities;
   status: SessionStatus;
+  /** Current durable admission wait explanation; cleared on every non-queued status. */
+  capacityWait?: RunnerCapacityBlocker;
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
@@ -2782,6 +2786,9 @@ export function metaToSnapshot(
     titleSource: m.titleSource,
     providerUpdatedAt: m.providerUpdatedAt,
     status: m.status,
+    capacityWait: runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")
+      ? m.capacityWait
+      : undefined,
     driver: m.driver,
     useWorktree: m.worktreePath != null,
     worktreePath: m.worktreePath,

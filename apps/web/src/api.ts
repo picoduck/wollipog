@@ -1056,6 +1056,11 @@ export function createApiClient(transport: ApiTransport) {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  updateMachineCapacity: (runnerId: string, body: { configuredUnits: number; expectedRevision: number }) =>
+    req<{ capacity: import("@wollipog/protocol").RunnerCapacityConfiguration }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/capacity`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
 
   // Phase 3: external (CLI-started) sessions on a box.
   listExternalSessions: (runnerId: string, agentId?: string) =>

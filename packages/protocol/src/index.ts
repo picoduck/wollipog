@@ -362,7 +362,9 @@
 //      its exact tool call; pre-v130 peers retain audit-backed client synthesis.
 // 131: merged change-request linkage may carry the forge-verified head OID so runners can safely
 //      discard its worktree after the remote branch and local upstream disappear.
-export const PROTOCOL_VERSION = 131;
+// 132: control-plane-authoritative, revisioned per-Machine runner capacity can be applied live;
+//      runners report lease usage, queued demand, and exact admission bottlenecks.
+export const PROTOCOL_VERSION = 132;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -596,6 +598,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
   hostAdminDoctor: 117,
+  /** Revisioned per-Machine capacity configuration, live resize, and usage/queue reporting. */
+  machineRunnerCapacity: 132,
 } as const;
 
 /* ========================================================================== */
@@ -1584,6 +1588,42 @@ export interface RunnerRuntimeInfo {
   };
 }
 
+export type RunnerCapacityBlockerKind =
+  | "runner_capacity"
+  | "agent_quota"
+  | "target_quota"
+  | "exclusive_group"
+  | "request_weight"
+  | "queue_order";
+
+/** Content-free explanation of the exact admission boundary holding one or more sessions. */
+export interface RunnerCapacityBlocker {
+  kind: RunnerCapacityBlockerKind;
+  description: string;
+  usedUnits: number;
+  limitUnits: number;
+  requiredUnits: number;
+  agentId?: string;
+  targetId?: string;
+  waitingSessions?: number;
+}
+
+/** Durable control-plane configuration coordinate sent to the runner. */
+export interface RunnerCapacityConfiguration {
+  configuredUnits: number;
+  revision: number;
+}
+
+/** Runner-authored live lease accounting projected into Machine settings. */
+export interface RunnerCapacityState extends RunnerCapacityConfiguration {
+  authority: "runner_local" | "control_plane";
+  usedUnits?: number;
+  availableUnits?: number;
+  queuedSessions?: number;
+  blockers?: RunnerCapacityBlocker[];
+  reportedAt?: number;
+}
+
 export type RunnerStatus = "online" | "offline";
 
 /** Denormalised runner record as the UI consumes it (REST + WS). */
@@ -1602,6 +1642,10 @@ export interface RunnerView {
   /** Editors found on the host (for "Open in …"); absent/empty hides the control. */
   editors?: EditorInfo[];
   runtime?: RunnerRuntimeInfo;
+  /** v132 authoritative configuration plus latest runner-authored usage. */
+  capacity?: RunnerCapacityState;
+  /** Principal-specific mutation permission; absent on older control planes. */
+  canManage?: boolean;
   /** Protocol v60 projection. Placement is separate from the agent definitions above. */
   executionTargets?: ExecutionTargetDefinition[];
   connectedAt: number | null;
@@ -3894,6 +3938,8 @@ export interface SessionView {
   /** True when older managed-job history exists beyond the projected bounded window. */
   backgroundJobsTruncated?: boolean;
   status: SessionStatus;
+  /** Exact current admission boundary for a capacity-queued session. */
+  capacityWait?: RunnerCapacityBlocker;
   column: BoardColumn;
   runId: string | null;
   useWorktree: boolean;
@@ -4048,6 +4094,8 @@ export interface SessionSnapshot {
   /** Bounded projection-safe managed-job inventory. Omitted for pre-v82 control planes. */
   backgroundJobs?: ManagedBackgroundJobSnapshot[];
   status: SessionStatus;
+  /** Durable runner-owned wait explanation for reconnect hydration. */
+  capacityWait?: RunnerCapacityBlocker;
   driver: AgentDriverKind;
   useWorktree: boolean;
   worktreePath: string | null;
@@ -4826,6 +4874,8 @@ export interface SessionStatusMessage {
   sessionId: string;
   status: SessionStatus;
   detail?: string;
+  /** v132 exact admission boundary while status is queued; absent clears a prior wait reason. */
+  capacityWait?: RunnerCapacityBlocker;
   /** Set once when the runner creates an isolated worktree for the session. */
   worktreePath?: string | null;
   /** Opaque identity of the accepted start_session command that owns this lifecycle. */
@@ -4993,6 +5043,12 @@ export interface AgentsUpdatedMessage {
   agents: AgentDefinition[];
   /** Editors found by the same discovery pass (absent on pre-v22 runners). */
   editors?: EditorInfo[];
+}
+
+/** Authoritative live capacity/queue accounting after registration and every admission change. */
+export interface RunnerCapacityStatusMessage {
+  type: "runner_capacity_status";
+  status: RunnerCapacityState;
 }
 
 /** Event-driven or initial account-level provider usage update. The control plane validates the
@@ -5227,6 +5283,7 @@ export type RunnerToControlPlane =
   | ShellInventoryCompleteMessage
   | ProcessStatusMessage
   | AgentsUpdatedMessage
+  | RunnerCapacityStatusMessage
   | SubscriptionUsageUpdatedMessage
   | SubscriptionUsageInventoryMessage
   | SubscriptionUsageRefreshResultMessage
@@ -5266,6 +5323,8 @@ export interface RegisteredMessage {
   heartbeatIntervalMs: number;
   /** The control-plane protocol version. Absent means a pre-negotiation control plane. */
   protocolVersion?: number;
+  /** Present once an administrator has made the control plane authoritative for this Machine. */
+  runnerCapacity?: RunnerCapacityConfiguration;
 }
 
 export interface RegisterRejectedMessage {
@@ -5688,6 +5747,11 @@ export interface SessionWorktreeResultMessage {
 export interface RediscoverMessage {
   type: "rediscover";
   runnerId: string;
+}
+
+/** Idempotent monotonic application of the control plane's durable Machine capacity setting. */
+export interface ConfigureRunnerCapacityMessage extends RunnerCapacityConfiguration {
+  type: "configure_runner_capacity";
 }
 
 /** Ask the runner to refresh provider-owned account usage without starting or interrupting a turn. */
@@ -6632,6 +6696,7 @@ export type ControlPlaneToRunner =
   | ForkSessionMessage
   | SessionWorktreeRequestMessage
   | RediscoverMessage
+  | ConfigureRunnerCapacityMessage
   | RefreshSubscriptionUsageMessage
   | GenerateSessionTitleMessage
   | ConfigureSessionNamingCustomModelMessage

@@ -278,7 +278,7 @@ export function AttentionPills({ session, compact = false }: {
 
 export function SessionStatusIndicators({ session, disconnected = false, onOpenAttention, attention = "badge" }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
-    "stopOperation" | "historyQuarantine" | "attentionOwners">;
+    "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait">;
   disconnected?: boolean;
   onOpenAttention?: () => void;
   /** Board cards show the per-kind pills; headers keep the single badge that opens the panel. */
@@ -302,6 +302,26 @@ export function SessionStatusIndicators({ session, disconnected = false, onOpenA
         historyQuarantine={session.historyQuarantine}
         ariaLabel={`Activity: ${lifecycle.label}`}
       />
+      {session.status === "queued" && session.capacityWait && (
+        <span
+          className="status-badge st-idle"
+          title={session.capacityWait.description}
+          aria-label={`Queue Reason: ${session.capacityWait.description}`}
+        >
+          <span className="status-dot2" aria-hidden="true" />
+          {session.capacityWait.kind === "runner_capacity"
+            ? "Runner Capacity"
+            : session.capacityWait.kind === "agent_quota"
+              ? "Agent Quota"
+              : session.capacityWait.kind === "target_quota"
+                ? "Target Quota"
+                : session.capacityWait.kind === "exclusive_group"
+                  ? "Provider Slot"
+                  : session.capacityWait.kind === "request_weight"
+                    ? "Agent Weight"
+                    : "Queue Order"}
+        </span>
+      )}
       {attention === "pills"
         ? <AttentionPills session={session} />
         : <AttentionBadge session={session} ariaLabel={attentionStatus ? `Attention: ${attentionStatus.label}` : undefined} onOpen={onOpenAttention} />}
