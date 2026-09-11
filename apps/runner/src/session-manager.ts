@@ -1293,12 +1293,47 @@ export class SessionManager {
   private async discardWorktreeLocked(
     sessionId: string,
     path: string,
+    options: { refreshMergedHead?: boolean } = {},
   ): Promise<{ removed: boolean; reason?: string; snapshot?: SessionSnapshot }> {
     const meta = this.store.readMeta(sessionId);
     if (!meta || !this.sessionCanOpen(sessionId)) return { removed: false, reason: "session is unavailable" };
-    const worktree = this.attributedWorktrees(meta)
+    let worktree = this.attributedWorktrees(meta)
       .find((item) => sameWorktreePath(meta.context, item.path, path));
     if (!worktree) return { removed: false, reason: "worktree is not linked to this session" };
+    if (worktree.source === "attached") {
+      return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
+    }
+    const recordedMergedHead = worktree.pullRequest?.state === "merged" &&
+      typeof worktree.pullRequest.headOid === "string" &&
+      /^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid)
+      ? worktree.pullRequest.headOid
+      : undefined;
+    if (options.refreshMergedHead !== false && worktree.pullRequest?.state === "merged" && !recordedMergedHead) {
+      const verified = await this.resolveWorktreePullRequestState(
+        worktree.path,
+        worktree.pullRequest.url,
+        { context: meta.context, provider: worktree.pullRequest.provider },
+      );
+      if (verified?.state === "merged" && verified.headOid) {
+        const latest = this.store.readMeta(sessionId);
+        if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
+        const current = this.attributedWorktrees(latest)
+          .find((item) => sameWorktreePath(latest.context, item.path, path));
+        if (!current) return { removed: true };
+        if (current.pullRequest?.state !== "merged" ||
+            current.pullRequest.url !== worktree.pullRequest.url) {
+          return { removed: false, reason: "worktree linkage changed while checking forge state" };
+        }
+        const worktrees = this.attributedWorktrees(latest).map((item) => sameWorktreePath(latest.context, item.path, path)
+          ? { ...item, pullRequest: { ...current.pullRequest!, state: "merged" as const, headOid: verified.headOid } }
+          : item);
+        const updated = this.store.patchMeta(sessionId, { worktrees });
+        const refreshed = updated && this.attributedWorktrees(updated)
+          .find((item) => sameWorktreePath(updated.context, item.path, path));
+        if (refreshed) worktree = refreshed;
+        if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      }
+    }
     const source = worktree.source;
     if (source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
@@ -1350,6 +1385,9 @@ export class SessionManager {
           context: meta.context,
           dataDir: this.dataDir,
           ownerHash: this.runnerOwnerHash,
+          ...(worktree.pullRequest?.state === "merged" && worktree.pullRequest.headOid
+            ? { verifiedMergedHead: worktree.pullRequest.headOid }
+            : {}),
         },
       );
       if (!result.removed) {
@@ -1438,23 +1476,43 @@ export class SessionManager {
                 .find((item) => sameWorktreePath(reconciliationContext, item.path, path));
               if (!worktree?.pullRequest) continue;
               let state = worktree.pullRequest.state;
-              if (state === "open") {
+              const needsMergedHead = worktree.source !== "attached" && state === "merged" &&
+                !/^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid ?? "");
+              if (state === "open" || needsMergedHead) {
                 const verified = await this.resolveWorktreePullRequestState(
                   worktree.path,
                   worktree.pullRequest.url,
                   { context: meta.context, provider: worktree.pullRequest.provider },
                 );
-                if (!verified || verified === "open") continue;
-                state = verified;
-                const worktrees = this.attributedWorktrees(meta).map((item) => sameWorktreePath(reconciliationContext, item.path, path)
-                  ? { ...item, pullRequest: { ...worktree.pullRequest!, state } }
-                  : item);
-                const updated = this.store.patchMeta(candidate.sessionId, { worktrees });
-                if (!updated) continue;
-                this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+                if (state === "open" && (!verified || verified.state === "open")) continue;
+                if (state === "open" && verified) state = verified.state;
+                const canPersist = verified &&
+                  (!needsMergedHead || (verified.state === "merged" && verified.headOid));
+                if (canPersist) {
+                  const latest = this.store.readMeta(candidate.sessionId);
+                  if (!latest) continue;
+                  const current = this.attributedWorktrees(latest)
+                    .find((item) => sameWorktreePath(latest.context, item.path, path));
+                  if (current?.pullRequest?.url !== worktree.pullRequest.url ||
+                      current.pullRequest.state !== worktree.pullRequest.state) continue;
+                  const worktrees = this.attributedWorktrees(latest).map((item) =>
+                    sameWorktreePath(latest.context, item.path, path)
+                      ? {
+                        ...item,
+                        pullRequest: {
+                          ...current.pullRequest!,
+                          state,
+                          ...(state === "merged" && verified.headOid ? { headOid: verified.headOid } : {}),
+                        },
+                      }
+                      : item);
+                  const updated = this.store.patchMeta(candidate.sessionId, { worktrees });
+                  if (!updated) continue;
+                  this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+                }
               }
               if (state === "merged" || state === "closed") {
-                await this.discardWorktreeLocked(candidate.sessionId, path);
+                await this.discardWorktreeLocked(candidate.sessionId, path, { refreshMergedHead: false });
               }
             }
           });

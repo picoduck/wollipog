@@ -39,20 +39,32 @@ function initRepoWithOrigin(root: string): { repo: string; remote: string } {
 
 test("change-request lifecycle parsing requires an exact forge URL and terminal vocabulary", () => {
   const url = "https://github.com/picoduck/wollipog/pull/701";
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "OPEN" }), url), "open");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), url), "merged");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "CLOSED" }), url), "closed");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "UNKNOWN" }), url), null);
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url: `${url}/files`, state: "MERGED" }), url), null);
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), "javascript:alert(1)"), null);
+  const githubHead = "A".repeat(40);
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "OPEN", headRefOid: githubHead }), url),
+    { state: "open", headOid: githubHead.toLowerCase() });
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED", headRefOid: githubHead }), url),
+    { state: "merged", headOid: githubHead.toLowerCase() });
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "CLOSED", headRefOid: githubHead }), url),
+    { state: "closed", headOid: githubHead.toLowerCase() });
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "UNKNOWN", headRefOid: githubHead }), url), null);
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url: `${url}/files`, state: "MERGED", headRefOid: githubHead }), url), null);
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED", headRefOid: githubHead }), "javascript:alert(1)"), null);
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), url),
+    { state: "merged" }, "lifecycle proof remains usable without deletion proof");
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED", headRefOid: "not-an-oid" }), url),
+    { state: "merged" }, "a malformed OID is never exposed as deletion proof");
   assert.equal(parseWorktreePullRequestState("not json", url), null);
 
   const gitlab = "https://gitlab.example.test/team/sub/repo/-/merge_requests/19";
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "opened" }), gitlab), "open");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged" }), gitlab), "merged");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "closed" }), gitlab), "closed");
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: `${gitlab}.evil.test`, state: "merged" }), gitlab), null);
-  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged" }),
+  const gitlabHead = "b".repeat(64);
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "opened", sha: gitlabHead }), gitlab),
+    { state: "open", headOid: gitlabHead });
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged", sha: gitlabHead }), gitlab),
+    { state: "merged", headOid: gitlabHead });
+  assert.deepEqual(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "closed", sha: gitlabHead }), gitlab),
+    { state: "closed", headOid: gitlabHead });
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: `${gitlab}.evil.test`, state: "merged", sha: gitlabHead }), gitlab), null);
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged", sha: gitlabHead }),
     "https://token@gitlab.example.test/team/sub/repo/-/merge_requests/19"), null);
 });
 
@@ -334,6 +346,35 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
       source: "created",
     }, { dataDir }), { removed: false, reason: "no_upstream" });
 
+    const mismatchedMerged = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "fix/mismatched-merged-head",
+    }, { dataDir });
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...mismatchedMerged,
+      source: "created",
+    }, { dataDir, verifiedMergedHead: "0".repeat(40) }), { removed: false, reason: "unpushed" });
+    assert.equal(existsSync(mismatchedMerged.path), true,
+      "a merge proof for any other commit cannot authorize cleanup");
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...mismatchedMerged,
+      source: "created",
+    }, { dataDir, verifiedMergedHead: "not-an-oid" }), { removed: false, reason: "no_upstream" });
+
+    const verifiedMerged = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "fix/verified-merged-head",
+    }, { dataDir });
+    const verifiedMergedHead = execFileSync("git", ["-C", verifiedMerged.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...verifiedMerged,
+      source: "created",
+    }, { dataDir, verifiedMergedHead }), { removed: true });
+    assert.equal(existsSync(verifiedMerged.path), false,
+      "the exact forge-verified merged head replaces only the missing upstream proof");
+
     const drifted = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "fix/drift-original",
@@ -607,10 +648,11 @@ test("PR reconciliation and explicit discard retain every unsafe worktree", { sk
       await manager.linkWorktreePullRequest("s_pr_cleanup", worktree.path, url);
     }
     (manager as unknown as {
-      resolveWorktreePullRequestState: (path: string) => Promise<"merged" | "closed" | null>;
+      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged" | "closed"; headOid: string } | null>;
     }).resolveWorktreePullRequestState = async (path) => {
-      if (path === clean.worktree.path || path === attached.worktree.path) return "merged";
-      if (path === dirty.worktree.path) return "closed";
+      const headOid = execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      if (path === clean.worktree.path || path === attached.worktree.path) return { state: "merged", headOid };
+      if (path === dirty.worktree.path) return { state: "closed", headOid };
       return null;
     };
 
@@ -630,6 +672,157 @@ test("PR reconciliation and explicit discard retain every unsafe worktree", { sk
     execFileSync("git", ["-C", dirty.worktree.path, "clean", "-fd"]);
     await manager.discardWorktree("s_pr_cleanup", dirty.worktree.path);
     assert.equal(existsSync(dirty.worktree.path), false, "explicit discard uses the same safe removal checks");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("merged PR worktrees remain discardable after their remote branches are deleted", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-merged-pr-no-upstream-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_merged_no_upstream", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const automatic = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/merged-automatic" },
+    );
+    const explicit = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/merged-explicit" },
+    );
+    const legacyMerged = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/legacy-merged-explicit" },
+    );
+    const unprovenMerged = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/unproven-merged" },
+    );
+    for (const worktree of [automatic.worktree, explicit.worktree, legacyMerged.worktree, unprovenMerged.worktree]) {
+      execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
+      if (worktree !== legacyMerged.worktree) {
+        await manager.linkWorktreePullRequest(
+          "s_merged_no_upstream",
+          worktree.path,
+          `https://github.com/picoduck/wollipog/pull/${worktree === automatic.worktree
+            ? "710"
+            : worktree === explicit.worktree ? "711" : "713"}`,
+        );
+      }
+      execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
+    }
+    const forgeCalls = new Map<string, number>();
+    let forgeUnavailablePath: string | undefined;
+    let removeSiblingOnResolve: string | undefined;
+    (manager as unknown as {
+      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged"; headOid?: string } | null>;
+    }).resolveWorktreePullRequestState = async (path) => {
+      forgeCalls.set(path, (forgeCalls.get(path) ?? 0) + 1);
+      if (removeSiblingOnResolve) {
+        const latest = store.readMeta("s_merged_no_upstream")!;
+        store.patchMeta("s_merged_no_upstream", {
+          worktrees: latest.worktrees?.filter((item) => item.path !== removeSiblingOnResolve),
+        });
+        removeSiblingOnResolve = undefined;
+      }
+      if (path === forgeUnavailablePath) return null;
+      if (path === unprovenMerged.worktree.path) return { state: "merged" };
+      return {
+        state: "merged",
+        headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      };
+    };
+
+    const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
+    activeEntries.set("s_merged_no_upstream", {
+      context: { kind: "native" },
+      cwd: explicit.worktree.path,
+      worktree: { path: explicit.worktree.path, branch: explicit.worktree.branch },
+    });
+    const beforeReconciliation = store.readMeta("s_merged_no_upstream")!;
+    const reconciliationSiblingPath = join(root, "reconciliation-sibling");
+    store.patchMeta("s_merged_no_upstream", {
+      worktrees: [
+        ...(beforeReconciliation.worktrees ?? []),
+        {
+          id: "reconciliation-sibling",
+          path: reconciliationSiblingPath,
+          branch: "fix/reconciliation-sibling",
+          source: "created",
+        },
+      ],
+    });
+    removeSiblingOnResolve = reconciliationSiblingPath;
+    await manager.reconcileWorktreePullRequests();
+
+    assert.equal(existsSync(automatic.worktree.path), false,
+      "automatic reconciliation removes the inactive merged worktree without its remote branch");
+    assert.equal(existsSync(explicit.worktree.path), true,
+      "the worktree still used by a provider remains protected");
+    const persistedExplicit = store.readMeta("s_merged_no_upstream")?.worktrees
+      ?.find((item) => item.path === explicit.worktree.path)?.pullRequest;
+    assert.equal(persistedExplicit?.state, "merged",
+      "the terminal forge proof remains available for a later explicit discard",
+    );
+    assert.equal(persistedExplicit?.headOid,
+      execFileSync("git", ["-C", explicit.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      "the exact merged head survives the durable session-store round trip");
+    assert.equal(forgeCalls.get(unprovenMerged.worktree.path), 1,
+      "a reconciliation pass does not repeat a forge lookup that returned no head proof");
+    assert.equal(existsSync(unprovenMerged.worktree.path), true,
+      "a merged lifecycle state without head proof cannot replace the missing upstream");
+    assert.equal(store.readMeta("s_merged_no_upstream")?.worktrees
+      ?.some((item) => item.id === "reconciliation-sibling"), false,
+      "automatic reconciliation cannot resurrect a sibling record removed during forge I/O");
+
+    activeEntries.delete("s_merged_no_upstream");
+    await manager.discardWorktree("s_merged_no_upstream", explicit.worktree.path);
+    assert.equal(existsSync(explicit.worktree.path), false,
+      "explicit discard also accepts the verified merged worktree without its remote branch");
+
+    await manager.linkWorktreePullRequest(
+      "s_merged_no_upstream",
+      legacyMerged.worktree.path,
+      "https://github.com/picoduck/wollipog/pull/712",
+    );
+    const beforeUpgrade = store.readMeta("s_merged_no_upstream")!;
+    store.patchMeta("s_merged_no_upstream", {
+      worktrees: [
+        ...(beforeUpgrade.worktrees?.map((item) => item.path === legacyMerged.worktree.path
+          ? { ...item, pullRequest: { ...item.pullRequest!, state: "merged", headOid: undefined } }
+          : item) ?? []),
+        {
+          id: "concurrently-removed-sibling",
+          path: join(root, "concurrently-removed-sibling"),
+          branch: "fix/concurrently-removed-sibling",
+          source: "created",
+        },
+      ],
+    });
+    removeSiblingOnResolve = join(root, "concurrently-removed-sibling");
+    await manager.discardWorktree("s_merged_no_upstream", legacyMerged.worktree.path);
+    assert.equal(existsSync(legacyMerged.worktree.path), false,
+      "explicit discard refreshes a merged record persisted by a pre-proof runner");
+    assert.equal(store.readMeta("s_merged_no_upstream")?.worktrees
+      ?.some((item) => item.id === "concurrently-removed-sibling"), false,
+      "forge re-verification cannot resurrect a sibling record removed by another runner");
+
+    forgeUnavailablePath = unprovenMerged.worktree.path;
+    await assert.rejects(manager.discardWorktree("s_merged_no_upstream", unprovenMerged.worktree.path),
+      /branch has no upstream/);
+    assert.equal(existsSync(unprovenMerged.worktree.path), true,
+      "a legacy merged record remains fail-closed when forge proof is unavailable");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
@@ -659,8 +852,11 @@ test("terminal PR cleanup waits until the provider releases its exact cwd", { sk
       "https://github.com/picoduck/wollipog/pull/705",
     );
     (manager as unknown as {
-      resolveWorktreePullRequestState: () => Promise<"merged">;
-    }).resolveWorktreePullRequestState = async () => "merged";
+      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged"; headOid: string }>;
+    }).resolveWorktreePullRequestState = async (path) => ({
+      state: "merged",
+      headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    });
     const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
     activeEntries.set("s_active_pr", {
       cwd: active.worktree.path,

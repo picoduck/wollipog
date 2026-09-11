@@ -360,7 +360,9 @@
 // 130: policy-hook terminal decisions become content-safe runner-owned session events. A
 //      correlated CP -> runner append fence orders the event before the hook response can release
 //      its exact tool call; pre-v130 peers retain audit-backed client synthesis.
-export const PROTOCOL_VERSION = 130;
+// 131: merged change-request linkage may carry the forge-verified head OID so runners can safely
+//      discard its worktree after the remote branch and local upstream disappear.
+export const PROTOCOL_VERSION = 131;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -4073,6 +4075,8 @@ export interface SessionWorktreeView {
   pullRequest?: {
     url: string;
     state: "open" | "merged" | "closed";
+    /** Forge-verified head OID. Only a merged record may use it as delivery proof. */
+    headOid?: string;
     provider?: ForgeProvider;
     kind?: ForgeChangeRequestKind;
   };
