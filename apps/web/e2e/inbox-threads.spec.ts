@@ -133,6 +133,7 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
     const time = row.querySelector<HTMLElement>(".inbox-row-signals > time")!.getBoundingClientRect();
     const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!.getBoundingClientRect();
     const icon = row.querySelector<HTMLElement>(".inbox-row-sender > :first-child")!.getBoundingClientRect();
+    const name = row.querySelector<HTMLElement>(".inbox-row-sender > span")!.getBoundingClientRect();
     return {
       title: shell.querySelector(".inbox-row-title")!.textContent,
       left: Math.round(box.left),
@@ -146,6 +147,8 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
       iconWidth: icon.width,
       iconClipped: icon.right - sender.right,
       senderOverlap: sender.right - signals.left,
+      // The agent name's visible width inside the sender's clip box: what survives of "Claude".
+      nameVisible: Math.max(0, Math.min(name.right, sender.right) - name.left),
     };
   }));
   // Every phone card measures the same, whatever its pills (#917), and indenting changes nothing.
@@ -165,6 +168,7 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   expect(three.iconClipped).toBeLessThanOrEqual(0.5);
   expect(three.senderOverlap).toBeLessThanOrEqual(0.5);
   expect(three.senderWidth).toBeGreaterThan(three.iconWidth);
+  expect(three.nameVisible, "the start of the agent name is visible beside the icon").toBeGreaterThan(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `${EVIDENCE}/phone-expanded.png`, fullPage: true });
 });
