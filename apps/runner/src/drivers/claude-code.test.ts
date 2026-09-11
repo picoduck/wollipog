@@ -1234,6 +1234,48 @@ test("an idle terminal notification preserves launch metadata and requests one c
   driver.dispose();
 });
 
+test("an idle persistent exit with pending work reaches the manager exit callback", async () => {
+  const child = fakeProcess();
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
+  const exits: Array<number | null> = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onBackgroundWork: (update) => background.push(update),
+      onExit: (code) => exits.push(code),
+    },
+    { spawn: () => child, kill: () => {}, now: () => 1234 } as any,
+  );
+  const turn = driver.prompt("launch an agent");
+  await nextTask();
+  child.stdout.write(JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "spawn", name: "Task", input: { run_in_background: true } }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "system", subtype: "task_started", task_id: "task-1", tool_use_id: "spawn",
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+
+  child.emit("close", 0);
+  await nextTask();
+  assert.deepEqual(background.at(-1), {
+    state: "orphaned",
+    pendingTaskIds: ["task-1"],
+    observedTaskIds: ["task-1"],
+    oldestPendingAt: 1234,
+    reason: "process_exit",
+  });
+  assert.deepEqual(exits, [0], "code-zero loss is still an unexpected exit while work is pending");
+  driver.dispose();
+});
+
 test("a task finishing during an unrelated turn still requests its parent continuation", async () => {
   const child = fakeProcess();
   const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];

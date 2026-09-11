@@ -6239,8 +6239,11 @@ export class SessionManager {
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (!this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) return;
     if (entry.pendingWorktreeRebind) {
-      await this.rebindSelectedWorktree(sessionId, entry);
-      return;
+      if (this.worktreeRebindCanProceed(sessionId, entry)) {
+        await this.rebindSelectedWorktree(sessionId, entry);
+        return;
+      }
+      if (!this.promoteQueuedWorktreePrerequisite(sessionId, entry.queue)) return;
     }
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
       if (!this.emitEvent(sessionId, { kind: "error", message: "this session is being driven by another dashboard" })) {
@@ -6374,8 +6377,16 @@ export class SessionManager {
   }
 
   private worktreeRebindCanProceed(sessionId: string, entry: ActiveSession): boolean {
+    const meta = this.store.readMeta(sessionId);
+    // A refused one-shot orphan recovery is terminal: no live provider still owns these task ids,
+    // and billing safety deliberately forbids submitting the recovery prompt again. Keep the
+    // diagnostic metadata visible, but do not turn it into a permanent worktree/queue barrier.
+    const backgroundWorkBlocksRebind =
+      (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
+      !meta?.orphanedWork?.recoveryAttemptedAt;
     return !entry.running &&
       this.active.get(sessionId) === entry &&
+      !backgroundWorkBlocksRebind &&
       !this.rewinding.has(sessionId) &&
       !this.forking.has(sessionId) &&
       !this.loggingOut.has(sessionId) &&
@@ -6396,6 +6407,19 @@ export class SessionManager {
     if (entry?.pendingWorktreeRebind && !entry.running) {
       setImmediate(() => this.scheduleDrain(sessionId));
     }
+  }
+
+  /** A deferred rebind holds user work, but its runner-owned prerequisite must cross that barrier.
+   * Preserve ordinary FIFO order while moving only the continuation that can settle background
+   * ownership. A recovered answer already promoted above retains priority when an approval is open. */
+  private promoteQueuedWorktreePrerequisite(sessionId: string, queue: QueuedPrompt[]): boolean {
+    if (this.hasPendingApproval(sessionId)) {
+      return this.queuedPromptResolvesPendingQuestion(sessionId, queue[0]);
+    }
+    const index = queue.findIndex((prompt) => prompt.syntheticRecovery);
+    if (index < 0) return false;
+    if (index > 0) queue.unshift(queue.splice(index, 1)[0]!);
+    return true;
   }
 
   /** Retire an idle provider generation and resume its exact conversation in the newly selected
@@ -8691,6 +8715,13 @@ export class SessionManager {
     this.releaseAdmission(sessionId);
     this.clearLock(sessionId);
     const meta = this.store.readMeta(sessionId);
+    const pendingClaudeTaskIds = meta?.driver === "claude-code" && entry.status !== "stopped"
+      ? [...new Set([
+          ...(meta.pendingBackgroundTaskIds ?? []),
+          ...(meta.orphanedWork?.pendingTaskIds ?? []),
+        ])].sort()
+      : [];
+    const recoverableClaudeWork = pendingClaudeTaskIds.length > 0 && !!meta?.agentSessionId;
     this.cancelApprovalTelemetry(sessionId);
     if (meta && entry.status !== "stopped") {
       this.emitTelemetry(meta, {
@@ -8734,6 +8765,17 @@ export class SessionManager {
     }
     if (entry.status !== "stopped") {
       this.restoreUnsubmittedPromotions(sessionId, entry);
+      if (recoverableClaudeWork) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `Claude provider exited with pending background work (${pendingClaudeTaskIds.join(", ")}); relaunching and resuming it automatically.`,
+        });
+      } else if (pendingClaudeTaskIds.length > 0) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `Claude provider exited with pending background work (${pendingClaudeTaskIds.join(", ")}); automatic recovery is unavailable because the provider conversation cannot be resumed.`,
+        });
+      }
       // Keep the entry installed until this append completes: if it is the first integrity
       // failure, failHistoryIntegrity must still own/cancel this session and its durable queue.
       if (!this.emitEvent(sessionId, { kind: "stderr", text: `agent process exited (code ${code})` })) {
@@ -8746,7 +8788,11 @@ export class SessionManager {
       const hadQueueProjection = queued.length > 0 || this.reservedPromotions(entry).size > 0;
       this.deleteActiveSession(sessionId, entry);
       if (hadQueueProjection) this.emitQueue(sessionId);
-      if (recoverableAppServer) {
+      if (recoverableClaudeWork) {
+        this.rejectQueued(queued, "Claude exited before queued command started");
+        this.emitStatus(sessionId, "idle", "Claude exited with pending background work; recovery is resuming automatically");
+        this.scheduleOrphanRecovery(sessionId);
+      } else if (recoverableAppServer) {
         // A crashed turn may already have reached turn/start, so never replay it. The entries
         // still in queue are provably unsubmitted and can safely continue after a fresh process
         // resumes the same durable thread.
@@ -9395,6 +9441,7 @@ export class SessionManager {
     if (updated?.orphanedWork && update.state === "orphaned" && automaticClaudeRecoveryAllowed(updated)) {
       this.scheduleOrphanRecovery(sessionId);
     }
+    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
   }
 
   private mergeDurableBackgroundJobs(
@@ -9761,6 +9808,7 @@ export class SessionManager {
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     if (this.queuedBackgroundJobIds(updated).length > 0) this.scheduleBackgroundContinuation(sessionId);
+    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
   }
 
   /** A legacy peer or a disconnected socket can make the durable delivery proof use the
