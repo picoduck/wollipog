@@ -3283,7 +3283,12 @@ app.post("/api/sessions", async (req, reply) => {
   if (body.launchSurface !== undefined && body.launchSurface !== "direct" && body.launchSurface !== "native_tui") {
     return reply.code(400).send({ error: "launchSurface must be direct or native_tui" });
   }
-  const ownership = resolveSessionCreationOwnership(db, principal, body);
+  const ownership = resolveSessionCreationOwnership(
+    db,
+    principal,
+    body,
+    { preserveOmittedProject: Boolean(parentSessionId) },
+  );
   if (!ownership.ok) return reply.code(ownership.status).send({ error: ownership.error });
   const launchError = nativeTuiCreationError(db, hub, ownership.body);
   if (launchError) return reply.code(launchError.status).send({ error: launchError.error });

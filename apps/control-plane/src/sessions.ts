@@ -2592,8 +2592,21 @@ export class SessionsService {
     runnerId: string,
     workspaceId: string | null,
     allowProjectWithoutLocation = false,
+    parentSessionId?: string,
   ): ServiceResult<{ projectId?: string | null; projectLocationId?: string | null }> {
     const explicit = req.projectId !== undefined || req.projectLocationId !== undefined;
+    if (!explicit && parentSessionId) {
+      const parent = this.db.getSession(parentSessionId);
+      if (!parent) return fail("parent session not found", 404);
+      if (!parent.projectId) return ok({ projectId: null, projectLocationId: null });
+      const location = workspaceId
+        ? this.db.findProjectLocationForProject(parent.projectId, runnerId, workspaceId)
+        : null;
+      if (!location || location.availability !== "available") {
+        return fail("the parent Project has no available Location matching the selected runner and workspace", 409);
+      }
+      return ok({ projectId: parent.projectId, projectLocationId: location.id });
+    }
     if (!explicit) return ok({});
     if (req.projectId === null) {
       if (req.projectLocationId != null) return fail("No Project sessions cannot have a project location", 400);
@@ -2785,11 +2798,13 @@ export class SessionsService {
       return fail("The Conductor agent is retired; select an ordinary agent to orchestrate child sessions.", 409);
     }
     const parentSessionId = creationContext?.parentSessionId;
+    let parentSession: SessionView | null = null;
     if (parentSessionId) {
       const parent = this.db.getSession(parentSessionId);
       if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
         return fail("the creating parent session is no longer active", 409);
       }
+      parentSession = parent;
       const allocated = this.db.childSessionAllocations(parentSessionId);
       const guarded = childSessionGuardrails({
         ...parent,
@@ -3063,12 +3078,13 @@ export class SessionsService {
     }
     const workspaceId = snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId);
     const requestedProject = this.requestedProjectAssignment(
-      req, req.runnerId, workspaceId, allowProjectWithoutLocation,
+      req, req.runnerId, workspaceId, allowProjectWithoutLocation, parentSessionId,
     );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
-    let sessionScope = scope;
+    let sessionScope = scope ?? (parentSession ? this.db.sessionScope(parentSession.id) ?? undefined : undefined);
+    if (parentSession && !sessionScope) return fail("parent session ownership is unavailable", 409);
     if (requestedProject.data.projectId) {
       const projectSessionScope = this.sessionScopeForProjectAssignment(
         requestedProject.data,
@@ -5635,7 +5651,9 @@ export class SessionsService {
       ? snapshotStarts[0].spec.workspacePath
       : this.db.getWorkspacePath(req.runnerId, req.workspaceId);
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
-    const requestedProject = this.requestedProjectAssignment(req, req.runnerId, req.workspaceId);
+    const requestedProject = this.requestedProjectAssignment(
+      req, req.runnerId, req.workspaceId, false, parentSessionId,
+    );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
@@ -5734,10 +5752,21 @@ export class SessionsService {
     if (!workerSessionScope.ok || !workerSessionScope.data) {
       return fail(workerSessionScope.error ?? "workflow session ownership is unavailable", workerSessionScope.status);
     }
-    // Trusted orchestrators require organization scope for organization workflow tools. When a
-    // Project is narrower, keep only that infrastructure session explicitly outside the Project;
-    // every worker still adopts the selected Project scope and identity.
-    const orchestratorProject = members.some((member) => member.orchestrator) &&
+    let childSessionScope = workerSessionScope.data;
+    if (parentSessionId) {
+      const parentScope = this.db.sessionScope(parentSessionId);
+      if (!parentScope) return fail("parent session ownership is unavailable", 409);
+      if (!this.db.scopeAudienceContainedWithMembership(parentScope, workerSessionScope.data)) {
+        return fail("parent session access is broader than the selected Project or execution Location", 409);
+      }
+      childSessionScope = parentScope;
+    }
+    // Human-created trusted orchestrators retain organization scope for workflow tools. An
+    // agent-created orchestrator is itself a child, so it stays in the authenticated parent's
+    // Project and scope with every worker.
+    const orchestratorProject = parentSessionId
+      ? requestedProject.data
+      : members.some((member) => member.orchestrator) &&
       requestedProject.data.projectId && orchestratorScope &&
       !this.db.scopeAudienceContainedWithMembership(
         orchestratorScope,
@@ -5745,6 +5774,7 @@ export class SessionsService {
       )
       ? { projectId: null, projectLocationId: null }
       : requestedProject.data;
+    const childOrchestratorScope = parentSessionId ? childSessionScope : orchestratorScope;
 
     if (delivery) {
       return this.createPreStagedWorkflowRun(
@@ -5797,7 +5827,7 @@ export class SessionsService {
         runId,
         driver: member.launch.driver,
         config,
-        scope: member.orchestrator ? orchestratorScope! : workerSessionScope.data,
+        scope: member.orchestrator ? childOrchestratorScope! : childSessionScope,
         now,
       });
       const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;
@@ -6742,21 +6772,32 @@ export class SessionsService {
     if (typeof req.task !== "string" || !req.task.trim()) return fail("a task is required");
     const workspacePath = this.db.getWorkspacePath(req.runnerId, req.workspaceId);
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
-    const requestedProject = this.requestedProjectAssignment(req, req.runnerId, req.workspaceId);
+    const requestedProject = this.requestedProjectAssignment(
+      req, req.runnerId, req.workspaceId, false, parentSessionId,
+    );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
-    const sessionScope = this.sessionScopeForProjectAssignment(
+    const projectSessionScope = this.sessionScopeForProjectAssignment(
       requestedProject.data,
       this.db.workspaceScope(req.runnerId, req.workspaceId) ?? this.db.runnerScope(req.runnerId),
     );
-    if (!sessionScope.ok || !sessionScope.data) {
-      return fail(sessionScope.error ?? "run session ownership is unavailable", sessionScope.status);
+    if (!projectSessionScope.ok || !projectSessionScope.data) {
+      return fail(projectSessionScope.error ?? "run session ownership is unavailable", projectSessionScope.status);
+    }
+    let sessionScope = projectSessionScope.data;
+    if (parentSessionId) {
+      const parentScope = this.db.sessionScope(parentSessionId);
+      if (!parentScope) return fail("parent session ownership is unavailable", 409);
+      if (!this.db.scopeAudienceContainedWithMembership(parentScope, projectSessionScope.data)) {
+        return fail("parent session access is broader than the selected Project or execution Location", 409);
+      }
+      sessionScope = parentScope;
     }
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     // Every member session carries the run's scope, so an owner over their daily allowance
     // cannot launch a fleet of new turns through a run either.
-    const runAdmissionDenied = this.dailyBudgetAdmissionError(sessionScope.data);
+    const runAdmissionDenied = this.dailyBudgetAdmissionError(sessionScope);
     if (runAdmissionDenied) return fail(runAdmissionDenied, 409);
 
     // Resolve every agent before creating the run so we never persist an empty run.
@@ -6824,7 +6865,7 @@ export class SessionsService {
         runId,
         driver: launch.driver,
         config,
-        scope: sessionScope.data,
+        scope: sessionScope,
         now,
       });
       // Run-level guardrails apply to every member session; each member gates independently.
