@@ -22,7 +22,7 @@ import {
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
-import { EditIcon, ThreadForkIcon } from "./Icons.js";
+import { EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { PromptImageView } from "./PromptImageView.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
@@ -87,6 +87,25 @@ export function assistantForkTurns(items: readonly TimelineItem[]): ReadonlyMap<
   }
   return turns;
 }
+
+/** Attach each file checkpoint to the canonical user message that starts its turn. Checkpoints are
+ * explicit semantic boundaries, so this never guesses from row position or lets a later prompt
+ * borrow an incomplete turn's checkpoint. */
+export function userRewindTurns(items: readonly TimelineItem[]): ReadonlyMap<number, number> {
+  const turns = new Map<number, number>();
+  let pendingCheckpoint: number | undefined;
+  for (const item of items) {
+    if (item.kind === "checkpoint") {
+      pendingCheckpoint = item.turn;
+    } else if (item.kind === "conversation_checkpoint") {
+      pendingCheckpoint = undefined;
+    } else if (item.kind === "user_message" && item.deliveryIntent !== "steer" && pendingCheckpoint != null) {
+      turns.set(item.id, pendingCheckpoint);
+      pendingCheckpoint = undefined;
+    }
+  }
+  return turns;
+}
 export type TimelineRenderRow =
   | {
       kind: "work_summary";
@@ -132,6 +151,7 @@ export const EventTimeline = memo(function EventTimeline({
   handoff,
   items,
   onRewind,
+  rewindUnavailableReason,
   onFork,
   onEditAndResend,
   onEditInFork,
@@ -156,6 +176,7 @@ export const EventTimeline = memo(function EventTimeline({
   handoff?: { open: (turn: number) => void; reason?: string };
   items: TimelineItem[];
   onRewind?: (turn: number) => void;
+  rewindUnavailableReason?: string;
   onFork?: (turn: number) => void;
   /** Composer preparation only; callers must never submit the prompt from this callback. */
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
@@ -194,6 +215,7 @@ export const EventTimeline = memo(function EventTimeline({
       key={effectiveHistoryKey}
       items={items}
       onRewind={onRewind}
+      rewindUnavailableReason={rewindUnavailableReason}
       onFork={onFork}
       onEditAndResend={onEditAndResend}
       onEditInFork={onEditInFork}
@@ -221,6 +243,7 @@ export const EventTimeline = memo(function EventTimeline({
 function EventTimelineBody({
   items,
   onRewind,
+  rewindUnavailableReason,
   onFork,
   onEditAndResend,
   onEditInFork,
@@ -243,6 +266,7 @@ function EventTimelineBody({
 }: {
   items: TimelineItem[];
   onRewind?: (turn: number) => void;
+  rewindUnavailableReason?: string;
   onFork?: (turn: number) => void;
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
@@ -271,6 +295,7 @@ function EventTimelineBody({
   const projection = useMemo(() => projector.current!.project(items, disclosure), [items, disclosure]);
   const { rows } = projection;
   const forkTurns = useMemo(() => assistantForkTurns(items), [items]);
+  const rewindTurns = useMemo(() => userRewindTurns(items), [items]);
   const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
   let pinnedQuestionRow: TimelineRenderRow | undefined;
   if (pendingQuestionRequestId !== null) {
@@ -369,6 +394,7 @@ function EventTimelineBody({
     const detailsKey = `row-details:${row.key}`;
     const detailsOpen = disclosure.get(detailsKey) ?? false;
     const assistantForkTurn = item.kind === "agent_message" ? forkTurns.get(item.id) : undefined;
+    const userRewindTurn = item.kind === "user_message" ? rewindTurns.get(item.id) : undefined;
     return (
       <div
         className={row.depth > 0 ? "tl-nested-row" : row.inWork ? "tl-work-row" : undefined}
@@ -381,6 +407,8 @@ function EventTimelineBody({
           disclosureOpen={detailsOpen}
           onDisclosureToggle={() => toggle(detailsKey, detailsOpen)}
           onRewind={onRewind}
+          rewindTurn={userRewindTurn}
+          rewindUnavailableReason={rewindUnavailableReason}
           onEditAndResend={onEditAndResend}
           onEditInFork={onEditInFork}
           onOpenSourceLocation={onOpenSourceLocation}
@@ -1547,6 +1575,8 @@ const TimelineRow = memo(function TimelineRow({
   item,
   inWork = false,
   onRewind,
+  rewindTurn,
+  rewindUnavailableReason,
   onFork,
   onEditAndResend,
   onEditInFork,
@@ -1562,6 +1592,8 @@ const TimelineRow = memo(function TimelineRow({
   item: TimelineItem;
   inWork?: boolean;
   onRewind?: (turn: number) => void;
+  rewindTurn?: number;
+  rewindUnavailableReason?: string;
   onFork?: (turn: number) => void;
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
@@ -1580,16 +1612,10 @@ const TimelineRow = memo(function TimelineRow({
   const handoff = useContext(HandoffContext);
   switch (item.kind) {
     case "checkpoint":
-      // Thin turn divider; the Rewind affordance stays discoverable whenever it is available.
       return (
         <div className="tl-checkpoint" title={`Files snapshot taken at the start of turn ${item.turn}`}>
           <span className="checkpoint-line" />
           <span className="checkpoint-label">Turn {item.turn}</span>
-          {onRewind && (
-            <button className="btn ghost sm checkpoint-rewind" onClick={() => onRewind(item.turn)}>
-              ⤺ Rewind Files to Here
-            </button>
-          )}
           <span className="checkpoint-line" />
         </div>
       );
@@ -1606,7 +1632,6 @@ const TimelineRow = memo(function TimelineRow({
         <div className="tl-checkpoint conversation" title={`Conversation and files after turn ${item.turn}`}>
           <span className="checkpoint-line" />
           <span className="checkpoint-label">after turn {item.turn}</span>
-          {handoff && <button className="btn ghost sm" disabled={!!handoff.reason} title={handoff.reason} onClick={() => handoff.open(item.turn)}>Hand Off to Another Agent</button>}
           <span className="checkpoint-line" />
         </div>
       );
@@ -1645,6 +1670,8 @@ const TimelineRow = memo(function TimelineRow({
               turnUsage={item.turnUsage}
               copyText={item.text}
               copyLabel="Copy user message"
+              onRewind={onRewind && rewindTurn != null ? () => onRewind(rewindTurn) : undefined}
+              rewindUnavailableReason={rewindUnavailableReason}
               onEditAndResend={onEditAndResend ? () => onEditAndResend(item) : undefined}
               onEditInFork={onEditInFork && editInForkTurn != null ? () => onEditInFork(item, editInForkTurn) : undefined}
             />
@@ -1665,6 +1692,8 @@ const TimelineRow = memo(function TimelineRow({
             copyLabel="Copy assistant message"
             onFork={onFork && forkTurn != null ? () => onFork(forkTurn) : undefined}
             forkAvailability={forkAvailability}
+            onHandoff={handoff && forkTurn != null ? () => handoff.open(forkTurn) : undefined}
+            handoffUnavailableReason={handoff?.reason}
           />
         </div>
       );
@@ -2090,6 +2119,10 @@ function MessageMeta({
   onEditInFork,
   onFork,
   forkAvailability,
+  onRewind,
+  rewindUnavailableReason,
+  onHandoff,
+  handoffUnavailableReason,
 }: {
   createdAt?: number;
   lastActivityAt?: number;
@@ -2103,12 +2136,17 @@ function MessageMeta({
   onEditInFork?: () => void;
   onFork?: () => void;
   forkAvailability?: ConversationForkAvailability;
+  onRewind?: () => void;
+  rewindUnavailableReason?: string;
+  onHandoff?: () => void;
+  handoffUnavailableReason?: string;
 }) {
   const duration = durationMs != null ? formatDuration(durationMs) : "";
   const driver = useContext(TimelineDriverContext);
   const usage = turnUsage ? turnUsageLabel(turnUsage, driver) : null;
   const timestamp = Number.isFinite(createdAt);
-  if (!timestamp && !duration && !usage && !copyText && !onEditAndResend && !onEditInFork && !forkAvailability) return null;
+  if (!timestamp && !duration && !usage && !copyText && !onEditAndResend && !onEditInFork &&
+      !forkAvailability && !onRewind && !onHandoff) return null;
   return (
     <div className="tl-message-meta">
       {timestamp && (
@@ -2133,42 +2171,103 @@ function MessageMeta({
           {usage.text}
         </span>
       )}
-      {copyText && <CopyButton text={copyText} iconOnly ariaLabel={copyLabel} className="tl-message-icon" />}
-      {forkAvailability && (
-        <button
-          type="button"
-          className="tl-message-icon"
-          disabled={!forkAvailability.available}
-          onClick={forkAvailability.available ? onFork : undefined}
-          title={forkAvailability.available ? "Fork Conversation Here" : forkAvailability.reason}
-          aria-label="Fork Conversation Here"
-        >
-          <ThreadForkIcon size={14} />
-        </button>
-      )}
-      {onEditAndResend && (
-        <button
-          type="button"
-          className="tl-message-icon"
-          onClick={onEditAndResend}
-          title="Edit & Resend"
-          aria-label="Edit User Message as a New Turn"
-        >
-          <EditIcon size={14} />
-        </button>
-      )}
-      {onEditInFork && (
-        <button
-          type="button"
-          className="tl-message-icon"
-          onClick={onEditInFork}
-          title="Edit in Fork"
-          aria-label="Edit User Message in a New Conversation Fork"
-        >
-          <ThreadForkIcon size={14} />
-        </button>
+      {(copyText || forkAvailability || onRewind || onHandoff || onEditAndResend || onEditInFork) && (
+        <div className="tl-message-actions" role="group" aria-label="Message Actions">
+          {copyText && <CopyButton text={copyText} iconOnly ariaLabel={copyLabel} className="tl-message-icon" />}
+          {onRewind && (
+            <MessageAction
+              label="Rewind Files to Before This Turn"
+              description="Restore files from before this turn without changing conversation history."
+              reason={rewindUnavailableReason}
+              onClick={onRewind}
+            >
+              <FolderUpIcon size={14} />
+            </MessageAction>
+          )}
+          {forkAvailability && (
+            <MessageAction
+              label="Fork Conversation After This Turn"
+              description="Fork with the same provider and its native conversation history."
+              reason={forkAvailability.available ? undefined : forkAvailability.reason}
+              onClick={forkAvailability.available ? onFork : undefined}
+            >
+              <ThreadForkIcon size={14} />
+            </MessageAction>
+          )}
+          {onHandoff && (
+            <MessageAction
+              label="Hand Off After This Turn"
+              description="Hand off to a different provider in a fresh conversation with portable context."
+              reason={handoffUnavailableReason}
+              onClick={onHandoff}
+            >
+              <ShareIcon size={14} />
+            </MessageAction>
+          )}
+          {onEditAndResend && (
+            <button
+              type="button"
+              className="tl-message-icon"
+              onClick={onEditAndResend}
+              title="Edit & Resend"
+              aria-label="Edit User Message as a New Turn"
+            >
+              <EditIcon size={14} />
+            </button>
+          )}
+          {onEditInFork && (
+            <button
+              type="button"
+              className="tl-message-icon"
+              onClick={onEditInFork}
+              title="Edit in Fork"
+              aria-label="Edit User Message in a New Conversation Fork"
+            >
+              <ThreadForkIcon size={14} />
+            </button>
+          )}
+        </div>
       )}
     </div>
+  );
+}
+
+function MessageAction({ label, description, reason, onClick, children }: {
+  label: string;
+  description: string;
+  reason?: string;
+  onClick?: () => void;
+  children: ReactNode;
+}) {
+  const descriptionId = useId();
+  if (reason || !onClick) {
+    const unavailableReason = reason ?? "This action is unavailable.";
+    return (
+      <details className="tl-message-action-unavailable">
+        <summary
+          className="tl-message-icon"
+          aria-label={`${label} Unavailable: ${description} ${unavailableReason}`}
+          aria-describedby={descriptionId}
+          title={`${description} ${unavailableReason}`}
+        >
+          {children}
+        </summary>
+        <span id={descriptionId} role="status"><strong>{label}:</strong> {description} {unavailableReason}</span>
+      </details>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="tl-message-icon"
+      onClick={onClick}
+      title={description}
+      aria-label={label}
+      aria-describedby={descriptionId}
+    >
+      {children}
+      <span id={descriptionId} className="sr-only">{description}</span>
+    </button>
   );
 }
 

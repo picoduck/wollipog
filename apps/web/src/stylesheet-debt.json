@@ -328,7 +328,6 @@
     "|.thought-body|font-size|13",
     "|.tick|font-size|13",
     "|.tl-agent-msg|font-size|14",
-    "|.tl-checkpoint .checkpoint-rewind|font-size|11",
     "|.tl-checkpoint|font-size|11",
     "|.tl-error|font-size|13",
     "|.tl-message-meta|font-size|11",

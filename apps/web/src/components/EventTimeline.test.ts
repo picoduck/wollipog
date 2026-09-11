@@ -15,6 +15,7 @@ import {
   stabilizeTimelineRowKeys,
   stabilizeWorkGroupKeys,
   timelineFileSourceLocation,
+  userRewindTurns,
 } from "./EventTimeline.js";
 import { reanchorAtLogicalIndex } from "./MeasuredVirtualList.js";
 
@@ -306,34 +307,56 @@ test("resolved question cards keep a concise summary and disclose complete rich 
   assert.equal((html.match(/signature=secret/g) ?? []).length, 1);
 });
 
-test("completed assistant metadata owns enabled and disabled fork controls beside Copy", () => {
+test("completed turn messages own compact rewind, fork, and handoff actions", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [
       { kind: "checkpoint", id: 1, turn: 1 },
-      { kind: "agent_message", id: 2, text: "First answer" },
-      { kind: "conversation_checkpoint", id: 3, turn: 1 },
-      { kind: "checkpoint", id: 4, turn: 2 },
-      { kind: "agent_message", id: 5, text: "Second answer" },
-      { kind: "conversation_checkpoint", id: 6, turn: 2 },
+      { kind: "user_message", id: 2, text: "First question" },
+      { kind: "agent_message", id: 3, text: "First answer" },
+      { kind: "conversation_checkpoint", id: 4, turn: 1 },
+      { kind: "checkpoint", id: 5, turn: 2 },
+      { kind: "user_message", id: 6, text: "Second question" },
+      { kind: "agent_message", id: 7, text: "Second answer" },
+      { kind: "conversation_checkpoint", id: 8, turn: 2 },
     ],
     onRewind: () => {},
     onFork: () => {},
+    handoff: { open: () => {} },
     forkAvailabilityByTurn: new Map([
       [1, { available: false, reason: "Claude Code can fork only its latest completed conversation checkpoint." }],
       [2, { available: true, forkTurn: 2 }],
     ]),
   }));
 
-  assert.equal((html.match(/Rewind Files to Here/g) ?? []).length, 2);
-  assert.equal((html.match(/aria-label="Fork Conversation Here"/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-label="Rewind Files to Before This Turn"/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-label="Fork Conversation After This Turn/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-label="Hand Off After This Turn/g) ?? []).length, 2);
   assert.equal((html.match(/lucide-git-fork/g) ?? []).length, 2,
     "plain historical forks use the shared Lucide fork glyph");
-  assert.match(html, /aria-label="Copy assistant message"[\s\S]*?aria-label="Fork Conversation Here"/,
+  assert.equal((html.match(/lucide-share/g) ?? []).length, 2,
+    "Hand Off uses a distinct shared glyph");
+  assert.match(html, /aria-label="Copy assistant message"[\s\S]*?aria-label="Fork Conversation After This Turn/,
     "Fork follows Copy in assistant metadata");
-  assert.match(html, /<button[^>]*disabled=""[^>]*title="Claude Code can fork only its latest completed conversation checkpoint\."[^>]*aria-label="Fork Conversation Here"/);
-  assert.match(html, /<button[^>]*title="Fork Conversation Here"[^>]*aria-label="Fork Conversation Here"/);
-  assert.doesNotMatch(html, /class="btn ghost sm checkpoint-rewind"[^>]*>[^<]*Fork Conversation Here/,
-    "checkpoint dividers no longer own the heavy text action");
+  assert.match(html, /<details class="tl-message-action-unavailable">[\s\S]*?Claude Code can fork only its latest completed conversation checkpoint\./);
+  assert.match(html, /title="Fork with the same provider and its native conversation history\."/);
+  assert.match(html, /title="Hand off to a different provider in a fresh conversation with portable context\."/);
+  assert.doesNotMatch(html, /Rewind Files to Here|Hand Off to Another Agent/,
+    "checkpoint dividers no longer own heavy text actions");
+});
+
+test("checkpoint projection maps only the owning canonical user message", () => {
+  assert.deepEqual([...userRewindTurns([
+    { kind: "checkpoint", id: 1, turn: 1 },
+    { kind: "user_message", id: 2, text: "first" },
+    { kind: "conversation_checkpoint", id: 3, turn: 1 },
+    { kind: "checkpoint", id: 4, turn: 2 },
+    { kind: "user_message", id: 5, text: "steer", deliveryIntent: "steer" },
+    { kind: "user_message", id: 6, text: "second" },
+    { kind: "error", id: 7, message: "cancelled" },
+    { kind: "checkpoint", id: 8, turn: 3 },
+    { kind: "conversation_checkpoint", id: 9, turn: 3 },
+    { kind: "user_message", id: 10, text: "must not borrow turn three" },
+  ])], [[2, 1], [6, 2]]);
 });
 
 test("assistant fork-point projection ignores nested answers and cancelled turns", () => {
