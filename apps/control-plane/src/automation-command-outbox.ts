@@ -7,7 +7,7 @@ import type {
   DurableSessionCommandUpdateMessage,
 } from "@wollipog/protocol";
 import { isDurableSessionCommandErrorCode, runnerSupportsProtocol } from "@wollipog/protocol";
-import type { ControlPlaneDb } from "./db.js";
+import type { AutomationCommandRecord, ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import { isTransientProviderError } from "./provider-error.js";
 
@@ -60,6 +60,12 @@ export class AutomationCommandOutbox {
     private readonly hub: Hub,
     private readonly log: Logger,
     private readonly changed: (executionId: string, now: number) => void,
+    /** False once a command has outlived its execution's delivery bound. Asked here rather than
+     * only before a tick's flush because `receipt()` and runner registration flush directly: a
+     * bound enforced only by the caller would let those paths hand a runner a launch the very
+     * sweep that follows is about to write off. Skipping only defers — the sweep does the
+     * expiring — so this stays a pure predicate and mutates nothing mid-flush. */
+    private readonly deliverable: (row: AutomationCommandRecord, now: number) => boolean = () => true,
   ) {}
 
   flush(now = Date.now(), runnerId?: string): number {
@@ -81,6 +87,7 @@ export class AutomationCommandOutbox {
     }
     for (const row of this.db.dueAutomationCommands(now, runnerId, MAX_BATCH)) {
       if (!this.hub.isRunnerOnline(row.runnerId)) continue;
+      if (!this.deliverable(row, now)) continue;
       if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, "automationCommandReceipts")) {
         this.failForCapabilityLoss(row, now);
         continue;

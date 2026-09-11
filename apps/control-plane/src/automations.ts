@@ -343,6 +343,7 @@ export class AutomationsService {
       hub,
       log,
       (executionId, now) => this.reconcileExecution(executionId, now),
+      (row, now) => this.commandStillDeliverable(row, now),
     );
   }
 
@@ -585,6 +586,22 @@ export class AutomationsService {
     const cadence = nextCronFire(schedule.cron, schedule.timezone, execution.scheduledFor) - execution.scheduledFor;
     const bound = Math.min(MAX_DELIVERY_BOUND_MS, Math.max(MIN_DELIVERY_BOUND_MS, cadence));
     return now - Math.max(...commands.map((command) => command.createdAt)) >= bound;
+  }
+
+  /** The bound as the outbox sees it, for one command about to be sent. A command past it is left
+   * alone rather than expired here: mutating inside the flush loop would reorder the very decision
+   * this exists to sequence, and the sweep settles it on the next pass. */
+  private commandStillDeliverable(row: AutomationCommandRecord, now: number): boolean {
+    const execution = this.db.getAutomationExecution(row.executionId);
+    if (!execution || execution.deliveryMode !== "receipted_v53") return true;
+    const schedule = this.executionSchedule(execution);
+    if (!schedule) return true;
+    try {
+      return !this.undeliverable(execution, schedule, this.db.listAutomationCommands(row.executionId), now);
+    } catch {
+      // An unparseable stored cron must not stop ordinary delivery; the sweep logs it.
+      return true;
+    }
   }
 
   /**

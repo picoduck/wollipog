@@ -1536,6 +1536,49 @@ test("a command that never reaches its runner settles the execution and releases
   assert.equal(service.tick(32 * 60_000), 1, "the automation claims its next occurrence once the dead one settles");
 });
 
+test("a flush outside the tick cannot transmit a command past its delivery bound", () => {
+  // `receipt()` flushes for the whole runner after any advancing receipt, and runner registration
+  // does the same, so ordering the sweep ahead of the tick's own flush is not enough: the bound can
+  // elapse between the sweep and one of those flushes. A second automation on the same runner is
+  // what makes that flush happen without a tick.
+  const { db, service, online, delivered } = harness();
+  const stalled = service.create(baseSpec({ name: "Stalled" }), { kind: "human", id: "device" }, 0).data!;
+  const neighbour = service.create(baseSpec({ name: "Neighbour" }), { kind: "human", id: "device" }, 0).data!;
+  service.tick(60_000);
+  const execution = db.listAutomationExecutions(stalled.automationId)[0]!;
+  const command = execution.commands![0]!;
+  const first = delivered.find((message) =>
+    (message as { commandId?: string }).commandId === command.commandId) as { requestId: string };
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: command.commandId,
+    sessionId: command.sessionId, state: "started", revision: 2,
+  }, 60_100);
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_result", requestId: first.requestId, duplicate: false,
+    commandId: command.commandId, sessionId: command.sessionId, state: "failed", revision: 3,
+    code: "COMMAND_CANCELLED",
+    error: "provider refusal: Failed to refresh OAuth token: another Claude Code process is refreshing it",
+  }, 60_200);
+  const replacement = db.listAutomationCommands(execution.executionId)[1]!;
+  assert.equal(replacement.state, "pending");
+
+  const other = db.listAutomationExecutions(neighbour.automationId)[0]!;
+  const otherCommand = other.commands![0]!;
+  const before = delivered.length;
+
+  // No tick: an advancing receipt on the neighbour flushes the whole runner with the bound elapsed.
+  service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: otherCommand.commandId,
+    sessionId: otherCommand.sessionId, state: "started", revision: 2,
+  }, 60_200 + 31 * 60_000);
+
+  const sent = delivered.slice(before).filter((message) =>
+    (message as { commandId?: string }).commandId === replacement.commandId);
+  assert.deepEqual(sent, [], "a direct flush must not transmit a command past its delivery bound");
+  assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "pending",
+    "and it must not be expired mid-flush either — the sweep owns that decision");
+});
+
 test("the delivery bound is decided before the outbox can transmit anything", () => {
   // The outbox marks a command `sent` and writes it to the runner in one step. If the bound were
   // judged after that, a reconnect at the bound would hand the runner a launch and release the
