@@ -140,7 +140,9 @@ test("desktop: a provider-reported free session stays $0.00 through its model de
   const usage = page.locator(".session-usage-popover").first();
   await expect(usage.locator(".session-usage-head > span")).toHaveText("$0.00");
   await expect(usage).toContainText("Cost as reported by the provider.");
-  const modelCosts = usage.locator(".session-usage-model dl > div:last-child dd");
+  const modelCosts = usage.locator(
+    '.session-usage-model dl > div:has(> dt:text-is("Cost")) > dd',
+  );
   await expect(modelCosts).toHaveCount(2);
   await expect(modelCosts).toHaveText(["$0.00", "$0.00"]);
   await expect(usage).not.toContainText("$1.21");

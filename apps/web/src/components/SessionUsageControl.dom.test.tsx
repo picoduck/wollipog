@@ -246,6 +246,7 @@ test("a lagging ledger drives nothing in the panel, not just the token rows", as
   assert.equal(rows["Total Processed"], "10k");
   assert.equal(view.button()!.textContent, "$—");
   // The rest of the rejected response is rejected too, so nothing on screen disagrees.
+  assert.match(popover.querySelector(".session-usage-head")!.textContent ?? "", /Not Priced/);
   assert.equal(popover.querySelector(".session-usage-models"), null);
   assert.doesNotMatch(popover.textContent ?? "", /stale-model|rate table|reported by the provider/);
   await view.cleanup();

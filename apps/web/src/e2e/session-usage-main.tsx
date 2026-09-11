@@ -41,9 +41,10 @@ const serviceTierFixture = params.has("tiers");
 const serviceTierChoice = params.get("tiers") === "1";
 const servedWindow = Number(params.get("served") ?? "0");
 // `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
-// marks the session unpriced, while `?cost=free` carries provider-reported zero provenance, and
-// `?cost=<amount>` sets the total so layout specs can stress the strip with a figure much wider
-// than the default (#893). Every variant keeps the token counts.
+// marks the session unpriced, while `?cost=free` carries provider-reported zero provenance,
+// `?usage-detail=pending|failed` holds or rejects the model breakdown, and `?cost=<amount>`
+// sets the total so layout specs can stress the strip with a figure much wider than the default
+// (#893). Every variant keeps the token counts.
 const unknownContextWindow = params.get("window") === "none";
 const costParam = params.get("cost");
 const unpricedCost = costParam === "none";
