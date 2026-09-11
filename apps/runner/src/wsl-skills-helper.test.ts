@@ -393,6 +393,35 @@ test("a later pass recovers a crash during cleanup-proof publication", async (t)
   }
 });
 
+test("a later pass removes an orphaned two-link cleanup proof and its publication alias", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-orphan-proof-alias-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await fillLeaseJournal(home, store);
+  const interruptedPublication = instrumentHelper(
+    "        os.fsync(lock)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+    "        os.fsync(lock)\n        if target.startswith(\".mutable-home.cleanup-\"): os._exit(90)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+  );
+  assert.equal((await invoke(home, specification, interruptedPublication)).status, 90);
+
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const [sibling] = compactionSiblings(home);
+  assert.ok(sibling);
+  rmSync(join(leaseRoot, sibling), { recursive: true });
+  assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), true);
+  assert.equal(readdirSync(leaseRoot).some((name) =>
+    name.startsWith(".provider-home-lease-") && name.endsWith(".tmp")), true);
+
+  const recovered = await invoke(home, specification);
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), false);
+  assert.equal(readdirSync(leaseRoot).some((name) =>
+    name.startsWith(".provider-home-lease-") && name.endsWith(".tmp")), false);
+});
+
 test("cleanup-proof publication recovery fails closed for unaccounted aliases", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-proof-alias-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

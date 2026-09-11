@@ -172,7 +172,7 @@ def normalize_cleanup_proof(root, proof_name, proof_identity, proof_raw):
             if not PUBLICATION_TEMP.fullmatch(alias_name): continue
             alias_info = os.stat(alias_name, dir_fd=root, follow_symlinks=False)
             if (alias_info.st_dev, alias_info.st_ino) != proof_identity: continue
-            alias_fd = os.open(alias_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+            alias_fd = os.open(alias_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
             try:
                 alias_opened = os.fstat(alias_fd)
                 if ((alias_opened.st_dev, alias_opened.st_ino) != proof_identity or
