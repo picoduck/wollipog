@@ -1508,3 +1508,69 @@ test("workflow members receive stable distinct command and session ids", () => {
   ]);
   assert.equal(new Set(commands.map((command) => command.commandId)).size, 2);
 });
+
+test("a command that never reaches its runner settles the execution and releases the wait policy", () => {
+  const { db, service, online } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  assert.equal(service.tick(60_000), 1);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const command = db.listAutomationCommands(execution.executionId)[0]!;
+  assert.equal(command.state, "sent");
+  online.delete("runner-1");
+
+  let claimed = 0;
+  for (let minute = 2; minute <= 30; minute += 1) claimed += service.tick(minute * 60_000);
+  assert.equal(claimed, 0);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "dispatching",
+    "the execution is still inside its delivery bound");
+
+  service.tick(31 * 60_000);
+  const settled = db.getAutomationExecution(execution.executionId)!;
+  assert.equal(settled.status, "failed", "an undeliverable execution gives up on the automation's cadence");
+  assert.equal(db.listAutomationCommands(execution.executionId)[0]?.state, "uncertain",
+    "a sent attempt may already be running on the unreachable runner, so it is never replayed");
+  assert.match(settled.error ?? "", new RegExp(command.commandId));
+  assert.match(settled.error ?? "", /runner-1/);
+
+  online.add("runner-1");
+  assert.equal(service.tick(32 * 60_000), 1, "the automation claims its next occurrence once the dead one settles");
+});
+
+test("a transient-refusal replacement that never reaches its runner settles the execution", () => {
+  const { db, service, online, delivered } = harness();
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  assert.equal(service.tick(60_000), 1);
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  const command = execution.commands![0]!;
+
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_update", commandId: command.commandId,
+    sessionId: command.sessionId, state: "started", revision: 2,
+  }, 60_100), true);
+  assert.equal(service.onDurableCommandReceipt("runner-1", {
+    type: "durable_session_command_result", requestId: (delivered[0] as { requestId: string }).requestId,
+    duplicate: false, commandId: command.commandId, sessionId: command.sessionId, state: "failed",
+    revision: 3, code: "COMMAND_CANCELLED", error: TRANSIENT_REFUSAL,
+  }, 60_200), true);
+  const replacement = db.listAutomationCommands(execution.executionId)[1]!;
+  assert.equal(replacement.state, "pending");
+  online.delete("runner-1");
+
+  let claimed = 0;
+  for (let minute = 2; minute <= 31; minute += 1) claimed += service.tick(minute * 60_000);
+  assert.equal(claimed, 0);
+  assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running",
+    "a queued replacement keeps its own full delivery bound");
+  assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "pending");
+
+  service.tick(32 * 60_000);
+  const settled = db.getAutomationExecution(execution.executionId)!;
+  assert.equal(settled.status, "failed");
+  assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "rejected",
+    "a replacement that was never sent is provably unaccepted");
+  assert.match(settled.error ?? "", new RegExp(replacement.commandId));
+  assert.match(settled.error ?? "", /runner-1/);
+
+  online.add("runner-1");
+  assert.equal(service.tick(33 * 60_000), 1);
+});
