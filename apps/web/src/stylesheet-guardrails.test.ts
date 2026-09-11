@@ -534,6 +534,22 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
  */
 const CLASS_HELPERS = new Set(["clsx", "cn", "classNames", "classnames", "rowClass"]);
 
+/**
+ * Array methods that RELAY their receiver's elements rather than inventing new ones.
+ *
+ * `["row", on ? "is-on" : ""].filter(Boolean).join(" ")` renders exactly the classes the array
+ * literal holds, but the `.join()` reader only followed its immediate receiver, so one chained
+ * call hid every class in the expression and reported all of them as dead CSS. Reading through
+ * these methods makes a chained `.join()` yield what a direct one yields, however many links deep.
+ *
+ * Kept separate from `CLASS_HELPERS`: those compose classes from their ARGUMENTS, these pass a
+ * RECEIVER along, and conflating the two would read a `.filter()` predicate as class text.
+ */
+const ARRAY_RELAYS = new Set(["filter", "map", "flat", "flatMap"]);
+
+/** Relays whose callback RESULT is itself class text — see `fromCallbackResult`. */
+const MAPPING_RELAYS = new Set(["map", "flatMap"]);
+
 export function classTokens(source: string, fileName = "input.tsx"): Set<string> {
   const out = new Set<string>();
   const add = (text: string) => {
@@ -580,6 +596,18 @@ export function classTokens(source: string, fileName = "input.tsx"): Set<string>
         : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
       // `[...].join(" ")` and the class-composition helpers pass their arguments through.
       if (name === "join") { fromValue(callee as ts.Node); return; }
+      if (ARRAY_RELAYS.has(name) && ts.isPropertyAccessExpression(callee)) {
+        // The receiver's elements survive the call, so keep reading down the chain — the next link
+        // is another relay, an array literal, or nothing, and each is already handled.
+        fromValue(callee.expression);
+        // A `.map()` CALLBACK BODY is class text: `names.map((n) => `row-${n}`)` writes the class
+        // there and nowhere else, so not following it would report exactly the classes this fix
+        // exists to stop reporting. A `.filter()` PREDICATE is not class text — `c === "hidden"`
+        // names no class it renders — and `.flat()` takes a depth, so only the mapping callbacks
+        // are read, which keeps the value-not-predicate rule intact.
+        if (MAPPING_RELAYS.has(name)) for (const argument of node.arguments) fromCallbackResult(argument);
+        return;
+      }
       if (CLASS_HELPERS.has(name)) { for (const argument of node.arguments) fromValue(argument); return; }
       return;
     }
@@ -590,6 +618,19 @@ export function classTokens(source: string, fileName = "input.tsx"): Set<string>
         if (ts.isPropertyAssignment(property) && ts.isStringLiteralLike(property.name)) add(property.name.text);
       }
     }
+  };
+
+  /** Collect from what a callback RETURNS — its concise body, or each `return` in its block. */
+  const fromCallbackResult = (node: ts.Node): void => {
+    if (!ts.isArrowFunction(node) && !ts.isFunctionExpression(node)) return;
+    if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) { fromValue(node.body); return; }
+    const fromReturns = (inner: ts.Node): void => {
+      // A nested function returns to its own caller, not to the `.map()`, so stop at its boundary.
+      if (inner !== node.body && ts.isFunctionLike(inner)) return;
+      if (ts.isReturnStatement(inner)) { if (inner.expression) fromValue(inner.expression); return; }
+      ts.forEachChild(inner, fromReturns);
+    };
+    fromReturns(node.body);
   };
 
   const walk = (node: ts.Node): void => {
@@ -918,6 +959,48 @@ test("classTokens takes values and refuses predicates", () => {
   assert.deepEqual([...classTokens('<b className={label ?? "untitled-row"} />')], ["untitled-row"]);
   assert.deepEqual([...classTokens('<b className={clsx("row", { "is-on": enabled })} />')], ["row", "is-on"]);
   assert.deepEqual([...classTokens('<b className={["row", "is-on"].join(" ")} />')], ["row", "is-on"]);
+});
+
+test("classTokens reads through array methods that relay class text", () => {
+  // A chained `.join()` has to yield what a direct one yields. It did not: the `.join()` reader
+  // followed exactly one link, so `.filter(Boolean)` in between made every class in the expression
+  // look like dead CSS — the single most common way this app builds a className.
+  const direct = [...classTokens('<b className={["row", on ? "is-on" : ""].join(" ")} />')];
+  assert.deepEqual(direct, ["row", "is-on"]);
+  assert.deepEqual([...classTokens('<b className={["row", on ? "is-on" : ""].filter(Boolean).join(" ")} />')],
+    direct);
+  assert.deepEqual([...classTokens('<b className={["row", "is-on"].map((c) => c).join(" ")} />')], direct);
+  assert.deepEqual([...classTokens('<b className={["row", ["is-on"]].flat().join(" ")} />')], direct);
+  assert.deepEqual([...classTokens('<b className={["row", "is-on"].flatMap((c) => c).join(" ")} />')], direct);
+  // More than one link deep, in either order.
+  assert.deepEqual([...classTokens('<b className={["row", "is-on"].filter(Boolean).map((c) => c).join(" ")} />')],
+    direct);
+  assert.deepEqual([...classTokens('<b className={["row", ["is-on"]].flat().filter(Boolean).join(" ")} />')],
+    direct);
+  // A mapping callback is where the class is written when the receiver holds data, not names.
+  assert.deepEqual([...classTokens('<b className={kinds.map((k) => k === "warn" ? "is-warn" : "is-calm").join(" ")} />')],
+    ["is-warn", "is-calm"]);
+  assert.deepEqual([...classTokens('<b className={kinds.map((k) => { if (k) { return "is-on"; } return "is-off"; }).join(" ")} />')],
+    ["is-on", "is-off"]);
+  assert.deepEqual([...classTokens('<b className={kinds.flatMap((k) => ["cell", k.wide ? "is-wide" : ""]).join(" ")} />')],
+    ["cell", "is-wide"]);
+  // The stem rule still holds through a relay: `driver-${id}` leaves `driver-`, which nothing renders.
+  assert.deepEqual([...classTokens('<b className={ids.map((id) => `driver-${id}`).join(" ")} />')], []);
+  // A bare `map(...)` is not an array relay, and reading its receiver would be reading nothing.
+  assert.deepEqual([...classTokens('<b className={map("row").join(" ")} />')], []);
+});
+
+test("classTokens refuses a filter predicate", () => {
+  // Reading through `.filter()` must stay a read of its RECEIVER. Its PREDICATE decides which
+  // classes survive; it does not name one. Taking `c === "hidden"` as class text would certify a
+  // dead `.hidden` rule as rendered — the same false evidence a comparison operand gives anywhere.
+  assert.deepEqual([...classTokens('<b className={["row"].filter((c) => c === "hidden").join(" ")} />')], ["row"]);
+  assert.deepEqual([...classTokens('<b className={["row"].filter((c) => c.startsWith("is-live")).join(" ")} />')],
+    ["row"]);
+  // The two above pass even if the predicate IS read, because `fromValue` already drops a
+  // comparison and a call. This one does not: `||` yields an operand, so `fromValue` would take
+  // "ghost" as class text. It is the case that tells a receiver-only read from an argument read.
+  assert.deepEqual([...classTokens('<b className={["row"].filter((c) => c || "ghost").join(" ")} />')], ["row"]);
 });
 
 test("classTokens sees producers that never touch a className attribute", () => {
