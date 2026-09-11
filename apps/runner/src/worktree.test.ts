@@ -356,6 +356,10 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     }, { dataDir, verifiedMergedHead: "0".repeat(40) }), { removed: false, reason: "unpushed" });
     assert.equal(existsSync(mismatchedMerged.path), true,
       "a merge proof for any other commit cannot authorize cleanup");
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...mismatchedMerged,
+      source: "created",
+    }, { dataDir, verifiedMergedHead: "not-an-oid" }), { removed: false, reason: "no_upstream" });
 
     const verifiedMerged = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
@@ -701,23 +705,44 @@ test("merged PR worktrees remain discardable after their remote branches are del
       "s_merged_no_upstream",
       { baseRef: "HEAD", branch: "fix/legacy-merged-explicit" },
     );
-    for (const worktree of [automatic.worktree, explicit.worktree, legacyMerged.worktree]) {
+    const unprovenMerged = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/unproven-merged" },
+    );
+    for (const worktree of [automatic.worktree, explicit.worktree, legacyMerged.worktree, unprovenMerged.worktree]) {
       execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
       if (worktree !== legacyMerged.worktree) {
         await manager.linkWorktreePullRequest(
           "s_merged_no_upstream",
           worktree.path,
-          `https://github.com/picoduck/wollipog/pull/${worktree === automatic.worktree ? "710" : "711"}`,
+          `https://github.com/picoduck/wollipog/pull/${worktree === automatic.worktree
+            ? "710"
+            : worktree === explicit.worktree ? "711" : "713"}`,
         );
       }
       execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
     }
+    const forgeCalls = new Map<string, number>();
+    let forgeUnavailablePath: string | undefined;
+    let removeSiblingOnResolve: string | undefined;
     (manager as unknown as {
-      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged"; headOid: string }>;
-    }).resolveWorktreePullRequestState = async (path) => ({
-      state: "merged",
-      headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
-    });
+      resolveWorktreePullRequestState: (path: string) => Promise<{ state: "merged"; headOid?: string } | null>;
+    }).resolveWorktreePullRequestState = async (path) => {
+      forgeCalls.set(path, (forgeCalls.get(path) ?? 0) + 1);
+      if (removeSiblingOnResolve) {
+        const latest = store.readMeta("s_merged_no_upstream")!;
+        store.patchMeta("s_merged_no_upstream", {
+          worktrees: latest.worktrees?.filter((item) => item.path !== removeSiblingOnResolve),
+        });
+        removeSiblingOnResolve = undefined;
+      }
+      if (path === forgeUnavailablePath) return null;
+      if (path === unprovenMerged.worktree.path) return { state: "merged" };
+      return {
+        state: "merged",
+        headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      };
+    };
 
     const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
     activeEntries.set("s_merged_no_upstream", {
@@ -725,18 +750,41 @@ test("merged PR worktrees remain discardable after their remote branches are del
       cwd: explicit.worktree.path,
       worktree: { path: explicit.worktree.path, branch: explicit.worktree.branch },
     });
+    const beforeReconciliation = store.readMeta("s_merged_no_upstream")!;
+    const reconciliationSiblingPath = join(root, "reconciliation-sibling");
+    store.patchMeta("s_merged_no_upstream", {
+      worktrees: [
+        ...(beforeReconciliation.worktrees ?? []),
+        {
+          id: "reconciliation-sibling",
+          path: reconciliationSiblingPath,
+          branch: "fix/reconciliation-sibling",
+          source: "created",
+        },
+      ],
+    });
+    removeSiblingOnResolve = reconciliationSiblingPath;
     await manager.reconcileWorktreePullRequests();
 
     assert.equal(existsSync(automatic.worktree.path), false,
       "automatic reconciliation removes the inactive merged worktree without its remote branch");
     assert.equal(existsSync(explicit.worktree.path), true,
       "the worktree still used by a provider remains protected");
-    assert.equal(
-      store.readMeta("s_merged_no_upstream")?.worktrees
-        ?.find((item) => item.path === explicit.worktree.path)?.pullRequest?.state,
-      "merged",
+    const persistedExplicit = store.readMeta("s_merged_no_upstream")?.worktrees
+      ?.find((item) => item.path === explicit.worktree.path)?.pullRequest;
+    assert.equal(persistedExplicit?.state, "merged",
       "the terminal forge proof remains available for a later explicit discard",
     );
+    assert.equal(persistedExplicit?.headOid,
+      execFileSync("git", ["-C", explicit.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      "the exact merged head survives the durable session-store round trip");
+    assert.equal(forgeCalls.get(unprovenMerged.worktree.path), 1,
+      "a reconciliation pass does not repeat a forge lookup that returned no head proof");
+    assert.equal(existsSync(unprovenMerged.worktree.path), true,
+      "a merged lifecycle state without head proof cannot replace the missing upstream");
+    assert.equal(store.readMeta("s_merged_no_upstream")?.worktrees
+      ?.some((item) => item.id === "reconciliation-sibling"), false,
+      "automatic reconciliation cannot resurrect a sibling record removed during forge I/O");
 
     activeEntries.delete("s_merged_no_upstream");
     await manager.discardWorktree("s_merged_no_upstream", explicit.worktree.path);
@@ -750,13 +798,31 @@ test("merged PR worktrees remain discardable after their remote branches are del
     );
     const beforeUpgrade = store.readMeta("s_merged_no_upstream")!;
     store.patchMeta("s_merged_no_upstream", {
-      worktrees: beforeUpgrade.worktrees?.map((item) => item.path === legacyMerged.worktree.path
-        ? { ...item, pullRequest: { ...item.pullRequest!, state: "merged", headOid: undefined } }
-        : item),
+      worktrees: [
+        ...(beforeUpgrade.worktrees?.map((item) => item.path === legacyMerged.worktree.path
+          ? { ...item, pullRequest: { ...item.pullRequest!, state: "merged", headOid: undefined } }
+          : item) ?? []),
+        {
+          id: "concurrently-removed-sibling",
+          path: join(root, "concurrently-removed-sibling"),
+          branch: "fix/concurrently-removed-sibling",
+          source: "created",
+        },
+      ],
     });
+    removeSiblingOnResolve = join(root, "concurrently-removed-sibling");
     await manager.discardWorktree("s_merged_no_upstream", legacyMerged.worktree.path);
     assert.equal(existsSync(legacyMerged.worktree.path), false,
       "explicit discard refreshes a merged record persisted by a pre-proof runner");
+    assert.equal(store.readMeta("s_merged_no_upstream")?.worktrees
+      ?.some((item) => item.id === "concurrently-removed-sibling"), false,
+      "forge re-verification cannot resurrect a sibling record removed by another runner");
+
+    forgeUnavailablePath = unprovenMerged.worktree.path;
+    await assert.rejects(manager.discardWorktree("s_merged_no_upstream", unprovenMerged.worktree.path),
+      /branch has no upstream/);
+    assert.equal(existsSync(unprovenMerged.worktree.path), true,
+      "a legacy merged record remains fail-closed when forge proof is unavailable");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
