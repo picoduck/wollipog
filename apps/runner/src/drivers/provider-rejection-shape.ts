@@ -2,11 +2,18 @@
  * Reduce a provider request-validation rejection to a content-free structural shape, so an
  * unrecognized one can be evidenced later without retaining anything the provider said.
  *
- * The safety property is compositional, not filtering: every part of the result is either a literal
- * this module already contained — a known field name, a phrase from a fixed list — or a number
- * introduced by a recognized measurement. Nothing is reproduced merely because it looked
- * structural. A denylist would have to anticipate every way content can appear; a vocabulary
- * cannot emit a word it does not already know.
+ * The safety property is compositional, not filtering: EVERY element of the result is drawn from a
+ * finite set this module defines. A path segment is `input[N]`, a known field name, or `<field>`;
+ * a phrase is one of the literals listed below. Nothing derived from the message's own bytes is
+ * reproduced.
+ *
+ * Measured sizes were deliberately dropped. Within one opaque string there is no sound way to tell
+ * provider-generated text from user content the provider echoed back, so any grammar for extracting
+ * "the limit" can be mimicked by content that contains the same words — `unsupported value
+ * 'tokens 123456789'` is indistinguishable from a real token limit by proximity, and a cap on how
+ * many numbers are kept only bounds how much leaks. Sizes are not needed here anyway: this journal
+ * answers "which rejection shapes exist", and a classifier case added later carries its own exact
+ * anchored matcher, as `classifyPoisonedProviderHistory` already does.
  *
  * Scope is deliberately narrow. Only a rejection naming an indexed item in the request's own input
  * — the shape of "something in your stored conversation is unacceptable" — produces a shape at all.
@@ -52,21 +59,12 @@ const INDEXED_ITEM_PATH = /\binput\[(?:\d{1,10})\](?:\[\d{1,10}\]|\.[A-Za-z_][A-
 const RECOGNIZED_FIELDS = new Set([
   "annotations", "arguments", "call_id", "content", "data", "detail", "encrypted_content",
   "file_data", "file_id", "file_url", "function", "id", "image_url", "input", "input_audio",
-  "instructions", "messages", "metadata", "name", "output", "output_text", "parameters",
+  "instructions", "messages", "metadata", "name", "output", "output_text", "parameters", "path",
   "reasoning", "refusal", "role", "status", "summary", "text", "tool_calls", "tool_choice",
   "tools", "type", "url",
 ]);
 const REDACTED_FIELD = "<field>";
 
-/**
- * Numbers are retained only where a recognized measurement introduces them. A whole-message scan
- * would copy any digits the provider happened to echo back — an account number quoted inside a
- * rejected value is still user content, however structural the surrounding error looks.
- */
-const MEASURED_NUMBER =
-  /\b(?:maximum|minimum|max|min|at most|at least|exceeds?|exceeded|length|limit|characters|bytes|tokens|items)\b[^0-9]{0,20}?(\d{1,15})\b/gi;
-
-const MAX_NUMBERS = 4;
 const MAX_PHRASES = 6;
 
 export interface ProviderRejectionShape {
@@ -74,8 +72,6 @@ export interface ProviderRejectionShape {
   path: string;
   /** Recognized diagnostic phrases, in the order this module lists them. Never provider prose. */
   phrases: string[];
-  /** Measured sizes and limits the provider reported. Numbers only; never identifiers. */
-  numbers: number[];
 }
 
 /**
@@ -102,14 +98,7 @@ export function providerRejectionShape(message: unknown): ProviderRejectionShape
     .join(".");
   const lowered = message.toLowerCase();
   const phrases = RECOGNIZED_PHRASES.filter((phrase) => lowered.includes(phrase)).slice(0, MAX_PHRASES);
-  const numbers: number[] = [];
-  for (const match of message.matchAll(MEASURED_NUMBER)) {
-    const value = Number(match[1]);
-    if (!Number.isSafeInteger(value) || numbers.includes(value)) continue;
-    numbers.push(value);
-    if (numbers.length >= MAX_NUMBERS) break;
-  }
-  return { path: normalized, phrases, numbers };
+  return { path: normalized, phrases };
 }
 
 /** Stable identity for deduplication. Two rejections of the same shape are one piece of evidence. */

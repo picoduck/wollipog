@@ -23,7 +23,6 @@ export interface UnclassifiedRejectionRecord {
   driver: string;
   path: string;
   phrases: string[];
-  numbers: number[];
   /** How many times this exact shape was observed. Repeats are counted, never appended. */
   count: number;
   firstSeenAt: number;
@@ -76,7 +75,6 @@ export class UnclassifiedRejectionJournal {
     if (existing) {
       existing.count += 1;
       existing.lastSeenAt = at;
-      // Sizes vary between observations of the same defect; the first set is the representative one.
       this.flush();
       return true;
     }
@@ -90,7 +88,6 @@ export class UnclassifiedRejectionJournal {
       driver,
       path: shape.path,
       phrases: [...shape.phrases],
-      numbers: [...shape.numbers],
       count: 1,
       firstSeenAt: at,
       lastSeenAt: at,

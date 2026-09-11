@@ -393,7 +393,7 @@ test("an unrecognized indexed-item rejection is recorded without changing its ha
   assert.deepEqual(h.events, [{ kind: "error", message: raw }]);
   assert.deepEqual(h.poisonedHistory, []);
   assert.deepEqual(h.unclassifiedRejections, [
-    { path: "input[N].content[N].image_url", phrases: ["unsupported value"], numbers: [] },
+    { path: "input[N].content[N].image_url", phrases: ["unsupported value"] },
   ]);
 });
 
@@ -421,7 +421,7 @@ test("ordinary provider errors never signal unrecoverable provider history", () 
   // and a reader deciding whether to widen the classifier needs to see the recoverable shapes too —
   // `input[N].content` being too long is fixed by shortening the message, not by quarantining.
   assert.deepEqual(h.unclassifiedRejections, [
-    { path: "input[N].content", phrases: ["string too long", "maximum length", "expected a string"], numbers: [1048576] },
+    { path: "input[N].content", phrases: ["string too long", "maximum length", "expected a string"] },
   ]);
 });
 

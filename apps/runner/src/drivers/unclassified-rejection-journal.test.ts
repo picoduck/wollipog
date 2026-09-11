@@ -79,7 +79,7 @@ test("retention is bounded and the bound is recorded rather than hidden", () => 
     // An already-known shape is still counted once the journal is full.
     const known = journal.list()[0]!;
     const before = known.count;
-    journal.record("codex-app-server", { path: known.path, phrases: known.phrases, numbers: known.numbers });
+    journal.record("codex-app-server", { path: known.path, phrases: known.phrases });
     assert.equal(journal.list().find((entry) => entry.path === known.path)!.count, before + 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
