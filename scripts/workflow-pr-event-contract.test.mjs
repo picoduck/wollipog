@@ -261,6 +261,20 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "next step. A key on either side of `run:` — an `if:` most of all — skips the suite on the legs " +
     "it excludes, and each of those legs still reports success.");
 
+  // The header pins everything BEFORE `steps:`; this pins everything after it. A job key placed at
+  // the very end of the job — immediately before the next job's heading — is still a job key, and
+  // `continue-on-error` there reports a failed leg to the aggregator as a success. Six bypasses over
+  // four rounds, and this was the last region left unread: asserting a REGION is what kept leaving
+  // one, so the two assertions together now cover the job from its first line to its last.
+  const afterSteps = structural.slice(structural.indexOf("\n    steps:") + "\n    steps:".length);
+  const strayJobKeys = afterSteps
+    .split("\n")
+    .filter((line) => /^    \S/.test(line));
+  assert.deepEqual(strayJobKeys, [],
+    "browser: every line after `steps:` must belong to a step. A key at this indentation is a JOB " +
+    "key wherever it sits, and `continue-on-error` among them reports a failed leg to the " +
+    "aggregator as a success.");
+
   const shards = header[1].split(",").map((value) => Number(value.trim()));
   assert.deepEqual(shards, shards.map((_, index) => index + 1),
     "browser: shards must be numbered 1..N with no gaps, because --shard=i/N means the i-th of N");
