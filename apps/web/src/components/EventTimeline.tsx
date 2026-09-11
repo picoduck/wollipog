@@ -100,7 +100,10 @@ export function userRewindTurns(items: readonly TimelineItem[]): ReadonlyMap<num
     } else if (item.kind === "checkpoint") {
       if (pendingUserMessageId != null) turns.set(pendingUserMessageId, item.turn);
       pendingUserMessageId = undefined;
-    } else if (item.kind === "conversation_checkpoint") {
+    } else if (item.kind !== "user_message") {
+      // The runner emits a normal checkpoint directly after its canonical prompt. Any intervening
+      // durable event means that snapshot was lost or this is an automatic recovery turn without
+      // a user message; neither may borrow the earlier prompt's action.
       pendingUserMessageId = undefined;
     }
   }

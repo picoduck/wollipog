@@ -358,6 +358,8 @@ test("checkpoint projection maps only the owning canonical user message", () => 
     { kind: "conversation_checkpoint", id: 10, turn: 3 },
     { kind: "checkpoint", id: 11, turn: 4 },
     { kind: "user_message", id: 12, text: "must not borrow an orphan checkpoint" },
+    { kind: "stderr", id: 13, text: "Runner resumed orphaned background work automatically." },
+    { kind: "checkpoint", id: 14, turn: 5 },
   ])], [[1, 1], [4, 2], [8, 3]]);
 });
 
