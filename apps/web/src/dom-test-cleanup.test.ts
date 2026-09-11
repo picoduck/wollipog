@@ -90,7 +90,41 @@ function timerOwningModules(files: string[]): string[] {
     .map((path) => basename(path));
 }
 
-/** A `setTimeout(fn, …)` written INSIDE `fn`'s own body — a timer that never stops arming itself. */
+/** The objects a timer is reached through. `window.setTimeout` is as repeating as the bare form. */
+const TIMER_GLOBALS = new Set(["window", "globalThis", "self"]);
+
+function isTimeoutCall(node: ts.CallExpression): boolean {
+  const callee = node.expression;
+  if (ts.isIdentifier(callee)) return callee.text === "setTimeout";
+  return ts.isPropertyAccessExpression(callee) && callee.name.text === "setTimeout"
+    && ts.isIdentifier(callee.expression) && TIMER_GLOBALS.has(callee.expression.text);
+}
+
+/** Does this callback body call one of the functions it is written inside? */
+function callsAnyOf(node: ts.Node, names: string[]): boolean {
+  let calls = false;
+  const walk = (inner: ts.Node): void => {
+    if (ts.isCallExpression(inner) && ts.isIdentifier(inner.expression) && names.includes(inner.expression.text)) {
+      calls = true;
+    }
+    ts.forEachChild(inner, walk);
+  };
+  walk(node);
+  return calls;
+}
+
+/**
+ * A `setTimeout` written INSIDE the body of a function it re-arms — a timer that never stops.
+ *
+ * Both ways of naming the function count, because both appear here: the function handed over
+ * directly, as `AgentsPanel` and `store.tsx`'s reconnect loop do, and the function called from
+ * inside an arrow, as `store.tsx`'s stall clock does — the very clock #690 was about, so a
+ * derivation blind to it would not have caught the original bug.
+ *
+ * The repository happens to satisfy the first shape in more places than the second, so the test
+ * below exercises all three shapes on synthetic sources rather than trusting that some file keeps
+ * carrying each one.
+ */
 function reschedulesItself(source: string, path: string): boolean {
   const tree = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true,
     path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
@@ -103,9 +137,11 @@ function reschedulesItself(source: string, path: string): boolean {
     } else if (ts.isFunctionDeclaration(node) && node.name) {
       names = [...enclosing, node.name.text];
     }
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "setTimeout") {
+    if (ts.isCallExpression(node) && isTimeoutCall(node)) {
       const callback = node.arguments[0];
       if (callback && ts.isIdentifier(callback) && names.includes(callback.text)) found = true;
+      else if (callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
+        && callsAnyOf(callback, names)) found = true;
     }
     ts.forEachChild(node, (child) => visit(child, names));
   };
@@ -170,6 +206,24 @@ test("every DOM test that mounts a timer-owning module installs the shared clean
   );
 });
 
+/** Every shape of self-rescheduling timer this repository actually contains, on fixed input. */
+test("the self-rescheduling detector reads each timer shape, and nothing else", () => {
+  const detect = (source: string) => reschedulesItself(source, "probe.ts");
+  // Bare call, function handed over directly.
+  assert.ok(detect("const refresh = () => { setTimeout(refresh, 10); };"));
+  // Reached through a global, which is how most of this app writes it.
+  assert.ok(detect("const open = () => { window.setTimeout(open, 10); };"));
+  assert.ok(detect("function poll() { globalThis.setTimeout(poll, 10); }"));
+  // Called from inside a wrapper rather than handed over — #690's own stall clock.
+  assert.ok(detect("const schedule = () => { window.setTimeout(() => { tick(); schedule(); }, 10); };"));
+  assert.ok(detect("function schedule() { setTimeout(function () { schedule(); }, 10); }"));
+  // A timeout that does not re-arm the function it sits in is not this hazard, and a guard that
+  // said otherwise would demand cleanup from most of the app.
+  assert.ok(!detect("const show = () => { setTimeout(hide, 10); };"));
+  assert.ok(!detect("const show = () => { window.setTimeout(() => hide(), 10); };"));
+  assert.ok(!detect("const show = () => { other.setTimeout(show, 10); };"));
+});
+
 /**
  * The #899 guard passes trivially if its derivation stops finding candidates — a regex or a source
  * refactor could empty the set and nothing would say so. This states the set is non-empty and
@@ -180,7 +234,11 @@ test("the timer-owning derivation still finds the files it was built for", () =>
   assert.ok(timerOwningModules(files).includes("UsageView.tsx"),
     "UsageView owns a setInterval; a derivation that misses it is protecting nothing");
   assert.ok(timerOwningModules(files).includes("AgentsPanel.tsx"),
-    "AgentsPanel reschedules a setTimeout onto itself, the shape #690's own root cause had");
+    "AgentsPanel hands a setTimeout its own function, the bare-identifier shape");
+  assert.ok(timerOwningModules(files).includes("store.tsx"),
+    "store.tsx is #690's own stall clock; a derivation that misses it would not have caught that bug");
+  assert.ok(timerOwningModules(files).includes("SessionDetail.tsx"),
+    "SessionDetail re-arms a window.setTimeout, the qualified-call shape");
   assert.ok(timerOwningDomTests(files).length > 0, "no candidate tests: the guard below is vacuous");
 });
 
