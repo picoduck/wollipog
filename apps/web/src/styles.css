@@ -9426,7 +9426,13 @@ body.shell-dock-dragging * {
 .inbox-status-pill { padding: 0 7px; }
 .inbox-status-pill.blocked { color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
 .inbox-status-pill.running { color: var(--teal-on-tint); background: color-mix(in srgb, var(--teal) 13%, transparent); }
-.inbox-status-pill.activity { color: var(--text-dim); background: var(--bg-elev-2); border: 1px solid var(--border); }
+/* 16px of line box plus the 1px border on each edge is the same 18px the unbordered pills measure,
+   so an idle card is not 2px taller than a running one on the phone shape, whose first line has
+   no other floor (#917; #784 did the same for the background-work badge). */
+.inbox-status-pill.activity { color: var(--text-dim); background: var(--bg-elev-2); border: 1px solid var(--border); line-height: 16px; }
+/* The time is the only soft text in the signals cluster, so it was what wrapped when three pills
+   left it no room, growing the card by a line (#916). It stays whole; the sender yields instead. */
+.inbox-row-signals > time { white-space: nowrap; }
 .inbox-status-pill.failed { color: var(--danger-text); background: color-mix(in srgb, var(--red) 16%, transparent); }
 .inbox-status-pill.stalled { color: var(--danger-text); background: color-mix(in srgb, var(--red) 16%, transparent); }
 .inbox-status-pill.reminder { color: var(--accent-on-tint); background: color-mix(in srgb, var(--accent) 15%, transparent); }
@@ -9612,6 +9618,12 @@ body.shell-dock-dragging * {
   /* The badge is on line three here, so line two is the title and the strip again and needs no
      floor of its own. Left at 20px it would add a pixel to every phone card. */
   .inbox-row-copy { min-height: auto; }
+  /* A phone's first line has the sender and up to three pills plus the time side by side. The
+     cluster packs a little tighter and the sender is what gives way, down to its icon and the
+     agent's first word (#916). */
+  .inbox-row-signals { gap: 3px; }
+  .inbox-status-pill { padding: 0 5px; }
+  .inbox-row-sender { min-width: 0; gap: 5px; }
   .inbox-row-base { display: none; }
   .inbox-row-meta { gap: 6px; }
   .inbox-row-activity { width: 58px; gap: 0; }

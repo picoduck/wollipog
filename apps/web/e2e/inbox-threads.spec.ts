@@ -30,8 +30,8 @@ test("a family sorts as one unit with the parent first, children indent under it
   expect(await titles(page)).toEqual([
     "Review Session",
     "Ship the usage and cost overhaul",
-    "#601: Link the cost source",
     "#603: Normalize the allowance window",
+    "#601: Link the cost source",
     "#600: Add the usage table",
     "#602: Roll the daily budget over",
     "Approval Session",
@@ -85,11 +85,11 @@ test("t, Shift+T, p, and the arrows drive the thread, the chevron is the pointer
   await list.press("t");
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
   await list.press("j");
-  await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("#601");
+  await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("#603");
   await list.press("p");
   await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("Ship the usage");
   await list.press("ArrowRight");
-  await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("#601");
+  await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("#603");
   await list.press("t");
   await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("Ship the usage");
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
@@ -126,21 +126,49 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   await expect(approval.locator(".inbox-status-pill.blocked")).toHaveAttribute("aria-label", "Attention: Answer Required, 3 Requests");
   await expect(approval.locator(".inbox-status-pill-count")).toHaveText("+2");
   const geometry = await page.locator(".inbox-row-shell").evaluateAll((shells) => shells.map((shell) => {
-    const box = shell.querySelector(".inbox-row")!.getBoundingClientRect();
+    const row = shell.querySelector<HTMLElement>(".inbox-row")!;
+    const box = row.getBoundingClientRect();
+    const style = getComputedStyle(row);
+    const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!.getBoundingClientRect();
+    const time = row.querySelector<HTMLElement>(".inbox-row-signals > time")!.getBoundingClientRect();
+    const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!.getBoundingClientRect();
+    const icon = row.querySelector<HTMLElement>(".inbox-row-sender > :first-child")!.getBoundingClientRect();
+    const name = row.querySelector<HTMLElement>(".inbox-row-sender > span")!.getBoundingClientRect();
     return {
       title: shell.querySelector(".inbox-row-title")!.textContent,
       left: Math.round(box.left),
       height: Math.round(box.height),
       child: shell.classList.contains("thread-child"),
+      pills: row.querySelectorAll(".inbox-status-pill").length,
+      timeHeight: time.height,
+      signalsOverflowRight: signals.right - (box.right - parseFloat(style.paddingRight)),
+      signalsOverflowLeft: (box.left + parseFloat(style.paddingLeft)) - signals.left,
+      senderWidth: sender.width,
+      iconWidth: icon.width,
+      iconClipped: icon.right - sender.right,
+      senderOverlap: sender.right - signals.left,
+      // The agent name's visible width inside the sender's clip box: what survives of "Claude".
+      nameVisible: Math.max(0, Math.min(name.right, sender.right) - name.left),
     };
   }));
-  // Indenting must not change a card's height. A phone card with three pills wraps its relative
-  // time whether or not it is indented, and a bordered lifecycle pill sits 2px taller than an
-  // unbordered one at every depth, so the comparison is between the parent and the child that
-  // carries the same pills.
-  const heightOf = (title: string) => geometry.find((row) => row.title === title)!.height;
-  expect(heightOf("#600: Add the usage table")).toBe(heightOf("Ship the usage and cost overhaul"));
+  // Every phone card measures the same, whatever its pills (#917), and indenting changes nothing.
+  expect(new Set(geometry.map((row) => row.height)).size, JSON.stringify(geometry)).toBe(1);
   for (const row of geometry) expect(row.left - geometry[0]!.left).toBe(row.child ? 14 : 0);
+  // The three-pill card (#603: Awaiting Input, Approval Required, Stalled) keeps its time on one
+  // line inside the card, and the sender is what yields, never the time or a pill (#916). How
+  // much of the agent's name survives depends on the font: about four characters with Segoe UI,
+  // one with CI's wider fallback face, so the assertion is relative (#ci-font-metrics): the icon
+  // is whole and the signals cluster never overlaps the sender.
+  const three = geometry.find((row) => row.title?.startsWith("#603"))!;
+  expect(three.pills).toBe(3);
+  expect(three.timeHeight, "the relative time is on one line").toBeLessThanOrEqual(20);
+  expect(three.signalsOverflowRight).toBeLessThanOrEqual(0.5);
+  expect(three.signalsOverflowLeft).toBeLessThanOrEqual(0.5);
+  expect(three.iconWidth).toBeGreaterThan(0);
+  expect(three.iconClipped).toBeLessThanOrEqual(0.5);
+  expect(three.senderOverlap).toBeLessThanOrEqual(0.5);
+  expect(three.senderWidth).toBeGreaterThan(three.iconWidth);
+  expect(three.nameVisible, "the start of the agent name is visible beside the icon").toBeGreaterThan(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `${EVIDENCE}/phone-expanded.png`, fullPage: true });
 });

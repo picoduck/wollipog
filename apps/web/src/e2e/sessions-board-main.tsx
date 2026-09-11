@@ -118,8 +118,10 @@ if (threads) {
       pendingApproval: { requestId: "ask-601", kind: "question", title: "Keep protocol 105 or bump to 106?", options: [], questions: [] } as never,
     }),
     orchestrated("s-child-602", "#602: Roll the daily budget over", "done", { status: "completed", lastEventAt: now - 240_000, updatedAt: now - 240_000 }),
+    // Old enough to read as stalled: with its lifecycle and attention pills that makes the
+    // three-pill signals cluster the phone shape has to fit on one line (#916).
     orchestrated("s-child-603", "#603: Normalize the allowance window", "review", {
-      status: "input_required", lastEventAt: now - 300_000, updatedAt: now - 300_000,
+      status: "input_required", lastEventAt: now - 900_000, updatedAt: now - 900_000,
       pendingApproval: { requestId: "rm-603", kind: "permission", title: "Delete usage-view-model.old.ts",
         options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "deny" }] } as never,
     }),
