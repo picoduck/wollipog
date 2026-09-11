@@ -139,9 +139,14 @@ function reschedulesItself(source: string, path: string): boolean {
     }
     if (ts.isCallExpression(node) && isTimeoutCall(node)) {
       const callback = node.arguments[0];
-      if (callback && ts.isIdentifier(callback) && names.includes(callback.text)) found = true;
+      // Only the function whose body OWNS this timeout counts. Matching any ancestor would flag
+      // `function outer() { function armOnce() { setTimeout(() => outer(), 10); } }`, where
+      // arming happens once and nothing repeats — a file forced to install cleanup it never
+      // needed, which is the crying-wolf failure this file exists to avoid.
+      const owner = names.at(-1);
+      if (callback && ts.isIdentifier(callback) && owner === callback.text) found = true;
       else if (callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
-        && callsAnyOf(callback, names)) found = true;
+        && owner !== undefined && callsAnyOf(callback, [owner])) found = true;
     }
     ts.forEachChild(node, (child) => visit(child, names));
   };
@@ -222,6 +227,10 @@ test("the self-rescheduling detector reads each timer shape, and nothing else", 
   assert.ok(!detect("const show = () => { setTimeout(hide, 10); };"));
   assert.ok(!detect("const show = () => { window.setTimeout(() => hide(), 10); };"));
   assert.ok(!detect("const show = () => { other.setTimeout(show, 10); };"));
+  // A timeout inside a NESTED function re-arms that function, not its ancestor. Arming `armOnce`
+  // schedules one call; nothing repeats, so demanding cleanup here would be crying wolf.
+  assert.ok(!detect("function outer() { function armOnce() { setTimeout(() => outer(), 10); } return armOnce; }"));
+  assert.ok(!detect("const outer = () => { const armOnce = () => { setTimeout(outer, 10); }; return armOnce; };"));
 });
 
 /**
