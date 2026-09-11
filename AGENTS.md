@@ -26,20 +26,21 @@ re-runs the checks against a merge group before landing the commit. Never pass `
 when enqueueing: the merge happens later, and deleting the branch early closes the pull request.
 
 Exactly one status check is required: **`Typecheck, Test & Sidecar Bundle`**. It is an aggregator —
-it reports only once the parallel jobs it summarises have finished, so it appears late. While those
-jobs run, `gh pr checks <n> --required` prints `no required checks reported`. On a PR into `main`
-with a run in progress that means *pending*, not passing, so it is never a green light.
+it reports only once the parallel jobs it summarises have finished, so it appears late, and until
+then `gh pr checks <n> --required` prints `no required checks reported`.
 
-That string is ambiguous, though, and the other readings mean "waiting will not help":
+That message is ambiguous, and only one of its readings means "keep waiting". **Check the base
+branch first**, because that is what decides whether anything is required at all:
 
-- The ruleset applies only to the default branch. A PR into any other branch — a release branch, for
-  example — has no required checks at all, so the message is permanent and no aggregator will ever
-  appear.
-- A workflow that never started prints it too, including while a fork PR waits for approval to run.
-
-So confirm which case you are in with plain `gh pr checks <n>` before waiting. Jobs listed as
-`pending` mean the aggregator is coming. An empty list means it is not, and the base branch and
-workflow state are what to check next.
+- **Into `main`, workflow running.** The aggregator is coming. The message means *pending*, never
+  passing, so it is not a green light — wait.
+- **Into any other branch.** The ruleset covers only the default branch, so no check is required
+  here and the message is permanent. CI still runs — `.github/workflows/ci.yml` has no branch filter
+  on `pull_request` — so jobs will appear and pass while `--required` stays empty forever. The job
+  list cannot tell you which case you are in; the base branch can.
+- **No workflow run at all.** Draft pull requests deliberately do not consume runners (CI triggers
+  on `ready_for_review`), and a fork pull request waits for approval to run. Nothing is pending, so
+  waiting will not help — mark it ready, or get the run approved.
 
 `Browser End-to-End Tests` is the long pole at roughly 20–30 minutes, and the merge group re-runs it,
 so expect that wait twice: once on the branch and once after enqueueing.
