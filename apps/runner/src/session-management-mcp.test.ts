@@ -568,6 +568,40 @@ test("an exact-session MCP credential cannot manage another session's worktrees"
   assert.equal(calls.length, 0);
 });
 
+test("create_session asks for a worktree by default and honours an explicit opt-out", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { id: "s_new", title: "t", status: "queued", runnerId: "r1" } }));
+  await callTool(deps, "create_session", { runnerId: "r1", agentId: "claude-code", workspaceId: "ws" });
+  // A child started in the primary checkout has no branch, so every Git surface goes blind to it.
+  assert.equal(calls[0]!.body.useWorktree, true);
+  await callTool(deps, "create_session", {
+    runnerId: "r1", agentId: "claude-code", workspaceId: "ws", useWorktree: false,
+  });
+  assert.equal(calls[1]!.body.useWorktree, false, "an explicit opt-out keeps the in-place behavior");
+});
+
+test("attach_worktree reports the platform-isolation boundary the runner returned", async () => {
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: {
+      worktree: { id: "wt_1", path: "/repos-worktrees/example", branch: "fix/example", source: "attached" },
+      session: { id: SELF_ID, status: "running", runnerId: "r1" },
+      isolation: { writableNow: false, writableAtNextLaunch: true },
+    },
+  }));
+  const attached = resultJson(await callTool(deps, "attach_worktree", { path: "/repos-worktrees/example" }));
+  assert.deepEqual(attached.isolation, { writableNow: false, writableAtNextLaunch: true });
+  // A pre-v133 runner reports nothing, and the tool says unknown rather than inventing a claim.
+  const { deps: older } = makeDeps(() => ({
+    status: 200,
+    body: {
+      worktree: { id: "wt_1", path: "/repos-worktrees/example", branch: "fix/example", source: "attached" },
+      session: { id: SELF_ID, status: "running", runnerId: "r1" },
+    },
+  }));
+  const legacy = resultJson(await callTool(older, "attach_worktree", { path: "/repos-worktrees/example" }));
+  assert.equal(legacy.isolation, null);
+});
+
 test("create_session -> POST /api/sessions with prompt riding create and config.model/permissionMode", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 201, body: { id: "s_new", title: "t", status: "queued", runnerId: "r1" } }));
   const result = await callTool(deps, "create_session", {

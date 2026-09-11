@@ -364,7 +364,12 @@
 //      discard its worktree after the remote branch and local upstream disappear.
 // 132: control-plane-authoritative, revisioned per-Machine runner capacity can be applied live;
 //      runners report lease usage, queued demand, and exact admission bottlenecks.
-export const PROTOCOL_VERSION = 132;
+// 133: attach matches a worktree against the REPOSITORY that registers it rather than against the
+//      worktree's own directory, so a registered worktree outside every configured Project
+//      Location is attachable, and the result carries a content-free platform-isolation notice
+//      saying whether the live process can already write there. Older runners omit the notice and
+//      the control plane presents it as unknown.
+export const PROTOCOL_VERSION = 133;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -5731,6 +5736,22 @@ export interface SessionWorktreeProgressMessage {
   phase: SessionWorktreeProgressPhase;
 }
 
+/**
+ * Protocol v133: what platform isolation makes of a freshly attached worktree path.
+ *
+ * A bwrap/Seatbelt boundary is bound at launch and cannot gain a mount afterwards, so attaching a
+ * worktree outside the boundary a live provider already holds leaves that path readable but not
+ * writable until the session relaunches. This states that instead of letting the agent discover it
+ * as a permission error mid-turn. Absent means unknown: either a pre-v133 runner, or an operation
+ * other than attach.
+ */
+export interface SessionWorktreeIsolationNotice {
+  /** True when the session's current provider process can already write to the attached path. */
+  writableNow: boolean;
+  /** True when the session's next launch binds the attached path into its writable boundary. */
+  writableAtNextLaunch: boolean;
+}
+
 export interface SessionWorktreeResultMessage {
   type: "session_worktree_result";
   requestId: string;
@@ -5741,6 +5762,8 @@ export interface SessionWorktreeResultMessage {
   error?: string;
   worktree?: SessionWorktreeView;
   snapshot?: SessionSnapshot;
+  /** Protocol v133+, attach only. */
+  isolation?: SessionWorktreeIsolationNotice;
 }
 
 /** Control plane asks the runner to re-probe installed agents and push the result. */
