@@ -416,10 +416,13 @@ test.describe("desktop: context and cost flank the live-output control", () => {
   });
 
   test("the centered cluster cannot overlap Reply where the container-query cutoff cannot run", async ({ page }) => {
-    // Size container queries are missing on some engines this project still targets
-    // (docs/vite-8-compatibility.md names Firefox 104; they arrived in Firefox 110), and the cutoff
-    // is inert there. Neutralising it stands in for that engine: the trailing grid cell must clip
-    // its optional hint without extending left across the centered status cluster.
+    // Defence in depth, not a supported-engine requirement. When this was written the declared
+    // browser floor was below the first version with size container queries, so the cutoff was
+    // genuinely inert on a targeted engine; #914 has since raised the floor above it, and every
+    // engine the bundle is now compiled for runs the cutoff. The guarantee does not depend on that:
+    // whenever the cutoff does not apply — a future floor change, a rule lost to a stylesheet edit —
+    // the trailing grid cell must still clip its optional hint without extending left across the
+    // centered status cluster. Neutralising the cutoff is how that is exercised on its own.
     await page.setViewportSize({ width: 1280, height: 820 });
     await page.goto("/session-usage-e2e.html?width=440&height=780&cost=12345.67");
     await page.addStyleTag({
