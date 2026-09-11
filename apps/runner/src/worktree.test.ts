@@ -3086,7 +3086,14 @@ test("the shells and Files root is re-proved without the boundary's side effects
       seq: 0, createdAt: 1, updatedAt: 1,
     });
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
-    const verify = () => manager!.sessionWorktreeRootFailure(store.readMeta("s_files_root")!);
+    // A standing proof is reused for a couple of seconds, so retire it between the steps below that
+    // deliberately change Git state behind the runner's back.
+    const proofs = (manager as unknown as { verifiedWorktreeRoots: Map<string, { at: number }> })
+      .verifiedWorktreeRoots;
+    const verify = () => {
+      proofs.delete("s_files_root");
+      return manager!.sessionWorktreeRootFailure(store.readMeta("s_files_root")!);
+    };
 
     assert.equal(await verify(), null, "a healthy selected worktree resolves with no complaint");
     assert.equal(existsSync(boundary), false,
@@ -3159,6 +3166,69 @@ test("worktree reconciliation records the identity a legacy row implied, and onl
     const before = store.readMeta("s_converges")?.updatedAt;
     await manager.reconcileWorktreePullRequests();
     assert.equal(store.readMeta("s_converges")?.updatedAt, before, "a converged row is not rewritten");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an interactive root proof is memoized against its own identity, never past a change", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-root-proof-memo-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_memo", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "memo",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const first = await manager.requestWorktree("s_memo", { baseRef: "HEAD", branch: "fix/memo-one" });
+    const second = await manager.requestWorktree("s_memo", { baseRef: "HEAD", branch: "fix/memo-two" });
+
+    // Count the git work the proof actually does, rather than inferring it from timings.
+    const internals = manager as unknown as { verifiedWorktreeRoots: Map<string, unknown> };
+    let proofs = 0;
+    const original = (manager as unknown as { sessionWorktreeRootFailure: unknown })
+      .sessionWorktreeRootFailure as (meta: SessionMeta) => Promise<string | null>;
+    const counted = async (meta: SessionMeta) => {
+      const before = internals.verifiedWorktreeRoots.get("s_memo");
+      const result = await original.call(manager, meta);
+      if (internals.verifiedWorktreeRoots.get("s_memo") !== before) proofs++;
+      return result;
+    };
+
+    const meta = () => store.readMeta("s_memo")!;
+    assert.equal(await counted(meta()), null);
+    assert.equal(proofs, 1, "the first request proves the root");
+    assert.equal(await counted(meta()), null);
+    assert.equal(await counted(meta()), null);
+    assert.equal(proofs, 1, "an overlapping burst on the same identity reuses that proof");
+
+    // A selection this runner makes changes the identity, so the memo cannot answer for it.
+    await manager.selectWorktree("s_memo", first.worktree.path);
+    assert.equal(await counted(meta()), null);
+    assert.equal(proofs, 2, "switching worktrees re-proves rather than reusing the previous root");
+
+    // Drift introduced outside Wollipog changes nothing the memo is keyed on, so it is answered by
+    // the standing proof until that proof ages out. This is the documented bound on the window.
+    execFileSync("git", ["-C", first.worktree.path, "switch", "-c", "operator/elsewhere"]);
+    assert.equal(await counted(meta()), null, "a fresh proof still stands within its window");
+
+    const entry = internals.verifiedWorktreeRoots.get("s_memo") as { at: number };
+    entry.at -= 60_000;
+    assert.match(await counted(meta()) ?? "", /instead of fix\/memo-one/,
+      "once the proof ages out the drift is reported");
+    assert.match(await counted(meta()) ?? "", /instead of fix\/memo-one/,
+      "and a failure is never memoized, so it is re-checked every time");
+
+    execFileSync("git", ["-C", first.worktree.path, "switch", first.worktree.branch]);
+    assert.equal(await counted(meta()), null, "so a repair is seen on the very next request");
+    void second;
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

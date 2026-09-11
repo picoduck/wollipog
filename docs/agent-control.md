@@ -90,6 +90,12 @@ A session whose worktree is missing, unregistered, unhealthy, or branch-drifted 
 the invalid path and the remedy instead of a bare filesystem error, and no shell or TUI process is
 started in it.
 
+These requests are interactive and overlap freely, so one positive proof stands for a couple of
+seconds against the exact path and branch it proved. Any selection the runner makes changes what the
+proof is keyed on and is therefore never answered from it; only a change made outside Wollipog waits
+out that window, which is shorter than the gap between proving a root and using it. Failures are not
+retained, so a repaired worktree is usable again on the next request.
+
 Claude Code launches also receive an additive `wollipog` stdio MCP configuration. Both adapters
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.

@@ -2042,11 +2042,19 @@ async function sessionFilesTarget(
   // provider launch, and shells, the Native TUI, and Files would otherwise open on whatever now
   // occupies the path — or report a bare ENOENT for a directory the user never chose.
   const failure = await sessions.sessionWorktreeRootFailure(meta);
+  // Verification awaits Git. Answer with metadata read after that window, never the snapshot taken
+  // before it: a selection that moved, or a session deleted, while the proof was in flight would
+  // otherwise be served the coordinate that was proved instead of the one now recorded.
+  const latest = store.readMeta(sessionId);
+  if (!latest || store.isDeleted(sessionId)) return null;
+  if ((latest.worktreePath ?? null) !== (meta.worktreePath ?? null)) {
+    return { invalid: "the session's worktree selection changed while it was being verified — try again" };
+  }
   if (failure) {
     return { invalid: `the session's worktree could not be verified: ${failure}` +
-      ` — restore ${meta.worktreePath} or select another worktree for this session` };
+      ` — restore ${latest.worktreePath} or select another worktree for this session` };
   }
-  return { root: meta.worktreePath ?? meta.repoPath, context: meta.context, meta };
+  return { root: latest.worktreePath ?? latest.repoPath, context: latest.context, meta: latest };
 }
 
 /** The unusable outcomes of sessionFilesTarget(), as one error string. */

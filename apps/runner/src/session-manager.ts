@@ -593,6 +593,10 @@ const PROVIDER_HISTORY_QUARANTINE_GUIDANCE =
   "Recover the session to continue from the last safe checkpoint in a new conversation.";
 const HISTORY_MAINTENANCE_MS = 5 * 60 * 1_000;
 const WORKTREE_PR_RECONCILIATION_MS = 5 * 60 * 1_000;
+/** How long one proof of a session's interactive worktree root stands. Short enough that a change
+ * made outside Wollipog surfaces while the user is still looking at what caused it, long enough to
+ * collapse a burst of overlapping Files and reference-search requests into a single check. */
+const VERIFIED_WORKTREE_ROOT_MS = 2_000;
 
 /** Hard cap on not-yet-started prompts per session (each holds full text + image payloads). */
 const MAX_QUEUED_PROMPTS = 100;
@@ -793,6 +797,8 @@ export class SessionManager {
    * tree we just refused to identify is not proven to be this launch's own garbage, so start()
    * must retain it instead of force-reaping whatever now sits at that path. */
   private readonly worktreeVerificationRefusals = new Map<string, number>();
+  /** Last positive proof of a session's shells/TUI/Files root, by the identity it proved. */
+  private readonly verifiedWorktreeRoots = new Map<string, { identity: string; at: number }>();
   /** Ephemeral approval timers. Only durations leave the runner; request/session ids never do. */
   private readonly approvalStarted = new Map<string, number>();
   private readonly cleanupJournal: WorktreeCleanupJournal;
@@ -3464,16 +3470,32 @@ export class SessionManager {
    * the launch check this skips the Project Locations boundary — the coordinate is the session's own
    * persisted selection, already located by the create/attach that stored it — which also keeps the
    * boundary's `mkdir` off a read path that a user can trigger by opening a directory. Returns the
-   * reason the root is unusable, or null. */
+   * reason the root is unusable, or null.
+   *
+   * A positive proof is briefly memoized against the exact identity it proved. These callers are
+   * interactive and overlapping — reference search fires on each typing pause without cancelling
+   * the request already in flight, and the file browser deliberately tolerates fast navigation — so
+   * verifying every one of them would put two subprocesses, and under WSL two `wsl.exe` launches,
+   * behind each keystroke burst. Keying the memo on the path and branch means any selection this
+   * runner makes misses it immediately; only a change made outside Wollipog waits out the window,
+   * and that window is far shorter than the gap between proving a root and using it. Failures are
+   * never memoized, so a repaired worktree recovers on the next request. */
   async sessionWorktreeRootFailure(meta: SessionMeta): Promise<string | null> {
     if (!meta.worktreePath) return null;
+    const identity = `${meta.worktreePath}\u0000${meta.worktreeBranch ?? ""}`;
+    const proven = this.verifiedWorktreeRoots.get(meta.sessionId);
+    if (proven?.identity === identity && Date.now() - proven.at < VERIFIED_WORKTREE_ROOT_MS) return null;
     try {
       const verified = await registeredSessionWorktree(meta.repoPath, meta.worktreePath, {
         context: meta.context,
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
       });
-      return this.worktreeBranchMismatch(meta, meta.worktreePath, meta.worktreeBranch, verified.branch);
+      const mismatch = this.worktreeBranchMismatch(
+        meta, meta.worktreePath, meta.worktreeBranch, verified.branch,
+      );
+      if (!mismatch) this.verifiedWorktreeRoots.set(meta.sessionId, { identity, at: Date.now() });
+      return mismatch;
     } catch (error) {
       return errText(error);
     }
@@ -8053,6 +8075,7 @@ export class SessionManager {
       // idempotent lock/admission release; the deletion journal exclusively owns destructive
       // worktree/provider cleanup.
       this.latestLaunchGenerations.delete(sessionId);
+      this.verifiedWorktreeRoots.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
       const rebinding = this.worktreeRebindings.get(sessionId);
       this.discardRecovery(sessionId);
