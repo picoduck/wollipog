@@ -1295,10 +1295,13 @@ export class SessionManager {
     path: string,
     options: { refreshMergedHead?: boolean } = {},
   ): Promise<{ removed: boolean; reason?: string; snapshot?: SessionSnapshot }> {
-    const meta = this.store.readMeta(sessionId);
-    if (!meta || !this.sessionCanOpen(sessionId)) return { removed: false, reason: "session is unavailable" };
-    let worktree = this.attributedWorktrees(meta)
-      .find((item) => sameWorktreePath(meta.context, item.path, path));
+    const initialMeta = this.store.readMeta(sessionId);
+    if (!initialMeta || !this.sessionCanOpen(sessionId)) {
+      return { removed: false, reason: "session is unavailable" };
+    }
+    let meta = initialMeta;
+    let worktree = this.attributedWorktrees(initialMeta)
+      .find((item) => sameWorktreePath(initialMeta.context, item.path, path));
     if (!worktree) return { removed: false, reason: "worktree is not linked to this session" };
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
@@ -1309,29 +1312,39 @@ export class SessionManager {
       ? worktree.pullRequest.headOid
       : undefined;
     if (options.refreshMergedHead !== false && worktree.pullRequest?.state === "merged" && !recordedMergedHead) {
+      const legacyPullRequest = worktree.pullRequest;
       const verified = await this.resolveWorktreePullRequestState(
         worktree.path,
-        worktree.pullRequest.url,
-        { context: meta.context, provider: worktree.pullRequest.provider },
+        legacyPullRequest.url,
+        { context: meta.context, provider: legacyPullRequest.provider },
       );
+      const latest = this.store.readMeta(sessionId);
+      if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
+      const current = this.attributedWorktrees(latest)
+        .find((item) => sameWorktreePath(latest.context, item.path, path));
+      if (!current) {
+        return { removed: false, reason: "the worktree record was removed while checking forge state" };
+      }
+      meta = latest;
+      worktree = current;
       if (verified?.state === "merged" && verified.headOid) {
-        const latest = this.store.readMeta(sessionId);
-        if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
-        const current = this.attributedWorktrees(latest)
-          .find((item) => sameWorktreePath(latest.context, item.path, path));
-        if (!current) return { removed: true };
         if (current.pullRequest?.state !== "merged" ||
-            current.pullRequest.url !== worktree.pullRequest.url) {
+            current.pullRequest.url !== legacyPullRequest.url) {
           return { removed: false, reason: "worktree linkage changed while checking forge state" };
         }
         const worktrees = this.attributedWorktrees(latest).map((item) => sameWorktreePath(latest.context, item.path, path)
           ? { ...item, pullRequest: { ...current.pullRequest!, state: "merged" as const, headOid: verified.headOid } }
           : item);
         const updated = this.store.patchMeta(sessionId, { worktrees });
-        const refreshed = updated && this.attributedWorktrees(updated)
+        if (!updated) return { removed: false, reason: "session became unavailable while checking forge state" };
+        const refreshed = this.attributedWorktrees(updated)
           .find((item) => sameWorktreePath(updated.context, item.path, path));
-        if (refreshed) worktree = refreshed;
-        if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        if (!refreshed) {
+          return { removed: false, reason: "the worktree record was removed while checking forge state" };
+        }
+        meta = updated;
+        worktree = refreshed;
+        this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
     }
     const source = worktree.source;
