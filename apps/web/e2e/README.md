@@ -66,6 +66,13 @@ away from failing.
 When you write a one-sided bound on something text-derived, **leave it room** — aim for at least a
 quarter of the measured value, and prefer a relative comparison where one is available.
 
+**Which direction is risky depends on which way the drift goes.** CI renders text *smaller*, so a
+lower bound is the one that fails there: `expect(label.width).toBeGreaterThan(300)` against a local
+341px has about 12% of headroom and roughly 3.5% of it is spent before the assertion even runs. An
+upper bound like `toBeLessThanOrEqual(45)` is comfortable on CI for the same reason — and is the one
+that will fail on a machine whose fonts render larger than yours. Neither direction is safe by
+default; both want room.
+
 ### Legitimate exceptions
 
 Some numbers really are fixed: a viewport width the test itself set, an SVG icon's box, a button
