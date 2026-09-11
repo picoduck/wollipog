@@ -95,19 +95,12 @@ for (const viewport of VIEWPORTS) {
       expect(groupOverflow.vertical).toBeLessThanOrEqual(1);
     });
 
-    test("an unavailable preset is readable rather than hidden", async ({ page }) => {
-      await openDialog(page, "?orchestrator=0");
-      const orchestrator = permissionPresets(page).getByRole("radio", { name: /Orchestrator/ });
-      // Rendered, not dropped — §11.3. The list used to omit it entirely, so a user could not learn
-      // that the reason was their agent.
-      await expect(orchestrator).toBeVisible();
-      await expect(orchestrator).toHaveAttribute("aria-disabled", "true");
-      await expect(orchestrator).toContainText(/does not offer the Orchestrator/);
-      const clipped = await overflow(orchestrator);
-      expect(clipped.vertical).toBeLessThanOrEqual(1);
-    });
-
     test("a two-option Select opens a list its own options fit inside", async ({ page }) => {
+      // The 44px floor exists only under `(pointer: coarse)`, so on a desktop pointer this asserts
+      // nothing about the defect. Skipped rather than run vacuously: the browser job has under a
+      // minute of headroom against its 30-minute cap (#842), and a test that cannot fail is the
+      // first thing that should stop costing time.
+      test.skip(!viewport.touch, "the touch floor does not apply to a fine pointer");
       // AC4, against the shared primitive rather than the one control that hit the defect. Every
       // other Select in the app — the archive filter, the agent-defaults rows, the colour-scheme
       // picker — shares this arithmetic, so the guard belongs on the primitive.
@@ -152,6 +145,9 @@ for (const viewport of VIEWPORTS) {
     });
 
     test("no choice control overflows the form horizontally", async ({ page }) => {
+      // 320 is the binding reflow width and 1280 the wide control; 390 lies between them and
+      // cannot fail while both pass.
+      test.skip(viewport.name === "phone", "bounded by the 320px and 1280px cases");
       await openDialog(page);
       const form = page.locator(".form");
       const formBox = await form.boundingBox();
@@ -172,6 +168,23 @@ for (const viewport of VIEWPORTS) {
     });
   });
 }
+
+test.describe("unavailable preset", () => {
+  // Viewport-independent: this is about the card being RENDERED with its reason at all, not about
+  // geometry, so one run covers it. It used to run once per viewport for no added signal.
+  test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
+
+  test("an unavailable preset is readable rather than hidden", async ({ page }) => {
+    await openDialog(page, "?orchestrator=0");
+    const orchestrator = permissionPresets(page).getByRole("radio", { name: /Orchestrator/ });
+    // Rendered, not dropped — §11.3. The list used to omit it entirely, so a user could not learn
+    // that the reason was their agent.
+    await expect(orchestrator).toBeVisible();
+    await expect(orchestrator).toHaveAttribute("aria-disabled", "true");
+    await expect(orchestrator).toContainText(/does not offer the Orchestrator/);
+    expect((await overflow(orchestrator)).vertical).toBeLessThanOrEqual(1);
+  });
+});
 
 test.describe("increased text size", () => {
   test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
