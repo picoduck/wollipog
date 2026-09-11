@@ -5,6 +5,30 @@
       "reason": "The difference between two CSS paddings on one element; both come from the stylesheet, so the difference is the same on every renderer."
     },
     {
+      "id": "apps/web/e2e/command-inbox-projects.spec.ts|dotGeometry[0].x|toEqual|12",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/command-inbox-projects.spec.ts|dotGeometry[0].y|toEqual|5",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/command-inbox-projects.spec.ts|dotGeometry[1].x|toEqual|12",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/command-inbox-projects.spec.ts|dotGeometry[1].y|toEqual|12",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/command-inbox-projects.spec.ts|dotGeometry[2].x|toEqual|12",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/command-inbox-projects.spec.ts|dotGeometry[2].y|toEqual|19",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
       "id": "apps/web/e2e/composer-image-picker.spec.ts|geometry.button.height|toEqual|30",
       "reason": "An icon button whose box is fixed by CSS rather than by its contents."
     },
@@ -29,8 +53,20 @@
       "reason": "The viewport the test itself set, read back. A font stack cannot change how wide the window is."
     },
     {
+      "id": "apps/web/e2e/mobile-viewport.spec.ts|Math.round(full - shortened)|toBe|KEYBOARD",
+      "reason": "The height the test itself removed by simulating a 300px software keyboard, read back to prove the root lost exactly that much. Both sides are set by the test, so no renderer is involved."
+    },
+    {
       "id": "apps/web/e2e/permission-mode-layout.spec.ts|(await menu.boundingBox())!.width|toBe|390",
       "reason": "The element is laid out to the full width of the viewport the test set, so this asserts it spans the window rather than that it is any particular size."
+    },
+    {
+      "id": "apps/web/e2e/remote-instances.spec.ts|boxes[0] && boxes[1] ? Math.round(boxes[0].y - (boxes[1].y + boxes[1].height)) : null|toBe|6",
+      "reason": "The gap between the trigger and its menu, set by a CSS anchor offset rather than by any rendered text."
+    },
+    {
+      "id": "apps/web/e2e/remote-instances.spec.ts|boxes[0] && boxes[1] ? Math.round(boxes[0].y - (boxes[1].y + boxes[1].height)) : null|toBe|6|#2",
+      "reason": "The gap between the trigger and its menu, set by a CSS anchor offset rather than by any rendered text."
     },
     {
       "id": "apps/web/e2e/remote-instances.spec.ts|page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio, })).height|toEqual|496",
@@ -43,6 +79,30 @@
     {
       "id": "apps/web/e2e/session-header.spec.ts|geometry.project.width - geometry.projectButton.width|toBeCloseTo|24",
       "reason": "The distance between two measured elements, which comes from a CSS spacing rule rather than from rendered text."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActionDots[0].x|toEqual|12",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActionDots[0].y|toEqual|5",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActionDots[1].x|toEqual|12",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActionDots[1].y|toEqual|12",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActionDots[2].x|toEqual|12",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActionDots[2].y|toEqual|19",
+      "reason": "An SVG circle centre read from the icon library glyph (Lucide EllipsisVertical) on its 24-unit viewBox. An attribute value, not a rendered size: no font participates."
     },
     {
       "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActions.height|toBe|24",
@@ -103,6 +163,10 @@
     {
       "id": "apps/web/e2e/settings-rows.spec.ts|page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio, })).width|toEqual|1024",
       "reason": "The viewport the test itself set, read back. A font stack cannot change how wide the window is."
+    },
+    {
+      "id": "apps/web/e2e/settings-rows.spec.ts|{ collisionDelta: Math.round(listBox.x - collisionLeft), insideRightMargin: listBox.x + listBox.width <= viewportWidth - 8 + 1, }|subject|8",
+      "reason": "The 8px viewport inset the popover is required to keep, a CSS rule rather than a text measurement. The literal appears inside the subject only because the containment check computes the margin inline."
     },
     {
       "id": "apps/web/e2e/skill-git-import.spec.ts|await page.evaluate(() => document.documentElement.scrollWidth)|toBe|320",

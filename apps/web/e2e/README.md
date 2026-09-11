@@ -75,9 +75,11 @@ default; both want room.
 
 ### What it cannot see, and why you still have to think
 
-Two reviewers attacked this guard and between them walked through it nine ways. Seven are closed and
-pinned by tests. Two are not closable statically, and it is better to know that than to trust the
-green tick:
+Two reviewers attacked this guard across several rounds and between them walked through it fifteen
+ways. Thirteen are closed and pinned by tests — including three that had LIVE instances in this
+suite the scanner could not see: a block-bodied `expect.poll` callback, an array of coordinate
+objects, and a measured local wrapped in `Math.round`. Two are not closable statically, and it is
+better to know that than to trust the green tick:
 
 - **A relative assertion with no headroom.** `expect(crowded.width).toBeGreaterThan(roomy.width * 0.4)`
   where the true ratio is 0.42. Both sides are measurements, so it is relative by this guard's rule —

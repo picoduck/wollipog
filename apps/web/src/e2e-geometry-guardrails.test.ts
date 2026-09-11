@@ -98,16 +98,31 @@ const COUNT_NAMES = /(^(length|size|count|renderedBars|index|position|rowIndex|i
  * that without having to treat every `toBe(n)` in the suite as geometry — which was the previous
  * rule, and which buried four real findings under thirty call counts and cursor offsets.
  */
-function measuredNames(parsed: ts.SourceFile): Set<string> {
-  const names = new Set<string>();
-  const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-      if (measuresGeometry(node.initializer.getText(parsed))) names.add(node.name.text);
+const FILE_SCOPE = -1;
+
+function measuredNames(parsed: ts.SourceFile): Map<number, Set<string>> {
+  // Keyed by the enclosing `test(...)`, because a file-wide set conflates locals that merely share a
+  // name: one test's `const value = box.height` made another test's `const value = await
+  // requestCount()` read as geometry, and reported a count as a pinned measurement.
+  // -1, not 0. A `test(` call at the very start of a file has `getStart() === 0`, so using 0 as the
+  // file-scope sentinel merged the first test's locals into every other test's scope — which is
+  // precisely the conflation this scoping was added to prevent, reintroduced by the sentinel.
+  const byScope = new Map<number, Set<string>>();
+  const visit = (node: ts.Node, scope: number): void => {
+    let nextScope = scope;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "test") {
+      nextScope = node.getStart(parsed);
     }
-    ts.forEachChild(node, visit);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && measuresGeometry(node.initializer.getText(parsed))) {
+      const names = byScope.get(nextScope) ?? new Set<string>();
+      names.add(node.name.text);
+      byScope.set(nextScope, names);
+    }
+    ts.forEachChild(node, (child) => visit(child, nextScope));
   };
-  visit(parsed);
-  return names;
+  visit(parsed, FILE_SCOPE);
+  return byScope;
 }
 
 /** Does this source text read a position or a size? */
@@ -118,7 +133,12 @@ function measuresGeometry(text: string): boolean {
 
 const stripWrappers = (node: ts.Expression): ts.Expression => {
   let inner = node;
-  while (ts.isNonNullExpression(inner) || ts.isParenthesizedExpression(inner) || ts.isAwaitExpression(inner)) {
+  // `as const`, `satisfies number` and a type assertion all leave the value untouched at runtime, so
+  // `toBeGreaterThanOrEqual(85 as const)` is the original #877 pin wearing a type annotation.
+  while (
+    ts.isNonNullExpression(inner) || ts.isParenthesizedExpression(inner) || ts.isAwaitExpression(inner)
+    || ts.isAsExpression(inner) || ts.isSatisfiesExpression(inner) || ts.isTypeAssertionExpression(inner)
+  ) {
     inner = inner.expression;
   }
   return inner;
@@ -257,7 +277,20 @@ function expectArgument(node: ts.LeftHandSideExpression): ts.Expression | null {
   // callback has no single expression to name, so it is left alone rather than reported under the
   // text of the whole function.
   if (ts.isArrowFunction(argument) || ts.isFunctionExpression(argument)) {
-    return ts.isArrowFunction(argument) && !ts.isBlock(argument.body) ? argument.body : null;
+    if (ts.isArrowFunction(argument) && !ts.isBlock(argument.body)) return argument.body;
+    // A BLOCK body still yields the value the matcher compares; it just says so in a `return`.
+    // Returning null here skipped the assertion entirely, which is how two live pins in
+    // `remote-instances.spec.ts` went unseen. The last return wins for naming purposes; any of them
+    // being a measurement is what matters.
+    const returned: ts.Expression[] = [];
+    const walk = (node: ts.Node): void => {
+      if (ts.isReturnStatement(node) && node.expression) returned.push(node.expression);
+      // Do not descend into a nested function: its `return` belongs to that function, not this one.
+      if (ts.isArrowFunction(node) || ts.isFunctionExpression(node) || ts.isFunctionDeclaration(node)) return;
+      ts.forEachChild(node, walk);
+    };
+    ts.forEachChild(argument.body, walk);
+    return returned.at(-1) ?? null;
   }
   return argument;
 }
@@ -285,6 +318,13 @@ function structuredNumbers(node: ts.Expression, constants: Map<string, number>):
       const number = bareNumber(property.initializer, constants);
       return number === null ? [] : [{ path: `.${key}`, number }];
     });
+  }
+  // An array of shapes, as in `toEqual([{ x: 12, y: 5 }, { x: 12, y: 12 }])`, which pins two SVG
+  // coordinates per element. Live at `command-inbox-projects.spec.ts` and `session-header.spec.ts`,
+  // and invisible until now because only object literals were walked.
+  if (ts.isArrayLiteralExpression(inner)) {
+    return inner.elements.flatMap((element, index) =>
+      structuredNumbers(element, constants).map(({ path, number }) => ({ path: `[${index}]${path}`, number })));
   }
   return [];
 }
@@ -344,7 +384,7 @@ const collapse = (value: string): string => value.replace(/\s+/g, " ").trim();
 /** `box?.height` and `box.height` are the same subject; only the source text differs. */
 const groupingKey = (subject: string): string => subject.replace(/\?\./g, ".").replace(/\s+/g, "");
 
-function comparisons(parsed: ts.SourceFile, constants: Map<string, number>, measured: Set<string>): {
+function comparisons(parsed: ts.SourceFile, constants: Map<string, number>, measured: Map<number, Set<string>>): {
   bounds: Comparison[];
   equalities: GeometryFinding[];
   subjectPins: Array<{ subject: string; number: ResolvedNumber; line: number }>;
@@ -368,8 +408,14 @@ function comparisons(parsed: ts.SourceFile, constants: Map<string, number>, meas
           // An equality is only interesting when the thing being pinned is a measurement. A narrow
           // two-sided RANGE is left unfiltered below: it is rare, it is the shape that broke CI, and
           // a range that tight on anything at all is worth a look.
-          const subjectIsGeometry = measuresGeometry(subjectText)
-            || (ts.isIdentifier(stripWrappers(subject)) && measured.has((stripWrappers(subject) as ts.Identifier).text));
+          // Any measured local ANYWHERE in the subject, not only a subject that IS one. Testing the
+          // whole expression meant `Math.round(size)` discarded what `size` was assigned from —
+          // and `mobile-viewport.spec.ts` pins a rounded height difference in exactly that shape.
+          // The enclosing test's locals, plus any declared at file scope.
+          const inScope = new Set([...(measured.get(nextScope) ?? []), ...(measured.get(FILE_SCOPE) ?? [])]);
+          const mentionsMeasuredLocal = [...subjectText.matchAll(/[A-Za-z_$][\w$]*/g)]
+            .some((match) => inScope.has(match[0]));
+          const subjectIsGeometry = measuresGeometry(subjectText) || mentionsMeasuredLocal;
           const line = parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1;
           const direct = bareNumber(argument, constants);
 
@@ -410,7 +456,7 @@ function comparisons(parsed: ts.SourceFile, constants: Map<string, number>, meas
     }
     ts.forEachChild(node, (child) => visit(child, nextScope));
   };
-  visit(parsed, 0);
+  visit(parsed, FILE_SCOPE);
   return { bounds, equalities, subjectPins };
 }
 
@@ -445,7 +491,10 @@ export function scanSpec(file: string, source: string): GeometryFinding[] {
     const floor = Math.max(...lower.map((one) => one.number.value));
     const ceiling = Math.min(...upper.map((one) => one.number.value));
     const midpoint = (floor + ceiling) / 2;
-    if (midpoint <= TOLERANCE) continue;
+    // MAGNITUDE. A card pinned to -87..-85 is pinned exactly as hard as one pinned to 85..87, and
+    // comparing the signed midpoint to the tolerance discarded every range over a negative
+    // coordinate — which is most of the ones that matter, since offsets go both ways.
+    if (Math.abs(midpoint) <= TOLERANCE) continue;
     // `>= 86` with `<= 86` pins harder than #877's range did, and `ceiling > floor` used to let it
     // through. An inclusive pair may be equal; only a genuinely inverted pair is not a range.
     const inclusivePair = lower.some((one) => INCLUSIVE_MATCHERS.has(one.matcher))
@@ -682,4 +731,53 @@ test("a number that is not a measurement is left alone", () => {
     "expect(await page.evaluate(() => window.devicePixelRatio)).toBe(1.25);",
   ].join("\n");
   assert.deepEqual(sample(source), []);
+});
+
+// --- Round two's routes. Three of these had live instances in the suite that the scanner could not
+// see, which is the only evidence that matters about whether a guard like this is working. ---
+
+test("a poll callback with a block body still yields the value the matcher compares", () => {
+  // Live at remote-instances.spec.ts, twice, and invisible: returning null for a block body skipped
+  // the assertion rather than reading its `return`.
+  const source = "await expect.poll(async () => { const box = await card.boundingBox(); return box!.height; }).toBe(86);";
+  assert.deepEqual(sample(source).map((finding) => finding.detail), ["expect(box!.height).toBe(86)"]);
+});
+
+test("an array of shapes pins every coordinate in it", () => {
+  // Live at command-inbox-projects.spec.ts and session-header.spec.ts. The comment claimed arrays
+  // were walked; only objects were.
+  const source = "expect(dotGeometry).toEqual([{ x: 12, y: 5 }, { x: 12, y: 12 }]);";
+  assert.equal(sample(source).length, 4, "two elements, two geometry keys each");
+});
+
+test("wrapping a measured local does not launder it", () => {
+  // Live at mobile-viewport.spec.ts. Provenance was tested against the WHOLE subject, so `size`
+  // alone was recognised and `Math.round(size)` was not.
+  const source = 'test("t", () => { const size = (await card.boundingBox())!.height; expect(Math.round(size)).toBe(86); });';
+  assert.deepEqual(sample(source).map((finding) => finding.detail), ["expect(Math.round(size)).toBe(86)"]);
+});
+
+test("a type assertion does not hide a bound", () => {
+  for (const suffix of ["as const", "satisfies number"]) {
+    const source = `test("t", () => { expect(phone).toBeGreaterThanOrEqual(85 ${suffix}); expect(phone).toBeLessThanOrEqual(87 ${suffix}); });`;
+    assert.deepEqual(sample(source).map((finding) => finding.detail), ["phone is pinned to 85..87"], suffix);
+  }
+});
+
+test("a range over a negative coordinate is still a range", () => {
+  // Offsets go both ways, and comparing the SIGNED midpoint to the tolerance discarded every range
+  // centred below zero however tight it was.
+  const source = 'test("t", () => { expect(card.x).toBeGreaterThanOrEqual(-87); expect(card.x).toBeLessThanOrEqual(-85); });';
+  assert.deepEqual(sample(source).map((finding) => finding.detail), ["card.x is pinned to -87..-85"]);
+});
+
+test("two tests may reuse a local name without one lending the other its meaning", () => {
+  // The file-wide set read `value` in the second test as geometry because the first test measured
+  // into a local of that name. The sentinel for file scope was 0, and a `test(` call at the start of
+  // a file starts at 0 — so the first test's locals leaked into every scope through the sentinel.
+  const source = [
+    'test("a", () => { const value = box.height; expect(value).toBe(86); });',
+    'test("b", () => { const value = requestCount(); expect(value).toBe(3); });',
+  ].join("\n");
+  assert.deepEqual(sample(source).map((finding) => finding.detail), ["expect(value).toBe(86)"]);
 });
