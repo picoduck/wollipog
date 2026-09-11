@@ -98,7 +98,7 @@ test("a journal written by an older build is sanitized on load and on disk", () 
         phrases: ["string too long"], numbers: [123456789, 4111111111111111],
         count: 3, firstSeenAt: 1, lastSeenAt: 2,
       }],
-      overflow: 0,
+      overflow: 4,
     }));
 
     const journal = new UnclassifiedRejectionJournal(dir);
@@ -106,6 +106,8 @@ test("a journal written by an older build is sanitized on load and on disk", () 
       version: 1, driver: "codex-app-server", path: "input[N].arguments",
       phrases: ["string too long"], count: 3, firstSeenAt: 1, lastSeenAt: 2,
     }], "the removed property is gone from memory");
+    assert.equal(journal.overflowCount(), 4, "the sanitizing rewrite preserves the rest of the journal");
+    assert.equal(new UnclassifiedRejectionJournal(dir).overflowCount(), 4, "and across a restart");
 
     // And gone from disk without waiting for another observation.
     const raw = readFileSync(file, "utf8");

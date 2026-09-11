@@ -63,10 +63,13 @@ export class UnclassifiedRejectionJournal {
         };
         this.records.set(providerRejectionShapeKey(sanitized.driver, sanitized), sanitized);
       }
+      // Restore every field the rewrite below will serialize BEFORE it runs, or that rewrite
+      // persists this field's default and the count of shapes the cap already rejected is lost at
+      // the next restart.
+      if (Number.isSafeInteger(parsed?.overflow) && parsed!.overflow! >= 0) this.overflow = parsed!.overflow!;
       // Rewrite immediately so a journal from an older build is sanitized on disk even if this
       // runner never records another rejection.
       if (this.records.size) this.flush();
-      if (Number.isSafeInteger(parsed?.overflow) && parsed!.overflow! >= 0) this.overflow = parsed!.overflow!;
     } catch {
       // A missing or corrupt journal is not an error worth propagating: this is a diagnostic, and
       // losing prior observations must never break the session that is already failing.
