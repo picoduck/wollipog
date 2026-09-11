@@ -373,6 +373,39 @@ export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 export const SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS = 4 * 60_000;
 export const SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS =
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS + 30_000;
+
+/**
+ * Session naming deadline chain, innermost first. Preparation (neutral directory, provider
+ * authentication, process start) is budgeted separately from generation so its normal variance
+ * cannot silently consume the provider's allowance, and every enclosing layer is strictly larger
+ * than the layer it supervises so an outer transport can never expire first:
+ *
+ *   preparation (<= 3s) + generation (>= 12s) = runner budget 15s
+ *     -> runner teardown allowance (<= 1s), inside the margin below rather than competing with it
+ *       -> control-plane runner request 17s
+ *         -> control-plane supervision abort 18s
+ *           -> desktop remote read budget 35s (apps/desktop/src-tauri/src/remote_transport.rs)
+ *
+ * A custom endpoint may be configured up to 30s, so its supervision worst case is 33s — still
+ * under the desktop read budget.
+ *
+ * The total stays bounded: the runner clamps any requested budget to the runner budget below.
+ */
+export const SESSION_NAMING_PREPARATION_BUDGET_MS = 3_000;
+export const SESSION_NAMING_GENERATION_BUDGET_MS = 12_000;
+export const SESSION_NAMING_RUNNER_BUDGET_MS =
+  SESSION_NAMING_PREPARATION_BUDGET_MS + SESSION_NAMING_GENERATION_BUDGET_MS;
+/** After the title is known the runner still tears down its neutral directory and isolation
+ * boundary, and a `return` inside `try` does not settle until `finally` completes. A WSL `rm -rf`
+ * alone is allowed five seconds, so awaiting teardown unbounded would let housekeeping push a
+ * generated title past the control plane's round-trip deadline and report it as a timeout. The
+ * runner therefore waits only this long for teardown and lets an overrun finish detached. */
+export const SESSION_NAMING_CLEANUP_BUDGET_MS = 1_000;
+/** Extra time the control plane waits on the runner round trip beyond the runner's own budget.
+ * Must exceed the cleanup budget, or teardown can still outlast the deadline it sits inside. */
+export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_MS + 1_000;
+/** Extra time the control plane's own abort timer allows beyond that runner request deadline. */
+export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
 export type { ConversationHandoffDraft } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";

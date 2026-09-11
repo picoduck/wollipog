@@ -116,6 +116,8 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type WorkflowInstanceView,
   type WorkflowNodeDefinition,
   type WorkflowNodeOutcome,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
 } from "@wollipog/protocol";
 import {
   MAX_PENDING_STEERING_RESOLUTION_REPLAYS,
@@ -929,7 +931,8 @@ export class SessionsService {
     private readonly notify?: (prev: SessionView, view: SessionView) => void,
     private readonly steeringRequestTimeoutMs = STEERING_REQUEST_TIMEOUT_MS,
     private readonly titleGenerator?: SessionTitleGenerator,
-    private readonly titleGenerationTimeoutMs: number | ((sessionId: string) => number) = 5_000,
+    private readonly titleGenerationTimeoutMs: number | ((sessionId: string) => number) =
+      SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS,
     private readonly titleGenerationEnabled?: (sessionId: string) => boolean,
     private readonly titleGenerationRevision?: (sessionId: string) => string,
   ) {

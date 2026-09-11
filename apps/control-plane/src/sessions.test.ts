@@ -31,6 +31,8 @@ import {
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
   WORKSPACE_REFERENCE_MIME_TYPE,
   pendingRequests,
 } from "@wollipog/protocol";
@@ -5147,6 +5149,71 @@ test("explicit retitle waits for success and reports sanitized asynchronous fail
   assert.deepEqual(succeeded, { ok: true, status: 200, data: { title: "Correlated Semantic Title" } });
   assert.equal(db.getSession(id)?.title, "Correlated Semantic Title");
   assert.equal(db.getSession(id)?.titleSource, "user");
+});
+
+test("an explicit rename answered after five seconds still succeeds within the naming budget", async (context) => {
+  // Mocked timers only: the abort timer is driven virtually, and the generator is resolved by hand,
+  // so the "slow" provider response costs no wall-clock time.
+  let finish: ((value: string) => void) | undefined;
+  let namingSignal: AbortSignal | undefined;
+  const generator: SessionTitleGenerator = ({ signal }) => {
+    namingSignal = signal;
+    return new Promise((resolve) => { finish = resolve; });
+  };
+  const supervisionMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS;
+  assert.ok(supervisionMs > 5_100, "the configured budget must outlast the old five-second default");
+  const { db, hub, svc } = makeHarness(generator, supervisionMs);
+  const id = seedSession(svc, hub);
+  assert.ok(svc.setTitle(id, "Current User Title").ok);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Completed naming context", final: true });
+
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const pending = svc.retitleSession(id);
+    // 5.1s is the response latency that the old five-second budget rejected outright.
+    context.mock.timers.tick(5_100);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(namingSignal?.aborted, false, "a 5.1s provider response is no longer cancelled");
+    finish!("Renamed Past The Old Boundary");
+    const result = await pending;
+    assert.deepEqual(result, { ok: true, status: 200, data: { title: "Renamed Past The Old Boundary" } });
+    assert.equal(db.getSession(id)?.title, "Renamed Past The Old Boundary");
+  } finally {
+    context.mock.timers.reset();
+  }
+});
+
+test("an explicit rename that reaches the naming deadline keeps the existing title and reports a timeout", async (context) => {
+  let finish: ((value: string) => void) | undefined;
+  let namingSignal: AbortSignal | undefined;
+  const generator: SessionTitleGenerator = ({ signal }) => {
+    namingSignal = signal;
+    return new Promise((resolve) => { finish = resolve; });
+  };
+  const supervisionMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS;
+  const { db, hub, svc } = makeHarness(generator, supervisionMs);
+  const id = seedSession(svc, hub);
+  assert.ok(svc.setTitle(id, "Current User Title").ok);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Completed naming context", final: true });
+
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const pending = svc.retitleSession(id);
+    context.mock.timers.tick(supervisionMs - 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(namingSignal?.aborted, false, "the deadline must not fire early");
+    context.mock.timers.tick(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(namingSignal?.aborted, true, "the revised budget still ends at a bounded deadline");
+    finish!("Late Title From A Timed Out Rename");
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 504);
+    assert.match(result.error ?? "", /timed out/i);
+    assert.equal(db.getSession(id)?.title, "Current User Title", "a true timeout leaves the title alone");
+  } finally {
+    context.mock.timers.reset();
+  }
 });
 
 test("explicit retitle reports precise sanitized naming target drift", async () => {
