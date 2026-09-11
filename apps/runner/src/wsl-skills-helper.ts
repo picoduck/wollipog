@@ -155,11 +155,13 @@ def process_alive(pid):
     except PermissionError: return True
     except: return True
 
-def normalize_cleanup_proof(root, proof_name, proof_identity, proof_raw):
-    proof_fd = os.open(proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+def normalize_cleanup_proof(root, proof_name, proof_identity, proof_raw, retained_fd=None):
+    proof_fd = retained_fd if retained_fd is not None else os.open(
+        proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
     try:
         info = os.fstat(proof_fd)
         named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+        os.lseek(proof_fd, 0, os.SEEK_SET)
         if ((info.st_dev, info.st_ino) != proof_identity or
             (named.st_dev, named.st_ino) != proof_identity or
             not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
@@ -198,7 +200,8 @@ def normalize_cleanup_proof(root, proof_name, proof_identity, proof_raw):
             (named.st_dev, named.st_ino) != proof_identity or named.st_nlink != 1):
             fail("compaction cleanup proof changed during recovery")
         return proof_identity
-    finally: os.close(proof_fd)
+    finally:
+        if retained_fd is None: os.close(proof_fd)
 
 def cleanup_compactions(root, lock):
     try:
@@ -313,10 +316,16 @@ def cleanup_compactions(root, lock):
                 not isinstance(proof.get("inode"), int)): continue
             try: os.stat(candidate_name, dir_fd=root, follow_symlinks=False)
             except FileNotFoundError:
-                os.close(proof_fd); proof_fd = None
-                proof_identity = normalize_cleanup_proof(root, proof_name, (info.st_dev, info.st_ino), proof_raw)
+                proof_identity = normalize_cleanup_proof(
+                    root, proof_name, (info.st_dev, info.st_ino), proof_raw, proof_fd)
+                verified = os.fstat(proof_fd)
                 named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
-                if proof_identity != (named.st_dev, named.st_ino):
+                os.lseek(proof_fd, 0, os.SEEK_SET)
+                if ((verified.st_dev, verified.st_ino) != proof_identity or
+                    (named.st_dev, named.st_ino) != proof_identity or
+                    not stat.S_ISREG(verified.st_mode) or verified.st_uid != os.geteuid() or
+                    stat.S_IMODE(verified.st_mode) != 0o600 or verified.st_nlink != 1 or
+                    verified.st_size > 4096 or os.read(proof_fd, verified.st_size + 1) != proof_raw):
                     fail("compaction cleanup proof changed during cleanup")
                 os.unlink(proof_name, dir_fd=root)
                 os.fsync(root)
