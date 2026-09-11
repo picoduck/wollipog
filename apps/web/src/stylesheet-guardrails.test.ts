@@ -632,13 +632,17 @@ export function classTokens(source: string, fileName = "input.tsx"): Set<string>
         // A relay passes its receiver's elements through, so keep reading down the chain — the
         // next link is another relay, an array literal, or nothing, each already handled.
         //
-        // A mapping does NOT relay, not even for `(c) => c`. Deciding whether a callback hands its
-        // element back means proving the parameter is the one returned, unshadowed, unreassigned
+        // A mapping does NOT relay, however its callback is written. Deciding whether one hands
+        // elements back means proving the parameter is the one returned, unshadowed, unreassigned
         // and not overridden by a later completion — and getting that wrong certifies dead CSS as
-        // live. Nothing in this app writes an identity mapping into a className: there are zero
-        // such callbacks and zero className expressions using map at all. The cost of this limit is
-        // that `["row"].map((c) => c)` reports `row` as unrendered; the benefit is that no
-        // reasoning about binding identity can be wrong, because none is done.
+        // live, silently, because an over-collecting scan leaves the suite green.
+        //
+        // STATED LIMIT: this covers every pass-through, not only `(c) => c`. A callback returning
+        // the element on SOME paths — `(c) => keep ? c : ""` — also loses the receiver's classes,
+        // which are then reported as dead CSS. Nothing here pays that cost: the app has zero
+        // identity mapping callbacks and zero className expressions using map or flatMap at all.
+        // Under-reporting is recoverable by reading the failure; over-reporting is not, because
+        // nothing fails.
         if (relays) fromValue(callee.expression);
         // A mapping CALLBACK BODY is class text: `names.map((n) => classFor(n))` writes the class
         // there and nowhere else. A `.filter()` PREDICATE is not — `c === "hidden"` names no class
@@ -1035,7 +1039,14 @@ test("classTokens sees through wrappers that do not change a value", () => {
   assert.deepEqual([...classTokens('<b className={["row"].filter(Boolean).join(" ") as string} />')], ["row"]);
   assert.deepEqual([...classTokens('<b className={kinds.map((k) => "is-on" as const).join(" ")} />')], ["is-on"]);
   assert.deepEqual([...classTokens('<b className={kinds.map((k) => "is-on" satisfies string).join(" ")} />')], ["is-on"]);
-  assert.deepEqual([...classTokens('<b className={kinds.map((k) => label!).join(" ")} />')], []);
+  // A literal under the wrapper, so removing the non-null branch changes the RESULT, not just the
+  // route to it — an assertion that reads the same either way pins nothing.
+  assert.deepEqual([...classTokens('<b className={kinds.map((k) => "is-on"!).join(" ")} />')], ["is-on"]);
+  // `<string>x` is a type assertion only outside TSX, where the same text is a JSX element. A
+  // non-JSX file reaches the DOM by assigning className, which is a context the scanner reads.
+  assert.deepEqual(
+    [...classTokens('el.className = ["row"].filter(Boolean).join(" ") as string;', "input.ts")], ["row"]);
+  assert.deepEqual([...classTokens('el.className = <string>"is-on";', "input.ts")], ["is-on"]);
   // A wrapper around the CALLBACK itself must not stop it being recognised as one.
   assert.deepEqual([...classTokens('<b className={kinds.map(((k) => "is-on")).join(" ")} />')], ["is-on"]);
 });
