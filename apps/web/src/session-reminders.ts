@@ -6,6 +6,12 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { formatReminderInstant } from "./reminder-schedule.js";
+import {
+  BACKGROUND_DELIVERY_STATUS,
+  backgroundDeliveryAccessibleName,
+  backgroundDeliveryAttentionDescription,
+  type BackgroundDeliverySeverity,
+} from "./background-delivery-status.js";
 
 export type ReminderInboxMode = "ordinary" | "snoozed";
 
@@ -17,15 +23,10 @@ export type SnoozedAttentionReason =
     kind: "background_delivery_watchdog";
     label: string;
     description: string;
+    accessibleName: string;
+    severity: BackgroundDeliverySeverity;
     watchdogState: BackgroundDeliveryWatchdogState;
   };
-
-const WATCHDOG_ATTENTION_LABELS: Record<BackgroundDeliveryWatchdogState, string> = {
-  terminal_without_continuation: "Continuation Required",
-  accepted_without_result: "Background Result Missing",
-  result_not_projected: "Transcript Update Missing",
-  dashboard_observation_pending: "Dashboard Check Pending",
-};
 
 /** One canonical explanation for every exception that keeps a pending reminder in Active. */
 export function snoozedSessionAttentionReason(session: SessionView): SnoozedAttentionReason | null {
@@ -59,11 +60,13 @@ export function snoozedSessionAttentionReason(session: SessionView): SnoozedAtte
   }
   const watchdogState = session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState;
   if (watchdogState) {
-    const label = WATCHDOG_ATTENTION_LABELS[watchdogState];
+    const status = BACKGROUND_DELIVERY_STATUS[watchdogState];
     return {
       kind: "background_delivery_watchdog",
-      label,
-      description: `${label}. Background delivery requires attention before this session can leave Active.`,
+      label: status.label,
+      description: backgroundDeliveryAttentionDescription(watchdogState),
+      accessibleName: backgroundDeliveryAccessibleName(watchdogState),
+      severity: status.severity,
       watchdogState,
     };
   }

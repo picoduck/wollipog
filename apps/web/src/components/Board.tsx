@@ -451,9 +451,12 @@ function SessionCard({
         )}
         {extraSnoozedAttention && (
           <span
-            className="inbox-status-pill blocked"
+            className={`inbox-status-pill ${extraSnoozedAttention.kind === "background_delivery_watchdog" &&
+              extraSnoozedAttention.severity === "pending" ? "background-delivery-pending" : "blocked"}`}
             title={extraSnoozedAttention.description}
-            aria-label={`Attention: ${extraSnoozedAttention.label}`}
+            aria-label={extraSnoozedAttention.kind === "background_delivery_watchdog"
+              ? extraSnoozedAttention.accessibleName
+              : `Attention: ${extraSnoozedAttention.label}`}
           >
             {extraSnoozedAttention.label}
           </span>

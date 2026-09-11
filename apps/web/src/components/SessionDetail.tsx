@@ -4182,6 +4182,7 @@ function SessionDetailLoaded({
                 richGitSupported={richGitSupported}
                 items={items}
                 onOpenReview={() => rightPanel.show("review")}
+                onOpenBackgroundWork={() => rightPanel.show("background")}
                 onOpenSourceLocation={openSourceLocation}
               />
             )}

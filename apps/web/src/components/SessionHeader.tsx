@@ -26,6 +26,7 @@ import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcrip
 import type { ConversationForkAvailability } from "../session-actions.js";
 import {
   ActiveSubagentsBadge,
+  BackgroundDeliveryBadge,
   BackgroundWorkBadge,
   ChangeStatusBadge,
   CopyButton,
@@ -179,6 +180,7 @@ export function SessionHeader({
     session.stopOperation,
     session.backgroundWorkState,
     session.backgroundWorkTracking,
+    session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState,
     changeStatus,
     runnerOnline,
     activeSubagents?.count,
@@ -187,6 +189,8 @@ export function SessionHeader({
   const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
     ? undefined
     : session.backgroundWorkState;
+  const backgroundDeliveryState = session.backgroundDeliveries
+    ?.find((delivery) => delivery.watchdogState)?.watchdogState;
   const reprocessSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionReprocess");
   const logoutSupported = runnerSupportsProtocol(runnerProtocolVersion, "acpLogout");
   const dashboardOrigin = instancePublicOrigin(instances);
@@ -208,6 +212,12 @@ export function SessionHeader({
         onOpenAttention();
       } : undefined} />
       {renderBackgroundWork()}
+      {backgroundDeliveryState && (
+        <BackgroundDeliveryBadge state={backgroundDeliveryState} onOpen={onOpenBackgroundWork ? () => {
+          closeStatusPopover(statusPopoverOpen);
+          onOpenBackgroundWork();
+        } : undefined} />
+      )}
       <ChangeStatusBadge change={changeStatus ?? null} />
       {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {

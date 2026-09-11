@@ -1235,6 +1235,11 @@ button.background-work-badge:focus-visible {
   background: color-mix(in srgb, var(--red) 16%, transparent);
   border-color: color-mix(in srgb, var(--red) 35%, transparent);
 }
+.background-delivery-pending {
+  color: var(--amber-on-tint);
+  background: color-mix(in srgb, var(--amber) 14%, transparent);
+  border-color: color-mix(in srgb, var(--amber) 40%, transparent);
+}
 .background-work-badge[data-attention="false"] {
   color: var(--teal-on-tint);
   background: color-mix(in srgb, var(--teal) 13%, transparent);
@@ -2060,6 +2065,51 @@ textarea {
   border-radius: var(--radius-sm);
   background: var(--bg-elev-1);
   overflow: hidden;
+}
+.background-work-group-watchdog {
+  border-color: color-mix(in srgb, var(--amber) 55%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--amber) 18%, transparent);
+}
+.background-work-group-watchdog[data-watchdog-state="accepted_without_result"] {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 18%, transparent);
+}
+.background-delivery-summary {
+  padding: 11px 12px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--amber) 8%, var(--bg-elev-1));
+}
+.background-work-group[data-watchdog-state="accepted_without_result"] .background-delivery-summary {
+  background: color-mix(in srgb, var(--red) 8%, var(--bg-elev-1));
+}
+.background-delivery-summary > strong { font-size: var(--text-sm); }
+.background-delivery-summary > p {
+  margin: 4px 0 0;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+.background-delivery-summary dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin: 10px 0 0;
+}
+.background-delivery-summary dl > div { min-width: 0; }
+.background-delivery-summary dt {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+}
+.background-delivery-summary dd {
+  margin: 2px 0 0;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+.background-delivery-summary details { margin-top: 10px; }
+.background-delivery-summary summary {
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: 600;
 }
 .background-work-group-head {
   display: flex;

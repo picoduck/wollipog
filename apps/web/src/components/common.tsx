@@ -12,6 +12,7 @@ import {
   type SessionAttentionGroup,
   sessionAttentionBreakdown,
 } from "@wollipog/protocol";
+import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
 import { statusMeta, type StatusMeta } from "../format.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CheckIcon, CloseIcon, CopyIcon, WarningIcon } from "./Icons.js";
@@ -466,26 +467,25 @@ export function ActiveSubagentsBadge({ count, onOpen, workers = false }: { count
   );
 }
 
-const BACKGROUND_DELIVERY_LABELS: Record<BackgroundDeliveryWatchdogState, string> = {
-  terminal_without_continuation: "Terminal Result Awaiting Continuation",
-  accepted_without_result: "Accepted Continuation Awaiting Result",
-  result_not_projected: "Result Awaiting Transcript Projection",
-  dashboard_observation_pending: "Notification Awaiting Dashboard",
-};
-
 export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDeliveryWatchdogState; onOpen?: () => void }) {
-  const label = `Background Delivery: ${BACKGROUND_DELIVERY_LABELS[state]}`;
+  const status = BACKGROUND_DELIVERY_STATUS[state];
+  const accessibleName = backgroundDeliveryAccessibleName(state);
   if (onOpen) return (
-    <button type="button" className="background-work-badge background-work-orphaned"
-      aria-label={label} aria-controls="right-panel" title={`Open ${label}`} onClick={onOpen}>
+    <button type="button" className={status.severity === "missing"
+      ? "background-work-badge background-work-orphaned"
+      : "background-work-badge background-delivery-pending"}
+      aria-label={accessibleName} aria-controls="right-panel" title={status.description} onClick={onOpen}>
       <span className="background-work-dot" aria-hidden="true" />
-      {label}
+      {status.label}
     </button>
   );
   return (
-    <span className="background-work-badge background-work-orphaned" aria-label={label}>
+    <span className={status.severity === "missing"
+      ? "background-work-badge background-work-orphaned"
+      : "background-work-badge background-delivery-pending"}
+      aria-label={accessibleName} title={status.description}>
       <span className="background-work-dot" aria-hidden="true" />
-      {label}
+      {status.label}
     </span>
   );
 }

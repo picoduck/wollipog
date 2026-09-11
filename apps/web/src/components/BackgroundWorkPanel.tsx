@@ -9,6 +9,7 @@ import {
 } from "@wollipog/protocol";
 import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { useTimelineClock } from "../timeline-clock.js";
+import { BACKGROUND_DELIVERY_STATUS } from "../background-delivery-status.js";
 
 export type BackgroundJobCurrentState =
   | "Running"
@@ -168,6 +169,7 @@ export function BackgroundWorkPanel({
     selectedJobId === undefined || jobs.some((job) => job.parentTurnId !== "unknown" && job.parentTurnId === delivery.parentTurnId)),
   [session.backgroundDeliveries, selectedJobId, jobs]);
   const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
+  const highlightedWatchdogDelivery = deliveries.find((delivery) => delivery.watchdogState);
   // Every visible relative timestamp ages, including settled history left open for inspection.
   const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0);
   const aggregateState = session.backgroundWorkState === "resumed"
@@ -232,6 +234,10 @@ export function BackgroundWorkPanel({
             const shownDeliveredCount = group.jobs.filter((job) => job.assistantResultPersistedAt != null ||
               (job.terminalObservedAt != null && job.continuationRequired === false)).length;
             const groupDeliveries = group.deliveries;
+            const watchdogDelivery = groupDeliveries.find((delivery) => delivery.watchdogState);
+            const watchdogState = watchdogDelivery?.watchdogState;
+            const watchdogStatus = watchdogState ? BACKGROUND_DELIVERY_STATUS[watchdogState] : null;
+            const watchdogHighlighted = watchdogDelivery === highlightedWatchdogDelivery;
             const recordedJobCount = groupDeliveries.reduce((total, delivery) => total + delivery.jobCount, 0);
             const recordedTerminalCount = groupDeliveries.reduce(
               (total, delivery) => total + delivery.terminalCount,
@@ -246,7 +252,10 @@ export function BackgroundWorkPanel({
               (!groupTruncated && shownDeliveredCount === group.jobs.length);
             const parentEventId = parentTurnEventIds.get(group.parentTurnId);
             return (
-              <section className="background-work-group" role="listitem" key={group.key}
+              <section className={`background-work-group${watchdogHighlighted ? " background-work-group-watchdog" : ""}`}
+                role="listitem" key={group.key} data-watchdog-state={watchdogState}
+                data-watchdog-highlighted={watchdogHighlighted || undefined}
+                aria-current={watchdogHighlighted ? "true" : undefined}
                 aria-labelledby={`background-work-group-${groupIndex}`}>
                 <div className="background-work-group-head">
                   <div>
@@ -273,6 +282,26 @@ export function BackgroundWorkPanel({
                     </span>
                   )}
                 </div>
+                {watchdogStatus && (
+                  <div className="background-delivery-summary" role="group"
+                    aria-labelledby={`background-delivery-summary-${groupIndex}`}>
+                    <strong id={`background-delivery-summary-${groupIndex}`}>{watchdogStatus.label}</strong>
+                    <p>{watchdogStatus.description}</p>
+                    <dl>
+                      <div><dt>Completed</dt><dd>{watchdogStatus.completed}</dd></div>
+                      <div><dt>Still Pending</dt><dd>{watchdogStatus.outstanding}</dd></div>
+                      <div><dt>Recovery</dt><dd>{watchdogStatus.recovery}</dd></div>
+                      <div><dt>Your Action</dt><dd>{watchdogStatus.action}</dd></div>
+                    </dl>
+                    <details>
+                      <summary>Technical Details</summary>
+                      <dl>
+                        <div><dt>Pipeline State</dt><dd><code>{watchdogState}</code></dd></div>
+                        <div><dt>Diagnostic</dt><dd>{watchdogStatus.diagnostic}</dd></div>
+                      </dl>
+                    </details>
+                  </div>
+                )}
                 <div className="background-work-barrier" role="group"
                   aria-label={deliveryOnly ? "Delivery Receipt Status" : "Barrier Status"}>
                   <span>{deliveryOnly ? "Delivery Receipt" : "Barrier"}</span>

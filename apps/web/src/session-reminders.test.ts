@@ -57,7 +57,7 @@ test("only explicit attention reasons retain a snoozed session in Active", () =>
         continuationId: "continuation",
         watchdogState: "terminal_without_continuation",
       } as never],
-    }), "Continuation Required"],
+    }), "Result Pending"],
   ];
 
   for (const [name, candidate, label] of cases) {
@@ -69,6 +69,29 @@ test("only explicit attention reasons retain a snoozed session in Active", () =>
   assert.equal(snoozedSessionAttentionReason(omittedApproval), null);
   assert.equal(sessionVisibleForReminderMode(omittedApproval, reminder(omittedApproval.id), "ordinary"), false,
     "a legacy omitted pendingApproval is absence, not an attention condition");
+});
+
+test("snoozed attention uses the shared delivery-watchdog presentation", () => {
+  const cases = [
+    ["terminal_without_continuation", "Result Pending", "pending", /returning the result automatically.*No action is needed/s],
+    ["accepted_without_result", "Result Missing", "missing", /will not repeat.*Review the parent turn/s],
+    ["result_not_projected", "Transcript Delayed", "pending", /updating the transcript automatically.*No action is needed/s],
+    ["dashboard_observation_pending", "Notification Pending", "pending", /waiting for the dashboard confirmation.*No action is needed/s],
+  ] as const;
+  for (const [watchdogState, label, severity, description] of cases) {
+    const reason = snoozedSessionAttentionReason(session(watchdogState, "idle", {
+      backgroundDeliveries: [{
+        parentTurnId: "parent",
+        jobCount: 1,
+        terminalCount: 1,
+        watchdogState,
+      }],
+    }));
+    assert.equal(reason?.label, label);
+    assert.equal(reason?.severity, severity);
+    assert.match(reason?.accessibleName ?? "", new RegExp(`^Background Work: ${label}\\.`));
+    assert.match(reason?.description ?? "", description);
+  }
 });
 
 test("clearing the final attention condition removes a still-snoozed session from Active", () => {
