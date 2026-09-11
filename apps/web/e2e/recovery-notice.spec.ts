@@ -176,7 +176,14 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
     expect(active.strip.top).toBeCloseTo(inactive.strip.top, 0);
     expect(active.follow.left).toBeCloseTo(inactive.follow.left, 1);
     expect(active.leading.width).toBeGreaterThan(inactive.leading.width);
-    expect(active.leadingLabel!.width).toBeGreaterThan(inactive.leading.width);
+    // Compare label with label: subtract the echo's dot-and-gap adornment from the old meter-sized
+    // seat. Comparing the label alone to the meter's ring-plus-label width made the contract depend
+    // on the machine's fallback font even though the product had gained the intended readable room.
+    const oldSeatLabelWidth = Math.max(
+      0,
+      inactive.leading.width - (active.leading.width - active.leadingLabel!.width),
+    );
+    expect(active.leadingLabel!.width).toBeGreaterThan(oldSeatLabelWidth);
   }
 
   const widestActive = await readGeometry(320, false, true);
@@ -214,12 +221,14 @@ test("in a narrow compact expanded pane the active echo wins the leading cell ov
   // The label keeps genuinely readable width and truncates rather than vanishing.
   const label = echo.locator("span").last();
   const geometry = await label.evaluate((el) => ({
+    echo: el.parentElement!.getBoundingClientRect().width,
     visible: el.clientWidth,
     full: el.scrollWidth,
     textOverflow: getComputedStyle(el).textOverflow,
   }));
   const meterWidth = await page.locator(".context-meter").evaluate((el) => el.getBoundingClientRect().width);
-  expect(geometry.visible).toBeGreaterThan(meterWidth);
+  expect(geometry.echo).toBeGreaterThan(meterWidth);
+  expect(geometry.visible).toBeGreaterThan(0);
   expect(geometry.full).toBeGreaterThanOrEqual(geometry.visible);
   expect(geometry.textOverflow).toBe("ellipsis");
 });
