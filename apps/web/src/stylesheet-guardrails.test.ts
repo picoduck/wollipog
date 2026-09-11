@@ -563,22 +563,39 @@ function isWrappedResult(node: ts.ArrowFunction | ts.FunctionExpression): boolea
   return Boolean(asyncModifier) || (!ts.isArrowFunction(node) && Boolean(node.asteriskToken));
 }
 
-/** `(c) => c` and `function (c) { return c; }` — the mapping that leaves its elements alone. */
+/**
+ * Does this mapping hand its element straight back — `(c) => c` — so the receiver still renders?
+ *
+ * ANY return of the parameter counts, not only a sole one. `function (c) { log(c); return c; }`
+ * and `function (c) { if (x) return "ghost"; return c; }` both let elements through, and reading
+ * only the first shape reported those elements as dead CSS: the exact bug the relay fix closes.
+ * The other returns are read separately as class text, so both outcomes are covered.
+ */
 function returnsItsParameter(node: ts.Node): boolean {
   if (!ts.isArrowFunction(node) && !ts.isFunctionExpression(node)) return false;
   if (isWrappedResult(node)) return false;
   const parameter = node.parameters[0];
-  if (!parameter || !ts.isIdentifier(parameter.name)) return false;
+  // A rest parameter is bound to an ARRAY of the arguments, never the element, so `(...c) => c`
+  // maps to arrays and the receiver's strings are not what renders.
+  if (!parameter || parameter.dotDotDotToken || !ts.isIdentifier(parameter.name)) return false;
   const name = parameter.name.text;
-  if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) {
-    return ts.isIdentifier(node.body) && node.body.text === name;
-  }
+  const isParameter = (expression: ts.Expression | undefined): boolean => {
+    let inner = expression;
+    while (inner && ts.isParenthesizedExpression(inner)) inner = inner.expression;
+    return inner !== undefined && ts.isIdentifier(inner) && inner.text === name;
+  };
+  if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) return isParameter(node.body);
   const body = node.body;
   if (!body || !ts.isBlock(body)) return false;
-  const statement = body.statements[0];
-  return body.statements.length === 1 && statement !== undefined && ts.isReturnStatement(statement)
-    && statement.expression !== undefined && ts.isIdentifier(statement.expression)
-    && statement.expression.text === name;
+  let relays = false;
+  const scan = (inner: ts.Node): void => {
+    // A nested function returns to its own caller, not to the mapping.
+    if (inner !== body && ts.isFunctionLike(inner)) return;
+    if (ts.isReturnStatement(inner)) { if (isParameter(inner.expression)) relays = true; return; }
+    ts.forEachChild(inner, scan);
+  };
+  scan(body);
+  return relays;
 }
 
 export function classTokens(source: string, fileName = "input.tsx"): Set<string> {
@@ -1055,6 +1072,23 @@ test("classTokens does not take a mapped-away element as a rendered class", () =
   // `filter` and `flat` DO relay, so they keep reading the receiver.
   assert.deepEqual([...classTokens('<b className={["row", "is-on"].filter(Boolean).join(" ")} />')], ["row", "is-on"]);
   assert.deepEqual([...classTokens('<b className={["row", ["is-on"]].flat().join(" ")} />')], ["row", "is-on"]);
+});
+
+test("classTokens recognises every shape of a mapping that keeps its elements", () => {
+  // Each of these lets `row` through, so reporting it as dead CSS would be the bug the relay fix
+  // exists to close — reached by a callback shape rather than by a chained call.
+  const relays = (src: string) => [...classTokens(src)];
+  assert.deepEqual(relays('<b className={["row"].map(function (c) { log(c); return c; }).join(" ")} />'), ["row"]);
+  assert.deepEqual(relays('<b className={["row"].map((c) => (c)).join(" ")} />'), ["row"]);
+  // An early return replaces SOME elements and keeps others, so both readings are class text.
+  assert.deepEqual(relays('<b className={["row"].map(function (c) { if (x) return "ghost"; return c; }).join(" ")} />'),
+    ["row", "ghost"]);
+  // A rest parameter is bound to an array of the arguments, never the element, so nothing the
+  // receiver holds is what renders.
+  assert.deepEqual(relays('<b className={["row"].map((...c) => c).join(" ")} />'), []);
+  // A return from a NESTED function belongs to that function, not to the mapping.
+  assert.deepEqual(relays('<b className={["row"].map(function (c) { const f = () => c; return "ghost"; }).join(" ")} />'),
+    ["ghost"]);
 });
 
 test("classTokens reads only the mapping callback, and not a wrapped result", () => {
