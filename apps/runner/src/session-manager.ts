@@ -799,6 +799,10 @@ export class SessionManager {
   private readonly worktreeVerificationRefusals = new Map<string, number>();
   /** Last positive proof of a session's shells/TUI/Files root, by the identity it proved. */
   private readonly verifiedWorktreeRoots = new Map<string, { identity: string; at: number }>();
+  /** Proofs currently in flight, so a burst that arrives before the first finishes shares it. */
+  private readonly provingWorktreeRoots = new Map<string, { identity: string; proof: Promise<string | null> }>();
+  /** Injectable so a test can hold a proof open; production always uses the real prover. */
+  private proveRegisteredWorktree: typeof registeredSessionWorktree = registeredSessionWorktree;
   /** Ephemeral approval timers. Only durations leave the runner; request/session ids never do. */
   private readonly approvalStarted = new Map<string, number>();
   private readonly cleanupJournal: WorktreeCleanupJournal;
@@ -3485,15 +3489,31 @@ export class SessionManager {
     const identity = `${meta.worktreePath}\u0000${meta.worktreeBranch ?? ""}`;
     const proven = this.verifiedWorktreeRoots.get(meta.sessionId);
     if (proven?.identity === identity && Date.now() - proven.at < VERIFIED_WORKTREE_ROOT_MS) return null;
+    // A memo of finished proofs alone would miss the case that motivated it: these requests overlap,
+    // so a burst can arrive entirely before the first proof returns, and each caller would start its
+    // own. Share the proof already in flight for the same identity instead.
+    const running = this.provingWorktreeRoots.get(meta.sessionId);
+    if (running?.identity === identity) return running.proof;
+    const entry = { identity, proof: this.proveWorktreeRoot(meta, identity) };
+    this.provingWorktreeRoots.set(meta.sessionId, entry);
     try {
-      const verified = await registeredSessionWorktree(meta.repoPath, meta.worktreePath, {
+      return await entry.proof;
+    } finally {
+      if (this.provingWorktreeRoots.get(meta.sessionId) === entry) {
+        this.provingWorktreeRoots.delete(meta.sessionId);
+      }
+    }
+  }
+
+  private async proveWorktreeRoot(meta: SessionMeta, identity: string): Promise<string | null> {
+    const path = meta.worktreePath!;
+    try {
+      const verified = await this.proveRegisteredWorktree(meta.repoPath, path, {
         context: meta.context,
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
       });
-      const mismatch = this.worktreeBranchMismatch(
-        meta, meta.worktreePath, meta.worktreeBranch, verified.branch,
-      );
+      const mismatch = this.worktreeBranchMismatch(meta, path, meta.worktreeBranch, verified.branch);
       if (!mismatch) this.verifiedWorktreeRoots.set(meta.sessionId, { identity, at: Date.now() });
       return mismatch;
     } catch (error) {
@@ -8076,6 +8096,7 @@ export class SessionManager {
       // worktree/provider cleanup.
       this.latestLaunchGenerations.delete(sessionId);
       this.verifiedWorktreeRoots.delete(sessionId);
+      this.provingWorktreeRoots.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
       const rebinding = this.worktreeRebindings.get(sessionId);
       this.discardRecovery(sessionId);

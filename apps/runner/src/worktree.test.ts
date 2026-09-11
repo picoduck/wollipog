@@ -3228,6 +3228,28 @@ test("an interactive root proof is memoized against its own identity, never past
 
     execFileSync("git", ["-C", first.worktree.path, "switch", first.worktree.branch]);
     assert.equal(await counted(meta()), null, "so a repair is seen on the very next request");
+
+    // The requests this memo exists for overlap, so a burst can arrive entirely before the first
+    // proof returns. Hold one open and confirm the others join it instead of each proving again.
+    const prover = manager as unknown as {
+      proveRegisteredWorktree: (...args: unknown[]) => Promise<unknown>;
+    };
+    const real = prover.proveRegisteredWorktree.bind(manager);
+    let started = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    prover.proveRegisteredWorktree = async (...args: unknown[]) => {
+      started++;
+      await gate;
+      return real(...args);
+    };
+    internals.verifiedWorktreeRoots.delete("s_memo");
+    const burst = [meta(), meta(), meta()].map((snapshot) => manager!.sessionWorktreeRootFailure(snapshot));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(started, 1, "three overlapping requests start one proof between them");
+    release();
+    assert.deepEqual(await Promise.all(burst), [null, null, null], "and every one of them is answered");
+    assert.equal(started, 1, "with no second proof started behind the first");
     void second;
   } finally {
     manager?.shutdownAll();
