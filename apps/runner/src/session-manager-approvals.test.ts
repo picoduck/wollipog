@@ -181,13 +181,15 @@ test("provider-initiated settlement preserves a pending request owned by another
   }
 });
 
-test("provider-initiated turns publish a stoppable coordinate and reject stale interrupts", () => {
+test("provider-initiated turns reject stale interrupts and resume the queued FIFO after settlement", async () => {
   const { sm, sent, store, cleanup } = makeHarness(true);
   try {
     const entry = (sm as any).active.get("s_perm");
     entry.running = false;
     let cancellations = 0;
+    const prompts: string[] = [];
     entry.client.cancel = () => { cancellations += 1; };
+    entry.client.prompt = async (text: string) => { prompts.push(text); return "end_turn" as const; };
 
     (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:3");
     const activeQueue = sent.filter((message) => message.type === "session_queue").at(-1);
@@ -195,12 +197,21 @@ test("provider-initiated turns publish a stoppable coordinate and reject stale i
     assert.equal(sm.interruptTurn("s_perm", "provider:stale"), "stale_turn");
     assert.equal(sm.interruptTurn("s_perm", "provider:3"), "applied");
     assert.equal(cancellations, 1);
+    sm.prompt("s_perm", "queued after provider turn");
+    assert.equal(entry.queue.length, 1);
+    assert.deepEqual(prompts, []);
 
     (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:3");
+    for (let attempt = 0; attempt < 200 && prompts.length === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
     assert.equal(sent.filter((message) => message.type === "session_queue").at(-1)?.activeTurnId, undefined);
     assert.equal(eventsOf(sent, "turn_interrupted").length, 1);
     assert.equal(store.readMeta("s_perm")?.status, "idle");
-    assert.equal(entry.holdQueuedPromptsAfterInterrupt, true);
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.equal(entry.interruptRequested, false);
+    assert.deepEqual(prompts, ["queued after provider turn"]);
+    assert.deepEqual(entry.queue, []);
   } finally {
     cleanup();
   }

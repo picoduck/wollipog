@@ -10242,10 +10242,15 @@ export class SessionManager {
     // callback is the only lifecycle boundary that can clear an answered provider-owned ask.
     if (!live.running) {
       const pending = this.store.readMeta(sessionId)?.pendingApproval;
-      if (state === "settled" && live.interruptRequested) {
+      const interrupted = state === "settled" && live.interruptRequested;
+      if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
+        this.settleTurnInterruption(sessionId, live);
       }
       this.emitStatus(sessionId, pending ? "input_required" : state === "started" ? "running" : "idle");
+      if (interrupted && (live.queue.length || live.pendingWorktreeRebind)) {
+        setImmediate(() => this.scheduleDrain(sessionId));
+      }
     }
   }
 
