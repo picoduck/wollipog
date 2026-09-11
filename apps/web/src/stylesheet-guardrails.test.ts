@@ -535,20 +535,51 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
 const CLASS_HELPERS = new Set(["clsx", "cn", "classNames", "classnames", "rowClass"]);
 
 /**
- * Array methods that RELAY their receiver's elements rather than inventing new ones.
+ * Array methods whose OUTPUT elements are their receiver's elements.
  *
  * `["row", on ? "is-on" : ""].filter(Boolean).join(" ")` renders exactly the classes the array
  * literal holds, but the `.join()` reader only followed its immediate receiver, so one chained
  * call hid every class in the expression and reported all of them as dead CSS. Reading through
- * these methods makes a chained `.join()` yield what a direct one yields, however many links deep.
+ * these makes a chained `.join()` yield what a direct one yields, however many links deep.
  *
  * Kept separate from `CLASS_HELPERS`: those compose classes from their ARGUMENTS, these pass a
  * RECEIVER along, and conflating the two would read a `.filter()` predicate as class text.
  */
-const ARRAY_RELAYS = new Set(["filter", "map", "flat", "flatMap"]);
+const RELAY_METHODS = new Set(["filter", "flat"]);
 
-/** Relays whose callback RESULT is itself class text — see `fromCallbackResult`. */
-const MAPPING_RELAYS = new Set(["map", "flatMap"]);
+/**
+ * Array methods that REPLACE each element with whatever their callback returns.
+ *
+ * The receiver's own strings are therefore NOT rendered — `["ghost"].map(() => "row")` renders
+ * `row` and never `ghost` — so reading the receiver here would certify a dead `.ghost` rule as
+ * live, the exact inverse of the bug this fix exists to close. The one exception is a callback
+ * that hands the element straight back, which is how `.map((c) => c)` is used.
+ */
+const MAPPING_METHODS = new Set(["map", "flatMap"]);
+
+/** An async or generator function wraps its return value, so the value is not what it maps to. */
+function isWrappedResult(node: ts.ArrowFunction | ts.FunctionExpression): boolean {
+  const asyncModifier = node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword);
+  return Boolean(asyncModifier) || (!ts.isArrowFunction(node) && Boolean(node.asteriskToken));
+}
+
+/** `(c) => c` and `function (c) { return c; }` — the mapping that leaves its elements alone. */
+function returnsItsParameter(node: ts.Node): boolean {
+  if (!ts.isArrowFunction(node) && !ts.isFunctionExpression(node)) return false;
+  if (isWrappedResult(node)) return false;
+  const parameter = node.parameters[0];
+  if (!parameter || !ts.isIdentifier(parameter.name)) return false;
+  const name = parameter.name.text;
+  if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) {
+    return ts.isIdentifier(node.body) && node.body.text === name;
+  }
+  const body = node.body;
+  if (!body || !ts.isBlock(body)) return false;
+  const statement = body.statements[0];
+  return body.statements.length === 1 && statement !== undefined && ts.isReturnStatement(statement)
+    && statement.expression !== undefined && ts.isIdentifier(statement.expression)
+    && statement.expression.text === name;
+}
 
 export function classTokens(source: string, fileName = "input.tsx"): Set<string> {
   const out = new Set<string>();
@@ -596,16 +627,21 @@ export function classTokens(source: string, fileName = "input.tsx"): Set<string>
         : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
       // `[...].join(" ")` and the class-composition helpers pass their arguments through.
       if (name === "join") { fromValue(callee as ts.Node); return; }
-      if (ARRAY_RELAYS.has(name) && ts.isPropertyAccessExpression(callee)) {
-        // The receiver's elements survive the call, so keep reading down the chain — the next link
-        // is another relay, an array literal, or nothing, and each is already handled.
-        fromValue(callee.expression);
-        // A `.map()` CALLBACK BODY is class text: `names.map((n) => `row-${n}`)` writes the class
-        // there and nowhere else, so not following it would report exactly the classes this fix
-        // exists to stop reporting. A `.filter()` PREDICATE is not class text — `c === "hidden"`
-        // names no class it renders — and `.flat()` takes a depth, so only the mapping callbacks
-        // are read, which keeps the value-not-predicate rule intact.
-        if (MAPPING_RELAYS.has(name)) for (const argument of node.arguments) fromCallbackResult(argument);
+      const relays = RELAY_METHODS.has(name);
+      const maps = MAPPING_METHODS.has(name);
+      if ((relays || maps) && ts.isPropertyAccessExpression(callee)) {
+        // Only the FIRST argument is the callback. `map`/`flatMap` take a `thisArg` second, and
+        // reading that as class text would collect from something that never renders.
+        const callback = maps ? node.arguments[0] : undefined;
+        // A relay passes its receiver's elements through, so keep reading down the chain — the
+        // next link is another relay, an array literal, or nothing, each already handled. A
+        // mapping only passes them through when its callback returns the element it was given.
+        if (relays || (callback && returnsItsParameter(callback))) fromValue(callee.expression);
+        // A mapping CALLBACK BODY is class text: `names.map((n) => classFor(n))` writes the class
+        // there and nowhere else. A `.filter()` PREDICATE is not — `c === "hidden"` names no class
+        // it renders — and `.flat()` takes a depth, so only mapping callbacks are read and the
+        // value-not-predicate rule stays intact.
+        if (callback) fromCallbackResult(callback);
         return;
       }
       if (CLASS_HELPERS.has(name)) { for (const argument of node.arguments) fromValue(argument); return; }
@@ -623,6 +659,10 @@ export function classTokens(source: string, fileName = "input.tsx"): Set<string>
   /** Collect from what a callback RETURNS — its concise body, or each `return` in its block. */
   const fromCallbackResult = (node: ts.Node): void => {
     if (!ts.isArrowFunction(node) && !ts.isFunctionExpression(node)) return;
+    // An async or generator callback does not map to what it returns: the element becomes a promise
+    // or an iterator, so `items.map(async () => "ghost")` renders neither `ghost` nor anything else
+    // a class scan should believe.
+    if (isWrappedResult(node)) return;
     if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) { fromValue(node.body); return; }
     const fromReturns = (inner: ts.Node): void => {
       // A nested function returns to its own caller, not to the `.map()`, so stop at its boundary.
@@ -1001,6 +1041,31 @@ test("classTokens refuses a filter predicate", () => {
   // comparison and a call. This one does not: `||` yields an operand, so `fromValue` would take
   // "ghost" as class text. It is the case that tells a receiver-only read from an argument read.
   assert.deepEqual([...classTokens('<b className={["row"].filter((c) => c || "ghost").join(" ")} />')], ["row"]);
+});
+
+test("classTokens does not take a mapped-away element as a rendered class", () => {
+  // A mapping REPLACES each element, so the receiver's own strings never reach the DOM. Reading
+  // them would certify a dead rule as live — the inverse of the bug the relay fix closes, and
+  // worse, because the suite stays green while the stylesheet keeps a rule nothing renders.
+  assert.deepEqual([...classTokens('<b className={["ghost"].map(() => "row").join(" ")} />')], ["row"]);
+  assert.deepEqual([...classTokens('<b className={["ghost"].flatMap(() => ["row"]).join(" ")} />')], ["row"]);
+  // The exception: a callback that hands the element straight back leaves the receiver rendered.
+  assert.deepEqual([...classTokens('<b className={["row", "is-on"].map((c) => c).join(" ")} />')], ["row", "is-on"]);
+  assert.deepEqual([...classTokens('<b className={["row"].map(function (c) { return c; }).join(" ")} />')], ["row"]);
+  // `filter` and `flat` DO relay, so they keep reading the receiver.
+  assert.deepEqual([...classTokens('<b className={["row", "is-on"].filter(Boolean).join(" ")} />')], ["row", "is-on"]);
+  assert.deepEqual([...classTokens('<b className={["row", ["is-on"]].flat().join(" ")} />')], ["row", "is-on"]);
+});
+
+test("classTokens reads only the mapping callback, and not a wrapped result", () => {
+  // The second argument to `map`/`flatMap` is a `thisArg`, not another callback.
+  assert.deepEqual(
+    [...classTokens('<b className={["row"].map((c) => c, function () { return "ghost"; }).join(" ")} />')],
+    ["row"]);
+  // An async callback maps to a promise and a generator to an iterator, so neither return value is
+  // the class that renders. Believing them would be the same false evidence as reading a thisArg.
+  assert.deepEqual([...classTokens('<b className={items.map(async () => "ghost").join(" ")} />')], []);
+  assert.deepEqual([...classTokens('<b className={items.map(function* () { return "ghost"; }).join(" ")} />')], []);
 });
 
 test("classTokens sees producers that never touch a className attribute", () => {
