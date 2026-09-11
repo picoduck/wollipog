@@ -101,6 +101,26 @@ test("the surface extractor lower-cases, so spelling cannot defeat the allowlist
   assert.deepEqual(shouty.functions, ["rgb"]);
 });
 
+test("strings are data, so valid CSS is never rejected for what is inside them", () => {
+  // The worst failure mode for a guard like this is a false POSITIVE: rejecting a legitimate change
+  // stops work, where a missed exotic case merely fails to start it. Both of these scanned as
+  // grammar before strings were stripped, inventing a `foo()` function and a `new-token` pseudo.
+  const urls = stylesheetSurface(postcss.parse('.a { background: url("foo(bar).svg") }'));
+  assert.deepEqual(urls.functions, ["url"], "a filename containing parentheses is not a function");
+  const attrs = stylesheetSurface(postcss.parse('[data-state="x:new-token"] { color: red }'));
+  assert.deepEqual(attrs.pseudos, [], "an attribute value containing a colon is not a pseudo");
+  // And the scan still sees real grammar in a declaration that also contains a string.
+  const mixed = stylesheetSurface(postcss.parse('.b { background: url("x.svg") var(--y) }'));
+  assert.deepEqual(mixed.functions, ["url", "var"]);
+});
+
+test("a custom property's value is surface even though its name is not", () => {
+  // `--x: oklch(...)` reaches the browser exactly like any other declaration.
+  const custom = stylesheetSurface(postcss.parse(":root { --probe: oklch(0.7 0.1 200) }"));
+  assert.deepEqual(custom.properties, [], "custom property names are the app's own, not platform surface");
+  assert.deepEqual(custom.functions, ["oklch"], "but what they contain still counts");
+});
+
 test("each entry carries the evidence its classification depends on", () => {
   for (const feature of CSS_FEATURES) {
     if (feature.kind === "requires-floor") {

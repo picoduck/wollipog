@@ -222,12 +222,37 @@ export interface StylesheetSurface {
 }
 
 /**
+ * Strip the parts of a value that are text, not grammar.
+ *
+ * Everything inside a string is data — a filename, a `content:` glyph, an attribute value — and
+ * scanning it for CSS syntax invents features that are not there. `url("foo(bar).svg")` reported a
+ * function called `foo`, which would have FAILED the guard on ordinary CSS: a check that rejects
+ * valid stylesheets is worse than one that misses an exotic case, because the first stops work and
+ * the second only fails to start it.
+ */
+function withoutStrings(value: string): string {
+  return value.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""');
+}
+
+/**
  * Extract that surface from a parsed stylesheet.
  *
  * Everything is lower-cased, because CSS identifiers are case-insensitive and the allowlist would
- * otherwise be defeated by spelling. Custom properties are skipped: their names ARE case-sensitive
- * and they are the app's own, not platform surface. `postcss` is passed in rather than imported so
+ * otherwise be defeated by spelling. `postcss` is passed in structurally rather than imported so
  * this module stays dependency-free for the Vite config that imports it at build time.
+ *
+ * **What this does NOT see, stated so nobody mistakes the guard for complete.** It reads four
+ * dimensions: at-rule names, property names, pseudos, and function names. New grammar that reuses
+ * an existing name is invisible to it — a new keyword (`display: masonry`), a new unit (`1rex`), a
+ * new at-rule parameter (`@container style(...)`, which is a different feature from a size query
+ * and has a later floor), or a new media feature. Escaped identifiers (`:\70 opover-open`) and
+ * vendor-prefixed functions are read as text and can also slip.
+ *
+ * Closing that needs token-aware parsing rather than these scans. Lightning CSS's visitor API can
+ * do it and is already in the dependency tree; doing it properly is tracked separately rather than
+ * grown further inside the change that fixed the floor. What IS guaranteed here: no new at-rule,
+ * property, pseudo, or function reaches the bundle unreviewed, which covers every way the floor has
+ * actually gone stale so far.
  */
 export function stylesheetSurface(root: {
   walkAtRules(cb: (rule: { name: string }) => void): unknown;
@@ -240,13 +265,16 @@ export function stylesheetSurface(root: {
   const functions = new Set<string>();
   root.walkAtRules((rule) => atRules.add(rule.name.toLowerCase()));
   root.walkDecls((decl) => {
+    // Custom property NAMES are the app's own and are case-sensitive, so they are not surface. Their
+    // values are scanned like any other, since `--x: oklch(...)` reaches the browser just the same.
     if (!decl.prop.startsWith("--")) properties.add(decl.prop.toLowerCase());
-    for (const match of decl.value.matchAll(/(?<![-\w])([a-z][a-z0-9-]*)\(/gi)) {
+    for (const match of withoutStrings(decl.value).matchAll(/(?<![-\w])([a-z][a-z0-9-]*)\(/gi)) {
       functions.add(match[1]!.toLowerCase());
     }
   });
   root.walkRules((rule) => {
-    for (const match of rule.selector.matchAll(/::?([a-z][a-z0-9-]*)/gi)) {
+    // Attribute values are data too: `[data-state="x:new-token"]` is not a pseudo-class.
+    for (const match of withoutStrings(rule.selector).matchAll(/::?([a-z][a-z0-9-]*)/gi)) {
       pseudos.add(match[1]!.toLowerCase());
     }
   });
