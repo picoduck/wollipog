@@ -53,6 +53,10 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
       .find((candidate) => candidate.id === "session-alpha");
     return { status: session?.status, activeTurnId: session?.activeTurnId, queued: session?.queued ?? [] };
   })).toEqual({ status: "running", activeTurnId: "queued-1", queued: [] });
+  await composer.focus();
+  await page.keyboard.press("ArrowUp");
+  await expect(composer).toHaveValue("Preserve this queued prompt");
+  await composer.fill("");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
     status: "running",
