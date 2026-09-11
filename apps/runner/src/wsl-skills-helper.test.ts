@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -351,6 +351,128 @@ test("an inode-bound proof recovers a crash after a compaction sibling becomes e
   assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
   assert.deepEqual(compactionSiblings(home), []);
   assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), false);
+});
+
+test("a later pass recovers a crash during cleanup-proof publication", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-proof-publication-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const interruptedPublication = instrumentHelper(
+    "        os.fsync(lock)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+    "        os.fsync(lock)\n        if target.startswith(\".mutable-home.cleanup-\"): os._exit(90)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+  );
+  const specification = { ownerHash: owner, distro: "Ubuntu", storeRoot: resolve(store), bindings: [],
+    skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true };
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    for (let pass = 0; pass < (cycle === 0 ? 8 : 7); pass += 1) {
+      const result = await invoke(home, specification);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+    }
+    const interrupted = await invoke(home, specification, interruptedPublication);
+    assert.equal(interrupted.status, 90, `cycle ${cycle} reaches cleanup-proof publication`);
+
+    const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+    const proofNames = readdirSync(leaseRoot).filter((name) => name.startsWith(".mutable-home.cleanup-"));
+    const aliasNames = readdirSync(leaseRoot).filter((name) =>
+      name.startsWith(".provider-home-lease-") && name.endsWith(".tmp"));
+    assert.equal(proofNames.length, 1, `cycle ${cycle} leaves one cleanup proof`);
+    assert.equal(aliasNames.length, 1, `cycle ${cycle} leaves one publication alias`);
+    const proof = statSync(join(leaseRoot, proofNames[0]!));
+    const alias = statSync(join(leaseRoot, aliasNames[0]!));
+    assert.deepEqual([alias.dev, alias.ino, alias.nlink], [proof.dev, proof.ino, 2]);
+
+    const recovered = await invoke(home, specification);
+    assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+    assert.deepEqual(compactionSiblings(home), [], `cycle ${cycle} removes the compaction sibling`);
+    assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), false);
+    assert.equal(readdirSync(leaseRoot).some((name) =>
+      name.startsWith(".provider-home-lease-") && name.endsWith(".tmp")), false);
+  }
+});
+
+test("a later pass removes an orphaned two-link cleanup proof and its publication alias", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-orphan-proof-alias-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await fillLeaseJournal(home, store);
+  const interruptedPublication = instrumentHelper(
+    "        os.fsync(lock)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+    "        os.fsync(lock)\n        if target.startswith(\".mutable-home.cleanup-\"): os._exit(90)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+  );
+  assert.equal((await invoke(home, specification, interruptedPublication)).status, 90);
+
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const [sibling] = compactionSiblings(home);
+  assert.ok(sibling);
+  rmSync(join(leaseRoot, sibling), { recursive: true });
+  assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), true);
+  assert.equal(readdirSync(leaseRoot).some((name) =>
+    name.startsWith(".provider-home-lease-") && name.endsWith(".tmp")), true);
+
+  const recovered = await invoke(home, specification);
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.equal(readdirSync(leaseRoot).some((name) => name.startsWith(".mutable-home.cleanup-")), false);
+  assert.equal(readdirSync(leaseRoot).some((name) =>
+    name.startsWith(".provider-home-lease-") && name.endsWith(".tmp")), false);
+});
+
+test("cleanup-proof publication recovery fails closed for unaccounted aliases", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-proof-alias-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await fillLeaseJournal(home, store);
+  const interruptedPublication = instrumentHelper(
+    "        os.fsync(lock)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+    "        os.fsync(lock)\n        if target.startswith(\".mutable-home.cleanup-\"): os._exit(90)\n    finally:\n        try: os.unlink(temp, dir_fd=root)",
+  );
+  assert.equal((await invoke(home, specification, interruptedPublication)).status, 90);
+
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const [proofName] = readdirSync(leaseRoot).filter((name) => name.startsWith(".mutable-home.cleanup-"));
+  const [aliasName] = readdirSync(leaseRoot).filter((name) =>
+    name.startsWith(".provider-home-lease-") && name.endsWith(".tmp"));
+  assert.ok(proofName);
+  assert.ok(aliasName);
+  const proofPath = join(leaseRoot, proofName);
+  const aliasPath = join(leaseRoot, aliasName);
+  const unexpectedAlias = join(leaseRoot, ".foreign-cleanup-proof-alias");
+  linkSync(proofPath, unexpectedAlias);
+
+  const extraLink = await invoke(home, specification);
+  assert.equal(extraLink.status, 0, extraLink.stderr || extraLink.stdout);
+  assert.equal(compactionSiblings(home).length, 1);
+  assert.equal(existsSync(proofPath), true);
+  assert.equal(existsSync(aliasPath), true);
+  assert.equal(existsSync(unexpectedAlias), true);
+
+  unlinkSync(unexpectedAlias);
+  renameSync(aliasPath, unexpectedAlias);
+  writeFileSync(aliasPath, "foreign", { mode: 0o600 });
+  const substituted = await invoke(home, specification);
+  assert.equal(substituted.status, 0, substituted.stderr || substituted.stdout);
+  assert.equal(compactionSiblings(home).length, 1);
+  assert.equal(readFileSync(aliasPath, "utf8"), "foreign");
+  assert.equal(existsSync(unexpectedAlias), true);
+
+  unlinkSync(aliasPath);
+  renameSync(unexpectedAlias, aliasPath);
+  const foreignSymlinkName = ".provider-home-lease-00000000-0000-4000-8000-000000000000.tmp";
+  symlinkSync(proofName, join(leaseRoot, foreignSymlinkName));
+  const recovered = await invoke(home, specification);
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.deepEqual(compactionSiblings(home), []);
+  assert.equal(existsSync(proofPath), false);
+  assert.equal(existsSync(aliasPath), false);
+  assert.equal(readlinkSync(join(leaseRoot, foreignSymlinkName)), proofName);
 });
 
 test("unavailable atomic exchange preserves the append-only journal and emits a bounded diagnostic", async (t) => {
