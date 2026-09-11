@@ -590,7 +590,7 @@ test("attach_worktree reports the platform-isolation boundary the runner returne
   }));
   const attached = resultJson(await callTool(deps, "attach_worktree", { path: "/repos-worktrees/example" }));
   assert.deepEqual(attached.isolation, { writableNow: false, writableAtNextLaunch: true });
-  // A pre-v131 runner reports nothing, and the tool says unknown rather than inventing a claim.
+  // A pre-v132 runner reports nothing, and the tool says unknown rather than inventing a claim.
   const { deps: older } = makeDeps(() => ({
     status: 200,
     body: {
