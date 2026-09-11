@@ -58,6 +58,81 @@ function storeProviderDomTests(files: string[]): string[] {
 }
 
 /**
+ * Modules whose own effects start a REPEATING timer.
+ *
+ * The #690 guard keys on the store, but the store's stall clock was only one instance of the
+ * hazard: any component that reschedules work and clears it in an effect teardown holds the
+ * process open when an assertion throws before the test's trailing unmount. `UsageView` proved
+ * that with a plain 30s `setInterval` and no `StoreProvider` anywhere near it (#899).
+ *
+ * Derived rather than listed, so a component that starts a timer tomorrow is covered without
+ * anyone remembering this file. `setTimeout` is deliberately NOT matched: a one-shot timer settles
+ * on its own and cannot hold the loop open indefinitely, and matching it would sweep in most of
+ * the app for no benefit.
+ *
+ * KNOWN LIMIT, the same one the set above carries: this matches a test's OWN imports, so a test
+ * that reaches a timer-owning module through a wrapper is not flagged. The honest fix when one
+ * appears is to name it here, not to widen the matching until it starts crying wolf.
+ */
+function timerOwningModules(files: string[]): string[] {
+  return files
+    .filter((path) => !isTest(path) && !path.includes(`${SRC}e2e/`))
+    .filter((path) => /\bsetInterval\s*\(/u.test(readFileSync(path, "utf8")))
+    .map((path) => basename(path));
+}
+
+/**
+ * Does this file tear the window down from somewhere a thrown assertion cannot skip?
+ *
+ * Two mechanisms in this repo do that, and the guard accepts either rather than mandating one.
+ * `installDomTestCleanup` is the shared helper; a `close()` on the window from a `node:test`
+ * `after` hook reaches the same end, and `WorkingIndicator.dom.test.tsx` already did it that way —
+ * measured, it fails in ~1s rather than hanging. Demanding the helper there would be crying wolf
+ * at a file that is already correct, which is the failure mode this file exists to avoid.
+ *
+ * KNOWN LIMIT: this reads source text, so it sees that a teardown is PRESENT, not that it always
+ * RUNS. A `close()` parked inside a test body would satisfy it and should not. That is the same
+ * trade the set above makes, and the same answer applies — when it lies, name the file here.
+ */
+function hasWindowTeardown(source: string): boolean {
+  return source.includes("installDomTestCleanup(") || /\.close\(\)/u.test(source);
+}
+
+/** Happy-dom tests that import one of those modules directly. */
+function timerOwningDomTests(files: string[]): string[] {
+  const specifiers = timerOwningModules(files).map((name) => name.replace(/\.tsx?$/u, ".js"));
+  return files
+    .filter((path) => isTest(path) && basename(path) !== SELF)
+    .filter((path) => {
+      const source = readFileSync(path, "utf8");
+      if (!/^(?:const|let) \w+ = new Window\(/mu.test(source)) return false;
+      return specifiers.some((specifier) => source.includes(`/${specifier}"`) || source.includes(`"./${specifier}"`));
+    });
+}
+
+/**
+ * The guardrail for #899.
+ *
+ * Same failure as #690 — a failing assertion cannot stop a rescheduling timer, so the file stalls
+ * past `--test-timeout` and a plain failure reads as a hung suite — reached by a different route.
+ * The store is not the only thing that keeps time, so this checks the hazard rather than the store.
+ */
+test("every DOM test that mounts a timer-owning module installs the shared cleanup", () => {
+  const offenders = timerOwningDomTests(sourceFiles(SRC))
+    .filter((path) => !hasWindowTeardown(readFileSync(path, "utf8")))
+    .map((path) => path.slice(SRC.length));
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `${offenders.join(", ")}: mounts a module that starts a repeating timer in a happy-dom ` +
+    "window with no teardown outside the test bodies. Add installDomTestCleanup(domWindow) beside " +
+    "the window, so a failing assertion cannot leave that timer rescheduling and hang the run " +
+    "(#899). A close() on the window from an after hook satisfies this too.",
+  );
+});
+
+/**
  * The guardrail for #690.
  *
  * A DOM test that mounts `StoreProvider` starts the store's self-rescheduling stall clock, and a
