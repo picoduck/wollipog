@@ -17,3 +17,22 @@
   `.agents/skills/log-github-issue/SKILL.md` and `.github/ISSUE_REPORTING.md`.
 - Do not publish an issue until the user approves the exact sanitized repository, title, body, and
   labels. After publication, read the issue back and return its verified link.
+
+## Merge Queue and CI
+
+`main` is protected by the `main: merge queue` ruleset: squash merge method, linear history, and a
+pull request required. `gh pr merge <n> --squash` therefore does not merge — it enqueues, and GitHub
+re-runs the checks against a merge group before landing the commit. Never pass `--delete-branch`
+when enqueueing: the merge happens later, and deleting the branch early closes the pull request.
+
+Exactly one status check is required: **`Typecheck, Test & Sidecar Bundle`**. It is an aggregator —
+it reports only once the parallel jobs it summarises have finished, so it appears late. While those
+jobs run, `gh pr checks <n> --required` prints `no required checks reported`, which means *pending*,
+not passing. Treat that string as "keep waiting", never as a green light.
+
+`Browser End-to-End Tests` is the long pole at roughly 20–30 minutes, and the merge group re-runs it,
+so expect that wait twice: once on the branch and once after enqueueing.
+
+The `Platform Isolation` jobs are not required. A failure there does not block the merge, but it
+should be explained rather than ignored — check whether it reproduces on the base commit before
+attributing it to your change.
