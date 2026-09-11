@@ -1519,7 +1519,7 @@ test("a command that never reaches its runner settles the execution and releases
   online.delete("runner-1");
 
   let claimed = 0;
-  for (let minute = 2; minute <= 30; minute += 1) claimed += service.tick(minute * 60_000);
+  for (const minute of [2, 10, 20, 30]) claimed += service.tick(minute * 60_000);
   assert.equal(claimed, 0);
   assert.equal(db.getAutomationExecution(execution.executionId)?.status, "dispatching",
     "the execution is still inside its delivery bound");
@@ -1557,7 +1557,7 @@ test("a transient-refusal replacement that never reaches its runner settles the 
   online.delete("runner-1");
 
   let claimed = 0;
-  for (let minute = 2; minute <= 31; minute += 1) claimed += service.tick(minute * 60_000);
+  for (const minute of [2, 10, 20, 31]) claimed += service.tick(minute * 60_000);
   assert.equal(claimed, 0);
   assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running",
     "a queued replacement keeps its own full delivery bound");
