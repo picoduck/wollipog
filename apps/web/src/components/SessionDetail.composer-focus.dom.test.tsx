@@ -3941,6 +3941,47 @@ test("R focuses the answer field when automatic Answer Mode is already active", 
   }
 });
 
+test("R focuses a read-only answer field for an unsupported question", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-unsupported-r",
+        title: "Legacy question",
+        options: [],
+        kind: "question",
+        questions: [{
+          id: "legacy",
+          question: "Legacy question without a response schema",
+          options: [],
+        }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+    assert.ok(answer);
+    assert.ok(reader);
+    assert.equal(answer.readOnly, true);
+    assert.equal(answer.getAttribute("aria-disabled"), "true");
+    await act(async () => { reader.focus(); });
+
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "r", bubbles: true }) as never);
+      flushFrames();
+    });
+    assert.equal(answer.ownerDocument.activeElement, answer,
+      "the defensive unsupported state must own the keyboard instead of leaking bare shortcuts");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
 test("external question resolution returns Answer Mode focus to ordinary composition", { timeout: 5_000 }, async () => {
   setQuestionResponseStyle("composer", domWindow as never);
   const draft = deferred<ComposerDraft | null>();

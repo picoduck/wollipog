@@ -160,7 +160,8 @@ export function ComposerQuestionResponse({
   const questionErrorId = `${ids}-composer-error`;
   const choicesId = `${ids}-composer-choices`;
   const unsupported = !isAnswerableAgentQuestion(question);
-  const controlsDisabled = busy || !runnerOnline || unsupported;
+  const responseUnavailable = !runnerOnline || unsupported;
+  const controlsDisabled = busy || responseUnavailable;
 
   const updateDraft = (draft: QuestionResponseDraft): Record<string, QuestionResponseDraft> => {
     const next = withDraft(values, question.id, draft);
@@ -344,7 +345,9 @@ export function ComposerQuestionResponse({
         value={rawValue}
         aria-describedby={`${questionHelpId}${question.options.length > 0 ? ` ${choicesId}` : ""}${validationError ? ` ${questionErrorId}` : ""}`}
         aria-invalid={validationError ? true : undefined}
-        disabled={controlsDisabled}
+        aria-disabled={responseUnavailable || undefined}
+        disabled={busy}
+        readOnly={responseUnavailable}
         placeholder={question.multiSelect
           ? "Numbers or labels, separated by commas"
           : question.options.length > 0 ? "Number or label" : "Type your response"}
