@@ -138,6 +138,7 @@ import {
   captureTurnDiff,
   discardWorktreeIfSafe,
   isLegacyWslSessionWorktreePath,
+  registeredSessionWorktree,
   sessionWorktreeBranch,
   isGitRepo,
   nativeRepositoryPathIsUnavailable,
@@ -3387,8 +3388,6 @@ export class SessionManager {
     path: string,
     branch: string | undefined,
   ): Promise<string | null> {
-    const expected = branch ??
-      sessionWorktreeBranch(meta.sessionId, path, meta.context, this.runnerOwnerHash);
     try {
       const verified = await attachRequestedWorktree(meta.repoPath, meta.sessionId, path, {
         context: meta.context,
@@ -3399,9 +3398,42 @@ export class SessionManager {
         // worktree health, and branch identity are all still re-proved.
         allowedProjectPaths: [path],
       });
-      return verified.branch === expected
-        ? null
-        : `it is now on branch ${verified.branch} instead of ${expected}`;
+      return this.worktreeBranchMismatch(meta, path, branch, verified.branch);
+    } catch (error) {
+      return errText(error);
+    }
+  }
+
+  /** The identity a session recorded for the worktree at `path`, or the one its layout implies when
+   * the row predates `worktreeBranch`. Shared so every caller refuses the same drift. */
+  private expectedWorktreeBranch(meta: SessionMeta, path: string, branch: string | undefined): string {
+    return branch ?? sessionWorktreeBranch(meta.sessionId, path, meta.context, this.runnerOwnerHash);
+  }
+
+  private worktreeBranchMismatch(
+    meta: SessionMeta,
+    path: string,
+    branch: string | undefined,
+    actual: string,
+  ): string | null {
+    const expected = this.expectedWorktreeBranch(meta, path, branch);
+    return actual === expected ? null : `it is now on branch ${actual} instead of ${expected}`;
+  }
+
+  /** Re-prove the root a session's shells, Native TUI, and Files browser are about to use. Unlike
+   * the launch check this skips the Project Locations boundary — the coordinate is the session's own
+   * persisted selection, already located by the create/attach that stored it — which also keeps the
+   * boundary's `mkdir` off a read path that a user can trigger by opening a directory. Returns the
+   * reason the root is unusable, or null. */
+  async sessionWorktreeRootFailure(meta: SessionMeta): Promise<string | null> {
+    if (!meta.worktreePath) return null;
+    try {
+      const verified = await registeredSessionWorktree(meta.repoPath, meta.worktreePath, {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+      });
+      return this.worktreeBranchMismatch(meta, meta.worktreePath, meta.worktreeBranch, verified.branch);
     } catch (error) {
       return errText(error);
     }

@@ -1947,6 +1947,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         consumeCancellation: (shellId) => pendingShellOpenCancellations.consume(shellId),
         sessionCanOpen: (sessionId) => sessions.sessionCanOpen(sessionId),
         resolveTarget: (sessionId) => sessionFilesTarget(sessionId),
+        targetError: (target) => sessionFilesTargetError(target),
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
         resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
@@ -2012,9 +2013,10 @@ async function handleHostAction(msg: HostActionMessage): Promise<void> {
     root = msg.path;
     context = { kind: "native" };
   } else {
-    const target = msg.sessionId ? sessionFilesTarget(msg.sessionId) : null;
-    if (!target || target === "pending") {
-      return reply({ ok: false, error: target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session" });
+    const target = msg.sessionId ? await sessionFilesTarget(msg.sessionId) : null;
+    const targetError = sessionFilesTargetError(target);
+    if (targetError || !target || target === "pending" || "invalid" in target) {
+      return reply({ ok: false, error: targetError ?? "unknown session" });
     }
     root = target.root;
     context = target.context;
@@ -2030,20 +2032,40 @@ async function handleHostAction(msg: HostActionMessage): Promise<void> {
  * dashboard only ever names root-relative paths, in this box's own context (native or WSL).
  * "pending" while worktree setup is still in flight: falling back to repoPath in that window
  * would put a shell/browser in the shared base checkout while the agent lands in the worktree. */
-function sessionFilesTarget(sessionId: string): { root: string; context: AgentContext; meta: SessionMeta } | "pending" | null {
+async function sessionFilesTarget(
+  sessionId: string,
+): Promise<{ root: string; context: AgentContext; meta: SessionMeta } | "pending" | { invalid: string } | null> {
   const meta = store.readMeta(sessionId);
   if (!meta || store.isDeleted(sessionId)) return null;
   if (meta.worktreePending && !meta.worktreePath) return "pending";
+  // A selected worktree can disappear or be replaced between turns exactly as it can before a
+  // provider launch, and shells, the Native TUI, and Files would otherwise open on whatever now
+  // occupies the path — or report a bare ENOENT for a directory the user never chose.
+  const failure = await sessions.sessionWorktreeRootFailure(meta);
+  if (failure) {
+    return { invalid: `the session's worktree could not be verified: ${failure}` +
+      ` — restore ${meta.worktreePath} or select another worktree for this session` };
+  }
   return { root: meta.worktreePath ?? meta.repoPath, context: meta.context, meta };
+}
+
+/** The unusable outcomes of sessionFilesTarget(), as one error string. */
+function sessionFilesTargetError(
+  target: Awaited<ReturnType<typeof sessionFilesTarget>>,
+): string | null {
+  if (target === "pending") return WORKTREE_PENDING_ERROR;
+  if (!target) return "unknown session";
+  return "invalid" in target ? target.invalid : null;
 }
 
 const WORKTREE_PENDING_ERROR = "the session's worktree is still being prepared — try again in a moment";
 
 async function handleListSessionFiles(msg: ListSessionFilesRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "list_session_files_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "list_session_files_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     const listing = await listSessionFiles(target.context, target.root, msg.path);
@@ -2054,10 +2076,11 @@ async function handleListSessionFiles(msg: ListSessionFilesRequestMessage): Prom
 }
 
 async function handleReadSessionFile(msg: ReadSessionFileRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     const file = await readSessionFile(target.context, target.root, msg.path);
@@ -2068,10 +2091,11 @@ async function handleReadSessionFile(msg: ReadSessionFileRequestMessage): Promis
 }
 
 async function handleSearchWorkspaceReferences(msg: SearchWorkspaceReferencesRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     const found = await searchWorkspaceReferences(target.context, target.root, msg.query);
@@ -2082,10 +2106,11 @@ async function handleSearchWorkspaceReferences(msg: SearchWorkspaceReferencesReq
 }
 
 async function handleCreateWorkspaceReference(msg: CreateWorkspaceReferenceRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     await inspectWorkspaceReferenceDiff(msg.target, (scope) =>

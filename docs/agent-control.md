@@ -76,6 +76,14 @@ the primary workspace, and no worktree lease, provider-home lease, or provider p
 before the check runs. A launch refused this way retains the worktree rather than reaping it: a
 tree whose identity the runner just declined to confirm may hold work the session never made.
 
+Shells, the Native TUI, and the Files browser resolve the same selection and re-prove it the same
+way before opening. They skip only the Project Locations boundary — the coordinate is the session's
+own persisted selection, already located by the create or attach that stored it, and the boundary's
+directory preparation has no business running on a read path a user triggers by opening a folder.
+A session whose worktree is missing, unregistered, unhealthy, or branch-drifted therefore reports
+the invalid path and the remedy instead of a bare filesystem error, and no shell or TUI process is
+started in it.
+
 Claude Code launches also receive an additive `wollipog` stdio MCP configuration. Both adapters
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
 their schemas, self-targeting checks, and REST paths cannot drift.

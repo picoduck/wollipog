@@ -3065,3 +3065,48 @@ test("legacy WSL worktree classification keys on the whole session suffix, not a
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the shells and Files root is re-proved without the boundary's side effects", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-files-root-verify-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    // A legacy-layout worktree sits beside the `<sessionId>.requested` boundary rather than inside
+    // it, so whether re-proving the root creates that directory is observable.
+    const worktree = await createWorktree(repo, "s_files_root", { dataDir });
+    const boundary = `${worktree.path}.requested`;
+    store.create({
+      sessionId: "s_files_root", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: worktree.path, worktreeBranch: worktree.branch,
+      driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "files",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const verify = () => manager!.sessionWorktreeRootFailure(store.readMeta("s_files_root")!);
+
+    assert.equal(await verify(), null, "a healthy selected worktree resolves with no complaint");
+    assert.equal(existsSync(boundary), false,
+      "re-proving a read path creates no worktree boundary directory");
+
+    execFileSync("git", ["-C", worktree.path, "switch", "-c", "operator/elsewhere"]);
+    assert.match(await verify() ?? "", /instead of agent\/s_files_root/,
+      "a switched branch is reported as the drift it is");
+
+    execFileSync("git", ["-C", worktree.path, "switch", worktree.branch]);
+    assert.equal(await verify(), null);
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", worktree.path]);
+    assert.match(await verify() ?? "", /not registered with the session repository/,
+      "a worktree removed outside Wollipog is named, not surfaced as a bare filesystem error");
+
+    // A session with no worktree keeps using the repository root, with nothing to prove.
+    store.patchMeta("s_files_root", { worktreePath: null, worktreeBranch: undefined });
+    assert.equal(await verify(), null);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -520,6 +520,21 @@ export async function attachRequestedWorktree(
   if (!allowed.some((root) => pathWithin(context, path, root))) {
     throw new Error("worktree path is outside the runner's configured Project Locations");
   }
+  return registeredSessionWorktree(repoPath, path, options);
+}
+
+/** Prove a path is still a usable linked worktree of `repoPath`: registered, not the primary
+ * workspace, not detached, and healthy. Split out of attachRequestedWorktree() so callers that
+ * already hold a runner-persisted coordinate can re-prove it without the Project Locations boundary
+ * check — and, more importantly, without the boundary's `mkdir`, which has no business running on a
+ * read path such as a file listing. */
+export async function registeredSessionWorktree(
+  repoPath: string,
+  requestedPath: string,
+  options: WorktreeOptions = {},
+): Promise<SessionWorktreeHandle> {
+  const context = options.context ?? nativeContext;
+  const path = safeGitArgument(requestedPath, "worktree path");
   const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
   const match = listed.find((entry) => sameWorktreePath(context, entry.path, path));
   if (!match) throw new Error("worktree path is not registered with the session repository");
