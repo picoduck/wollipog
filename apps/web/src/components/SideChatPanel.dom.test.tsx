@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionEvent, SessionView, SideChatView } from "@wollipog/protocol";
 import { api } from "../api.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { SideChatPanel } from "./SideChatPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -19,6 +20,11 @@ for (const [name, value] of Object.entries({
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+
+// `SideChatPanel` starts a repeating timer that only its effect teardown clears. Without this, an
+// assertion throwing before the trailing `root.unmount()` left the timer rescheduling and the
+// process could not exit — a plain failure reading as a hung suite (#899).
+installDomTestCleanup(domWindow);
 
 const parent = {
   id: "primary-session",
