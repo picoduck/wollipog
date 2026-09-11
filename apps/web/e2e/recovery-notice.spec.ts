@@ -128,6 +128,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       const stripBox = rect(".transcript-status-strip");
       const cluster = rect(".transcript-status-cluster");
       const leading = rect(recoverySettled ? ".context-meter" : ".transcript-recovery-strip-echo");
+      const leadingLabel = recoverySettled ? null : rect(".transcript-recovery-strip-echo > span:last-child");
       const follow = rect(".follow-tail-chip");
       const usage = rect(".transcript-status-usage");
       const composerBar = rect(".composer-bar");
@@ -139,6 +140,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
         cluster,
         slot: slotBox,
         leading,
+        leadingLabel,
         follow,
         usage,
         composerBar,
@@ -173,6 +175,8 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
     expect(active.reader.height).toBeCloseTo(inactive.reader.height, 0);
     expect(active.strip.top).toBeCloseTo(inactive.strip.top, 0);
     expect(active.follow.left).toBeCloseTo(inactive.follow.left, 1);
+    expect(active.leading.width).toBeGreaterThan(inactive.leading.width);
+    expect(active.leadingLabel!.width).toBeGreaterThan(inactive.leading.width);
   }
 
   const widestActive = await readGeometry(320, false, true);
@@ -214,7 +218,8 @@ test("in a narrow compact expanded pane the active echo wins the leading cell ov
     full: el.scrollWidth,
     textOverflow: getComputedStyle(el).textOverflow,
   }));
-  expect(geometry.visible).toBeGreaterThan(0);
+  const meterWidth = await page.locator(".context-meter").evaluate((el) => el.getBoundingClientRect().width);
+  expect(geometry.visible).toBeGreaterThan(meterWidth);
   expect(geometry.full).toBeGreaterThanOrEqual(geometry.visible);
   expect(geometry.textOverflow).toBe("ellipsis");
 });

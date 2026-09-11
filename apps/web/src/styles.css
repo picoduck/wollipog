@@ -10551,8 +10551,10 @@ body.shell-dock-dragging * {
   position: absolute;
   top: 50%;
   right: 0;
-  width: 100%;
-  max-width: 80px;
+  /* Use the intended readable width at ordinary phone sizes, but yield enough of the 320px
+     pane's leading quarter when the follow-state label consumes its widest compact shape. */
+  width: min(80px, calc(25cqw - 11px));
+  max-width: none;
   transform: translateY(-50%);
 }
 .transcript-status-context-standalone {
