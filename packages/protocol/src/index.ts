@@ -4024,7 +4024,7 @@ export interface SessionView {
   queued?: QueuedPromptView[];
   /** Durable user prompts rendered in the transcript while delivery remains incomplete/terminal. */
   pendingPrompts?: PendingPromptView[];
-  /** The runner interrupted the active turn and is holding the preserved FIFO for explicit resume. */
+  /** The runner is temporarily holding the preserved FIFO behind a runtime or control boundary. */
   queueHeld?: boolean;
   /** Ephemeral runner-owned coordinate for the currently dequeued turn. */
   activeTurnId?: string;
@@ -5567,7 +5567,7 @@ export interface CancelSessionMessage {
 }
 
 /** Interrupt only the active turn. Unlike cancel_session, the session remains non-terminal and
- * queued prompts are preserved until a later explicit prompt resumes their FIFO. */
+ * queued prompts resume in FIFO order after the interrupted turn safely settles. */
 export interface InterruptTurnMessage {
   type: "interrupt_turn";
   sessionId: string;

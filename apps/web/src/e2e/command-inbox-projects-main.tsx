@@ -1776,9 +1776,10 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error(`unknown session: ${id}`);
     const seq = value.messageCount + 1;
+    const resumed = value.queued?.[0];
     value.messageCount = seq;
     value.status = "idle";
-    value.queueHeld = true;
+    value.queueHeld = false;
     value.activeTurnId = undefined;
     value.updatedAt += 1;
     value.lastEventAt = value.updatedAt;
@@ -1788,6 +1789,17 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
       event: { id: seq, sessionId: id, seq, ts: value.updatedAt, payload: { kind: "turn_interrupted" } },
     });
     socket?.push({ type: "session_upsert", session: structuredClone(value) });
+    if (resumed) {
+      setTimeout(() => {
+        value.queued?.shift();
+        value.status = "running";
+        value.activeTurnId = resumed.id;
+        value.updatedAt += 1;
+        value.lastEventAt = value.updatedAt;
+        saveModel();
+        socket?.push({ type: "session_upsert", session: structuredClone(value) });
+      }, 0);
+    }
   },
   upsertProject(project) {
     const index = model.projects.findIndex((candidate) => candidate.id === project.id);

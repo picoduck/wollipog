@@ -441,7 +441,7 @@ test("a synchronous provider cancel failure rolls back the interruption hold", (
   }
 });
 
-test("turn-only interruption is idempotent and preserves FIFO for every driver contract", async () => {
+test("turn-only interruption auto-resumes the exact FIFO after safe settlement for every driver contract", async () => {
   for (const driver of ["codex-app-server", "codex", "claude-code", "acp"] as AgentDriverKind[]) {
     const root = mkdtempSync(join(tmpdir(), `wollipog-sm-interrupt-${driver}-`));
     const sent: RunnerToControlPlane[] = [];
@@ -449,17 +449,18 @@ test("turn-only interruption is idempotent and preserves FIFO for every driver c
     store.create(meta({ driver, status: "idle" }));
     let settleFirst!: (value: "cancelled") => void;
     const firstTurn = new Promise<"cancelled">((resolve) => { settleFirst = resolve; });
-    const ran: string[] = [];
+    const ran: Array<{ text: string; images: unknown[] }> = [];
+    const configs: Array<{ model?: string }> = [];
     let cancelCalls = 0;
     const client = {
       resolvePermission: () => false,
       cancel: () => { cancelCalls += 1; },
       dispose: () => {},
-      prompt: (text: string) => {
-        ran.push(text);
+      prompt: (text: string, images: unknown[]) => {
+        ran.push({ text, images });
         return text === "A" ? firstTurn : Promise.resolve("end_turn" as const);
       },
-      setConfig: () => {},
+      setConfig: (config: { model?: string }) => { configs.push(config); },
       agentSessionId: () => "agent-1",
     };
     const manager = new SessionManager((message) => sent.push(message), () => {}, store, "test-runner");
@@ -474,22 +475,27 @@ test("turn-only interruption is idempotent and preserves FIFO for every driver c
       const activeQueue = sent.filter((message): message is SessionQueueMessage =>
         message.type === "session_queue").at(-1)!;
       assert.ok(activeQueue.activeTurnId, `${driver} publishes the dequeued turn coordinate`);
-      manager.prompt("s_q", "B");
+      manager.prompt("s_q", "B", [{ mimeType: "image/png", data: "AAAA" }], undefined, { model: "model-b" });
+      manager.prompt("s_q", "C", [], undefined, { model: "model-c" });
+      const acceptedQueue = sent.filter((message): message is SessionQueueMessage =>
+        message.type === "session_queue").at(-1)!.queue;
+      const acceptedIds = acceptedQueue.map((prompt) => prompt.id);
 
       assert.equal(manager.interruptTurn("s_q"), "applied");
       assert.equal(manager.interruptTurn("s_q"), "already_requested");
       const heldQueue = sent.filter((message): message is SessionQueueMessage =>
         message.type === "session_queue").at(-1)!;
       assert.equal(heldQueue.held, true, `${driver} publishes the FIFO hold`);
-      assert.deepEqual(heldQueue.queue.map((prompt) => prompt.text), ["B"], driver);
-      manager.prompt("s_q", "C");
-      const releasedQueue = sent.filter((message): message is SessionQueueMessage =>
-        message.type === "session_queue").at(-1)!;
-      assert.equal(releasedQueue.held, undefined, `${driver} publishes explicit resume`);
-      assert.deepEqual(releasedQueue.queue.map((prompt) => prompt.text), ["B", "C"], driver);
+      assert.deepEqual(heldQueue.queue.map((prompt) => prompt.id), acceptedIds, `${driver} preserves queue identity`);
+      assert.deepEqual(heldQueue.queue.map((prompt) => prompt.text), ["B", "C"], driver);
+      manager.reportQueues();
+      assert.equal(sent.filter((message): message is SessionQueueMessage =>
+        message.type === "session_queue").at(-1)!.held, true, `${driver} preserves the fence across reconnect`);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(ran.length, 1, `${driver} cannot dispatch before cancellation settles`);
       assert.equal(cancelCalls, 1, `${driver} receives one provider cancellation`);
       settleFirst("cancelled");
-      await waitFor(() => ran.length === 3, `${driver} redirect prompt releases the held FIFO after settlement`);
+      await waitFor(() => ran.length === 3, `${driver} resumes the accepted FIFO after settlement`);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const interrupted = (manager as any).active.get("s_q");
@@ -498,7 +504,9 @@ test("turn-only interruption is idempotent and preserves FIFO for every driver c
       assert.equal(store.readMeta("s_q")?.status, "idle", driver);
       assert.equal(store.readEvents("s_q").filter((event) => event.payload.kind === "turn_interrupted").length, 1, driver);
       assert.equal(store.readEvents("s_q").some((event) => event.payload.kind === "error"), false, driver);
-      assert.deepEqual(ran, ["A", "B", "C"], driver);
+      assert.deepEqual(ran.map((turn) => turn.text), ["A", "B", "C"], driver);
+      assert.deepEqual(ran[1]!.images, [{ mimeType: "image/png", data: "AAAA" }], `${driver} preserves attachments`);
+      assert.deepEqual(configs, [{ model: "model-b" }, { model: "model-c" }], `${driver} preserves per-message config`);
       assert.equal(sent.filter((message): message is SessionQueueMessage =>
         message.type === "session_queue").at(-1)!.activeTurnId, undefined, `${driver} clears the turn coordinate`);
     } finally {
@@ -507,7 +515,7 @@ test("turn-only interruption is idempotent and preserves FIFO for every driver c
   }
 });
 
-test("synthetic orphan recovery cannot resume a user-interrupted Claude queue", async () => {
+test("synthetic orphan recovery cannot overtake an interruption that has not settled", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-orphan-"));
   const store = new SessionStore(root);
   store.create(meta({
@@ -529,7 +537,7 @@ test("synthetic orphan recovery cannot resume a user-interrupted Claude queue", 
     sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
     context: { kind: "native" }, status: "idle", running: false, queue: [{
       id: "held", text: "B", images: [], syntheticRecovery: false,
-    }], holdQueuedPromptsAfterInterrupt: true,
+    }], interruptRequested: true, holdQueuedPromptsAfterInterrupt: true,
   });
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -547,7 +555,7 @@ test("synthetic orphan recovery cannot resume a user-interrupted Claude queue", 
   }
 });
 
-test("a configuration rejection cannot skip an interruption hold", async () => {
+test("a pre-provider configuration settlement releases the interruption fence and resumes the FIFO", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-config-reject-"));
   const store = new SessionStore(root);
   store.create(meta({ status: "idle" }));
@@ -573,19 +581,14 @@ test("a configuration rejection cannot skip an interruption hold", async () => {
     manager.prompt("s_q", "C");
     manager.interruptTurn("s_q");
     rejectConfig(new Error("model unavailable"));
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await waitFor(() => !(manager as any).active.get("s_q").running);
-    assert.deepEqual(ran, []);
+    await waitFor(() => ran.length === 1);
+    assert.deepEqual(ran, ["C"]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const entry = (manager as any).active.get("s_q");
-    assert.equal(entry.holdQueuedPromptsAfterInterrupt, true);
-    assert.deepEqual(entry.queue.map((prompt: { text: string }) => prompt.text), ["C"]);
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.deepEqual(entry.queue, []);
     assert.equal(store.readEvents("s_q").filter((event) => event.payload.kind === "turn_interrupted").length, 1);
     assert.equal(store.readEvents("s_q").some((event) => event.payload.kind === "error"), false);
-
-    manager.prompt("s_q", "D");
-    await waitFor(() => ran.length === 2);
-    assert.deepEqual(ran, ["C", "D"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -709,7 +712,7 @@ test("provider completion winning the interrupt race does not fabricate Interrup
   }
 });
 
-test("pre-provider interruption survives awaited configuration and never submits the interrupted turn", async () => {
+test("pre-provider interruption skips the interrupted turn and automatically resumes the preserved FIFO", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-pre-provider-"));
   const store = new SessionStore(root);
   store.create(meta({ status: "idle" }));
@@ -738,17 +741,12 @@ test("pre-provider interruption survives awaited configuration and never submits
     manager.prompt("s_q", "B");
     manager.interruptTurn("s_q");
     releaseConfig();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await waitFor(() => !(manager as any).active.get("s_q").running);
+    await waitFor(() => ran.length === 1);
     assert.equal(cancels, 1);
-    assert.deepEqual(ran, [], "provider prompt is never called for the interrupted prepared turn");
+    assert.deepEqual(ran, ["B"], "the interrupted prepared turn is skipped and the preserved FIFO resumes");
     assert.equal(store.readEvents("s_q").filter((event) => event.payload.kind === "turn_interrupted").length, 1);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    assert.deepEqual((manager as any).active.get("s_q").queue.map((prompt: { text: string }) => prompt.text), ["B"]);
-
-    manager.prompt("s_q", "C");
-    await waitFor(() => ran.length === 2);
-    assert.deepEqual(ran, ["B", "C"]);
+    assert.deepEqual((manager as any).active.get("s_q").queue, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
