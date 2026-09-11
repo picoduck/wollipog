@@ -44,6 +44,15 @@ const MAX_STORED_ACTION_BYTES = 64 * 1024;
 const MISFIRE_GRACE_MS = 60_000;
 const MAX_MISSED_OCCURRENCES = 10_000;
 const COMMAND_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+/** How long an execution may hold an automation while nothing of its plan has reached a runner.
+ * The retention horizon above is a storage bound, not a scheduling one: waiting it out parks a
+ * `wait` automation for a month over a single unreachable runner. The automation's own cadence is
+ * the honest limit — once the next occurrence is due, this one is a loss. The floor stays well
+ * clear of the bounded provider-retry chain, whose last replacement is due four minutes after the
+ * refusal that produced it, and the ceiling keeps a daily or weekly automation from parking a dead
+ * occurrence for its whole period. */
+const MIN_DELIVERY_BOUND_MS = 30 * 60_000;
+const MAX_DELIVERY_BOUND_MS = 12 * 60 * 60_000;
 
 type Logger = { info: (message: string) => void; warn: (message: string) => void };
 type AutomationNotifier = (
@@ -559,13 +568,34 @@ export class AutomationsService {
       commands.some((command) => !["completed", "rejected", "uncertain"].includes(command.state));
   }
 
+  /** True once nothing of the execution's plan has reached its runner within the delivery bound.
+   * A command the runner acknowledged means the work is under way and only its own receipts may
+   * end it; the bound is measured from the newest command so a replacement issued for a
+   * transiently refused launch gets the full window rather than the remains of its predecessor's. */
+  private undeliverable(
+    execution: AutomationExecution,
+    schedule: AutomationSchedule,
+    commands: AutomationCommandRecord[],
+    now: number,
+  ): boolean {
+    if (commands.some((command) => ["accepted", "started", "completed"].includes(command.state))) return false;
+    if (!commands.some((command) => ["staged", "pending", "sent"].includes(command.state))) return false;
+    const cadence = nextCronFire(schedule.cron, schedule.timezone, execution.scheduledFor) - execution.scheduledFor;
+    const bound = Math.min(MAX_DELIVERY_BOUND_MS, Math.max(MIN_DELIVERY_BOUND_MS, cadence));
+    return now - Math.max(...commands.map((command) => command.createdAt)) >= bound;
+  }
+
   private reconcileExecution(executionId: string, now: number): void {
     const execution = this.db.getAutomationExecution(executionId);
     if (!execution || execution.deliveryMode !== "receipted_v53" ||
         !["dispatching", "running"].includes(execution.status)) return;
-    const commands = this.db.listAutomationCommands(executionId);
+    let commands = this.db.listAutomationCommands(executionId);
     if (!commands.length) return;
     const schedule = this.executionSchedule(execution);
+    if (schedule && this.undeliverable(execution, schedule, commands, now)) {
+      this.db.expireUndeliveredAutomationCommands(executionId, now);
+      commands = this.db.listAutomationCommands(executionId);
+    }
     // A superseded command was replaced by a live retry; the replacement carries the verdict.
     const failed = commands.find((command) =>
       (command.state === "rejected" || command.state === "uncertain") && command.supersededBy === undefined);
