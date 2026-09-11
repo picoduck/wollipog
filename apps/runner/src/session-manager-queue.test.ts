@@ -424,6 +424,28 @@ test("a governance-tripped entry rejects turn interruption without holding or ca
   }
 });
 
+test("a markerless interrupt cannot install a hold between serialized turns", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    // drain() retains running=true while a steering fence settles between turns, but the absence
+    // of activeTurnId proves there is no provider turn whose completion could clear a new hold.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (sm as any).active.get("s_q");
+    let cancels = 0;
+    entry.client.cancel = () => { cancels += 1; };
+    entry.steerFences = new Set(["between-turns"]);
+
+    const before = queues().length;
+    assert.equal(sm.interruptTurn("s_q"), "turn_not_running");
+    assert.equal(entry.interruptRequested, undefined);
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, undefined);
+    assert.equal(cancels, 0);
+    assert.equal(queues().length, before);
+  } finally {
+    cleanup();
+  }
+});
+
 test("a synchronous provider cancel failure rolls back the interruption hold", () => {
   const { sm, queues, cleanup } = harness();
   try {
@@ -1029,6 +1051,8 @@ test("reportQueues re-emits every non-empty, held, or active queue (reconnect re
     // A hold is independently authoritative even when no prompt currently waits behind it.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const entry = (sm as any).active.get("s_q");
+    entry.client.steer = async () => ({ outcome: "accepted" });
+    entry.steeringAvailable = true;
     entry.queue = [];
     entry.holdQueuedPromptsAfterInterrupt = true;
     const heldBefore = queues().length;
@@ -1036,6 +1060,12 @@ test("reportQueues re-emits every non-empty, held, or active queue (reconnect re
     assert.equal(queues().length, heldBefore + 1);
     assert.equal(queues().at(-1)!.held, true);
     assert.deepEqual(queues().at(-1)!.queue, []);
+
+    sm.prompt("s_q", "held steering reason");
+    assert.equal(
+      queues().at(-1)!.queue[0]?.steerDisabledReason,
+      "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
+    );
 
     entry.holdQueuedPromptsAfterInterrupt = false;
     entry.activeTurnId = "turn-live";

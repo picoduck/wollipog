@@ -5209,7 +5209,7 @@ export class SessionManager {
       return {
         eligible: false,
         reason: "policy_blocked",
-        message: "Send a normal prompt to resume the held queue before steering.",
+        message: "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
       };
     }
     if (entry.client.activeSteeringTurnId && !entry.client.activeSteeringTurnId()) {
