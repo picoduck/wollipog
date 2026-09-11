@@ -3123,6 +3123,10 @@ function SessionDetailLoaded({
   // The web registry owns app/provider identity, availability, collisions, and menu ranking. The
   // provider wire shape stays unchanged until IDEA-004C adds transport-specific execution modes.
   const agentCaps = resolveCaps(runner, session);
+  const contextModel = agentCaps?.models?.find((model) => model.id === session.model)
+    ?? agentCaps?.models?.find((model) => model.default);
+  const hasContextWindow = (session.contextWindow ?? 0) > 0
+    || (contextModel?.contextWindow ?? 0) > 0;
   // Plan mode is only safe where the driver actually advertises the `plan` approval mode (Claude).
   // Codex silently falls back to a writable sandbox for an unknown mode, so exposing it there would
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
@@ -4348,10 +4352,10 @@ function SessionDetailLoaded({
                 panes CSS collapses the slot and surfaces the echo inside the status strip. */}
             <TranscriptRecoveryNotice active={transcript.notice === "refreshing"} />
             <div className="transcript-status-strip" aria-label="Transcript Status">
-              {/* Preview has no usage indicators, so its compact recovery echo keeps the leading
-                  grid seat while the live-output group itself remains centered. */}
-              {mode === "preview" && (
-                <div className="transcript-status-context transcript-status-context-preview">
+              {/* Without a context meter, compact recovery uses the leading grid seat while the
+                  visible live-output/cost group itself remains centered. */}
+              {(mode === "preview" || !hasContextWindow) && (
+                <div className="transcript-status-context transcript-status-context-standalone">
                   <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
                 </div>
               )}
@@ -4359,7 +4363,7 @@ function SessionDetailLoaded({
                   status cluster on every viewport. The recovery echo may temporarily replace the
                   context meter in compact panes, but it owns the same leading seat. */}
               <div className="transcript-status-cluster">
-                {mode === "expanded" && (
+                {mode === "expanded" && hasContextWindow && (
                   <div className="transcript-status-context">
                     <ContextWindowMeter session={session} />
                     <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />

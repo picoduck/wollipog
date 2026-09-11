@@ -10551,18 +10551,18 @@ body.shell-dock-dragging * {
   position: absolute;
   top: 50%;
   right: 0;
-  width: 80px;
-  max-width: none;
+  width: 100%;
+  max-width: 80px;
   transform: translateY(-50%);
 }
-.transcript-status-context-preview {
+.transcript-status-context-standalone {
   grid-column: 1;
   justify-self: stretch;
   width: 100%;
   min-width: 0;
   overflow: hidden;
 }
-.transcript-status-context-preview .transcript-recovery-strip-echo {
+.transcript-status-context-standalone .transcript-recovery-strip-echo {
   position: static;
   width: 100%;
   max-width: 100%;
@@ -11489,7 +11489,7 @@ body.shell-dock-dragging * {
   .session-detail .transcript-recovery-slot { display: none; }
   .session-detail .transcript-recovery-strip-echo { display: inline-flex; }
   .session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter {
-    display: none;
+    visibility: hidden;
   }
 
   /* The floating pinned summary would cover the whole transcript — make it a normal block
@@ -11934,7 +11934,7 @@ body.shell-dock-dragging * {
      track at phone widths, which starved the shrinkable echo down to zero visible label. While
      recovery is ACTIVE the echo is the one thing this compact geometry exists to preserve —
      the meter yields until recovery completes. */
-  .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter { display: none; }
+  .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter { visibility: hidden; }
 }
 /* Inbox PREVIEW panes always use the compact presentation, whatever their height. A preview is
    a secondary, splitter-resizable reading surface: the pill band would permanently spend ~47px

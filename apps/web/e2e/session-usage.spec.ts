@@ -175,6 +175,16 @@ test("desktop: an unknown context window hides the ring and keeps the cost contr
   await expect(page.locator(".context-ring-button")).toHaveCount(0);
   const cost = page.getByRole("button", { name: "Session Usage: $1.37" });
   await expect(cost).toBeVisible();
+  const visibleCentering = await page.locator(".transcript-status-strip").evaluate((strip) => {
+    const stripBox = strip.getBoundingClientRect();
+    const follow = strip.querySelector(".follow-tail-chip")!.getBoundingClientRect();
+    const costBox = strip.querySelector(".transcript-status-usage")!.getBoundingClientRect();
+    return {
+      stripCenter: stripBox.left + stripBox.width / 2,
+      visibleCenter: (follow.left + costBox.right) / 2,
+    };
+  });
+  expect(Math.abs(visibleCentering.visibleCenter - visibleCentering.stripCenter)).toBeLessThanOrEqual(1);
   await cost.click();
   await expect(page.locator(".session-usage-popover").first()).toContainText("Total Processed");
   await page.screenshot({ path: `${SHOT}/desktop-unknown-context.png` });

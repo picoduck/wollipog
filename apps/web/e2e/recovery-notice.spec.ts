@@ -68,7 +68,7 @@ test("a tall pane shows the in-flow pill and the pinned summary can never inters
 });
 
 test("full-height mobile Sessions keep recovery readable in the persistent strip without an empty band", async ({ page }) => {
-  const readGeometry = async (width: number, settled: boolean) => {
+  const readGeometry = async (width: number, settled: boolean, widestFollow = false) => {
     await page.setViewportSize({ width, height: 800 });
     await page.goto(`/recovery-notice-e2e.html?mode=expanded&height=640&width=${width}${settled ? "&settled=1" : ""}`);
     // Stress the three tracks with wider-than-default text metrics. GitHub's Linux fallback made
@@ -88,7 +88,14 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       await expect(page.locator(".context-meter")).toBeHidden();
       expect(await echo.locator("span").last().evaluate((label) => label.clientWidth)).toBeGreaterThan(0);
     }
-    await expect(page.locator(".follow-tail-chip")).toContainText("Following Live Output");
+    if (widestFollow) {
+      await page.locator(".follow-tail-chip span").first().evaluate((label) => {
+        label.textContent = "Previewing · Follow Live Output";
+      });
+    }
+    await expect(page.locator(".follow-tail-chip")).toContainText(
+      widestFollow ? "Previewing · Follow Live Output" : "Following Live Output",
+    );
     await expect(usage).toBeVisible();
     await expect(page.locator(".cbar-usage")).toHaveCount(0);
     // #781: cost remains distinct from context, with its accessible name and tooltip on the
@@ -165,7 +172,11 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
     }
     expect(active.reader.height).toBeCloseTo(inactive.reader.height, 0);
     expect(active.strip.top).toBeCloseTo(inactive.strip.top, 0);
+    expect(active.follow.left).toBeCloseTo(inactive.follow.left, 1);
   }
+
+  const widestActive = await readGeometry(320, false, true);
+  expect(widestActive.leading.left).toBeGreaterThanOrEqual(widestActive.strip.left - 0.5);
 });
 
 test("a compressed expanded pane hides the pinned summary instead of letting it cover the strip", async ({ page }) => {
