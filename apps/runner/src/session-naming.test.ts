@@ -338,6 +338,22 @@ test("a stalled preparation step stays bounded and releases its late result", as
   assert.equal(released, 1, "a late preparation result is cleaned up rather than leaked");
 });
 
+test("a stalled teardown cannot turn a generated title into a transport timeout", async () => {
+  let cleaned = 0;
+  const executor = new SessionNamingExecutor({
+    // Teardown that never settles. Awaiting it would hold the result past the control plane's
+    // round-trip deadline, and a valid title would come back as a timeout.
+    cleanupBudgetMs: 25,
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: () => new Promise<void>(() => {}) }),
+    authorize: async () => ({ cleanup: async () => { cleaned += 1; } }),
+    generate: async () => "Generated Before Teardown Stalled",
+  });
+  const result = await executor.execute(request(), claudeAgent(), {});
+  assert.equal(result.ok, true);
+  assert.equal(result.ok && result.title, "Generated Before Teardown Stalled");
+  assert.equal(cleaned, 1, "teardown still runs; only waiting for it is bounded");
+});
+
 test("executor preflight rejects before preparing a target-local naming directory", async () => {
   let prepared = 0;
   let generated = 0;

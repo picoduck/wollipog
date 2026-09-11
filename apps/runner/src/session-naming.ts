@@ -14,6 +14,7 @@ import {
   runnerSupportsProtocol,
   sessionNamingAgentFailureCode,
   SESSION_NAMING_GENERATION_BUDGET_MS,
+  SESSION_NAMING_CLEANUP_BUDGET_MS,
   SESSION_NAMING_PREPARATION_BUDGET_MS,
   SESSION_NAMING_RUNNER_BUDGET_MS,
 } from "@wollipog/protocol";
@@ -244,6 +245,20 @@ async function withinPreparationBudget<T>(
   }
 }
 
+/** Bound post-generation teardown. The result is already known here, so an overrunning cleanup must
+ * not delay it past the caller's round-trip deadline — it is allowed to finish detached instead. */
+async function withinCleanupBudget(work: Promise<unknown>, budgetMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, Math.max(0, budgetMs));
+  });
+  try {
+    await Promise.race([work, expiry]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function validMessages(messages: GenerateSessionTitleMessage["messages"]): boolean {
   return Array.isArray(messages) && messages.length > 0 && messages.length <= INPUT_MAX_MESSAGES &&
     messages.every((message) => (message.role === "user" || message.role === "assistant") &&
@@ -439,6 +454,8 @@ export interface SessionNamingExecutorOptions {
   maxConcurrent?: number;
   rateLimit?: number;
   rateWindowMs?: number;
+  /** Overridable only so tests can bound teardown without a real wall-clock wait. */
+  cleanupBudgetMs?: number;
   now?: () => number;
   spawn?: (options: SpawnAgentOptions) => AgentProcess;
   preflight?: (agent: AgentDefinition) => void | Promise<void>;
@@ -466,6 +483,7 @@ export class SessionNamingExecutor {
   private readonly maxConcurrent: number;
   private readonly rateLimit: number;
   private readonly rateWindowMs: number;
+  private readonly cleanupBudgetMs: number;
   private readonly now: () => number;
   private readonly spawn: (options: SpawnAgentOptions) => AgentProcess;
   private readonly preflight?: SessionNamingExecutorOptions["preflight"];
@@ -477,6 +495,7 @@ export class SessionNamingExecutor {
     this.maxConcurrent = Math.max(1, Math.floor(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT));
     this.rateLimit = Math.max(1, Math.floor(options.rateLimit ?? DEFAULT_RATE_LIMIT));
     this.rateWindowMs = Math.max(1, Math.floor(options.rateWindowMs ?? DEFAULT_RATE_WINDOW_MS));
+    this.cleanupBudgetMs = Math.max(0, Math.floor(options.cleanupBudgetMs ?? SESSION_NAMING_CLEANUP_BUDGET_MS));
     this.now = options.now ?? Date.now;
     this.spawn = options.spawn ?? spawnAgent;
     this.preflight = options.preflight;
@@ -590,8 +609,10 @@ export class SessionNamingExecutor {
         : fail("provider_failed", failurePhase);
     } finally {
       this.active--;
-      await authorization?.cleanup().catch(() => {});
-      await neutral?.cleanup().catch(() => {});
+      await withinCleanupBudget((async () => {
+        await authorization?.cleanup().catch(() => {});
+        await neutral?.cleanup().catch(() => {});
+      })(), this.cleanupBudgetMs);
     }
   }
 }

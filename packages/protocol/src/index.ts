@@ -383,14 +383,24 @@ export const SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS =
  *       -> control-plane supervision abort 17s
  *         -> desktop remote read budget 35s (apps/desktop/src-tauri/src/remote_transport.rs)
  *
+ * Teardown after a successful generation is bounded separately by the cleanup budget below, so it
+ * is covered by the transport margin rather than competing with it.
+ *
  * The total stays bounded: the runner clamps any requested budget to the runner budget below.
  */
 export const SESSION_NAMING_PREPARATION_BUDGET_MS = 3_000;
 export const SESSION_NAMING_GENERATION_BUDGET_MS = 12_000;
 export const SESSION_NAMING_RUNNER_BUDGET_MS =
   SESSION_NAMING_PREPARATION_BUDGET_MS + SESSION_NAMING_GENERATION_BUDGET_MS;
-/** Extra time the control plane waits on the runner round trip beyond the runner's own budget. */
-export const SESSION_NAMING_TRANSPORT_MARGIN_MS = 1_000;
+/** After the title is known the runner still tears down its neutral directory and isolation
+ * boundary, and a `return` inside `try` does not settle until `finally` completes. A WSL `rm -rf`
+ * alone is allowed five seconds, so awaiting teardown unbounded would let housekeeping push a
+ * generated title past the control plane's round-trip deadline and report it as a timeout. The
+ * runner therefore waits only this long for teardown and lets an overrun finish detached. */
+export const SESSION_NAMING_CLEANUP_BUDGET_MS = 1_000;
+/** Extra time the control plane waits on the runner round trip beyond the runner's own budget.
+ * Must exceed the cleanup budget, or teardown can still outlast the deadline it sits inside. */
+export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_MS + 1_000;
 /** Extra time the control plane's own abort timer allows beyond that runner request deadline. */
 export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";

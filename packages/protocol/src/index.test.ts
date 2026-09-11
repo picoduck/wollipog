@@ -10,6 +10,7 @@ import {
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
   PROTOCOL_VERSION,
+  SESSION_NAMING_CLEANUP_BUDGET_MS,
   SESSION_NAMING_GENERATION_BUDGET_MS,
   SESSION_NAMING_PREPARATION_BUDGET_MS,
   SESSION_NAMING_RUNNER_BUDGET_MS,
@@ -248,6 +249,8 @@ test("session naming budgets account for preparation and stay ordered outermost-
   assert.ok(supervisionMs > runnerRequestMs,
     "the control-plane abort must not preempt its own runner request deadline");
   // The desktop transport grants 35s and the runner clamps naming to 15s: the chain stays bounded.
+  assert.ok(SESSION_NAMING_TRANSPORT_MARGIN_MS > SESSION_NAMING_CLEANUP_BUDGET_MS,
+    "teardown after a generated title must fit inside the round-trip margin it sits within");
   assert.ok(SESSION_NAMING_RUNNER_BUDGET_MS <= 15_000, "the runner rejects budgets above 15s");
   assert.ok(supervisionMs < 35_000, "the desktop naming read budget must outlast the whole chain");
 });
