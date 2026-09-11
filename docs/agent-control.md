@@ -76,6 +76,12 @@ the primary workspace, and no worktree lease, provider-home lease, or provider p
 before the check runs. A launch refused this way retains the worktree rather than reaping it: a
 tree whose identity the runner just declined to confirm may hold work the session never made.
 
+A session row written before the runner recorded `worktreeBranch` has no stored identity, so these
+checks derive one from the layout that named the worktree. Worktree reconciliation records that
+identity on such a row once it can confirm the worktree still carries it — and deliberately records
+nothing when it does not, because persisting a branch someone switched to would bless the drift and
+retire the check that catches it.
+
 Shells, the Native TUI, and the Files browser resolve the same selection and re-prove it the same
 way before opening. They skip only the Project Locations boundary — the coordinate is the session's
 own persisted selection, already located by the create or attach that stored it, and the boundary's

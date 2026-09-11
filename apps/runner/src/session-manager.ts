@@ -1418,6 +1418,44 @@ export class SessionManager {
     });
   }
 
+  /** Give a row that predates `worktreeBranch` the identity it always implied, so the field is read
+   * rather than reconstructed. Rides the worktree reconciliation sweep because that pass already
+   * holds this session's worktree lane — `patchMeta` replaces the whole document, so writing from
+   * outside the lane could drop a concurrent launch's `worktreePath` — and already pays for git per
+   * session, making one porcelain listing marginal.
+   *
+   * It records only what the derivation already claims. Persisting whatever Git reports would bless
+   * a worktree someone switched to another branch and permanently retire the fail-closed check that
+   * catches exactly that, so a divergence is left unrecorded and keeps failing at launch. The guard
+   * is the first line, so the pass costs nothing once a row has converged and nothing at all for
+   * rows written since the field existed. */
+  private async recordLegacyWorktreeBranch(meta: SessionMeta): Promise<void> {
+    if (!meta.worktreePath || meta.worktreeBranch !== undefined) return;
+    const path = meta.worktreePath;
+    let actual: string;
+    try {
+      actual = (await registeredSessionWorktree(meta.repoPath, path, {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+      })).branch;
+    } catch {
+      // Unreachable distro, unmounted volume, pruned worktree: the row simply does not converge
+      // this pass. Leaving the field absent keeps the derivation answering for it.
+      return;
+    }
+    if (actual !== this.expectedWorktreeBranch(meta, path, undefined)) {
+      this.log(`session ${boundedSessionIdForLog(meta.sessionId)} worktree is not on the branch its layout implies; leaving its identity underived`);
+      return;
+    }
+    // Re-read after the git round trip: this lane excludes worktree mutations, but a prompt or
+    // status write from elsewhere can still have replaced the document underneath.
+    const latest = this.store.readMeta(meta.sessionId);
+    if (!latest || latest.worktreeBranch !== undefined ||
+        !latest.worktreePath || !sameWorktreePath(latest.context, latest.worktreePath, path)) return;
+    this.store.patchMeta(meta.sessionId, { worktreeBranch: actual });
+  }
+
   /** Conservative startup/periodic reconciliation. Forge failures retain state, while a durable
    * terminal state is remembered so dirty or active trees can be retried after they become safe. */
   async reconcileWorktreePullRequests(): Promise<void> {
@@ -1429,6 +1467,8 @@ export class SessionManager {
           await this.runWorktreeOperation(candidate.sessionId, async () => {
             let meta = this.store.readMeta(candidate.sessionId);
             if (!meta || !this.sessionCanOpen(candidate.sessionId)) return;
+            await this.recordLegacyWorktreeBranch(meta);
+            meta = this.store.readMeta(candidate.sessionId) ?? meta;
             const linkedPaths = this.attributedWorktrees(meta)
               .filter((worktree) => worktree.pullRequest)
               .map((worktree) => worktree.path);

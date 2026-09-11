@@ -3110,3 +3110,57 @@ test("the shells and Files root is re-proved without the boundary's side effects
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("worktree reconciliation records the identity a legacy row implied, and only that", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-branch-backfill-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const legacyRow = (sessionId: string, worktreePath: string) => ({
+      sessionId, agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath, driver: "claude-code" as const, command: "claude", args: [], env: {},
+      context: { kind: "native" as const }, agentSessionId: null, status: "idle" as const,
+      title: sessionId, config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null,
+      pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
+    });
+
+    const converges = await createWorktree(repo, "s_converges", { dataDir });
+    const switched = await createWorktree(repo, "s_switched", { dataDir });
+    const gone = await createWorktree(repo, "s_gone", { dataDir });
+    store.create(legacyRow("s_converges", converges.path));
+    store.create(legacyRow("s_switched", switched.path));
+    store.create(legacyRow("s_gone", gone.path));
+    // A row written since the field existed must not be touched, even if it disagrees with Git.
+    const recorded = await createWorktree(repo, "s_recorded", { dataDir });
+    store.create({ ...legacyRow("s_recorded", recorded.path), worktreeBranch: "fix/recorded-by-hand" });
+
+    execFileSync("git", ["-C", switched.path, "switch", "-c", "operator/elsewhere"]);
+    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", gone.path]);
+
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    await manager.reconcileWorktreePullRequests();
+
+    assert.equal(store.readMeta("s_converges")?.worktreeBranch, "agent/s_converges",
+      "a legacy row whose worktree still matches its layout records that identity");
+    assert.equal(store.readMeta("s_switched")?.worktreeBranch, undefined,
+      "a switched worktree is never blessed by the backfill");
+    assert.equal(store.readMeta("s_gone")?.worktreeBranch, undefined,
+      "an unreachable worktree simply does not converge this pass");
+    assert.equal(store.readMeta("s_recorded")?.worktreeBranch, "fix/recorded-by-hand",
+      "an already recorded identity is left exactly as it was");
+
+    // The switched row must still fail closed at launch: the backfill did not retire that check.
+    const failure = await manager.sessionWorktreeRootFailure(store.readMeta("s_switched")!);
+    assert.match(failure ?? "", /instead of agent\/s_switched/);
+
+    // Converged rows make the pass a no-op rather than a repeating git cost.
+    const before = store.readMeta("s_converges")?.updatedAt;
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(store.readMeta("s_converges")?.updatedAt, before, "a converged row is not rewritten");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
