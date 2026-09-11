@@ -998,14 +998,33 @@ test("desktop search Enter focuses the exact filtered result set without activat
     });
   };
 
+  // Enter in the same event batch as the final input change must wait for the deferred filter,
+  // rather than focusing a row from the previous result set.
+  const rowC = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
+    .find((row) => row.textContent?.includes("Session C"))!;
+  await act(async () => { rowC.click(); });
+  search.focus();
+  await act(async () => {
+    search.value = "Session A";
+    fireDomEvent.change(search as never, { target: { value: "Session A" } as never });
+    search.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, cancelable: true,
+    }) as never);
+  });
+  await act(async () => { await Promise.resolve(); });
+  let grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  assert.equal(domWindow.document.activeElement, grid);
+  assert.equal(selectedRowTitle(container), "Session A");
+  assert.equal(grid.getAttribute("aria-rowcount"), "1");
+
   // A visible selection remains active across a multi-result handoff.
+  await filter("Session");
   const rowB = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
     .find((row) => row.textContent?.includes("Session B"))!;
   await act(async () => { rowB.click(); });
   search.focus();
-  await filter("Session");
   await pressSearchEnter();
-  let grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  grid = container.querySelector<HTMLElement>(".inbox-list")!;
   assert.equal(domWindow.document.activeElement, grid);
   assert.equal(search.value, "Session");
   assert.equal(selectedRowTitle(container), "Session B");

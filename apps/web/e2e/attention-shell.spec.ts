@@ -101,6 +101,7 @@ test("search Enter hands the preserved filter to the Sessions grid for keyboard 
   const repairedActiveId = await grid.getAttribute("aria-activedescendant");
   expect(repairedActiveId).toBeTruthy();
   await expect(page.locator(`#${repairedActiveId}`)).toBeAttached();
+  await expect(page.locator(`#${repairedActiveId}`)).toBeInViewport();
 
   // An empty result set retains both input focus and the existing no-match announcement.
   await page.keyboard.press("/");
