@@ -198,7 +198,9 @@ export function SegmentedControl<T extends string>({
         role="radiogroup"
         aria-label={label}
         aria-describedby={groupReason ? reasonId : undefined}
-        onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}
+        // See the note beside ChoiceCards' handler: disabled options stay in the arrow order so
+        // their reason is reachable without a mouse.
+        onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}
       >
         {options.map((option, index) => {
           const selected = option.value === value;
@@ -262,6 +264,19 @@ export interface ChoiceCardOption<T extends string> {
  * tell which was which until they clicked a second card and the first one either stayed on or
  * turned off. The role now says it, and so does the marker: a dot for one-of, a tick for many-of.
  */
+/*
+ * Arrows reach a DISABLED option; only activating it is refused.
+ *
+ * `handleRovingChoiceKeyDown` filters `aria-disabled` out of the roving set by default, and neither
+ * primitive opted out — so an option the comments above promise is "rendered, never hidden" was
+ * reachable by mouse and by nothing else. `rovingChoiceStop` never puts the tab stop on a disabled
+ * option either, which left the arrows as the only way in, and they skipped it.
+ *
+ * Including them is safe because the activation guard lives on the option: the handler clicks
+ * whatever it focuses, and each `onClick` below returns early when `option.disabled`. So focus
+ * moves, the screen reader announces the option and its reason, and nothing is selected — which is
+ * what the ARIA practices recommend for a radio that must explain why it is unavailable.
+ */
 export function ChoiceCards<T extends string>({
   options,
   value,
@@ -295,7 +310,7 @@ export function ChoiceCards<T extends string>({
       className={`ui-choice-cards${className ? ` ${className}` : ""}`}
       role={multiple ? "group" : "radiogroup"}
       aria-label={label}
-      onKeyDown={multiple ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio")}
+      onKeyDown={multiple ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}
     >
       {options.map((option, index) => {
         const selected = isSelected(option);
