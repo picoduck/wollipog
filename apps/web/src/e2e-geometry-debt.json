@@ -1,0 +1,88 @@
+{
+  "allowed": [
+    {
+      "id": "apps/web/e2e/command-inbox-projects.spec.ts|control.paddingTop - control.paddingBottom|toBe|2",
+      "reason": "The difference between two CSS paddings on one element. Both come from the stylesheet, so the difference is the same on every renderer."
+    },
+    {
+      "id": "apps/web/e2e/machine-management.spec.ts|await page.evaluate(() => window.innerWidth)|toBe|1280",
+      "reason": "The viewport the test set, not a rendered size. A font stack cannot change how wide the window is."
+    },
+    {
+      "id": "apps/web/e2e/permission-mode-layout.spec.ts|(await menu.boundingBox())!.width|toBe|390",
+      "reason": "The menu is laid out to the full width of the 390px viewport the test set, so this asserts it spans the window rather than that it is any particular size."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.project.width - geometry.projectButton.width|toBeCloseTo|24",
+      "reason": "The distance between two measured elements, which comes from a CSS spacing rule rather than from rendered text."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActions.height|toBe|24",
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents, so it does not move with the font stack."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActions.width|toBe|24",
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents, so it does not move with the font stack."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActions.x + geometry.projectActions.width - geometry.projectActionsIcon.x - geometry.projectActionsIcon.width|toBeCloseTo|5",
+      "reason": "The distance between two measured elements, which comes from a CSS spacing rule rather than from rendered text."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|geometry.projectActionsIcon.x - geometry.projectActions.x|toBeCloseTo|5",
+      "reason": "The distance between two measured elements, which comes from a CSS spacing rule rather than from rendered text."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|metrics.fork.x - metrics.overflow.right|toBeCloseTo|7",
+      "reason": "The distance between two measured elements, which comes from a CSS spacing rule rather than from rendered text."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|metrics.forkIcon.height|toBe|15",
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|metrics.forkIcon.width|toBe|15",
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|metrics.moreActionsIcon.height|toBe|15",
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|metrics.moreActionsIcon.width|toBe|15",
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|metrics.share.x - metrics.fork.right|toBeCloseTo|7",
+      "reason": "The distance between two measured elements, which comes from a CSS spacing rule rather than from rendered text."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|metrics.shareIcon.height|toBe|15",
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|metrics.shareIcon.width|toBe|15",
+      "reason": "An SVG icon box, sized by its size prop and CSS rather than by text, so it does not move with the font stack."
+    },
+    {
+      "id": "apps/web/e2e/session-header.spec.ts|mobileBox?.width|toBe|390",
+      "reason": "The header spans the full width of the 390px viewport the test set, so this asserts it fills the window rather than that it is any particular size."
+    },
+    {
+      "id": "apps/web/e2e/skill-git-import.spec.ts|await page.evaluate(() => document.documentElement.scrollWidth)|toBe|320",
+      "reason": "The document must not scroll wider than the 320px viewport the test set. This is a containment claim about the window, not a size claim about text."
+    },
+    {
+      "id": "apps/web/e2e/skill-machine-versions.spec.ts|writes|toBe|2",
+      "reason": "Not a geometry value at all: a count of recorded writes. The scanner cannot tell from a bare identifier, so it is recorded here rather than silently excluded."
+    },
+    {
+      "id": "apps/web/e2e/stop-turn.spec.ts|stopBox?.height|toBe|32",
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents, so it does not move with the font stack."
+    },
+    {
+      "id": "apps/web/e2e/stop-turn.spec.ts|stopBox?.width|toBe|32",
+      "reason": "An icon button whose box is fixed by CSS rather than by its contents, so it does not move with the font stack."
+    }
+  ]
+}
