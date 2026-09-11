@@ -212,48 +212,59 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   }
   assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
 
-  // The browser suite is sharded across matrix legs, and the leg COUNT is written twice: once as the
-  // matrix list, once as the denominator of --shard. GitHub cannot read a matrix's length from
-  // inside the job, so nothing but this assertion keeps them together.
+  // The browser suite is sharded across matrix legs, and there are many ways to make that run less
+  // than the whole suite while every leg still reports green. Three rounds of review found three:
+  // a matrix list that disagrees with the `--shard` denominator, an `exclude:` that removes a leg
+  // the list still declares, and an `if:` on the run step that skips it on one leg. Each was closed
+  // with a pattern, and each time the next round found another spelling — a quoted `"exclude":`, a
+  // blank line that ended the scanned block early.
   //
-  // The failure it guards is silent in the worst way. A matrix of three against `--shard=i/4` runs
-  // three quarters of the suite and reports every shard green; nobody sees the missing quarter,
-  // because a shard that was never scheduled cannot fail. (The opposite mismatch is loud — shard 4
-  // of 3 is an error — which is exactly why it is not the one to worry about.)
-  const shardList = byId.browser.match(/^        shard: \[([^\]]+)\]$/m);
-  assert.ok(shardList, "browser: the suite must be sharded across a matrix, or it is one long job again");
-  const shards = shardList[1].split(",").map((value) => Number(value.trim()));
+  // So this asserts the WHOLE shape rather than denying tricks one at a time: the strategy block and
+  // the shard command are compared to their exact expected text, with comments and blank lines
+  // stripped. Any structural edit — another matrix key however it is quoted, a guard on the step, a
+  // reindentation — fails here and has to be made deliberately by updating this expectation, which
+  // is the reviewable act the whole guard exists to force. A denylist of known spellings is the one
+  // shape this must not be, because the failure it guards is silent: a leg that was never scheduled,
+  // or a step that was skipped, cannot fail.
+  const structural = byId.browser
+    .split("\n")
+    .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
+    .join("\n");
+
+  // Anchored on `steps:` so the block's END is pinned too. Without that the pattern matched a
+  // PREFIX, and an `exclude:` added on the line after the shard list sailed through — the assertion
+  // read the shape it expected and never saw what followed it.
+  const strategy = structural.match(
+    /^    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[([^\]]*)\]\n    steps:$/m,
+  );
+  assert.ok(strategy,
+    "browser: the strategy block must be exactly `fail-fast: false` and a single `shard:` list. " +
+    "fail-fast off because the aggregator reads a cancelled job as a budget hit, so one failing " +
+    "test would otherwise be announced as several timeouts; and no other matrix key, because " +
+    "`exclude` drops a leg the list still declares and `include` can add one the denominator does " +
+    "not cover.");
+
+  const step = structural.match(
+    /^      - name: Remote-Instance Browser End-to-End Tests\n        run: pnpm test:e2e --shard=\$\{\{ matrix\.shard \}\}\/(\d+)$/m,
+  );
+  assert.ok(step,
+    "browser: the shard command must follow its step name with nothing between them. An `if:` here " +
+    "skips the suite on whichever legs it excludes, and those legs still report success.");
+
+  // `continue-on-error` at the job level reports a FAILED leg as a success to `needs.browser.result`,
+  // so the aggregator goes green over a shard whose tests did not pass. Different mechanism from the
+  // ones above, same end state: a quarter of the suite unaccounted for and nothing to see.
+  assert.doesNotMatch(byId.browser, /^    continue-on-error:/m,
+    "browser: a leg that fails must fail the aggregator");
+
+  const shards = strategy[1].split(",").map((value) => Number(value.trim()));
   assert.deepEqual(shards, shards.map((_, index) => index + 1),
     "browser: shards must be numbered 1..N with no gaps, because --shard=i/N means the i-th of N");
-  const denominators = [...byId.browser.matchAll(/--shard=\$\{\{ matrix\.shard \}\}\/(\d+)/g)]
-    .map((match) => Number(match[1]));
-  assert.ok(denominators.length > 0, "browser: the sharded run must pass --shard=<leg>/<count>");
-  for (const denominator of denominators) {
-    assert.equal(denominator, shards.length,
-      `browser: --shard=i/${denominator} against ${shards.length} matrix legs runs the wrong fraction of the suite`);
-  }
+  assert.equal(Number(step[1]), shards.length,
+    `browser: --shard=i/${step[1]} against ${shards.length} matrix legs runs the wrong fraction of ` +
+    "the suite. The dangerous direction is silent: fewer legs than the denominator runs a fraction " +
+    "and reports every leg green, because a shard that was never scheduled cannot fail.");
 
-  // `exclude` removes a leg that the shard list still declares, so counting declared values is not
-  // counting scheduled ones:
-  //
-  //     matrix:
-  //       shard: [1, 2, 3, 4]
-  //       exclude: [{ shard: 4 }]
-  //
-  // Three legs run, each passes, the aggregator is green, and a quarter of the suite never executed
-  // — the same silent shape the denominator check above exists to prevent, arriving by a different
-  // door. `include` is rejected with it: it can add a leg whose shard value the denominator does not
-  // cover, and neither key has a legitimate use for a plain numeric split.
-  const matrixBlock = byId.browser.match(/^      matrix:\r?\n((?:        .*\r?\n?)*)/m);
-  assert.ok(matrixBlock, "browser: the shard matrix must be declared under `matrix:`");
-  const matrixKeys = [...matrixBlock[1].matchAll(/^        ([A-Za-z-]+):/gm)].map((match) => match[1]);
-  assert.deepEqual(matrixKeys, ["shard"],
-    "browser: the shard matrix takes no other keys — `exclude` silently drops legs the shard list " +
-    "still declares, and `include` can add one the --shard denominator does not cover");
-
-  assert.match(byId.browser, /^      fail-fast: false$/m,
-    "browser: without this, one failing test cancels the sibling shards and the aggregator below " +
-    "reports those cancellations as budget hits");
   assert.doesNotMatch(byId.checks, /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
     "the browser suites must not share the unit-test job's budget");
   assert.match(byId.checks, /^      - name: Unit Tests$/m);
