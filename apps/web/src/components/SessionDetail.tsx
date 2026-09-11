@@ -4576,7 +4576,7 @@ function SessionDetailLoaded({
                       <span
                         className={`queued-badge${session.queueHeld ? " held" : ""}`}
                         title={session.queueHeld
-                          ? "Held after stopping the active turn; send another prompt to resume"
+                          ? "Waiting for the active turn or control-plane decision to settle; resolve any visible prompt to continue"
                           : queueTitle}
                       >
                         {queueLabel}

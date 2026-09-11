@@ -4669,7 +4669,7 @@ test("explicit restart keeps legacy exec Codex fresh while its process-loss resu
   }
 });
 
-test("a prompt arriving during crash recovery stays behind the older recovered queue", async () => {
+test("a runner exit during interruption recovery resumes the preserved FIFO before newer work", async () => {
   let releaseInitialize!: () => void;
   const gate = new Promise<void>((resolve) => { releaseInitialize = resolve; });
   const h = harness({ status: "running" }, gate);
@@ -4683,6 +4683,8 @@ test("a prompt arriving during crash recovery stays behind the older recovered q
       status: "running",
       running: true,
       queue: [{ id: "older", text: "older recovered", images: [] }],
+      interruptRequested: true,
+      holdQueuedPromptsAfterInterrupt: true,
     });
     exitActive(h.manager, "resume-session", 1);
     await tick(); // recovery launch has installed an active entry and is awaiting initialize

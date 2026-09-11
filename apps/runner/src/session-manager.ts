@@ -421,8 +421,8 @@ interface ActiveSession {
   currentBackgroundJobIds?: string[];
   backgroundPromptAccepted?: boolean;
   backgroundAssistantMessagePersisted?: boolean;
-  /** A successful turn-only interruption preserves the remaining FIFO but does not run it until
-   * a later explicit prompt unambiguously asks the session to continue. */
+  /** A turn-only interruption fences the remaining FIFO until the interrupted turn reaches a
+   * safe settlement boundary. It is released automatically after cancellation is acknowledged. */
   holdQueuedPromptsAfterInterrupt?: boolean;
   /** A control-plane card (checkpoint, unpriced, daily budget) is holding the queue. Its own flag,
    * because the interrupt hold above is cleared when a provider completes before the interrupt
@@ -4762,12 +4762,6 @@ export class SessionManager {
     }
     if (entry.authenticationBlocked && !syntheticRecovery) entry.authenticationBlocked = false;
     if (projectedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
-    // Only a user-originated prompt is the explicit resume signal. It may arrive while the
-    // cancelled provider turn is still settling; clearing the hold now lets the current drain
-    // continue into the preserved FIFO as soon as that turn returns.
-    if (entry.holdQueuedPromptsAfterInterrupt && !syntheticRecovery) {
-      this.setInterruptQueueHold(sessionId, entry, false);
-    }
     // Config rides the queue ENTRY (applied when it dequeues in drain()) rather than being
     // applied now: with prompts B(config X) and C(config Y) queued, B must run under X, not Y.
     durable?.queued();
@@ -4862,10 +4856,6 @@ export class SessionManager {
       lifecycle.failed("session command queue is full", "QUEUE_FULL");
       return false;
     }
-    if (entry.holdQueuedPromptsAfterInterrupt) {
-      this.setInterruptQueueHold(message.sessionId, entry, false);
-    }
-
     lifecycle.queued();
     this.insertQueuedPrompt(message.sessionId, entry.queue, {
       id: randomUUID(),
@@ -5219,7 +5209,7 @@ export class SessionManager {
       return {
         eligible: false,
         reason: "policy_blocked",
-        message: "Send a normal prompt to resume the held queue before steering.",
+        message: "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
       };
     }
     if (entry.client.activeSteeringTurnId && !entry.client.activeSteeringTurnId()) {
@@ -6025,6 +6015,13 @@ export class SessionManager {
     this.emitQueue(sessionId);
   }
 
+  /** Release only the Stop Turn fence once the interrupted turn has provably settled. Other queue
+   * holds remain independent, so a governance or control-plane boundary still blocks the FIFO. */
+  private settleTurnInterruption(sessionId: string, entry: ActiveSession): void {
+    entry.interruptRequested = false;
+    this.setInterruptQueueHold(sessionId, entry, false);
+  }
+
   /** Publish exactly one authoritative queue projection for every stored, non-deleted session
    * after registration. Empty frames clear stale control-plane overlays; non-empty active queues
    * preserve in-memory work across a transport-only reconnect. */
@@ -6454,6 +6451,12 @@ export class SessionManager {
               this.emitStatus(sessionId, "idle");
               this.failQueuedPrompt(next, "provider cancelled", "COMMAND_CANCELLED");
               entry.activeTurnId = undefined;
+              this.settleTurnInterruption(sessionId, entry);
+              // Leave this drain generation before dispatching another entry. The loop-tail
+              // fences are below this pre-provider branch, so continuing here could skip a
+              // concurrent governance hold or worktree rebind. A fresh drain rechecks every
+              // admission fence once this generation releases its lock.
+              setImmediate(() => this.scheduleDrain(sessionId));
               break;
             }
             if (!this.emitEvent(sessionId, { kind: "error", message: errText(error) }, next.durable)) {
@@ -6485,6 +6488,11 @@ export class SessionManager {
           this.failQueuedPrompt(next, `session queue drain failed: ${errText(error)}`, "INVALID_COMMAND");
           throw error;
         } finally {
+          // This is the universal manager-side turn boundary. Individual prompt/command paths
+          // settle earlier when they need to classify Interrupted, but a pre-provider resolver or
+          // checkpoint failure can return before those sites. Never leave its accepted Stop Turn
+          // fence attached to a drain generation that no longer owns a turn.
+          if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
           entry.currentDurable = undefined;
           entry.currentSessionCommand = undefined;
           entry.sessionCommandProviderStarted = false;
@@ -7128,6 +7136,7 @@ export class SessionManager {
       this.emitEvent(sessionId, { kind: "turn_interrupted" });
       this.emitStatus(sessionId, "idle");
       durable?.failed("command was interrupted before provider submission", "COMMAND_CANCELLED");
+      this.settleTurnInterruption(sessionId, entry);
       return;
     }
     if (syntheticRecovery) {
@@ -7205,6 +7214,11 @@ export class SessionManager {
       }
       await this.recordConversationForkPoint(sessionId, entry, stop, postTurnTree);
       if (entry.historyIntegrityFailure) return;
+      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
+      // A provider result is the terminal turn boundary even when authentication or governance
+      // installs its own independent hold. Clear only the Stop Turn fence before those branches
+      // return; their distinct gates continue to block the FIFO.
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         const block = this.store.readMeta(sessionId)?.providerAuthBlock;
@@ -7221,7 +7235,6 @@ export class SessionManager {
         const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
         if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
       }
-      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
         this.emitStatus(sessionId, "idle");
@@ -7233,10 +7246,6 @@ export class SessionManager {
       } else {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
         // or strand the existing FIFO: this was a normal completed turn, not a cancelled one.
-        if (entry.interruptRequested) {
-          entry.interruptRequested = false;
-          this.setInterruptQueueHold(sessionId, entry, false);
-        }
         this.emitStatus(sessionId, "idle");
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
@@ -7255,6 +7264,12 @@ export class SessionManager {
         durable?.uncertain("session stopped while provider execution was in progress");
         return;
       }
+      // An accepted Stop Turn followed by a terminal provider rejection is settled from the
+      // manager's perspective: there is no live promise left that can mutate this turn. Treat the
+      // rejection as the cancellation acknowledgement, while a synchronous cancel() throw is
+      // still rolled back by interruptTurn before reaching this path.
+      const interrupted = !entry.governanceTripped && entry.interruptRequested;
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       if (entry.governanceTripped) {
         this.emitStatus(sessionId, "idle");
         durable?.completed();
@@ -7263,6 +7278,12 @@ export class SessionManager {
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         durable?.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
+        return;
+      }
+      if (interrupted) {
+        this.emitEvent(sessionId, { kind: "turn_interrupted" });
+        this.emitStatus(sessionId, "idle");
+        durable?.failed(providerStopError("cancelled", entry.client), "COMMAND_CANCELLED");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
@@ -7407,6 +7428,7 @@ export class SessionManager {
       await this.rollbackPreparedCommandCheckpoint(sessionId, entry, checkpoint);
       lifecycle.failed("command was interrupted before provider submission", "COMMAND_CANCELLED");
       this.emitStatus(sessionId, "idle");
+      this.settleTurnInterruption(sessionId, entry);
       return;
     }
 
@@ -7533,6 +7555,8 @@ export class SessionManager {
         return;
       }
 
+      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         const block = this.store.readMeta(sessionId)?.providerAuthBlock;
@@ -7545,7 +7569,6 @@ export class SessionManager {
         return;
       }
 
-      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
         this.emitStatus(sessionId, "idle");
@@ -7554,10 +7577,6 @@ export class SessionManager {
       } else if (stop === "cancelled") {
         this.emitStatus(sessionId, "stopped");
       } else {
-        if (entry.interruptRequested) {
-          entry.interruptRequested = false;
-          this.setInterruptQueueHold(sessionId, entry, false);
-        }
         this.emitStatus(sessionId, "idle");
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
@@ -7571,6 +7590,8 @@ export class SessionManager {
         lifecycle.uncertain("session stopped while provider command execution was in progress");
         return;
       }
+      const interrupted = !entry.governanceTripped && entry.interruptRequested;
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       // Governance cancellation commonly rejects the provider promise. Match ordinary prompt
       // semantics: the policy turn is parked successfully at idle, not reported as a transport
       // failure whose retry could duplicate already-observed provider work.
@@ -7582,6 +7603,12 @@ export class SessionManager {
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         lifecycle.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
+        return;
+      }
+      if (interrupted) {
+        this.emitEvent(sessionId, { kind: "turn_interrupted" });
+        this.emitStatus(sessionId, "idle");
+        lifecycle.failed(providerStopError("cancelled", entry.client), "COMMAND_CANCELLED");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `session command failed: ${errText(error)}` });
@@ -8017,8 +8044,8 @@ export class SessionManager {
   }
 
   /** Interrupt only the active turn. The session remains promptable and its not-yet-started FIFO
-   * is held until a later explicit prompt resumes it. The disposition lets correlated callers
-   * distinguish an applied interrupt from a raced, stale, or otherwise inapplicable request. */
+   * is held until that turn safely settles, then resumes automatically. The disposition lets
+   * correlated callers distinguish an applied interrupt from a raced, stale, or inapplicable request. */
   interruptTurn(sessionId: string, turnId?: string): InterruptTurnResultReason {
     const entry = this.active.get(sessionId);
     // Launch/admission cancellation is a lifecycle operation and can discard the initial prompt.
@@ -8125,8 +8152,8 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     if (!entry) return;
     // A threshold-bearing message is also used for ordinary live config synchronization. Only a
-    // real governance Continue may release a separate Stop-Turn interrupt hold; otherwise a budget
-    // edit could silently resume FIFO work the user deliberately paused.
+    // real governance Continue may release a separate Stop-Turn interrupt hold before normal turn
+    // settlement; otherwise a budget edit could bypass the cancellation boundary.
     if (!holdFor && entry.governanceTripped) {
       entry.interruptRequested = false;
       this.setInterruptQueueHold(sessionId, entry, false);
@@ -10215,10 +10242,15 @@ export class SessionManager {
     // callback is the only lifecycle boundary that can clear an answered provider-owned ask.
     if (!live.running) {
       const pending = this.store.readMeta(sessionId)?.pendingApproval;
-      if (state === "settled" && live.interruptRequested) {
+      const interrupted = state === "settled" && live.interruptRequested;
+      if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
+        this.settleTurnInterruption(sessionId, live);
       }
       this.emitStatus(sessionId, pending ? "input_required" : state === "started" ? "running" : "idle");
+      if (interrupted && (live.queue.length || live.pendingWorktreeRebind)) {
+        setImmediate(() => this.scheduleDrain(sessionId));
+      }
     }
   }
 

@@ -1836,7 +1836,7 @@ test("a control-plane hold survives rebind and its release resumes an empty defe
   }
 });
 
-test("an interrupt hold defers worktree rebind until an explicit prompt resumes the queue", { skip: !haveGit() }, async () => {
+test("an interrupt hold defers worktree rebind until settlement then resumes the queue automatically", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-interrupt-worktree-rebind-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
@@ -1885,18 +1885,14 @@ test("an interrupt hold defers worktree rebind until an explicit prompt resumes 
     });
     manager.prompt(spec.sessionId, "held");
     assert.equal(manager.interruptTurn(spec.sessionId), "applied");
-    releasePrompt();
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    assert.deepEqual(launchedCwds, [repo], "the interrupt hold must defer provider replacement");
+    assert.deepEqual(launchedCwds, [repo], "the interrupt hold must defer provider replacement before settlement");
     assert.deepEqual(prompts, [{ cwd: repo, text: "first" }],
-      "the preserved FIFO must not run until a later explicit prompt");
-    manager.prompt(spec.sessionId, "resume");
-    await waitForCondition(() => prompts.length === 3, "explicit resume did not drain the preserved FIFO");
+      "the preserved FIFO must not run before cancellation settles");
+    releasePrompt();
+    await waitForCondition(() => prompts.length === 2, "settlement did not drain the preserved FIFO");
     assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
-    assert.deepEqual(prompts.slice(1), [
-      { cwd: requested.worktree.path, text: "held" },
-      { cwd: requested.worktree.path, text: "resume" },
-    ]);
+    assert.deepEqual(prompts[1], { cwd: requested.worktree.path, text: "held" });
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {
