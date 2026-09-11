@@ -3780,7 +3780,7 @@ test("the shells and Files root is re-proved without the boundary's side effects
     execFileSync("git", ["-C", worktree.path, "switch", worktree.branch]);
     assert.equal(await verify(), null);
     execFileSync("git", ["-C", repo, "worktree", "remove", "--force", worktree.path]);
-    assert.match(await verify() ?? "", /not registered with the session repository/,
+    assert.match(await verify() ?? "", /not registered by the repository it was matched against \(/,
       "a worktree removed outside Wollipog is named, not surfaced as a bare filesystem error");
 
     // A session with no worktree keeps using the repository root, with nothing to prove.
