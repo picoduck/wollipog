@@ -5282,8 +5282,15 @@ export class SessionsService {
     let linkedLocation = false;
     if (projectId !== null) {
       if (!this.db.getProject(projectId)) return fail("project not found", 404);
-      const location = session.workspaceId
-        ? this.db.findProjectLocationForProject(projectId, session.runnerId, session.workspaceId)
+      const adHocWorkspaceId = session.workspaceId === null
+        ? this.db.resolveImportedSessionLocation(
+            session.runnerId,
+            this.db.getAdHocWorkspacePath(sessionId) ?? "",
+          ).workspaceId
+        : null;
+      const assignmentWorkspaceId = session.workspaceId ?? adHocWorkspaceId;
+      const location = assignmentWorkspaceId
+        ? this.db.findProjectLocationForProject(projectId, session.runnerId, assignmentWorkspaceId)
         : null;
       if (!location) {
         if (!options.linkLocation) {

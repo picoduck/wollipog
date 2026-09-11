@@ -956,6 +956,17 @@ test("agent-created ad-hoc children inherit a parent Project Location containing
     assert.equal(db.getSession(compatible.data!.id)!.projectId, project.id);
     assert.equal(db.getSession(compatible.data!.id)!.projectLocationId, location.id);
 
+    const otherProject = db.createProject({ name: "Refiled Ad-Hoc Child", scope });
+    const otherLocation = db.addProjectLocation(
+      otherProject.id,
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID },
+    );
+    const refiled = svc.setProject(compatible.data!.id, otherProject.id);
+    assert.ok(refiled.ok, refiled.error);
+    assert.equal(refiled.data!.workspaceId, null, "re-filing does not change ad-hoc launch identity");
+    assert.equal(refiled.data!.projectId, otherProject.id);
+    assert.equal(refiled.data!.projectLocationId, otherLocation.id);
+
     const incompatible = svc.createSession({
       runnerId: RUNNER_ID,
       workspaceId: WORKSPACE_ID,

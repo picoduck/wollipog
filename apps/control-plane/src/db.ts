@@ -5376,15 +5376,23 @@ export class ControlPlaneDb {
     if (projectId !== null && !this.getProject(projectId)) throw new Error("project not found");
     const projectScope = projectId === null ? null : this.projectScope(projectId);
     if (projectId !== null && !projectScope) throw new Error("project ownership is unavailable");
+    const adHocWorkspacePath = session.workspaceId === null
+      ? this.getAdHocWorkspacePath(sessionId)
+      : null;
+    const assignmentWorkspaceId = session.workspaceId ?? (
+      adHocWorkspacePath
+        ? this.resolveImportedSessionLocation(session.runnerId, adHocWorkspacePath).workspaceId
+        : null
+    );
     if (projectLocationId !== null) {
       const location = this.projectLocation(projectLocationId);
       if (!location || location.projectId !== projectId) throw new Error("project location does not belong to project");
-      if (location.runnerId !== session.runnerId || location.workspaceId !== session.workspaceId) {
+      if (location.runnerId !== session.runnerId || location.workspaceId !== assignmentWorkspaceId) {
         throw new Error("project location does not match session runner/workspace");
       }
     }
-    const executionScope = session.workspaceId
-      ? this.workspaceScope(session.runnerId, session.workspaceId) ?? this.runnerScope(session.runnerId)
+    const executionScope = assignmentWorkspaceId
+      ? this.workspaceScope(session.runnerId, assignmentWorkspaceId) ?? this.runnerScope(session.runnerId)
       : this.runnerScope(session.runnerId);
     if (projectScope &&
         (!executionScope || !this.scopeAudienceContainedWithMembership(projectScope, executionScope))) {
