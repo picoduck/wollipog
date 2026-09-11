@@ -137,6 +137,7 @@ import {
   createWorktreeFromTree,
   captureTurnDiff,
   discardWorktreeIfSafe,
+  isLegacyWslSessionWorktreePath,
   sessionWorktreeBranch,
   isGitRepo,
   nativeRepositoryPathIsUnavailable,
@@ -2724,7 +2725,7 @@ export class SessionManager {
           ownerHash: this.runnerOwnerHash,
           ...(context.kind === "wsl" && prior?.context.kind === "wsl" &&
             prior.context.distro === context.distro && prior.worktreePath &&
-            prior.worktreePath.includes("/.agent-manager/worktrees/")
+            isLegacyWslSessionWorktreePath(prior.worktreePath, repoPath, spec.sessionId)
             ? { legacyWslWorktreePath: prior.worktreePath }
             : {}),
         };

@@ -589,6 +589,23 @@ export async function reuseRegisteredLegacyWslWorktree(
  * positively — rather than ruling the legacy root out — keeps an unusual WSL `$HOME` from
  * misclassifying a real owner-rooted path. Deliberately free of WSL command execution so every case
  * is covered on any CI host. */
+/** True when `path` is exactly this session's pre-attestation legacy WSL worktree: the root
+ * `worktreeRootPath({ legacyWslRoot: true })` builds, followed by this repository's key and session
+ * id. Deciding it by that whole suffix rather than by a bare `/.agent-manager/worktrees/` substring
+ * is what keeps an owner-instance path out: its own `worktrees` segment sits under
+ * `runner-instances/<ownerHash>`, so it can never end this way, however unusual the distro user's
+ * `$HOME` is. `$HOME` is deliberately not consulted — resolving it costs a round trip into the
+ * distro, and `reuseRegisteredLegacyWslWorktree()` re-proves the whole path before reusing
+ * anything, so a wrong guess here fails closed rather than adopting a foreign tree. */
+export function isLegacyWslSessionWorktreePath(
+  path: string,
+  repoPath: string,
+  sessionId: string,
+): boolean {
+  return path.replace(/\/$/u, "")
+    .endsWith(`/.agent-manager/worktrees/${repoKey(repoPath)}/${sessionId}`);
+}
+
 export function sessionWorktreeBranch(
   sessionId: string,
   path: string,

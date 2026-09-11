@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -3027,4 +3027,41 @@ test("the derived session worktree branch follows the root that created the path
   assert.equal(
     sessionWorktreeBranch("s1", `/home/me/.agent-manager/runner-instances/${"b".repeat(64)}/worktrees/repo/s1`, wsl, hash),
     "agent/s1", "another owner's root is not this runner's, so no prefix is claimed for it");
+});
+
+test("legacy WSL worktree classification keys on the whole session suffix, not a bare segment", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-legacy-wsl-classify-"));
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", "-q", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "base"]);
+    // Let production name the path, so the repository key under test is the real one rather than a
+    // second copy of its hashing rule.
+    const created = await createWorktree(repo, "s_legacy", { dataDir: join(root, "data") });
+    const key = created.path.split(/[\\/]/u).at(-2)!;
+    const owner = "a".repeat(64);
+
+    for (const [path, expected, why] of [
+      [`/home/dev/.agent-manager/worktrees/${key}/s_legacy`, true,
+        "the legacy root, this repository's key, and this session id"],
+      [`/home/dev/.agent-manager/worktrees/${key}/s_legacy/`, true,
+        "a trailing slash names the same worktree"],
+      [`/home/dev/.agent-manager/runner-instances/${owner}/worktrees/${key}/s_legacy`, false,
+        "an owner-instance root is never legacy"],
+      // The reported failure: the owner root nested under a distro HOME that itself contains the
+      // legacy segment. A bare substring test reads this as legacy and fails the restart closed.
+      [`/home/.agent-manager/worktrees/dev/.agent-manager/runner-instances/${owner}/worktrees/${key}/s_legacy`,
+        false, "an owner root under a legacy-looking HOME stays owner-rooted"],
+      [`/home/dev/.agent-manager/worktrees/other-repo-key/s_legacy`, false,
+        "another repository's legacy worktree is not this session's"],
+      [`/home/dev/.agent-manager/worktrees/${key}/s_other`, false,
+        "another session's legacy worktree is not this one"],
+    ] as const) {
+      assert.equal(isLegacyWslSessionWorktreePath(path, repo, "s_legacy"), expected, why);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
