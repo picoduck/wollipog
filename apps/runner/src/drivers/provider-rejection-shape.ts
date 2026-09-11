@@ -76,8 +76,8 @@ export interface ProviderRejectionShape {
 
 /**
  * `null` when the message is not an indexed-item rejection, which is most errors. A non-null shape
- * is safe to persist and to show: it contains a normalized schema path, phrases from the list
- * above, and integers.
+ * is safe to persist and to show: a normalized schema path and phrases from the list above, both
+ * drawn entirely from literals this module defines.
  */
 export function providerRejectionShape(message: unknown): ProviderRejectionShape | null {
   if (typeof message !== "string" || !message) return null;

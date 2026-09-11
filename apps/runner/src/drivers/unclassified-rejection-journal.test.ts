@@ -86,6 +86,35 @@ test("retention is bounded and the bound is recorded rather than hidden", () => 
   }
 });
 
+test("a journal written by an older build is sanitized on load and on disk", () => {
+  const dir = root();
+  const file = join(dir, "unclassified-provider-rejections.json");
+  try {
+    // A record from the build that still stored measured sizes. Removing the field from the type
+    // does nothing to bytes already on disk; the loader is where retention is actually decided.
+    writeFileSync(file, JSON.stringify({
+      records: [{
+        version: 1, driver: "codex-app-server", path: "input[N].arguments",
+        phrases: ["string too long"], numbers: [123456789, 4111111111111111],
+        count: 3, firstSeenAt: 1, lastSeenAt: 2,
+      }],
+      overflow: 0,
+    }));
+
+    const journal = new UnclassifiedRejectionJournal(dir);
+    assert.deepEqual(journal.list(), [{
+      version: 1, driver: "codex-app-server", path: "input[N].arguments",
+      phrases: ["string too long"], count: 3, firstSeenAt: 1, lastSeenAt: 2,
+    }], "the removed property is gone from memory");
+
+    // And gone from disk without waiting for another observation.
+    const raw = readFileSync(file, "utf8");
+    assert.doesNotMatch(raw, /numbers|123456789|4111111111111111/, raw);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a corrupt or missing journal loses observations rather than raising", () => {
   const dir = root();
   try {

@@ -48,8 +48,24 @@ export class UnclassifiedRejectionJournal {
       };
       for (const record of parsed?.records ?? []) {
         if (record?.version !== 1 || typeof record.driver !== "string" || typeof record.path !== "string") continue;
-        this.records.set(providerRejectionShapeKey(record.driver, record), record);
+        // Reconstruct rather than adopt. A record written by an older build carries whatever fields
+        // that build stored, and inserting the parsed object would re-serialize them on the next
+        // flush — so a property since removed for privacy would persist indefinitely. Loading is the
+        // point at which retention is decided, so only fields named here survive.
+        const sanitized: UnclassifiedRejectionRecord = {
+          version: 1,
+          driver: record.driver,
+          path: record.path,
+          phrases: Array.isArray(record.phrases) ? record.phrases.filter((phrase) => typeof phrase === "string") : [],
+          count: Number.isSafeInteger(record.count) && record.count > 0 ? record.count : 1,
+          firstSeenAt: Number.isSafeInteger(record.firstSeenAt) ? record.firstSeenAt : 0,
+          lastSeenAt: Number.isSafeInteger(record.lastSeenAt) ? record.lastSeenAt : 0,
+        };
+        this.records.set(providerRejectionShapeKey(sanitized.driver, sanitized), sanitized);
       }
+      // Rewrite immediately so a journal from an older build is sanitized on disk even if this
+      // runner never records another rejection.
+      if (this.records.size) this.flush();
       if (Number.isSafeInteger(parsed?.overflow) && parsed!.overflow! >= 0) this.overflow = parsed!.overflow!;
     } catch {
       // A missing or corrupt journal is not an error worth propagating: this is a diagnostic, and
