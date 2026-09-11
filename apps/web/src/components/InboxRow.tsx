@@ -119,6 +119,19 @@ function InboxRowInner({
     )
     : null;
 
+  /* ONE time element, rendered into whichever line the current shape puts it on (#934), for the
+     same reason the background badge is built this way (#877): two copies hidden by a media query
+     would say the instant twice in the row's accessible name.
+     The stacked shape puts it at the trailing edge of line three, where the branch has room to
+     give way, so line one is the sender and its pills alone and the agent's name survives beside
+     the icon. That is also why the compact "15m" form #916 needed is gone: line three can afford
+     the suffix. The two-row desktop shape keeps it in the signals column, where it always was. */
+  const timeLabel = (
+    <time dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}>
+      {relativeTime(lastActivityAt)}
+    </time>
+  );
+
   const children: InboxThreadChildren | null = threadChildren ? JSON.parse(threadChildren) as InboxThreadChildren : null;
   const childrenLabel = children ? inboxThreadChildrenLabel(children) : null;
   /* The family chip: one dot per child and the rollup, on the title line of a parent card. It reads
@@ -159,7 +172,8 @@ function InboxRowInner({
    * four rows and never said whether a card without a Git line had no branch or merely an
    * unreported one.
    *
-   * A phone keeps it as line three, sharing that line with the background badge. A desktop card
+   * A phone keeps it as line three, sharing that line with the background badge and, since #934,
+   * the relative time. A desktop card
    * puts it on line one, after the agent and project (#877): three rows of Git state, title, and
    * sender spend about 94px per card saying what two say in 73, and horizontal space is the one
    * thing a desktop has and a phone does not.
@@ -207,6 +221,7 @@ function InboxRowInner({
         )}
       </span>
       {threeRow && backgroundWorkBadge}
+      {threeRow && timeLabel}
     </span>
   );
   return (
@@ -311,11 +326,7 @@ function InboxRowInner({
             )}
             {pinned && <span className="inbox-pin-indicator" aria-label="Pinned Session">●</span>}
             {unread && <span className="inbox-unread-badge" aria-label="Unread Activity">1</span>}
-            {/* A phone shows the bare "15m": its signals line carries the sender too (#916). */}
-            <time dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}
-              title={threeRow ? relativeTime(lastActivityAt) : undefined}>
-              {relativeTime(lastActivityAt, threeRow)}
-            </time>
+            {!threeRow && timeLabel}
           </span>
         </button>
       </div>

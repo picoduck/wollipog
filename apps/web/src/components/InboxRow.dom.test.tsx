@@ -402,3 +402,25 @@ test("a desktop card with background work but no activity strip keeps the badge 
     { threeRow: false },
   );
 });
+
+test("the relative time renders once, on line three when stacked and in the signals column otherwise (#934)", async () => {
+  const session = {
+    id: "session-time", runnerId: "runner-1", title: "Timed Session", status: "running",
+    column: "review", archived: false, pendingApproval: null, lastEventAt: Date.now() - 15 * 60_000,
+    preview: null, agentId: "codex", agentName: "Codex", driver: "codex-app-server",
+  } as unknown as SessionView;
+  for (const threeRow of [true, false]) {
+    await withRow(session, (container) => {
+      const times = container.querySelectorAll("time");
+      assert.equal(times.length, 1, "one element, so the instant is never said twice");
+      const time = times[0]!;
+      assert.equal(time.textContent, "15m ago", "the suffix survives on both shapes (#934)");
+      assert.equal(time.getAttribute("title"), null, "no tooltip: the visible text is already whole");
+      assert.equal(
+        time.parentElement?.className,
+        threeRow ? "inbox-row-meta" : "inbox-row-signals",
+        threeRow ? "stacked: line three, beside the Git state" : "two-row: the signals column",
+      );
+    }, { threeRow });
+  }
+});

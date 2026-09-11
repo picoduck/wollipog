@@ -1,16 +1,13 @@
 import type { AgentDriverKind, OS, SessionStatus } from "@wollipog/protocol";
 
-/** "15m ago", or with `compact` just "15m": the phone card's signals line has no room for the
- * suffix once three pills sit beside the sender (#916). */
-export function relativeTime(ts: number | null, compact = false): string {
+export function relativeTime(ts: number | null): string {
   if (!ts) return "—";
   const diff = Date.now() - ts;
-  const suffix = compact ? "" : " ago";
-  if (diff < 5_000) return compact ? "now" : "just now";
-  if (diff < 60_000) return `${Math.round(diff / 1000)}s${suffix}`;
-  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m${suffix}`;
-  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h${suffix}`;
-  return `${Math.round(diff / 86_400_000)}d${suffix}`;
+  if (diff < 5_000) return "just now";
+  if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
+  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
+  return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
 const TITLE_CASE_MINOR_WORDS = new Set([
