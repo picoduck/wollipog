@@ -2967,6 +2967,11 @@ function SessionDetailLoaded({
       : busy || forkInProgress || session.queued?.length || ["running", "starting", "queued", "input_required"].includes(session.status) ? "The source session is busy."
       : undefined,
   }), [runnerOnline, runner?.protocolVersion, session.worktreePath, session.queued?.length, session.status, busy, forkInProgress]);
+  const rewindUnavailableReason = session.worktreePath == null
+    ? "A worktree is required."
+    : !runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
+      ? runnerCapabilityRequirement(runner?.protocolVersion, "checkpointRewind", "Checkpoint rewind")
+      : undefined;
   const latestForkAvailability = useMemo(
     () => conversationForkAvailability(latestConversationForkTurn, latestKnownTurn, forkContext),
     [forkContext, latestConversationForkTurn, latestKnownTurn],
@@ -4286,14 +4291,10 @@ function SessionDetailLoaded({
                       anchorRecoveryPending={anchorRecoveryPending}
                       onVisibleAnchorChange={followTail.onVisibleAnchorChange}
                       onAnchorLost={followTail.onAnchorLost}
-                      // Worktree sessions on a v25+ runner only — persisted checkpoint rows can
-                      // outlive a runner downgrade, and the CP would 409 the click anyway.
-                      onRewind={
-                        mode === "expanded" &&
-                        session.worktreePath != null && runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
-                          ? onRewind
-                          : undefined
-                      }
+                      // Keep checkpoint actions discoverable when the runner or worktree cannot
+                      // currently satisfy them; activation still uses the existing API contract.
+                      onRewind={mode === "expanded" ? onRewind : undefined}
+                      rewindUnavailableReason={rewindUnavailableReason}
                       onFork={mode === "expanded" ? onFork : undefined}
                       handoff={mode === "expanded" ? handoffControls : undefined}
                       onEditAndResend={mode === "expanded" && canPrompt ? openResendAction : undefined}

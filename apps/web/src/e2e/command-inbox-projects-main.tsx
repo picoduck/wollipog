@@ -529,8 +529,9 @@ if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handof
 if (SCENARIO === "conversation-handoff") {
   sessionEvents.set("session-alpha", [
     { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
-    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
-    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
+    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "checkpoint", turn: 1, tree: "tree-before-turn" } },
+    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
+    { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "conversation_checkpoint", turn: 1 } },
   ]);
 }
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
