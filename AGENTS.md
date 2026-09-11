@@ -38,9 +38,12 @@ branch first**, because that is what decides whether anything is required at all
   here and the message is permanent. CI still runs — `.github/workflows/ci.yml` has no branch filter
   on `pull_request` — so jobs will appear and pass while `--required` stays empty forever. The job
   list cannot tell you which case you are in; the base branch can.
-- **No workflow run at all.** Draft pull requests deliberately do not consume runners (CI triggers
-  on `ready_for_review`), and a fork pull request waits for approval to run. Nothing is pending, so
-  waiting will not help — mark it ready, or get the run approved.
+- **Draft pull request.** A run is created, but every job is guarded on `draft == false` — including
+  the aggregator, which carries that guard alongside its `always()` — so all of them skip and the
+  required context never appears. Skipped is not pending: waiting will not help. Mark it ready for
+  review, which re-triggers CI.
+- **No run at all.** A fork pull request waits for approval before any workflow starts. Get the run
+  approved rather than waiting on it.
 
 `Browser End-to-End Tests` is the long pole at roughly 20–30 minutes, and the merge group re-runs it,
 so expect that wait twice: once on the branch and once after enqueueing.
