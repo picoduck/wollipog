@@ -944,6 +944,17 @@ test("agent-created ad-hoc children inherit a parent Project Location containing
     assert.equal(compatible.data!.workspaceId, null, "ad-hoc launch semantics remain unchanged");
     assert.equal(compatible.data!.projectId, project.id);
     assert.equal(compatible.data!.projectLocationId, location.id);
+    svc.hydrateRunnerSessions(RUNNER_ID, [
+      snapshot({ id: parent.id, status: "running" }),
+      snapshot({
+        id: compatible.data!.id,
+        workspaceId: null,
+        workspacePath: `${WORKSPACE_PATH}/packages/core`,
+        status: "running",
+      }),
+    ]);
+    assert.equal(db.getSession(compatible.data!.id)!.projectId, project.id);
+    assert.equal(db.getSession(compatible.data!.id)!.projectLocationId, location.id);
 
     const incompatible = svc.createSession({
       runnerId: RUNNER_ID,

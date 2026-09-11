@@ -344,17 +344,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     now: Date.now(),
     expiresAt: Date.now() + 60_000,
   });
-  const parentProject = seed.createProject({
-    name: "Agent Parent Project",
-    scope: {
-      organizationId: identity.organizationId,
-      owner: { kind: "organization", organizationId: identity.organizationId },
-    },
-  });
-  const parentLocation = seed.addProjectLocation(parentProject.id, {
-    runnerId: "runner-ui-route",
-    workspaceId: "workspace-1",
-  });
+  const inferredParentLocation = seed.findProjectLocation("runner-ui-route", "workspace-1");
+  assert.ok(inferredParentLocation);
+  const parentProject = seed.getProject(inferredParentLocation.projectId);
+  assert.ok(parentProject);
+  const parentLocation = inferredParentLocation;
   seed.createSession({
     id: "session-agent-parent",
     runnerId: "runner-ui-route",
@@ -820,7 +814,6 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     locations: Array<{ id: string; runnerId: string; workspaceId: string }>;
   }>;
   assert.deepEqual(initialProjects.map((project) => project.name), [
-    "Agent Parent Project",
     "Alice Private Project",
     "Bob Private Project",
     "Second Alice Private Project",

@@ -5765,12 +5765,10 @@ export class SessionsService {
       }
       childSessionScope = parentScope;
     }
-    // Human-created trusted orchestrators retain organization scope for workflow tools. An
-    // agent-created orchestrator is itself a child, so it stays in the authenticated parent's
-    // Project and scope with every worker.
-    const orchestratorProject = parentSessionId
-      ? requestedProject.data
-      : members.some((member) => member.orchestrator) &&
+    // Trusted orchestrators require organization scope for organization workflow tools. When a
+    // Project is narrower, keep only that infrastructure session explicitly outside the Project;
+    // every ordinary workflow child still adopts the inherited Project and parent scope.
+    const orchestratorProject = members.some((member) => member.orchestrator) &&
       requestedProject.data.projectId && orchestratorScope &&
       !this.db.scopeAudienceContainedWithMembership(
         orchestratorScope,
@@ -5778,7 +5776,6 @@ export class SessionsService {
       )
       ? { projectId: null, projectLocationId: null }
       : requestedProject.data;
-    const childOrchestratorScope = parentSessionId ? childSessionScope : orchestratorScope;
 
     if (delivery) {
       return this.createPreStagedWorkflowRun(
@@ -5831,7 +5828,7 @@ export class SessionsService {
         runId,
         driver: member.launch.driver,
         config,
-        scope: member.orchestrator ? childOrchestratorScope! : childSessionScope,
+        scope: member.orchestrator ? orchestratorScope! : childSessionScope,
         now,
       });
       const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;
