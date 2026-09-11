@@ -712,6 +712,14 @@ test("a session attaches a worktree beside its repository and states the isolati
       writableNow: true,
       writableAtNextLaunch: true,
     });
+    // Seatbelt also grants the provider's transcript leaf. The notice reads the profile's own list
+    // rather than restating it, so a worktree under that leaf is reported writable too.
+    const providerHome = join(root, "provider-home");
+    const providerMeta = { ...store.readMeta("s_ext"), env: { HOME: providerHome } };
+    assert.deepEqual(
+      await internals.attachIsolationNotice(providerMeta, join(providerHome, ".claude", "projects", "wt")),
+      { writableNow: true, writableAtNextLaunch: true },
+    );
     internals.executionIsolation = { mode: "bwrap", network: "deny" };
     internals.active.delete("s_ext");
 

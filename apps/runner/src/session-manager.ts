@@ -71,7 +71,7 @@ import {
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type {
@@ -94,6 +94,7 @@ import {
   providerStateKey,
   removeExecutionIsolationState,
   resolveExecutionIsolation,
+  seatbeltWritableRoots,
   verifyExecutionIsolationForkState,
 } from "./execution-isolation.js";
 import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
@@ -1328,10 +1329,19 @@ export class SessionManager {
       ownerHash: this.runnerOwnerHash,
     }, false);
     const writableRoots = [boundary, live.cwd];
-    // Seatbelt grants the runner state directory and the native temporary directory outright
-    // (`buildSeatbeltProfile`), so a worktree under either is already writable and must not be
-    // reported as blocked.
-    if (mode === "seatbelt") writableRoots.push(this.stateDir, tmpdir());
+    // Seatbelt grants more than the boundary and the cwd — the runner state directory, the native
+    // temporary directory, and the provider's transcript leaf. Read that list from the same place
+    // the profile is built from rather than restating it here, so the notice cannot drift from what
+    // the sandbox actually permits.
+    if (mode === "seatbelt") {
+      writableRoots.push(...seatbeltWritableRoots({
+        driver: meta.driver,
+        dataDir: this.stateDir,
+        env: meta.env,
+        sessionId: meta.sessionId,
+        cwd: live.cwd,
+      }, homedir()));
+    }
     return {
       writableNow: writableRoots.some((root) => pathWithin(meta.context, path, root)),
       writableAtNextLaunch,
