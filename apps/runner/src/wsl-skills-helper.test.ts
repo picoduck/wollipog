@@ -45,6 +45,28 @@ async function fillLeaseJournal(home: string, store: string): Promise<Record<str
   return specification;
 }
 
+function createOrphanCleanupProof(leaseRoot: string, index: number): { aliasName: string; proofName: string } {
+  const suffix = index.toString(16);
+  const leaseId = `00000000-0000-4000-8000-${suffix.padStart(12, "0")}`;
+  const proofHash = suffix.padStart(64, "0");
+  const proofToken = suffix.padStart(32, "0");
+  const candidateName = `.mutable-home.compact-${leaseId}-${proofHash}-${proofToken}`;
+  const proofName = `.mutable-home.cleanup-${proofToken}.json`;
+  const aliasName = `.provider-home-lease-00000000-0000-4000-8000-${suffix.padStart(12, "0")}.tmp`;
+  const proof = { version: 1, name: candidateName, leaseId, proofHash, device: 1, inode: 1 };
+  writeFileSync(join(leaseRoot, proofName), JSON.stringify(proof), { mode: 0o600 });
+  linkSync(join(leaseRoot, proofName), join(leaseRoot, aliasName));
+  return { aliasName, proofName };
+}
+
+async function initializeLeaseRoot(home: string, store: string): Promise<Record<string, unknown>> {
+  const specification = { ownerHash: owner, distro: "Ubuntu", storeRoot: resolve(store), bindings: [],
+    skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true };
+  const initialized = await invoke(home, specification);
+  assert.equal(initialized.status, 0, initialized.stderr || initialized.stdout);
+  return specification;
+}
+
 test("the fixed WSL helper atomically deploys, switches, and removes owned links", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -452,6 +474,120 @@ test("orphan cleanup pins the verified proof while preserving a replacement", as
   assert.equal(readFileSync(join(leaseRoot, proofName), "utf8"), "foreign");
   assert.equal(readdirSync(leaseRoot).some((name) =>
     name.startsWith(".provider-home-lease-") && name.endsWith(".tmp")), false);
+});
+
+test("cleanup reuses one bounded alias inventory for multiple two-link proofs", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-alias-inventory-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await initializeLeaseRoot(home, store);
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const artifacts = [createOrphanCleanupProof(leaseRoot, 1), createOrphanCleanupProof(leaseRoot, 2)];
+  const counted = instrumentHelper(
+    "def discover_cleanup_proof_aliases(root):",
+    "cleanup_alias_scan_count = 0\n\ndef discover_cleanup_proof_aliases(root):\n    global cleanup_alias_scan_count\n    cleanup_alias_scan_count += 1\n    if cleanup_alias_scan_count > 1: os._exit(92)",
+  );
+
+  const recovered = await invoke(home, specification, counted);
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  for (const artifact of artifacts) {
+    assert.equal(existsSync(join(leaseRoot, artifact.proofName)), false);
+    assert.equal(existsSync(join(leaseRoot, artifact.aliasName)), false);
+  }
+});
+
+test("cleanup alias inventory tolerates bounded padding and preserves unrelated entries", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-alias-padding-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await initializeLeaseRoot(home, store);
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const artifact = createOrphanCleanupProof(leaseRoot, 3);
+  const foreignFiles = Array.from({ length: 24 }, (_, index) => `.foreign-padding-${index}`);
+  for (const name of foreignFiles) writeFileSync(join(leaseRoot, name), "keep", { mode: 0o600 });
+  const unrelatedTemp = ".provider-home-lease-00000000-0000-4000-8000-000000000004.tmp";
+  const foreignTemp = ".provider-home-lease-00000000-0000-4000-8000-000000000005.tmp";
+  const unrelatedSymlink = ".provider-home-lease-00000000-0000-4000-8000-000000000006.tmp";
+  const lock = join(leaseRoot, "mutable-home.lock");
+  const [canonicalRecord] = readdirSync(lock);
+  assert.ok(canonicalRecord);
+  linkSync(join(lock, canonicalRecord), join(leaseRoot, unrelatedTemp));
+  const canonicalBytes = readFileSync(join(leaseRoot, unrelatedTemp), "utf8");
+  writeFileSync(join(leaseRoot, foreignTemp), "foreign", { mode: 0o600 });
+  symlinkSync(artifact.proofName, join(leaseRoot, unrelatedSymlink));
+
+  const recovered = await invoke(home, specification);
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.equal(existsSync(join(leaseRoot, artifact.proofName)), false);
+  assert.equal(existsSync(join(leaseRoot, artifact.aliasName)), false);
+  for (const name of foreignFiles) assert.equal(readFileSync(join(leaseRoot, name), "utf8"), "keep");
+  assert.equal(readFileSync(join(leaseRoot, unrelatedTemp), "utf8"), canonicalBytes);
+  assert.equal(readFileSync(join(leaseRoot, foreignTemp), "utf8"), "foreign");
+  assert.equal(readlinkSync(join(leaseRoot, unrelatedSymlink)), artifact.proofName);
+});
+
+test("cleanup alias inventory budgets fail closed without blocking lease reconciliation", async (t) => {
+  for (const budget of ["scan", "retained"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `wollipog-wsl-skills-compact-alias-${budget}-budget-`));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const store = join(root, "store");
+    mkdirSync(home, { mode: 0o700 });
+    mkdirSync(store);
+    const specification = await initializeLeaseRoot(home, store);
+    const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+    const lock = join(leaseRoot, "mutable-home.lock");
+    const artifact = createOrphanCleanupProof(leaseRoot, budget === "scan" ? 6 : 7);
+    const beforeRecords = readdirSync(lock).length;
+    let helper: string;
+    if (budget === "scan") {
+      for (let index = 0; index < 4; index += 1) {
+        writeFileSync(join(leaseRoot, `.scan-padding-${index}`), "keep", { mode: 0o600 });
+      }
+      helper = instrumentHelper("MAX_CLEANUP_ALIAS_SCAN_ENTRIES = 4096", "MAX_CLEANUP_ALIAS_SCAN_ENTRIES = 4");
+    } else {
+      for (const suffix of [8, 9]) {
+        const name = `.provider-home-lease-00000000-0000-4000-8000-${suffix.toString(16).padStart(12, "0")}.tmp`;
+        writeFileSync(join(leaseRoot, name), "foreign", { mode: 0o600 });
+      }
+      helper = instrumentHelper("MAX_CLEANUP_ALIASES = 128", "MAX_CLEANUP_ALIASES = 2");
+    }
+
+    const reconciled = await invoke(home, specification, helper);
+    assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
+    assert.ok(readdirSync(lock).length > beforeRecords, `${budget} overflow does not block the canonical lease chain`);
+    assert.equal(existsSync(join(leaseRoot, artifact.proofName)), true);
+    assert.equal(existsSync(join(leaseRoot, artifact.aliasName)), true);
+  }
+});
+
+test("cleanup revalidates a cached alias after discovery before unlink", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-compact-cached-alias-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(store);
+  const specification = await initializeLeaseRoot(home, store);
+  const leaseRoot = join(home, ".agent-manager", "provider-home-leases-v1");
+  const artifact = createOrphanCleanupProof(leaseRoot, 10);
+  const movedAlias = ".foreign-cleanup-proof-alias";
+  const substituted = instrumentHelper(
+    "    aliases_by_identity = discover_cleanup_proof_aliases(root)\n    for name in names[:MAX_COMPACTION_SIBLINGS]:",
+    "    aliases_by_identity = discover_cleanup_proof_aliases(root)\n    if aliases_by_identity is not None:\n        selected = next((value[0] for value in aliases_by_identity.values() if value), None)\n        if selected is not None:\n            os.rename(selected, \".foreign-cleanup-proof-alias\", src_dir_fd=root, dst_dir_fd=root)\n            replacement = os.open(selected, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)\n            try: write_all(replacement, b\"foreign\")\n            finally: os.close(replacement)\n    for name in names[:MAX_COMPACTION_SIBLINGS]:",
+  );
+
+  const reconciled = await invoke(home, specification, substituted);
+  assert.equal(reconciled.status, 0, reconciled.stderr || reconciled.stdout);
+  assert.equal(existsSync(join(leaseRoot, artifact.proofName)), true);
+  assert.equal(readFileSync(join(leaseRoot, artifact.aliasName), "utf8"), "foreign");
+  assert.equal(statSync(join(leaseRoot, movedAlias)).ino, statSync(join(leaseRoot, artifact.proofName)).ino);
 });
 
 test("cleanup-proof publication recovery fails closed for unaccounted aliases", async (t) => {
