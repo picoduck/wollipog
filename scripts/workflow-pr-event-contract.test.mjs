@@ -213,51 +213,55 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
 
   // The browser suite is sharded across matrix legs, and there are many ways to make that run less
-  // than the whole suite while every leg still reports green. Three rounds of review found three:
-  // a matrix list that disagrees with the `--shard` denominator, an `exclude:` that removes a leg
-  // the list still declares, and an `if:` on the run step that skips it on one leg. Each was closed
-  // with a pattern, and each time the next round found another spelling — a quoted `"exclude":`, a
-  // blank line that ended the scanned block early.
+  // than the whole suite while every leg still reports green. Four rounds of review found five:
+  // a matrix list disagreeing with the `--shard` denominator; an `exclude:` removing a leg the list
+  // still declares; the same key spelled `"exclude":`; an `if:` on the run step; and a
+  // `continue-on-error` reporting a failed leg as a success. Two of those arrived only after the
+  // patch for the previous one, and one of them — a quoted key — defeated a fix I had just written
+  // for the unquoted spelling of a different key.
   //
-  // So this asserts the WHOLE shape rather than denying tricks one at a time: the strategy block and
-  // the shard command are compared to their exact expected text, with comments and blank lines
-  // stripped. Any structural edit — another matrix key however it is quoted, a guard on the step, a
-  // reindentation — fails here and has to be made deliberately by updating this expectation, which
-  // is the reviewable act the whole guard exists to force. A denylist of known spellings is the one
-  // shape this must not be, because the failure it guards is silent: a leg that was never scheduled,
-  // or a step that was skipped, cannot fail.
+  // The through-line is that a denylist cannot work here. YAML has more spellings than a pattern
+  // has branches (quoted keys, reordered mappings, blank lines), and every miss is silent: a shard
+  // that was never scheduled, or a step that was skipped, cannot fail.
+  //
+  // So the job's whole shape is asserted at once, against its exact expected text with comment-only
+  // and blank lines stripped. Not "these keys are forbidden" but "these lines are the job" — which
+  // forecloses spellings nobody has thought of yet, including inserting a key ANYWHERE rather than
+  // only where the last bypass happened to put it. Changing the job then means editing this
+  // expectation by hand, which is the reviewable act the guard exists to force.
   const structural = byId.browser
     .split("\n")
     .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
     .join("\n");
 
-  // Anchored on `steps:` so the block's END is pinned too. Without that the pattern matched a
-  // PREFIX, and an `exclude:` added on the line after the shard list sailed through — the assertion
-  // read the shape it expected and never saw what followed it.
-  const strategy = structural.match(
-    /^    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[([^\]]*)\]\n    steps:$/m,
+  // The `if:` line is the shared draft guard, asserted for every job further up; matching it loosely
+  // here keeps this expectation about sharding. Everything else is fixed, in order, with nothing
+  // between the lines.
+  const header = structural.match(
+    /^  browser:\n    if: [^\n]*\n    name: Browser End-to-End Tests\n    runs-on: ubuntu-22\.04\n    timeout-minutes: \d+\n    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[([^\]]*)\]\n    steps:$/m,
   );
-  assert.ok(strategy,
-    "browser: the strategy block must be exactly `fail-fast: false` and a single `shard:` list. " +
-    "fail-fast off because the aggregator reads a cancelled job as a budget hit, so one failing " +
-    "test would otherwise be announced as several timeouts; and no other matrix key, because " +
-    "`exclude` drops a leg the list still declares and `include` can add one the denominator does " +
-    "not cover.");
+  assert.ok(header,
+    "browser: the job header must be exactly its guard, name, runner, timeout, `fail-fast: false`, " +
+    "a single `shard:` list, and then `steps:` — nothing else and nothing between. `fail-fast` is " +
+    "off because the aggregator reads a cancelled job as a budget hit, so one failing test would " +
+    "otherwise be announced as several timeouts. Any other key fails here whatever it is called or " +
+    "however it is quoted: `exclude` drops a leg the list still declares, `include` can add one the " +
+    "denominator does not cover, `max-parallel` serialises the legs back into one long job, and " +
+    "`continue-on-error` reports a failed leg to the aggregator as a success.");
 
+  // Anchored on the NEXT step, so the shard command's step is exactly its name and its run line.
+  // YAML mapping order is irrelevant, so pinning only the first two lines let `if:` be appended
+  // after `run:` and skip the suite on whichever legs it excluded — which those legs then reported
+  // as success.
   const step = structural.match(
-    /^      - name: Remote-Instance Browser End-to-End Tests\n        run: pnpm test:e2e --shard=\$\{\{ matrix\.shard \}\}\/(\d+)$/m,
+    /^      - name: Remote-Instance Browser End-to-End Tests\n        run: pnpm test:e2e --shard=\$\{\{ matrix\.shard \}\}\/(\d+)\n      - name: /m,
   );
   assert.ok(step,
-    "browser: the shard command must follow its step name with nothing between them. An `if:` here " +
-    "skips the suite on whichever legs it excludes, and those legs still report success.");
+    "browser: the shard command's step must be exactly its name and its run line, followed by the " +
+    "next step. A key on either side of `run:` — an `if:` most of all — skips the suite on the legs " +
+    "it excludes, and each of those legs still reports success.");
 
-  // `continue-on-error` at the job level reports a FAILED leg as a success to `needs.browser.result`,
-  // so the aggregator goes green over a shard whose tests did not pass. Different mechanism from the
-  // ones above, same end state: a quarter of the suite unaccounted for and nothing to see.
-  assert.doesNotMatch(byId.browser, /^    continue-on-error:/m,
-    "browser: a leg that fails must fail the aggregator");
-
-  const shards = strategy[1].split(",").map((value) => Number(value.trim()));
+  const shards = header[1].split(",").map((value) => Number(value.trim()));
   assert.deepEqual(shards, shards.map((_, index) => index + 1),
     "browser: shards must be numbered 1..N with no gaps, because --shard=i/N means the i-th of N");
   assert.equal(Number(step[1]), shards.length,
