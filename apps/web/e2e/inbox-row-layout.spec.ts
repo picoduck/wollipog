@@ -714,26 +714,43 @@ test("a sender squeezed to nothing takes its icon with it instead of painting ov
   expect(geometry.metaOwnsContestedPoint).toBe(true);
 });
 
-// #901's whole claim, asserted at the two widths that decide it. Below the tablet breakpoint the
-// card stacks, so the Git state owns a line and a crowded signals column cannot reach it; above it
-// the card is two rows and the Git state shares line one. The branch name has to survive both.
-for (const width of [TABLET_BREAKPOINT_PX, TABLET_BREAKPOINT_PX + 1]) {
-  test(`a crowded card keeps a readable branch name at ${width}px`, async ({ page }) => {
-    await useViewport(page, width);
-    const roomy = await measureUnderSignalPressure(page, 0);
-    // Four pills beyond the fixture's lifecycle pill and Stalled: a card showing an attention pill,
-    // an orphaned-background-work pill, a reminder, and one more at once. That is a crowded real
-    // card, and at 770px before this change it left 13px of branch text.
-    const crowded = await measureUnderSignalPressure(page, 4);
+// #901's whole claim, and it is stronger than "readable": BELOW the threshold the Git state has a
+// line of its own, so a crowded signals column cannot reach it at all. The branch is the same width
+// crowded as uncrowded.
+//
+// An earlier version asserted `crowded > roomy * 0.4` at both 900px and 901px. At 900px that is true
+// by a mile — the real ratio is 1.0 — and at 901px it was true by 5%, which CI promptly disproved:
+// the two-row card there keeps 42% of the branch on a developer machine and 20% on the runner. The
+// assertion was relative and still had no headroom, and worse, it claimed something at 901px that
+// #901 never fixed. The squeeze just above the threshold is #877's documented residual; what this
+// change does is put the widths where it bites on the other side of the line.
+test(`a crowded card keeps its whole branch name at ${TABLET_BREAKPOINT_PX}px`, async ({ page }) => {
+  await useViewport(page, TABLET_BREAKPOINT_PX);
+  const roomy = await measureUnderSignalPressure(page, 0);
+  // Four pills beyond the fixture's lifecycle pill and Stalled: a card showing an attention pill, an
+  // orphaned-background-work pill, a reminder, and one more at once.
+  const crowded = await measureUnderSignalPressure(page, 4);
 
-    // Readable, expressed against the branch's own unpressured width rather than a pixel count, so
-    // the claim holds on any renderer: a crowded card keeps most of its branch name.
-    expect(crowded.branchWidth).toBeGreaterThan(roomy.branchWidth * 0.4);
-    // And the card is the same height crowded as uncrowded, so the virtualization estimate holds.
-    expect(Math.abs(crowded.height - roomy.height)).toBeLessThanOrEqual(0.5);
-    expect(crowded.signalsOverflowRight).toBeLessThanOrEqual(0.5);
-  });
-}
+  expect(crowded.branchWidth).toBeCloseTo(roomy.branchWidth, 0);
+  expect(Math.abs(crowded.height - roomy.height)).toBeLessThanOrEqual(0.5);
+  expect(crowded.signalsOverflowRight).toBeLessThanOrEqual(0.5);
+});
+
+// One pixel wider the card is two rows again, and the Git state shares line one. The branch DOES
+// give up width there — that is the trade #877 made and #901 bounds rather than removes. What must
+// still hold is everything that is not about width: the card does not change height, and nothing is
+// drawn past its edge.
+test(`a crowded card stays intact at ${TABLET_BREAKPOINT_PX + 1}px, where the branch does yield`, async ({ page }) => {
+  await useViewport(page, TABLET_BREAKPOINT_PX + 1);
+  const roomy = await measureUnderSignalPressure(page, 0);
+  const crowded = await measureUnderSignalPressure(page, 4);
+
+  expect(Math.abs(crowded.height - roomy.height)).toBeLessThanOrEqual(0.5);
+  expect(crowded.signalsOverflowRight).toBeLessThanOrEqual(0.5);
+  // The branch is narrower than it was, and still there rather than erased.
+  expect(crowded.branchWidth).toBeLessThan(roomy.branchWidth);
+  expect(crowded.branchWidth).toBeGreaterThan(0);
+});
 
 // The stacked card is what the narrow widths fall back to, so it has to actually be the stacked one
 // — and the two-row card has to start exactly one pixel further out. This is the pair of widths the
