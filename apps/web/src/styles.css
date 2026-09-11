@@ -10586,7 +10586,15 @@ body.shell-dock-dragging * {
 
    Two rules rather than one calc(): the plain length parses in every engine that supports size
    container queries at all, while the calc() refinement, which an older engine may drop as
-   invalid, only ever retires the hint EARLIER. Whichever survives, the cost keeps its seat. */
+   invalid, only ever retires the hint EARLIER. Whichever survives, the cost keeps its seat.
+
+   These numbers are CHECKED, not just explained (#915). A container query cannot read a custom
+   property, so the budget cannot be composed from the values it depends on — it has to be a
+   literal. `apps/web/e2e/status-strip-budget.spec.ts` closes that loop from the other end: it parses
+   these rules back out of this file, measures what the follow-state control, the hint, and a wide
+   cost actually render at, and fails when the constants stop covering them. Retuning any control in
+   this strip therefore fails that spec rather than silently squeezing the cost. Change these numbers
+   only in response to a measurement, and let the spec confirm it. */
 @container transcript-pane (max-width: 590px) {
   .transcript-status-actions { display: none; }
 }
