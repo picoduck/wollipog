@@ -498,6 +498,24 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const credential = await credentialResponse.json() as { token: string };
   assert.match(credential.token, /^wollipogr_[A-Za-z0-9_-]{43}$/u);
 
+  const { socket: credentialRunner, inbox: credentialRunnerInbox } = await openSocketWithInbox(`${wsBase}/runner`);
+  sockets.add(credentialRunner);
+  credentialRunner.send(JSON.stringify({
+    type: "register",
+    token: credential.token,
+    protocolVersion: PROTOCOL_VERSION,
+    runner: {
+      runnerId: "runner-credential-route-fixture",
+      hostname: "credential-route-host",
+      os: "linux",
+      version: "integration",
+      workspaces: [],
+      agents: [],
+    },
+    sessionSnapshots: [],
+  }));
+  await credentialRunnerInbox.take((message) => message.type === "registered");
+
   const { socket: runner, inbox: runnerInbox } = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(runner);
   runner.send(JSON.stringify({

@@ -1111,6 +1111,11 @@ for (const kind of ["run", "workflow"] as const) {
             { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
       };
       const before = hub.sentOfType("start_session").length;
+      hub.online = false;
+      const offline = create();
+      assert.equal(offline.status, 409);
+      assert.match(offline.error ?? "", /runner .* is offline/);
+      hub.online = true;
       for (const invalid of [{ costBudgetUsd: -1 }, { maxToolCalls: -1 }, { maxToolCalls: 0.5 }, { config: { maxChildSessions: 65 } }]) {
         assert.equal(create(invalid).ok, false);
         assert.equal(db.listRuns().length, 0);

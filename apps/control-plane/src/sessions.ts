@@ -5655,13 +5655,13 @@ export class SessionsService {
       ? snapshotStarts[0].spec.workspacePath
       : this.db.getWorkspacePath(req.runnerId, req.workspaceId);
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
+    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     const requestedProject = this.requestedProjectAssignment(
       req, req.runnerId, req.workspaceId, false, parentSessionId,
     );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
-    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     if (req.config?.serviceTier) {
       const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection");
       if (unsupported) return unsupported;
@@ -6773,6 +6773,7 @@ export class SessionsService {
     if (typeof req.task !== "string" || !req.task.trim()) return fail("a task is required");
     const workspacePath = this.db.getWorkspacePath(req.runnerId, req.workspaceId);
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
+    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     const requestedProject = this.requestedProjectAssignment(
       req, req.runnerId, req.workspaceId, false, parentSessionId,
     );
@@ -6795,7 +6796,6 @@ export class SessionsService {
       }
       sessionScope = parentScope;
     }
-    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     // Every member session carries the run's scope, so an owner over their daily allowance
     // cannot launch a fleet of new turns through a run either.
     const runAdmissionDenied = this.dailyBudgetAdmissionError(sessionScope);
