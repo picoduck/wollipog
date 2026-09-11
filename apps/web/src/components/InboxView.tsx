@@ -236,6 +236,9 @@ export function InboxView({
   // value, so a keystroke in a 200-session inbox does not block on re-filtering and re-rendering
   // the list before the character appears.
   const deferredQuery = useDeferredValue(query);
+  // Enter may arrive before the deferred filter has committed. Keep the request in React state so
+  // the handoff uses the rows for the exact query the input displays, never the previous result set.
+  const [searchFocusPending, setSearchFocusPending] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
   const [reminderMode, setReminderMode] = useState<ReminderInboxMode>("ordinary");
   const [snoozeSessionId, setSnoozeSessionId] = useState<string | null>(null);
@@ -327,6 +330,7 @@ export function InboxView({
   const exitSearch = useCallback(() => {
     setQuery("");
     setExitPending(true);
+    setSearchFocusPending(false);
   }, []);
 
   // Typing CANCELS a pending handoff. Escape on a nonempty query, then a new search before the
@@ -335,6 +339,7 @@ export function InboxView({
   const changeQuery = useCallback((next: string) => {
     setQuery(next);
     setExitPending(false);
+    setSearchFocusPending(false);
   }, []);
 
   useEffect(() => {
@@ -781,6 +786,15 @@ export function InboxView({
       document.getElementById(`inbox-session-${encodeResourceId(sessionId)}`)?.scrollIntoView({ block: "nearest" });
     });
   }, [activeSplit?.key, holdOrderAfterNavigation, selectSession]);
+
+  useEffect(() => {
+    if (!searchFocusPending || query !== deferredQuery) return;
+    setSearchFocusPending(false);
+    if (isMobile || boardMode || entries.length === 0) return;
+    // Preserve a visible selection. A selection hidden by the filter has no active descendant, so
+    // establish one at the first displayed row before moving focus into the grid.
+    selectRow(displayedSelection ?? entries[0]!.session.id);
+  }, [boardMode, deferredQuery, displayedSelection, entries, isMobile, query, searchFocusPending, selectRow]);
 
   const threadRowOf = useCallback((sessionId: string | null) =>
     sessionId === null ? undefined : entries.find((entry) => entry.session.id === sessionId), [entries]);
@@ -1275,6 +1289,13 @@ export function InboxView({
                 value={query}
                 onChange={(event) => changeQuery(event.target.value)}
                 onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
+                      !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !isMobile && !boardMode) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setSearchFocusPending(true);
+                    return;
+                  }
                   if (event.key !== "Escape") return;
                   event.preventDefault();
                   event.stopPropagation();

@@ -61,6 +61,57 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   await page.screenshot({ path: ".agents/tmp/attention-followup/keyboard-shell.png", fullPage: true });
 });
 
+test("search Enter hands the preserved filter to the Sessions grid for keyboard browsing", async ({ page }) => {
+  await page.goto(fullShell());
+  const grid = page.getByRole("grid", { name: "Sessions", exact: true });
+  const search = page.locator(".inbox-search input");
+  const selectedTitle = () => page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title');
+  await expect(grid).toBeVisible();
+
+  // Keep a visible selection when the query still includes it.
+  await page.locator(".inbox-row", { hasText: "Review Session" }).click();
+  await grid.press("/");
+  await expect(search).toBeFocused();
+  await search.fill("Session");
+  await search.press("Enter");
+  await expect(grid).toBeFocused();
+  await expect(search).toHaveValue("Session");
+  await expect(selectedTitle()).toHaveText("Review Session");
+  await expect(page.locator(".inbox-view")).not.toHaveClass(/expanded/);
+  const retainedActiveId = await grid.getAttribute("aria-activedescendant");
+  expect(retainedActiveId).toBeTruthy();
+  await expect(page.locator(`#${retainedActiveId}`)).toBeAttached();
+  await expect(page.locator(`#${retainedActiveId}`)).toBeInViewport();
+
+  // The normal filtered-list keys work, and slash returns to the same query for refinement.
+  await grid.press("j");
+  await expect(selectedTitle()).not.toHaveText("Review Session");
+  await grid.press("k");
+  await expect(selectedTitle()).toHaveText("Review Session");
+  await grid.press("/");
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue("Session");
+
+  // If the old selection is hidden, the sole displayed row becomes the mounted active descendant.
+  await search.fill("Queued");
+  await search.press("Enter");
+  await expect(grid).toBeFocused();
+  await expect(grid).toHaveAttribute("aria-rowcount", "1");
+  await expect(selectedTitle()).toHaveText("Queued Session");
+  const repairedActiveId = await grid.getAttribute("aria-activedescendant");
+  expect(repairedActiveId).toBeTruthy();
+  await expect(page.locator(`#${repairedActiveId}`)).toBeAttached();
+
+  // An empty result set retains both input focus and the existing no-match announcement.
+  await page.keyboard.press("/");
+  await search.fill("nothing matches this");
+  await search.press("Enter");
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue("nothing matches this");
+  await expect(page.getByText("No Matching Sessions", { exact: true })).toBeVisible();
+  await expect(page.getByRole("grid", { name: "Sessions", exact: true })).toHaveCount(0);
+});
+
 for (const width of [390, 1280]) test(`real shell threads an exact attention route through the panel at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 900 });
   // The list no longer offers a per-request target (#896); the exact child route is a deep link.

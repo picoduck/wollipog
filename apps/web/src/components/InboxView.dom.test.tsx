@@ -952,6 +952,108 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
 
 });
 
+test("desktop search Enter focuses the exact filtered result set without activating a session", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-search-enter-test",
+    runtimeKey: "inbox-search-enter-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const pushed: unknown[] = [];
+  const spyNavigation: ViewNavigation = {
+    current: () => ({ name: "inbox" }),
+    push: (view) => void pushed.push(view),
+    listen: () => () => {},
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={spyNavigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([session("A", 30), session("B", 20), session("C", 10)]));
+  });
+
+  const search = container.querySelector<HTMLInputElement>(".inbox-search input")!;
+  const filter = async (value: string) => {
+    await act(async () => {
+      search.value = value;
+      fireDomEvent.change(search as never, { target: { value } as never });
+    });
+    await act(async () => { await Promise.resolve(); });
+  };
+  const pressSearchEnter = async (init: KeyboardEventInit = {}) => {
+    await act(async () => {
+      search.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Enter", bubbles: true, cancelable: true, ...init,
+      } as never) as never);
+    });
+  };
+
+  // A visible selection remains active across a multi-result handoff.
+  const rowB = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
+    .find((row) => row.textContent?.includes("Session B"))!;
+  await act(async () => { rowB.click(); });
+  search.focus();
+  await filter("Session");
+  await pressSearchEnter();
+  let grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  assert.equal(domWindow.document.activeElement, grid);
+  assert.equal(search.value, "Session");
+  assert.equal(selectedRowTitle(container), "Session B");
+  let activeDescendant = grid.getAttribute("aria-activedescendant");
+  assert.ok(activeDescendant);
+  assert.ok(domWindow.document.getElementById(activeDescendant), "the active result is mounted");
+  assert.deepEqual(pushed, [], "search Enter moves focus without opening the selected session");
+
+  // Normal list commands now operate on the displayed results.
+  await act(async () => {
+    domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "j", bubbles: true, cancelable: true }));
+  });
+  assert.equal(selectedRowTitle(container), "Session C");
+
+  // A hidden selection is repaired to the first (and only) displayed result.
+  search.focus();
+  await filter("Session A");
+  await pressSearchEnter();
+  grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  assert.equal(domWindow.document.activeElement, grid);
+  assert.equal(selectedRowTitle(container), "Session A");
+  assert.equal(grid.getAttribute("aria-rowcount"), "1");
+
+  // An empty result set keeps focus and has no grid or stale active descendant.
+  search.focus();
+  await filter("does not exist");
+  await pressSearchEnter();
+  assert.equal(domWindow.document.activeElement, search);
+  assert.equal(container.querySelector(".inbox-list"), null);
+  assert.match(container.querySelector(".inbox-zero")?.textContent ?? "", /No Matching Sessions/);
+
+  // Modified and composing Enter remain input-owned even when results exist.
+  await filter("Session");
+  for (const init of [
+    { altKey: true }, { ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { keyCode: 229 },
+  ] satisfies KeyboardEventInit[]) {
+    search.focus();
+    await pressSearchEnter(init);
+    assert.equal(domWindow.document.activeElement, search);
+  }
+  await act(async () => {
+    search.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, cancelable: true, isComposing: true,
+    } as never) as never);
+  });
+  assert.equal(domWindow.document.activeElement, search);
+});
+
 test("board mode shares the Sessions toolbar scope and toggles back to the list", async () => {
   mobileViewport = false;
   setWindowFocused(true);
@@ -1004,6 +1106,14 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   await act(async () => { await Promise.resolve(); });
   assert.equal(container.querySelectorAll(".board .card").length, 1,
     "the toolbar query scopes board mode");
+  search.focus();
+  await act(async () => {
+    search.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, cancelable: true,
+    }) as never);
+  });
+  assert.equal(domWindow.document.activeElement, search,
+    "Enter does not invent a selected-row focus model for the board");
 
   const toggle = container.querySelector(".sessions-view-toggle");
   assert.ok(toggle, "the List / Board toggle lives in the shared toolbar");
