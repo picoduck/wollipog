@@ -205,11 +205,14 @@ function descendantRequest(title: string): DescendantRequestView {
 }
 
 test("descendant polling coalesces intervals and rejects superseded responses", async () => {
-  const requests: Array<Deferred<{ requests: DescendantRequestView[] }> & { signal?: AbortSignal }> = [];
+  const requests: Array<Deferred<{ requests: DescendantRequestView[] }> & {
+    sessionId: string;
+    signal?: AbortSignal;
+  }> = [];
   const client = {
     ...api,
-    descendantRequests: async (_sessionId: string, signal?: AbortSignal) => {
-      const request = { ...deferred<{ requests: DescendantRequestView[] }>(), signal };
+    descendantRequests: async (sessionId: string, signal?: AbortSignal) => {
+      const request = { ...deferred<{ requests: DescendantRequestView[] }>(), sessionId, signal };
       requests.push(request);
       return request.promise;
     },
@@ -229,8 +232,10 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
     value: (() => {}) as typeof domWindow.clearInterval,
   });
   let requestReferenceChanges = 0;
+  let exposedRefreshAfterResolution: (() => void) | undefined;
   function Harness({ sessionId, enabled }: { sessionId: string; enabled: boolean }) {
     const polling = useDescendantRequestPolling({ sessionId, enabled });
+    exposedRefreshAfterResolution = polling.refreshAfterResolution;
     const priorRequests = React.useRef(polling.requests);
     React.useEffect(() => {
       if (priorRequests.current === polling.requests) return;
@@ -278,26 +283,44 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
     assert.equal(requestReferenceChanges, referenceChangesAfterNewResult,
       "a structurally unchanged poll retains the current state reference");
 
+    await act(async () => intervalHandler?.());
+    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    assert.equal(requests[3]!.signal?.aborted, true);
+    await act(async () => {
+      requests[4]!.resolve({ requests: [descendantRequest("newer")] });
+      await requests[4]!.promise;
+    });
+    await act(async () => {
+      requests[3]!.reject(new Error("late failure"));
+      await requests[3]!.promise.catch(() => {});
+    });
+    assert.equal(container.querySelector("span")?.textContent, "newer",
+      "a superseded failure cannot clear a newer successful result");
+
     await act(async () => fireDomEvent.click(container.querySelector("button")!));
     await act(async () => {
-      requests[3]!.reject(new Error("offline"));
-      await requests[3]!.promise.catch(() => {});
+      requests[5]!.reject(new Error("offline"));
+      await requests[5]!.promise.catch(() => {});
     });
     assert.equal(container.querySelector("span")?.textContent, "",
       "a current request failure clears stale request controls");
 
     await act(async () => fireDomEvent.click(container.querySelector("button")!));
     await act(async () => render("parent-b", true));
-    assert.equal(requests[4]!.signal?.aborted, true, "changing sessions aborts the old request");
-    assert.equal(requests.length, 6);
+    assert.equal(requests[6]!.signal?.aborted, true, "changing sessions aborts the old request");
+    assert.equal(requests.length, 8);
+    assert.equal(requests[7]!.sessionId, "parent-b");
     assert.equal(container.querySelector("span")?.textContent, "");
+    const enabledRefresh = exposedRefreshAfterResolution;
     await act(async () => render("parent-b", false));
-    assert.equal(requests[5]!.signal?.aborted, true, "disabling Parent Control aborts the request");
+    assert.equal(requests[7]!.signal?.aborted, true, "disabling Parent Control aborts the request");
     assert.equal(container.querySelector("span")?.textContent, "");
+    await act(async () => enabledRefresh?.());
+    assert.equal(requests.length, 8, "a stale resolution callback cannot restart disabled polling");
     await act(async () => render("parent-b", true));
-    assert.equal(requests.length, 7);
+    assert.equal(requests.length, 9);
     await act(async () => root.unmount());
-    assert.equal(requests[6]!.signal?.aborted, true, "unmounting aborts the active request");
+    assert.equal(requests[8]!.signal?.aborted, true, "unmounting aborts the active request");
   } finally {
     if (container.isConnected) await act(async () => root.unmount());
     container.remove();

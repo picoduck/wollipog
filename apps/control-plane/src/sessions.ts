@@ -215,14 +215,21 @@ const SESSION_COMMAND_RECEIPT_CODES = new Set([
 ]);
 
 const HUMAN_ONLY_PARENT_CONTROL_REQUEST =
-  /(?:^|[^a-z0-9])(?:account|api[\s_-]*keys?|auth(?:enticate|entication)?|authorization(?:[\s_-]*headers?)?|bearer|cookies?|credentials?|device|identity|login|logout|mfa|oauth2?|passphrases?|password|secrets?|ssh[\s_-]*keys?|tokens?|2fa)(?:[^a-z0-9]|$)/iu;
+  /(?:^|[^a-z0-9])(?:account|api[\s_-]*keys?|auth(?:enticate|entication)?|authorization(?:[\s_-]*headers?)?|bearer|cookies?|credentials?|device|identity|login|logout|mfa|oauth2?|passphrases?|password|secrets?|ssh[\s_-]*keys?|tokens?|2[\s_-]*fa)(?:[^a-z0-9]|$)/iu;
 const EMAIL_IDENTITY_PARENT_CONTROL_REQUEST =
   /(?:^|[^a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?:[^a-z0-9.-]|$)/iu;
 
 function containsHumanOnlyParentControlText(values: Array<string | undefined>): boolean {
   return values.some((value) => {
     const text = value ?? "";
-    return HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(text) || EMAIL_IDENTITY_PARENT_CONTROL_REQUEST.test(text);
+    const camelSeparated = text
+      .replace(/([A-Z])([A-Z][a-z])/gu, "$1 $2")
+      .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+      .replace(/([a-z])([0-9])/giu, "$1 $2")
+      .replace(/([0-9])([a-z])/giu, "$1 $2");
+    return HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(text) ||
+      HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(camelSeparated) ||
+      EMAIL_IDENTITY_PARENT_CONTROL_REQUEST.test(text);
   });
 }
 

@@ -1298,7 +1298,7 @@ test("Parent Control eligibility excludes secrets, authentication, policy gates,
     ...question, questions: [{ ...question.questions[0]!, secret: true }],
   }), false);
   const sensitiveQuestions = [
-    ["question id", { id: "apiKey" }],
+    ["question id", { id: "openaiApiKey" }],
     ["question header", { header: "OAuth2 Consent" }],
     ["question text", { question: "Paste the SSH-key." }],
     ["question context", { context: "Use the Authorization_Header." }],
@@ -1307,12 +1307,22 @@ test("Parent Control eligibility excludes secrets, authentication, policy gates,
     ["bearer token", { question: "Enter a BEARER token." }],
     ["passphrase", { context: "Provide the passphrases" }],
     ["2FA", { header: "2FA Challenge" }],
+    ["camelCase OAuth", { question: "Use oauthClientSecret" }],
   ] as const;
   for (const [field, patch] of sensitiveQuestions) {
     assert.equal(parentControlRequestEligible("questions", {
       ...question,
       questions: [{ ...question.questions[0]!, ...patch }],
     }), false, `${field} remains human-only`);
+  }
+  for (const id of [
+    "apiKeyId", "OAuthToken", "bearerToken", "passphraseValue", "sshKeyPath",
+    "cookieJar", "mfaCode", "twoFactor2FAResponse", "setAuthorizationHeader",
+  ]) {
+    assert.equal(parentControlRequestEligible("questions", {
+      ...question,
+      questions: [{ ...question.questions[0]!, id }],
+    }), false, `${id} remains human-only inside a camelCase identifier`);
   }
   assert.equal(parentControlRequestEligible("questions", {
     ...question,
@@ -1370,7 +1380,7 @@ test("Parent Control eligibility excludes secrets, authentication, policy gates,
   }), false);
   const sensitiveApprovals = [
     ["title", { title: "OAuth Consent" }],
-    ["tool name", { context: { toolName: "sshKey" } }],
+    ["tool name", { context: { toolName: "setApiKey" } }],
     ["input", { context: { toolName: "Bash", input: "Authorization: Bearer redacted" } }],
     ["path", { context: { toolName: "Read", path: "/tmp/api_keys" } }],
     ["network", { context: { toolName: "Fetch", network: "cookies.example" } }],
@@ -1380,6 +1390,7 @@ test("Parent Control eligibility excludes secrets, authentication, policy gates,
     ["option description", { options: [{
       optionId: "once", name: "Allow", description: "Use an API key", kind: "allow_once" as const,
     }] }],
+    ["camelCase path", { context: { toolName: "Read", path: "/tmp/sshKeyPath" } }],
   ] as const;
   for (const [field, patch] of sensitiveApprovals) {
     assert.equal(parentControlRequestEligible("questions_and_approvals", {

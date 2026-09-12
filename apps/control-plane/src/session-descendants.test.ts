@@ -37,5 +37,7 @@ test("descendant checks use persisted ancestry and terminate on malformed cycles
     db.raw().prepare("UPDATE sessions SET parent_session_id=? WHERE id=?").run("sibling", "root");
     assert.equal(db.isSessionDescendant("unrelated", "sibling"), false, "cycle terminates");
     assert.equal(db.isSessionDescendant("root", "root"), false, "cycle cannot grant self access");
+    assert.deepEqual(db.listSessionDescendantRequestCandidates("root").map((session) => session.id), ["sibling"],
+      "candidate projection terminates a cycle without returning self");
   } finally { db.close(); }
 });

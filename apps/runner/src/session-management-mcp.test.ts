@@ -927,6 +927,14 @@ test("Parent Control MCP reports when descendant requests exceed its response bo
   assert.deepEqual(listed.requests, source.slice(0, 128));
   assert.equal(listed.truncated, true);
   assert.equal(listed.limit, 128);
+
+  const exact = makeDeps(() => ({ status: 200, body: { requests: source.slice(0, 128) } }));
+  exact.deps.orchestrator = true;
+  assert.deepEqual(resultJson(await callTool(exact.deps, "list_descendant_requests")), {
+    requests: source.slice(0, 128),
+    truncated: false,
+    limit: 128,
+  });
 });
 
 test("workflow authoring and execution tools route exact mutation bodies", async () => {
