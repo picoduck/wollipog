@@ -374,7 +374,10 @@
 //      idempotent acknowledgement, so accepted in-flight work is never mislabeled or replayed.
 // 135: runner capacity reports batch filesystem diagnostics, bound high-cardinality blocker groups,
 //      and may expose separate active-turn, resident-process, and retained-session dimensions.
-export const PROTOCOL_VERSION = 135;
+// 136: explicit human-owned Parent Control delegates eligible descendant questions and approvals.
+//      Requests carry control-plane occurrence identity and parent-resolution provenance; older
+//      runners fail closed because delegated resolutions require this protocol capability.
+export const PROTOCOL_VERSION = 136;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -554,6 +557,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   managedBackgroundDelivery: 82,
   managedBackgroundInventory: 82,
   backgroundMissingResultRecovery: 134,
+  delegatedParentControl: 136,
   workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
@@ -1275,6 +1279,9 @@ export interface SessionConfig {
    * Control-plane owned; runners ignore it (v105+). */
   costCheckpointsUsd?: number[];
 }
+
+/** Human-owned delegation level for an eligible supervising session. */
+export type ParentControlMode = "off" | "questions" | "questions_and_approvals";
 
 /** Native provider TUIs do not expose their turns through Wollipog's structured event stream.
  * A positive tracked guardrail therefore cannot coexist with a Native TUI without presenting a
@@ -2439,6 +2446,9 @@ export interface PendingApproval {
    * remains the legacy presentation. Entries never contain another additionalRequests array. */
   additionalRequests?: PendingApproval[];
   requestId: string;
+  /** Wollipog-owned identity for this exact pending occurrence. Unlike provider requestId it is
+   * never reused when a later request happens to carry the same provider id. */
+  occurrenceId?: string;
   title: string;
   options: PermissionOption[];
   /** What raised this approval. "permission" = a runner-side tool/permission request (default);
@@ -2636,6 +2646,21 @@ export interface ApprovalQueueRejectResult {
   status: number;
   error?: string;
 }
+
+/** One descendant request projected only through an explicitly enabled Parent Control surface. */
+export interface DescendantRequestView {
+  sessionId: string;
+  sessionTitle: string;
+  runnerId: string;
+  runnerOnline: boolean;
+  occurrenceId: string;
+  request: PendingApproval;
+}
+
+export type DescendantRequestResolution =
+  | { action: "answer"; answers: Record<string, string | string[]> }
+  | { action: "dismiss" }
+  | { action: "approve" | "deny"; optionId: string };
 
 /* -------------------------- Inline code review -------------------------- */
 
@@ -3147,20 +3172,24 @@ export type SessionEventPayload =
     }
   | PolicyHookDecisionEvent
   | ({ kind: "review_decision" } & ReviewDecision)
-  | { kind: "permission_request"; requestId: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication"; ownerToolUseId?: string }
+  | { kind: "permission_request"; requestId: string; occurrenceId?: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication"; ownerToolUseId?: string }
   | {
       kind: "permission_resolved";
       requestId: string;
       optionId: string | null;
       resolutionReason?: StructuredRequestResolutionReason;
+      /** Controlling session when this decision came through Parent Control. */
+      resolvedByParentSessionId?: string;
     }
-  | { kind: "question_request"; requestId: string; questions: AgentQuestion[]; ownerToolUseId?: string }
+  | { kind: "question_request"; requestId: string; occurrenceId?: string; questions: AgentQuestion[]; ownerToolUseId?: string }
   | { kind: "question_policy_answered"; requestId: string; questionEventSeq?: number; policies: { policyId: string; name: string }[] }
   | {
       kind: "question_resolved";
       requestId: string;
       answered: boolean;
       resolutionReason?: StructuredRequestResolutionReason;
+      /** Controlling session when this answer came through Parent Control. */
+      resolvedByParentSessionId?: string;
       /** Durable recovery-command identity when provider continuation replaced a lost callback. */
       commandId?: string;
     }
@@ -3948,6 +3977,8 @@ export interface SessionView {
   /** Control-plane-attributed creator session. Never accepted from a client or runner snapshot. */
   parentSessionId?: string | null;
   maxChildSessions?: number;
+  /** Explicit human-owned descendant request delegation. Omitted by older control planes. */
+  parentControl?: ParentControlMode;
   runnerId: string;
   workspaceId: string | null;
   workspaceName: string | null;
@@ -5439,6 +5470,8 @@ export interface AnswerRecoveredQuestionCommand {
    * reuse across process generations. */
   recoveryId: string;
   answers: Record<string, string | string[]>;
+  /** Present only for a delegated descendant resolution authorized by the control plane. */
+  resolvedByParentSessionId?: string;
 }
 
 /** Attempt to incorporate direct input or one existing queue item into the exact active turn.
@@ -5681,6 +5714,8 @@ export interface ResolvePermissionMessage {
   requestId: string;
   /** optionId to select, or null to cancel. */
   optionId: string | null;
+  /** Present only for a delegated descendant resolution authorized by the control plane. */
+  resolvedByParentSessionId?: string;
 }
 
 /** Answer a structured agent question (question_request). Answers are keyed by AgentQuestion.id
@@ -5693,6 +5728,8 @@ export interface AnswerQuestionMessage {
   /** Explicit UI intent distinguishes accepting an all-optional form from dismissing it.
    * Optional for rolling compatibility; absent peers retain the legacy empty-map convention. */
   action?: "submit" | "dismiss";
+  /** Present only for a delegated descendant resolution authorized by the control plane. */
+  resolvedByParentSessionId?: string;
 }
 
 /** Restore a worktree session's FILES to the checkpoint taken before `turn` (T3-style rewind).
@@ -7035,6 +7072,8 @@ export interface CreateSessionRequest {
   /** Cloud-only source session and existing workflow artifacts to transfer/prove. */
   executionHandoff?: { sourceSessionId?: string; artifactIds?: string[] };
   config?: SessionConfig;
+  /** Human-owned opt-in. Agent-created children may not set or broaden it. */
+  parentControl?: ParentControlMode;
   /** An ad-hoc directory chosen via the remote browser; overrides `workspaceId` when set. */
   workspacePath?: string;
   /** ACP-only session overrides. The control plane validates and persists only secret references. */

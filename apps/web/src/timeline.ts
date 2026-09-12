@@ -168,6 +168,7 @@ export type TimelineItem =
       options: PermissionOption[];
       resolvedOptionId?: string | null;
       resolutionReason?: StructuredRequestResolutionReason;
+      resolvedByParentSessionId?: string;
       context?: ApprovalContext;
     }
   | {
@@ -179,6 +180,7 @@ export type TimelineItem =
       answered?: boolean;
       answeredByPolicies?: string[];
       resolutionReason?: StructuredRequestResolutionReason;
+      resolvedByParentSessionId?: string;
     }
   /** A content-safe policy-hook outcome. Current histories use the runner event sequence as `id`;
    * legacy histories synthesize a negative id from the audit and anchor it chronologically. */
@@ -1028,7 +1030,14 @@ export class TimelineBuilder {
         const idx = this.permIndex.get(p.requestId);
         if (idx != null) {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "permission" }>;
-          this.items[idx] = { ...it, resolvedOptionId: p.optionId, resolutionReason: p.resolutionReason };
+          this.items[idx] = {
+            ...it,
+            resolvedOptionId: p.optionId,
+            resolutionReason: p.resolutionReason,
+            ...(p.resolvedByParentSessionId
+              ? { resolvedByParentSessionId: p.resolvedByParentSessionId }
+              : {}),
+          };
           this.permIndex.delete(p.requestId);
           if (this.activeAuthenticationIndex === idx) this.activeAuthenticationIndex = null;
           this.markDirty(idx);
@@ -1060,6 +1069,9 @@ export class TimelineBuilder {
         if (idx != null && this.items[idx]!.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
           this.items[idx] = { ...it, answered: p.answered, resolutionReason: p.resolutionReason,
+            ...(p.resolvedByParentSessionId
+              ? { resolvedByParentSessionId: p.resolvedByParentSessionId }
+              : {}),
             ...(!p.answered ? { answeredByPolicies: undefined } : {}) };
           this.markDirty(idx);
         }

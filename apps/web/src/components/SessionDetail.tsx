@@ -27,6 +27,8 @@ import {
   type CreateWorkspaceReferenceRequest,
   type QueuedPromptView,
   type SessionConfig,
+  type DescendantRequestView,
+  type ParentControlMode,
   type SessionReminderView,
   type SessionView,
   type SourceLocation,
@@ -111,7 +113,7 @@ import {
   subscribeSessionForks,
   type ConversationForkAvailability,
 } from "../session-actions.js";
-import { SessionApprovalRegion } from "./SessionApproval.js";
+import { SessionApprovalBanner, SessionApprovalRegion, SessionQuestionBanner } from "./SessionApproval.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
@@ -190,7 +192,7 @@ import {
   shouldSubmitProjectAssignment,
 } from "../session-project-assignment.js";
 import { durableInboxProjectKey, INBOX_NO_PROJECT_SPLIT_KEY } from "../inbox.js";
-import { ChoiceCards, type ChoiceCardOption } from "./ui/ChoiceControls.js";
+import { ChoiceCards, Select, type ChoiceCardOption } from "./ui/ChoiceControls.js";
 import {
   clearDurableQueuedEditRecoveriesForAccount,
   clearDurableQueuedEditRecovery,
@@ -650,6 +652,24 @@ function SessionDetailLoaded({
   const richGitSupported = runnerSupportsProtocol(runner?.protocolVersion, "gitVisibility");
   const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
   const conn = useStoreSelector((s) => s.conn);
+  const [descendantRequests, setDescendantRequests] = useState<DescendantRequestView[]>([]);
+  const refreshDescendantRequests = useCallback(() => {
+    if (mode !== "expanded" || conn !== "online" || (session.parentControl ?? "off") === "off") {
+      setDescendantRequests([]);
+      return;
+    }
+    void api.descendantRequests(sessionId).then(
+      ({ requests }) => setDescendantRequests((current) =>
+        JSON.stringify(current) === JSON.stringify(requests) ? current : requests),
+      () => setDescendantRequests((current) => current.length ? [] : current),
+    );
+  }, [api, conn, mode, session.parentControl, sessionId]);
+  useEffect(() => {
+    refreshDescendantRequests();
+    if (mode !== "expanded" || conn !== "online" || (session.parentControl ?? "off") === "off") return;
+    const timer = window.setInterval(refreshDescendantRequests, 2_000);
+    return () => window.clearInterval(timer);
+  }, [conn, mode, refreshDescendantRequests, session.parentControl]);
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
   const recoveryRevision = useStoreSelector((s) =>
@@ -4154,6 +4174,40 @@ function SessionDetailLoaded({
             // virtual list can keep it reachable at its canonical transcript position.
             questionInTimeline={questionInTimeline}
           />
+          {descendantRequests.length > 0 && (
+            <section className="descendant-request-region" aria-label="Descendant Requests">
+              {descendantRequests.map((item) => (
+                <div className="descendant-request" key={item.occurrenceId}>
+                  <div className="plus-section">Request from {item.sessionTitle}</div>
+                  {item.request.kind === "question" ? (
+                    <SessionQuestionBanner
+                      sessionId={item.sessionId}
+                      requestId={item.request.requestId}
+                      questions={item.request.questions ?? []}
+                      recoveryReason={item.request.recoveryReason}
+                      recoveryAction={item.request.recoveryAction}
+                      runnerOnline={item.runnerOnline}
+                      onSessionUpdate={refreshDescendantRequests}
+                      showKeyHints={false}
+                    />
+                  ) : (
+                    <SessionApprovalBanner
+                      session={{
+                        ...session,
+                        id: item.sessionId,
+                        title: item.sessionTitle,
+                        runnerId: item.runnerId,
+                        pendingApproval: item.request,
+                      }}
+                      runnerOnline={item.runnerOnline}
+                      onSessionUpdate={refreshDescendantRequests}
+                      showKeyHints={false}
+                    />
+                  )}
+                </div>
+              ))}
+            </section>
+          )}
           <div
             className="detail-main"
             data-active-pane={activePane}
@@ -4819,6 +4873,11 @@ function SessionDetailLoaded({
                     planSupported={planSupported}
                     onTogglePlan={togglePlan}
                     onApply={applyConfig}
+                    onSetParentControl={(mode) => {
+                      void api.setParentControl(sessionId, mode).then(loadSession, (cause) => {
+                        setError((cause as Error).message);
+                      });
+                    }}
                     disabled={!canPrompt}
                     imageMimeTypes={allowedImageMimeTypes}
                     onAttachImages={addFiles}
@@ -5755,6 +5814,7 @@ export function ComposerPlusMenu({
   planSupported,
   onTogglePlan,
   onApply,
+  onSetParentControl,
   disabled,
   imageMimeTypes,
   onAttachImages,
@@ -5764,6 +5824,7 @@ export function ComposerPlusMenu({
   planSupported: boolean;
   onTogglePlan: (on?: boolean) => void;
   onApply: (patch: Partial<SessionConfig>) => void;
+  onSetParentControl?: (mode: ParentControlMode) => void;
   disabled: boolean;
   /** Exactly the types the connected runner and selected model accept; empty when images cannot be sent. */
   imageMimeTypes: readonly string[];
@@ -5924,6 +5985,22 @@ export function ComposerPlusMenu({
               hint="A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."
               onCommit={(v) => onApply({ maxChildSessions: v })}
             />
+            {session.permissionMode === "orchestrator" && (
+              <div className="plus-budget">
+                <span className="plus-budget-prefix" aria-hidden="true">↯</span>
+                <Select<ParentControlMode>
+                  label="Parent Control"
+                  value={session.parentControl ?? "off"}
+                  onChange={(value) => onSetParentControl?.(value)}
+                  options={[
+                    { value: "off", label: "Off", description: "Keep descendant requests human-only." },
+                    { value: "questions", label: "Questions", description: "Delegate non-secret descendant questions." },
+                    { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
+                  ]}
+                />
+                <span className="muted">Only an authenticated human can change descendant request delegation.</span>
+              </div>
+            )}
           </div>
         </>
       )}

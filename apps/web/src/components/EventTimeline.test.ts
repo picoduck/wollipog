@@ -307,6 +307,25 @@ test("resolved question cards keep a concise summary and disclose complete rich 
   assert.equal((html.match(/signature=secret/g) ?? []).length, 1);
 });
 
+test("delegated question and approval histories identify the controlling parent", () => {
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [
+      {
+        kind: "question", id: 6, requestId: "question", answered: true,
+        resolvedByParentSessionId: "parent-session",
+        questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }] }],
+      },
+      {
+        kind: "permission", id: 7, requestId: "permission", title: "Run command",
+        options: [{ optionId: "allow", name: "Allow" }],
+        resolvedOptionId: "allow", resolvedByParentSessionId: "parent-session",
+      },
+    ],
+  }));
+  assert.match(html, /Answered by Parent parent-session/);
+  assert.match(html, /Approved by Parent parent-session/);
+});
+
 test("completed turn messages own compact rewind, fork, and handoff actions", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [

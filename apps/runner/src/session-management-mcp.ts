@@ -150,6 +150,38 @@ async function createWithSpawnApproval(deps: McpDeps, path: string, body: unknow
   return result;
 }
 
+async function resolveDescendantRequestTool(
+  args: Json,
+  deps: McpDeps,
+  action: "answer" | "dismiss" | "approve" | "deny",
+): Promise<ToolResult> {
+  if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+  if (typeof args?.sessionId !== "string" || !args.sessionId ||
+      typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
+    return errorResult("sessionId and occurrenceId are required");
+  }
+  let resolution: Json;
+  if (action === "answer") {
+    if (!args.answers || typeof args.answers !== "object" || Array.isArray(args.answers)) {
+      return errorResult("answers must be an object keyed by the exact question ids");
+    }
+    resolution = { action, answers: args.answers };
+  } else if (action === "dismiss") {
+    resolution = { action };
+  } else {
+    if (typeof args.optionId !== "string" || !args.optionId) return errorResult("optionId is required");
+    resolution = { action, optionId: args.optionId };
+  }
+  const r = await cpFetch(
+    deps,
+    "POST",
+    `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests/resolve`,
+    { sessionId: args.sessionId, occurrenceId: args.occurrenceId, resolution },
+  );
+  if (!r.ok) return errorResult(r.message);
+  return textResult({ session: mapSession(r.data) });
+}
+
 /** Field-map a SessionView to the compact shape every session-returning tool shares. */
 function mapSession(s: Json): Json {
   return {
@@ -162,6 +194,7 @@ function mapSession(s: Json): Json {
     runId: s?.runId ?? null,
     parentSessionId: s?.parentSessionId ?? null,
     maxChildSessions: s?.maxChildSessions ?? null,
+    parentControl: s?.parentControl ?? "off",
     costUsd: s?.costUsd,
     costBudgetUsd: s?.costBudgetUsd ?? null,
     costCheckpointsUsd: s?.costCheckpointsUsd ?? null,
@@ -350,9 +383,14 @@ const GOVERNANCE_POLICY_PROPERTIES: Json = {
 /* -------------------------------------------------------------------------- */
 
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "list_sessions", "get_session", "get_session_events",
+  "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "stop_session", "restart_session", "archive_session", "set_guardrails", "create_worktree", "attach_worktree",
   "select_worktree", "discard_worktree"]);
+const PARENT_CONTROL_TOOLS = new Set([
+  "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
+  "resolve_descendant_approval",
+]);
 
 export const TOOLS: McpTool[] = [
   /* ------------------------------- READS --------------------------------- */
@@ -435,6 +473,67 @@ export const TOOLS: McpTool[] = [
                 preview: typeof s.preview === "string" ? truncate(s.preview, MAX_LINE) : null,
               },
       });
+    },
+  },
+  {
+    name: "list_descendant_requests",
+    description: "List exact unresolved descendant questions and eligible approvals authorized by this session's human-controlled Parent Control setting.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (_args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const r = await cpFetch(
+        deps,
+        "GET",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests`,
+      );
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ requests: capArray(r.data?.requests, 128) });
+    },
+  },
+  {
+    name: "answer_descendant_question",
+    description: "Answer one exact descendant structured-question occurrence. Parent Control must allow Questions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        occurrenceId: { type: "string" },
+        answers: { type: "object", additionalProperties: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] } },
+      },
+      required: ["sessionId", "occurrenceId", "answers"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => resolveDescendantRequestTool(args, deps, "answer"),
+  },
+  {
+    name: "dismiss_descendant_question",
+    description: "Dismiss one exact descendant structured-question occurrence. Parent Control must allow Questions.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" }, occurrenceId: { type: "string" } },
+      required: ["sessionId", "occurrenceId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => resolveDescendantRequestTool(args, deps, "dismiss"),
+  },
+  {
+    name: "resolve_descendant_approval",
+    description: "Approve or deny one exact eligible descendant approval occurrence. Parent Control must allow Questions and Approvals.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        occurrenceId: { type: "string" },
+        decision: { type: "string", enum: ["approve", "deny"] },
+        optionId: { type: "string", description: "Exact allow-once or reject-once option id from list_descendant_requests" },
+      },
+      required: ["sessionId", "occurrenceId", "decision", "optionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      const decision = args?.decision;
+      if (decision !== "approve" && decision !== "deny") return errorResult("decision must be approve or deny");
+      return resolveDescendantRequestTool(args, deps, decision);
     },
   },
   {
@@ -1259,7 +1358,9 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
       return isRequest ? reply({}) : null;
     case "tools/list":
       return isRequest
-        ? reply({ tools: TOOLS.filter((tool) => !deps.orchestrator || ORCHESTRATOR_TOOLS.has(tool.name)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
+        ? reply({ tools: TOOLS.filter((tool) => deps.orchestrator
+          ? ORCHESTRATOR_TOOLS.has(tool.name)
+          : !PARENT_CONTROL_TOOLS.has(tool.name)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
         : null;
     case "tools/call": {
       if (!isRequest) return null;
@@ -1267,6 +1368,7 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
       if (typeof name !== "string") return rpcError(-32602, "tools/call requires params.name");
       const tool = TOOLS.find((t) => t.name === name);
       if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return reply(errorResult("the orchestrator preset does not allow this tool"));
+      if (!deps.orchestrator && PARENT_CONTROL_TOOLS.has(name)) return reply(errorResult("this tool requires the orchestrator preset"));
       // Unknown tool → an isError TOOL result (not a protocol error) so the model can
       // recover in-conversation instead of the client tearing the turn down.
       if (!tool) return reply(errorResult(`unknown tool '${name}'`));
@@ -1286,6 +1388,7 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
  * schemas, response projection, self-targeting checks, and REST routes cannot drift. */
 export async function executeManagerTool(name: string, args: Json, deps: McpDeps): Promise<ToolResult> {
   if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return errorResult("the orchestrator preset does not allow this tool");
+  if (!deps.orchestrator && PARENT_CONTROL_TOOLS.has(name)) return errorResult("this tool requires the orchestrator preset");
   const tool = TOOLS.find((candidate) => candidate.name === name);
   if (!tool) return errorResult(`unknown tool '${name}'`);
   try {

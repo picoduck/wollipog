@@ -1878,7 +1878,16 @@ const TimelineRow = memo(function TimelineRow({
             <span>{item.title}</span>
             {item.resolvedOptionId !== undefined ? (
               <span className="perm-resolved">
-                {item.resolutionReason === "replaced"
+                {item.resolvedByParentSessionId
+                  ? item.resolvedOptionId == null
+                    ? `→ Dismissed by Parent ${item.resolvedByParentSessionId}`
+                    : (() => {
+                      const option = item.options.find((candidate) => candidate.optionId === item.resolvedOptionId);
+                      return option?.kind === "allow_once" || (option?.kind == null && item.resolvedOptionId === "allow");
+                    })()
+                      ? `→ Approved by Parent ${item.resolvedByParentSessionId}`
+                      : `→ Denied by Parent ${item.resolvedByParentSessionId}`
+                  : item.resolutionReason === "replaced"
                   ? "→ Replaced"
                   : item.resolutionReason === "provider_resolved"
                     ? "→ Resolved by Provider"
@@ -1947,7 +1956,11 @@ const TimelineRow = memo(function TimelineRow({
               </span>
               {item.answered !== undefined ? (
                 <span className="perm-resolved">
-                  {item.answeredByPolicies?.length ? `→ Answered by Policy: ${item.answeredByPolicies.join(", ")}` : item.resolutionReason === "replaced"
+                  {item.resolvedByParentSessionId
+                    ? item.answered
+                      ? `→ Answered by Parent ${item.resolvedByParentSessionId}`
+                      : `→ Dismissed by Parent ${item.resolvedByParentSessionId}`
+                    : item.answeredByPolicies?.length ? `→ Answered by Policy: ${item.answeredByPolicies.join(", ")}` : item.resolutionReason === "replaced"
                     ? "→ Replaced"
                     : item.resolutionReason === "provider_resolved"
                       ? "→ Resolved by Provider"

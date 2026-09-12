@@ -700,11 +700,14 @@ test("side pane collapses per-turn worktree deltas into one Files entry", () => 
   );
 });
 
-test("question resolution projection preserves submitted and replacement outcomes", () => {
+test("question resolution projection preserves submitted, replacement, and Parent Control provenance", () => {
   const questions = [{ id: "Which?", question: "Which?", options: [{ label: "A" }, { label: "B" }] }];
   const items = deriveTimeline([
     ev({ kind: "question_request", requestId: "submitted", questions }),
-    ev({ kind: "question_resolved", requestId: "submitted", answered: true, resolutionReason: "submitted" }),
+    ev({
+      kind: "question_resolved", requestId: "submitted", answered: true,
+      resolutionReason: "submitted", resolvedByParentSessionId: "parent-session",
+    }),
     ev({ kind: "question_request", requestId: "replaced", questions }),
     ev({ kind: "question_resolved", requestId: "replaced", answered: false, resolutionReason: "replaced" }),
   ]);
@@ -713,11 +716,12 @@ test("question resolution projection preserves submitted and replacement outcome
   const replaced = items[1] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
   assert.equal(submitted.answered, true);
   assert.equal(submitted.resolutionReason, "submitted");
+  assert.equal(submitted.resolvedByParentSessionId, "parent-session");
   assert.equal(replaced.answered, false);
   assert.equal(replaced.resolutionReason, "replaced");
 });
 
-test("permission resolution reasons survive timeline projection", () => {
+test("permission resolution reasons and Parent Control provenance survive timeline projection", () => {
   const items = deriveTimeline([
     ev({
       kind: "permission_request",
@@ -730,11 +734,13 @@ test("permission resolution reasons survive timeline projection", () => {
       requestId: "p-provider",
       optionId: null,
       resolutionReason: "provider_resolved",
+      resolvedByParentSessionId: "parent-session",
     }),
   ]);
   const permission = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "permission" }>;
   assert.equal(permission.resolvedOptionId, null);
   assert.equal(permission.resolutionReason, "provider_resolved");
+  assert.equal(permission.resolvedByParentSessionId, "parent-session");
 });
 
 test("permission context rides into the timeline item", () => {

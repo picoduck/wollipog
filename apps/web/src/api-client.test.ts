@@ -70,6 +70,40 @@ test("cancelTurn posts to the encoded non-terminal turn endpoint", async () => {
   assert.deepEqual(calls, [{ path: "/api/sessions/session%2F1/cancel", method: "POST" }]);
 });
 
+test("Parent Control setting and descendant reads use encoded session-scoped endpoints", async () => {
+  const calls: Array<{ path: string; method: string; body: unknown }> = [];
+  const client = createApiClient({
+    instanceId: "instance-a",
+    publicOrigin: "https://instance-a.example.test",
+    async request(path, init) {
+      calls.push({
+        path,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+      });
+      return new Response(JSON.stringify(path.endsWith("descendant-requests") ? { requests: [] } : {}), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+    close() {},
+  });
+
+  await client.setParentControl("parent/1", "questions");
+  assert.deepEqual(await client.descendantRequests("parent/1"), { requests: [] });
+  assert.deepEqual(calls, [
+    {
+      path: "/api/sessions/parent%2F1/parent-control",
+      method: "POST",
+      body: { mode: "questions" },
+    },
+    {
+      path: "/api/sessions/parent%2F1/descendant-requests",
+      method: "GET",
+      body: undefined,
+    },
+  ]);
+});
+
 test("governance audit requests encode the optional older-page cursor", async () => {
   const paths: string[] = [];
   const client = createApiClient({

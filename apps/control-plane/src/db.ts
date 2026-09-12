@@ -109,6 +109,7 @@ import {
   type UserStatus,
   type OS,
   type PendingApproval,
+  type ParentControlMode,
   type PromptImageReference,
   type PromptSessionMessage,
   type ProjectLocationAvailability,
@@ -477,6 +478,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   archived       INTEGER NOT NULL DEFAULT 0,
   preview        TEXT,
   pending_approval TEXT,
+  parent_control TEXT NOT NULL DEFAULT 'off',
   policy_resume_status TEXT,
   driver         TEXT NOT NULL DEFAULT 'acp',
   model          TEXT,
@@ -500,6 +502,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   adopted        INTEGER NOT NULL DEFAULT 0,
   acp_session_context TEXT,
   CHECK (policy_resume_status IS NULL OR policy_resume_status='idle'),
+  CHECK (parent_control IN ('off','questions','questions_and_approvals')),
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
   FOREIGN KEY (project_location_id) REFERENCES project_locations(id) ON DELETE SET NULL
 );
@@ -2092,6 +2095,7 @@ interface SessionRow {
   archived: number;
   preview: string | null;
   pending_approval: string | null;
+  parent_control: string;
   driver: string;
   model: string | null;
   resolved_model: string | null;
@@ -2972,6 +2976,8 @@ export interface NewSessionInput {
   runId?: string | null;
   driver: AgentDriverKind;
   config: SessionConfig;
+  /** Explicit human-owned descendant request delegation. */
+  parentControl?: ParentControlMode;
   /** Ad-hoc browsed directory (when workspaceId is null); lets restart re-launch from it. */
   workspacePath?: string | null;
   acpSessionContext?: AcpSessionContextConfig;
@@ -4121,6 +4127,7 @@ export class ControlPlaneDb {
       // Runner-authoritative multi-worktree inventory; worktree_path stays the active legacy
       // projection for rolling peers and existing queries.
       "worktrees TEXT",
+      "parent_control TEXT NOT NULL DEFAULT 'off' CHECK (parent_control IN ('off','questions','questions_and_approvals'))",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -9977,6 +9984,22 @@ export class ControlPlaneDb {
     `).get(targetId, ancestorId));
   }
 
+  /** Descendant rows only, so callers do not scan every archived session and issue one ancestry
+   * query per row. UNION terminates malformed cycles and the final predicate never returns self. */
+  listSessionDescendants(ancestorId: string): SessionView[] {
+    const rows = this.stmt(`
+      WITH RECURSIVE descendants(id) AS (
+        SELECT id FROM sessions WHERE parent_session_id=?
+        UNION
+        SELECT s.id FROM sessions s JOIN descendants d ON s.parent_session_id=d.id
+      ) SELECT s.* FROM descendants d JOIN sessions s ON s.id=d.id
+        WHERE s.id<>? ORDER BY s.created_at DESC, s.id ASC
+    `).all(ancestorId, ancestorId) as unknown as SessionRow[];
+    const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
+    const stopIntents = this.sessionStopIntents();
+    return rows.map((row) => this.sessionView(row, legacyTargets, stopIntents.get(row.id), false));
+  }
+
   childSessionAllocations(parentSessionId: string): {
     /** Lifetime creations remain the stable ordinal and deletion-resistant accounting fence. */
     count: number;
@@ -10043,8 +10066,8 @@ export class ControlPlaneDb {
       this.stmt(
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, run_id, use_worktree, archived,
-             driver, model, effort, service_tier, permission_mode, workspace_path, acp_session_context, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             driver, model, effort, service_tier, permission_mode, parent_control, workspace_path, acp_session_context, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -10063,6 +10086,7 @@ export class ControlPlaneDb {
         input.config.effort ?? null,
         input.config.serviceTier ?? null,
         input.config.permissionMode ?? null,
+        input.parentControl ?? "off",
         input.workspacePath ?? null,
         input.acpSessionContext ? JSON.stringify(input.acpSessionContext) : null,
         input.now,
@@ -10189,7 +10213,7 @@ export class ControlPlaneDb {
         snap.config.permissionMode ?? null,
         snap.agentCapabilities ? JSON.stringify(snap.agentCapabilities) : null,
         snap.preview,
-        snap.pendingApproval ? JSON.stringify(snap.pendingApproval) : null,
+        snap.pendingApproval ? JSON.stringify(pendingApprovalWithOccurrenceIds(snap.pendingApproval)) : null,
         snap.tokensIn,
         snap.tokensOut,
         snap.contextTokensUsed ?? null,
@@ -10306,10 +10330,11 @@ export class ControlPlaneDb {
       /* malformed cached approval — fall through to the snapshot */
     }
     const status = keepPolicyPause ? "input_required" : snap.status;
+    const currentPending = parseJson<PendingApproval>(existing?.pending_approval ?? null);
     const pendingJson = keepPolicyPause
       ? existing!.pending_approval
       : snap.pendingApproval
-        ? JSON.stringify(snap.pendingApproval)
+        ? JSON.stringify(pendingApprovalWithOccurrenceIds(snap.pendingApproval, currentPending))
         : null;
     const snapshotTitleSource = snap.titleSource ?? "generated";
     // The control plane owns explicit rename order. A runner snapshot can carry an OLDER user
@@ -11542,6 +11567,10 @@ export class ControlPlaneDb {
     this.stmt("UPDATE sessions SET max_child_sessions=?, updated_at=? WHERE id=?").run(max, now, id);
   }
 
+  updateSessionParentControl(id: string, mode: ParentControlMode, now: number): void {
+    this.stmt("UPDATE sessions SET parent_control=?, updated_at=? WHERE id=?").run(mode, now, id);
+  }
+
   /** Advance the absolute cost threshold by its original fixed allowance window. */
   rearmSessionCostBudget(id: string, observedCostUsd: number, now: number): number | null {
     const row = this.stmt(
@@ -11635,8 +11664,12 @@ export class ControlPlaneDb {
   }
 
   setPendingApproval(id: string, approval: PendingApproval | null): void {
+    const existing = parseJson<PendingApproval>((this.stmt(
+      "SELECT pending_approval FROM sessions WHERE id=?",
+    ).get(id) as { pending_approval: string | null } | undefined)?.pending_approval ?? null);
+    const identified = approval ? pendingApprovalWithOccurrenceIds(approval, existing) : null;
     this.stmt("UPDATE sessions SET pending_approval=? WHERE id=?")
-      .run(approval ? JSON.stringify(approval) : null, id);
+      .run(identified ? JSON.stringify(identified) : null, id);
   }
 
   getPolicyHookApproval(sessionId: string, requestId: string): PolicyHookApprovalRecord | null {
@@ -14618,6 +14651,9 @@ export class ControlPlaneDb {
       runId: row.run_id,
       parentSessionId: row.parent_session_id ?? null,
       maxChildSessions: row.max_child_sessions ?? undefined,
+      parentControl: row.parent_control === "questions" || row.parent_control === "questions_and_approvals"
+        ? row.parent_control
+        : "off",
       useWorktree: row.use_worktree === 1,
       worktreePath: row.worktree_path,
       worktrees: (() => {
@@ -19233,6 +19269,24 @@ function parseJson<T>(raw: string | null): T | null {
   } catch {
     return null;
   }
+}
+
+function pendingApprovalWithOccurrenceIds(
+  approval: PendingApproval,
+  prior?: PendingApproval | null,
+): PendingApproval {
+  const priorByRequestId = new Map(
+    pendingRequests(prior).map((request) => [request.requestId, request.occurrenceId]),
+  );
+  const identify = (request: PendingApproval): PendingApproval => ({
+    ...request,
+    occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId) ||
+      `request_${randomUUID().replace(/-/g, "")}`,
+    ...(request.additionalRequests
+      ? { additionalRequests: request.additionalRequests.map(identify) }
+      : {}),
+  });
+  return identify(approval);
 }
 
 function parseBackgroundWorkState(raw: string | null): BackgroundWorkState | undefined {

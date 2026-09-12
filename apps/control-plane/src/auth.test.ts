@@ -22,9 +22,12 @@ test("orchestrator credentials expose only session management and governance rea
     ["POST", "/api/sessions"], ["POST", "/api/sessions/:id/stop"],
     ["POST", "/api/sessions/:id/restart"], ["POST", "/api/sessions/:id/config"],
     ["POST", "/api/sessions/:id/worktrees"], ["POST", "/api/sessions/:id/archive"],
+    ["GET", "/api/sessions/:id/descendant-requests"],
+    ["POST", "/api/sessions/:id/descendant-requests/resolve"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), true, route);
   for (const [method, route] of [
     ["POST", "/api/runs"], ["POST", "/api/sessions/:id/approve"],
+    ["POST", "/api/sessions/:id/parent-control"],
     ["PUT", "/api/governance/policies/:policyId"], ["POST", "/api/artifacts/screenshots"],
     ["POST", "/api/workflow-instances/:instanceId/nodes/:nodeId/dispatch"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), false, route);
@@ -102,6 +105,9 @@ test("session-management REST access is method- and route-scoped to its publishe
   for (const [method, route] of [
     ["DELETE", "/api/sessions/:id"],
     ["POST", "/api/sessions/:id/approve"],
+    ["GET", "/api/sessions/:id/descendant-requests"],
+    ["POST", "/api/sessions/:id/descendant-requests/resolve"],
+    ["POST", "/api/sessions/:id/parent-control"],
     ["POST", "/api/sessions/:id/git"],
     ["GET", "/api/devices"],
     ["POST", "/api/devices"],

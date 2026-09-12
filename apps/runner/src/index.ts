@@ -1506,6 +1506,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             msg.command.recoveryId,
             msg.command.answers,
             lifecycle,
+            msg.command.resolvedByParentSessionId,
           );
         } catch (error) {
           lifecycle.failed(`recovered answer acceptance failed: ${errText(error)}`);
@@ -1585,10 +1586,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
       break;
     case "resolve_permission":
-      sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId);
+      sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId);
       break;
     case "answer_question":
-      sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers, msg.action);
+      sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers, msg.action, msg.resolvedByParentSessionId);
       break;
     case "rewind_session": {
       // Serialize behind the same per-session queue as mutating git actions: a rewind

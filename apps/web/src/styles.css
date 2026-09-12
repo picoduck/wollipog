@@ -2854,6 +2854,14 @@ textarea {
   margin-left: auto;
   margin-right: auto;
 }
+.descendant-request-region {
+  width: 100%;
+  max-width: var(--chat-max);
+  margin: 0 auto;
+}
+.descendant-request .plus-section {
+  margin: 12px 0 -6px;
+}
 .approval-text {
   flex: 1;
   font-size: 13px;

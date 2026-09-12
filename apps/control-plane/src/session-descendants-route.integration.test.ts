@@ -113,6 +113,37 @@ test("HTTP agent management scopes descendants and composes governance policy vi
           ...(method === "POST" ? { body: JSON.stringify(body) } : {}),
         });
       const other = mode === "normal" ? "orchestrator" : "normal";
+      if (mode === "normal") {
+        assert.equal((await request(mode, "descendant-requests", undefined, "GET")).status, 401,
+          "ordinary agent credentials never gain Parent Control routes");
+      } else {
+        assert.equal((await request(mode, "parent-control", { mode: "questions" })).status, 401,
+          "agent credentials cannot enable their own Parent Control");
+        const humanRequest = (operation: string, body: unknown) => fetch(
+          `http://127.0.0.1:${port}/api/sessions/${mode}/${operation}`, {
+            method: "POST", signal: AbortSignal.timeout(3000),
+            headers: { authorization: `Bearer device-${ownerId}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+        assert.equal((await humanRequest("parent-control", { mode: "questions" })).status, 200,
+          "the owning human can enable Parent Control");
+        assert.equal((await humanRequest("descendant-requests/resolve", {
+          sessionId: `${mode}-child`, occurrenceId: "request", resolution: { action: "dismiss" },
+        })).status, 403, "human credentials cannot use the parent-agent resolution route");
+        assert.equal((await request(`${mode}-child`, "descendant-requests", undefined, "GET")).status, 404,
+          "an orchestrator credential cannot pose as its descendant");
+        assert.equal((await request(mode, "descendant-requests", undefined, "GET")).status, 200,
+          "the matching orchestrator credential can inspect its own descendants");
+        for (const body of [
+          { sessionId: `${mode}-child`, occurrenceId: "bad\nid", resolution: { action: "dismiss" } },
+          { sessionId: `${mode}-child`, occurrenceId: "request", resolution: [] },
+          { sessionId: `${mode}-child`, occurrenceId: "request", resolution: { action: "answer", answers: [] } },
+          { sessionId: `${mode}-child`, occurrenceId: "request", resolution: { action: "approve", optionId: "" } },
+        ]) {
+          assert.equal((await request(mode, "descendant-requests/resolve", body)).status, 400,
+            "malformed Parent Control coordinates and resolutions fail closed");
+        }
+      }
       for (const target of [mode, other, `${other}-child`, `${mode}-hidden`, "missing"]) {
         for (const operation of ["prompt", "stop", "archive"]) {
           assert.equal((await request(target, operation, { text: "test", archived: true })).status, 404, `${mode} ${operation} ${target}`);

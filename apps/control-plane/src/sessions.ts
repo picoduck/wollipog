@@ -32,6 +32,8 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type AgentCapabilities,
   type ApprovalQueueItem,
   type ApprovalQueueRejectResult,
+  type DescendantRequestResolution,
+  type DescendantRequestView,
   type AddPodMemberRequest,
   type AppendPodContextRequest,
   type CreatePodRequest,
@@ -63,6 +65,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type SessionCommandInvocationUpdateMessage,
   type SessionCommandInvocationView,
   type PendingApproval,
+  type ParentControlMode,
   type PolicyHookEvaluationRequest,
   type PolicyHookEvaluationResponse,
   type RecordPolicyHookDecisionMessage,
@@ -210,6 +213,58 @@ const SESSION_COMMAND_RECEIPT_CODES = new Set([
   "QUEUE_FULL", "COMMAND_CANCELLED", "PROVIDER_AUTHENTICATION_REQUIRED", "RECEIPT_STORE_FULL", "COMMAND_CATALOG_STALE",
   "COMMAND_UNAVAILABLE", "COMMAND_MODE_UNSUPPORTED",
 ]);
+
+const HUMAN_ONLY_PARENT_CONTROL_REQUEST =
+  /(?:^|[^a-z0-9])(?:account|auth(?:enticate|entication)?|credentials?|device|identity|login|logout|password|secrets?|tokens?)(?:[^a-z0-9]|$)/iu;
+const EMAIL_IDENTITY_PARENT_CONTROL_REQUEST =
+  /(?:^|[^a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?:[^a-z0-9.-]|$)/iu;
+
+function containsHumanOnlyParentControlText(values: Array<string | undefined>): boolean {
+  return values.some((value) => {
+    const text = value ?? "";
+    return HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(text) || EMAIL_IDENTITY_PARENT_CONTROL_REQUEST.test(text);
+  });
+}
+
+export function parentControlRequestEligible(mode: ParentControlMode, request: PendingApproval): boolean {
+  if (mode === "off" || request.kind === "authentication" || request.kind === "policy_hook") return false;
+  if (request.kind === "question") {
+    return !(request.questions ?? []).some((question) =>
+      question.secret === true || question.inputFormat === "email" ||
+      containsHumanOnlyParentControlText([
+        question.id,
+        question.header,
+        question.question,
+        question.context,
+        ...question.options.flatMap((option) => [option.label, option.description]),
+      ]));
+  }
+  if (mode !== "questions_and_approvals" || (request.kind && request.kind !== "permission")) return false;
+  if (request.governancePolicyId || request.context?.escalatedBy ||
+      containsHumanOnlyParentControlText([
+        request.title,
+        request.context?.toolName,
+        request.context?.input,
+        request.context?.path,
+        request.context?.network,
+        request.context?.branch,
+        ...request.options.flatMap((option) => [option.optionId, option.name, option.description]),
+      ])) return false;
+  return request.options.some((option) =>
+    option.kind === "allow_once" || option.kind === "reject_once" ||
+    (option.kind == null && (option.optionId === "allow" || option.optionId === "deny")));
+}
+
+function delegatedOptionMatchesAction(
+  request: PendingApproval,
+  optionId: string,
+  action: "approve" | "deny",
+): boolean {
+  const option = request.options.find((candidate) => candidate.optionId === optionId);
+  if (!option) return false;
+  if (action === "approve") return option.kind === "allow_once" || (option.kind == null && optionId === "allow");
+  return option.kind === "reject_once" || (option.kind == null && optionId === "deny");
+}
 
 /** Match the runner's Git checkout identity without conflating case-sensitive POSIX paths. */
 function normalizeGitCheckoutPath(value: string): string {
@@ -2809,6 +2864,13 @@ export class SessionsService {
       return fail("The Conductor agent is retired; select an ordinary agent to orchestrate child sessions.", 409);
     }
     const parentSessionId = creationContext?.parentSessionId;
+    const parentControl = req.parentControl ?? "off";
+    if (parentControl !== "off" && parentControl !== "questions" && parentControl !== "questions_and_approvals") {
+      return fail("parentControl must be off, questions, or questions_and_approvals", 400);
+    }
+    if (parentSessionId && parentControl !== "off") {
+      return fail("an agent-created child cannot enable Parent Control", 403);
+    }
     let parentSession: SessionView | null = null;
     if (parentSessionId) {
       const parent = this.db.getSession(parentSessionId);
@@ -3053,6 +3115,17 @@ export class SessionsService {
         return fail("the orchestrator preset requires a supported native host harness or verified Direct WSL bridge", 409);
       }
     }
+    if (parentControl !== "off" && requestedConfig.permissionMode !== "orchestrator") {
+      return fail("Parent Control is available only for the Orchestrator preset", 409);
+    }
+    if (parentControl !== "off") {
+      const unsupported = this.capabilityFailure(
+        req.runnerId,
+        "delegatedParentControl",
+        "Parent Control",
+      );
+      if (unsupported) return unsupported;
+    }
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);
     if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
@@ -3194,6 +3267,7 @@ export class SessionsService {
       archived: initiallyArchived,
       driver: launch.driver,
       config,
+      parentControl,
       // Remember the ad-hoc browsed directory so restart re-launches from it (workspaceId is null).
       workspacePath: adHoc || null,
       acpSessionContext,
@@ -4736,6 +4810,108 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  setParentControl(sessionId: string, mode: ParentControlMode): ServiceResult<SessionView> {
+    if (mode !== "off" && mode !== "questions" && mode !== "questions_and_approvals") {
+      return fail("parentControl must be off, questions, or questions_and_approvals", 400);
+    }
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    if (mode !== "off" && session.permissionMode !== "orchestrator") {
+      return fail("Parent Control is available only for the Orchestrator preset", 409);
+    }
+    if (mode !== "off") {
+      const unsupported = this.capabilityFailure(
+        session.runnerId,
+        "delegatedParentControl",
+        "Parent Control",
+      );
+      if (unsupported) return unsupported;
+    }
+    this.db.updateSessionParentControl(sessionId, mode, Date.now());
+    this.hub.sessionChangedById(sessionId);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
+  descendantRequests(
+    parentSessionId: string,
+    canAccess: (sessionId: string) => boolean,
+  ): ServiceResult<{ requests: DescendantRequestView[] }> {
+    const parent = this.db.getSession(parentSessionId);
+    if (!parent) return fail("session not found", 404);
+    const mode = parent.parentControl ?? "off";
+    if (mode === "off") return fail("Parent Control is off", 403);
+    const requests = this.db.listSessionDescendants(parentSessionId).flatMap((session): DescendantRequestView[] => {
+      if (!canAccess(session.id)) return [];
+      if (!runnerSupportsProtocol(
+        this.db.getRunner(session.runnerId)?.protocolVersion,
+        "delegatedParentControl",
+      )) return [];
+      return pendingRequests(session.pendingApproval).flatMap((request): DescendantRequestView[] => {
+        if (!request.occurrenceId || !parentControlRequestEligible(mode, request)) return [];
+        return [{
+          sessionId: session.id,
+          sessionTitle: session.title,
+          runnerId: session.runnerId,
+          runnerOnline: this.hub.isRunnerOnline(session.runnerId),
+          occurrenceId: request.occurrenceId,
+          request,
+        }];
+      });
+    });
+    return ok({ requests });
+  }
+
+  resolveDescendantRequest(
+    parentSessionId: string,
+    childSessionId: string,
+    occurrenceId: string,
+    resolution: DescendantRequestResolution,
+    canAccess: (sessionId: string) => boolean,
+  ): ServiceResult<SessionView> {
+    const parent = this.db.getSession(parentSessionId);
+    if (!parent) return fail("session not found", 404);
+    const mode = parent.parentControl ?? "off";
+    if (mode === "off") return fail("Parent Control is off", 403);
+    if (!this.db.isSessionDescendant(parentSessionId, childSessionId) || !canAccess(childSessionId)) {
+      return fail("session not found", 404);
+    }
+    const child = this.db.getSession(childSessionId);
+    if (!child) return fail("session not found", 404);
+    const pending = pendingRequests(child.pendingApproval).find((request) => request.occurrenceId === occurrenceId);
+    if (!pending) return fail("descendant request occurrence is stale or no longer pending", 409);
+    if (!parentControlRequestEligible(mode, pending)) {
+      return fail("this request requires a human response", 403);
+    }
+    const unsupported = this.capabilityFailure(
+      child.runnerId,
+      "delegatedParentControl",
+      "Delegated Parent Control",
+    );
+    if (unsupported) return unsupported;
+    const actor: GovernanceActor = { kind: "agent", id: parentSessionId };
+    let result: ServiceResult<SessionView>;
+    if (resolution.action === "answer" || resolution.action === "dismiss") {
+      if (pending.kind !== "question") return fail("the descendant request is not a question", 409);
+      const answers = resolution.action === "answer" ? resolution.answers : {};
+      result = this.answerQuestion(
+        childSessionId,
+        pending.requestId,
+        answers,
+        actor,
+        resolution.action === "answer" ? "submit" : "dismiss",
+        parentSessionId,
+      );
+    } else {
+      if (pending.kind === "question") return fail("the descendant request is not an approval", 409);
+      if (!delegatedOptionMatchesAction(pending, resolution.optionId, resolution.action)) {
+        return fail(`the selected option cannot ${resolution.action} this delegated request`, 400);
+      }
+      result = this.approve(childSessionId, pending.requestId, resolution.optionId, actor, parentSessionId);
+    }
+    if (result.ok) this.hub.sessionChangedById(parentSessionId);
+    return result;
+  }
+
   /** Answer a structured agent question (pendingApproval.kind === "question"). Same guards as
    * approve(): only the pending request may be answered, and delivery precedes state mutation. */
   answerQuestion(
@@ -4744,6 +4920,7 @@ export class SessionsService {
     answers: Record<string, string | string[]>,
     actor: GovernanceActor = { kind: "human", id: "local" },
     action: "submit" | "dismiss" = Object.keys(answers).length > 0 ? "submit" : "dismiss",
+    resolvedByParentSessionId?: string,
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -4785,6 +4962,7 @@ export class SessionsService {
         requestId,
         recoveryId: pending.recoveryId,
         answers,
+        ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
       };
       const now = Date.now();
       try {
@@ -4830,7 +5008,10 @@ export class SessionsService {
       return ok(this.db.getSession(sessionId)!);
     }
 
-    const sent = this.hub.sendToRunner(session.runnerId, { type: "answer_question", sessionId, requestId, answers, action });
+    const sent = this.hub.sendToRunner(session.runnerId, {
+      type: "answer_question", sessionId, requestId, answers, action,
+      ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+    });
     if (!sent) {
       this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, Date.now(), {
         content: auditContent,
@@ -4870,6 +5051,7 @@ export class SessionsService {
     requestId: string,
     optionId: string | null,
     actor: GovernanceActor = { kind: "human", id: "local" },
+    resolvedByParentSessionId?: string,
   ): ServiceResult<SessionView> {
     const now = Date.now();
     this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -5084,8 +5266,14 @@ export class SessionsService {
     const sent = this.hub.sendToRunner(
       session.runnerId,
       pending.kind === "question"
-        ? { type: "answer_question", sessionId, requestId, answers: {}, action: "dismiss" }
-        : { type: "resolve_permission", sessionId, requestId, optionId },
+        ? {
+            type: "answer_question", sessionId, requestId, answers: {}, action: "dismiss",
+            ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+          }
+        : {
+            type: "resolve_permission", sessionId, requestId, optionId,
+            ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+          },
     );
     if (!sent) {
       this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, now, { optionId });
@@ -7461,6 +7649,7 @@ export class SessionsService {
       const approval: PendingApproval = {
         ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
         requestId: payload.requestId,
+        ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
         title: payload.title,
         options: payload.options,
         ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
@@ -7524,6 +7713,9 @@ export class SessionsService {
       // Auto-allow is strictly single-shot. A hard deny may cancel the provider request with null
       // when it offers no reject_once option; it must never weaken into a human-overridable ask.
       const effectiveEffect = policyDecision.effect === "allow" && !policyOption ? "ask" : policyDecision.effect;
+      if (effectiveEffect === "ask" && policyDecision.policy) {
+        approval.governancePolicyId = policyDecision.policy.policyId;
+      }
       if (policyDecision.policy) {
         this.recordGovernanceAudit(
           session,
@@ -7604,6 +7796,7 @@ export class SessionsService {
       const approval: PendingApproval = {
         ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
         requestId: payload.requestId,
+        ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
         title: payload.questions[0]?.question ?? "The agent has a question",
         options: [],
         kind: "question",
@@ -7981,6 +8174,7 @@ export class SessionsService {
     if (payload.kind === "permission_request") {
       return addPendingRequest(trailingAsk, {
         requestId: payload.requestId,
+        ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
         title: payload.title,
         options: payload.options,
         ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
@@ -7991,6 +8185,7 @@ export class SessionsService {
     if (payload.kind === "question_request") {
       return addPendingRequest(trailingAsk, {
         requestId: payload.requestId,
+        ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
         title: payload.questions[0]?.question ?? "The agent has a question",
         options: [],
         kind: "question",
