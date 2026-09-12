@@ -178,6 +178,112 @@ test("terminal missing continuations show age and acknowledge independently with
   }
 });
 
+test("missing-result feedback stays with its session across same-id rerenders and overlapping requests", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const requests: Array<{
+    sessionId: string;
+    resolve: (value: SessionView) => void;
+    reject: (reason: unknown) => void;
+  }> = [];
+  const client = {
+    acknowledgeBackgroundMissingResult: (sessionId: string) => new Promise<SessionView>((resolve, reject) => {
+      requests.push({ sessionId, resolve, reject });
+    }),
+  } as unknown as ApiClient;
+  const renderSession = (sessionId: string, missingResultAcknowledgedAt?: number) => root.render(
+    <ApiProvider client={client}>
+      <BackgroundWorkPanel
+        session={{
+          id: sessionId,
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [],
+          backgroundDeliveries: [{
+            continuationId: "bgcont-shared",
+            parentTurnId: `turn-${sessionId}`,
+            jobCount: 1,
+            terminalCount: 1,
+            acceptedAt: 10_000,
+            missingResultAt: 20_000,
+            missingResultAcknowledgedAt,
+            watchdogState: "accepted_without_result",
+          }],
+        } as unknown as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />
+    </ApiProvider>
+  );
+  const button = () => container.querySelector<HTMLButtonElement>("button")!;
+  try {
+    await act(async () => renderSession("session-a"));
+    await act(async () => {
+      button().click();
+      await Promise.resolve();
+    });
+    assert.equal(requests[0]?.sessionId, "session-a");
+    assert.equal(button().disabled, true);
+    assert.equal(button().textContent, "Acknowledging…");
+
+    await act(async () => renderSession("session-b"));
+    assert.equal(button().disabled, false,
+      "session A's same-id request must not make session B look busy");
+    assert.equal(button().textContent, "Acknowledge Missing Result");
+    await act(async () => {
+      button().click();
+      await Promise.resolve();
+    });
+    assert.deepEqual(requests.map((request) => request.sessionId), ["session-a", "session-b"]);
+    assert.equal(button().textContent, "Acknowledging…");
+
+    await act(async () => {
+      requests[0]!.reject(new Error("Session A acknowledgement failed."));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(button().disabled, true,
+      "session A's late settlement must not clear session B's newer request");
+    assert.equal(button().textContent, "Acknowledging…");
+    assert.equal(container.querySelector('[role="alert"]'), null,
+      "session A's late error must not appear in session B");
+
+    await act(async () => {
+      requests[1]!.resolve({} as SessionView);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.match(container.textContent ?? "", /Missing Result Acknowledged/,
+      "session B retains its own successful optimistic acknowledgement");
+
+    await act(async () => renderSession("session-c", 30_000));
+    assert.match(container.textContent ?? "", /Missing Result Acknowledged/,
+      "a durable server acknowledgement remains authoritative without local state");
+    assert.equal(container.querySelector<HTMLButtonElement>("button"), null);
+
+    await act(async () => renderSession("session-a"));
+    assert.equal(container.querySelector('[role="alert"]')?.textContent,
+      "Session A acknowledgement failed.",
+      "the late error remains available only in its originating session");
+    assert.equal(button().disabled, false);
+
+    await act(async () => renderSession("session-a", 30_000));
+    assert.match(container.textContent ?? "", /Missing Result Acknowledged/,
+      "durable acknowledgement supersedes the same session's transient failure");
+    assert.equal(container.querySelector('[role="alert"]'), null,
+      "durable acknowledgement clears the stale local error from view");
+    assert.equal(container.querySelector<HTMLButtonElement>("button"), null);
+  } finally {
+    for (const request of requests) request.resolve({} as SessionView);
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("terminal missing history remains actionable without a watchdog but yields to late proof", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

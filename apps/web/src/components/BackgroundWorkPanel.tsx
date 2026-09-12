@@ -72,6 +72,19 @@ interface BackgroundJobGroup {
   deliveries: BackgroundDeliveryView[];
 }
 
+type AcknowledgementFeedback = {
+  token: symbol;
+  state: "pending";
+} | {
+  token: symbol;
+  state: "error";
+  message: string;
+};
+
+function acknowledgementKey(sessionId: string, continuationId: string): string {
+  return JSON.stringify([sessionId, continuationId]);
+}
+
 function deliveryTimestamp(delivery: BackgroundDeliveryView): number {
   return Math.max(
     delivery.queuedAt ?? 0,
@@ -174,12 +187,9 @@ export function BackgroundWorkPanel({
   selectedJobId?: string;
 }) {
   const api = useApi();
-  const [acknowledgingContinuationId, setAcknowledgingContinuationId] = useState<string | null>(null);
   const [locallyAcknowledged, setLocallyAcknowledged] = useState<ReadonlySet<string>>(() => new Set());
-  const [acknowledgementError, setAcknowledgementError] = useState<{
-    continuationId: string;
-    message: string;
-  } | null>(null);
+  const [acknowledgementFeedback, setAcknowledgementFeedback] =
+    useState<ReadonlyMap<string, AcknowledgementFeedback>>(() => new Map());
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
   const jobs = useMemo(() => (session.backgroundJobs ?? []).filter((job) =>
     selectedJobId === undefined || job.id === selectedJobId), [session.backgroundJobs, selectedJobId]);
@@ -269,7 +279,7 @@ export function BackgroundWorkPanel({
               (session.backgroundJobsTruncated === true && recordedJobCount <= group.jobs.length);
             const locallyAcknowledgedDelivery = (delivery: BackgroundDeliveryView) =>
               delivery.continuationId != null && locallyAcknowledged.has(
-                JSON.stringify([session.id, delivery.continuationId]),
+                acknowledgementKey(session.id, delivery.continuationId),
               );
             const deliveryComplete = (groupDeliveries.length > 0 &&
               groupDeliveries.every((delivery) => delivery.runnerResultPersistedAt != null)) ||
@@ -323,7 +333,11 @@ export function BackgroundWorkPanel({
                   const continuationId = delivery.continuationId;
                   const localAcknowledgementKey = continuationId == null
                     ? null
-                    : JSON.stringify([session.id, continuationId]);
+                    : acknowledgementKey(session.id, continuationId);
+                  const feedback = localAcknowledgementKey == null
+                    ? undefined
+                    : acknowledgementFeedback.get(localAcknowledgementKey);
+                  const acknowledging = feedback?.state === "pending";
                   const acknowledged = delivery.missingResultAcknowledgedAt != null ||
                     locallyAcknowledgedDelivery(delivery);
                   const isMissing = delivery.missingResultAt != null;
@@ -360,25 +374,45 @@ export function BackgroundWorkPanel({
                       </dl>
                       {!acknowledged && isMissing && delivery.runnerResultPersistedAt == null && continuationId && (
                         <button type="button" className="btn ghost sm"
-                          disabled={acknowledgingContinuationId === continuationId}
+                          disabled={acknowledging}
                           onClick={() => {
-                            setAcknowledgingContinuationId(continuationId);
-                            setAcknowledgementError(null);
+                            const token = Symbol("missing-result-acknowledgement");
+                            setAcknowledgementFeedback((current) => {
+                              const next = new Map(current);
+                              next.set(localAcknowledgementKey!, { token, state: "pending" });
+                              return next;
+                            });
                             void api.acknowledgeBackgroundMissingResult(session.id, continuationId)
                               .then(() => setLocallyAcknowledged((current) =>
                                 new Set(current).add(localAcknowledgementKey!)))
-                              .catch((error: unknown) => setAcknowledgementError({
-                                continuationId,
-                                message: error instanceof Error
-                                  ? error.message
-                                  : "Missing-result acknowledgement failed.",
+                              .catch((error: unknown) => setAcknowledgementFeedback((current) => {
+                                if (current.get(localAcknowledgementKey!)?.token !== token) return current;
+                                const next = new Map(current);
+                                next.set(localAcknowledgementKey!, {
+                                  token,
+                                  state: "error",
+                                  message: error instanceof Error
+                                    ? error.message
+                                    : "Missing-result acknowledgement failed.",
+                                });
+                                return next;
                               }))
-                              .finally(() => setAcknowledgingContinuationId(null));
+                              .finally(() => setAcknowledgementFeedback((current) => {
+                                const settled = current.get(localAcknowledgementKey!);
+                                if (settled?.token !== token || settled.state !== "pending") return current;
+                                const next = new Map(current);
+                                next.delete(localAcknowledgementKey!);
+                                return next;
+                              }));
                           }}>
-                          {acknowledgingContinuationId === continuationId
+                          {acknowledging
                             ? "Acknowledging…"
                             : "Acknowledge Missing Result"}
                         </button>
+                      )}
+                      {feedback?.state === "error" && !acknowledged && isMissing &&
+                        delivery.runnerResultPersistedAt == null && (
+                        <p className="hint warn" role="alert">{feedback.message}</p>
                       )}
                       <details>
                         <summary>Technical Details</summary>
@@ -392,10 +426,6 @@ export function BackgroundWorkPanel({
                     </div>
                   );
                 })}
-                {acknowledgementError && groupDeliveries.some((delivery) =>
-                  delivery.continuationId === acknowledgementError.continuationId) && (
-                  <p className="hint warn" role="alert">{acknowledgementError.message}</p>
-                )}
                 <div className="background-work-barrier" role="group"
                   aria-label={deliveryOnly ? "Delivery Receipt Status" : "Barrier Status"}>
                   <span>{deliveryOnly ? "Delivery Receipt" : "Barrier"}</span>
