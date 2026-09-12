@@ -60,10 +60,17 @@ enough to move the outcome. `fc-match "Segoe UI"` tells you what a given machine
 So when an assertion's **margin** depends on text advance width, measure it twice: once in the
 ambient face, once with a wide face pinned — having first proved that face actually resolved, because
 an absent family falls through to the ambient one and the second pass silently re-measures the first.
-`inbox-threads.spec.ts` has a working implementation. #984 tracks lifting it into a shared helper.
+Use `pinWidestFace(page, scope)` from `font-geometry.ts` for that second pass. It verifies that a
+candidate face actually resolves, pins the widest verified candidate on the supplied subtree, and
+returns its name for the assertion message. If no candidate resolves, it names the font packages to
+install rather than silently repeating the ambient measurement.
 
 An assertion that compares two text measurements which scale together, or that reads a structural
 fact such as a resolved track count, needs only the ambient pass.
+
+For example, `status-badge-parity.spec.ts` needs no pinned pass: its badge comparisons use the same
+font and scale together, while its responsive status-row assertions derive which badges fit from
+the current face instead of expecting a particular wrap.
 
 ### There is no automated check for this — yet
 
