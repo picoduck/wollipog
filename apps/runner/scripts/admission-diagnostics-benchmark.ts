@@ -9,6 +9,7 @@ import { SessionStore } from "../src/session-store.js";
 const WAITER_COUNT = 50_000;
 const TURN_BOUNDARY_CYCLES = 1_000;
 const MAX_ELAPSED_MS = 5_000;
+const MAX_TURN_BOUNDARY_ELAPSED_MS = 5_000;
 const root = mkdtempSync(join(tmpdir(), "wollipog-capacity-benchmark-"));
 
 try {
@@ -80,6 +81,9 @@ try {
   const cyclesElapsedMs = performance.now() - cyclesStartedAt;
   assert.equal(residentLeaseRootScans, 1,
     "active-turn reports must reuse the unchanged 256-slot resident observation");
+  assert.ok(cyclesElapsedMs < MAX_TURN_BOUNDARY_ELAPSED_MS,
+    `turn-boundary diagnostics took ${cyclesElapsedMs.toFixed(1)}ms ` +
+    `(limit ${MAX_TURN_BOUNDARY_ELAPSED_MS}ms)`);
   console.log(JSON.stringify({
     waiters: WAITER_COUNT,
     capacity: 256,
@@ -90,6 +94,7 @@ try {
     maxElapsedMs: MAX_ELAPSED_MS,
     turnBoundaryCycles: TURN_BOUNDARY_CYCLES,
     turnBoundaryElapsedMs: Number(cyclesElapsedMs.toFixed(1)),
+    maxTurnBoundaryElapsedMs: MAX_TURN_BOUNDARY_ELAPSED_MS,
   }));
   manager.shutdownAll();
 } finally {

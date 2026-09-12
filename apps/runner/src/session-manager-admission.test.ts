@@ -359,6 +359,51 @@ test("cached capacity observations detect sibling mutations, partial-slot expiry
   }
 });
 
+test("capacity observation caching does not certify concurrent mutations or partial scans", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-observation-races-"));
+  try {
+    const gate = new BoxAdmission(root, 2);
+    const sibling = new BoxAdmission(root, 2);
+    assert.equal(sibling.acquire({ sessionId: "sibling", agentId: "claude", weight: 2 }), true);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = gate as any;
+    const inspectSlot = internals.inspectSlot.bind(gate) as (path: string) => { used: boolean };
+    const rootSignature = internals.rootSignature.bind(gate) as (path: string) => string;
+    let generation = "before-release";
+    let released = false;
+    internals.rootSignature = () => generation;
+    internals.inspectSlot = (path: string) => {
+      const inspected = inspectSlot(path);
+      if (!released) {
+        released = true;
+        sibling.release("sibling");
+        generation = "after-release";
+      }
+      return inspected;
+    };
+    assert.equal(gate.observe().usedCapacity, 1,
+      "the racing scan may conservatively retain the entry it already inspected");
+    internals.inspectSlot = inspectSlot;
+    assert.equal(gate.observe().usedCapacity, 0,
+      "a mutation during the scan leaves the cached generation stale and forces a rescan");
+    internals.rootSignature = rootSignature;
+
+    assert.equal(sibling.acquire({ sessionId: "sibling-again", agentId: "claude", weight: 2 }), true);
+    let inspections = 0;
+    internals.inspectSlot = (path: string) => {
+      if (++inspections === 2) throw new Error("simulated stale-slot cleanup failure");
+      return inspectSlot(path);
+    };
+    assert.equal(gate.observe().usedCapacity, 0, "an interrupted scan preserves the fail-closed legacy result");
+    internals.inspectSlot = inspectSlot;
+    assert.equal(gate.observe().usedCapacity, 2,
+      "an interrupted scan is not cached and the next observation retries every slot");
+    sibling.releaseAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("capacity status deterministically summarizes blocker groups beyond the wire bound", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-admission-overflow-"));
   try {
@@ -1293,6 +1338,13 @@ test("an unconfirmed parking retirement is contained while another idle provider
           dispose: () => { throw new Error("forced dispose failed"); },
         };
       }
+      if (providerId === "provider-2") {
+        return {
+          ...client,
+          close: async () => true,
+          dispose: () => { throw new Error("async forced dispose failed"); },
+        };
+      }
       return { ...client, close: async () => true };
     };
     const manager = new SessionManager(
@@ -1305,12 +1357,12 @@ test("an unconfirmed parking retirement is contained while another idle provider
       undefined,
       factory as never,
       root,
-      2,
+      3,
       undefined,
       undefined,
       { agentLimits: {}, agentWeights: {}, idleProcessPolicy: "park_when_needed" },
     );
-    for (const id of ["stuck", "closable"]) {
+    for (const id of ["sync-stuck", "async-stuck", "closable"]) {
       assert.equal(await manager.start(launchSpec(root, id), `warm ${id}`), true);
       for (let attempt = 0; attempt < 100 && store.readMeta(id)?.status !== "idle"; attempt++) {
         await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -1328,15 +1380,20 @@ test("an unconfirmed parking retirement is contained while another idle provider
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = manager as any;
-    assert.equal(internals.closing.get("stuck")?.unconfirmed, true);
-    assert.equal(internals.admitted.has("stuck"), true, "the unconfirmed process keeps its resident lease");
+    assert.equal(internals.closing.get("sync-stuck")?.unconfirmed, true);
+    assert.equal(internals.closing.get("async-stuck")?.unconfirmed, true);
+    assert.equal(internals.admitted.has("sync-stuck"), true,
+      "the synchronously unconfirmed process keeps its resident lease");
+    assert.equal(internals.admitted.has("async-stuck"), true,
+      "the asynchronously unconfirmed process keeps its resident lease");
     assert.equal(internals.closing.has("closable"), false, "the independent retirement completed exactly");
     const current = manager.capacityState();
-    assert.equal(current.usedUnits, 2);
-    assert.equal(current.dimensions?.residentProcessUnits.used, 2);
+    assert.equal(current.usedUnits, 3);
+    assert.equal(current.dimensions?.residentProcessUnits.used, 3);
     assert.equal(current.dimensions?.parkedSessions, 1,
       "only the exactly retired provider is reported as parked");
-    assert.ok(logs.some((message) => message.includes("parking idle provider stuck remains unconfirmed")));
+    assert.ok(logs.some((message) => message.includes("parking idle provider sync-stuck remains unconfirmed")));
+    assert.ok(logs.some((message) => message.includes("session async-stuck provider retirement remains unconfirmed")));
     for (const report of reports) {
       assert.equal(report.usedUnits, report.dimensions?.residentProcessUnits.used);
       assert.equal(report.availableUnits, Math.max(0, report.configuredUnits - report.usedUnits));
@@ -1344,10 +1401,13 @@ test("an unconfirmed parking retirement is contained while another idle provider
     }
 
     exits.get("provider-1")?.(1);
-    assert.equal(internals.closing.has("stuck"), false);
-    assert.equal(internals.admitted.has("stuck"), false);
-    assert.equal(manager.capacityState().dimensions?.parkedSessions, 2,
-      "the failed candidate becomes parked only after its exact exit callback");
+    exits.get("provider-2")?.(1);
+    assert.equal(internals.closing.has("sync-stuck"), false);
+    assert.equal(internals.closing.has("async-stuck"), false);
+    assert.equal(internals.admitted.has("sync-stuck"), false);
+    assert.equal(internals.admitted.has("async-stuck"), false);
+    assert.equal(manager.capacityState().dimensions?.parkedSessions, 3,
+      "failed candidates become parked only after their exact exit callbacks");
     manager.stop("new");
     await internals.closing.get("new")?.promise;
     manager.shutdownAll();

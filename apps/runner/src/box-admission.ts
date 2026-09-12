@@ -269,6 +269,9 @@ export class BoxAdmission {
   }
 
   private usedSlots(root: string): number {
+    // Capture the generation before reading entries. If a sibling mutates the root during this
+    // scan, the cached generation is stale in the safe direction and the next observation rescans.
+    const signature = this.rootSignature(root);
     let used = 0;
     const ownerPids = new Set<number>();
     let recheckAt: number | undefined;
@@ -283,9 +286,18 @@ export class BoxAdmission {
           recheckAt = Math.min(recheckAt ?? inspected.recheckAt, inspected.recheckAt);
         }
       }
-    } catch { /* a missing root has no used slots */ }
+    } catch {
+      // A missing optional quota root is a stable zero. Any other failure may have interrupted a
+      // partial scan, which must never become a reusable diagnostic snapshot.
+      if (signature === "missing") {
+        this.observationCache.set(root, { signature, used: 0, ownerPids: [] });
+      } else {
+        this.observationCache.delete(root);
+      }
+      return 0;
+    }
     this.observationCache.set(root, {
-      signature: this.rootSignature(root),
+      signature,
       used,
       ownerPids: [...ownerPids],
       ...(recheckAt === undefined ? {} : { recheckAt }),
