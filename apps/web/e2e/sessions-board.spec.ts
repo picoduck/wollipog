@@ -68,6 +68,102 @@ test("the reminder and mode controls use scoped badges and compact mobile icons"
   expect(geometry.contained).toBe(true);
 });
 
+test("the Inbox footer centers readable counts on phones and keeps shortcuts trailing on desktop", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openHarness(page);
+
+  const footer = page.locator('footer[aria-label="Inbox Status and Shortcuts"]');
+  const summary = footer.getByLabel("Inbox Activity Summary");
+  const shortcuts = footer.locator(".inbox-shortcut-rail");
+  await expect(shortcuts).toBeVisible();
+  await expect(shortcuts.getByRole("button", { name: "Reply" })).toBeVisible();
+  const desktopGeometry = await footer.evaluate((element) => {
+    const rail = element.querySelector<HTMLElement>(".inbox-shortcut-rail")!.getBoundingClientRect();
+    const bounds = element.getBoundingClientRect();
+    return {
+      contained: element.scrollWidth <= element.clientWidth,
+      railTrailingGap: bounds.right - rail.right,
+    };
+  });
+  expect(desktopGeometry.contained).toBe(true);
+  expect(desktopGeometry.railTrailingGap).toBeLessThanOrEqual(9);
+
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(shortcuts).toBeHidden();
+    await expect(summary.locator("span")).toHaveText([
+      "0 Running",
+      "0 Queued",
+      "0 Starting",
+      "1 Blocked",
+      "0 Stalled",
+    ]);
+
+    const phoneGeometry = await footer.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const counts = element.querySelector<HTMLElement>(".inbox-activity-summary")!.getBoundingClientRect();
+      return {
+        centered: Math.abs((counts.left + counts.right) / 2 - (bounds.left + bounds.right) / 2),
+        contained: element.scrollWidth <= element.clientWidth,
+        height: bounds.height,
+      };
+    });
+    expect(phoneGeometry.centered).toBeLessThanOrEqual(1);
+    expect(phoneGeometry.contained).toBe(true);
+    expect(phoneGeometry.height).toBe(34);
+  }
+
+  const wideFace = await page.evaluate(() => {
+    const widthIn = (family: string) => {
+      const probe = document.createElement("span");
+      probe.textContent = "12 Running 24 Blocked 5 Stalled";
+      probe.style.cssText =
+        `position:absolute;visibility:hidden;white-space:nowrap;font-size:11px;font-family:${family}`;
+      document.body.append(probe);
+      const width = probe.getBoundingClientRect().width;
+      probe.remove();
+      return width;
+    };
+    const absent = widthIn('"a face no machine has, 96d10"');
+    return ["DejaVu Sans", "Liberation Sans"].find((face) => widthIn(`"${face}"`) !== absent) ?? null;
+  });
+  expect(wideFace, "no wide face to measure: install fonts-dejavu-core (CI renders in DejaVu Sans)")
+    .not.toBeNull();
+  await page.addStyleTag({
+    content: `.inbox-activity-footer, .inbox-activity-footer * { font-family: "${wideFace}" !important; }`,
+  });
+  const crowdedCounts = ["12 Running", "8 Queued", "3 Starting", "24 Blocked", "5 Stalled"];
+  await summary.locator("span").evaluateAll((spans, values) => {
+    for (const [index, span] of spans.entries()) span.textContent = values[index]!;
+  }, crowdedCounts);
+  await expect(summary.locator("span")).toHaveText(crowdedCounts);
+  const crowdedGeometry = await footer.evaluate((element) => ({
+    contained: element.scrollWidth <= element.clientWidth,
+    summaryContained: element.querySelector<HTMLElement>(".inbox-activity-summary")!.scrollWidth <=
+      element.querySelector<HTMLElement>(".inbox-activity-summary")!.clientWidth,
+  }));
+  expect(crowdedGeometry.contained).toBe(true);
+  expect(crowdedGeometry.summaryContained).toBe(true);
+
+  const overflowingCounts = ["1234 Running", "5678 Queued", "9012 Starting", "3456 Blocked", "7890 Stalled"];
+  await summary.locator("span").evaluateAll((spans, values) => {
+    for (const [index, span] of spans.entries()) span.textContent = values[index]!;
+  }, overflowingCounts);
+  const leadingOverflow = await footer.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const padding = Number.parseFloat(getComputedStyle(element).paddingInlineStart);
+    const firstCount = element.querySelector<HTMLElement>(".inbox-activity-summary span")!.getBoundingClientRect();
+    return bounds.left + padding - firstCount.left;
+  });
+  expect(leadingOverflow, "an over-wide summary keeps its leading count reachable").toBeLessThanOrEqual(0.5);
+
+  await page.getByRole("radio", { name: "Board" }).click();
+  await expect(footer).toHaveCount(0);
+  await page.getByRole("radio", { name: "List" }).click();
+  await expect(summary).toBeVisible();
+  await expect(shortcuts).toBeHidden();
+});
+
 test("a returned session explains its snooze and offers state-aware actions", async ({ page }) => {
   await openHarness(page);
   const row = page.locator(".inbox-row-shell", { hasText: "Review Session" });
