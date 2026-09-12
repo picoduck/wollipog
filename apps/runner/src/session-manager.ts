@@ -8302,6 +8302,9 @@ export class SessionManager {
         });
         this.emitStatus(sessionId, "stopped");
       }
+      if (!this.closing.has(sessionId) && !rebinding) {
+        this.releaseAdmissionIfInactive(sessionId);
+      }
       if (authenticationBlock) this.surfaceProviderAuthentication(authenticationBlock.credentialScopeId);
       return;
     }

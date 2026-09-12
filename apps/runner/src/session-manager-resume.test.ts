@@ -1744,6 +1744,8 @@ test("Stop during provider authentication preflight cannot revive the terminal s
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
     assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
     assert.equal(h.prompts.length, 0);
+    assert.equal((h.manager as any).admitted.has("resume-session"), false);
+    assert.equal(h.manager.capacityState().usedUnits, 0);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
