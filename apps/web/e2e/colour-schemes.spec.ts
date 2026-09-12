@@ -29,13 +29,18 @@ const AA = 4.5;
 
 async function measure(page: Page) {
   return page.evaluate(() => {
+    const colourProbe = document.createElement("span");
+    colourProbe.style.transition = "none";
+    document.body.append(colourProbe);
     const parse = (value: string) => {
-      // Chromium serialises a `color-mix()` result as `color(srgb 0.51 0.73 0.98)` — components in
-      // 0-1, not 0-255. Reading those as bytes made a light blue label parse as near-black and
-      // measure 1.09:1 against a dark page, which looked exactly like a palette failure and was a
-      // failure to read the palette.
-      const srgb = /^color\(\s*srgb/.test(value);
-      const parts = value.match(/[\d.]+/g)?.map(Number) ?? [];
+      // Computed colours keep whichever standards-compliant colour space Chromium used. In 153,
+      // the same colour can arrive as `color(srgb ...)` or `oklab(...)`; reading oklab's 0-1
+      // lightness as an RGB byte produced the exact false 1.3:1 failures this harness reported.
+      // Let the browser convert its own CSS value to sRGB before doing the WCAG arithmetic.
+      colourProbe.style.color = `color-mix(in srgb, ${value} 100%, transparent)`;
+      const normalised = getComputedStyle(colourProbe).color;
+      const srgb = /^color\(\s*srgb/.test(normalised);
+      const parts = normalised.match(/-?(?:\d*\.)?\d+(?:e[+-]?\d+)?/gi)?.map(Number) ?? [];
       const scale = srgb ? 255 : 1;
       return {
         r: (parts[0] ?? 0) * scale,
@@ -133,6 +138,7 @@ async function measure(page: Page) {
         results.push({ label: `${path} "${own.slice(0, 24)}"`, ratio: ratio(painted, ground) });
       }
     }
+    colourProbe.remove();
     return { results, unsupported };
   });
 }
@@ -156,6 +162,39 @@ for (const scheme of SCHEMES) {
     });
   }
 }
+
+test("equivalent oklab computed colours retain their rendered contrast", async ({ page }) => {
+  await page.goto("/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  await expect(page.locator(".slash-item.active")).toBeVisible();
+
+  // Chromium may preserve a standards-compliant colour space while serialising computed styles.
+  // These relative colours are visually identical to the production tokens, but force the oklab
+  // representation that previously made the measurement parser report false ~1.3:1 ratios.
+  await page.addStyleTag({ content: `
+    .st-running { color: oklab(from var(--blue-on-tint) l a b / alpha); }
+    .st-input { color: oklab(from var(--amber-on-tint) l a b / alpha); }
+    .st-done { color: oklab(from var(--green-on-tint) l a b / alpha); }
+    .btn.danger { color: oklab(from var(--red-on-strong-tint) l a b / alpha); }
+  ` });
+  await expect(page.locator(".st-running")).toHaveCSS("color", /^oklab\(/);
+
+  const { results: measured, unsupported } = await measure(page);
+  expect(unsupported, "group opacity is not modelled; no measured path may contain it").toEqual([]);
+  const failures = measured
+    .filter((entry) => entry.ratio < AA)
+    .map((entry) => `${entry.label} is ${entry.ratio.toFixed(2)}:1`);
+  expect(failures, "equivalent oklab colours retain their accessible contrast").toEqual([]);
+
+  await page.locator(".st-running").evaluate((element) => {
+    const style = (element as HTMLElement).style;
+    style.transitionProperty = "none";
+    style.color = "oklab(from var(--bg) l a b / alpha)";
+    style.backgroundColor = "oklab(from var(--bg) l a b / alpha)";
+  });
+  await expect(page.locator(".st-running")).toHaveCSS("background-color", /^oklab\(/);
+  const lowContrast = (await measure(page)).results.find((entry) => entry.label.includes("span.st-running"));
+  expect(lowContrast?.ratio, "a genuine oklab contrast failure remains visible").toBeLessThan(AA);
+});
 
 for (const scheme of SCHEMES) {
   for (const theme of THEMES) {
