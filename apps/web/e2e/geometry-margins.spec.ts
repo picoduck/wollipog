@@ -5,12 +5,29 @@ test("geometry bounds require measured headroom and name a narrow margin", () =>
   expect(MINIMUM_GEOMETRY_HEADROOM).toBe(0.1);
 
   expectGeometry(90, "a generous lower bound").toBeGreaterThan(40);
+  expectGeometry(50, "an inclusive lower bound").toBeGreaterThanOrEqual(40);
+  expectGeometry(70, "a strict upper bound").toBeLessThan(80);
   expectGeometry(0, "a containment tolerance").toBeLessThanOrEqual(0.5);
+  expectGeometry(0.5, "the documented half-pixel tolerance").toBeLessThanOrEqual(0.61);
 
   expect(() => expectGeometry(42, "the branch keeps a safe share").toBeGreaterThan(40))
     .toThrow(/the branch keeps a safe share: geometry margin 2 is below 4 .*observed 42, bound 40/);
   expect(() => expectGeometry(87, "the card height has renderer headroom").toBeLessThanOrEqual(88))
     .toThrow(/geometry margin 1 is below 8\.8000 .*observed 87, bound 88/);
+});
+
+test("geometry bounds reject invalid values and missing reasons actionably", async () => {
+  expect(() => expectGeometry(Number.NaN, "a finite observation").toBeGreaterThan(0))
+    .toThrow(/observed geometry must be a finite number; received NaN/);
+  expect(() => expectGeometry(1, "a finite bound").toBeLessThan(Number.POSITIVE_INFINITY))
+    .toThrow(/geometry bound must be a finite number; received Infinity/);
+  expect(() => expectGeometry(1, "   ").toBeGreaterThan(0))
+    .toThrow(/a geometry assertion must state why the bound is safe/);
+  expect(() => expectGeometryPoll(() => 1, "   "))
+    .toThrow(/a geometry assertion must state why the bound is safe/);
+  await expect(
+    expectGeometryPoll(() => 1, "a finite poll bound").toBeLessThan(Number.POSITIVE_INFINITY),
+  ).rejects.toThrow(/geometry bound must be a finite number; received Infinity/);
 });
 
 test("a polled geometry bound checks the sample that actually settled", async () => {
@@ -29,4 +46,26 @@ test("a polled geometry bound checks the sample that actually settled", async ()
     return 0;
   }, "transient samples retry until they have headroom").toBeLessThanOrEqual(1);
   expect(samples).toBe(3);
+});
+
+test("a polled lower bound retries until the adjusted bound has headroom", async () => {
+  let samples = 0;
+  await expectGeometryPoll(() => {
+    samples += 1;
+    if (samples === 1) return Number.NEGATIVE_INFINITY;
+    if (samples === 2) return 10.5;
+    return 12;
+  }, "the lower bound settles above its required margin").toBeGreaterThan(10);
+  expect(samples).toBe(3);
+});
+
+test("polled strict and inclusive aliases keep their intended directions", async () => {
+  await expectGeometryPoll(
+    () => 12,
+    "the inclusive lower-bound alias keeps the above direction",
+  ).toBeGreaterThanOrEqual(10);
+  await expectGeometryPoll(
+    () => 0,
+    "the strict upper-bound alias keeps the below direction",
+  ).toBeLessThan(1);
 });
