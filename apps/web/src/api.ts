@@ -851,9 +851,10 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ mode }),
     }),
-  descendantRequests: (id: string) =>
+  descendantRequests: (id: string, signal?: AbortSignal) =>
     req<{ requests: DescendantRequestView[] }>(
       `/api/sessions/${encodeURIComponent(id)}/descendant-requests`,
+      { signal },
     ),
   childSessions: (id: string, eventEpoch: number, after = 0, limit = 50) => {
     const query = new URLSearchParams({ eventEpoch: String(eventEpoch), after: String(after), limit: String(limit) });

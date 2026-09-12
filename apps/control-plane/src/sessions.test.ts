@@ -1297,6 +1297,41 @@ test("Parent Control eligibility excludes secrets, authentication, policy gates,
   assert.equal(parentControlRequestEligible("questions", {
     ...question, questions: [{ ...question.questions[0]!, secret: true }],
   }), false);
+  const sensitiveQuestions = [
+    ["question id", { id: "openaiApiKey" }],
+    ["question header", { header: "OAuth2 Consent" }],
+    ["question text", { question: "Paste the SSH-key." }],
+    ["question context", { context: "Use the Authorization_Header." }],
+    ["option label", { options: [{ label: "MFA Code" }] }],
+    ["option description", { options: [{ label: "Continue", description: "Send browser cookies." }] }],
+    ["bearer token", { question: "Enter a BEARER token." }],
+    ["passphrase", { context: "Provide the passphrases" }],
+    ["2FA", { header: "2FA Challenge" }],
+    ["camelCase OAuth", { question: "Use oauthClientSecret" }],
+  ] as const;
+  for (const [field, patch] of sensitiveQuestions) {
+    assert.equal(parentControlRequestEligible("questions", {
+      ...question,
+      questions: [{ ...question.questions[0]!, ...patch }],
+    }), false, `${field} remains human-only`);
+  }
+  for (const id of [
+    "apiKeyId", "OAuthToken", "bearerToken", "passphraseValue", "sshKeyPath",
+    "cookieJar", "mfaCode", "twoFactor2FAResponse", "setAuthorizationHeader",
+  ]) {
+    assert.equal(parentControlRequestEligible("questions", {
+      ...question,
+      questions: [{ ...question.questions[0]!, id }],
+    }), false, `${id} remains human-only inside a camelCase identifier`);
+  }
+  assert.equal(parentControlRequestEligible("questions", {
+    ...question,
+    questions: [{
+      ...question.questions[0]!, id: "apikeynote", header: "OAuthics",
+      question: "A bearerish cookiest choice", context: "passphrasebook and sshkeynote",
+      options: [{ label: "Mfactor", description: "Continue normally" }],
+    }],
+  }), true, "credential substrings inside neutral words do not create false positives");
   assert.equal(parentControlRequestEligible("questions", {
     ...question, questions: [{ ...question.questions[0]!, question: "Which account should sign in?" }],
   }), false);
@@ -1343,6 +1378,37 @@ test("Parent Control eligibility excludes secrets, authentication, policy gates,
   assert.equal(parentControlRequestEligible("questions_and_approvals", {
     ...permission, context: { toolName: "Read", path: "/home/person/.aws/credentials" },
   }), false);
+  const sensitiveApprovals = [
+    ["title", { title: "OAuth Consent" }],
+    ["tool name", { context: { toolName: "setApiKey" } }],
+    ["input", { context: { toolName: "Bash", input: "Authorization: Bearer redacted" } }],
+    ["path", { context: { toolName: "Read", path: "/tmp/api_keys" } }],
+    ["network", { context: { toolName: "Fetch", network: "cookies.example" } }],
+    ["branch", { context: { toolName: "Git", branch: "rotate-passphrase" } }],
+    ["option id", { options: [{ optionId: "mfa", name: "Allow", kind: "allow_once" as const }] }],
+    ["option name", { options: [{ optionId: "once", name: "2FA Code", kind: "allow_once" as const }] }],
+    ["option description", { options: [{
+      optionId: "once", name: "Allow", description: "Use an API key", kind: "allow_once" as const,
+    }] }],
+    ["camelCase path", { context: { toolName: "Read", path: "/tmp/sshKeyPath" } }],
+  ] as const;
+  for (const [field, patch] of sensitiveApprovals) {
+    assert.equal(parentControlRequestEligible("questions_and_approvals", {
+      ...permission,
+      ...patch,
+    }), false, `approval ${field} remains human-only`);
+  }
+  assert.equal(parentControlRequestEligible("questions_and_approvals", {
+    ...permission,
+    title: "Bearerish Work",
+    context: {
+      toolName: "Mfactor", input: "cookiest", path: "/tmp/apikeynote",
+      network: "oauthics.example", branch: "passphrasebook-sshkeynote",
+    },
+    options: [{
+      optionId: "authorizationist", name: "Continue", description: "Neutral operation", kind: "allow_once",
+    }],
+  }), true, "approval credential substrings inside neutral words remain eligible");
   assert.equal(parentControlRequestEligible("questions_and_approvals", {
     ...permission, options: [{ optionId: "always", name: "Always Allow", kind: "allow_always" }],
   }), false);

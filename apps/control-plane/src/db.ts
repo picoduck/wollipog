@@ -9984,20 +9984,34 @@ export class ControlPlaneDb {
     `).get(targetId, ancestorId));
   }
 
-  /** Descendant rows only, so callers do not scan every archived session and issue one ancestry
-   * query per row. UNION terminates malformed cycles and the final predicate never returns self. */
-  listSessionDescendants(ancestorId: string): SessionView[] {
+  /** Descendant request candidates only, so Parent Control does not hydrate complete session views
+   * or scan every archived session. UNION terminates malformed cycles and never returns self. */
+  listSessionDescendantRequestCandidates(ancestorId: string): Array<{
+    id: string;
+    title: string;
+    runnerId: string;
+    pendingApproval: PendingApproval | null;
+  }> {
     const rows = this.stmt(`
       WITH RECURSIVE descendants(id) AS (
         SELECT id FROM sessions WHERE parent_session_id=?
         UNION
         SELECT s.id FROM sessions s JOIN descendants d ON s.parent_session_id=d.id
-      ) SELECT s.* FROM descendants d JOIN sessions s ON s.id=d.id
+      ) SELECT s.id, s.title, s.runner_id, s.pending_approval
+        FROM descendants d JOIN sessions s ON s.id=d.id
         WHERE s.id<>? ORDER BY s.created_at DESC, s.id ASC
-    `).all(ancestorId, ancestorId) as unknown as SessionRow[];
-    const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
-    const stopIntents = this.sessionStopIntents();
-    return rows.map((row) => this.sessionView(row, legacyTargets, stopIntents.get(row.id), false));
+    `).all(ancestorId, ancestorId) as unknown as Array<{
+      id: string;
+      title: string;
+      runner_id: string;
+      pending_approval: string | null;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      runnerId: row.runner_id,
+      pendingApproval: parseJson<PendingApproval>(row.pending_approval),
+    }));
   }
 
   childSessionAllocations(parentSessionId: string): {

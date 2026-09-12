@@ -105,7 +105,11 @@ test("Parent Control tools are orchestrator-only and bind resolutions to exact o
     : { status: 200, body: { session: { id: "child", status: "running" } } });
   deps.orchestrator = true;
   const listed = await callTool(deps, "list_descendant_requests");
-  assert.deepEqual(resultJson(listed), { requests: [{ sessionId: "child", occurrenceId: "request_1" }] });
+  assert.deepEqual(resultJson(listed), {
+    requests: [{ sessionId: "child", occurrenceId: "request_1" }],
+    truncated: false,
+    limit: 128,
+  });
   assert.equal(calls[0]?.method, "GET");
   assert.equal(calls[0]?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests`);
 
@@ -903,6 +907,33 @@ test("governance policy inspection and authoring tools preserve exact validated 
     scope: stored.scope,
     conditions: stored.conditions,
     askTimeout: stored.askTimeout,
+  });
+});
+
+test("Parent Control MCP reports when descendant requests exceed its response bound", async () => {
+  const source = Array.from({ length: 129 }, (_, index) => ({
+    sessionId: `child-${index}`,
+    occurrenceId: `request-${index}`,
+  }));
+  const { deps } = makeDeps(() => ({ status: 200, body: { requests: source } }));
+  deps.orchestrator = true;
+
+  const listed = resultJson(await callTool(deps, "list_descendant_requests")) as {
+    requests: typeof source;
+    truncated: boolean;
+    limit: number;
+  };
+  assert.equal(listed.requests.length, 128);
+  assert.deepEqual(listed.requests, source.slice(0, 128));
+  assert.equal(listed.truncated, true);
+  assert.equal(listed.limit, 128);
+
+  const exact = makeDeps(() => ({ status: 200, body: { requests: source.slice(0, 128) } }));
+  exact.deps.orchestrator = true;
+  assert.deepEqual(resultJson(await callTool(exact.deps, "list_descendant_requests")), {
+    requests: source.slice(0, 128),
+    truncated: false,
+    limit: 128,
   });
 });
 
