@@ -299,7 +299,7 @@ test.describe("New Session dialog keyboard contract", () => {
     await expect(project).toHaveAttribute("aria-expanded", "false");
 
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("alert")).toHaveText("Choose a Project or No Project.");
+    await expect(page.locator('.form-error[role="alert"]')).toHaveText("Choose a Project or No Project.");
     await expect(project).toBeFocused();
   });
 
@@ -313,7 +313,7 @@ test.describe("New Session dialog keyboard contract", () => {
 
     await page.keyboard.press("ControlOrMeta+Enter");
     const project = page.getByRole("combobox", { name: "Project" });
-    await expect(page.getByRole("alert")).toHaveText("Choose a Project or No Project.");
+    await expect(page.locator('.form-error[role="alert"]')).toHaveText("Choose a Project or No Project.");
     await expect(project).toBeFocused();
     await expect(project).toHaveAttribute("aria-expanded", "true");
 
@@ -349,6 +349,25 @@ test.describe("New Session dialog keyboard contract", () => {
     await expect.poll(async () => page.locator("html").getAttribute("data-create-session-count"))
       .toBe("1");
     await expect(page.getByRole("dialog", { name: "New Session" })).toHaveCount(0);
+  });
+
+  test("modified Enter submits from a Select trigger instead of reopening its list", async ({ page }) => {
+    await openDialogWithoutPointer(page);
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    const project = page.getByRole("combobox", { name: "Project" });
+    await expect(project).toBeFocused();
+    await page.keyboard.type("No Project");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(project).toHaveValue("No Project");
+
+    const workspace = page.getByRole("button", { name: /Workspace:/ });
+    await expect(workspace).toHaveAttribute("aria-expanded", "false");
+    await workspace.press("ControlOrMeta+Enter");
+    await expect(page.getByRole("dialog", { name: "New Session" })).toHaveCount(0);
+    await expect.poll(async () => page.locator("html").getAttribute("data-create-session-count"))
+      .toBe("1");
   });
 });
 

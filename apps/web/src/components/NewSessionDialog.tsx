@@ -500,11 +500,12 @@ export function NewSessionDialog({
   useEffect(() => {
     setValidationError(null);
   }, [
-    projectSelection, selectedProject, projectLocationId, projectLocationLaunchable,
-    runnerId, workspaceId, browsedPath, agentId, selectedAgentOption,
+    projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
+    runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled,
     defaultsReady, presetOverride, orchestrator, orchestratorSupported,
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
-    executionTargetId, executionTarget, cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
+    executionTargetId, executionTarget?.id, executionTarget?.available,
+    cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
   ]);
 
   // Keep the secondary shortcut local to this dialog. Unmodified Enter is native form behavior: an
@@ -672,7 +673,7 @@ export function NewSessionDialog({
         {projectsSupported && (
             <>
               <div className="field">
-                <label className="new-session-field-label" htmlFor={projectInputId}>Project</label>
+                <label htmlFor={projectInputId}>Project</label>
                 <SearchableCombobox<string>
                   inputId={projectInputId}
                   className="new-session-choice-control"
@@ -894,7 +895,7 @@ export function NewSessionDialog({
           )}
 
           <div className="field">
-            <label className="new-session-field-label" htmlFor={agentInputId}>Agent</label>
+            <label htmlFor={agentInputId}>Agent</label>
             <div className="agent-select">
               <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={15} />
               <SearchableCombobox<string>

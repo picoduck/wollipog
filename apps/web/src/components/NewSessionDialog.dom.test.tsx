@@ -299,12 +299,12 @@ test("modified Enter validates and focuses the first actionable problem", async 
     const projectInput = combobox(fixture.container, "Project");
     await act(async () => { pressFormShortcut(fixture.container); });
     assert.equal(fixture.requests.length, 0);
-    assert.equal(fixture.container.querySelector('[role="alert"]')?.textContent,
+    assert.equal(fixture.container.querySelector('.form-error[role="alert"]')?.textContent,
       "Choose a Project or No Project.");
     assert.equal((domWindow.document.activeElement as unknown) === projectInput, true,
       "validation moves focus to the first control that can fix the form");
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(fixture.container.querySelector('[role="alert"]'), null,
+    assert.equal(fixture.container.querySelector('.form-error[role="alert"]'), null,
       "correcting the reported problem clears its stale validation message");
   } finally {
     await unmountFixture(fixture);
@@ -959,8 +959,18 @@ test("a selected Location becoming unavailable disables submission and fails clo
       "Choose an available Project Location.",
     );
 
+    const stillUnavailableProject: ProjectView = { ...unavailableProject, updatedAt: 2 };
+    await act(async () => {
+      fixture.socket.push(snapshot({ projects: [stillUnavailableProject] }));
+    });
+    assert.equal(
+      fixture.container.querySelector('.form-error[role="alert"]')?.textContent,
+      "Choose an available Project Location.",
+      "a validity-neutral inventory refresh preserves actionable feedback",
+    );
+
     await act(async () => { fixture.socket.push(snapshot()); });
-    assert.equal(fixture.container.querySelector('[role="alert"]') === null, true,
+    assert.equal(fixture.container.querySelector('.form-error[role="alert"]') === null, true,
       "a validation-relevant live-state correction clears the stale diagnosis");
   } finally {
     await unmountFixture(fixture);

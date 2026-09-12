@@ -1050,7 +1050,10 @@ export function Select<T extends string>({
         onClick={() => { if (!disabled) (open ? popover.close(true) : openAt(options.findIndex((o) => o.value === value))); }}
         onKeyDown={(event) => {
           if (disabled) return;
-          if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ") {
+          // Modified Enter belongs to an enclosing form's explicit shortcut; only plain Enter
+          // owns this trigger's ordinary open-listbox behavior.
+          const unmodifiedEnter = event.key === "Enter" && !event.ctrlKey && !event.metaKey;
+          if (event.key === "ArrowDown" || event.key === "ArrowUp" || unmodifiedEnter || event.key === " ") {
             event.preventDefault();
             openAt(event.key === "ArrowUp" ? lastEnabledIndex : options.findIndex((o) => o.value === value));
           }
