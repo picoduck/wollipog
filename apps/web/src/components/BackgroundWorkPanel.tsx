@@ -410,7 +410,8 @@ export function BackgroundWorkPanel({
                             : "Acknowledge Missing Result"}
                         </button>
                       )}
-                      {feedback?.state === "error" && (
+                      {feedback?.state === "error" && !acknowledged && isMissing &&
+                        delivery.runnerResultPersistedAt == null && (
                         <p className="hint warn" role="alert">{feedback.message}</p>
                       )}
                       <details>

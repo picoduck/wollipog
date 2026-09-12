@@ -270,6 +270,13 @@ test("missing-result feedback stays with its session across same-id rerenders an
       "Session A acknowledgement failed.",
       "the late error remains available only in its originating session");
     assert.equal(button().disabled, false);
+
+    await act(async () => renderSession("session-a", 30_000));
+    assert.match(container.textContent ?? "", /Missing Result Acknowledged/,
+      "durable acknowledgement supersedes the same session's transient failure");
+    assert.equal(container.querySelector('[role="alert"]'), null,
+      "durable acknowledgement clears the stale local error from view");
+    assert.equal(container.querySelector<HTMLButtonElement>("button"), null);
   } finally {
     for (const request of requests) request.resolve({} as SessionView);
     await act(async () => root.unmount());
