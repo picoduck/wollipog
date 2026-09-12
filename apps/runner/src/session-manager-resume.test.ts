@@ -1501,6 +1501,9 @@ test("evidence-free identity mismatch offers accurate redacted recovery guidance
     assert.match(guidance, /Choose Use Current Account/);
     assert.match(guidance, /choose Recheck Authentication/);
     assert.doesNotMatch(guidance, /current-secret|opaque-current|opaque-recorded/);
+    assert.ok(h.logs.some((line) => /provider authentication identity could not be confirmed/i.test(line)));
+    assert.ok(h.logs.every((line) =>
+      !/account identity mismatch|current-secret|opaque-current|opaque-recorded/i.test(line)));
     assert.deepEqual(options.slice(0, 2).map((option) => option.name), [
       "Use Current Account",
       "Recheck Authentication",
