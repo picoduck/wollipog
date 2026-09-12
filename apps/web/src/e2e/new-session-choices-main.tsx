@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
   type AgentHarnessDefaultsView,
+  type CreateSessionRequest,
   type ProjectView,
   type RunnerView,
   type UiSnapshotMessage,
@@ -161,6 +162,15 @@ const defaults: AgentHarnessDefaultsView = { defaults: [] };
 const client = {
   ...api,
   agentHarnessDefaults: async () => defaults,
+  createSession: async (request: CreateSessionRequest) => {
+    const documentRoot = document.documentElement;
+    const count = Number(documentRoot.dataset.createSessionCount ?? "0") + 1;
+    documentRoot.dataset.createSessionCount = String(count);
+    documentRoot.dataset.createSessionRequest = JSON.stringify(request);
+    const delay = Number(fixtureParams.get("createDelay") ?? "0");
+    if (delay > 0) await new Promise((resolve) => window.setTimeout(resolve, delay));
+    return { id: `session-${count}` };
+  },
 } as ApiClient;
 
 /**
@@ -203,8 +213,18 @@ function SelectProbe() {
 
 function Harness() {
   const ready = useStoreSelector((state) => state.snapshotLoaded);
+  const keyboardFixture = fixtureParams.get("keyboard") === "1";
+  const [dialogOpen, setDialogOpen] = React.useState(!keyboardFixture);
   if (!ready) return null;
   if (fixtureParams.get("probe") === "select") return <SelectProbe />;
+  if (keyboardFixture) return (
+    <>
+      <button type="button" onClick={() => setDialogOpen(true)}>New Session</button>
+      {dialogOpen && (
+        <NewSessionDialog onClose={() => setDialogOpen(false)} />
+      )}
+    </>
+  );
   return (
     <NewSessionDialog
       onClose={() => undefined}

@@ -49,6 +49,31 @@ async function openDialog(page: Page, query = "") {
   await expect(page.getByRole("heading", { name: "New Session" })).toBeVisible();
 }
 
+async function openDialogWithoutPointer(page: Page, query = "") {
+  await page.goto(`/new-session-choices-e2e.html?keyboard=1${query}`);
+  const opener = page.getByRole("button", { name: "New Session" });
+  await page.keyboard.press("Tab");
+  await expect(opener).toBeFocused();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "New Session" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toBeFocused();
+  return { dialog, opener };
+}
+
+async function selectCommonProjectWithoutPointer(page: Page) {
+  const project = page.getByRole("combobox", { name: "Project" });
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(project).toBeFocused();
+  await page.keyboard.type("Wollipog");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await expect(project).toHaveValue(/Wollipog/);
+  return project;
+}
+
 const permissionPresets = (page: Page) =>
   page.getByRole("radiogroup", { name: "Permission Preset" });
 
@@ -198,6 +223,88 @@ test.describe("searchable Project and Agent controls", () => {
     await expect(options.first()).toContainText("Codex — Non-Interactive");
     await page.keyboard.press("Enter");
     await expect(agent).toHaveValue(/Codex — Non-Interactive/);
+  });
+});
+
+for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
+  test.describe(`common keyboard path at ${viewport.name} width`, () => {
+    test.use({
+      viewport: { width: viewport.width, height: viewport.height },
+      hasTouch: viewport.touch,
+      isMobile: viewport.touch,
+    });
+
+    test("selects Project and Agent, then submits with the popup safely closed", async ({ page }) => {
+      await openDialogWithoutPointer(page);
+      await selectCommonProjectWithoutPointer(page);
+
+      // Every step between the two data-backed selectors remains keyboard-reachable and ordered:
+      // Project management, the required Location, then Agent.
+      await page.keyboard.press("Tab");
+      await expect(page.getByRole("button", { name: "Create Project…" })).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(page.getByRole("radiogroup", { name: "Project Location" }).getByRole("radio"))
+        .toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(page.getByRole("button", { name: "Add Location…" })).toBeFocused();
+      await page.keyboard.press("Tab");
+
+      const agent = page.getByRole("combobox", { name: "Agent" });
+      await expect(agent).toBeFocused();
+      await page.keyboard.type("codex app server");
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("Enter");
+      await expect(agent).toHaveValue(/Codex App Server/);
+
+      // The first Enter belonged to the open combobox. Only the next Enter, after it closed,
+      // reaches the native form's default submit action.
+      await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
+      await page.keyboard.press("Enter");
+      await expect(page.getByRole("dialog", { name: "New Session" })).toHaveCount(0);
+      await expect.poll(async () => page.locator("html").getAttribute("data-create-session-count"))
+        .toBe("1");
+    });
+  });
+}
+
+test.describe("New Session dialog keyboard contract", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("traps focus, validates, closes the selector before the dialog, and restores its opener", async ({ page }) => {
+    const { dialog, opener } = await openDialogWithoutPointer(page);
+
+    await page.keyboard.press("Shift+Tab");
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
+
+    await page.keyboard.press("ControlOrMeta+Enter");
+    const project = page.getByRole("combobox", { name: "Project" });
+    await expect(page.getByRole("alert")).toHaveText("Choose a Project or No Project.");
+    await expect(project).toBeFocused();
+    await expect(project).toHaveAttribute("aria-expanded", "true");
+
+    await page.keyboard.press("Escape");
+    await expect(project).toHaveAttribute("aria-expanded", "false");
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
+  });
+
+  test("modified Enter ignores composition and repeats and permits only one delayed creation", async ({ page }) => {
+    await openDialogWithoutPointer(page, "&createDelay=250");
+    const project = await selectCommonProjectWithoutPointer(page);
+
+    await project.dispatchEvent("keydown", { key: "Enter", ctrlKey: true, repeat: true });
+    await project.dispatchEvent("keydown", { key: "Enter", metaKey: true, isComposing: true });
+    await expect(page.locator("html")).not.toHaveAttribute("data-create-session-count", /.+/);
+
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(async () => page.locator("html").getAttribute("data-create-session-count"))
+      .toBe("1");
+    await expect(page.getByRole("dialog", { name: "New Session" })).toHaveCount(0);
   });
 });
 

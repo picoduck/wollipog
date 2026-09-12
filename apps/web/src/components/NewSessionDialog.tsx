@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   type ProjectLocationView,
   type ProjectView,
@@ -210,8 +210,18 @@ export function NewSessionDialog({
   );
   const [browsing, setBrowsing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [retainedSessionId, setRetainedSessionId] = useState<string | null>(null);
+  const retainedSessionButtonRef = useRef<HTMLButtonElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  const generatedFormId = useId();
+  const formId = `${generatedFormId}-new-session`;
+  const projectInputId = `${generatedFormId}-project`;
+  const agentInputId = `${generatedFormId}-agent`;
+  const projectLocationOptionsId = `${generatedFormId}-project-locations`;
+  const permissionOptionsId = `${generatedFormId}-permission-presets`;
+  const harnessOptionsId = `${generatedFormId}-harnesses`;
   const selectedProjectId = projectSelection && projectSelection !== NO_PROJECT_SELECTION ? projectSelection : null;
   const selectedProject = selectedProjectId ? projects.get(selectedProjectId) ?? null : null;
   const selectedProjectLocation = selectedProject?.locations.find((location) => location.id === projectLocationId) ?? null;
@@ -228,9 +238,7 @@ export function NewSessionDialog({
     return {
       value: option.agent.id,
       label: option.label,
-      description: option.disabled
-        ? undefined
-        : `${option.advanced ? "Advanced Agent · " : ""}${metadata}`,
+      description: `${option.advanced ? "Advanced Agent · " : ""}${metadata}`,
       disabled: option.disabled,
       disabledReason: option.disabled ? `Needs setup. ${metadata}` : undefined,
     };
@@ -386,6 +394,9 @@ export function NewSessionDialog({
   };
 
   const pickProject = (value: string) => {
+    // An editable combobox can commit its current value again. Unlike a native select, that is a
+    // real event, but it is not a new Project decision and must not erase an explicit Location.
+    if (value === projectSelection) return;
     projectSelectionChangedRef.current = true;
     setProjectSelection(value);
     setProjectLocationId("");
@@ -480,31 +491,76 @@ export function NewSessionDialog({
     (!orchestrator || orchestratorSupported) &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
 
-  // Enter submits from any plain field. Exemptions: the directory browser's path input
-  // preventDefaults its own Enter (navigate, not submit); buttons keep Enter as click; selects
-  // are skipped because Firefox dispatches the Enter that COMMITS an open dropdown choice
-  // (Chrome swallows it) — submitting there would create a session mid-configuration. e.repeat
-  // drops held-key auto-repeats.
-  const submitOnEnter = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "Enter" || e.defaultPrevented || e.repeat) return;
-    const t = e.target as HTMLElement;
-    if (t instanceof HTMLTextAreaElement || t instanceof HTMLButtonElement || t instanceof HTMLSelectElement) return;
-    e.preventDefault();
-    void submit();
+  // Keep the secondary shortcut local to this dialog. Unmodified Enter is native form behavior: an
+  // open combobox prevents it while committing its option, and a closed single-line input lets it
+  // reach the real submit button. Modified Enter works from controls that own plain Enter.
+  const submitOnModifiedEnter = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Enter" || event.defaultPrevented) return;
+    if (event.repeat || event.nativeEvent.isComposing || event.keyCode === 229) {
+      event.preventDefault();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+      event.preventDefault();
+      formRef.current?.requestSubmit();
+    }
+  };
+
+  const focusValidationProblem = (selector?: string) => {
+    if (!selector) return;
+    formRef.current?.querySelector<HTMLElement>(selector)?.focus();
   };
 
   const submit = async () => {
     // Re-entrancy guard: the Enter path bypasses the footer button's disabled attribute, and a
     // second submit while createSession is in flight would spawn a duplicate session.
-    if (busy) return;
+    if (busyRef.current) return;
     setError(null);
     if (!valid) {
-      if (projectsSupported && !projectSelection) setError("Choose a Project or No Project.");
-      else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !projectLocationLaunchable) {
+      if (retainedSessionId) {
+        setError("Open the retained session before creating another one.");
+        retainedSessionButtonRef.current?.focus();
+      } else if (projectsSupported && !projectSelection) {
+        setError("Choose a Project or No Project.");
+        focusValidationProblem('[role="combobox"][aria-label="Project"]');
+      } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !projectLocationLaunchable) {
         setError("Choose an available Project Location.");
-      } else setError("Pick a runner, workspace, and agent.");
+        focusValidationProblem(`[id="${projectLocationOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+      } else if (!runnerId) {
+        setError("Pick a runner, workspace, and agent.");
+        focusValidationProblem('button[aria-label^="Machine:"]');
+      } else if (!workspaceId && !browsedPath) {
+        setError("Pick a runner, workspace, and agent.");
+        focusValidationProblem('button[aria-label^="Workspace:"]');
+      } else if (!agentId || !selectedAgentOption || selectedAgentOption.disabled) {
+        setError("Pick a runner, workspace, and agent.");
+        focusValidationProblem('[role="combobox"][aria-label="Agent"]');
+      } else if (!defaultsReady && presetOverride !== "orchestrator") {
+        setError(harnessDefaults?.error
+          ? "Retry loading saved permission defaults before creating a session."
+          : "Wait for saved permission defaults to finish loading.");
+        focusValidationProblem('[data-validation-target="defaults"]');
+      } else if (orchestrator && !orchestratorSupported) {
+        setError("Choose an available Permission Preset.");
+        focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+      } else if (directWslRequiresSafeOrchestrator && !orchestrator) {
+        setError("Choose Orchestrator or another execution context.");
+        focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+      } else if (launchSurface === "native_tui" && !nativeTuiSupported) {
+        setError("Choose an available Harness.");
+        focusValidationProblem(`[id="${harnessOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+      } else if (executionTarget && !executionTarget.available) {
+        setError("Choose an available Execution Target.");
+        focusValidationProblem('button[aria-label^="Execution Target:"]');
+      } else if (!cloudBudgetValid) {
+        setError("Enter a Cloud Cost Budget within the allowed range.");
+        focusValidationProblem('input[type="number"]');
+      } else {
+        setError("Complete the required session settings before creating a session.");
+      }
       return;
     }
+    busyRef.current = true;
     setBusy(true);
     try {
       const placement = projectSessionPlacement(
@@ -536,6 +592,7 @@ export function NewSessionDialog({
       }
       setError((e as Error).message);
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -545,11 +602,14 @@ export function NewSessionDialog({
     {!creatingProject && !addingLocation && <Modal
       title="New Session"
       onClose={onClose}
+      onKeyDown={submitOnModifiedEnter}
       footer={
         <>
-          {error && <span className="form-error">{error}</span>}
+          {error && <span className="form-error" role="alert">{error}</span>}
           {retainedSessionId && (
             <button
+              ref={retainedSessionButtonRef}
+              type="button"
               className="btn ghost"
               onClick={() => {
                 navigate({ name: "session", id: retainedSessionId });
@@ -559,22 +619,28 @@ export function NewSessionDialog({
               Open Retained Session
             </button>
           )}
-          <button className="btn ghost" onClick={onClose}>
+          <button type="button" className="btn ghost" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn primary" onClick={submit} disabled={busy || !valid}>
+          <button type="submit" form={formId} className="btn primary" disabled={busy || !valid}>
             {busy ? "Creating…" : "Create Session"}
           </button>
         </>
       }
     >
-      <div className="form" onKeyDown={submitOnEnter}>
+      <form
+        id={formId}
+        ref={formRef}
+        className="form"
+        onSubmit={(event) => { event.preventDefault(); void submit(); }}
+      >
         {online.length === 0 && <p className="muted">No runners online. Start a runner first.</p>}
         {projectsSupported && (
             <>
               <div className="field">
-                <span>Project</span>
+                <label className="new-session-field-label" htmlFor={projectInputId}>Project</label>
                 <SearchableCombobox<string>
+                  inputId={projectInputId}
                   className="new-session-choice-control"
                   label="Project"
                   value={projectSelection || null}
@@ -604,6 +670,7 @@ export function NewSessionDialog({
               <span>Project Location</span>
               {selectedProject.locations.length > 0 ? (
                 <ChoiceCards<string>
+                  id={projectLocationOptionsId}
                   label="Project Location"
                   value={projectLocationId || null}
                   onChange={(id) => {
@@ -793,10 +860,11 @@ export function NewSessionDialog({
           )}
 
           <div className="field">
-            <span>Agent</span>
+            <label className="new-session-field-label" htmlFor={agentInputId}>Agent</label>
             <div className="agent-select">
               <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={15} />
               <SearchableCombobox<string>
+                inputId={agentInputId}
                 className="new-session-choice-control"
                 label="Agent"
                 value={agentId || null}
@@ -832,6 +900,7 @@ export function NewSessionDialog({
                 #832's clipping — a 76px menu over 98px of touch targets, with half of one of only
                 two choices below the fold. Always visible, there is no menu to mis-measure. */}
             <ChoiceCards<"default" | "orchestrator">
+              id={permissionOptionsId}
               label="Permission Preset"
               value={presetOverride}
               onChange={setPresetOverride}
@@ -857,7 +926,14 @@ export function NewSessionDialog({
             />
             {!defaultsReady && (harnessDefaults?.error ? <>
               <span className="form-error">Could not load saved permission defaults. Retry before using Default.</span>
-              <button type="button" className="btn ghost sm" onClick={() => setDefaultsRetry((value) => value + 1)}>Retry Defaults</button>
+              <button
+                type="button"
+                className="btn ghost sm"
+                data-validation-target="defaults"
+                onClick={() => setDefaultsRetry((value) => value + 1)}
+              >
+                Retry Defaults
+              </button>
             </> : <span className="muted">Loading saved permission defaults…</span>)}
             {orchestrator && <>
               {presetOverride === "default" && <span className="muted">Orchestrator is your saved Agent Harness default. Change it in Settings to use another default.</span>}
@@ -874,6 +950,7 @@ export function NewSessionDialog({
                 unavailable option's own `disabledReason`, so the control and its explanation arrive
                 together instead of as siblings a screen reader meets separately. */}
             <ChoiceCards<"direct" | "native_tui">
+              id={harnessOptionsId}
               label="Harness"
               value={launchSurface}
               onChange={setLaunchSurface}
@@ -965,7 +1042,7 @@ export function NewSessionDialog({
           <p className="muted new-session-hint">
             Pick the model, effort, and your first message once the session opens.
           </p>
-        </div>
+        </form>
     </Modal>}
     {creatingProject && (
       <CreateProjectDialog

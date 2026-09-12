@@ -138,6 +138,7 @@ async function mountFixture(
   preset?: NewSessionPreset,
   createError?: string | Error,
   defaults: () => Promise<AgentHarnessDefaultsView> = async () => ({ defaults: [] }),
+  createSession?: (request: CreateSessionRequest) => Promise<{ id: string }>,
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -158,6 +159,7 @@ async function mountFixture(
     createSession: async (request: CreateSessionRequest) => {
       requests.push(structuredClone(request));
       if (createError) throw typeof createError === "string" ? new Error(createError) : createError;
+      if (createSession) return createSession(request);
       return { id: "session-1" };
     },
   } as unknown as ApiClient;
@@ -253,10 +255,87 @@ function permissionPresetCard(container: HTMLDivElement, title: string): HTMLBut
 }
 
 function submitWithEnter(container: HTMLDivElement): void {
-  const form = container.querySelector(".form");
+  const form = container.querySelector("form.form") as HTMLFormElement | null;
   assert.ok(form, "dialog form is rendered");
-  form.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+  form.requestSubmit();
 }
+
+function pressFormShortcut(
+  container: HTMLDivElement,
+  init: { ctrlKey?: boolean; metaKey?: boolean; repeat?: boolean; isComposing?: boolean; keyCode?: number } = { ctrlKey: true },
+): void {
+  const form = container.querySelector("form.form") as HTMLFormElement | null;
+  assert.ok(form, "dialog form is rendered");
+  form.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+    key: "Enter",
+    bubbles: true,
+    ...init,
+  } as never) as never);
+}
+
+test("New Session is a labelled form with Create Session as its default action", async () => {
+  const fixture = await mountFixture();
+  try {
+    const form = fixture.container.querySelector("form.form") as HTMLFormElement | null;
+    assert.ok(form, "the dialog body is a native form");
+    const submit = createButton(fixture.container);
+    assert.equal(submit.type, "submit");
+    assert.equal(submit.getAttribute("form"), form.id,
+      "the modal footer's default action owns the dialog form");
+    for (const name of ["Project", "Agent"]) {
+      const input = combobox(fixture.container, name);
+      const label = fixture.container.querySelector(`label[for="${input.id}"]`);
+      assert.equal(label?.textContent, name, `${name} has a pointer-associated visible label`);
+    }
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("modified Enter validates and focuses the first actionable problem", async () => {
+  const fixture = await mountFixture();
+  try {
+    const projectInput = combobox(fixture.container, "Project");
+    await act(async () => { pressFormShortcut(fixture.container); });
+    assert.equal(fixture.requests.length, 0);
+    assert.equal(fixture.container.querySelector('[role="alert"]')?.textContent,
+      "Choose a Project or No Project.");
+    assert.equal((domWindow.document.activeElement as unknown) === projectInput, true,
+      "validation moves focus to the first control that can fix the form");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("IME, held keys, and concurrent shortcuts cannot create duplicate sessions", async () => {
+  let resolveCreate!: (session: { id: string }) => void;
+  const pending = new Promise<{ id: string }>((resolve) => { resolveCreate = resolve; });
+  const fixture = await mountFixture(
+    {},
+    { projectId: project.id, projectLocationId: project.locations[0]!.id },
+    undefined,
+    undefined,
+    async () => pending,
+  );
+  try {
+    await act(async () => {
+      pressFormShortcut(fixture.container, { ctrlKey: true, repeat: true });
+      pressFormShortcut(fixture.container, { metaKey: true, isComposing: true });
+      pressFormShortcut(fixture.container, { ctrlKey: true, keyCode: 229 });
+    });
+    assert.equal(fixture.requests.length, 0, "repeat and composition are ignored before submission");
+
+    await act(async () => {
+      pressFormShortcut(fixture.container, { metaKey: true });
+      pressFormShortcut(fixture.container, { ctrlKey: true });
+    });
+    assert.equal(fixture.requests.length, 1,
+      "a synchronous ref closes the same-render gap before the busy state paints");
+    await act(async () => { resolveCreate({ id: "session-delayed" }); await pending; });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
 
 test("Project visibility copy names every audience and the new transcript consequence", async () => {
   const expectations = [
@@ -332,6 +411,47 @@ test("Project search uses visible location context to disambiguate duplicate nam
   }
 });
 
+test("recommitting the selected Project preserves an explicit Location", async () => {
+  const secondLocation = {
+    ...project.locations[0]!,
+    id: "location-2",
+    workspaceId: "workspace-2",
+    name: "Wollipog Fork",
+    path: "/repos/wollipog-fork",
+    isDefault: false,
+  };
+  const multiLocationProject = {
+    ...project,
+    locations: [{ ...project.locations[0]!, isDefault: false }, secondLocation],
+  };
+  const multiWorkspaceRunner = {
+    ...runner,
+    workspaces: [
+      ...runner.workspaces,
+      { id: "workspace-2", name: "Wollipog Fork", path: "/repos/wollipog-fork" },
+    ],
+  };
+  const fixture = await mountFixture(
+    { projects: [multiLocationProject], runners: [multiWorkspaceRunner] },
+    { projectId: project.id, projectLocationId: secondLocation.id },
+  );
+  try {
+    const selected = () => fixture.container.querySelector(
+      '[role="radiogroup"][aria-label="Project Location"] [role="radio"][aria-checked="true"]',
+    );
+    assert.match(selected()?.textContent ?? "", /wollipog-fork/);
+
+    const input = combobox(fixture.container, "Project");
+    await act(async () => { input.focus(); pressComboboxKey(input, "Enter"); });
+
+    assert.match(selected()?.textContent ?? "", /wollipog-fork/,
+      "committing the same Project is not a dependent-selection reset");
+    assert.equal(createButton(fixture.container).disabled, false);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("primary, Advanced, and unavailable Agents share one searchable flow", async () => {
   domWindow.localStorage.clear();
   const agentRunner: RunnerView = {
@@ -374,6 +494,35 @@ test("primary, Advanced, and unavailable Agents share one searchable flow", asyn
   } finally {
     await unmountFixture(fixture);
     domWindow.localStorage.clear();
+  }
+});
+
+test("an unavailable Advanced Agent keeps its marker, search term, and refusal reason", async () => {
+  const fixture = await mountFixture({ runners: [{
+    ...runner,
+    agents: [
+      ...runner.agents,
+      {
+        id: "codex-exec",
+        name: "Codex",
+        command: "codex",
+        args: ["exec"],
+        env: {},
+        driver: "codex",
+        available: false,
+      },
+    ],
+  }] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    await act(async () => { input.focus(); setComboboxQuery(input, "advanced"); });
+    const options = comboboxOptions(fixture.container, "Agent");
+    assert.equal(options.length, 1);
+    assert.equal(options[0]?.getAttribute("aria-disabled"), "true");
+    assert.match(options[0]?.textContent ?? "", /Advanced Agent.*Non-interactive via codex exec.*Needs setup/);
+  } finally {
+    await unmountFixture(fixture);
   }
 });
 

@@ -555,6 +555,7 @@ export function Modal({
   describedBy,
   className,
   returnFocusRef,
+  onKeyDown,
 }: {
   title: string;
   onClose: () => void;
@@ -567,6 +568,8 @@ export function Modal({
    * was focused at open — which fails when the opener was a menu item removed in the same
    * commit that opened the dialog (the menu closes as the dialog mounts). */
   returnFocusRef?: { current: HTMLElement | null };
+  /** Optional dialog-scoped keyboard contract; runs after the shared focus trap. */
+  onKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 }) {
   const titleId = useId();
   const cardRef = useRef<HTMLDivElement>(null);
@@ -668,7 +671,10 @@ export function Modal({
         aria-describedby={describedBy}
         tabIndex={-1}
         onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={trapTab}
+        onKeyDown={(event) => {
+          trapTab(event);
+          onKeyDown?.(event);
+        }}
       >
         <div className="modal-head">
           <h2 id={titleId}>{title}</h2>
