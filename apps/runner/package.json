@@ -15,7 +15,7 @@
   "dependencies": {
     "@wollipog/protocol": "workspace:*",
     "node-pty": "1.1.0",
-    "ws": "^8.18.0"
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "1.2.1",
