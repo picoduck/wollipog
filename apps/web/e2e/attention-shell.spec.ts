@@ -12,8 +12,11 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   await expect(grid).toBeVisible();
   // Every row carries its attention as pills with counts, and none carries a disclosure (#896).
   await expect(grid.locator(".attention-requests")).toHaveCount(0);
-  await expect(grid.locator(".inbox-status-pill-count")).toHaveCount(4);
+  await expect(grid.locator(".inbox-row-shell", { hasText: "Snoozed Session" })).toHaveCount(0);
+  await expect(grid.locator(".inbox-status-pill-count")).toHaveCount(3);
   await expect(grid.locator(".inbox-status-pill-count").first()).toHaveText("2");
+  await expect(page.locator(".rail-badge.blocked")).toHaveText("4");
+  await expect(page.locator(".rail-badge.stalled")).toHaveText("4");
   await grid.focus();
   // The primary requests in this fixture offer no options, so one-key approval has nothing safe to pick.
   await grid.press("a");

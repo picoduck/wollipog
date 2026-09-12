@@ -25,6 +25,7 @@ import { pickTopmost } from "./layers.js";
 import { useIsMobile } from "./components/useIsMobile.js";
 import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
+import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { RunnersView } from "./components/RunnersView.js";
 import { RunsView, RunDetail } from "./components/RunsView.js";
 import { InboxView } from "./components/InboxView.js";
@@ -269,7 +270,9 @@ export function Shell() {
   }, [activeInstanceKind, activeInstanceLabel, authRequired, conn, desktopMultiInstance, reportActiveStatus]);
   const runners = useStoreSelector((s) => s.runners);
   const sessions = useStoreSelector((s) => s.sessions);
-  const stalledSessions = useStoreSelector((s) => s.stalledCount);
+  const reminders = useStoreSelector((s) => s.reminders);
+  const stalledSessionIds = useStoreSelector((s) => s.stalledSessionIds);
+  const stalledRevision = useStoreSelector((s) => s.stalledRevision);
   const experiments = useExperiments();
   // The Conductor switch needs to say when the runner side is missing. ONLINE runners only:
   // the store keeps a disconnected runner's advertised agents, and a row calling the conductor
@@ -608,9 +611,18 @@ export function Shell() {
     () => [...runners.values()].filter((r) => r.status === "online").length,
     [runners],
   );
+  const activeSessions = useMemo(
+    () => [...sessions.values()].filter((session) =>
+      sessionVisibleForReminderMode(session, reminders.get(session.id), "ordinary")),
+    [reminders, sessions],
+  );
   const blockedSessions = useMemo(
-    () => [...sessions.values()].filter((session) => !session.archived && isInboxBlocked(session)).length,
-    [sessions],
+    () => activeSessions.filter(isInboxBlocked).length,
+    [activeSessions],
+  );
+  const stalledSessions = useMemo(
+    () => activeSessions.filter((session) => stalledSessionIds.has(session.id)).length,
+    [activeSessions, stalledRevision, stalledSessionIds],
   );
 
   // Codex-style session control cluster. Desktop includes the host-side Open destination picker
