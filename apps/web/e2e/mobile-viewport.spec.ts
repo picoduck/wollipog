@@ -463,9 +463,13 @@ test("the app shortens by the occluded band", async ({ page }) => {
   const full = await page.evaluate(() => document.getElementById("root")!.getBoundingClientRect().height);
 
   await openKeyboard(page);
-  const shortened = await page.evaluate(() => document.getElementById("root")!.getBoundingClientRect().height);
   // Not merely "smaller": the whole point is that it clears the keyboard exactly.
-  expect(Math.round(full - shortened), "the root must lose exactly the occluded height").toBe(KEYBOARD);
+  await expect
+    .poll(async () => {
+      const shortened = await page.evaluate(() => document.getElementById("root")!.getBoundingClientRect().height);
+      return Math.round(full - shortened);
+    }, { message: "the root must lose exactly the occluded height" })
+    .toBe(KEYBOARD);
 });
 
 for (const theme of THEMES) {
