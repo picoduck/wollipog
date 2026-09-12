@@ -5437,7 +5437,7 @@ dependencies = [
  "dirs 7.0.0",
  "fs2",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hmac 0.13.0",
  "keyring",
  "libc",
