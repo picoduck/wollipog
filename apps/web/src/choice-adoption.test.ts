@@ -103,7 +103,10 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/NewRunDialog.tsx", "workflow-preset", 3],
   ["components/NewSessionDialog.tsx", "agent-pick", 2],
-  ["components/NewSessionDialog.tsx", "native-select", 5],
+  /* Down from 5 on 2026-09-11: Machine, Workspace and Execution Target adopted the shared Select.
+     The two left are Project and Agent, which #218 specifies as SEARCHABLE comboboxes — migrating
+     them to the plain listbox first would mean rewriting both controls twice. */
+  ["components/NewSessionDialog.tsx", "native-select", 2],
   ["components/OnboardRunnerDialog.tsx", "seg", 2],
   ["components/PeopleDevicesPanel.tsx", "access-choice", 2],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],

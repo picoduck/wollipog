@@ -47,7 +47,7 @@ import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../proj
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
-import { ChoiceCards, SegmentedControl } from "./ui/ChoiceControls.js";
+import { ChoiceCards, SegmentedControl, Select } from "./ui/ChoiceControls.js";
 
 /**
  * New Session is intentionally minimal — pick where it runs (runner + agent + workspace) and go.
@@ -679,7 +679,7 @@ export function NewSessionDialog({
               <span className="muted">Choose from {locations.length} known workspace Locations.</span>
             </div>
           )}
-          {online.length > 0 && <label className="field">
+          {online.length > 0 && <div className="field">
             <span>Machine</span>
             {online.length === 1 ? (
               // With a single online runner there is nothing to choose — show where it runs.
@@ -688,17 +688,19 @@ export function NewSessionDialog({
                 {runnerDisplay(online[0]!, boxByRunner.get(online[0]!.runnerId), online[0]!.runnerId).name}
               </div>
             ) : (
-              <select value={runnerId} onChange={(e) => pickRunner(e.target.value)}>
-                {online.map((r) => (
-                  <option key={r.runnerId} value={r.runnerId}>
-                    {machineLabels.get(r.runnerId)}
-                  </option>
-                ))}
-              </select>
+              <Select<string>
+                label="Machine"
+                value={runnerId || null}
+                onChange={pickRunner}
+                options={online.map((r) => ({
+                  value: r.runnerId,
+                  label: machineLabels.get(r.runnerId) ?? r.runnerId,
+                }))}
+              />
             )}
-          </label>}
+          </div>}
 
-          {runner && <label className="field">
+          {runner && <div className="field">
             <span>Workspace</span>
             {browsedPath ? (
               <div className="ws-chosen">
@@ -711,13 +713,12 @@ export function NewSessionDialog({
               </div>
             ) : (
               <div className="ws-select">
-                <select value={workspaceId} onChange={(e) => { setWorkspaceId(e.target.value); setAdditionalDirectories([]); }}>
-                  {runner?.workspaces.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
-                </select>
+                <Select<string>
+                  label="Workspace"
+                  value={workspaceId || null}
+                  onChange={(value) => { setWorkspaceId(value); setAdditionalDirectories([]); }}
+                  options={(runner?.workspaces ?? []).map((w) => ({ value: w.id, label: w.name }))}
+                />
                 <button
                   type="button"
                   className="btn ghost sm"
@@ -729,7 +730,7 @@ export function NewSessionDialog({
                 </button>
               </div>
             )}
-          </label>}
+          </div>}
 
           {browsing && !browsedPath && runnerId && (
             <DirectoryPicker
@@ -922,20 +923,24 @@ export function NewSessionDialog({
               onChange={(mode) => selectHostMode(mode === "worktree")}
             />
             {executionTargets.length > 2 && (
-              <label>
+              <div className="field">
                 <span>Execution Target</span>
-                <select
-                  aria-label="Execution Target"
-                  value={executionTarget?.id ?? ""}
-                  onChange={(event) => selectExecutionTarget(event.target.value)}
-                >
-                  {executionTargets.map((target) => (
-                    <option key={target.id} value={target.id} disabled={!target.available}>
-                      {target.name}{target.available ? "" : ` — ${target.unavailableReason ?? "unavailable"}`}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                <Select<string>
+                  label="Execution Target"
+                  value={executionTarget?.id ?? null}
+                  onChange={selectExecutionTarget}
+                  options={executionTargets.map((target) => ({
+                    value: target.id,
+                    label: target.name,
+                    // A native <option> cannot render a second line, so the reason used to be
+                    // glued onto the label with an em dash. The shared Select has a slot for it.
+                    disabled: !target.available,
+                    disabledReason: target.available
+                      ? undefined
+                      : target.unavailableReason ?? "Unavailable on this runner.",
+                  }))}
+                />
+              </div>
             )}
             <span className="muted">
               {useWorktree
