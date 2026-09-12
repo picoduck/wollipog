@@ -8,7 +8,11 @@ import type { DescendantRequestView, ParentControlMode, SessionConfig, SessionVi
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { ComposerPlusMenu, useDescendantRequestPolling } from "./SessionDetail.js";
+import {
+  ComposerPlusMenu,
+  DESCENDANT_REQUEST_POLL_TIMEOUT_MS,
+  useDescendantRequestPolling,
+} from "./SessionDetail.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -326,5 +330,119 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
     container.remove();
     Object.defineProperty(domWindow, "setInterval", { configurable: true, value: originalSetInterval });
     Object.defineProperty(domWindow, "clearInterval", { configurable: true, value: originalClearInterval });
+  }
+});
+
+test("descendant polling recovers from timed-out requests and ignores late settlements", async () => {
+  const requests: Array<Deferred<{ requests: DescendantRequestView[] }> & {
+    signal?: AbortSignal;
+  }> = [];
+  const client = {
+    ...api,
+    descendantRequests: async (_sessionId: string, signal?: AbortSignal) => {
+      const request = { ...deferred<{ requests: DescendantRequestView[] }>(), signal };
+      requests.push(request);
+      return request.promise;
+    },
+  } as ApiClient;
+  let intervalHandler: (() => void) | undefined;
+  let nextTimeoutId = 1;
+  const timeouts = new Map<number, { handler: () => void; delay: number }>();
+  const clearedTimeouts: number[] = [];
+  const originalSetInterval = domWindow.setInterval;
+  const originalClearInterval = domWindow.clearInterval;
+  const originalSetTimeout = domWindow.setTimeout;
+  const originalClearTimeout = domWindow.clearTimeout;
+  Object.defineProperty(domWindow, "setInterval", {
+    configurable: true,
+    value: ((handler: () => void) => {
+      intervalHandler = handler;
+      return 1 as unknown as ReturnType<typeof domWindow.setInterval>;
+    }) as unknown as typeof domWindow.setInterval,
+  });
+  Object.defineProperty(domWindow, "clearInterval", {
+    configurable: true,
+    value: (() => {}) as typeof domWindow.clearInterval,
+  });
+  Object.defineProperty(domWindow, "setTimeout", {
+    configurable: true,
+    value: ((handler: () => void, delay = 0) => {
+      const id = nextTimeoutId++;
+      timeouts.set(id, { handler, delay });
+      return id as unknown as ReturnType<typeof domWindow.setTimeout>;
+    }) as unknown as typeof domWindow.setTimeout,
+  });
+  Object.defineProperty(domWindow, "clearTimeout", {
+    configurable: true,
+    value: ((id: number) => {
+      clearedTimeouts.push(id);
+      timeouts.delete(id);
+    }) as unknown as typeof domWindow.clearTimeout,
+  });
+  const fireNextTimeout = () => {
+    const next = timeouts.entries().next().value as [number, { handler: () => void; delay: number }] | undefined;
+    assert.ok(next);
+    timeouts.delete(next[0]);
+    next[1].handler();
+  };
+  function Harness() {
+    const polling = useDescendantRequestPolling({ sessionId: "parent", enabled: true });
+    return <span>{polling.requests.map((request) => request.sessionTitle).join(",")}</span>;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider client={client}><Harness /></ApiProvider>));
+    assert.equal(requests.length, 1);
+    assert.deepEqual([...timeouts.values()].map(({ delay }) => delay), [DESCENDANT_REQUEST_POLL_TIMEOUT_MS]);
+    await act(async () => intervalHandler?.());
+    assert.equal(requests.length, 1, "intervals still coalesce before the deadline");
+
+    await act(async () => fireNextTimeout());
+    assert.equal(requests[0]!.signal?.aborted, true, "the deadline aborts the hung request");
+    await act(async () => intervalHandler?.());
+    assert.equal(requests.length, 2, "the next interval starts a replacement poll");
+    await act(async () => {
+      requests[1]!.resolve({ requests: [descendantRequest("current")] });
+      await requests[1]!.promise;
+    });
+    assert.equal(container.querySelector("span")?.textContent, "current");
+    assert.equal(timeouts.size, 0, "successful settlement clears its deadline");
+    assert.ok(clearedTimeouts.length > 0);
+    await act(async () => {
+      requests[0]!.resolve({ requests: [descendantRequest("late-success")] });
+      await requests[0]!.promise;
+    });
+    assert.equal(container.querySelector("span")?.textContent, "current",
+      "a timed-out success cannot replace current state");
+
+    await act(async () => intervalHandler?.());
+    await act(async () => fireNextTimeout());
+    assert.equal(requests[2]!.signal?.aborted, true);
+    await act(async () => intervalHandler?.());
+    await act(async () => {
+      requests[3]!.resolve({ requests: [descendantRequest("newer")] });
+      await requests[3]!.promise;
+    });
+    await act(async () => {
+      requests[2]!.reject(new Error("late timeout failure"));
+      await requests[2]!.promise.catch(() => {});
+    });
+    assert.equal(container.querySelector("span")?.textContent, "newer",
+      "a timed-out failure cannot clear current state");
+
+    await act(async () => intervalHandler?.());
+    assert.equal(timeouts.size, 1);
+    await act(async () => root.unmount());
+    assert.equal(requests[4]!.signal?.aborted, true, "unmounting aborts the active request");
+    assert.equal(timeouts.size, 0, "unmounting clears the active deadline");
+  } finally {
+    if (container.isConnected) await act(async () => root.unmount());
+    container.remove();
+    Object.defineProperty(domWindow, "setInterval", { configurable: true, value: originalSetInterval });
+    Object.defineProperty(domWindow, "clearInterval", { configurable: true, value: originalClearInterval });
+    Object.defineProperty(domWindow, "setTimeout", { configurable: true, value: originalSetTimeout });
+    Object.defineProperty(domWindow, "clearTimeout", { configurable: true, value: originalClearTimeout });
   }
 });

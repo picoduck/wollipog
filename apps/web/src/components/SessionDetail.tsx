@@ -561,6 +561,14 @@ export function SessionDetail(props: SessionDetailProps) {
   return <SessionDetailLoaded {...props} session={session} />;
 }
 
+const DESCENDANT_REQUEST_POLL_INTERVAL_MS = 2_000;
+export const DESCENDANT_REQUEST_POLL_TIMEOUT_MS = 10_000;
+
+type ActiveDescendantRequestPoll = {
+  controller: AbortController;
+  timeout: number;
+};
+
 export function useDescendantRequestPolling({
   sessionId,
   enabled,
@@ -574,26 +582,37 @@ export function useDescendantRequestPolling({
   const api = useApi();
   const [requests, setRequests] = useState<DescendantRequestView[]>([]);
   const generationRef = useRef(0);
-  const inFlightRef = useRef<AbortController | null>(null);
+  const inFlightRef = useRef<ActiveDescendantRequestPoll | null>(null);
   const enabledRef = useRef(enabled);
   const sessionIdRef = useRef(sessionId);
   useLayoutEffect(() => {
     enabledRef.current = enabled;
     sessionIdRef.current = sessionId;
   }, [enabled, sessionId]);
+  const abortInFlight = useCallback(() => {
+    const active = inFlightRef.current;
+    if (!active) return;
+    inFlightRef.current = null;
+    window.clearTimeout(active.timeout);
+    active.controller.abort();
+  }, []);
   const refresh = useCallback((supersede = false) => {
     if (!enabledRef.current) {
       generationRef.current += 1;
-      inFlightRef.current?.abort();
-      inFlightRef.current = null;
+      abortInFlight();
       setRequests((current) => current.length ? [] : current);
       return;
     }
     if (inFlightRef.current && !supersede) return;
-    inFlightRef.current?.abort();
+    abortInFlight();
     const controller = new AbortController();
     const generation = ++generationRef.current;
-    inFlightRef.current = controller;
+    const timeout = window.setTimeout(() => {
+      if (inFlightRef.current?.controller !== controller) return;
+      inFlightRef.current = null;
+      controller.abort();
+    }, DESCENDANT_REQUEST_POLL_TIMEOUT_MS);
+    inFlightRef.current = { controller, timeout };
     void api.descendantRequests(sessionIdRef.current, controller.signal).then(
       ({ requests: next }) => {
         if (controller.signal.aborted || generation !== generationRef.current) return;
@@ -604,9 +623,10 @@ export function useDescendantRequestPolling({
         setRequests((current) => current.length ? [] : current);
       },
     ).finally(() => {
-      if (inFlightRef.current === controller) inFlightRef.current = null;
+      window.clearTimeout(timeout);
+      if (inFlightRef.current?.controller === controller) inFlightRef.current = null;
     });
-  }, [api]);
+  }, [abortInFlight, api]);
   const refreshAfterResolution = useCallback(() => refresh(true), [refresh]);
   useEffect(() => {
     setRequests((current) => current.length ? [] : current);
@@ -614,14 +634,13 @@ export function useDescendantRequestPolling({
   useEffect(() => {
     refresh();
     if (!enabled) return;
-    const timer = window.setInterval(refresh, 2_000);
+    const timer = window.setInterval(refresh, DESCENDANT_REQUEST_POLL_INTERVAL_MS);
     return () => {
       window.clearInterval(timer);
       generationRef.current += 1;
-      inFlightRef.current?.abort();
-      inFlightRef.current = null;
+      abortInFlight();
     };
-  }, [enabled, refresh, sessionId]);
+  }, [abortInFlight, enabled, refresh, sessionId]);
   return { requests, refreshAfterResolution };
 }
 
