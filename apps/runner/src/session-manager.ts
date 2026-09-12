@@ -8265,6 +8265,10 @@ export class SessionManager {
   }
 
   stop(sessionId: string): void {
+    // Stop is a terminal lifecycle boundary even while launch is suspended in an asynchronous
+    // provider-authentication probe. Fence that generation before the probe can persist a new
+    // recovery block or publish a non-terminal status for the stopped session.
+    this.invalidateLaunchGeneration(sessionId);
     this.revokeSessionCommandAuthority(sessionId);
     this.cancelBackgroundContinuationTimer(sessionId);
     this.discardRecovery(sessionId);

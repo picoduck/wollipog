@@ -1712,6 +1712,44 @@ test("Stop clears durable authentication recovery and restart reconciliation pre
   }
 });
 
+test("Stop during provider authentication preflight cannot revive the terminal session", async () => {
+  const preflight = deferred<{
+    status: "unauthenticated";
+  }>();
+  let revalidationStarted = false;
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => {
+      revalidationStarted = true;
+      return preflight.promise;
+    },
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained before Stop");
+    for (let index = 0; index < 8 && !revalidationStarted; index += 1) await tick();
+    assert.equal(revalidationStarted, true);
+
+    h.manager.stop("resume-session");
+    preflight.resolve({ status: "unauthenticated" });
+    for (let index = 0; index < 4; index += 1) await tick();
+
+    assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    assert.equal(h.prompts.length, 0);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("scope-less provider authentication cards can be explicitly dismissed", async () => {
   let h!: ReturnType<typeof harness>;
   h = harness({
