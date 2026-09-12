@@ -416,6 +416,24 @@ test("capacity observation caching does not certify concurrent mutations or part
       "a reclaiming scan is not cached even when a sibling restores the same root signature");
     internals.rootSignature = rootSignature;
     sibling.releaseAll();
+
+    assert.equal(sibling.acquire({ sessionId: "vanishing", agentId: "claude", weight: 2 }), true);
+    let releasedBeforeInspection = false;
+    internals.rootSignature = () => "coarse-filesystem-foreign-aba";
+    internals.inspectSlot = (path: string) => {
+      if (!releasedBeforeInspection) {
+        releasedBeforeInspection = true;
+        sibling.releaseAll();
+      }
+      return inspectSlot(path);
+    };
+    assert.equal(gate.observe().usedCapacity, 0, "a sibling can release a listed slot before inspection");
+    internals.inspectSlot = inspectSlot;
+    assert.equal(sibling.acquire({ sessionId: "foreign-replacement", agentId: "claude", weight: 2 }), true);
+    assert.equal(gate.observe().usedCapacity, 2,
+      "a scan containing vanished slots is not cached when a sibling restores the root signature");
+    internals.rootSignature = rootSignature;
+    sibling.releaseAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

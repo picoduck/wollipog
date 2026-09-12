@@ -16,7 +16,7 @@ interface SlotInspection {
   used: boolean;
   ownerPid?: number;
   recheckAt?: number;
-  reclaimed?: boolean;
+  invalidatesSnapshot?: boolean;
 }
 
 export interface AdmissionRequest {
@@ -274,14 +274,14 @@ export class BoxAdmission {
     // scan, the cached generation is stale in the safe direction and the next observation rescans.
     const signature = this.rootSignature(root);
     let used = 0;
-    let reclaimed = false;
+    let snapshotInvalidated = false;
     const ownerPids = new Set<number>();
     let recheckAt: number | undefined;
     try {
       for (const entry of readdirSync(root, { withFileTypes: true })) {
         if (!entry.isDirectory() || !/^slot-\d+$/.test(entry.name)) continue;
         const inspected = this.inspectSlot(join(root, entry.name));
-        reclaimed ||= inspected.reclaimed === true;
+        snapshotInvalidated ||= inspected.invalidatesSnapshot === true;
         if (!inspected.used) continue;
         used++;
         if (inspected.ownerPid !== undefined) ownerPids.add(inspected.ownerPid);
@@ -299,10 +299,10 @@ export class BoxAdmission {
       }
       return 0;
     }
-    // A reclamation changes this root while it is being scanned. Do not overwrite inspectSlot's
-    // invalidation with the pre-reclamation generation: on coarse-timestamp filesystems, a sibling
-    // creation could otherwise restore nlink and make that stale count reusable.
-    if (reclaimed) {
+    // A reclamation or vanished listed slot changes this root while it is being scanned. Do not
+    // overwrite inspectSlot's invalidation with the pre-scan generation: on coarse-timestamp
+    // filesystems, a sibling creation could otherwise restore nlink and make the stale count reusable.
+    if (snapshotInvalidated) {
       this.observationCache.delete(root);
     } else {
       this.observationCache.set(root, {
@@ -348,12 +348,12 @@ export class BoxAdmission {
       try {
         const recheckAt = statSync(slot).mtimeMs + 5_000;
         if (Date.now() < recheckAt) return { used: true, recheckAt };
-      } catch { return { used: false }; }
+      } catch { return { used: false, invalidatesSnapshot: true }; }
     }
     if (!this.isOwnedSlot(slot)) return { used: true };
     rmSync(slot, { recursive: true, force: true });
     this.observationCache.delete(dirname(slot));
-    return { used: false, reclaimed: true };
+    return { used: false, invalidatesSnapshot: true };
   }
 
   private isOwnedSlot(slot: string): boolean {
