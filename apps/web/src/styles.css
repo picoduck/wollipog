@@ -12577,6 +12577,9 @@ body.shell-dock-dragging * {
   .ui-seg.usage-range .ui-seg-option { flex: 1; }
 }
 .ui-seg.is-block .ui-seg-option { flex: 1; }
+/* New Session's two short Mode choices keep an intentional content width. `.field` stretches its
+   children by default, which otherwise leaves a large empty bordered track after the buttons. */
+.ui-seg.new-session-mode { align-self: flex-start; max-width: 100%; }
 /* Why the whole group is unavailable, rendered rather than left in a `title` nobody can reach on
    touch. It is associated with the group through aria-describedby. */
 .ui-seg-reason {

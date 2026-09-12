@@ -983,6 +983,7 @@ export function NewSessionDialog({
                 520px — a native select, aria-checked cards, and this bespoke `.seg`. One of them
                 goes here; the rest follow as their screens are migrated. */}
             <SegmentedControl
+              className="new-session-mode"
               label="Session Mode"
               value={useWorktree ? "worktree" : "in-place"}
               options={[

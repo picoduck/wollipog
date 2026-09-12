@@ -150,6 +150,25 @@ for (const viewport of VIEWPORTS) {
             .toBeLessThanOrEqual(formBox.x + formBox.width + 1);
         }
       }
+
+      // A short segmented choice should wrap its options, not inherit `.field`'s stretch and draw
+      // an empty bordered track across the dialog. Compare the rendered group with its own options
+      // so the assertion remains stable across font rendering, zoom and viewport size.
+      const mode = page.getByRole("radiogroup", { name: "Session Mode" });
+      const modeBox = (await mode.boundingBox())!;
+      const modeOptions = await mode.getByRole("radio").all();
+      await expect(modeOptions).toHaveLength(2);
+      const modeOptionBoxes = await Promise.all(modeOptions.map((option) => option.boundingBox()));
+      const renderedOptionWidth = modeOptionBoxes.reduce((width, box) => width + box!.width, 0);
+      expect(modeBox.width - renderedOptionWidth).toBeLessThanOrEqual(modeBox.width * 0.1);
+      expect(modeBox.width).toBeLessThan(formBox.width * 0.75);
+      for (const [index, option] of modeOptions.entries()) {
+        await expect(option).toBeVisible();
+        const box = modeOptionBoxes[index]!;
+        expect(box.x).toBeGreaterThanOrEqual(modeBox.x - 1);
+        expect(box.x + box.width).toBeLessThanOrEqual(modeBox.x + modeBox.width + 1);
+        if (viewport.floor) expect(box.height).toBeGreaterThanOrEqual(43);
+      }
     });
 
     test("a two-option Select opens a list its own options fit inside", async ({ page }) => {
