@@ -397,6 +397,7 @@ export function NewSessionDialog({
     // An editable combobox can commit its current value again. Unlike a native select, that is a
     // real event, but it is not a new Project decision and must not erase an explicit Location.
     if (value === projectSelection) return;
+    setError(null);
     projectSelectionChangedRef.current = true;
     setProjectSelection(value);
     setProjectLocationId("");

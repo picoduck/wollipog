@@ -302,6 +302,9 @@ test("modified Enter validates and focuses the first actionable problem", async 
       "Choose a Project or No Project.");
     assert.equal((domWindow.document.activeElement as unknown) === projectInput, true,
       "validation moves focus to the first control that can fix the form");
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    assert.equal(fixture.container.querySelector('[role="alert"]'), null,
+      "correcting the reported problem clears its stale validation message");
   } finally {
     await unmountFixture(fixture);
   }
