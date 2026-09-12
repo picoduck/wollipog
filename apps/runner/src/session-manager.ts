@@ -113,7 +113,7 @@ import {
   type CheckpointRefOwnershipClaim,
   type CheckpointRefOwnershipRecord,
 } from "./checkpoint-ref-ownership.js";
-import { anchorForkRef, anchorTurnRef, captureWorktreeTree, deleteTurnRef, deleteTurnRefs, gitDiff, isMissingGitRepositoryError, readTurnRef, resetWorktreeIndex, restoreWorktreeToTree, synchronizeCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
+import { anchorForkRef, anchorTurnRef, captureWorktreeTree, deleteTurnRef, deleteTurnRefs, gitDiff, isMissingGitRepositoryError, mapWithConcurrency, readTurnRef, resetWorktreeIndex, restoreWorktreeToTree, synchronizeCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
 import {
   readSessionFile,
   inspectWorkspaceReferenceDiff,
@@ -166,6 +166,8 @@ import {
   WorktreeCleanupJournal,
   type WorktreeCleanupRecord,
   type WorktreeHandle,
+  type DiscoveredMergedPullRequest,
+  type MissingUpstreamPullRequestIdentity,
 } from "./worktree.js";
 
 export interface SessionNamingExecutionAuthorization {
@@ -622,6 +624,14 @@ const PROVIDER_HISTORY_QUARANTINE_GUIDANCE =
   "Recover the session to continue from the last safe checkpoint in a new conversation.";
 const HISTORY_MAINTENANCE_MS = 5 * 60 * 1_000;
 const WORKTREE_PR_RECONCILIATION_MS = 5 * 60 * 1_000;
+/** Periodic missing-upstream discovery is deliberately smaller than the historical backlog. The
+ * rotating cursor makes every candidate eligible eventually while the fixed worker pool limits
+ * forge pressure to two waves per pass. The helper caps each forge command at 30 seconds and each
+ * Git preflight command at eight seconds, so neither candidate count nor a stuck forge can make
+ * the discovery phase unbounded. */
+const WORKTREE_PR_DISCOVERY_CANDIDATES_PER_RECONCILIATION = 8;
+const WORKTREE_PR_DISCOVERY_CONCURRENCY = 4;
+const WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS = 30 * 60 * 1_000;
 /** How long one proof of a session's interactive worktree root stands. Short enough that a change
  * made outside Wollipog surfaces while the user is still looking at what caused it, long enough to
  * collapse a burst of overlapping Files and reference-search requests into a single check. */
@@ -885,6 +895,13 @@ export class SessionManager {
   private historyMaintenanceRunning = false;
   private providerStateReconciling = false;
   private worktreePullRequestReconciling = false;
+  private worktreePullRequestDiscoveryCursor = 0;
+  private readonly worktreePullRequestDiscoveryRetryAt = new Map<string, {
+    identity: string;
+    retryAt: number;
+  }>();
+  /** Test seam for deterministic expiry without changing production time. */
+  private worktreePullRequestDiscoveryNow: () => number = Date.now;
   private admissionRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Box-wide process admission. A reservation starts immediately before driver launch and is
    * released on stop/exit/failure. Oldest-eligible selection plus bounded bypass prevents both
@@ -1516,6 +1533,8 @@ export class SessionManager {
     await this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta?.worktrees) return;
+      const linked = meta.worktrees.find((worktree) => sameWorktreePath(meta.context, worktree.path, worktreePath));
+      if (linked) this.worktreePullRequestDiscoveryRetryAt.delete(JSON.stringify([sessionId, linked.path]));
       const worktrees = meta.worktrees.map((worktree) => sameWorktreePath(meta.context, worktree.path, worktreePath)
         ? { ...worktree, pullRequest: { url, state: "open" as const, ...(provider ? { provider } : {}), ...(kind ? { kind } : {}) } }
         : worktree);
@@ -1566,8 +1585,27 @@ export class SessionManager {
   }
 
   /** Recover linkage for worktrees whose PR was opened outside Wollipog. The forge helper accepts
-   * only an exact merged-head proof, and the session lane keeps a concurrent explicit link from
-   * being overwritten while that proof is fetched. */
+   * only an exact merged-head proof. Callers hold the session lane while persisting so a concurrent
+   * explicit link cannot be overwritten. */
+  private persistDiscoveredMergedWorktree(
+    sessionId: string,
+    path: string,
+    expectedBranch: string,
+    discovered: DiscoveredMergedPullRequest,
+  ): void {
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    const current = this.attributedWorktrees(latest)
+      .find((item) => sameWorktreePath(latest.context, item.path, path));
+    if (!current || current.pullRequest || current.branch !== expectedBranch || current.source === "attached") return;
+    const worktrees = this.attributedWorktrees(latest).map((item) =>
+      sameWorktreePath(latest.context, item.path, path)
+        ? { ...item, pullRequest: discovered }
+        : item);
+    const updated = this.store.patchMeta(sessionId, { worktrees });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
   private async discoverUnlinkedMergedWorktree(
     sessionId: string,
     path: string,
@@ -1583,17 +1621,96 @@ export class SessionManager {
       { context: initial.context },
     );
     if (!discovered) return;
-    const latest = this.store.readMeta(sessionId);
-    if (!latest) return;
-    const current = this.attributedWorktrees(latest)
-      .find((item) => sameWorktreePath(latest.context, item.path, path));
-    if (!current || current.pullRequest || current.branch !== worktree.branch || current.source === "attached") return;
-    const worktrees = this.attributedWorktrees(latest).map((item) =>
-      sameWorktreePath(latest.context, item.path, path)
-        ? { ...item, pullRequest: discovered }
-        : item);
-    const updated = this.store.patchMeta(sessionId, { worktrees });
-    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    this.worktreePullRequestDiscoveryRetryAt.delete(JSON.stringify([sessionId, worktree.path]));
+    this.persistDiscoveredMergedWorktree(sessionId, path, worktree.branch, discovered);
+  }
+
+  /** Probe a rotating, bounded candidate slice outside the session mutation lanes. Only the short
+   * proof-persistence step enters a lane, where current linkage and branch identity are rechecked.
+   * A negative result is memoized against the full Git identity, so a changed head/upstream bypasses
+   * the backoff while unchanged closed-unmerged branches do not hit the forge every five minutes. */
+  private async discoverUnlinkedMergedWorktreesForReconciliation(
+    candidates: readonly { sessionId: string; path: string }[],
+  ): Promise<void> {
+    const unique = [...new Map(candidates.map((candidate) => [
+      JSON.stringify([candidate.sessionId, candidate.path]),
+      candidate,
+    ])).entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([, candidate]) => candidate);
+    const now = this.worktreePullRequestDiscoveryNow();
+    for (const [key, retry] of this.worktreePullRequestDiscoveryRetryAt) {
+      if (retry.retryAt <= now) this.worktreePullRequestDiscoveryRetryAt.delete(key);
+    }
+    if (unique.length === 0) {
+      this.worktreePullRequestDiscoveryCursor = 0;
+      return;
+    }
+    const start = this.worktreePullRequestDiscoveryCursor % unique.length;
+    const count = Math.min(WORKTREE_PR_DISCOVERY_CANDIDATES_PER_RECONCILIATION, unique.length);
+    const selected = Array.from({ length: count }, (_, offset) => unique[(start + offset) % unique.length]!);
+    this.worktreePullRequestDiscoveryCursor = (start + count) % unique.length;
+
+    await mapWithConcurrency(selected, WORKTREE_PR_DISCOVERY_CONCURRENCY, async ({ sessionId, path }) => {
+      try {
+        const initial = this.store.readMeta(sessionId);
+        if (!initial || !this.sessionCanOpen(sessionId)) return;
+        const worktree = this.attributedWorktrees(initial)
+          .find((item) => sameWorktreePath(initial.context, item.path, path));
+        if (!worktree || worktree.source === "attached" || worktree.pullRequest) return;
+        const pathKey = JSON.stringify([sessionId, worktree.path]);
+        let attemptedIdentity: string | undefined;
+        let forgeUnavailable = false;
+        const discovered = await this.discoverMergedWorktreePullRequest(
+          worktree.path,
+          worktree.branch,
+          {
+            context: initial.context,
+            preflightTimeoutMs: 8_000,
+            onIneligible: () => {
+              this.worktreePullRequestDiscoveryRetryAt.delete(pathKey);
+            },
+            onForgeUnavailable: () => {
+              forgeUnavailable = true;
+              this.worktreePullRequestDiscoveryRetryAt.delete(pathKey);
+            },
+            onForgeAttempt: (identity: MissingUpstreamPullRequestIdentity) => {
+              const identityKey = JSON.stringify([
+                initial.context,
+                worktree.branch,
+                identity.remote,
+                identity.merge,
+                identity.headOid,
+              ]);
+              const retry = this.worktreePullRequestDiscoveryRetryAt.get(pathKey);
+              if (retry?.identity === identityKey && retry.retryAt > this.worktreePullRequestDiscoveryNow()) {
+                return false;
+              }
+              attemptedIdentity = identityKey;
+              return true;
+            },
+          },
+        );
+        if (!discovered && attemptedIdentity && !forgeUnavailable) {
+          const latest = this.store.readMeta(sessionId);
+          const current = latest && this.attributedWorktrees(latest)
+            .find((item) => sameWorktreePath(latest.context, item.path, path));
+          if (current && !current.pullRequest && current.source !== "attached" && current.branch === worktree.branch) {
+            this.worktreePullRequestDiscoveryRetryAt.set(pathKey, {
+              identity: attemptedIdentity,
+              retryAt: this.worktreePullRequestDiscoveryNow() + WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS,
+            });
+          }
+        }
+        if (!discovered) return;
+        this.worktreePullRequestDiscoveryRetryAt.delete(pathKey);
+        await this.runWorktreeOperation(sessionId, async () => {
+          this.persistDiscoveredMergedWorktree(sessionId, path, worktree.branch, discovered);
+        });
+      } catch (error) {
+        this.log(`merged pull request discovery failed for ${boundedSessionIdForLog(sessionId)}: ${errText(error)}`);
+      }
+    });
   }
 
   private async discardWorktreeLocked(
@@ -1611,6 +1728,15 @@ export class SessionManager {
     if (!worktree) return { removed: false, reason: "worktree is not linked to this session" };
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
+    }
+    const initiallySelectedIsLaunching = !!meta.worktreePath &&
+      sameWorktreePath(meta.context, meta.worktreePath, worktree.path) &&
+      (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
+    if (initiallySelectedIsLaunching) {
+      return { removed: false, reason: "the worktree is still being launched by a provider process" };
+    }
+    if (this.liveWorktreeUsesPath(sessionId, worktree.path)) {
+      return { removed: false, reason: "the worktree is still active in a provider process" };
     }
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
       await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path);
@@ -1829,7 +1955,16 @@ export class SessionManager {
     if (this.worktreePullRequestReconciling || this.shuttingDown) return;
     this.worktreePullRequestReconciling = true;
     try {
-      for (const candidate of this.store.listSessions()) {
+      const candidates = this.store.listSessions();
+      const unlinked = candidates.flatMap((candidate) => {
+        const meta = this.store.readMeta(candidate.sessionId);
+        if (!meta || !this.sessionCanOpen(candidate.sessionId)) return [];
+        return this.attributedWorktrees(meta)
+          .filter((worktree) => !worktree.pullRequest && worktree.source !== "attached")
+          .map((worktree) => ({ sessionId: candidate.sessionId, path: worktree.path }));
+      });
+      await this.discoverUnlinkedMergedWorktreesForReconciliation(unlinked);
+      for (const candidate of candidates) {
         try {
           await this.runWorktreeOperation(candidate.sessionId, async () => {
             let meta = this.store.readMeta(candidate.sessionId);
@@ -1837,7 +1972,7 @@ export class SessionManager {
             await this.recordLegacyWorktreeBranch(meta);
             meta = this.store.readMeta(candidate.sessionId) ?? meta;
             const candidatePaths = this.attributedWorktrees(meta)
-              .filter((worktree) => worktree.pullRequest || worktree.source !== "attached")
+              .filter((worktree) => worktree.pullRequest)
               .map((worktree) => worktree.path);
             for (const path of candidatePaths) {
               meta = this.store.readMeta(candidate.sessionId);
@@ -1845,14 +1980,6 @@ export class SessionManager {
               const reconciliationContext = meta.context;
               let worktree = this.attributedWorktrees(meta)
                 .find((item) => sameWorktreePath(reconciliationContext, item.path, path));
-              if (worktree && !worktree.pullRequest) {
-                await this.discoverUnlinkedMergedWorktree(candidate.sessionId, path);
-                const refreshedMeta = this.store.readMeta(candidate.sessionId);
-                if (!refreshedMeta) continue;
-                meta = refreshedMeta;
-                worktree = this.attributedWorktrees(refreshedMeta)
-                  .find((item) => sameWorktreePath(refreshedMeta.context, item.path, path));
-              }
               if (!worktree?.pullRequest) continue;
               let state = worktree.pullRequest.state;
               const needsMergedHead = worktree.source !== "attached" && state === "merged" &&

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -84,6 +84,85 @@ test("merged branch discovery requires the exact branch and head", () => {
   assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, headRefOid: "b".repeat(40) }]), branch, head), null);
   assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, url: "https://example.test/pull/983" }]), branch, head), null);
   assert.equal(parseMergedWorktreePullRequestForBranch("{}", branch, head), null);
+});
+
+test("missing-upstream discovery exercises every production Git gate before the forge", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-missing-upstream-discovery-"));
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const branch = "fix/git-backed-discovery";
+    execFileSync("git", ["-C", repo, "switch", "-c", branch]);
+    let forgeOutput: string | Error = "[]";
+    const forgeCalls: Array<{ command: string; args: string[]; timeoutMs?: number }> = [];
+    const runForgeCommand: typeof runContextCommand = async (_context, command, args, options) => {
+      forgeCalls.push({ command, args, timeoutMs: options.timeoutMs });
+      if (forgeOutput instanceof Error) throw forgeOutput;
+      return { stdout: forgeOutput, stderr: "" };
+    };
+    const discover = (options: Parameters<typeof mergedWorktreePullRequestForBranch>[2] = {}) =>
+      mergedWorktreePullRequestForBranch(repo, branch, { ...options, runForgeCommand });
+
+    assert.equal(await discover(), null, "a never-pushed branch is ineligible");
+    assert.equal(forgeCalls.length, 0);
+
+    execFileSync("git", ["-C", repo, "push", "-u", "origin", branch]);
+    assert.equal(await discover(), null, "a live upstream is ineligible");
+    assert.equal(forgeCalls.length, 0);
+
+    execFileSync("git", ["-C", repo, "push", "origin", "--delete", branch]);
+    const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const exact = {
+      url: "https://github.com/picoduck/wollipog/pull/1020",
+      state: "MERGED",
+      headRefOid: head,
+      headRefName: branch,
+    };
+    forgeOutput = JSON.stringify([exact]);
+    assert.deepEqual(await discover(), {
+      url: exact.url,
+      state: "merged",
+      headOid: head,
+      provider: "github",
+      kind: "pull_request",
+    });
+    assert.equal(forgeCalls.length, 1);
+    assert.equal(forgeCalls[0]?.command, "gh");
+    assert.deepEqual(forgeCalls[0]?.args, [
+      "pr", "list", "--head", branch, "--state", "merged", "--limit", "100",
+      "--json", "url,state,headRefOid,headRefName",
+    ]);
+    assert.equal(forgeCalls[0]?.timeoutMs, 30_000, "a stuck forge has a fixed deadline");
+
+    assert.equal(await discover({ onForgeAttempt: () => false }), null,
+      "the reconciliation governor can stop before spawning the forge");
+    assert.equal(forgeCalls.length, 1);
+
+    for (const rejected of [
+      [{ ...exact, headRefName: "fix/other" }],
+      [{ ...exact, headRefOid: "b".repeat(40) }],
+      [{ ...exact, state: "CLOSED" }],
+      { malformed: true },
+    ]) {
+      forgeOutput = JSON.stringify(rejected);
+      assert.equal(await discover(), null);
+    }
+    forgeOutput = new Error("forge unavailable");
+    let forgeUnavailable = 0;
+    assert.equal(await discover({ onForgeUnavailable: () => { forgeUnavailable++; } }), null,
+      "command failure is fail-closed");
+    assert.equal(forgeUnavailable, 1, "transport failure is distinguishable from an empty result");
+
+    const callsBeforeLocalRemote = forgeCalls.length;
+    execFileSync("git", ["-C", repo, "config", `branch.${branch}.remote`, "."]);
+    assert.equal(await discover(), null, "a local remote is ineligible");
+    assert.equal(forgeCalls.length, callsBeforeLocalRemote);
+    execFileSync("git", ["-C", repo, "config", `branch.${branch}.remote`, "origin"]);
+    execFileSync("git", ["-C", repo, "config", `branch.${branch}.merge`, "refs/heads/fix/other"]);
+    assert.equal(await discover(), null, "a differently named merge ref is ineligible");
+    assert.equal(forgeCalls.length, callsBeforeLocalRemote);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("git preflight distinguishes a non-repo from a broken context/path", { skip: !haveGit() }, async () => {
@@ -1085,7 +1164,37 @@ test("merged PR worktrees remain discardable after their remote branches are del
       ?.some((item) => item.id === "reconciliation-sibling"), false,
       "automatic reconciliation cannot resurrect a sibling record removed during forge I/O");
 
+    const discoveryCallsBeforeActiveDiscard = discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0;
+    activeEntries.set("s_merged_no_upstream", {
+      context: { kind: "native" },
+      cwd: discoveredExplicit.worktree.path,
+      worktree: { path: discoveredExplicit.worktree.path, branch: discoveredExplicit.worktree.branch },
+    });
+    await assert.rejects(
+      manager.discardWorktree("s_merged_no_upstream", discoveredExplicit.worktree.path),
+      /still active in a provider process/,
+    );
+    assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard,
+      "explicit discard rejects an active unlinked worktree before forge discovery");
     activeEntries.delete("s_merged_no_upstream");
+    store.patchMeta("s_merged_no_upstream", {
+      status: "starting",
+      worktreePath: discoveredExplicit.worktree.path,
+      worktreeBranch: discoveredExplicit.worktree.branch,
+      worktreePending: true,
+    });
+    await assert.rejects(
+      manager.discardWorktree("s_merged_no_upstream", discoveredExplicit.worktree.path),
+      /still being launched by a provider process/,
+    );
+    assert.equal(discoveryCalls.get(discoveredExplicit.worktree.path) ?? 0, discoveryCallsBeforeActiveDiscard,
+      "explicit discard rejects a launching unlinked worktree before forge discovery");
+    store.patchMeta("s_merged_no_upstream", {
+      status: "idle",
+      worktreePath: null,
+      worktreeBranch: undefined,
+      worktreePending: false,
+    });
     await manager.discardWorktree("s_merged_no_upstream", explicit.worktree.path);
     assert.equal(existsSync(explicit.worktree.path), false,
       "explicit discard also accepts the verified merged worktree without its remote branch");
@@ -1139,6 +1248,151 @@ test("merged PR worktrees remain discardable after their remote branches are del
       "a legacy merged record remains fail-closed when forge proof is unavailable");
   } finally {
     manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane-independent", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-bounded-pr-discovery-"));
+  const dataDir = join(root, "data");
+  const candidatePaths = Array.from({ length: 20 }, (_, index) =>
+    join(root, `candidate-${index.toString().padStart(2, "0")}`));
+  const heads = new Map(candidatePaths.map((path, index) => [path, index.toString(16).padStart(40, "0")]));
+  const laneProbePath = join(root, "lane-probe-attached");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  store.create({
+    sessionId: "s_bounded_discovery", agentId: "claude", workspaceId: "repo", repoPath: root,
+    worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+    context: { kind: "native" }, agentSessionId: null, status: "idle", title: "bounded",
+    config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+    worktrees: [
+      ...candidatePaths.map((path, index) => ({
+        id: `candidate-${index}`, path, branch: `fix/candidate-${index}`, source: "created" as const,
+      })),
+      { id: "lane-probe", path: laneProbePath, branch: "fix/lane-probe", source: "attached" as const },
+    ],
+    seq: 0, createdAt: 1, updatedAt: 1,
+  });
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+  let now = 1_000_000;
+  let holdFirstWave = true;
+  let releaseFirstWave!: () => void;
+  const firstWave = new Promise<void>((resolve) => { releaseFirstWave = resolve; });
+  let active = 0;
+  let highWater = 0;
+  const attempts: string[] = [];
+  let mergedPath: string | undefined;
+  let ineligiblePath: string | undefined;
+  let forgeUnavailablePath: string | undefined;
+  const internals = manager as unknown as {
+    discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+    resolveWorktreePullRequestState: () => Promise<null>;
+    discardSessionWorktreeIfSafe: () => Promise<{ removed: false; reason: "unavailable" }>;
+    worktreePullRequestDiscoveryNow: () => number;
+    worktreePullRequestDiscoveryCursor: number;
+    worktreePullRequestDiscoveryRetryAt: Map<string, { identity: string; retryAt: number }>;
+  };
+  internals.worktreePullRequestDiscoveryNow = () => now;
+  internals.resolveWorktreePullRequestState = async () => null;
+  internals.discardSessionWorktreeIfSafe = async () => ({ removed: false, reason: "unavailable" });
+  internals.discoverMergedWorktreePullRequest = async (path, branch, options = {}) => {
+    assert.equal(options.preflightTimeoutMs, 8_000, "periodic discovery uses the bounded Git preflight");
+    if (path === ineligiblePath) {
+      options.onIneligible?.();
+      return null;
+    }
+    const headOid = heads.get(path)!;
+    if (!options.onForgeAttempt?.({ remote: "origin", merge: `refs/heads/${branch}`, headOid })) return null;
+    attempts.push(path);
+    if (path === forgeUnavailablePath) {
+      options.onForgeUnavailable?.();
+      return null;
+    }
+    active++;
+    highWater = Math.max(highWater, active);
+    if (holdFirstWave) await firstWave;
+    active--;
+    return path === mergedPath
+      ? {
+        url: "https://github.com/picoduck/wollipog/pull/1019",
+        state: "merged",
+        headOid,
+        provider: "github",
+        kind: "pull_request",
+      }
+      : null;
+  };
+
+  try {
+    const firstPass = manager.reconcileWorktreePullRequests();
+    await waitForCondition(() => attempts.length === 4, "the fixed first discovery wave did not start");
+    assert.equal(active, 4);
+    assert.equal(attempts.length, 4, "the fifth forge lookup waits for a worker slot");
+    await manager.linkWorktreePullRequest(
+      "s_bounded_discovery",
+      laneProbePath,
+      "https://github.com/picoduck/wollipog/pull/999",
+    );
+    assert.equal(store.readMeta("s_bounded_discovery")?.worktrees
+      ?.find((worktree) => worktree.path === laneProbePath)?.pullRequest?.state, "open",
+      "forge I/O does not hold even the candidate-owning session's worktree lane");
+    holdFirstWave = false;
+    releaseFirstWave();
+    await firstPass;
+    assert.equal(attempts.length, 8, "one pass admits only the documented candidate budget");
+    assert.equal(highWater, 4, "forge subprocess concurrency has a fixed ceiling");
+
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(attempts.length, 16, "the rotating cursor advances to the next candidate slice");
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(attempts.length, 20, "every candidate is eventually inspected despite the smaller pass budget");
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(attempts.length, 20, "unchanged negative identities reuse their backoff");
+
+    heads.set(candidatePaths[12]!, "f".repeat(40));
+    heads.set(candidatePaths[15]!, "e".repeat(40));
+    ineligiblePath = candidatePaths[14];
+    forgeUnavailablePath = candidatePaths[15];
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(attempts.length, 22, "changed heads invalidate only their prior negative identities");
+    assert.equal(internals.worktreePullRequestDiscoveryRetryAt.has(
+      JSON.stringify(["s_bounded_discovery", ineligiblePath]),
+    ), false, "a changed upstream eligibility invalidates its negative cache entry");
+    assert.equal(internals.worktreePullRequestDiscoveryRetryAt.has(
+      JSON.stringify(["s_bounded_discovery", forgeUnavailablePath]),
+    ), false, "forge unavailability is not cached as an authoritative negative");
+    forgeUnavailablePath = undefined;
+    internals.worktreePullRequestDiscoveryCursor = 12;
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(attempts.length, 23, "an unavailable forge is retried on the candidate's next eligible pass");
+    ineligiblePath = undefined;
+
+    const linkedPath = candidatePaths[13]!;
+    const linkedCacheKey = JSON.stringify(["s_bounded_discovery", linkedPath]);
+    assert.equal(internals.worktreePullRequestDiscoveryRetryAt.has(linkedCacheKey), true);
+    await manager.linkWorktreePullRequest(
+      "s_bounded_discovery",
+      linkedPath,
+      "https://github.com/picoduck/wollipog/pull/1000",
+    );
+    assert.equal(internals.worktreePullRequestDiscoveryRetryAt.has(linkedCacheKey), false,
+      "explicit linkage invalidates its negative cache entry immediately");
+
+    mergedPath = candidatePaths[0];
+    now += 31 * 60 * 1_000;
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(store.readMeta("s_bounded_discovery")?.worktrees
+      ?.find((worktree) => worktree.path === mergedPath)?.pullRequest?.state, "merged",
+      "an expired negative is retried and a later merge is discovered");
+
+    store.patchMeta("s_bounded_discovery", { worktrees: [] });
+    now += 31 * 60 * 1_000;
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(internals.worktreePullRequestDiscoveryRetryAt.size, 0,
+      "expired negatives are purged even when no discovery candidates remain");
+  } finally {
+    releaseFirstWave();
+    manager.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
