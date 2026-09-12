@@ -113,9 +113,42 @@ test("the Inbox footer centers readable counts on phones and keeps shortcuts tra
     expect(phoneGeometry.height).toBe(34);
   }
 
+  const wideFace = await page.evaluate(() => {
+    const widthIn = (family: string) => {
+      const probe = document.createElement("span");
+      probe.textContent = "12 Running 24 Blocked 5 Stalled";
+      probe.style.cssText =
+        `position:absolute;visibility:hidden;white-space:nowrap;font-size:11px;font-family:${family}`;
+      document.body.append(probe);
+      const width = probe.getBoundingClientRect().width;
+      probe.remove();
+      return width;
+    };
+    const absent = widthIn('"a face no machine has, 96d10"');
+    return ["DejaVu Sans", "Liberation Sans"].find((face) => widthIn(`"${face}"`) !== absent) ?? null;
+  });
+  expect(wideFace, "no wide face to measure: install fonts-dejavu-core (CI renders in DejaVu Sans)")
+    .not.toBeNull();
+  await page.addStyleTag({
+    content: `.inbox-activity-footer, .inbox-activity-footer * { font-family: "${wideFace}" !important; }`,
+  });
+  const crowdedCounts = ["12 Running", "8 Queued", "3 Starting", "24 Blocked", "5 Stalled"];
+  await summary.locator("span").evaluateAll((spans, values) => {
+    for (const [index, span] of spans.entries()) span.textContent = values[index]!;
+  }, crowdedCounts);
+  await expect(summary.locator("span")).toHaveText(crowdedCounts);
+  const crowdedGeometry = await footer.evaluate((element) => ({
+    contained: element.scrollWidth <= element.clientWidth,
+    summaryContained: element.querySelector<HTMLElement>(".inbox-activity-summary")!.scrollWidth <=
+      element.querySelector<HTMLElement>(".inbox-activity-summary")!.clientWidth,
+  }));
+  expect(crowdedGeometry.contained).toBe(true);
+  expect(crowdedGeometry.summaryContained).toBe(true);
+
   await page.getByRole("radio", { name: "Board" }).click();
   await expect(footer).toHaveCount(0);
   await page.getByRole("radio", { name: "List" }).click();
+  await expect(summary).toBeVisible();
   await expect(shortcuts).toBeHidden();
 });
 
