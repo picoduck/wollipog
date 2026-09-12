@@ -9984,6 +9984,22 @@ export class ControlPlaneDb {
     `).get(targetId, ancestorId));
   }
 
+  /** Descendant rows only, so callers do not scan every archived session and issue one ancestry
+   * query per row. UNION terminates malformed cycles and the final predicate never returns self. */
+  listSessionDescendants(ancestorId: string): SessionView[] {
+    const rows = this.stmt(`
+      WITH RECURSIVE descendants(id) AS (
+        SELECT id FROM sessions WHERE parent_session_id=?
+        UNION
+        SELECT s.id FROM sessions s JOIN descendants d ON s.parent_session_id=d.id
+      ) SELECT s.* FROM descendants d JOIN sessions s ON s.id=d.id
+        WHERE s.id<>? ORDER BY s.created_at DESC, s.id ASC
+    `).all(ancestorId, ancestorId) as unknown as SessionRow[];
+    const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
+    const stopIntents = this.sessionStopIntents();
+    return rows.map((row) => this.sessionView(row, legacyTargets, stopIntents.get(row.id), false));
+  }
+
   childSessionAllocations(parentSessionId: string): {
     /** Lifetime creations remain the stable ordinal and deletion-resistant accounting fence. */
     count: number;

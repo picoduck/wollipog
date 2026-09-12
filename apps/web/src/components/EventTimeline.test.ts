@@ -317,7 +317,7 @@ test("delegated question and approval histories identify the controlling parent"
       },
       {
         kind: "permission", id: 7, requestId: "permission", title: "Run command",
-        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        options: [{ optionId: "allow", name: "Allow" }],
         resolvedOptionId: "allow", resolvedByParentSessionId: "parent-session",
       },
     ],

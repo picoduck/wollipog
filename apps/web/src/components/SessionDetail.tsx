@@ -659,8 +659,9 @@ function SessionDetailLoaded({
       return;
     }
     void api.descendantRequests(sessionId).then(
-      ({ requests }) => setDescendantRequests(requests),
-      () => setDescendantRequests([]),
+      ({ requests }) => setDescendantRequests((current) =>
+        JSON.stringify(current) === JSON.stringify(requests) ? current : requests),
+      () => setDescendantRequests((current) => current.length ? [] : current),
     );
   }, [api, conn, mode, session.parentControl, sessionId]);
   useEffect(() => {
@@ -4187,7 +4188,7 @@ function SessionDetailLoaded({
                       recoveryAction={item.request.recoveryAction}
                       runnerOnline={item.runnerOnline}
                       onSessionUpdate={refreshDescendantRequests}
-                      showKeyHints={!isMobile}
+                      showKeyHints={false}
                     />
                   ) : (
                     <SessionApprovalBanner
@@ -4200,7 +4201,7 @@ function SessionDetailLoaded({
                       }}
                       runnerOnline={item.runnerOnline}
                       onSessionUpdate={refreshDescendantRequests}
-                      showKeyHints={!isMobile}
+                      showKeyHints={false}
                     />
                   )}
                 </div>

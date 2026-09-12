@@ -215,20 +215,41 @@ const SESSION_COMMAND_RECEIPT_CODES = new Set([
 ]);
 
 const HUMAN_ONLY_PARENT_CONTROL_REQUEST =
-  /(?:^|[^a-z0-9])(?:account|auth(?:enticate|entication)?|credential|device|identity|login|logout|password|secrets?|tokens?)(?:[^a-z0-9]|$)/iu;
+  /(?:^|[^a-z0-9])(?:account|auth(?:enticate|entication)?|credentials?|device|identity|login|logout|password|secrets?|tokens?)(?:[^a-z0-9]|$)/iu;
+const EMAIL_IDENTITY_PARENT_CONTROL_REQUEST =
+  /(?:^|[^a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?:[^a-z0-9.-]|$)/iu;
+
+function containsHumanOnlyParentControlText(values: Array<string | undefined>): boolean {
+  return values.some((value) => {
+    const text = value ?? "";
+    return HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(text) || EMAIL_IDENTITY_PARENT_CONTROL_REQUEST.test(text);
+  });
+}
 
 export function parentControlRequestEligible(mode: ParentControlMode, request: PendingApproval): boolean {
   if (mode === "off" || request.kind === "authentication" || request.kind === "policy_hook") return false;
   if (request.kind === "question") {
     return !(request.questions ?? []).some((question) =>
       question.secret === true || question.inputFormat === "email" ||
-      [question.id, question.header, question.question]
-        .some((value) => HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(value ?? "")));
+      containsHumanOnlyParentControlText([
+        question.id,
+        question.header,
+        question.question,
+        question.context,
+        ...question.options.flatMap((option) => [option.label, option.description]),
+      ]));
   }
   if (mode !== "questions_and_approvals" || (request.kind && request.kind !== "permission")) return false;
   if (request.governancePolicyId || request.context?.escalatedBy ||
-      [request.title, request.context?.toolName, request.context?.input]
-        .some((value) => HUMAN_ONLY_PARENT_CONTROL_REQUEST.test(value ?? ""))) return false;
+      containsHumanOnlyParentControlText([
+        request.title,
+        request.context?.toolName,
+        request.context?.input,
+        request.context?.path,
+        request.context?.network,
+        request.context?.branch,
+        ...request.options.flatMap((option) => [option.optionId, option.name, option.description]),
+      ])) return false;
   return request.options.some((option) =>
     option.kind === "allow_once" || option.kind === "reject_once" ||
     (option.kind == null && (option.optionId === "allow" || option.optionId === "deny")));
@@ -4819,8 +4840,8 @@ export class SessionsService {
     if (!parent) return fail("session not found", 404);
     const mode = parent.parentControl ?? "off";
     if (mode === "off") return fail("Parent Control is off", 403);
-    const requests = this.db.listSessions({ includeArchived: true }).flatMap((session): DescendantRequestView[] => {
-      if (!this.db.isSessionDescendant(parentSessionId, session.id) || !canAccess(session.id)) return [];
+    const requests = this.db.listSessionDescendants(parentSessionId).flatMap((session): DescendantRequestView[] => {
+      if (!canAccess(session.id)) return [];
       if (!runnerSupportsProtocol(
         this.db.getRunner(session.runnerId)?.protocolVersion,
         "delegatedParentControl",

@@ -1303,6 +1303,17 @@ test("Parent Control eligibility excludes secrets, authentication, policy gates,
   assert.equal(parentControlRequestEligible("questions", {
     ...question, questions: [{ ...question.questions[0]!, inputFormat: "email" }],
   }), false);
+  assert.equal(parentControlRequestEligible("questions", {
+    ...question, questions: [{ ...question.questions[0]!, context: "Choose how to re-authenticate." }],
+  }), false);
+  assert.equal(parentControlRequestEligible("questions", {
+    ...question, questions: [{ ...question.questions[0]!, options: [{ label: "work@example.com" }] }],
+  }), false);
+  assert.equal(parentControlRequestEligible("questions", {
+    ...question, questions: [{
+      ...question.questions[0]!, options: [{ label: "Continue", description: "Paste the token to proceed." }],
+    }],
+  }), false);
   assert.equal(parentControlRequestEligible("questions_and_approvals", {
     requestId: "auth", title: "Sign In", options: [], kind: "authentication",
   }), false);
@@ -1328,6 +1339,9 @@ test("Parent Control eligibility excludes secrets, authentication, policy gates,
   }), false);
   assert.equal(parentControlRequestEligible("questions_and_approvals", {
     ...permission, context: { toolName: "Bash", escalatedBy: { kind: "agent", id: "reviewer" } },
+  }), false);
+  assert.equal(parentControlRequestEligible("questions_and_approvals", {
+    ...permission, context: { toolName: "Read", path: "/home/person/.aws/credentials" },
   }), false);
   assert.equal(parentControlRequestEligible("questions_and_approvals", {
     ...permission, options: [{ optionId: "always", name: "Always Allow", kind: "allow_always" }],

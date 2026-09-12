@@ -1881,7 +1881,10 @@ const TimelineRow = memo(function TimelineRow({
                 {item.resolvedByParentSessionId
                   ? item.resolvedOptionId == null
                     ? `→ Dismissed by Parent ${item.resolvedByParentSessionId}`
-                    : item.options.find((option) => option.optionId === item.resolvedOptionId)?.kind === "allow_once"
+                    : (() => {
+                      const option = item.options.find((candidate) => candidate.optionId === item.resolvedOptionId);
+                      return option?.kind === "allow_once" || (option?.kind == null && item.resolvedOptionId === "allow");
+                    })()
                       ? `→ Approved by Parent ${item.resolvedByParentSessionId}`
                       : `→ Denied by Parent ${item.resolvedByParentSessionId}`
                   : item.resolutionReason === "replaced"
