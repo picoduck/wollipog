@@ -28,13 +28,14 @@ export async function prepareAgentTuiLaunch(
   },
 ): Promise<ShellProcessLaunch | null> {
   if (meta.config?.permissionMode !== "orchestrator") return agentTuiLaunch(meta);
+  const platform = dependencies.platform ?? process.platform;
   if (!runnerSupportsProtocol(dependencies.controlPlaneProtocolVersion, "orchestratorNativeTui") ||
       meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host") ||
       !TUI_DRIVERS.has(meta.driver)) {
     throw new Error("Orchestrator Native TUI requires a current native host harness and control plane.");
   }
   if (!supportsNativeOrchestratorBoundary(
-    meta.driver, dependencies.platform ?? process.platform, dependencies.executionIsolationMode,
+    meta.driver, platform, dependencies.executionIsolationMode,
   )) {
     throw new Error("Orchestrator Native TUI requires an attested native filesystem boundary for this harness.");
   }
@@ -46,14 +47,14 @@ export async function prepareAgentTuiLaunch(
   await dependencies.provision(prepared);
   prepared.env = {
     ...prepared.env,
-    ...((dependencies.platform ?? process.platform) === "win32" ? { TEMP: cwd, TMP: cwd } : { TMPDIR: cwd }),
+    ...(platform === "win32" ? { TEMP: cwd, TMP: cwd } : { TMPDIR: cwd }),
   };
   if (prepared.driver !== "claude-code") {
     prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
       prepared, cwd,
     ));
   }
-  const launch = agentTuiLaunch(prepared);
+  const launch = agentTuiLaunch(prepared, { platform, comspec: process.env.ComSpec });
   return launch ? { ...launch, cwd } : null;
 }
 
