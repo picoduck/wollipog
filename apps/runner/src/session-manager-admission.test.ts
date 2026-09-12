@@ -649,6 +649,42 @@ test("cancelling the last capacity-waiting prompt removes its waiter and queued 
   }
 });
 
+test("cancelling a capacity waiter cannot overwrite a newer terminal status", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cancel-waiter-terminal-status-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("waiting"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    const entry = {
+      sessionId: "waiting",
+      running: false,
+      status: "idle",
+      queue: [{ id: "queued", text: "wait", images: [] }],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    };
+    internals.active.set("waiting", entry);
+    await internals.drain("waiting");
+    assert.equal(internals.activeTurnWaiters.has("waiting"), true);
+    store.patchMeta("waiting", { status: "failed" });
+
+    manager.removeQueuedPrompt("waiting", "queued");
+
+    assert.equal(internals.activeTurnWaiters.has("waiting"), false);
+    assert.equal(store.readMeta("waiting")?.status, "failed");
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("containment that empties a FIFO removes its active-turn waiter and retry state", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-contained-active-turn-waiter-"));
   try {
@@ -948,6 +984,88 @@ test("a held terminal continuation releases its permit until recovery can run", 
     assert.equal(internals.activeTurnAdmitted.has("held"), false);
     assert.equal(internals.acquireActiveTurn("next"), true);
     internals.releaseActiveTurn("next");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a tombstoned non-terminal job row cannot retain an active-work permit", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-tombstoned-background-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("tombstoned"), status: "idle", recoveredBackgroundTaskIds: ["task-1"] });
+    store.create({ ...meta("next"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    const entry = {
+      sessionId: "tombstoned",
+      running: true,
+      status: "running",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    };
+    internals.active.set("tombstoned", entry);
+    assert.equal(internals.acquireActiveTurn("tombstoned"), true);
+    internals.onDriverBackgroundWork("tombstoned", {
+      state: "running",
+      pendingTaskIds: ["task-1"],
+      jobs: [{ id: "task-1", launchType: "agent", startedAt: 1 }],
+    });
+    assert.equal(store.readMeta("tombstoned")?.backgroundWorkState, undefined);
+    assert.equal(store.readMeta("tombstoned")?.backgroundJobs?.[0]?.terminalStatus, undefined);
+
+    entry.running = false;
+    internals.settleActiveWorkPermit("tombstoned", entry);
+
+    assert.equal(internals.activeTurnAdmitted.has("tombstoned"), false);
+    assert.equal(internals.acquireActiveTurn("next"), true);
+    internals.releaseActiveTurn("next");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("retirement completion refreshes inventory after a suppressed handoff refresh", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retirement-inventory-refresh-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("handoff"), status: "idle", agentSessionId: "provider-1" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 1,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    const client = { dispose: () => {}, cancel: () => {}, agentSessionId: () => "provider-1" };
+    const entry = {
+      sessionId: "handoff",
+      running: false,
+      status: "idle",
+      queue: [],
+      client,
+    };
+    internals.active.set("handoff", entry);
+    assert.equal(manager.capacityState().dimensions?.parkedSessions, 0);
+    internals.deleteActiveSession("handoff", entry, false, false);
+    const retirement = {
+      client,
+      entry,
+      promise: Promise.resolve(),
+      preserveAdmission: false,
+      preserveLock: false,
+      acceptPromptsDuringHandoff: false,
+      parking: false,
+    };
+    internals.closing.set("handoff", retirement);
+
+    internals.completeProviderRetirement("handoff", retirement);
+
+    assert.equal(manager.capacityState().dimensions?.parkedSessions, 1);
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -1061,8 +1061,9 @@ export class SessionManager {
       this.activeTurnLimit = configuration.configuredUnits;
       // A Machine-capacity decrease preserves existing resident leases. The implicit active-turn
       // gate must preserve the same legacy behavior for those residents instead of becoming a new,
-      // narrower boundary until they naturally drain. Reporting still follows Machine capacity;
-      // steady-state active turns cannot exceed it because every turn owns a resident lease.
+      // narrower boundary. Its conservative ceiling may remain until the next configuration; the
+      // effective turn count still cannot exceed Machine capacity because every turn owns a
+      // resident lease.
       this.activeTurnAdmission.setLimit(Math.max(
         configuration.configuredUnits,
         this.boxAdmission.usedCapacity(),
@@ -3786,10 +3787,11 @@ export class SessionManager {
     // held by governance/budget, or already attempted. A live callback replaces this state with
     // running before provider work can again rely on the parent-turn permit.
     if (meta.backgroundWorkState === "orphaned") return false;
-    const liveDetachedWork = meta.backgroundWorkState === "running" || !meta.orphanedWork && (
-      !!meta.pendingBackgroundTaskIds?.length ||
-      !!meta.backgroundJobs?.some((job) => !job.terminalStatus)
-    );
+    // Durable job rows are audit state, not proof of current execution. A tombstoned task can keep
+    // a non-terminal row after its pending id is filtered; only the live state plus an eligible id
+    // may retain an execution permit.
+    const liveDetachedWork = meta.backgroundWorkState === "running" &&
+      !!meta.pendingBackgroundTaskIds?.length;
     if (liveDetachedWork) return true;
     const continuationPending = meta.backgroundWorkState === "continuation_pending" ||
       !!meta.backgroundJobs?.some((job) => job.continuationRequired &&
@@ -6551,7 +6553,8 @@ export class SessionManager {
     else this.preLaunchQueues.delete(sessionId);
     this.rejectQueued(removed, "queued command was cancelled");
     if (retained.length !== before) {
-      if (entry && retained.length === 0 && !entry.running && this.cancelActiveTurnWait(sessionId)) {
+      if (entry && retained.length === 0 && !entry.running && this.cancelActiveTurnWait(sessionId) &&
+          this.store.readMeta(sessionId)?.status === "queued") {
         this.emitStatus(sessionId, "idle");
       }
       this.emitQueue(sessionId);
@@ -8851,11 +8854,14 @@ export class SessionManager {
     if (this.closing.get(sessionId) !== retirement) return;
     this.closing.delete(sessionId);
     if (retirement.parking) this.parkingSessions.delete(sessionId);
+    // Callers suppress inventory refresh between active deletion and closing-fence installation.
+    // Once exact retirement completes, every path—including a failed rebind with no replacement—
+    // must project the now-nonresident resumable session as parked before release reports capacity.
+    this.refreshCapacityInventorySession(sessionId);
     this.releaseActiveWorktreeLease(retirement.entry);
     if (!retirement.preserveAdmission) this.releaseAdmission(sessionId);
     if (!retirement.preserveLock) this.clearLock(sessionId);
     if (retirement.parking) {
-      this.refreshCapacityInventorySession(sessionId);
       this.resumePromptsQueuedDuringParking(sessionId, retirement);
       this.reportCapacity();
     }
