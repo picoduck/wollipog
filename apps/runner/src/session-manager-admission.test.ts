@@ -252,6 +252,1206 @@ test("capacity blockers identify the exact weighted, provider, target, and runne
   }
 });
 
+test("one capacity observation scans each lease root once across a large waiter fan-out", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-observation-"));
+  try {
+    const gate = new BoxAdmission(root, 256);
+    const sibling = new BoxAdmission(root, 256);
+    assert.equal(gate.acquire({ sessionId: "provider-holder", agentId: "claude", weight: 1, agentLimit: 1 }), true);
+    assert.equal(gate.acquire({
+      sessionId: "target-holder", agentId: "codex", weight: 1, targetId: "cloud-a", targetLimit: 1,
+    }), true);
+    assert.equal(gate.acquire({
+      sessionId: "exclusive-holder", agentId: "gemini", weight: 1, exclusiveGroup: "seatbelt:gemini",
+    }), true);
+    assert.equal(sibling.acquire({ sessionId: "weighted-sibling", agentId: "heavy", weight: 253 }), true);
+    // Count deterministic filesystem-root inspections rather than asserting a timing threshold.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = gate as any;
+    const original = internals.usedSlots.bind(gate) as (path: string) => number;
+    const scans = new Map<string, number>();
+    internals.usedSlots = (path: string) => {
+      scans.set(path, (scans.get(path) ?? 0) + 1);
+      return original(path);
+    };
+    const observation = gate.observe();
+    for (let index = 0; index < 2_000; index++) {
+      assert.equal(gate.blocker({
+        sessionId: `provider-${index}`, agentId: "claude", weight: 1, agentLimit: 1,
+      }, observation)?.kind, "agent_quota");
+      assert.equal(gate.blocker({
+        sessionId: `target-${index}`, agentId: "codex", weight: 1, targetId: "cloud-a", targetLimit: 1,
+      }, observation)?.kind, "target_quota");
+      assert.equal(gate.blocker({
+        sessionId: `exclusive-${index}`, agentId: "gemini", weight: 1, exclusiveGroup: "seatbelt:gemini",
+      }, observation)?.kind, "exclusive_group");
+      assert.equal(gate.blocker({
+        sessionId: `global-${index}`, agentId: "other", weight: 1,
+      }, observation)?.kind, "runner_capacity");
+    }
+    assert.equal(scans.size, 4, "only the global, provider, target, and exclusive roots are relevant");
+    assert.deepEqual([...scans.values()], [1, 1, 1, 1], "waiter fan-out does not multiply filesystem scans");
+    gate.releaseAll();
+    sibling.releaseAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("capacity status deterministically summarizes blocker groups beyond the wire bound", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-overflow-"));
+  try {
+    const manager = new SessionManager(
+      () => {}, () => {}, new SessionStore(root), "runner", undefined, undefined, root, 1,
+    );
+    // Exercise the aggregate directly so the regression is independent of provider launch setup.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gate = manager as any;
+    for (let index = 0; index < 300; index++) {
+      gate.admissionQueue.push({
+        request: { sessionId: `s-${index}`, agentId: `agent-${index}`, weight: 2 },
+        bypasses: 0,
+        resolve: () => {},
+      });
+    }
+    const status = manager.capacityState();
+    assert.equal(status.blockers?.length, 256);
+    assert.equal(status.blockers?.at(-1)?.kind, "diagnostic_overflow");
+    assert.equal(status.blockers?.at(-1)?.waitingSessions, 45);
+    assert.equal(
+      status.blockers?.reduce((sum, blocker) => sum + (blocker.waitingSessions ?? 0), 0),
+      status.queuedSessions,
+    );
+
+    gate.controlPlaneProtocolVersion = () => 134;
+    gate.activeTurnWaiters.set("legacy-active-turn", {
+      sessionId: "legacy-active-turn", agentId: "claude", weight: 1,
+    });
+    const legacy = manager.capacityState();
+    assert.ok(legacy.blockers?.some((blocker) => blocker.kind === "runner_capacity"),
+      "an older control plane receives a bounded report in its closed vocabulary");
+    assert.equal(
+      new Set(legacy.blockers?.map((blocker) =>
+        `${blocker.kind}:${blocker.agentId ?? ""}:${blocker.targetId ?? ""}`)).size,
+      legacy.blockers?.length,
+      "legacy snapshots contain only one row for each dashboard blocker key",
+    );
+    assert.equal(
+      legacy.blockers?.reduce((sum, blocker) => sum + (blocker.waitingSessions ?? 0), 0),
+      legacy.queuedSessions,
+      "coalescing the legacy capacity and overflow rows keeps the waiter total exact",
+    );
+    gate.activeTurnWaiters.clear();
+    gate.controlPlaneProtocolVersion = () => 135;
+
+    gate.admissionQueue.splice(0);
+    assert.equal(gate.boxAdmission.acquire({ sessionId: "resident", agentId: "holder", weight: 1 }), true);
+    for (let index = 0; index < 300; index++) {
+      gate.admissionQueue.push({
+        request: { sessionId: `global-${index}`, agentId: `agent-${index}`, weight: 1 },
+        bypasses: 0,
+        resolve: () => {},
+      });
+    }
+    const global = manager.capacityState();
+    assert.equal(global.blockers?.length, 1,
+      "irrelevant agent identities do not split one global-capacity boundary");
+    assert.equal(global.blockers?.[0]?.waitingSessions, 300);
+    assert.equal(global.blockers?.[0]?.agentId, undefined);
+    gate.boxAdmission.release("resident");
+
+    const exactKinds = [
+      "runner_capacity", "agent_quota", "target_quota", "exclusive_group", "queue_order", "active_turn_capacity",
+    ] as const;
+    const mixed = [
+      ...Array.from({ length: 300 }, (_, index) => ({
+        kind: "request_weight" as const,
+        description: `request ${index}`,
+        usedUnits: 1,
+        limitUnits: 1,
+        requiredUnits: 2,
+        waitingSessions: 1,
+        agentId: `agent-${index}`,
+      })),
+      ...exactKinds.map((kind) => ({
+        kind,
+        description: kind,
+        usedUnits: 1,
+        limitUnits: 1,
+        requiredUnits: 1,
+        waitingSessions: 1,
+      })),
+    ];
+    gate.controlPlaneProtocolVersion = () => 135;
+    const bounded = gate.boundCapacityBlockers(mixed, 1) as Array<{ kind: string; waitingSessions?: number }>;
+    assert.equal(bounded.length, 256);
+    for (const kind of ["request_weight", ...exactKinds]) {
+      assert.ok(bounded.some((blocker) => blocker.kind === kind), `${kind} remains actionable after overflow`);
+    }
+    assert.equal(bounded.reduce((sum, blocker) => sum + (blocker.waitingSessions ?? 0), 0), mixed.length);
+    assert.equal(gate.boundCapacityBlockers(mixed.slice(0, 256), 1).length, 256,
+      "the protocol boundary itself needs no aggregate");
+    const justOver = gate.boundCapacityBlockers(mixed.slice(0, 257), 1) as Array<{ kind: string }>;
+    assert.equal(justOver.length, 256);
+    assert.equal(justOver.at(-1)?.kind, "diagnostic_overflow");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("retained-session inventory is cached on hot reports and distinguishes resident from parked", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-capacity-inventory-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("resident"), agentSessionId: "provider-resident", status: "idle" });
+    store.create({ ...meta("parked"), agentSessionId: "provider-parked", status: "idle" });
+    let storeScans = 0;
+    const originalListSessions = store.listSessions.bind(store);
+    store.listSessions = () => {
+      storeScans++;
+      return originalListSessions();
+    };
+    const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, root, 4);
+    assert.deepEqual(manager.capacityState().dimensions, {
+      activeTurns: { used: 0, limit: 4, available: 4 },
+      residentProcessUnits: { used: 0, limit: 4, available: 4 },
+      retainedSessions: { used: 2, limit: null, available: null },
+      parkedSessions: 2,
+      idleProcessPolicy: "retain",
+    });
+    manager.capacityState();
+    assert.equal(storeScans, 1, "repeated turn-boundary reports do not rescan every durable session");
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.active.set("resident", {});
+    internals.refreshCapacityInventorySession("resident");
+    assert.equal(manager.capacityState().dimensions?.retainedSessions.used, 2);
+    assert.equal(manager.capacityState().dimensions?.parkedSessions, 1,
+      "a resumable resident session is retained but not parked");
+    internals.active.delete("resident");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("active-turn capacity is enforced across runner processes independently of resident leases", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-active-turn-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create(meta("s1"));
+    store.create(meta("s2"));
+    const policy = {
+      agentLimits: {},
+      agentWeights: {},
+      activeTurnLimit: 1,
+      idleProcessPolicy: "retain" as const,
+    };
+    const firstManager = new SessionManager(
+      () => {}, () => {}, store, "runner-a", undefined, undefined, root, 4,
+      undefined, undefined, policy,
+    );
+    const secondManager = new SessionManager(
+      () => {}, () => {}, store, "runner-b", undefined, undefined, root, 4,
+      undefined, undefined, policy,
+    );
+    // Exercise the cross-process lease itself; prompt scheduling is covered by the queue tests.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const first = firstManager as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const second = secondManager as any;
+    assert.equal(first.acquireActiveTurn("s1"), true);
+    assert.equal(second.acquireActiveTurn("s2"), false);
+    const waiting = secondManager.capacityState();
+    assert.equal(waiting.usedUnits, 0, "a turn permit does not consume a resident-process unit");
+    assert.equal(waiting.dimensions?.activeTurns.used, 1);
+    assert.equal(waiting.dimensions?.residentProcessUnits.used, 0);
+    assert.equal(waiting.blockers?.[0]?.kind, "active_turn_capacity");
+    assert.equal(store.readMeta("s2")?.capacityWait?.kind, "active_turn_capacity");
+
+    first.releaseActiveTurn("s1");
+    assert.equal(second.acquireActiveTurn("s2"), true);
+    assert.equal(secondManager.capacityState().dimensions?.activeTurns.used, 1);
+    second.releaseActiveTurn("s2");
+    firstManager.shutdownAll();
+    secondManager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an active-turn waiter runs before another session drains its deeper local queue", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-active-turn-fairness-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create(meta("s1"));
+    store.create(meta("s2"));
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 4,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    const order: string[] = [];
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+    let finishFirst!: () => void;
+    const firstResult = new Promise<"end_turn">((resolve) => { finishFirst = () => resolve("end_turn"); });
+    const client = {
+      resolvePermission: () => false,
+      cancel: () => {},
+      dispose: () => {},
+      prompt: (text: string) => {
+        order.push(text);
+        if (text === "A1") {
+          firstStarted();
+          return firstResult;
+        }
+        return Promise.resolve("end_turn" as const);
+      },
+      setConfig: () => {},
+      agentSessionId: () => "provider",
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    for (const sessionId of ["s1", "s2"]) {
+      internals.active.set(sessionId, {
+        sessionId,
+        client,
+        repoPath: root,
+        cwd: root,
+        worktree: null,
+        status: "running",
+        running: true,
+        queue: [],
+      });
+    }
+    manager.prompt("s1", "A1");
+    manager.prompt("s1", "A2");
+    manager.prompt("s2", "B");
+    internals.active.get("s1").running = false;
+    internals.active.get("s2").running = false;
+    const firstDrain = internals.drain("s1") as Promise<void>;
+    await started;
+    await internals.drain("s2");
+    assert.equal(store.readMeta("s2")?.capacityWait?.kind, "active_turn_capacity");
+    finishFirst();
+    await firstDrain;
+    for (let attempt = 0; attempt < 100 && order.length < 3; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(order, ["A1", "B", "A2"]);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an empty scheduled drain never creates a durable active-turn waiter", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-empty-active-turn-drain-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("empty"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    internals.active.set("empty", {
+      sessionId: "empty",
+      running: false,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, agentSessionId: () => null },
+    });
+    await internals.drain("empty");
+    assert.equal(internals.activeTurnWaiters.size, 0);
+    assert.equal(store.readMeta("empty")?.status, "idle");
+    assert.equal(store.readMeta("empty")?.capacityWait, undefined);
+    internals.active.delete("empty");
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("authentication and history gates do not self-reschedule an undrainable FIFO", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-gated-active-turn-drain-"));
+  try {
+    for (const gate of ["authenticationBlocked", "historyQuarantined"] as const) {
+      const store = new SessionStore(join(root, gate));
+      store.create({ ...meta(gate), status: "idle" });
+      const manager = new SessionManager(
+        () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+        undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const internals = manager as any;
+      internals.active.set(gate, {
+        sessionId: gate,
+        running: false,
+        status: "idle",
+        queue: [{ id: "queued", text: "wait", images: [] }],
+        [gate]: true,
+        client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+      });
+      let reschedules = 0;
+      internals.scheduleDrain = () => { reschedules++; };
+      await internals.drain(gate);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(reschedules, 0, `${gate} must wait for its recovery transition`);
+      assert.equal(internals.activeTurnAdmitted.has(gate), false);
+      manager.shutdownAll();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cancelling the last capacity-waiting prompt removes its waiter and queued status", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cancel-active-turn-waiter-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("waiting"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    internals.active.set("waiting", {
+      sessionId: "waiting",
+      running: true,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    });
+    manager.prompt("waiting", "cancel me");
+    const promptId = internals.active.get("waiting").queue[0].id as string;
+    internals.active.get("waiting").running = false;
+    await internals.drain("waiting");
+    assert.equal(internals.activeTurnWaiters.has("waiting"), true);
+
+    manager.removeQueuedPrompt("waiting", promptId);
+    assert.equal(internals.activeTurnWaiters.has("waiting"), false);
+    assert.equal(store.readMeta("waiting")?.status, "idle");
+    assert.equal(store.readMeta("waiting")?.capacityWait, undefined);
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cancelling a capacity waiter cannot overwrite a newer terminal status", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cancel-waiter-terminal-status-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("waiting"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    const entry = {
+      sessionId: "waiting",
+      running: false,
+      status: "idle",
+      queue: [{ id: "queued", text: "wait", images: [] }],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    };
+    internals.active.set("waiting", entry);
+    await internals.drain("waiting");
+    assert.equal(internals.activeTurnWaiters.has("waiting"), true);
+    store.patchMeta("waiting", { status: "failed" });
+
+    manager.removeQueuedPrompt("waiting", "queued");
+
+    assert.equal(internals.activeTurnWaiters.has("waiting"), false);
+    assert.equal(store.readMeta("waiting")?.status, "failed");
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("containment that empties a FIFO removes its active-turn waiter and retry state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-contained-active-turn-waiter-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("contained"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    const entry = {
+      sessionId: "contained",
+      running: false,
+      status: "idle",
+      queue: [{ id: "queued", text: "wait", images: [] }],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    };
+    internals.active.set("contained", entry);
+    await internals.drain("contained");
+    assert.equal(internals.activeTurnWaiters.has("contained"), true);
+
+    entry.queue.length = 0;
+    entry.historyIntegrityFailure = "contained";
+    await internals.drain("contained");
+
+    assert.equal(internals.activeTurnWaiters.has("contained"), false);
+    assert.equal(internals.activeTurnRetryTimer, null);
+    assert.equal(store.readMeta("contained")?.status, "idle");
+    assert.equal(store.readMeta("contained")?.capacityWait, undefined);
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("non-running retained background metadata does not cancel a provider at capacity", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retained-background-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("orphaned"), status: "idle", backgroundWorkState: "orphaned" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    let cancellations = 0;
+    const entry = {
+      sessionId: "orphaned",
+      running: false,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => { cancellations++; }, agentSessionId: () => null },
+    };
+    internals.active.set("orphaned", entry);
+    internals.reconcileAuthoritativeBackgroundWorkPermit("orphaned", entry, false);
+    assert.equal(cancellations, 0);
+    assert.equal(internals.activeTurnAdmitted.has("orphaned"), false);
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("idle background rediscovery at active-turn capacity reports retained work without cancellation", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-idle-background-rediscovery-capacity-"));
+  try {
+    const sent: RunnerToControlPlane[] = [];
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("rediscovered"), status: "idle" });
+    const manager = new SessionManager(
+      (message) => sent.push(message), () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    let cancellations = 0;
+    const entry = {
+      sessionId: "rediscovered",
+      running: false,
+      providerInitiatedTurnActive: false,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => { cancellations++; }, agentSessionId: () => null },
+    };
+    internals.active.set("rediscovered", entry);
+
+    internals.onDriverBackgroundWork("rediscovered", {
+      state: "running",
+      pendingTaskIds: ["artifact-task"],
+      jobs: [{ id: "artifact-task", launchType: "unknown", startedAt: 1 }],
+    });
+
+    assert.equal(cancellations, 0);
+    assert.equal(internals.activeTurnAdmitted.has("rediscovered"), false);
+    assert.equal(store.readMeta("rediscovered")?.backgroundWorkState, "running");
+    assert.equal(store.readMeta("rediscovered")?.orphanedWork, undefined);
+    assert.equal(sent.some((message) => message.type === "session_event" &&
+      message.payload.kind === "error" && /Active Turn Capacity/.test(message.payload.message)), false);
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launch-time background reconciliation at capacity cannot cancel the initializing provider", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-launch-background-reconcile-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("launching"), status: "starting", backgroundWorkState: "running",
+      pendingBackgroundTaskIds: ["seed-task"] });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    let cancellations = 0;
+    const entry = {
+      sessionId: "launching",
+      running: false,
+      providerInitiatedTurnActive: false,
+      status: "starting",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => { cancellations++; }, agentSessionId: () => null },
+    };
+    internals.active.set("launching", entry);
+
+    internals.reconcileAuthoritativeBackgroundWorkPermit("launching", entry, true);
+
+    assert.equal(cancellations, 0);
+    assert.equal(internals.activeTurnAdmitted.has("launching"), false);
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a terminal missing-result continuation releases its active-work permit", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-missing-result-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta("missing-result"),
+      status: "idle",
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [{
+        id: "job-1",
+        parentTurnId: "turn-1",
+        runnerId: "runner",
+        workspaceId: "repo",
+        context: { kind: "native" },
+        launchType: "agent",
+        registeredAt: 1,
+        terminalStatus: "completed",
+        terminalObservedAt: 2,
+        continuationRequired: true,
+        continuationId: "bgcont-1",
+        continuationQueuedAt: 3,
+        continuationSubmittedAt: 4,
+        continuationAcceptedAt: 5,
+      }],
+    });
+    store.create({ ...meta("next"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    const entry = {
+      sessionId: "missing-result",
+      running: false,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    };
+    internals.active.set("missing-result", entry);
+    assert.equal(internals.acquireActiveTurn("missing-result"), true);
+    internals.markBackgroundContinuationMissingResult("missing-result", ["job-1"]);
+    assert.ok(store.readMeta("missing-result")?.backgroundJobs?.[0]?.continuationMissingResultAt);
+    assert.equal(store.readMeta("missing-result")?.backgroundWorkState, undefined);
+
+    internals.settleActiveWorkPermit("missing-result", entry);
+    assert.equal(manager.capacityState().dimensions?.activeTurns.used, 0);
+    assert.equal(internals.acquireActiveTurn("next"), true,
+      "a terminally missing result cannot starve later sessions");
+    internals.releaseActiveTurn("next");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal orphan metadata releases its active-work permit for another session", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-terminal-orphan-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta("orphaned"),
+      status: "idle",
+      backgroundWorkState: "orphaned",
+      pendingBackgroundTaskIds: ["task-1"],
+      orphanedWork: {
+        pendingTaskIds: ["task-1"],
+        markedAt: 1,
+        reason: "process_exit",
+        recoveryAttemptedAt: 2,
+      },
+    });
+    store.create({ ...meta("next"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    const entry = {
+      sessionId: "orphaned",
+      running: false,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    };
+    internals.active.set("orphaned", entry);
+    assert.equal(internals.acquireActiveTurn("orphaned"), true);
+
+    internals.settleActiveWorkPermit("orphaned", entry);
+
+    assert.equal(internals.activeTurnAdmitted.has("orphaned"), false);
+    assert.equal(internals.acquireActiveTurn("next"), true);
+    assert.equal(manager.capacityState().dimensions?.activeTurns.used, 1);
+    internals.releaseActiveTurn("next");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a held terminal continuation releases its permit until recovery can run", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-held-continuation-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta("held"),
+      status: "idle",
+      costUsd: 1,
+      config: { costBudgetUsd: 1 },
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [{
+        id: "job-1",
+        parentTurnId: "turn-1",
+        runnerId: "runner",
+        workspaceId: "repo",
+        context: { kind: "native" },
+        launchType: "agent",
+        registeredAt: 1,
+        terminalStatus: "completed",
+        terminalObservedAt: 2,
+        continuationRequired: true,
+        continuationId: "bgcont-1",
+        continuationQueuedAt: 3,
+      }],
+    });
+    store.create({ ...meta("next"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    const entry = {
+      sessionId: "held",
+      running: false,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    };
+    internals.active.set("held", entry);
+    assert.equal(internals.acquireActiveTurn("held"), true);
+
+    internals.settleActiveWorkPermit("held", entry);
+
+    assert.equal(internals.activeTurnAdmitted.has("held"), false);
+    assert.equal(internals.acquireActiveTurn("next"), true);
+    internals.releaseActiveTurn("next");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a tombstoned non-terminal job row cannot retain an active-work permit", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-tombstoned-background-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("tombstoned"), status: "idle", recoveredBackgroundTaskIds: ["task-1"] });
+    store.create({ ...meta("next"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    const entry = {
+      sessionId: "tombstoned",
+      running: true,
+      status: "running",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    };
+    internals.active.set("tombstoned", entry);
+    assert.equal(internals.acquireActiveTurn("tombstoned"), true);
+    internals.onDriverBackgroundWork("tombstoned", {
+      state: "running",
+      pendingTaskIds: ["task-1"],
+      jobs: [{ id: "task-1", launchType: "agent", startedAt: 1 }],
+    });
+    assert.equal(store.readMeta("tombstoned")?.backgroundWorkState, undefined);
+    assert.equal(store.readMeta("tombstoned")?.backgroundJobs?.[0]?.terminalStatus, undefined);
+
+    entry.running = false;
+    internals.settleActiveWorkPermit("tombstoned", entry);
+
+    assert.equal(internals.activeTurnAdmitted.has("tombstoned"), false);
+    assert.equal(internals.acquireActiveTurn("next"), true);
+    internals.releaseActiveTurn("next");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("retirement completion refreshes inventory after a suppressed handoff refresh", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retirement-inventory-refresh-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("handoff"), status: "idle", agentSessionId: "provider-1" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 1,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    const client = { dispose: () => {}, cancel: () => {}, agentSessionId: () => "provider-1" };
+    const entry = {
+      sessionId: "handoff",
+      running: false,
+      status: "idle",
+      queue: [],
+      client,
+    };
+    internals.active.set("handoff", entry);
+    assert.equal(manager.capacityState().dimensions?.parkedSessions, 0);
+    internals.deleteActiveSession("handoff", entry, false, false);
+    const retirement = {
+      client,
+      entry,
+      promise: Promise.resolve(),
+      preserveAdmission: false,
+      preserveLock: false,
+      acceptPromptsDuringHandoff: false,
+      parking: false,
+    };
+    internals.closing.set("handoff", retirement);
+
+    internals.completeProviderRetirement("handoff", retirement);
+
+    assert.equal(manager.capacityState().dimensions?.parkedSessions, 1);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an undelivered capacity snapshot is retried and reconnect can force reconciliation", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-capacity-report-retry-"));
+  try {
+    const manager = new SessionManager(
+      () => { throw new Error("socket closed"); },
+      () => {},
+      new SessionStore(join(root, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      root,
+      1,
+    );
+    assert.throws(() => manager.reportCapacity(), /socket closed/);
+    let reports = 0;
+    manager.setSend((message) => {
+      if (message.type === "runner_capacity_status") reports++;
+    });
+    manager.reportCapacity();
+    assert.equal(reports, 1, "a synchronous delivery failure did not poison the deduplication cache");
+    manager.reportCapacity();
+    assert.equal(reports, 1);
+    manager.reportCapacity(true);
+    assert.equal(reports, 2, "registration reconnect forces the current bounded snapshot");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("park-when-needed retires only a resumable idle provider and preserves its session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-idle-provider-parking-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    let launches = 0;
+    const closed: string[] = [];
+    const resumedWith: Array<string | undefined> = [];
+    let warmCloseStarted!: () => void;
+    const warmClosing = new Promise<void>((resolve) => { warmCloseStarted = resolve; });
+    let finishWarmClose!: () => void;
+    const warmCloseFinished = new Promise<void>((resolve) => { finishWarmClose = resolve; });
+    const factory = (_driver: unknown, options: { resumeId?: string }) => {
+      launches++;
+      resumedWith.push(options.resumeId);
+      const providerId = options.resumeId ?? `provider-${launches}`;
+      return {
+        pid: launches,
+        initialize: async () => {},
+        newSession: async () => providerId,
+        prompt: async () => "end_turn" as const,
+        close: async () => {
+          if (providerId === "provider-1") {
+            warmCloseStarted();
+            await warmCloseFinished;
+          }
+          closed.push(providerId);
+          return true;
+        },
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => providerId,
+      };
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
+      undefined, undefined, {
+        agentLimits: {},
+        agentWeights: {},
+        idleProcessPolicy: "park_when_needed",
+      },
+    );
+    const warmSpec = { ...launchSpec(root, "warm"), config: { model: "stable-model" } };
+    assert.equal(await manager.start(warmSpec, "establish resume coordinate"), true);
+    for (let attempt = 0; attempt < 100 && store.readMeta("warm")?.status !== "idle"; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(store.readMeta("warm")?.status, "idle");
+    assert.equal(store.readMeta("warm")?.agentSessionId, "provider-1");
+
+    const newStart = manager.start(launchSpec(root, "new"));
+    await warmClosing;
+    const durableStates = { queued: 0, started: 0, completed: 0, failed: 0 };
+    const parkingPrompt = {
+      commandId: "parking-prompt",
+      queued: () => { durableStates.queued++; },
+      started: () => { durableStates.started++; },
+      completed: () => { durableStates.completed++; },
+      failed: () => { durableStates.failed++; },
+      uncertain: () => { durableStates.failed++; },
+    };
+    assert.equal(manager.prompt("warm", "resume parked session", [], undefined, undefined, parkingPrompt), true,
+      "a prompt racing graceful parking is queued instead of cancelled");
+    assert.deepEqual(durableStates, { queued: 1, started: 0, completed: 0, failed: 0 });
+    finishWarmClose();
+    assert.equal(await newStart, true, "resident pressure parks the warm process and admits the new one");
+    assert.deepEqual(closed, ["provider-1"]);
+    assert.deepEqual(manager.liveSessionIds(), ["new"]);
+    assert.equal(store.readMeta("warm")?.status, "idle", "parking is not a terminal lifecycle transition");
+    assert.equal(store.readMeta("warm")?.agentSessionId, "provider-1", "the resume coordinate remains durable");
+    assert.equal(store.readMeta("warm")?.config.model, "stable-model");
+    assert.equal(manager.capacityState().dimensions?.retainedSessions.used, 1,
+      "the established parked conversation remains retained");
+    assert.equal(manager.capacityState().dimensions?.parkedSessions, 1);
+    manager.stop("new");
+    await (manager as unknown as { closing: Map<string, { promise: Promise<void> }> })
+      .closing.get("new")?.promise;
+    for (let attempt = 0; attempt < 100 && launches < 3; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(launches, 3);
+    assert.equal(resumedWith.at(-1), "provider-1", "the parked provider identity is used for resume");
+    for (let attempt = 0; attempt < 100 && store.readMeta("warm")?.status !== "idle"; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(durableStates, { queued: 1, started: 1, completed: 1, failed: 0 },
+      "the deferred durable prompt keeps one lifecycle and is never cancelled by automatic parking");
+    assert.equal(store.readMeta("warm")?.config.model, "stable-model");
+    assert.deepEqual(manager.liveSessionIds(), ["warm"]);
+    manager.stop("warm");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("parking replay preserves a non-durable prompt's dashboard identity and ordinal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-parking-prompt-identity-"));
+  try {
+    const manager = new SessionManager(
+      () => {}, () => {}, new SessionStore(join(root, "sessions")), "runner",
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.launchGenerations.set("parked", 7);
+    internals.preLaunchQueues.set("parked", [{
+      id: "stable-prompt-id",
+      ordinal: 41,
+      text: "resume me",
+      images: [],
+    }]);
+    let replayed: unknown[] | undefined;
+    internals.prompt = (...args: unknown[]) => { replayed = args; return true; };
+    internals.resumePromptsQueuedDuringParking("parked", { parkingGeneration: 7 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(replayed?.[7], 41, "FIFO order survives parking");
+    assert.equal(replayed?.[11], "stable-prompt-id", "dashboard cancellation keeps the same id");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("authoritative background work retains the active-work permit and cannot be parked", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-background-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    let background!: (update: {
+      state: "running" | "orphaned" | null;
+      pendingTaskIds: string[];
+      jobs?: Array<{ id: string; launchType: "agent"; startedAt: number }>;
+      terminalJobs?: Array<{
+        id: string;
+        launchType: "agent";
+        startedAt: number;
+        status: "completed";
+        terminalAt: number;
+        continuationRequired: boolean;
+      }>;
+    }) => void;
+    let promptStarted!: () => void;
+    const started = new Promise<void>((resolve) => { promptStarted = resolve; });
+    let finishPrompt!: () => void;
+    const promptResult = new Promise<"end_turn">((resolve) => { finishPrompt = () => resolve("end_turn"); });
+    const factory = (_driver: unknown, _options: unknown, callbacks: {
+      onBackgroundWork(update: Parameters<typeof background>[0]): void;
+    }) => {
+      background = callbacks.onBackgroundWork;
+      return {
+        pid: 1,
+        initialize: async () => {},
+        newSession: async () => "provider-1",
+        prompt: async () => { promptStarted(); return promptResult; },
+        close: async () => true,
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "provider-1",
+      };
+    };
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, root, 2,
+      undefined, undefined, {
+        agentLimits: {}, agentWeights: {}, activeTurnLimit: 1, idleProcessPolicy: "park_when_needed",
+      },
+    );
+    assert.equal(await manager.start(launchSpec(root, "background")), true);
+    manager.prompt("background", "do work");
+    await started;
+    background({
+      state: "running",
+      pendingTaskIds: ["task-1"],
+      jobs: [{ id: "task-1", launchType: "agent", startedAt: 1 }],
+    });
+    finishPrompt();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    for (let attempt = 0; attempt < 100 && internals.active.get("background")?.running; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(manager.capacityState().dimensions?.activeTurns.used, 1);
+    assert.equal(internals.idleProviderCanPark("background", internals.active.get("background")), false);
+
+    background({
+      state: null,
+      pendingTaskIds: [],
+      terminalJobs: [{
+        id: "task-1",
+        launchType: "agent",
+        startedAt: 1,
+        status: "completed",
+        terminalAt: 2,
+        continuationRequired: false,
+      }],
+    });
+    assert.equal(manager.capacityState().dimensions?.activeTurns.used, 0);
+    manager.stop("background");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex, app-server, and resume-capable ACP sessions park and resume by provider identity", async () => {
+  for (const driver of ["codex", "codex-app-server", "acp"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `wollipog-${driver}-parking-`));
+    try {
+      const store = new SessionStore(join(root, "sessions"));
+      let launches = 0;
+      const resumeIds: Array<string | undefined> = [];
+      const factory = (_kind: unknown, options: { resumeId?: string }, callbacks: {
+        onAcpCapabilities?: (capabilities: {
+          logout: boolean;
+          loadSession: boolean;
+          sessionList: boolean;
+          sessionDelete: boolean;
+          sessionResume: boolean;
+          sessionClose: boolean;
+        }) => void;
+      }) => {
+        launches++;
+        resumeIds.push(options.resumeId);
+        const providerId = options.resumeId ?? `${driver}-provider-${launches}`;
+        return {
+          pid: launches,
+          initialize: async () => {
+            if (driver === "acp") callbacks.onAcpCapabilities?.({
+              logout: true,
+              loadSession: true,
+              sessionList: true,
+              sessionDelete: false,
+              sessionResume: true,
+              sessionClose: true,
+            });
+          },
+          newSession: async () => providerId,
+          prompt: async () => "end_turn" as const,
+          close: async () => true,
+          cancel: () => {},
+          dispose: () => {},
+          setConfig: () => {},
+          resolvePermission: () => false,
+          agentSessionId: () => providerId,
+        };
+      };
+      const manager = new SessionManager(
+        () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
+        undefined, undefined, { agentLimits: {}, agentWeights: {}, idleProcessPolicy: "park_when_needed" },
+      );
+      const spec = {
+        ...launchSpec(root, "warm"),
+        agentId: driver,
+        command: driver,
+        driver,
+      };
+      assert.equal(await manager.start(spec, "establish"), true, driver);
+      for (let attempt = 0; attempt < 100 && store.readMeta("warm")?.status !== "idle"; attempt++) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      const providerId = `${driver}-provider-1`;
+      assert.equal(store.readMeta("warm")?.agentSessionId, providerId, driver);
+      assert.equal(await manager.start({ ...spec, sessionId: "replacement", args: ["replacement"] }), true, driver);
+      assert.equal(manager.capacityState().dimensions?.parkedSessions, 1, driver);
+      manager.stop("replacement");
+      await (manager as unknown as { closing: Map<string, { promise: Promise<void> }> })
+        .closing.get("replacement")?.promise;
+      manager.prompt("warm", "resume");
+      for (let attempt = 0; attempt < 100 && launches < 3; attempt++) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(resumeIds.at(-1), providerId, driver);
+      manager.stop("warm");
+      manager.shutdownAll();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("parking eligibility is capability-derived and fails closed for provider-owned state", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-parking-rules-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 8,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, idleProcessPolicy: "park_when_needed" },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    const eligibleEntry = () => ({
+      status: "idle",
+      running: false,
+      providerInitiatedTurnActive: false,
+      queue: [],
+      client: { agentSessionId: () => "provider", cancel: () => {}, dispose: () => {} },
+      steerFenceIds: new Set(),
+      reservedPromotions: new Map(),
+    });
+    const providers = [
+      { id: "claude", driver: "claude-code", expected: true },
+      { id: "codex", driver: "codex", expected: true },
+      { id: "app-server", driver: "codex-app-server", expected: true },
+      { id: "acp-resume", driver: "acp", acpCapabilities: { sessionResume: true }, expected: true },
+      { id: "acp-load", driver: "acp", acpCapabilities: { loadSession: true }, expected: true },
+      { id: "acp-unsafe", driver: "acp", acpCapabilities: {}, expected: false },
+    ] as const;
+    for (const provider of providers) {
+      store.create({
+        ...meta(provider.id),
+        driver: provider.driver,
+        agentSessionId: `provider-${provider.id}`,
+        status: "idle",
+        ...(provider.driver === "acp" ? { acpCapabilities: provider.acpCapabilities } : {}),
+      });
+      assert.equal(internals.idleProviderCanPark(provider.id, eligibleEntry()), provider.expected, provider.id);
+    }
+
+    store.create({
+      ...meta("guarded"),
+      agentSessionId: "provider-guarded",
+      status: "input_required",
+      pendingApproval: {
+        requestId: "approval",
+        title: "Approve",
+        options: [{ optionId: "yes", name: "Yes" }],
+      },
+    });
+    const guarded = eligibleEntry();
+    guarded.status = "input_required";
+    assert.equal(internals.idleProviderCanPark("guarded", guarded), false, "input and approval state stays resident");
+    guarded.status = "idle";
+    guarded.queue.push({ text: "queued" });
+    assert.equal(internals.idleProviderCanPark("guarded", guarded), false, "queued provider commands stay resident");
+    guarded.queue.length = 0;
+    store.patchMeta("guarded", { pendingApproval: null, backgroundWorkState: "running", pendingBackgroundTaskIds: ["task"] });
+    assert.equal(internals.idleProviderCanPark("guarded", guarded), false, "detached background work stays resident");
+    internals.controlPlaneProtocolVersion = () => 134;
+    internals.active.set("claude", eligibleEntry());
+    assert.equal(internals.parkOneIdleProvider(), false,
+      "a pre-v135 control plane cannot confirm parking, so the resident process is retained");
+    internals.active.delete("claude");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("box admission is FIFO and a queued launch can be cancelled", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-admission-"));
   try {
@@ -307,6 +1507,13 @@ test("a live capacity increase drains waiters and a decrease preserves running l
       availableUnits: 0,
       queuedSessions: 0,
       blockers: [],
+      dimensions: {
+        activeTurns: { used: 0, limit: 2, available: 2 },
+        residentProcessUnits: { used: 2, limit: 2, available: 0 },
+        retainedSessions: { used: 0, limit: null, available: null },
+        parkedSessions: 0,
+        idleProcessPolicy: "retain",
+      },
     });
 
     assert.equal(manager.configureCapacity({ configuredUnits: 1, revision: 2 }), true);
@@ -326,6 +1533,41 @@ test("a live capacity increase drains waiters and a decrease preserves running l
     assert.ok(sent.some((message) => message.type === "runner_capacity_status" &&
       message.status.configuredUnits === 1 && message.status.usedUnits === 2));
     gate.releaseAdmission("s3");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an implicit active-turn limit does not narrow preserved residents after a capacity decrease", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-implicit-active-turn-decrease-"));
+  try {
+    const store = new SessionStore(root);
+    for (const id of ["s1", "s2"]) store.create(meta(id));
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, undefined, 2,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.acquireAdmission("s2"), true);
+    assert.equal(internals.acquireActiveTurn("s1"), true);
+    assert.equal(internals.acquireActiveTurn("s2"), true);
+
+    assert.equal(manager.configureCapacity({ configuredUnits: 1, revision: 1 }), true);
+    assert.deepEqual(manager.capacityState().dimensions?.activeTurns, {
+      used: 2, limit: 1, available: 0,
+    });
+    internals.releaseActiveTurn("s1");
+    internals.releaseActiveTurn("s2");
+
+    assert.equal(internals.acquireActiveTurn("s1"), true);
+    assert.equal(internals.acquireActiveTurn("s2"), true,
+      "preserved resident sessions retain the pre-decrease concurrency behavior");
+    internals.releaseActiveTurn("s1");
+    internals.releaseActiveTurn("s2");
+    internals.releaseAdmission("s1");
+    internals.releaseAdmission("s2");
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

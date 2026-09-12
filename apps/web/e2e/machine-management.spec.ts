@@ -136,6 +136,12 @@ test("Machine settings explain live Runner Capacity and apply an authorized incr
   await expect(dialog.getByRole("heading", { name: "Runner Capacity" })).toBeVisible();
   await expect(dialog.getByLabel("Runner Capacity Usage")).toContainText("12 Units");
   await expect(dialog.getByText("12 of 16 Units Used · 3 Sessions Queued", { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Active Turns4 of 4");
+  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Resident Process Units12 of 16");
+  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Retained Resumable Sessions9 (Unlimited)");
+  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Parked Sessions2");
+  await expect(dialog.getByLabel("Capacity Dimensions")).toContainText("Idle Process PolicyPark When Needed");
+  await expect(dialog.getByText(/idle-process parking are configured in/)).toBeVisible();
   await expect(dialog.getByRole("list", { name: "Current Capacity Bottlenecks" }))
     .toContainText("claude is using 4 of 4 provider slots · 3 Waiting");
 

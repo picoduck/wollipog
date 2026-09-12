@@ -31,14 +31,14 @@ export class Outbox<T extends CoalescableMessage> {
   /**
    * Buffer one message while the transport is unavailable.
    *
-   * Coalesces redundant `session_status` / `session_queue` for the same session — only the LATEST of
-   * either matters (a queue snapshot fully replaces the previous one, and snapshots carry prompt
-   * previews, so letting them stack during a blip wastes the buffer on payloads a flush would
-   * immediately supersede). The surviving entry is re-appended at the tail so it flushes in the
-   * newest position. Past the cap, the oldest entries are dropped.
+   * Coalesces redundant `session_status` / `session_queue` for the same session and global
+   * `runner_capacity_status` snapshots — only the LATEST of each matters. The surviving entry is
+   * re-appended at the tail so it flushes in the newest position. Past the cap, the oldest entries
+   * are dropped.
    */
   enqueue(msg: T): void {
-    if (msg.type === "session_status" || msg.type === "session_queue") {
+    if (msg.type === "session_status" || msg.type === "session_queue" ||
+        msg.type === "runner_capacity_status") {
       const i = this.buffer.findIndex((m) => m.type === msg.type && m.sessionId === msg.sessionId);
       if (i !== -1) this.buffer.splice(i, 1);
     }

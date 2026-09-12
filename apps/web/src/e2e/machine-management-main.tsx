@@ -27,7 +27,7 @@ let runner: RunnerView | null = {
   workspaces: [{ id: "home", name: "Home", path: "C:\\Users\\misko" }],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 132,
+  protocolVersion: 135,
   agentsRefreshed: true,
   canManage: identityRole !== "viewer",
   capacity: {
@@ -37,6 +37,13 @@ let runner: RunnerView | null = {
     usedUnits: 12,
     availableUnits: 4,
     queuedSessions: 3,
+    dimensions: {
+      activeTurns: { used: 4, limit: 4, available: 0 },
+      residentProcessUnits: { used: 12, limit: 16, available: 4 },
+      retainedSessions: { used: 9, limit: null, available: null },
+      parkedSessions: 2,
+      idleProcessPolicy: "park_when_needed",
+    },
     blockers: [{
       kind: "agent_quota",
       description: "claude is using 4 of 4 provider slots",
@@ -156,6 +163,17 @@ const client = {
       configuredUnits: body.configuredUnits,
       revision: body.expectedRevision + 1,
       availableUnits: Math.max(0, body.configuredUnits - (runner.capacity.usedUnits ?? 0)),
+      ...(runner.capacity.dimensions ? {
+        dimensions: {
+          ...runner.capacity.dimensions,
+          residentProcessUnits: {
+            used: runner.capacity.dimensions.residentProcessUnits.used,
+            limit: body.configuredUnits,
+            available: Math.max(0,
+              body.configuredUnits - runner.capacity.dimensions.residentProcessUnits.used),
+          },
+        },
+      } : {}),
     };
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { capacity: { configuredUnits: runner.capacity.configuredUnits, revision: runner.capacity.revision } };

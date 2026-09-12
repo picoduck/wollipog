@@ -51,6 +51,18 @@ test("outbox coalescing is keyed per session and never collapses across sessions
   assert.deepEqual(outbox.drain().map((m) => m.tag), [1, 2, 3]);
 });
 
+test("outbox coalesces global runner capacity snapshots while offline", () => {
+  const outbox = new Outbox<TestMessage>();
+  outbox.enqueue({ type: "runner_capacity_status", tag: 1 });
+  outbox.enqueue({ type: "session_event", sessionId: "a", tag: 2 });
+  outbox.enqueue({ type: "runner_capacity_status", tag: 3 });
+
+  assert.deepEqual(outbox.drain(), [
+    { type: "session_event", sessionId: "a", tag: 2 },
+    { type: "runner_capacity_status", tag: 3 },
+  ]);
+});
+
 test("outbox never coalesces non-status/queue messages even for the same session", () => {
   const outbox = new Outbox<TestMessage>();
   outbox.enqueue({ type: "session_event", sessionId: "a", tag: 1 });

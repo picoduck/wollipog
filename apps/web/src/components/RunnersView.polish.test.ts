@@ -94,6 +94,12 @@ test("machine cards use consistent action rows and progressively disclose deploy
   assert.match(view, /<h3>Runner Capacity<\/h3>/);
   assert.match(view, /api\.updateMachineCapacity/);
   assert.match(view, /aria-label="Runner Capacity Usage"/);
+  assert.match(view, /aria-label="Capacity Dimensions"/);
+  assert.match(view, /<dt>Active Turns<\/dt>/);
+  assert.match(view, /<dt>Resident Process Units<\/dt>/);
+  assert.match(view, /<dt>Retained Resumable Sessions<\/dt>/);
+  assert.match(view, /<dt>Parked Sessions<\/dt>/);
+  assert.match(view, /<dt>Idle Process Policy<\/dt>/);
   assert.match(view, /aria-label="Current Capacity Bottlenecks"/);
   assert.match(view, /does not infer it from CPU or memory/);
   assert.match(view, /machineSettingsMutationError\(cause\)/);
