@@ -211,7 +211,8 @@ export function NewSessionDialog({
   const [browsing, setBrowsing] = useState(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const [error, setError] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [requestError, setRequestError] = useState<string | null>(null);
   const [retainedSessionId, setRetainedSessionId] = useState<string | null>(null);
   const retainedSessionButtonRef = useRef<HTMLButtonElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -238,7 +239,9 @@ export function NewSessionDialog({
     return {
       value: option.agent.id,
       label: option.label,
-      description: `${option.advanced ? "Advanced Agent · " : ""}${metadata}`,
+      description: option.disabled
+        ? option.advanced ? "Advanced Agent" : undefined
+        : `${option.advanced ? "Advanced Agent · " : ""}${metadata}`,
       disabled: option.disabled,
       disabledReason: option.disabled ? `Needs setup. ${metadata}` : undefined,
     };
@@ -397,7 +400,7 @@ export function NewSessionDialog({
     // An editable combobox can commit its current value again. Unlike a native select, that is a
     // real event, but it is not a new Project decision and must not erase an explicit Location.
     if (value === projectSelection) return;
-    setError(null);
+    setValidationError(null);
     projectSelectionChangedRef.current = true;
     setProjectSelection(value);
     setProjectLocationId("");
@@ -492,6 +495,18 @@ export function NewSessionDialog({
     (!orchestrator || orchestratorSupported) &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
 
+  // Validation feedback describes the state that produced it. Once any value participating in
+  // validation changes, remove that stale diagnosis; request failures remain until the next submit.
+  useEffect(() => {
+    setValidationError(null);
+  }, [
+    projectSelection, selectedProject, projectLocationId, projectLocationLaunchable,
+    runnerId, workspaceId, browsedPath, agentId, selectedAgentOption,
+    defaultsReady, presetOverride, orchestrator, orchestratorSupported,
+    directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
+    executionTargetId, executionTarget, cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
+  ]);
+
   // Keep the secondary shortcut local to this dialog. Unmodified Enter is native form behavior: an
   // open combobox prevents it while committing its option, and a closed single-line input lets it
   // reach the real submit button. Modified Enter works from controls that own plain Enter.
@@ -501,7 +516,21 @@ export function NewSessionDialog({
       event.preventDefault();
       return;
     }
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+    const target = event.target as HTMLElement;
+    const modifiedSubmit = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey;
+    if (modifiedSubmit) {
+      event.preventDefault();
+      // A visible query and highlighted option are uncommitted user intent. Require the popup's
+      // ordinary Enter first instead of silently creating with the previously committed value.
+      if (target.getAttribute("role") === "combobox" && target.getAttribute("aria-expanded") === "true") return;
+      formRef.current?.requestSubmit();
+      return;
+    }
+    const plainKey = !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+    if (plainKey && !valid &&
+        !(target instanceof HTMLTextAreaElement || target instanceof HTMLButtonElement || target instanceof HTMLSelectElement)) {
+      // Native implicit submission is suppressed when its default button is disabled. Keep the
+      // visual disabled state, but route an eligible invalid Enter through our actionable feedback.
       event.preventDefault();
       formRef.current?.requestSubmit();
     }
@@ -516,48 +545,49 @@ export function NewSessionDialog({
     // Re-entrancy guard: the Enter path bypasses the footer button's disabled attribute, and a
     // second submit while createSession is in flight would spawn a duplicate session.
     if (busyRef.current) return;
-    setError(null);
+    setValidationError(null);
+    setRequestError(null);
     if (!valid) {
       if (retainedSessionId) {
-        setError("Open the retained session before creating another one.");
+        setValidationError("Open the retained session before creating another one.");
         retainedSessionButtonRef.current?.focus();
       } else if (projectsSupported && !projectSelection) {
-        setError("Choose a Project or No Project.");
+        setValidationError("Choose a Project or No Project.");
         focusValidationProblem('[role="combobox"][aria-label="Project"]');
       } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !projectLocationLaunchable) {
-        setError("Choose an available Project Location.");
+        setValidationError("Choose an available Project Location.");
         focusValidationProblem(`[id="${projectLocationOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
       } else if (!runnerId) {
-        setError("Pick a runner, workspace, and agent.");
+        setValidationError("Pick a runner, workspace, and agent.");
         focusValidationProblem('button[aria-label^="Machine:"]');
       } else if (!workspaceId && !browsedPath) {
-        setError("Pick a runner, workspace, and agent.");
+        setValidationError("Pick a runner, workspace, and agent.");
         focusValidationProblem('button[aria-label^="Workspace:"]');
       } else if (!agentId || !selectedAgentOption || selectedAgentOption.disabled) {
-        setError("Pick a runner, workspace, and agent.");
+        setValidationError("Pick a runner, workspace, and agent.");
         focusValidationProblem('[role="combobox"][aria-label="Agent"]');
       } else if (!defaultsReady && presetOverride !== "orchestrator") {
-        setError(harnessDefaults?.error
+        setValidationError(harnessDefaults?.error
           ? "Retry loading saved permission defaults before creating a session."
           : "Wait for saved permission defaults to finish loading.");
         focusValidationProblem('[data-validation-target="defaults"]');
       } else if (orchestrator && !orchestratorSupported) {
-        setError("Choose an available Permission Preset.");
+        setValidationError("Choose an available Permission Preset.");
         focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
       } else if (directWslRequiresSafeOrchestrator && !orchestrator) {
-        setError("Choose Orchestrator or another execution context.");
+        setValidationError("Choose Orchestrator or another execution context.");
         focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
       } else if (launchSurface === "native_tui" && !nativeTuiSupported) {
-        setError("Choose an available Harness.");
+        setValidationError("Choose an available Harness.");
         focusValidationProblem(`[id="${harnessOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
       } else if (executionTarget && !executionTarget.available) {
-        setError("Choose an available Execution Target.");
+        setValidationError("Choose an available Execution Target.");
         focusValidationProblem('button[aria-label^="Execution Target:"]');
       } else if (!cloudBudgetValid) {
-        setError("Enter a Cloud Cost Budget within the allowed range.");
+        setValidationError("Enter a Cloud Cost Budget within the allowed range.");
         focusValidationProblem('input[type="number"]');
       } else {
-        setError("Complete the required session settings before creating a session.");
+        setValidationError("Complete the required session settings before creating a session.");
       }
       return;
     }
@@ -591,12 +621,14 @@ export function NewSessionDialog({
           typeof e.details?.sessionId === "string") {
         setRetainedSessionId(e.details.sessionId);
       }
-      setError((e as Error).message);
+      setRequestError((e as Error).message);
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
   };
+
+  const error = requestError ?? validationError;
 
   return (
     <>
@@ -633,6 +665,7 @@ export function NewSessionDialog({
         id={formId}
         ref={formRef}
         className="form"
+        noValidate
         onSubmit={(event) => { event.preventDefault(); void submit(); }}
       >
         {online.length === 0 && <p className="muted">No runners online. Start a runner first.</p>}

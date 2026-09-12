@@ -278,6 +278,7 @@ test("New Session is a labelled form with Create Session as its default action",
   try {
     const form = fixture.container.querySelector("form.form") as HTMLFormElement | null;
     assert.ok(form, "the dialog body is a native form");
+    assert.equal(form.noValidate, true, "the dialog's fail-closed validation owns every error path");
     const submit = createButton(fixture.container);
     assert.equal(submit.type, "submit");
     assert.equal(submit.getAttribute("form"), form.id,
@@ -523,7 +524,9 @@ test("an unavailable Advanced Agent keeps its marker, search term, and refusal r
     const options = comboboxOptions(fixture.container, "Agent");
     assert.equal(options.length, 1);
     assert.equal(options[0]?.getAttribute("aria-disabled"), "true");
-    assert.match(options[0]?.textContent ?? "", /Advanced Agent.*Non-interactive via codex exec.*Needs setup/);
+    assert.match(options[0]?.textContent ?? "", /Advanced Agent.*Needs setup.*Non-interactive via codex exec/);
+    assert.equal(options[0]?.textContent?.match(/Non-interactive via codex exec/g)?.length, 1,
+      "unavailable metadata is rendered once, in its actionable setup reason");
   } finally {
     await unmountFixture(fixture);
   }
@@ -955,6 +958,10 @@ test("a selected Location becoming unavailable disables submission and fails clo
       fixture.container.querySelector(".form-error")?.textContent,
       "Choose an available Project Location.",
     );
+
+    await act(async () => { fixture.socket.push(snapshot()); });
+    assert.equal(fixture.container.querySelector('[role="alert"]') === null, true,
+      "a validation-relevant live-state correction clears the stale diagnosis");
   } finally {
     await unmountFixture(fixture);
   }

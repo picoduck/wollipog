@@ -289,6 +289,20 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
 test.describe("New Session dialog keyboard contract", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
+  test("plain Enter reports an invalid closed combobox even while the submit button is disabled", async ({ page }) => {
+    await openDialogWithoutPointer(page);
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    const project = page.getByRole("combobox", { name: "Project" });
+    await expect(project).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(project).toHaveAttribute("aria-expanded", "false");
+
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("alert")).toHaveText("Choose a Project or No Project.");
+    await expect(project).toBeFocused();
+  });
+
   test("traps focus, validates, closes the selector before the dialog, and restores its opener", async ({ page }) => {
     const { dialog, opener } = await openDialogWithoutPointer(page);
 
@@ -318,6 +332,17 @@ test.describe("New Session dialog keyboard contract", () => {
     await project.dispatchEvent("keydown", { key: "Enter", ctrlKey: true, repeat: true });
     await project.dispatchEvent("keydown", { key: "Enter", metaKey: true, isComposing: true });
     await expect(page.locator("html")).not.toHaveAttribute("data-create-session-count", /.+/);
+
+    for (let index = 0; index < 4; index += 1) await page.keyboard.press("Tab");
+    const agent = page.getByRole("combobox", { name: "Agent" });
+    await expect(agent).toBeFocused();
+    await page.keyboard.type("codex app server");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect(agent).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("html")).not.toHaveAttribute("data-create-session-count", /.+/);
+    await page.keyboard.press("Enter");
+    await expect(agent).toHaveValue(/Codex App Server/);
 
     await page.keyboard.press("ControlOrMeta+Enter");
     await page.keyboard.press("ControlOrMeta+Enter");
