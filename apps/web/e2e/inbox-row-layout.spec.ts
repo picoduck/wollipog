@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { TABLET_BREAKPOINT_PX } from "../src/components/useIsMobile.js";
+import { expectGeometry, expectGeometryPoll } from "./geometry-margins.js";
 
 /** At or below this width the card is #782's three-row stack; above it, #877's two-row card (#901). */
 const stacked = (width: number): boolean => width <= TABLET_BREAKPOINT_PX;
@@ -62,12 +63,17 @@ for (const width of WIDTHS) {
     expect(strips).toHaveLength(11);
     for (const strip of strips) {
       expect(strip.renderedBars).toBe(30);
-      expect(strip.stripWidth).toBeGreaterThan(50);
-      expect(strip.overflowRight).toBeLessThanOrEqual(0.5);
-      expect(strip.overflowLeft).toBeLessThanOrEqual(0.5);
+      expectGeometry(strip.stripWidth, "the activity strip keeps a readable width").toBeGreaterThan(50);
+      expectGeometry(strip.overflowRight, "the activity strip stays inside the row's right edge")
+        .toBeLessThanOrEqual(0.5);
+      expectGeometry(strip.overflowLeft, "the activity strip stays inside the row's left edge")
+        .toBeLessThanOrEqual(0.5);
     }
     // The strip never shrinks, so its width is identical on every row at a given width.
-    expect(Math.max(...strips.map((s) => s.stripWidth)) - Math.min(...strips.map((s) => s.stripWidth)))
+    expectGeometry(
+      Math.max(...strips.map((s) => s.stripWidth)) - Math.min(...strips.map((s) => s.stripWidth)),
+      "every activity strip keeps the same width",
+    )
       .toBeLessThanOrEqual(0.5);
   });
 
@@ -97,13 +103,17 @@ for (const width of WIDTHS) {
       expect(title.overflowX).toBe("hidden");
       expect(title.textOverflow).toBe("clip");
       // The title yields to the strip rather than growing under it.
-      expect(title.right).toBeLessThanOrEqual(title.stripLeft + 1);
+      expectGeometry(title.right - title.stripLeft, "the title stays left of the activity strip")
+        .toBeLessThanOrEqual(1);
     }
     // A title long enough to overrun this viewport is present at every width under test, so the
     // fade is actually exercised and not merely declared.
     expect(titles.filter((title) => title.clipped).length).toBeGreaterThan(0);
     // Every title starts on the same reading axis, whatever the row's signals or worktree line.
-    expect(Math.max(...titles.map((t) => t.left)) - Math.min(...titles.map((t) => t.left)))
+    expectGeometry(
+      Math.max(...titles.map((t) => t.left)) - Math.min(...titles.map((t) => t.left)),
+      "every title starts on the same reading axis",
+    )
       .toBeLessThanOrEqual(1);
   });
 }
@@ -180,41 +190,57 @@ for (const width of LAYOUT_WIDTHS) {
       expect(row.gridRows).toBe(expectedRows);
       // Every card says something about Git; none of them says it by saying nothing.
       expect(row.gitText.length).toBeGreaterThan(0);
-      expect(row.lastLineBottom).toBeLessThanOrEqual(row.cardInnerBottom + 0.5);
+      expectGeometry(row.lastLineBottom - row.cardInnerBottom, "the final line stays inside the card")
+        .toBeLessThanOrEqual(0.5);
       if (phone) {
         // Line three, under the title line, with the Git state and the background badge on it.
-        expect(row.metaCentre).toBeGreaterThan(row.copyCentre);
-        expect(row.copyCentre).toBeGreaterThan(row.senderCentre);
+        expectGeometry(row.metaCentre - row.copyCentre, "line three follows the title line")
+          .toBeGreaterThan(0);
+        expectGeometry(row.copyCentre - row.senderCentre, "the title line follows the sender line")
+          .toBeGreaterThan(0);
       } else {
         // The Git state shares line one with the sender; the title line is the only other line.
-        expect(Math.abs(row.metaCentre - row.senderCentre)).toBeLessThanOrEqual(1);
-        expect(row.copyCentre).toBeGreaterThan(row.senderCentre);
+        expectGeometry(Math.abs(row.metaCentre - row.senderCentre), "Git and sender share line one")
+          .toBeLessThanOrEqual(1);
+        expectGeometry(row.copyCentre - row.senderCentre, "the title line follows desktop line one")
+          .toBeGreaterThan(0);
       }
       if (row.badgeCentre !== null) {
-        expect(row.badgeWidth!).toBeGreaterThan(20);
-        expect(row.badgeOverflowRight!).toBeLessThanOrEqual(0.5);
+        expectGeometry(row.badgeWidth!, "the background-work badge keeps readable width")
+          .toBeGreaterThan(20);
+        expectGeometry(row.badgeOverflowRight!, "the background-work badge stays inside the card")
+          .toBeLessThanOrEqual(0.5);
         if (phone) {
           // On line three with the Git state, below the strip.
           expect(row.badgeOnTitleLine).toBe(false);
-          expect(Math.abs(row.badgeTop! - row.metaTop)).toBeLessThanOrEqual(4);
-          expect(row.badgeTop!).toBeGreaterThanOrEqual(row.stripBottom - 0.5);
+          expectGeometry(Math.abs(row.badgeTop! - row.metaTop), "the badge starts on line three")
+            .toBeLessThanOrEqual(4);
+          expectGeometry(row.badgeTop! - row.stripBottom, "the line-three badge clears the activity strip")
+            .toBeGreaterThanOrEqual(-0.5);
         } else {
           // On the title line, immediately LEFT of the strip rather than under it.
           expect(row.badgeOnTitleLine).toBe(true);
-          expect(Math.abs(row.badgeCentre - row.copyCentre)).toBeLessThanOrEqual(1);
-          expect(row.badgeRight!).toBeLessThanOrEqual(row.stripLeft + 0.5);
+          expectGeometry(Math.abs(row.badgeCentre - row.copyCentre), "the badge shares the title line")
+            .toBeLessThanOrEqual(1);
+          expectGeometry(row.badgeRight! - row.stripLeft, "the badge stays left of the activity strip")
+            .toBeLessThanOrEqual(0.5);
         }
       }
     }
     // Four of the eleven carry background work, and they are the same height as the seven that do
     // not — which is what makes ONE virtualization estimate per shape honest.
     expect(rows.filter((row) => row.badgeCentre !== null)).toHaveLength(4);
-    expect(Math.max(...rows.map((row) => row.height)) - Math.min(...rows.map((row) => row.height)))
+    expectGeometry(
+      Math.max(...rows.map((row) => row.height)) - Math.min(...rows.map((row) => row.height)),
+      "every card at one breakpoint keeps the same height",
+    )
       .toBeLessThanOrEqual(1);
     // The virtualizer positions from measured heights: no overlap, no gap it cannot explain.
     for (let index = 1; index < rows.length; index += 1) {
-      expect(rows[index]!.top).toBeGreaterThanOrEqual(rows[index - 1]!.bottom - 0.5);
-      expect(rows[index]!.top - rows[index - 1]!.bottom).toBeLessThan(24);
+      expectGeometry(rows[index]!.top - rows[index - 1]!.bottom, "neighbouring cards do not overlap")
+        .toBeGreaterThanOrEqual(-0.5);
+      expectGeometry(rows[index]!.top - rows[index - 1]!.bottom, "neighbouring cards do not leave a row-sized gap")
+        .toBeLessThan(24);
     }
   });
 }
@@ -239,7 +265,8 @@ test("a desktop card is a whole line shorter than a phone card", async ({ page }
   const desktop = await heightAt(1400);
   // A whole line's worth of card, whatever a line measures on this machine. This also catches the
   // desktop card quietly reverting to three rows, which would collapse the difference to nothing.
-  expect(phone).toBeGreaterThan(desktop + 15);
+  expectGeometry(phone - desktop, "the phone card is at least one text line taller")
+    .toBeGreaterThan(15);
 });
 
 test("a card's height does not move with selection, unread, or stalled state", async ({ page }) => {
@@ -256,7 +283,8 @@ test("a card's height does not move with selection, unread, or stalled state", a
       return measured;
     }, state);
     for (const [index, height] of heights.entries()) {
-      expect(Math.abs(height - baseline[index]!), `${state} card ${index}`).toBeLessThanOrEqual(0.5);
+      expectGeometry(Math.abs(height - baseline[index]!), `${state} card ${index} keeps its height`)
+        .toBeLessThanOrEqual(0.5);
     }
   }
 });
@@ -322,24 +350,30 @@ for (const width of [390, 770, 1000, 1400]) {
         badgeOverflowRight: badge.getBoundingClientRect().right - rightEdge,
         // Nothing on a shared line may be drawn over anything else.
         pillClearsBadge: badge.getBoundingClientRect().left - pill.getBoundingClientRect().right,
-        sameLineAsSender: Math.abs(
+        senderLineDelta: Math.abs(
           branch.getBoundingClientRect().top - sender.getBoundingClientRect().top,
-        ) <= 4,
+        ),
       };
     });
 
-    expect(geometry.branchWidth).toBeGreaterThan(40);
-    expect(geometry.pillWidth).toBeGreaterThan(20);
-    expect(geometry.badgeWidth).toBeGreaterThan(20);
-    expect(geometry.pillOverflowRight).toBeLessThanOrEqual(0.5);
-    expect(geometry.badgeOverflowRight).toBeLessThanOrEqual(0.5);
+    expectGeometry(geometry.branchWidth, "the long branch keeps readable width").toBeGreaterThan(40);
+    expectGeometry(geometry.pillWidth, "the pull-request pill keeps readable width").toBeGreaterThan(20);
+    expectGeometry(geometry.badgeWidth, "the background-work badge keeps readable width").toBeGreaterThan(20);
+    expectGeometry(geometry.pillOverflowRight, "the pull-request pill stays inside the row")
+      .toBeLessThanOrEqual(0.5);
+    expectGeometry(geometry.badgeOverflowRight, "the background-work badge stays inside the row")
+      .toBeLessThanOrEqual(0.5);
     if (!stacked(width)) {
       // The branch shares line one with the sender and starts clear of it, rather than under it.
-      expect(geometry.sameLineAsSender).toBe(true);
+      expectGeometry(geometry.senderLineDelta, "the branch shares the sender's line")
+        .toBeLessThanOrEqual(4);
+      // Exact contact is valid; this is a structural ordering invariant, not a safety margin.
       expect(geometry.branchLeft).toBeGreaterThanOrEqual(geometry.senderRight);
     } else {
-      expect(geometry.sameLineAsSender).toBe(false);
-      expect(geometry.pillClearsBadge).toBeGreaterThanOrEqual(-0.5);
+      expectGeometry(geometry.senderLineDelta, "the stacked branch leaves the sender's line")
+        .toBeGreaterThan(4);
+      expectGeometry(geometry.pillClearsBadge, "the pull-request pill clears the background-work badge")
+        .toBeGreaterThanOrEqual(-0.5);
     }
   });
 }
@@ -386,13 +420,17 @@ for (const width of [901, 1000, 1200, 1400]) {
     const after = await measureUnderSignalPressure(page, 2);
 
     // The branch is the card's identity and stays readable.
-    expect(after.branchWidth).toBeGreaterThan(40);
+    expectGeometry(after.branchWidth, "the pressured branch keeps readable width").toBeGreaterThan(40);
     // The sender is what paid for it: it gave up width, or there was enough for both.
-    expect(after.senderWidth).toBeLessThanOrEqual(before.senderWidth);
+    // Equality is the expected safe outcome when there was enough room for both; a percentage
+    // margin from zero would reject that structural monotonic invariant rather than renderer drift.
+    expect(after.senderWidth, "signal pressure never grows the sender").toBeLessThanOrEqual(before.senderWidth);
     if (after.senderWidth < before.senderWidth) expect(after.senderClipped).toBe(true);
     // And line one never grows the card or spills past its padding.
-    expect(Math.abs(after.height - before.height)).toBeLessThanOrEqual(0.5);
-    expect(after.signalsOverflowRight).toBeLessThanOrEqual(0.5);
+    expectGeometry(Math.abs(after.height - before.height), "signal pressure does not change card height")
+      .toBeLessThanOrEqual(0.5);
+    expectGeometry(after.signalsOverflowRight, "pressured signals stay inside the row")
+      .toBeLessThanOrEqual(0.5);
   });
 }
 
@@ -407,7 +445,8 @@ test("the crowded extreme spends the sender completely before the branch gives u
   // CI, so a bare floor near the real value spends most of its headroom on the renderer before it
   // says anything about the layout.
   const unpressured = await measureUnderSignalPressure(page, 0);
-  expect(roomy.branchWidth).toBeCloseTo(unpressured.branchWidth, 0);
+  expectGeometry(Math.abs(roomy.branchWidth - unpressured.branchWidth), "wide cards preserve branch width under pressure")
+    .toBeLessThanOrEqual(0.5);
   expect(roomy.senderClipped).toBe(false);
 
   await useViewport(page, TABLET_BREAKPOINT_PX + 1);
@@ -418,9 +457,11 @@ test("the crowded extreme spends the sender completely before the branch gives u
   // and nothing is drawn past the card's edge.
   // Spent, not exactly zero: how much of "Codex App Server · Alpha" fits before the pills push it
   // out depends on the renderer's font metrics, and sub-pixel is still spent.
-  expect(tight.senderWidth).toBeLessThanOrEqual(1);
-  expect(tight.signalsOverflowRight).toBeLessThanOrEqual(0.5);
-  expect(tight.height).toBeCloseTo(roomy.height, 0);
+  expectGeometry(tight.senderWidth, "the sender is spent before the branch yields").toBeLessThanOrEqual(1);
+  expectGeometry(tight.signalsOverflowRight, "extreme signal pressure stays inside the row")
+    .toBeLessThanOrEqual(0.5);
+  expectGeometry(Math.abs(tight.height - roomy.height), "extreme signal pressure does not change card height")
+    .toBeLessThanOrEqual(0.5);
 });
 
 // The same priority with no signals pressure at all: a very long agent-and-project label must
@@ -451,7 +492,9 @@ for (const width of [901, 1400]) {
     // Clipped with an ellipsis, and still leaving the branch a readable share of the line.
     expect(geometry.clipped).toBe(true);
     expect(geometry.ellipsis).toBe("ellipsis");
-    expect(geometry.branchWidth).toBeGreaterThan(40);
+    expectGeometry(geometry.branchWidth, "the branch stays readable after a long sender label")
+      .toBeGreaterThan(40);
+    // Exact contact is valid; this is a structural ordering invariant, not a safety margin.
     expect(geometry.branchLeft).toBeGreaterThanOrEqual(geometry.senderRight);
   });
 }
@@ -489,11 +532,12 @@ for (const width of [770, 800, 1000, 1400]) {
     });
 
     // The branch is the row's identity; it must never be the thing that disappears.
-    expect(geometry.branchWidth).toBeGreaterThan(80);
-    expect(geometry.pillWidth).toBeGreaterThan(20);
-    expect(geometry.pillOverflowRight).toBeLessThanOrEqual(0.5);
+    expectGeometry(geometry.branchWidth, "the branch survives a long base ref").toBeGreaterThan(80);
+    expectGeometry(geometry.pillWidth, "the pull-request pill survives a long base ref").toBeGreaterThan(20);
+    expectGeometry(geometry.pillOverflowRight, "the pull-request pill stays inside the row with a long base ref")
+      .toBeLessThanOrEqual(0.5);
     // The base ref yields width rather than taking it; it is the least important item on the line.
-    expect(geometry.baseWidth).toBeGreaterThan(0);
+    expectGeometry(geometry.baseWidth, "the base ref yields without disappearing").toBeGreaterThan(0);
   });
 }
 
@@ -576,12 +620,14 @@ test("crossing the breakpoint keeps the reader's row and the list's geometry", a
       .sort((left, right) => left.index - right.index);
     let overlap = 0;
     let gap = 0;
+    let pairs = 0;
     for (let at = 1; at < rows.length; at += 1) {
       if (rows[at]!.index !== rows[at - 1]!.index + 1) continue;
+      pairs += 1;
       overlap = Math.max(overlap, rows[at - 1]!.box.bottom - rows[at]!.box.top);
       gap = Math.max(gap, rows[at]!.box.top - rows[at - 1]!.box.bottom);
     }
-    return { mounted: rows.length, overlap, gap };
+    return { pairs, overlap, gap };
   });
 
   // ONE crossing at a time, each starting from a fresh scroll to the reader's row.
@@ -614,18 +660,31 @@ test("crossing the breakpoint keeps the reader's row and the list's geometry", a
     await useViewport(page, to, 800);
     // Within one card of where it was. A card is the unit a reader notices: land inside one and the
     // list looks like it held its place, land several away and it looks like it jumped.
-    await expect
-      .poll(anchorDisplacement, { message: `the reader's row across ${from} to ${to}` })
-      .toBeLessThanOrEqual(await cardHeight());
+    await expectGeometryPoll(
+      anchorDisplacement,
+      `the reader's row stays within one card across ${from} to ${to}`,
+    ).toBeLessThanOrEqual(await cardHeight());
 
     // Polled on the predicate itself: a width change opens a new measurement epoch, and the
     // re-seeded rows settle over the next frame or two. What must never settle is an overlap or a
     // hole between consecutive cards.
-    await expect.poll(async () => {
-      const { mounted, overlap, gap } = await worstNeighbours();
-      return { neighbours: mounted > 1, overlapping: overlap > 0.5, holed: gap >= 24 };
-    }, { message: `neighbouring cards across ${from} to ${to}` })
-      .toEqual({ neighbours: true, overlapping: false, holed: false });
+    await expect.poll(async () => (await worstNeighbours()).pairs, {
+      message: `consecutive neighbouring cards mount across ${from} to ${to}`,
+    }).toBeGreaterThan(0);
+    await expectGeometryPoll(
+      async () => {
+        const { pairs, overlap } = await worstNeighbours();
+        return pairs > 0 ? overlap : Number.NaN;
+      },
+      `neighbouring cards do not overlap across ${from} to ${to}`,
+    ).toBeLessThanOrEqual(0.5);
+    await expectGeometryPoll(
+      async () => {
+        const { pairs, gap } = await worstNeighbours();
+        return pairs > 0 ? gap : Number.NaN;
+      },
+      `neighbouring cards do not leave a hole across ${from} to ${to}`,
+    ).toBeLessThan(24);
   }
   await expect(list).toBeVisible();
 });
@@ -706,7 +765,8 @@ test("a sender squeezed to nothing takes its icon with it instead of painting ov
 
   // The premise: this pressure really does collapse the sender, and the icon's box really does
   // extend into the Git line's territory.
-  expect(geometry.senderWidth).toBeLessThanOrEqual(1);
+  expectGeometry(geometry.senderWidth, "the squeezed sender collapses before painting over Git")
+    .toBeLessThanOrEqual(1);
   expect(geometry.senderClipsOverflow).toBe("hidden");
   expect(geometry.contestedInsideMeta).toBe(true);
   // And nothing of the sender is painted there: the icon is clipped away with its box.
@@ -731,9 +791,12 @@ test(`a crowded card keeps its whole branch name at ${TABLET_BREAKPOINT_PX}px`, 
   // orphaned-background-work pill, a reminder, and one more at once.
   const crowded = await measureUnderSignalPressure(page, 4);
 
-  expect(crowded.branchWidth).toBeCloseTo(roomy.branchWidth, 0);
-  expect(Math.abs(crowded.height - roomy.height)).toBeLessThanOrEqual(0.5);
-  expect(crowded.signalsOverflowRight).toBeLessThanOrEqual(0.5);
+  expectGeometry(Math.abs(crowded.branchWidth - roomy.branchWidth), "stacked cards preserve branch width under pressure")
+    .toBeLessThanOrEqual(0.5);
+  expectGeometry(Math.abs(crowded.height - roomy.height), "stacked cards preserve height under pressure")
+    .toBeLessThanOrEqual(0.5);
+  expectGeometry(crowded.signalsOverflowRight, "stacked pressured signals stay inside the row")
+    .toBeLessThanOrEqual(0.5);
 });
 
 // One pixel wider the card is two rows again, and the Git state shares line one. The branch DOES
@@ -745,11 +808,14 @@ test(`a crowded card stays intact at ${TABLET_BREAKPOINT_PX + 1}px, where the br
   const roomy = await measureUnderSignalPressure(page, 0);
   const crowded = await measureUnderSignalPressure(page, 4);
 
-  expect(Math.abs(crowded.height - roomy.height)).toBeLessThanOrEqual(0.5);
-  expect(crowded.signalsOverflowRight).toBeLessThanOrEqual(0.5);
+  expectGeometry(Math.abs(crowded.height - roomy.height), "two-row cards preserve height under pressure")
+    .toBeLessThanOrEqual(0.5);
+  expectGeometry(crowded.signalsOverflowRight, "two-row pressured signals stay inside the row")
+    .toBeLessThanOrEqual(0.5);
   // The branch is narrower than it was, and still there rather than erased.
-  expect(crowded.branchWidth).toBeLessThan(roomy.branchWidth);
-  expect(crowded.branchWidth).toBeGreaterThan(0);
+  expectGeometry(crowded.branchWidth - roomy.branchWidth, "the two-row branch yields under pressure")
+    .toBeLessThan(0);
+  expectGeometry(crowded.branchWidth, "the yielding branch remains present").toBeGreaterThan(0);
 });
 
 // The stacked card is what the narrow widths fall back to, so it has to actually be the stacked one
