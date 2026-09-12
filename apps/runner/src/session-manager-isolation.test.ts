@@ -147,7 +147,6 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     const internals = manager as any;
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
-
     rmSync(homeLink);
     symlinkSync(retargetedHome, homeLink, "dir");
     const currentMeta = store.readMeta("s1");
@@ -174,6 +173,48 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     );
   } finally {
     manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native bwrap Orchestrator binds scratch without a writable project boundary", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-orchestrator-bwrap-"));
+  try {
+    const store = new SessionStore(root);
+    store.create({ ...meta(), config: { permissionMode: "orchestrator" } });
+    let captured: DriverOptions | undefined;
+    let isolationInput: unknown;
+    const factory = (_driver: unknown, opts: DriverOptions) => {
+      captured = opts;
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+      };
+    };
+    const isolation = { backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "allow" as const };
+    const dataDir = join(root, ".runner-data");
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "allow" }, async (_policy, _context, _deps, options) => {
+        isolationInput = options;
+        return isolation;
+      },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    const scratch = join(store.sessionPath("s1"), "orchestrator-scratch");
+    assert.equal(captured?.cwd, scratch);
+    assert.deepEqual(captured?.isolation, isolation);
+    assert.deepEqual(isolationInput, {
+      driver: "claude-code", dataDir, env: { TMPDIR: scratch }, sessionId: "s1", cwd: scratch,
+      orchestratorScratchOnly: true,
+    });
+    manager.shutdownAll();
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

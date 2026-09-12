@@ -2132,6 +2132,7 @@ test("buildCodexTurnParams: orchestrator cannot request sandbox escalation", () 
   assert.equal(params.approvalPolicy, "never");
   assert.deepEqual(params.sandboxPolicy, {
     type: "workspaceWrite", writableRoots: ["/w"], networkAccess: true,
+    excludeTmpdirEnvVar: true, excludeSlashTmp: true,
   });
 });
 

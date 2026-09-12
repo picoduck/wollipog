@@ -4,7 +4,6 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { windowsCommandSpec } from "./windows-cmd.js";
 import { existsSync } from "node:fs";
-import { verifiedNativeClaudeGitBashPath } from "./discovery/claude-code.js";
 import { killTree, spawnAgent, type SpawnAgentOptions, type WslBwrapSpawnIsolation } from "./spawn.js";
 
 const execFileAsync = promisify(execFile);
@@ -139,14 +138,9 @@ export function withOrchestratorPreset(
     }
     if ((contextKind !== "native" && !wslSupported) ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
-    if (contextKind === "native" && (agent.driver === "claude-code" || acpSupported) &&
-        (host.platform ?? process.platform) === "win32") {
-      if (!verifiedNativeClaudeGitBashPath(agent.env ?? {}, { env: host.env, exists: host.exists })) return agent;
-    }
-    // Windows Job Objects do not attest filesystem confinement. Claude's narrow command patterns
-    // remain enforceable there, but a Codex shell must not be advertised without a proven sandbox.
-    if (contextKind === "native" && (host.platform ?? process.platform) === "win32" &&
-        (agent.driver === "codex" || agent.driver === "codex-app-server")) return agent;
+    // Windows Job Objects do not attest filesystem confinement, and Claude Bash-prefix rules
+    // cannot prevent an otherwise read-only Git command from redirecting output into a project.
+    if (contextKind === "native" && (host.platform ?? process.platform) === "win32") return agent;
     if (acpSupported && !agent.capabilities) {
       return { ...agent, capabilities: acpOrchestratorCapabilities() };
     }

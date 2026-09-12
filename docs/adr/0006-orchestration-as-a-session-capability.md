@@ -70,8 +70,8 @@ enforce that boundary; unsupported adapters must fail closed. ACP transport avai
 not establish tool restriction capability.
 
 The initial implementation supports native host Codex and Claude Code where their boundaries can be
-verified. Native Windows Codex is withheld because Windows Job Objects do not attest filesystem
-confinement for its newly enabled shell. Codex disables native
+verified. Native Windows harnesses are withheld because Windows Job Objects do not attest filesystem
+confinement and Claude Bash-prefix rules cannot prevent output redirection. Codex disables native
 extensions, hooks, ambient MCP servers, multi-agent tools, and browser/computer/image tools. It
 keeps shell and live web search available under a no-approval workspace-write sandbox whose sole
 project-independent writable root is a session-private scratch directory. Claude Code receives

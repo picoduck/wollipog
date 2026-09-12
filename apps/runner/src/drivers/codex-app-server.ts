@@ -213,6 +213,7 @@ export function buildCodexTurnParams(
   if (mode === "orchestrator") {
     return { threadId, input, approvalPolicy: "never", sandboxPolicy: {
       type: "workspaceWrite", writableRoots: [cwd], networkAccess: true,
+      excludeTmpdirEnvVar: true, excludeSlashTmp: true,
     }, cwd,
       ...(cfg.model && cfg.model !== "default" ? { model: cfg.model } : {}),
       ...(cfg.effort ? { effort: cfg.effort } : {}),

@@ -63,7 +63,7 @@ test("Codex MCP isolation probes an in-distro WSL binary through exact argv", ()
   assert.equal(built.env.EXISTING, "override");
 });
 
-test("native Windows Claude advertises orchestrator only with verified Git Bash", () => {
+test("native Windows harnesses withhold orchestrator without filesystem confinement", () => {
   const agent: AgentDefinition = {
     id: "claude-code", name: "Claude Code", command: "claude.cmd", args: [], driver: "claude-code",
     env: {}, context: { kind: "native" },
@@ -73,7 +73,7 @@ test("native Windows Claude advertises orchestrator only with verified Git Bash"
   const exists = (path: string) => path === "C:\\Program Files\\Git\\bin\\bash.exe";
   assert.equal(withOrchestratorPreset([agent], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
   const ready = { ...agent, env: { CLAUDE_CODE_GIT_BASH_PATH: "C:\\Program Files\\Git\\bin\\bash.exe" } };
-  assert.equal(withOrchestratorPreset([ready], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), true);
+  assert.equal(withOrchestratorPreset([ready], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
   const missingDontAsk = { ...ready, capabilities: { ...ready.capabilities!, permissionModes: ["default"] } };
   assert.equal(withOrchestratorPreset([missingDontAsk], { platform: "win32", env: {}, exists })[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), false);
@@ -89,7 +89,7 @@ test("native Windows Claude advertises orchestrator only with verified Git Bash"
     env: {}, driver: "acp", context: { kind: "native" },
   };
   assert.equal(withOrchestratorPreset([acp], { platform: "win32", env: {}, exists })[0]!.capabilities, undefined);
-  assert.deepEqual(withOrchestratorPreset([{ ...acp, env: ready.env }], { platform: "win32", env: {}, exists })[0]!.capabilities!.permissionModes, ["orchestrator"]);
+  assert.equal(withOrchestratorPreset([{ ...acp, env: ready.env }], { platform: "win32", env: {}, exists })[0]!.capabilities, undefined);
 });
 
 test("only the exact audited native Claude ACP adapter advertises orchestrator", () => {
@@ -191,7 +191,10 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   assert.ok(claude.includes('{"disableAllHooks":true}'));
   const codex = orchestratorLaunchArgs("codex", mcp, ["/repo"]);
   for (const setting of ['sandbox_mode="workspace-write"', "sandbox_workspace_write.writable_roots=[]",
-    "sandbox_workspace_write.network_access=true", 'approval_policy="never"', 'web_search="live"']) assert.ok(codex.includes(setting));
+    "sandbox_workspace_write.network_access=true", "sandbox_workspace_write.exclude_slash_tmp=true",
+    'approval_policy="never"', 'web_search="live"']) assert.ok(codex.includes(setting));
+  assert.equal(codex.some((arg) => arg.includes("exclude_tmpdir_env_var")), false,
+    "TMPDIR names scratch and must remain writable through the explicit workspace root");
   for (const feature of ["hooks", "multi_agent", "plugins", "apps"]) {
     assert.equal(codex[codex.indexOf(feature) - 1], "--disable");
   }
