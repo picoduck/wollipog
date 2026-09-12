@@ -31,6 +31,10 @@ test("CLI root help is identical through help, --help, and -h and covers common 
   assert.ok(outputs.every(({ stderr }) => stderr === ""));
   assert.equal(outputs[0]!.stdout, outputs[1]!.stdout);
   assert.equal(outputs[0]!.stdout, outputs[2]!.stdout);
+  assert.match(outputs[0]!.stdout, /Global Option: --version/u);
+  assert.match(outputs[0]!.stdout, /Root Help Options: --help, -h/u);
+  assert.match(outputs[0]!.stdout, /Help is always text/u);
+  assert.doesNotMatch(outputs[0]!.stdout, /Global Options:.*--help/u);
   for (const expected of [
     "session", "worktree", "admin", "service", "help [topic]", "doctor", "update", "pair <command>",
     "service install", "service status", "pair create", "pair list", "pair revoke", "service logs",
@@ -54,6 +58,11 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     assert.equal(result.stderr, "", topic);
     for (const text of expected) assert.ok(result.stdout.includes(text), `${topic} help omits ${text}`);
   }
+
+  assert.deepEqual(await captureCli(["help", "help"]), await captureCli(["help"]));
+  const textWithJsonFlag = await captureCli(["help", "pair", "--json"]);
+  assert.equal(textWithJsonFlag.code, 0);
+  assert.match(textWithJsonFlag.stdout, /^Usage: wollipog pair/u);
 });
 
 test("new aliases accept --help without changing established canonical group help behavior", async () => {

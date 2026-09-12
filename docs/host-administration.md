@@ -56,7 +56,7 @@ Exit code 0 is success, 1 is an operational failure, and 2 is a usage or fail-cl
 
 For frequent operator workflows, `wollipog doctor` aliases `admin doctor`, while `wollipog pair create`,
 `pair list`, and `pair revoke` alias the corresponding `admin device` commands. `wollipog pair url`
-aliases `admin pairing-url`. Every option and safety rule is identical through an alias.
+aliases `admin pairing-url`. Every operational option and safety rule is identical through an alias.
 In particular, `pair create` mints a new one-time credential, while `pair url` recovers the existing
 bootstrap pairing URL. Run `wollipog help pair` or `wollipog help admin` for command-line help.
 

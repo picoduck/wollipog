@@ -26,7 +26,8 @@ export function rootHelp(): string {
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
     "",
-    "Global Options: --version, --help, -h",
+    "Global Option: --version",
+    "Root Help Options: --help, -h",
     "",
     "Examples:",
     "  wollipog service install",
@@ -42,7 +43,7 @@ export function rootHelp(): string {
     "  wollipog service uninstall  # preserves data by default",
     "",
     "Topics: doctor, update, pair, service, admin, session, worktree",
-    "Run `wollipog help <topic>` for complete commands and options. Use --json for stable machine-readable command output.",
+    "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
 
@@ -109,6 +110,7 @@ export function doctorHelp(): string {
 function helpForTopic(topic: string): string | null {
   switch (topic) {
     case "":
+    case "help":
     case "root":
       return rootHelp();
     case "update":
