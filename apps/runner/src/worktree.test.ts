@@ -674,7 +674,12 @@ test("a session attaches a worktree beside its repository and states the isolati
     );
     const internals = manager as unknown as {
       configuredProjectPaths: string[];
-      active: Map<string, { sessionId: string; cwd: string; context: { kind: "native" | "wsl" } }>;
+      active: Map<string, {
+        sessionId: string;
+        cwd: string;
+        context: { kind: "native" | "wsl" };
+        seatbeltWritableRoots?: string[];
+      }>;
       executionIsolation: { mode: string; network: string };
       attachIsolationNotice(meta: unknown, path: string): Promise<unknown>;
       requestedWorktreeIsolation(meta: unknown): Promise<string[]>;
@@ -724,15 +729,21 @@ test("a session attaches a worktree beside its repository and states the isolati
 
     // Seatbelt grants the native temporary directory outright, so a worktree under it is writable
     // already and reporting otherwise would send the agent into a pointless relaunch.
-    internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "native" } });
+    // Seatbelt also grants the provider's transcript leaf. The notice reads the profile's own list
+    // rather than restating it, so a worktree under that leaf is reported writable too. This fake
+    // active session carries the same launch snapshot a real Seatbelt process retains.
+    const providerHome = join(root, "provider-home");
+    internals.active.set("s_ext", {
+      sessionId: "s_ext",
+      cwd: repo,
+      context: { kind: "native" },
+      seatbeltWritableRoots: [repo, dataDir, tmpdir(), join(providerHome, ".claude", "projects")],
+    });
     internals.executionIsolation = { mode: "seatbelt", network: "deny" };
     assert.deepEqual(await internals.attachIsolationNotice(store.readMeta("s_ext"), beside), {
       writableNow: true,
       writableAtNextLaunch: true,
     });
-    // Seatbelt also grants the provider's transcript leaf. The notice reads the profile's own list
-    // rather than restating it, so a worktree under that leaf is reported writable too.
-    const providerHome = join(root, "provider-home");
     const providerMeta = { ...store.readMeta("s_ext"), env: { HOME: providerHome } };
     assert.deepEqual(
       await internals.attachIsolationNotice(providerMeta, join(providerHome, ".claude", "projects", "wt")),

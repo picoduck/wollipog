@@ -182,7 +182,7 @@ test("Seatbelt session naming shares the provider-exclusive admission group", as
   );
   const policy = { mode: "seatbelt" as const, network: "inherit" as const };
   const isolation = { backend: "seatbelt" as const, command: "sandbox-exec", args: [],
-    network: "inherit" as const, profile: "(version 1)" };
+    network: "inherit" as const, profile: "(version 1)", writableRoots: ["/neutral"] };
   let admission: { sessionId: string; exclusiveGroup?: string } | undefined;
   let released: string | undefined;
   (manager as unknown as { executionIsolation: typeof policy }).executionIsolation = policy;

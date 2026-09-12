@@ -45,6 +45,12 @@ test("native macOS and Windows policies resolve only their audited platform adap
   assert.doesNotMatch(seatbelt?.backend === "seatbelt" ? seatbelt.profile : "", /allow network/);
   assert.doesNotMatch(seatbelt?.backend === "seatbelt" ? seatbelt.profile : "", /allow mach/);
   assert.match(seatbelt?.backend === "seatbelt" ? seatbelt.profile : "", /Volumes\/provider-state\/claude\/projects/);
+  assert.deepEqual(seatbelt?.backend === "seatbelt" ? seatbelt.writableRoots : [], [
+    "/Users/me/Work/repo",
+    "/Users/me/Library/Application Support/Wollipog",
+    "/private/var/folders/tmp",
+    "/Volumes/provider-state/claude/projects",
+  ]);
   assert.deepEqual(macCreated, [["/Users/me/.claude/projects"]]);
 
   const windows = await resolveExecutionIsolation(
