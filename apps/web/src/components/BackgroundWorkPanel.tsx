@@ -252,7 +252,8 @@ export function BackgroundWorkPanel({
             const watchdogState = watchdogDelivery?.watchdogState;
             const watchdogHighlighted = watchdogDelivery === highlightedWatchdogDelivery;
             const recoveryDeliveries = groupDeliveries.filter((delivery) =>
-              delivery.watchdogState || delivery.missingResultAt != null);
+              delivery.watchdogState || (delivery.missingResultAt != null &&
+                delivery.runnerResultPersistedAt == null));
             const recordedJobCount = groupDeliveries.reduce((total, delivery) => total + delivery.jobCount, 0);
             const recordedTerminalCount = groupDeliveries.reduce(
               (total, delivery) => total + delivery.terminalCount,
@@ -311,8 +312,11 @@ export function BackgroundWorkPanel({
                 {recoveryDeliveries.map((delivery, deliveryIndex) => {
                   const recoveryState = delivery.watchdogState;
                   const continuationId = delivery.continuationId;
+                  const localAcknowledgementKey = continuationId == null
+                    ? null
+                    : JSON.stringify([session.id, continuationId]);
                   const acknowledged = delivery.missingResultAcknowledgedAt != null ||
-                    (continuationId != null && locallyAcknowledged.has(continuationId));
+                    (localAcknowledgementKey != null && locallyAcknowledged.has(localAcknowledgementKey));
                   const isMissing = delivery.missingResultAt != null;
                   const status = recoveryState
                     ? BACKGROUND_DELIVERY_STATUS[recoveryState]
@@ -322,7 +326,7 @@ export function BackgroundWorkPanel({
                     <div className="background-delivery-summary" role="group" key={continuationId ?? summaryId}
                       aria-labelledby={summaryId} data-recovery-state={acknowledged
                         ? "missing-result-acknowledged"
-                        : recoveryState}>
+                        : recoveryState ?? (isMissing ? "accepted_without_result" : undefined)}>
                       <strong id={summaryId}>{acknowledged ? "Missing Result Acknowledged" : status?.label}</strong>
                       <p>{acknowledged
                         ? "You acknowledged that this continuation ended without a durable result. Its delivery history remains available."
@@ -345,14 +349,15 @@ export function BackgroundWorkPanel({
                             : "Acknowledgement Required"}</dd></div>
                         )}
                       </dl>
-                      {!acknowledged && recoveryState === "accepted_without_result" && continuationId && (
+                      {!acknowledged && isMissing && delivery.runnerResultPersistedAt == null && continuationId && (
                         <button type="button" className="btn ghost sm"
                           disabled={acknowledgingContinuationId === continuationId}
                           onClick={() => {
                             setAcknowledgingContinuationId(continuationId);
                             setAcknowledgementError(null);
                             void api.acknowledgeBackgroundMissingResult(session.id, continuationId)
-                              .then(() => setLocallyAcknowledged((current) => new Set(current).add(continuationId)))
+                              .then(() => setLocallyAcknowledged((current) =>
+                                new Set(current).add(localAcknowledgementKey!)))
                               .catch((error: unknown) => setAcknowledgementError({
                                 continuationId,
                                 message: error instanceof Error
@@ -371,7 +376,7 @@ export function BackgroundWorkPanel({
                         <dl>
                           <div><dt>Pipeline State</dt><dd><code>{acknowledged
                             ? "missing_result_acknowledged"
-                            : recoveryState}</code></dd></div>
+                            : recoveryState ?? (isMissing ? "accepted_without_result" : undefined)}</code></dd></div>
                           {status && !acknowledged && <div><dt>Diagnostic</dt><dd>{status.diagnostic}</dd></div>}
                         </dl>
                       </details>

@@ -178,6 +178,56 @@ test("terminal missing continuations show age and acknowledge independently with
   }
 });
 
+test("terminal missing history remains actionable without a watchdog but yields to late proof", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const client = {
+    acknowledgeBackgroundMissingResult: async () => ({} as SessionView),
+  } as unknown as ApiClient;
+  const missingDelivery = {
+    continuationId: "bgcont-suppressed",
+    parentTurnId: "turn-suppressed",
+    jobCount: 1,
+    terminalCount: 1,
+    acceptedAt: 10_000,
+    missingResultAt: 20_000,
+  };
+  const render = (delivery: typeof missingDelivery & { runnerResultPersistedAt?: number }) => root.render(
+    <ApiProvider client={client}>
+      <BackgroundWorkPanel
+        session={{
+          id: "session-suppressed",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [],
+          backgroundDeliveries: [delivery],
+        } as unknown as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />
+    </ApiProvider>
+  );
+  try {
+    await act(async () => render(missingDelivery));
+    assert.match(container.textContent ?? "", /Acknowledgement Required/);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 1,
+      "terminal missing audit remains resolvable when attention is suppressed");
+    await act(async () => render({ ...missingDelivery, runnerResultPersistedAt: 30_000 }));
+    assert.doesNotMatch(container.textContent ?? "", /Acknowledgement Required/);
+    assert.doesNotMatch(container.textContent ?? "", /Result Missing/);
+    assert.match(container.textContent ?? "", /Result Delivered/);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 0,
+      "late delivery proof is authoritative and needs no acknowledgement");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("the panel renders individual jobs, their parent barrier, durable times, and a transcript action", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
