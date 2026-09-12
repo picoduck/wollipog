@@ -27,22 +27,71 @@ const THEMES = ["dark", "light"] as const;
 /** WCAG AA for normal text. Large text is exempt at 3:1; the harness renders none. */
 const AA = 4.5;
 
+async function waitForContrastFixture(
+  page: Page,
+  expected: { scheme: string; theme: typeof THEMES[number] } = { scheme: "wollipog", theme: "dark" },
+) {
+  await page.waitForFunction(() => {
+    const root = document.documentElement;
+    return root.hasAttribute("data-contrast-fixture-ready")
+      || root.hasAttribute("data-contrast-fixture-error");
+  });
+  const state = await page.locator("html").evaluate((root) => ({
+    ready: root.getAttribute("data-contrast-fixture-ready"),
+    error: root.getAttribute("data-contrast-fixture-error"),
+  }));
+  expect(state.error, `contrast fixture settlement failed: ${state.error ?? "no error"}`).toBeNull();
+  expect(state.ready, "the fixture must publish its settled scheme and theme")
+    .toBe(`${expected.scheme}/${expected.theme}`);
+}
+
+async function openContrastFixture(
+  page: Page,
+  url: string,
+  expected?: { scheme: string; theme: typeof THEMES[number] },
+) {
+  await page.goto(url);
+  await waitForContrastFixture(page, expected);
+}
+
 async function measure(page: Page) {
   return page.evaluate(() => {
+    if (!document.documentElement.hasAttribute("data-contrast-fixture-ready")) {
+      const root = document.documentElement;
+      throw new Error(
+        `Contrast fixture is not settled: ready=${root.dataset.contrastFixtureReady ?? "missing"}; `
+        + `pending=${root.dataset.contrastFixturePending ?? "missing"}; `
+        + `error=${root.dataset.contrastFixtureError ?? "none"}`,
+      );
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Could not create a color normalization context");
     const parse = (value: string) => {
-      // Chromium serialises a `color-mix()` result as `color(srgb 0.51 0.73 0.98)` — components in
-      // 0-1, not 0-255. Reading those as bytes made a light blue label parse as near-black and
-      // measure 1.09:1 against a dark page, which looked exactly like a palette failure and was a
-      // failure to read the palette.
-      const srgb = /^color\(\s*srgb/.test(value);
-      const parts = value.match(/[\d.]+/g)?.map(Number) ?? [];
-      const scale = srgb ? 255 : 1;
-      return {
-        r: (parts[0] ?? 0) * scale,
-        g: (parts[1] ?? 0) * scale,
-        b: (parts[2] ?? 0) * scale,
-        a: parts[3] ?? 1,
-      };
+      const parts = value.match(/-?(?:\d+(?:\.\d*)?|\.\d+)/g)?.map(Number) ?? [];
+      if (/^rgba?\(/.test(value)) {
+        return { r: parts[0] ?? 0, g: parts[1] ?? 0, b: parts[2] ?? 0, a: parts[3] ?? 1 };
+      }
+      if (/^color\(\s*srgb/.test(value)) {
+        return {
+          r: (parts[0] ?? 0) * 255,
+          g: (parts[1] ?? 0) * 255,
+          b: (parts[2] ?? 0) * 255,
+          a: parts[3] ?? 1,
+        };
+      }
+      // Let Chromium convert other CSS Color values into sRGB bytes. A one-millisecond
+      // reduced-motion transition is serialised as oklab(); reading its lightness and a/b channels
+      // as RGB bytes fabricated ~1:1 contrast. Common rgb()/sRGB values stay on the exact path
+      // above, avoiding canvas quantization for translucent tints.
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = "rgb(0 0 0 / 0)";
+      context.fillStyle = value;
+      context.fillRect(0, 0, 1, 1);
+      const [r = 0, g = 0, b = 0, alpha = 255] = context.getImageData(0, 0, 1, 1).data;
+      return { r, g, b, a: alpha / 255 };
     };
     const over = (top: ReturnType<typeof parse>, bottom: ReturnType<typeof parse>) => ({
       r: top.r * top.a + bottom.r * (1 - top.a),
@@ -94,7 +143,33 @@ async function measure(page: Page) {
       return stops.map((stop) => over(stop, beneath));
     };
 
-    const results: { label: string; ratio: number }[] = [];
+    const selectorOf = (element: Element) => {
+      const classes = (element.getAttribute("class") ?? "").trim().split(/\s+/).filter(Boolean);
+      return `${element.tagName.toLowerCase()}${classes.map((name) => `.${name}`).join("")}`;
+    };
+    const formatColor = (color: ReturnType<typeof parse>) =>
+      `rgb(${color.r.toFixed(2)} ${color.g.toFixed(2)} ${color.b.toFixed(2)} / ${color.a.toFixed(3)})`;
+    const ancestryOf = (element: Element) => {
+      const ancestry: string[] = [];
+      let node: Element | null = element;
+      while (node) {
+        const style = getComputedStyle(node);
+        ancestry.push(
+          `${selectorOf(node)}{background-color:${style.backgroundColor};background-image:${style.backgroundImage};opacity:${style.opacity}}`,
+        );
+        if (parse(style.backgroundColor).a >= 1) break;
+        node = node.parentElement;
+      }
+      return ancestry;
+    };
+
+    const results: {
+      label: string;
+      ratio: number;
+      foreground: string;
+      background: string;
+      ancestry: string[];
+    }[] = [];
     /** Paths this measurement cannot model. Reported rather than silently skipped. */
     const unsupported: string[] = [];
     for (const element of document.querySelectorAll("*")) {
@@ -127,21 +202,77 @@ async function measure(page: Page) {
       const grounds = groundsOf(element);
       // The ink's own alpha and any inherited opacity are composited before measuring, so a faded
       // label is measured as it appears rather than as it is declared.
-      const path = `${element.tagName.toLowerCase()}.${(element.className || "").toString().split(" ").join(".")}`;
+      const path = selectorOf(element);
+      const ancestry = ancestryOf(element);
       for (const ground of grounds) {
         const painted = over({ ...ink, a: ink.a * Number(style.opacity || 1) }, ground);
-        results.push({ label: `${path} "${own.slice(0, 24)}"`, ratio: ratio(painted, ground) });
+        results.push({
+          label: `${path} "${own.slice(0, 24)}"`,
+          ratio: ratio(painted, ground),
+          foreground: style.color,
+          background: formatColor(ground),
+          ancestry,
+        });
       }
     }
     return { results, unsupported };
   });
 }
 
+test("rendered contrast waits for final fixture styles", async ({ page }) => {
+  await page.goto("/colour-schemes-e2e.html?scheme=wollipog&theme=dark&settle=manual");
+  await expect(page.locator(".slash-item.active")).toBeVisible();
+  await expect(page.locator(".slash-detail-disabled")).toHaveCSS("color", "rgb(18, 26, 36)");
+
+  await expect(measure(page)).rejects.toThrow("Contrast fixture is not settled");
+  await page.evaluate(() => window.dispatchEvent(new Event("contrast-fixture-release")));
+  await waitForContrastFixture(page);
+
+  const { results: measured } = await measure(page);
+  const failures = measured
+    .filter((entry) => entry.ratio < AA)
+    .map((entry) => `${entry.label} is ${entry.ratio.toFixed(2)}:1`);
+  expect(failures, "measurement must not sample the fixture's pending cascade").toEqual([]);
+});
+
+test("CSS color-space serialization is normalized before contrast measurement", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    (element as HTMLElement).style.transition = "none";
+    (element as HTMLElement).style.color = "oklab(1 0 0)";
+  });
+
+  const { results: measured } = await measure(page);
+  const entry = measured.find((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entry?.foreground).toBe("oklab(1 0 0)");
+  expect(entry?.ratio).toBeGreaterThan(10);
+});
+
+test("settled contrast measurement still reports genuine failures", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    (element as HTMLElement).style.color = "var(--bg-elev-1)";
+  });
+  await expect(disabledDetail).toHaveCSS("color", "rgb(18, 26, 36)");
+
+  const { results: measured } = await measure(page);
+  const failure = measured.find((entry) => entry.label.startsWith("p.slash-detail-disabled"));
+  expect(failure?.ratio).toBeLessThan(AA);
+  expect(failure?.foreground).toMatch(/^(rgb|color)\(/);
+  expect(failure?.background).toMatch(/^rgb\(/);
+  expect(failure?.ancestry.some((entry) => entry.startsWith("p.slash-detail-disabled{"))).toBe(true);
+});
+
 for (const scheme of SCHEMES) {
   for (const theme of THEMES) {
     test(`every rendered label clears AA in ${scheme} ${theme}`, async ({ page }) => {
-      await page.goto(`/colour-schemes-e2e.html?scheme=${scheme}&theme=${theme}`);
-      await expect(page.locator(".slash-item.active")).toBeVisible();
+      await openContrastFixture(
+        page,
+        `/colour-schemes-e2e.html?scheme=${scheme}&theme=${theme}`,
+        { scheme, theme },
+      );
 
       const { results: measured, unsupported } = await measure(page);
       expect(unsupported, "group opacity is not modelled; no measured path may contain it").toEqual([]);
@@ -151,7 +282,11 @@ for (const scheme of SCHEMES) {
 
       const failures = measured
         .filter((entry) => entry.ratio < AA)
-        .map((entry) => `${entry.label} is ${entry.ratio.toFixed(2)}:1`);
+        .map((entry) => [
+          `${entry.label} is ${entry.ratio.toFixed(2)}:1`,
+          `foreground=${entry.foreground}; composited-background=${entry.background}`,
+          `ancestry=${entry.ancestry.join(" <- ")}`,
+        ].join("; "));
       expect(failures, `${scheme}/${theme} renders text below ${AA}:1`).toEqual([]);
     });
   }
