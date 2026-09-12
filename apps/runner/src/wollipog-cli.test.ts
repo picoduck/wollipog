@@ -11,7 +11,7 @@ import {
 } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
 import { runWollipogCli } from "./wollipog-cli.js";
-import { expandCommandAlias } from "./wollipog-help.js";
+import { expandCommandAlias, resolveHelp } from "./wollipog-help.js";
 
 async function captureCli(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";
@@ -34,7 +34,7 @@ test("CLI root help is identical through help, --help, and -h and covers common 
   for (const expected of [
     "session", "worktree", "admin", "service", "help [topic]", "doctor", "update", "pair <command>",
     "service install", "service status", "pair create", "pair list", "pair revoke", "service logs",
-    "service restart", "runner-credential rotate", "service uninstall",
+    "service restart", "runner-credential rotate", "service uninstall", "--version",
   ]) assert.match(outputs[0]!.stdout, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
 });
 
@@ -64,6 +64,10 @@ test("new aliases accept --help without changing established canonical group hel
     assert.match(result.stdout, new RegExp(`Usage: wollipog ${alias}`, "u"));
   }
 
+  const pairVerb = await captureCli(["pair", "create", "--help"]);
+  assert.equal(pairVerb.code, 0);
+  assert.match(pairVerb.stdout, /Usage: wollipog pair/u);
+
   for (const group of ["admin", "service"]) {
     const result = await captureCli([group, "--help"]);
     assert.equal(result.code, 2, group);
@@ -85,6 +89,7 @@ test("CLI aliases preserve every argument while delegating to canonical commands
   assert.deepEqual(expandCommandAlias(["pair", "list", ...adminOptions]), ["admin", "device", "list", ...adminOptions]);
   assert.deepEqual(expandCommandAlias(["pair", "revoke", "d1", "--yes", ...adminOptions]), ["admin", "device", "revoke", "d1", "--yes", ...adminOptions]);
   assert.deepEqual(expandCommandAlias(["pair", "url", ...adminOptions]), ["admin", "pairing-url", ...adminOptions]);
+  assert.equal(resolveHelp(["pair", "create", "--name", "-h", "--output", "/tmp/pair"]), null);
 });
 
 test("aliases preserve canonical fail-closed output, JSON, and exit codes", async () => {
@@ -113,10 +118,29 @@ test("unknown help topics and pair verbs return usage without external work", as
   assert.equal(unknown.stdout, "");
   assert.match(unknown.stderr, /Unknown help topic `bogus`/u);
 
+  const unknownJson = await captureCli(["help", "bogus", "--json"]);
+  assert.equal(unknownJson.code, 2);
+  assert.equal(unknownJson.stderr, "");
+  assert.match(JSON.parse(unknownJson.stdout).error, /Unknown help topic `bogus`/u);
+
   const pair = await captureCli(["pair", "bogus", "--json"]);
   assert.equal(pair.code, 2);
   assert.equal(pair.stderr, "");
   assert.match(JSON.parse(pair.stdout).error, /Usage: wollipog pair/u);
+});
+
+test("unknown session and worktree verbs retain contextual command help", async () => {
+  const session = await captureCli(["session", "bogus"]);
+  assert.equal(session.code, 2);
+  assert.match(session.stderr, /Usage: wollipog session/u);
+  assert.match(session.stderr, /session guardrails/u);
+  assert.doesNotMatch(session.stderr, /Common Workflows/u);
+
+  const worktree = await captureCli(["worktree", "bogus"]);
+  assert.equal(worktree.code, 2);
+  assert.match(worktree.stderr, /Usage: wollipog worktree/u);
+  assert.match(worktree.stderr, /worktree discard/u);
+  assert.doesNotMatch(worktree.stderr, /Common Workflows/u);
 });
 
 test("CLI alias never reparses a later internal marker as its entry mode", async () => {

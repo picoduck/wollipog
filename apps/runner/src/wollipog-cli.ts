@@ -17,7 +17,7 @@ import {
 import { VERSION } from "./version.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
-import { expandCommandAlias, pairHelp, resolveHelp, rootHelp } from "./wollipog-help.js";
+import { expandCommandAlias, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
 
 type Write = (text: string) => void;
 
@@ -121,7 +121,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         input: { ...(sessionId ? { sessionId } : {}), path },
       };
     }
-    return { error: usage() };
+    return { error: worktreeHelp() };
   }
   if (words[0] !== "session" && words[0] !== "sessions") return { error: usage() };
   const verb = words[1];
@@ -191,7 +191,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
           }
         : { error: "session guardrails requires an id" };
     default:
-      return { error: usage() };
+      return { error: sessionHelp() };
   }
 }
 
@@ -251,7 +251,10 @@ export async function runWollipogCli(
   }
   const help = resolveHelp(invocation);
   if (help) {
-    (help.ok ? io.stdout : io.stderr)(`${help.text}\n`);
+    const json = flag(invocation, "--json");
+    (help.ok || json ? io.stdout : io.stderr)(help.ok || !json
+      ? `${help.text}\n`
+      : `${JSON.stringify({ error: help.text })}\n`);
     return help.ok ? 0 : 2;
   }
   const args = expandCommandAlias(invocation);

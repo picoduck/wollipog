@@ -26,6 +26,8 @@ export function rootHelp(): string {
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
     "",
+    "Global Options: --version, --help, -h",
+    "",
     "Examples:",
     "  wollipog service install",
     "  wollipog service status",
@@ -134,8 +136,9 @@ function helpForTopic(topic: string): string | null {
 export function resolveHelp(args: string[]): HelpResponse | null {
   const helpCommand = args[0] === "help";
   const rootHelpFlag = args[0] === "--help" || args[0] === "-h";
-  const aliasHelpFlag = ["update", "doctor", "pair"].includes(args[0] ?? "")
-    && (args.includes("--help") || args.includes("-h"));
+  const helpAt = (index: number) => args[index] === "--help" || args[index] === "-h";
+  const aliasHelpFlag = (["update", "doctor"].includes(args[0] ?? "") && helpAt(1))
+    || (args[0] === "pair" && (helpAt(1) || (["create", "list", "revoke", "url"].includes(args[1] ?? "") && helpAt(2))));
   if (!helpCommand && !rootHelpFlag && !aliasHelpFlag) return null;
 
   const topic = helpCommand
