@@ -157,6 +157,10 @@
       "reason": "The element is laid out to the full width of the viewport the test set, so this asserts it spans the window rather than that it is any particular size."
     },
     {
+      "id": "apps/web/e2e/session-usage.spec.ts|Math.abs(clusterBox.x + clusterBox.width / 2 - 195)|subject|195",
+      "reason": "Half of the 390px viewport the test sets: the assertion is that the cluster is CENTRED, and its centre line is fixed by the window rather than by any rendered text."
+    },
+    {
       "id": "apps/web/e2e/settings-rows.spec.ts|page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio, })).height|toEqual|576",
       "reason": "The viewport the test itself set, read back. A font stack cannot change how wide the window is."
     },
