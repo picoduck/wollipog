@@ -65,6 +65,7 @@ import {
   type DispatchWorkflowNodeRequest,
   type CreateWorkflowArtifactRequest,
   type CreateSessionRequest,
+  type DescendantRequestResolution,
   type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
   type UpdateProjectRequest,
@@ -77,6 +78,7 @@ import {
   type OrganizationRole,
   type ResourceOwner,
   type ResourceScope,
+  type ParentControlMode,
   type SessionView,
   type ShellView,
   type UserStatus,
@@ -551,6 +553,11 @@ function requestPrincipal(req: FastifyRequest, allowQueryToken = false): AuthPri
 function requestHuman(req: FastifyRequest): HumanPrincipal | null {
   const principal = requestPrincipal(req);
   return principal?.kind === "human" ? principal : null;
+}
+
+function validParentControlCoordinate(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/u.test(value);
 }
 
 function humanActorId(req: FastifyRequest): string {
@@ -3064,6 +3071,60 @@ app.get("/api/sessions/:id", async (req, reply) => {
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
   return { session };
+});
+
+app.post("/api/sessions/:id/parent-control", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only an authenticated human may change Parent Control" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  const mode = (req.body as { mode?: ParentControlMode } | undefined)?.mode;
+  if (mode !== "off" && mode !== "questions" && mode !== "questions_and_approvals") {
+    return reply.code(400).send({ error: "mode must be off, questions, or questions_and_approvals" });
+  }
+  return respond(reply, svc.setParentControl(id, mode));
+});
+
+app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (!principal) return reply.code(403).send({ error: "authentication required" });
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (principal.kind === "agent" && principal.credentialSessionId !== id) {
+    return reply.code(404).send({ error: "session not found" });
+  }
+  return respond(reply, svc.descendantRequests(id, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/descendant-requests/resolve", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching parent session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as {
+    sessionId?: unknown;
+    occurrenceId?: unknown;
+    resolution?: DescendantRequestResolution;
+  };
+  if (!validParentControlCoordinate(body?.sessionId) ||
+      !validParentControlCoordinate(body.occurrenceId) ||
+      !body.resolution || typeof body.resolution !== "object") {
+    return reply.code(400).send({ error: "sessionId, occurrenceId, and resolution are required" });
+  }
+  const resolution = body.resolution;
+  const valid = resolution.action === "dismiss" ||
+    (resolution.action === "answer" && resolution.answers && typeof resolution.answers === "object" && !Array.isArray(resolution.answers)) ||
+    ((resolution.action === "approve" || resolution.action === "deny") && typeof resolution.optionId === "string" && resolution.optionId);
+  if (!valid) return reply.code(400).send({ error: "invalid descendant request resolution" });
+  return respond(reply, svc.resolveDescendantRequest(
+    id,
+    body.sessionId,
+    body.occurrenceId,
+    resolution,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
 });
 
 app.get("/api/sessions/:id/child-sessions", async (req, reply) => {

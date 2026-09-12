@@ -4,7 +4,7 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionConfig, SessionView } from "@wollipog/protocol";
+import type { ParentControlMode, SessionConfig, SessionView } from "@wollipog/protocol";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ComposerPlusMenu } from "./SessionDetail.js";
 
@@ -22,6 +22,8 @@ const globals: Record<string, unknown> = {
   MouseEvent: domWindow.MouseEvent,
   FocusEvent: domWindow.FocusEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 };
@@ -120,6 +122,46 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
       input.dispatchEvent(new domWindow.FocusEvent("focusout", { bubbles: true }) as unknown as Event);
     });
     assert.deepEqual(applied, [], "an underflow typo cannot pause child admission");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the Composer exposes human-controlled Parent Control only for Orchestrator sessions", async () => {
+  const selected: ParentControlMode[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (permissionMode: string) => root.render(<ComposerPlusMenu
+    session={{ permissionMode, parentControl: "off", costBudgetUsd: null,
+      costCheckpointsUsd: null, maxToolCalls: null } as SessionView}
+    planActive={false}
+    planSupported={false}
+    onTogglePlan={() => {}}
+    onApply={() => {}}
+    onSetParentControl={(mode) => selected.push(mode)}
+    disabled={false}
+    imageMimeTypes={[]}
+    onAttachImages={() => {}}
+  />);
+  await act(async () => render("default"));
+  try {
+    await act(async () => fireDomEvent.click(
+      container.querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!,
+    ));
+    assert.equal(container.querySelector('[aria-label^="Parent Control:"]'), null);
+
+    await act(async () => render("orchestrator"));
+    const select = container.querySelector<HTMLButtonElement>('[aria-label="Parent Control: Off"]');
+    assert.ok(select);
+    await act(async () => fireDomEvent.click(select));
+    const questions = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((option) => option.textContent?.includes("Questions") && !option.textContent?.includes("Approvals"));
+    assert.ok(questions);
+    await act(async () => fireDomEvent.click(questions));
+    assert.deepEqual(selected, ["questions"]);
+    assert.match(container.textContent ?? "", /Only an authenticated human can change/);
   } finally {
     await act(async () => root.unmount());
     container.remove();

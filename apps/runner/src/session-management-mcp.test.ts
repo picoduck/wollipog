@@ -79,6 +79,10 @@ test("orchestrator MCP lists only management tools and rejects hidden mutations 
   const names = (response!.result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
   assert.ok(names.includes("create_session"));
   assert.ok(names.includes("list_governance_policies"));
+  for (const name of [
+    "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
+    "resolve_descendant_approval",
+  ]) assert.ok(names.includes(name), name);
   for (const name of ["create_run", "set_session_config", "upsert_governance_policy", "create_workflow"]) {
     assert.equal(names.includes(name), false);
     assert.equal((await callTool(deps, name)).isError, true);
@@ -86,6 +90,49 @@ test("orchestrator MCP lists only management tools and rejects hidden mutations 
   assert.equal(calls.length, 0);
   assert.equal((await callTool(deps, "create_worktree", { sessionId: SELF_ID, branch: "fix/self" })).isError, true);
   assert.equal(calls.length, 0);
+});
+
+test("Parent Control tools are orchestrator-only and bind resolutions to exact occurrences", async () => {
+  const ordinary = makeDeps();
+  const ordinaryList = await dispatch({ jsonrpc: "2.0", id: 3, method: "tools/list" }, ordinary.deps);
+  const ordinaryNames = (ordinaryList!.result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
+  assert.equal(ordinaryNames.includes("list_descendant_requests"), false);
+  assert.equal((await callTool(ordinary.deps, "list_descendant_requests")).isError, true);
+  assert.equal(ordinary.calls.length, 0);
+
+  const { deps, calls } = makeDeps((call) => call.method === "GET"
+    ? { status: 200, body: { requests: [{ sessionId: "child", occurrenceId: "request_1" }] } }
+    : { status: 200, body: { session: { id: "child", status: "running" } } });
+  deps.orchestrator = true;
+  const listed = await callTool(deps, "list_descendant_requests");
+  assert.deepEqual(resultJson(listed), { requests: [{ sessionId: "child", occurrenceId: "request_1" }] });
+  assert.equal(calls[0]?.method, "GET");
+  assert.equal(calls[0]?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests`);
+
+  await callTool(deps, "answer_descendant_question", {
+    sessionId: "child", occurrenceId: "request_1", answers: { q: "Continue" },
+  });
+  assert.deepEqual(calls.at(-1)?.body, {
+    sessionId: "child", occurrenceId: "request_1",
+    resolution: { action: "answer", answers: { q: "Continue" } },
+  });
+  await callTool(deps, "dismiss_descendant_question", {
+    sessionId: "child", occurrenceId: "request_2",
+  });
+  assert.deepEqual(calls.at(-1)?.body, {
+    sessionId: "child", occurrenceId: "request_2", resolution: { action: "dismiss" },
+  });
+  await callTool(deps, "resolve_descendant_approval", {
+    sessionId: "child", occurrenceId: "request_3", decision: "deny", optionId: "deny-once",
+  });
+  assert.deepEqual(calls.at(-1)?.body, {
+    sessionId: "child", occurrenceId: "request_3",
+    resolution: { action: "deny", optionId: "deny-once" },
+  });
+  for (const call of calls.slice(1)) {
+    assert.equal(call.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/resolve`);
+    assert.equal(call.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], SELF_ID);
+  }
 });
 
 /* -------------------------------------------------------------------------- */

@@ -55,6 +55,7 @@ import {
   claudeModelConfigForValidation,
   defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
+  parentControlRequestEligible,
   resolveEffectiveModelEffort,
   resolveEffectiveServiceTier,
   sessionBlocksConversationFork,
@@ -1285,6 +1286,164 @@ function seedSession(
   assert.ok(res.ok && res.data, "seed createSession should succeed");
   return res.data!.id;
 }
+
+test("Parent Control eligibility excludes secrets, authentication, policy gates, and persistent grants", () => {
+  const question = {
+    requestId: "question", title: "Question", options: [], kind: "question" as const,
+    questions: [{ id: "q", header: "Next", question: "What next?", options: [{ label: "Continue" }] }],
+  };
+  assert.equal(parentControlRequestEligible("off", question), false);
+  assert.equal(parentControlRequestEligible("questions", question), true);
+  assert.equal(parentControlRequestEligible("questions", {
+    ...question, questions: [{ ...question.questions[0]!, secret: true }],
+  }), false);
+  assert.equal(parentControlRequestEligible("questions", {
+    ...question, questions: [{ ...question.questions[0]!, question: "Which account should sign in?" }],
+  }), false);
+  assert.equal(parentControlRequestEligible("questions", {
+    ...question, questions: [{ ...question.questions[0]!, inputFormat: "email" }],
+  }), false);
+  assert.equal(parentControlRequestEligible("questions_and_approvals", {
+    requestId: "auth", title: "Sign In", options: [], kind: "authentication",
+  }), false);
+
+  const permission = {
+    requestId: "permission", title: "Run Command", kind: "permission" as const,
+    options: [
+      { optionId: "once", name: "Allow Once", kind: "allow_once" as const },
+      { optionId: "always", name: "Always Allow", kind: "allow_always" as const },
+    ],
+    context: { toolName: "Bash" },
+  };
+  assert.equal(parentControlRequestEligible("questions", permission), false);
+  assert.equal(parentControlRequestEligible("questions_and_approvals", permission), true);
+  assert.equal(parentControlRequestEligible("questions_and_approvals", {
+    ...permission, governancePolicyId: "human-review",
+  }), false);
+  assert.equal(parentControlRequestEligible("questions_and_approvals", {
+    ...permission, context: { toolName: "device_login" },
+  }), false);
+  assert.equal(parentControlRequestEligible("questions_and_approvals", {
+    ...permission, title: "Approve Account Authentication", context: { toolName: "Bash" },
+  }), false);
+  assert.equal(parentControlRequestEligible("questions_and_approvals", {
+    ...permission, context: { toolName: "Bash", escalatedBy: { kind: "agent", id: "reviewer" } },
+  }), false);
+  assert.equal(parentControlRequestEligible("questions_and_approvals", {
+    ...permission, options: [{ optionId: "always", name: "Always Allow", kind: "allow_always" }],
+  }), false);
+});
+
+test("opt-in Parent Control resolves exact nested request occurrences with agent provenance", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    assert.equal(parent.data.parentControl, "questions");
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+
+    const createChild = (parentSessionId: string, title: string) => {
+      const request = {
+        runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title,
+      };
+      let created = svc.createSession(
+        request, undefined, undefined, false, false, false, { parentSessionId },
+      );
+      if (created.status === 428) {
+        const spawnApproval = db.getSession(parentSessionId)!.pendingApproval!;
+        assert.ok(svc.approve(parentSessionId, spawnApproval.requestId, "allow").ok);
+        created = svc.createSession(
+          request, undefined, undefined, false, false, false, { parentSessionId },
+        );
+      }
+      assert.ok(created.ok && created.data, created.error);
+      db.updateSessionStatus(created.data.id, "running", Date.now());
+      return created.data;
+    };
+    const child = createChild(parent.data.id, "Child");
+    const grandchild = createChild(child.id, "Grandchild");
+    const questionOccurrence = "request_question_occurrence";
+    svc.onSessionEvent(grandchild.id, {
+      kind: "question_request", requestId: "provider-reused-id", occurrenceId: questionOccurrence,
+      questions: [{ id: "q", header: "Next", question: "What next?", options: [{ label: "Continue" }] }],
+    });
+
+    const listed = svc.descendantRequests(parent.data.id, () => true);
+    assert.ok(listed.ok && listed.data, listed.error);
+    assert.deepEqual(listed.data.requests.map(({ sessionId, occurrenceId }) => ({ sessionId, occurrenceId })), [
+      { sessionId: grandchild.id, occurrenceId: questionOccurrence },
+    ]);
+    assert.deepEqual(svc.descendantRequests(parent.data.id, () => false).data?.requests, []);
+    const answered = svc.resolveDescendantRequest(parent.data.id, grandchild.id, questionOccurrence, {
+      action: "answer", answers: { q: "Continue" },
+    }, () => true);
+    assert.ok(answered.ok, answered.error);
+    assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+      type: "answer_question", sessionId: grandchild.id, requestId: "provider-reused-id",
+      answers: { q: "Continue" }, action: "submit", resolvedByParentSessionId: parent.data.id,
+    });
+    assert.equal(svc.resolveDescendantRequest(parent.data.id, grandchild.id, questionOccurrence, {
+      action: "dismiss",
+    }, () => true).status, 409, "the same occurrence cannot be resolved twice");
+    assert.ok(svc.governanceAudit(grandchild.id).some((entry) =>
+      entry.stage === "resolution" && entry.actor.kind === "agent" && entry.actor.id === parent.data!.id));
+
+    assert.ok(svc.setParentControl(parent.data.id, "questions_and_approvals").ok);
+    const approvalOccurrence = "request_approval_occurrence";
+    svc.onSessionEvent(child.id, {
+      kind: "permission_request", requestId: "permission", occurrenceId: approvalOccurrence,
+      title: "Run Command", context: { toolName: "Bash" }, options: [
+        { optionId: "once", name: "Allow Once", kind: "allow_once" },
+        { optionId: "always", name: "Always Allow", kind: "allow_always" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+    });
+    assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, approvalOccurrence, {
+      action: "approve", optionId: "always",
+    }, () => true).status, 400, "delegation never grants persistent permission");
+    assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, approvalOccurrence, {
+      action: "approve", optionId: "once",
+    }, () => true).ok);
+    assert.equal(hub.sentOfType("resolve_permission").at(-1)?.resolvedByParentSessionId, parent.data.id);
+
+    svc.onSessionEvent(child.id, {
+      kind: "permission_request", requestId: "old-runner", occurrenceId: "request_old_runner",
+      title: "Run Command", options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+    });
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl - 1);
+    assert.deepEqual(svc.descendantRequests(parent.data.id, () => true).data?.requests, []);
+    assert.equal(svc.resolveDescendantRequest(parent.data.id, child.id, "request_old_runner", {
+      action: "approve", optionId: "once",
+    }, () => true).status, 409);
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.ok(svc.setParentControl(parent.data.id, "off").ok);
+    assert.equal(svc.descendantRequests(parent.data.id, () => true).status, 403);
+
+    const ordinary = seedSession(svc, hub);
+    assert.equal(svc.setParentControl(ordinary, "questions").status, 409);
+    assert.equal(svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+      parentControl: "questions",
+    }, undefined, undefined, false, false, false, { parentSessionId: parent.data.id }).status, 403);
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl - 1);
+    assert.equal(svc.setParentControl(parent.data.id, "questions").status, 409,
+      "an old parent runner cannot enable tools it does not host");
+    assert.equal(svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    }).status, 409);
+  } finally { db.close(); }
+});
 
 test("question policy answers avoid input state, record provenance, and survive history cache resets", async () => {
   const { db, svc, hub } = makeHarness();
@@ -11012,7 +11171,10 @@ test("hydrateRunnerSessions persists a snapshot's pendingApproval so it survives
     options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }],
   };
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "input_required", pendingApproval: approval })]);
-  assert.deepEqual(db.getSession("s_box1")!.pendingApproval, approval);
+  const identified = db.getSession("s_box1")!.pendingApproval!;
+  assert.match(identified.occurrenceId ?? "", /^request_[0-9a-f]{32}$/u);
+  const { occurrenceId: _occurrenceId, ...persistedApproval } = identified;
+  assert.deepEqual(persistedApproval, approval);
 
   // Clearing it on the box (next snapshot) clears the cache.
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ pendingApproval: null })]);

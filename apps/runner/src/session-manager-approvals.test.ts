@@ -90,6 +90,52 @@ test("delivered approval emits exactly one permission_resolved and flips box met
   }
 });
 
+test("request occurrences are runner-owned, durable, and never alias a reused provider id", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const emit = () => (sm as any).emitEvent("s_perm", {
+      kind: "permission_request", requestId: "reused", title: "Run Command",
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+    });
+    emit();
+    const first = (eventsOf(sent, "permission_request").at(-1) as {
+      payload: { occurrenceId: string };
+    }).payload.occurrenceId;
+    assert.match(first, /^request_[0-9a-f]{32}$/u);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.occurrenceId, first);
+    assert.equal(store.readEvents("s_perm").at(-1)?.payload.kind, "permission_request");
+    assert.equal((store.readEvents("s_perm").at(-1)?.payload as { occurrenceId?: string }).occurrenceId, first);
+
+    sm.resolvePermission("s_perm", "reused", "allow");
+    (sm as any).emitEvent("s_perm", {
+      kind: "permission_request", requestId: "reused", occurrenceId: first, title: "Run Command",
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+    });
+    const second = (eventsOf(sent, "permission_request").at(-1) as {
+      payload: { occurrenceId: string };
+    }).payload.occurrenceId;
+    assert.notEqual(second, first);
+  } finally {
+    cleanup();
+  }
+});
+
+test("delegated resolutions persist the controlling parent in runner history", () => {
+  const { sm, sent, cleanup } = makeHarness(true);
+  try {
+    sm.resolvePermission("s_perm", "req-1", "allow", "parent-session");
+    assert.equal((eventsOf(sent, "permission_resolved")[0] as {
+      payload: { resolvedByParentSessionId?: string };
+    }).payload.resolvedByParentSessionId, "parent-session");
+    sm.answerQuestion("s_perm", "question-1", {}, "dismiss", "parent-session");
+    assert.equal((eventsOf(sent, "question_resolved")[0] as {
+      payload: { resolvedByParentSessionId?: string };
+    }).payload.resolvedByParentSessionId, "parent-session");
+  } finally {
+    cleanup();
+  }
+});
+
 test("provider-initiated turn settlement restores idle after an answered approval", () => {
   const { sm, store, cleanup } = makeHarness(true);
   try {
@@ -462,6 +508,7 @@ test("startup preserves a stranded question as a dismissible recovery and resolv
       requestId: "question-before-restart",
       questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
     });
+    const occurrenceId = (store.readEvents("s_perm")[0]!.payload as { occurrenceId: string }).occurrenceId;
     // Reproduce the metadata left by the affected older startup path: history still contains the
     // unresolved request, but the actionable card and waiting status were erased.
     store.patchMeta("s_perm", { status: "idle", pendingApproval: null });
@@ -477,6 +524,7 @@ test("startup preserves a stranded question as a dismissible recovery and resolv
     assert.equal(recovered.questionRecoveryReconciled, true);
     assert.deepEqual(recovered.pendingApproval, {
       requestId: "question-before-restart",
+      occurrenceId,
       title: "Which target?",
       options: [],
       kind: "question",

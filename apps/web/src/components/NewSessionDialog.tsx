@@ -6,6 +6,7 @@ import {
   runnerSupportsProtocol,
   type BoxView,
   type AgentHarnessDefaultsView,
+  type ParentControlMode,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
@@ -162,6 +163,7 @@ export function NewSessionDialog({
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [presetOverride, setPresetOverride] = useState<"default" | "orchestrator">("default");
+  const [parentControl, setParentControl] = useState<ParentControlMode>("off");
   const [harnessDefaults, setHarnessDefaults] = useState<{
     api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
   } | null>(null);
@@ -221,6 +223,15 @@ export function NewSessionDialog({
   const nativeTuiAccountingExplanation = nativeTuiAccountingDetail(agent);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const orchestrator = presetOverride === "orchestrator" || savedPermissionMode === "orchestrator";
+  const parentControlSupported = runnerSupportsProtocol(runner?.protocolVersion, "delegatedParentControl");
+  const parentControlUnavailable = runnerCapabilityRequirement(
+    runner?.protocolVersion,
+    "delegatedParentControl",
+    "Parent Control",
+  );
+  useEffect(() => {
+    if (!orchestrator || !parentControlSupported) setParentControl("off");
+  }, [orchestrator, parentControlSupported]);
   const orchestratorContext = agent?.context?.kind ?? "native";
   const directWslOrchestrator = orchestratorContext === "wsl" &&
     ["claude-code", "codex", "codex-app-server"].includes(agent?.driver ?? "acp") &&
@@ -496,6 +507,7 @@ export function NewSessionDialog({
         executionTargetId: executionTarget?.id,
         config: presetOverride === "orchestrator" ? { permissionMode: "orchestrator" }
           : executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : undefined,
+        ...(orchestrator ? { parentControl } : {}),
         workspacePath: (!projectsSupported || projectSelection === NO_PROJECT_SELECTION) ? browsedPath ?? undefined : undefined,
         acpSessionContext: additionalDirectories.length ? { additionalDirectories } : undefined,
         ...(launchSurface === "native_tui" ? { launchSurface: "native_tui" as const } : {}),
@@ -842,6 +854,26 @@ export function NewSessionDialog({
               {presetOverride === "default" && <span className="muted">Orchestrator is your saved Agent Harness default. Change it in Settings to use another default.</span>}
               {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset is unavailable here. {orchestratorUnavailable} Choose a compatible target or change the saved default in Settings.</span>}
             </>}
+            {orchestrator && (
+              <ChoiceCards<ParentControlMode>
+                label="Parent Control"
+                value={parentControl}
+                onChange={setParentControl}
+                options={[
+                  { value: "off", title: "Off", description: "Keep descendant questions and approvals human-only." },
+                  {
+                    value: "questions", title: "Questions",
+                    description: "Let this session inspect and answer non-secret descendant questions.",
+                    disabled: !parentControlSupported, disabledReason: parentControlUnavailable,
+                  },
+                  {
+                    value: "questions_and_approvals", title: "Questions and Approvals",
+                    description: "Also allow eligible one-time descendant approval decisions.",
+                    disabled: !parentControlSupported, disabledReason: parentControlUnavailable,
+                  },
+                ]}
+              />
+            )}
             {directWslRequiresSafeOrchestrator && !orchestrator &&
               <span className="form-error">Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.</span>}
           </div>

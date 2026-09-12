@@ -12,6 +12,7 @@ import type {
   UiSnapshotMessage,
   AgentHarnessDefaultsView,
 } from "@wollipog/protocol";
+import { RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
@@ -231,6 +232,13 @@ function permissionPresetCard(container: HTMLDivElement, title: string): HTMLBut
     .find((button) => button.querySelector(".ui-choice-card-title")?.textContent?.trim() === title);
 }
 
+function parentControlCard(container: HTMLDivElement, title: string): HTMLButtonElement | undefined {
+  const group = container.querySelector('[role="radiogroup"][aria-label="Parent Control"]');
+  if (!group) return undefined;
+  return [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+    .find((button) => button.querySelector(".ui-choice-card-title")?.textContent?.trim() === title);
+}
+
 function submitWithEnter(container: HTMLDivElement): void {
   const form = container.querySelector(".form");
   assert.ok(form, "dialog form is rendered");
@@ -326,6 +334,50 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
   } finally { await unmountFixture(fixture); }
+});
+
+test("Parent Control is Orchestrator-only, defaults Off, and submits an explicit opt-in", async () => {
+  const enabledRunner: RunnerView = {
+    ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedParentControl,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture({ runners: [enabledRunner] });
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    assert.equal(parentControlCard(fixture.container, "Off"), undefined);
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.equal(parentControlCard(fixture.container, "Off")?.getAttribute("aria-checked"), "true");
+    const optIn = parentControlCard(fixture.container, "Questions and Approvals");
+    assert.ok(optIn);
+    await act(async () => { optIn.click(); });
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.parentControl, "questions_and_approvals");
+    assert.equal(fixture.requests[0]?.config?.permissionMode, "orchestrator");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Parent Control opt-ins stay disabled on an older runner", async () => {
+  const oldRunner: RunnerView = {
+    ...runner, protocolVersion: 134,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture({ runners: [oldRunner] });
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.equal(parentControlCard(fixture.container, "Off")?.getAttribute("aria-checked"), "true");
+    assert.equal(parentControlCard(fixture.container, "Questions")?.getAttribute("aria-disabled"), "true");
+  } finally {
+    await unmountFixture(fixture);
+  }
 });
 
 test("Native TUI orchestrator creation is gated by its own runner capability", async () => {

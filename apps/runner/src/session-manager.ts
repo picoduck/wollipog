@@ -327,6 +327,7 @@ interface QueuedPrompt {
     requestId: string;
     recoveryId: string;
     answers: Record<string, string | string[]>;
+    resolvedByParentSessionId?: string;
   };
 }
 
@@ -2191,6 +2192,7 @@ export class SessionManager {
             scanned: true,
             question: {
               requestId: payload.requestId,
+              ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
               recoveryId: `question:${logEpoch}:${events[index]!.seq}`,
               title: payload.questions[0]?.question ?? "The agent has a question",
               options: [],
@@ -2231,6 +2233,7 @@ export class SessionManager {
           const payload = event.payload;
           requests.set(payload.requestId, {
             requestId: payload.requestId, kind: "question", options: [],
+            ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
             questions: payload.questions, title: payload.questions[0]?.question ?? "The agent has a question",
             ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
             recoveryId: `question:${generation.logEpoch}:${event.seq}`,
@@ -7548,6 +7551,9 @@ export class SessionManager {
           requestId: recoveredQuestion.requestId,
           answered: true,
           resolutionReason: "submitted",
+          ...(recoveredQuestion.resolvedByParentSessionId
+            ? { resolvedByParentSessionId: recoveredQuestion.resolvedByParentSessionId }
+            : {}),
           ...(durable ? { commandId: durable.commandId } : {}),
         }, durable)
       : syntheticRecovery
@@ -9288,7 +9294,12 @@ export class SessionManager {
     }
   }
 
-  resolvePermission(sessionId: string, requestId: string, optionId: string | null): void {
+  resolvePermission(
+    sessionId: string,
+    requestId: string,
+    optionId: string | null,
+    resolvedByParentSessionId?: string,
+  ): void {
     if (requestId.startsWith("provider-auth:")) {
       void this.resolveProviderAuthentication(sessionId, requestId, optionId).catch(() => {
         const meta = this.store.readMeta(sessionId);
@@ -9333,6 +9344,7 @@ export class SessionManager {
         requestId,
         optionId,
         resolutionReason: optionId == null || optionKind === "cancel" ? "dismissed" : "submitted",
+        ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
       });
       return;
     }
@@ -9351,7 +9363,13 @@ export class SessionManager {
     this.emitStatus(sessionId, status);
   }
 
-  answerQuestion(sessionId: string, requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): void {
+  answerQuestion(
+    sessionId: string,
+    requestId: string,
+    answers: Record<string, string | string[]>,
+    action?: "submit" | "dismiss",
+    resolvedByParentSessionId?: string,
+  ): void {
     const entry = this.active.get(sessionId);
     const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers, action) : false;
     if (delivered) {
@@ -9371,6 +9389,7 @@ export class SessionManager {
         requestId,
         answered,
         resolutionReason: answered ? "submitted" : "dismissed",
+        ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
       });
       return;
     }
@@ -9388,6 +9407,7 @@ export class SessionManager {
         requestId,
         answered: false,
         resolutionReason: "dismissed",
+        ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
       });
       this.emitStatus(sessionId, statusAfterDismiss);
       return;
@@ -9413,6 +9433,7 @@ export class SessionManager {
     recoveryId: string,
     answers: Record<string, string | string[]>,
     durable: DurableCommandLifecycle,
+    resolvedByParentSessionId?: string,
   ): void {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -9445,7 +9466,7 @@ export class SessionManager {
       undefined,
       true,
       undefined,
-      { requestId, recoveryId, answers },
+      { requestId, recoveryId, answers, ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}) },
     );
   }
 
@@ -9952,14 +9973,21 @@ export class SessionManager {
       return undefined;
     }
     try {
+      // Provider request ids are not occurrence identities: some providers may reuse one after a
+      // restart or a later turn. Stamp the durable event before any snapshot or relay observes it
+      // so delegated Parent Control can compare-and-set the exact pending occurrence.
+      const identifiedPayload: SessionEventPayload =
+        payload.kind === "permission_request" || payload.kind === "question_request"
+          ? { ...payload, occurrenceId: `request_${randomUUID().replaceAll("-", "")}` }
+          : payload;
       // Persist to the box store (the source of truth) and stamp the runner-owned seq/ts onto the
       // live message so every dashboard's cache agrees. No lifecycle caller may observe a rejected
       // append: a complete-history failure is latched and contained to this session here.
-      const stored = this.store.appendEvent(sessionId, payload);
+      const stored = this.store.appendEvent(sessionId, identifiedPayload);
       if (!stored) throw new Error("session metadata disappeared before history append");
       try {
-        this.accrueMeta(sessionId, payload);
-        this.send({ type: "session_event", sessionId, payload, seq: stored.seq, ts: stored.ts });
+        this.accrueMeta(sessionId, identifiedPayload);
+        this.send({ type: "session_event", sessionId, payload: identifiedPayload, seq: stored.seq, ts: stored.ts });
       } catch (relayError) {
         // The authoritative append already committed. Do not misclassify a best-effort metadata or
         // transport failure as corrupt history, and never throw it through a driver callback; the
@@ -11748,6 +11776,7 @@ export class SessionManager {
       this.store.patchMeta(sessionId, {
         pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, {
           requestId: payload.requestId,
+          ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
           title: payload.title,
           options: payload.options,
           ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
@@ -11768,6 +11797,7 @@ export class SessionManager {
       this.store.patchMeta(sessionId, {
         pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, {
           requestId: payload.requestId,
+          ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
           title: payload.questions[0]?.question ?? "The agent has a question",
           options: [],
           kind: "question",

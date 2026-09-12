@@ -637,6 +637,9 @@ export function isDurableSessionCommandMessage(value: unknown): value is Durable
     return typeof command.sessionId === "string" && Boolean(command.sessionId) &&
       typeof command.requestId === "string" && Boolean(command.requestId) &&
       typeof command.recoveryId === "string" && Boolean(command.recoveryId) &&
+      (command.resolvedByParentSessionId === undefined ||
+        (typeof command.resolvedByParentSessionId === "string" && Boolean(command.resolvedByParentSessionId) &&
+          command.resolvedByParentSessionId.length <= 256)) &&
       isQuestionAnswerMap(command.answers);
   }
   if (command.type !== "start_session" || !isObject(command.spec)) return false;

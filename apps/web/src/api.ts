@@ -32,6 +32,7 @@ import type {
   CreateWorkflowRunRequest,
   CreateWorkflowRunResult,
   DeviceView,
+  DescendantRequestView,
   DirectoryEntry,
   ExternalSessionDescriptor,
   GitActionData,
@@ -48,6 +49,7 @@ import type {
   OrganizationMembershipView,
   OrganizationRole,
   ResourceOwner,
+  ParentControlMode,
   PodContextEntry,
   PodContextPage,
   PodOrchestrationActionResult,
@@ -844,6 +846,15 @@ export function createApiClient(transport: ApiTransport) {
   /** Exact authorized lookup used by direct links, including archived sessions omitted from the
    * live dashboard snapshot. */
   session: (id: string) => req<{ session: SessionView }>(sessionLookupPath(id)),
+  setParentControl: (id: string, mode: ParentControlMode) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control`, {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
+  descendantRequests: (id: string) =>
+    req<{ requests: DescendantRequestView[] }>(
+      `/api/sessions/${encodeURIComponent(id)}/descendant-requests`,
+    ),
   childSessions: (id: string, eventEpoch: number, after = 0, limit = 50) => {
     const query = new URLSearchParams({ eventEpoch: String(eventEpoch), after: String(after), limit: String(limit) });
     return req<ChildSessionRegistryPage>(`/api/sessions/${encodeURIComponent(id)}/child-sessions?${query}`);

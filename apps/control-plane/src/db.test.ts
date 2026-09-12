@@ -1481,7 +1481,11 @@ test("capacity dimensions and overflow diagnostics are accepted only from protoc
     requiredUnits: 1,
   }), false, "the aggregate overflow sentinel is never valid as one session's reason");
 
-  db.registerRunner(meta({ runnerId: "legacy", runtime }), 130, PROTOCOL_VERSION - 1);
+  db.registerRunner(
+    meta({ runnerId: "legacy", runtime }),
+    130,
+    RUNNER_CAPABILITY_MIN_PROTOCOL.runnerCapacityDimensions - 1,
+  );
   assert.equal(db.updateRunnerCapacityStatus("legacy", status, 140), false,
     "a rolling-deployment peer cannot introduce fields or enum members outside its vocabulary");
   db.close();
@@ -2517,11 +2521,14 @@ test("updateSessionStatus clears pending approval when leaving input_required", 
   };
   db.updateSessionStatus("sess-1", "input_required", 2000);
   db.setPendingApproval("sess-1", approval);
-  assert.deepEqual(db.getSession("sess-1")!.pendingApproval, approval);
+  const identified = db.getSession("sess-1")!.pendingApproval!;
+  assert.match(identified.occurrenceId ?? "", /^request_[0-9a-f]{32}$/u);
+  const { occurrenceId: _occurrenceId, ...persistedApproval } = identified;
+  assert.deepEqual(persistedApproval, approval);
 
   // staying in input_required keeps it
   db.updateSessionStatus("sess-1", "input_required", 2100);
-  assert.deepEqual(db.getSession("sess-1")!.pendingApproval, approval);
+  assert.deepEqual(db.getSession("sess-1")!.pendingApproval, identified);
 
   // leaving clears it
   db.updateSessionStatus("sess-1", "running", 2200);
@@ -3859,6 +3866,43 @@ test("legacy session rows add event_epoch at zero before the first replacement",
     upgraded.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Parent Control defaults off and persists opt-in across restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-parent-control-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    assert.equal(initial.createSession(newSession()).parentControl, "off");
+    initial.updateSessionParentControl("sess-1", "questions_and_approvals", 2_000);
+    assert.equal(initial.getSession("sess-1")?.parentControl, "questions_and_approvals");
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    assert.equal(reopened.getSession("sess-1")?.parentControl, "questions_and_approvals");
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pending request occurrences remain stable until settlement and rotate after clearing", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession());
+    const pending = { requestId: "provider-reused", title: "Run", options: [] };
+    db.setPendingApproval("sess-1", pending);
+    const first = db.getSession("sess-1")!.pendingApproval!.occurrenceId!;
+    assert.match(first, /^request_[0-9a-f]{32}$/u);
+    db.setPendingApproval("sess-1", pending);
+    assert.equal(db.getSession("sess-1")!.pendingApproval!.occurrenceId, first);
+    db.setPendingApproval("sess-1", null);
+    db.setPendingApproval("sess-1", pending);
+    assert.notEqual(db.getSession("sess-1")!.pendingApproval!.occurrenceId, first);
+  } finally {
+    db.close();
   }
 });
 
@@ -5446,7 +5490,10 @@ test("setPendingApproval tolerates being set and cleared", () => {
     options: [{ optionId: "o", name: "O" }],
   };
   db.setPendingApproval("sess-1", approval);
-  assert.deepEqual(db.getSession("sess-1")!.pendingApproval, approval);
+  const identified = db.getSession("sess-1")!.pendingApproval!;
+  assert.match(identified.occurrenceId ?? "", /^request_[0-9a-f]{32}$/u);
+  const { occurrenceId: _occurrenceId, ...persistedApproval } = identified;
+  assert.deepEqual(persistedApproval, approval);
   db.setPendingApproval("sess-1", null);
   assert.equal(db.getSession("sess-1")!.pendingApproval, null);
 });

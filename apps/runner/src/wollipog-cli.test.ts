@@ -113,6 +113,7 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
         archived: false,
         parentSessionId: null,
         maxChildSessions: null,
+        parentControl: "off",
       }],
     });
     assert.equal(calls[1]!.url, "http://127.0.0.1:4317/api/sessions");
