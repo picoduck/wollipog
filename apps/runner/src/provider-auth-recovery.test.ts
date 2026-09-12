@@ -139,6 +139,24 @@ test("partial Claude account observations compare by shared redacted fields with
   }), /email, orgId were missing.*authMethod, apiProvider were missing/);
 });
 
+test("evidence-free mismatch guidance explains uncertainty and names available recovery actions", () => {
+  const guidance = describeProviderAuthIdentityMismatch({
+    matches: false,
+    evidenceAvailable: false,
+    differingFields: [],
+    expectedMissingFields: [],
+    observedMissingFields: [],
+    sharedAccountFields: [],
+  });
+
+  assert.match(guidance, /cannot match the current authenticated state to the state recorded for this session/i);
+  assert.match(guidance, /cannot determine whether the account changed/i);
+  assert.match(guidance, /Choose Use Current Account/);
+  assert.match(guidance, /choose Recheck Authentication/);
+  assert.match(guidance, /Credential and account values are redacted/);
+  assert.doesNotMatch(guidance, /Provider account identity mismatch/);
+});
+
 test("identity comparison exhaustively rejects every shared field change and requires a matching account anchor", () => {
   const fields = ["email", "orgId", "authMethod", "apiProvider"] as const;
   for (let expectedMask = 0; expectedMask < 16; expectedMask += 1) {

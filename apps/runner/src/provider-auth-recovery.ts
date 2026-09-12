@@ -136,22 +136,24 @@ export function mergeProviderAuthIdentityEvidence(
 }
 
 export function describeProviderAuthIdentityMismatch(comparison: ProviderAuthIdentityComparison): string {
-  const details: string[] = [];
   if (!comparison.evidenceAvailable) {
-    details.push("field-level evidence is unavailable for the recorded or current observation");
-  } else {
-    if (comparison.differingFields.length) {
-      details.push(`${comparison.differingFields.join(", ")} differed`);
-    }
-    if (comparison.expectedMissingFields.length) {
-      details.push(`${comparison.expectedMissingFields.join(", ")} ${comparison.expectedMissingFields.length === 1 ? "was" : "were"} missing from the recorded observation`);
-    }
-    if (comparison.observedMissingFields.length) {
-      details.push(`${comparison.observedMissingFields.join(", ")} ${comparison.observedMissingFields.length === 1 ? "was" : "were"} missing from the current observation`);
-    }
-    if (!comparison.differingFields.length && !comparison.sharedAccountFields.length) {
-      details.push("the observations share no comparable email or orgId field");
-    }
+    return "Wollipog cannot match the current authenticated state to the state recorded for this session " +
+      "with the available evidence, so it cannot determine whether the account changed. Choose Use Current Account " +
+      "to accept the current authenticated state for this session, or restore the recorded authentication and choose " +
+      "Recheck Authentication. Credential and account values are redacted.";
+  }
+  const details: string[] = [];
+  if (comparison.differingFields.length) {
+    details.push(`${comparison.differingFields.join(", ")} differed`);
+  }
+  if (comparison.expectedMissingFields.length) {
+    details.push(`${comparison.expectedMissingFields.join(", ")} ${comparison.expectedMissingFields.length === 1 ? "was" : "were"} missing from the recorded observation`);
+  }
+  if (comparison.observedMissingFields.length) {
+    details.push(`${comparison.observedMissingFields.join(", ")} ${comparison.observedMissingFields.length === 1 ? "was" : "were"} missing from the current observation`);
+  }
+  if (!comparison.differingFields.length && !comparison.sharedAccountFields.length) {
+    details.push("the observations share no comparable email or orgId field");
   }
   if (!details.length) details.push("no differing or missing field was identified");
   return `Provider account identity mismatch: ${details.join("; ")}. Account values are redacted.`;

@@ -11052,7 +11052,10 @@ export class SessionManager {
     const identityComparison = compareProviderAuthIdentity(expected, expectedEvidence, observation);
     if (expected && (!observation.identityId || !identityComparison.matches)) {
       const reason = describeProviderAuthIdentityMismatch(identityComparison);
-      this.log(`provider account identity mismatch for ${boundedSessionIdForLog(current.sessionId)}: ${reason}`);
+      const logLabel = identityComparison.evidenceAvailable
+        ? "provider account identity mismatch"
+        : "provider authentication identity could not be confirmed";
+      this.log(`${logLabel} for ${boundedSessionIdForLog(current.sessionId)}: ${reason}`);
       this.parkProviderAuthentication(current, scope, "launch", "not_delivered", reason);
       return false;
     }
@@ -11190,7 +11193,7 @@ export class SessionManager {
     const options = block.identityMismatch ? [{
       optionId: "auth:accept-current",
       name: "Use Current Account",
-      description: "Explicitly accept the newly authenticated account for this session only.",
+      description: "Explicitly accept the current authenticated state for this session only.",
       kind: "allow_once",
     }] : [];
     if (block.canStartLogin) {
@@ -11530,7 +11533,10 @@ export class SessionManager {
           ? describeProviderAuthIdentityMismatch(identityComparison)
           : "The provider is authenticated, but this session has no recorded account identity to compare. Confirm the current account explicitly for this session.";
         if (expected) {
-          this.log(`provider account identity mismatch for ${boundedSessionIdForLog(sessionId)}: ${reason}`);
+          const logLabel = identityComparison.evidenceAvailable
+            ? "provider account identity mismatch"
+            : "provider authentication identity could not be confirmed";
+          this.log(`${logLabel} for ${boundedSessionIdForLog(sessionId)}: ${reason}`);
         }
         block = { ...block, identityMismatch: true, reason };
         this.store.patchMeta(sessionId, { providerAuthBlock: block });
