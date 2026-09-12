@@ -27,7 +27,7 @@ let runner: RunnerView | null = {
   workspaces: [{ id: "home", name: "Home", path: "C:\\Users\\misko" }],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 134,
+  protocolVersion: 135,
   agentsRefreshed: true,
   canManage: identityRole !== "viewer",
   capacity: {

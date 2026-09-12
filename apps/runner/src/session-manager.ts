@@ -870,7 +870,7 @@ export class SessionManager {
   /** At most one pressure retirement may be unconfirmed. This prevents one admission burst from
    * retiring every eligible warm process before the first released unit is observed. */
   private readonly parkingSessions = new Set<string>();
-  /** Lazily reconciled durable-session inventory. The first v134 report may scan the store; hot
+  /** Lazily reconciled durable-session inventory. The first v135 report may scan the store; hot
    * turn-boundary reports remain O(1) in retained-session count. */
   private capacityInventoryInitialized = false;
   private readonly retainedResumableSessions = new Set<string>();

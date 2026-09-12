@@ -35,7 +35,7 @@ follows Machine capacity and adds no narrower boundary. `idleProcessPolicy` defa
 historical warm-process behavior. Opting into `park_when_needed` lets the runner retire the oldest
 eligible idle provider when resident capacity blocks new work. Only a provider with a verified
 resume coordinate is eligible; active turns, background work, approvals, queued commands, and
-unresumable providers are never pressure-parked. Parking is disabled while connected to a pre-v134
+unresumable providers are never pressure-parked. Parking is disabled while connected to a pre-v135
 control plane, because that peer cannot confirm the expanded capacity state.
 
 The Machine view defines the three dimensions independently:
@@ -73,7 +73,7 @@ the box idle. An older entry may be bypassed at most eight times; after that, ca
 until it can start or is cancelled. The runner reports configured, used, available, and queued units,
 plus the actual boundary blocking each waiter: Machine capacity, agent quota, execution-target quota,
 exclusive provider state, a request whose weight exceeds the configured capacity, or bounded-fairness
-queue order. Protocol-v134 peers also report active turns, resident process units, retained resumable
+queue order. Protocol-v135 peers also report active turns, resident process units, retained resumable
 sessions, parked sessions, and the idle-process policy. Queued session cards and search results
 preserve the exact reason, including Active Turn Capacity. Stop cancels a waiter before any agent
 process launches.

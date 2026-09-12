@@ -323,11 +323,11 @@ test("capacity status deterministically summarizes blocker groups beyond the wir
       status.queuedSessions,
     );
 
-    gate.controlPlaneProtocolVersion = () => 133;
+    gate.controlPlaneProtocolVersion = () => 134;
     const legacy = manager.capacityState();
     assert.equal(legacy.blockers?.at(-1)?.kind, "runner_capacity",
       "an older control plane receives a bounded report in its closed vocabulary");
-    gate.controlPlaneProtocolVersion = () => 134;
+    gate.controlPlaneProtocolVersion = () => 135;
 
     gate.admissionQueue.splice(0);
     assert.equal(gate.boxAdmission.acquire({ sessionId: "resident", agentId: "holder", weight: 1 }), true);
@@ -367,7 +367,7 @@ test("capacity status deterministically summarizes blocker groups beyond the wir
         waitingSessions: 1,
       })),
     ];
-    gate.controlPlaneProtocolVersion = () => 134;
+    gate.controlPlaneProtocolVersion = () => 135;
     const bounded = gate.boundCapacityBlockers(mixed, 1) as Array<{ kind: string; waitingSessions?: number }>;
     assert.equal(bounded.length, 256);
     for (const kind of ["request_weight", ...exactKinds]) {
@@ -1035,10 +1035,10 @@ test("parking eligibility is capability-derived and fails closed for provider-ow
     guarded.queue.length = 0;
     store.patchMeta("guarded", { pendingApproval: null, backgroundWorkState: "running", pendingBackgroundTaskIds: ["task"] });
     assert.equal(internals.idleProviderCanPark("guarded", guarded), false, "detached background work stays resident");
-    internals.controlPlaneProtocolVersion = () => 133;
+    internals.controlPlaneProtocolVersion = () => 134;
     internals.active.set("claude", eligibleEntry());
     assert.equal(internals.parkOneIdleProvider(), false,
-      "a pre-v134 control plane cannot confirm parking, so the resident process is retained");
+      "a pre-v135 control plane cannot confirm parking, so the resident process is retained");
     internals.active.delete("claude");
     manager.shutdownAll();
   } finally {

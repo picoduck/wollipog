@@ -372,9 +372,9 @@
 // 134: managed background continuations record a durable terminal missing-result boundary after
 //      provider acceptance. The control plane keeps that audit evidence separately from a user's
 //      idempotent acknowledgement, so accepted in-flight work is never mislabeled or replayed.
-// 134: runner capacity reports batch filesystem diagnostics, bound high-cardinality blocker groups,
+// 135: runner capacity reports batch filesystem diagnostics, bound high-cardinality blocker groups,
 //      and may expose separate active-turn, resident-process, and retained-session dimensions.
-export const PROTOCOL_VERSION = 134;
+export const PROTOCOL_VERSION = 135;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -612,7 +612,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** Revisioned per-Machine capacity configuration, live resize, and usage/queue reporting. */
   machineRunnerCapacity: 132,
   /** Bounded blocker overflow plus opt-in active-turn and idle-process capacity dimensions. */
-  runnerCapacityDimensions: 134,
+  runnerCapacityDimensions: 135,
 } as const;
 
 /* ========================================================================== */
@@ -1639,7 +1639,7 @@ export interface RunnerCapacityDimension {
   available: number | null;
 }
 
-/** Protocol v134 resource dimensions. Resident capacity remains weighted; active turns include
+/** Protocol v135 resource dimensions. Resident capacity remains weighted; active turns include
  * authoritative background work; retained sessions count all safe resumable conversations; and
  * parked sessions are the retained subset without a resident process. A null retained limit
  * deliberately means unbounded durable retention. */

@@ -1415,7 +1415,7 @@ test("Machine Runner Capacity is durable, conflict-safe, and re-established afte
   }
 });
 
-test("capacity dimensions and overflow diagnostics are accepted only from protocol-v134 runners", () => {
+test("capacity dimensions and overflow diagnostics are accepted only from protocol-v135 runners", () => {
   const db = ControlPlaneDb.open(":memory:");
   const runtime = {
     dataDir: "/data",
