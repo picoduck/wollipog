@@ -39,7 +39,6 @@ import {
 import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
-import { handleRovingChoiceKeyDown, rovingChoiceTabIndex } from "./interactions.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
@@ -47,7 +46,8 @@ import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
 import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
-import { ChoiceCards, SegmentedControl } from "./ui/ChoiceControls.js";
+import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
+import { ChoiceCards, SegmentedControl, Select } from "./ui/ChoiceControls.js";
 
 /**
  * New Session is intentionally minimal — pick where it runs (runner + agent + workspace) and go.
@@ -255,9 +255,24 @@ export function NewSessionDialog({
   const nativeTuiHostTarget = hostExecutionTarget;
   const orchestratorTuiSupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorNativeTui");
   const orchestratorTuiHostContext = !orchestrator || (agent?.context?.kind ?? "native") === "native";
-  const nativeTuiSupported = nativeTuiLaunchSupported && (!orchestrator || orchestratorTuiSupported) &&
-    nativeTuiRunnerSupported && nativeTuiStartFenceSupported &&
-    nativeTuiHostTarget && orchestratorTuiHostContext && !selectedAgentOption?.disabled;
+  // Availability DERIVED from the sentence that explains it, so the control and its reason cannot
+  // disagree. The hand-assembled predicate this replaces enumerated the same conditions a second
+  // time, which is how `selectedAgentOption?.disabled` came to grey the option out with no message.
+  const nativeTuiUnavailable = nativeTuiUnavailableReason({
+    launchSupported: nativeTuiLaunchSupported,
+    agentReady: !selectedAgentOption?.disabled,
+    orchestrator,
+    orchestratorTuiSupported,
+    orchestratorTuiHostContext,
+    runnerSupported: nativeTuiRunnerSupported,
+    startFenceSupported: nativeTuiStartFenceSupported,
+    hostExecutionTarget: nativeTuiHostTarget,
+    orchestratorTuiRequirement: runnerCapabilityRequirement(
+      runner?.protocolVersion, "orchestratorNativeTui", "Orchestrator Native TUI",
+    ),
+    startFenceHint: nativeTuiStartFenceHint,
+  });
+  const nativeTuiSupported = nativeTuiUnavailable === undefined;
   const workspace = runner?.workspaces.find((item) => item.id === workspaceId);
   const directoryGrants = !browsedPath && (agent?.driver ?? "acp") === "acp"
     ? (workspace?.additionalDirectoryGrants ?? [])
@@ -563,34 +578,45 @@ export function NewSessionDialog({
             <div className="field">
               <span>Project Location</span>
               {selectedProject.locations.length > 0 ? (
-                <div className="loc-picks" role="radiogroup" aria-label="Project Location" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-                  {selectedProject.locations.map((location) => {
-                    const r = runners.get(location.runnerId);
-                    const display = runnerDisplay(r, boxByRunner.get(location.runnerId), location.runnerId);
-                    const selected = location.id === projectLocationId;
-                    const launchable = isLaunchableProjectLocation(location, runners);
-                    return (
-                      <button
-                        type="button"
-                        key={location.id}
-                        role="radio"
-                        aria-checked={selected}
-                        aria-disabled={!launchable}
-                        disabled={!launchable}
-                        tabIndex={launchable && (selected || (!projectLocationLaunchable && location.id === projectLocationsAvailable[0]?.id)) ? 0 : -1}
-                        className={`loc-pick ${selected ? "on" : ""}`}
-                        onClick={() => pickProjectLocation(location)}
-                      >
-                        <span className="loc-host">
-                          {display.name}
-                          <span className={`loc-kind loc-${display.kind}`}>{display.kind === "ssh" ? "SSH" : "Local"}</span>
-                          <span className={`project-availability availability-${location.availability}`}>{projectAvailabilityLabel(location.availability)}</span>
-                        </span>
-                        <span className="loc-path" title={location.path}>{shortenPath(location.path)}</span>
-                      </button>
+                <ChoiceCards<string>
+                  label="Project Location"
+                  value={projectLocationId || null}
+                  onChange={(id) => {
+                    const location = selectedProject.locations.find((item) => item.id === id);
+                    if (location) pickProjectLocation(location);
+                  }}
+                  options={selectedProject.locations.map((location) => {
+                    const display = runnerDisplay(
+                      runners.get(location.runnerId),
+                      boxByRunner.get(location.runnerId),
+                      location.runnerId,
                     );
+                    const launchable = isLaunchableProjectLocation(location, runners);
+                    return {
+                      value: location.id,
+                      title: display.name,
+                      // The kind and the availability are STATUS, not description: they say what
+                      // this Location is and whether it can host a session, which is the whole
+                      // basis for choosing between two of them.
+                      status: (
+                        <>
+                          <span className={`loc-kind loc-${display.kind}`}>{display.kind === "ssh" ? "SSH" : "Local"}</span>
+                          <span className={`project-availability availability-${location.availability}`}>
+                            {projectAvailabilityLabel(location.availability)}
+                          </span>
+                        </>
+                      ),
+                      description: <span title={location.path}>{shortenPath(location.path)}</span>,
+                      disabled: !launchable,
+                      // The availability label already names the cause — Runner Offline, Workspace
+                      // Missing, Runner Removed — so the reason restates it as a sentence rather
+                      // than inventing a second vocabulary for the same states.
+                      disabledReason: launchable
+                        ? undefined
+                        : `${projectAvailabilityLabel(location.availability)} — this Location cannot host a session right now.`,
+                    };
                   })}
-                </div>
+                />
               ) : (
                 <div className="project-manager-empty compact">
                   <strong>No Project Locations</strong>
@@ -622,37 +648,38 @@ export function NewSessionDialog({
           {locations.length > 1 && (
             <div className="field">
               <span>Location</span>
-              <div className="loc-picks" role="radiogroup" aria-label="Workspace Location" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-                {locations.map((loc, locationIndex) => {
-                  const r = runners.get(loc.runnerId);
-                  const disp = runnerDisplay(r, boxByRunner.get(loc.runnerId), loc.runnerId);
-                  const ws = r?.workspaces.find((w) => w.id === loc.workspaceId);
-                  const on = runnerId === loc.runnerId && workspaceId === loc.workspaceId && !browsedPath;
-                  return (
-                    <button
-                      type="button"
-                      key={workspaceLocationKey(loc.runnerId, loc.workspaceId)}
-                      role="radio"
-                      aria-checked={on}
-                      tabIndex={rovingChoiceTabIndex(on, registeredLocationSelected, locationIndex)}
-                      className={`loc-pick ${on ? "on" : ""}`}
-                      onClick={() => pickLocation(loc)}
-                    >
-                      <span className="loc-host">
-                        {disp.name}
-                        <span className={`loc-kind loc-${disp.kind}`}>{disp.kind === "ssh" ? "SSH" : "Local"}</span>
-                      </span>
-                      <span className="loc-path" title={ws?.path}>
-                        {ws?.path ? shortenPath(ws.path) : loc.workspaceId}
-                      </span>
-                    </button>
+              {/* The legacy workspace quick-pick, on the same primitive as Project Location so
+                  the two read identically. No option here is ever unavailable: `locations` is
+                  already filtered to runners that are online and still advertise the workspace. */}
+              <ChoiceCards<string>
+                label="Workspace Location"
+                value={browsedPath ? null : workspaceLocationKey(runnerId, workspaceId)}
+                onChange={(key) => {
+                  const picked = locations.find(
+                    (loc) => workspaceLocationKey(loc.runnerId, loc.workspaceId) === key,
                   );
+                  if (picked) pickLocation(picked);
+                }}
+                options={locations.map((loc) => {
+                  const runnerForLocation = runners.get(loc.runnerId);
+                  const disp = runnerDisplay(runnerForLocation, boxByRunner.get(loc.runnerId), loc.runnerId);
+                  const ws = runnerForLocation?.workspaces.find((w) => w.id === loc.workspaceId);
+                  return {
+                    value: workspaceLocationKey(loc.runnerId, loc.workspaceId),
+                    title: disp.name,
+                    status: (
+                      <span className={`loc-kind loc-${disp.kind}`}>{disp.kind === "ssh" ? "SSH" : "Local"}</span>
+                    ),
+                    description: (
+                      <span title={ws?.path}>{ws?.path ? shortenPath(ws.path) : loc.workspaceId}</span>
+                    ),
+                  };
                 })}
-              </div>
+              />
               <span className="muted">Choose from {locations.length} known workspace Locations.</span>
             </div>
           )}
-          {online.length > 0 && <label className="field">
+          {online.length > 0 && <div className="field">
             <span>Machine</span>
             {online.length === 1 ? (
               // With a single online runner there is nothing to choose — show where it runs.
@@ -661,17 +688,19 @@ export function NewSessionDialog({
                 {runnerDisplay(online[0]!, boxByRunner.get(online[0]!.runnerId), online[0]!.runnerId).name}
               </div>
             ) : (
-              <select value={runnerId} onChange={(e) => pickRunner(e.target.value)}>
-                {online.map((r) => (
-                  <option key={r.runnerId} value={r.runnerId}>
-                    {machineLabels.get(r.runnerId)}
-                  </option>
-                ))}
-              </select>
+              <Select<string>
+                label="Machine"
+                value={runnerId || null}
+                onChange={pickRunner}
+                options={online.map((r) => ({
+                  value: r.runnerId,
+                  label: machineLabels.get(r.runnerId) ?? r.runnerId,
+                }))}
+              />
             )}
-          </label>}
+          </div>}
 
-          {runner && <label className="field">
+          {runner && <div className="field">
             <span>Workspace</span>
             {browsedPath ? (
               <div className="ws-chosen">
@@ -684,13 +713,12 @@ export function NewSessionDialog({
               </div>
             ) : (
               <div className="ws-select">
-                <select value={workspaceId} onChange={(e) => { setWorkspaceId(e.target.value); setAdditionalDirectories([]); }}>
-                  {runner?.workspaces.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
-                </select>
+                <Select<string>
+                  label="Workspace"
+                  value={workspaceId || null}
+                  onChange={(value) => { setWorkspaceId(value); setAdditionalDirectories([]); }}
+                  options={(runner?.workspaces ?? []).map((w) => ({ value: w.id, label: w.name }))}
+                />
                 <button
                   type="button"
                   className="btn ghost sm"
@@ -702,7 +730,7 @@ export function NewSessionDialog({
                 </button>
               </div>
             )}
-          </label>}
+          </div>}
 
           {browsing && !browsedPath && runnerId && (
             <DirectoryPicker
@@ -849,51 +877,32 @@ export function NewSessionDialog({
 
           <div className="field">
             <span>Harness</span>
-            <div className="workflow-preset-grid" role="radiogroup" aria-label="Harness" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={launchSurface === "direct"}
-                tabIndex={launchSurface === "direct" ? 0 : -1}
-                className={`workflow-preset ${launchSurface === "direct" ? "on" : ""}`}
-                onClick={() => setLaunchSurface("direct")}
-              >
-                <strong>Direct</strong>
-                <span>Use structured chat, tool events, approval cards, and manager controls.</span>
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={launchSurface === "native_tui"}
-                tabIndex={launchSurface === "native_tui" ? 0 : -1}
-                disabled={!nativeTuiSupported}
-                className={`workflow-preset ${launchSurface === "native_tui" ? "on" : ""}`}
-                onClick={() => setLaunchSurface("native_tui")}
-              >
-                <strong>Native TUI</strong>
-                <span>Open a separate provider conversation in Terminal. Usage accounting is unavailable.</span>
-              </button>
-            </div>
-            {!nativeTuiLaunchSupported && (
-              <span className="muted">Native TUI launch requires a newer control plane.</span>
-            )}
-            {orchestrator && !orchestratorTuiSupported && (
-              <span className="muted">{runnerCapabilityRequirement(
-                runner?.protocolVersion, "orchestratorNativeTui", "Orchestrator Native TUI",
-              )}</span>
-            )}
-            {orchestrator && orchestratorTuiSupported && !orchestratorTuiHostContext && (
-              <span className="muted">Orchestrator Native TUI is unavailable for WSL agents. Use a native host.</span>
-            )}
-            {nativeTuiLaunchSupported && !nativeTuiRunnerSupported && (
-              <span className="muted">Native TUI requires a supported Claude Code or Codex agent on a Windows or Linux runner.</span>
-            )}
-            {nativeTuiLaunchSupported && nativeTuiRunnerSupported && !nativeTuiStartFenceSupported && (
-              <span className="muted">{nativeTuiStartFenceHint}</span>
-            )}
-            {nativeTuiLaunchSupported && nativeTuiRunnerSupported && nativeTuiStartFenceSupported && !nativeTuiHostTarget && (
-              <span className="muted">Native TUI currently runs only on the host execution target.</span>
-            )}
+            {/* Two fixed options that each need a sentence: the shape ChoiceCard exists for.
+                The six mutually exclusive muted spans that used to sit below this group are now the
+                unavailable option's own `disabledReason`, so the control and its explanation arrive
+                together instead of as siblings a screen reader meets separately. */}
+            <ChoiceCards<"direct" | "native_tui">
+              label="Harness"
+              value={launchSurface}
+              onChange={setLaunchSurface}
+              options={[
+                {
+                  value: "direct",
+                  title: "Direct",
+                  description: "Use structured chat, tool events, approval cards, and manager controls.",
+                },
+                {
+                  value: "native_tui",
+                  title: "Native TUI",
+                  description: "Open a separate provider conversation in Terminal. Usage accounting is unavailable.",
+                  // `aria-disabled` rather than the `disabled` attribute the bespoke button used:
+                  // that removed the option from the tab order entirely, so a keyboard user could
+                  // not reach the reason it is unavailable.
+                  disabled: !nativeTuiSupported,
+                  disabledReason: nativeTuiUnavailable,
+                },
+              ]}
+            />
             {launchSurface === "native_tui" && (
               <span className="muted">Usage Accounting: Unavailable. No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Sessions with cost budgets, cost checkpoints, or tool-call limits must use Direct. {nativeTuiAccountingExplanation && <>{nativeTuiAccountingExplanation} </>}Manager policy hook status appears after launch.</span>
             )}
@@ -914,20 +923,24 @@ export function NewSessionDialog({
               onChange={(mode) => selectHostMode(mode === "worktree")}
             />
             {executionTargets.length > 2 && (
-              <label>
+              <div className="field">
                 <span>Execution Target</span>
-                <select
-                  aria-label="Execution Target"
-                  value={executionTarget?.id ?? ""}
-                  onChange={(event) => selectExecutionTarget(event.target.value)}
-                >
-                  {executionTargets.map((target) => (
-                    <option key={target.id} value={target.id} disabled={!target.available}>
-                      {target.name}{target.available ? "" : ` — ${target.unavailableReason ?? "unavailable"}`}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                <Select<string>
+                  label="Execution Target"
+                  value={executionTarget?.id ?? null}
+                  onChange={selectExecutionTarget}
+                  options={executionTargets.map((target) => ({
+                    value: target.id,
+                    label: target.name,
+                    // A native <option> cannot render a second line, so the reason used to be
+                    // glued onto the label with an em dash. The shared Select has a slot for it.
+                    disabled: !target.available,
+                    disabledReason: target.available
+                      ? undefined
+                      : target.unavailableReason ?? "Unavailable on this runner.",
+                  }))}
+                />
+              </div>
             )}
             <span className="muted">
               {useWorktree

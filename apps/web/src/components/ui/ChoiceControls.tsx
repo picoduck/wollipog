@@ -249,6 +249,19 @@ export function SegmentedControl<T extends string>({
 export interface ChoiceCardOption<T extends string> {
   value: T;
   title: string;
+  /**
+   * Short status shown BESIDE the title — a kind, a state, an availability.
+   *
+   * §11.1 names "options that need descriptions or status" as this primitive's remit, and the
+   * Location pickers are the status half: a machine name alone does not say whether it is local or
+   * SSH, or whether it can host a session right now. It sits on the title row rather than in
+   * `description`, because a badge that wraps under a path reads as part of the path.
+   *
+   * It joins the option's accessible name, which is intended: "runner-1, Local, Available" is what
+   * a screen-reader user needs to choose between two machines. Callers must therefore pass text, or
+   * mark decorative parts `aria-hidden` themselves.
+   */
+  status?: ReactNode;
   description?: ReactNode;
   icon?: ReactNode;
   disabled?: boolean;
@@ -327,7 +340,10 @@ export function ChoiceCards<T extends string>({
           >
             {option.icon && <span className="ui-choice-card-icon" aria-hidden="true">{option.icon}</span>}
             <span className="ui-choice-card-body">
-              <span className="ui-choice-card-title">{option.title}</span>
+              <span className="ui-choice-card-title">
+                {option.title}
+                {option.status && <span className="ui-choice-card-status">{option.status}</span>}
+              </span>
               {option.description && <span className="ui-choice-card-desc">{option.description}</span>}
               {option.disabled && option.disabledReason && (
                 <small className="ui-choice-card-reason">{option.disabledReason}</small>
@@ -460,9 +476,15 @@ export const SELECT_LIST_CHROME_PX = 10;
 /** Past this the list scrolls on purpose: the options genuinely do not fit. */
 export const SELECT_MENU_MAX_HEIGHT_PX = 320;
 
-/** The compact per-option budgets, for a pointer the touch floor does not apply to. */
+/** One line of option: the label on its own, for a pointer the touch floor does not apply to. */
 const COMPACT_OPTION_HEIGHT_PX = 34;
-const DESCRIBED_OPTION_HEIGHT_PX = 52;
+/**
+ * What each line AFTER the first adds.
+ *
+ * 18px, so a two-line option still budgets the 52px it always did — the rewrite below moved from
+ * "described or not" to a line count, and the cases that already worked must not move with it.
+ */
+const EXTRA_OPTION_LINE_PX = 18;
 
 /**
  * The exact condition `styles.css` applies the 44px touch floor under.
@@ -489,13 +511,23 @@ export const TOUCH_TARGET_MEDIA =
  */
 export function selectMenuDesiredHeight(input: {
   optionCount: number;
-  hasDescription: boolean;
+  /**
+   * The most lines any one option renders — its label, plus a description, plus a disabled reason.
+   *
+   * A line count rather than a `hasDescription` flag because an option renders up to three lines
+   * and the flag could only distinguish two. #986's review caught the consequence: giving an option
+   * a `disabledReason` added a line the budget did not know about, so the list asked for less height
+   * than it drew and reproduced #832's clipping from the other direction. A count cannot fall behind
+   * the markup the same way.
+   */
+  maxOptionLines: number;
   /** A caller's row budget for content that may wrap. Raised to the touch floor, never lowered. */
   estimatedOptionHeight?: number;
   coarsePointer: boolean;
 }): number {
+  const lines = Math.max(1, input.maxOptionLines);
   const estimated = input.estimatedOptionHeight
-    ?? (input.hasDescription ? DESCRIBED_OPTION_HEIGHT_PX : COMPACT_OPTION_HEIGHT_PX);
+    ?? COMPACT_OPTION_HEIGHT_PX + EXTRA_OPTION_LINE_PX * (lines - 1);
   const perOption = input.coarsePointer
     ? Math.max(estimated, TOUCH_OPTION_MIN_HEIGHT_PX)
     : estimated;
@@ -678,7 +710,11 @@ export function Select<T extends string>({
     // viewport and flips above the trigger.
     desiredHeight: selectMenuDesiredHeight({
       optionCount: options.length,
-      hasDescription: options.some((option) => option.description),
+      // Counted from what each option will actually render, so a caller cannot add a line the
+      // budget has not accounted for.
+      maxOptionLines: options.reduce((most, option) => Math.max(most, 1
+        + (option.description ? 1 : 0)
+        + (option.disabled && option.disabledReason ? 1 : 0)), 1),
       estimatedOptionHeight,
       coarsePointer,
     }),

@@ -114,7 +114,10 @@ for (const viewport of VIEWPORTS) {
       // the browser job has roughly 18 seconds of headroom against its 30-minute cap (#842).
       const form = page.locator(".form");
       const formBox = (await form.boundingBox())!;
-      for (const selector of [".ui-choice-card", ".ui-seg", ".ui-select-trigger", ".loc-pick"]) {
+      // `.loc-pick` is gone: the Location groups moved onto ChoiceCards, so a selector for it
+      // would match nothing and quietly stop checking anything. Native selects are included
+      // because the dialog still renders them for Project and Agent until #218 lands.
+      for (const selector of [".ui-choice-card", ".ui-seg", ".ui-select-trigger", ".form select"]) {
         for (const control of await page.locator(selector).all()) {
           if (!(await control.isVisible())) continue;
           const box = (await control.boundingBox())!;
