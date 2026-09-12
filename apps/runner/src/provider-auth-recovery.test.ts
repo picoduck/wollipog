@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
+  compareProviderAuthIdentity,
+  describeProviderAuthIdentityMismatch,
   NativeProviderAuthRecovery,
   describeProviderCredentialScope,
 } from "./provider-auth-recovery.js";
@@ -90,8 +92,70 @@ test("Claude status derives only an opaque account identity and never returns pr
   const observation = await controller.revalidate(meta({ driver: "claude-code", command: "claude" }));
   assert.equal(observation.status, "authenticated");
   assert.match(observation.identityId ?? "", /^[a-f0-9]{64}$/);
+  assert.deepEqual(Object.keys(observation.identityEvidence?.fields ?? {}).sort(),
+    ["apiProvider", "authMethod", "email", "orgId"]);
   assert.equal(JSON.stringify(observation).includes("private"), false);
   assert.equal(JSON.stringify(observation).includes("must-not-escape"), false);
+});
+
+test("partial Claude account observations compare by shared redacted fields without hiding real changes", async () => {
+  const results = [
+    { loggedIn: true, email: "private@example.test", orgId: "private-org", authMethod: "claude.ai", apiProvider: "firstParty" },
+    { loggedIn: true, email: "private@example.test", authMethod: "claude.ai", apiProvider: "firstParty" },
+    { loggedIn: true, email: "other@example.test", authMethod: "claude.ai", apiProvider: "firstParty" },
+  ];
+  const controller = new NativeProviderAuthRecovery(async () => ({
+    stdout: JSON.stringify(results.shift()),
+    stderr: "",
+  }), "runner-local-hmac-key");
+  const recorded = await controller.revalidate(meta({ driver: "claude-code", command: "claude" }));
+  const partial = await controller.revalidate(meta({
+    driver: "claude-code",
+    command: "claude",
+    env: { WOLLIPOG_SESSION_ID: "interactive-context" },
+    worktreePath: "/repo/worktree",
+  }));
+  assert.notEqual(recorded.identityId, partial.identityId,
+    "the legacy aggregate digest demonstrates why a missing field used to cause a false mismatch");
+  const stable = compareProviderAuthIdentity(recorded.identityId, recorded.identityEvidence, partial);
+  assert.equal(stable.matches, true);
+  assert.deepEqual(stable.observedMissingFields, ["orgId"]);
+
+  const changed = await controller.revalidate(meta({ driver: "claude-code", command: "claude" }));
+  const mismatch = compareProviderAuthIdentity(recorded.identityId, recorded.identityEvidence, changed);
+  assert.equal(mismatch.matches, false);
+  assert.deepEqual(mismatch.differingFields, ["email"]);
+  assert.match(describeProviderAuthIdentityMismatch(mismatch), /email differed/);
+  assert.equal(describeProviderAuthIdentityMismatch(mismatch).includes("private@example.test"), false);
+  assert.equal(describeProviderAuthIdentityMismatch(mismatch).includes("other@example.test"), false);
+});
+
+test("identity comparison exhaustively rejects every shared field change and requires a matching account anchor", () => {
+  const fields = ["email", "orgId", "authMethod", "apiProvider"] as const;
+  for (let expectedMask = 0; expectedMask < 16; expectedMask += 1) {
+    for (let observedMask = 0; observedMask < 16; observedMask += 1) {
+      const sharedMask = expectedMask & observedMask;
+      for (let changedMask = 0; changedMask < 16; changedMask += 1) {
+        const expectedFields = Object.fromEntries(fields.flatMap((field, index) =>
+          expectedMask & (1 << index) ? [[field, `${field}:same`]] : []));
+        const observedFields = Object.fromEntries(fields.flatMap((field, index) =>
+          observedMask & (1 << index)
+            ? [[field, changedMask & (1 << index) ? `${field}:changed` : `${field}:same`]]
+            : []));
+        const comparison = compareProviderAuthIdentity(
+          "expected-aggregate",
+          { version: 1, fields: expectedFields },
+          { status: "authenticated", identityId: "observed-aggregate", identityEvidence: { version: 1, fields: observedFields } },
+        );
+        const hasSharedDifference = fields.some((_, index) =>
+          (sharedMask & (1 << index)) !== 0 && (changedMask & (1 << index)) !== 0);
+        const hasMatchingAccountAnchor = [0, 1].some((index) =>
+          (sharedMask & (1 << index)) !== 0 && (changedMask & (1 << index)) === 0);
+        assert.equal(comparison.matches, !hasSharedDifference && hasMatchingAccountAnchor,
+          `expected=${expectedMask.toString(2)} observed=${observedMask.toString(2)} changed=${changedMask.toString(2)}`);
+      }
+    }
+  }
 });
 
 test("production auth probe spawn scrubs daemon-only credentials", async () => {

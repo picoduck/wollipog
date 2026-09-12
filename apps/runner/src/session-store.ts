@@ -137,6 +137,9 @@ export interface SessionMeta {
   providerCredentialScopeId?: string;
   /** Runner-only account/credential digest observed while provider-native status was authenticated. */
   providerCredentialIdentityId?: string;
+  /** Per-field runner-keyed digests let the runner distinguish a changed account field from a
+   * provider status observation that merely omitted a field. Raw account values never persist. */
+  providerCredentialIdentityEvidence?: ProviderAuthIdentityEvidence;
   /** Durable authentication recovery state. Never projected into SessionSnapshot; the browser sees
    * only the bounded pendingApproval card and its random recovery request id. */
   providerAuthBlock?: {
@@ -149,7 +152,10 @@ export interface SessionMeta {
     canStartLogin: boolean;
     configuredCredential: boolean;
     expectedIdentityId?: string;
+    expectedIdentityEvidence?: ProviderAuthIdentityEvidence;
     identityMismatch?: boolean;
+    /** Redacted field names only; safe for runner logs and the authentication card. */
+    reason?: string;
     /** Correlates one live login subprocess; stale cancels cannot target a later generation. */
     loginOperationId?: string;
     retry?: {
@@ -252,6 +258,14 @@ export interface SessionMeta {
   logEpoch?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export type ProviderAuthIdentityField = "email" | "orgId" | "authMethod" | "apiProvider";
+
+export interface ProviderAuthIdentityEvidence {
+  version: 1;
+  /** Each value is a runner-keyed digest of the field name and value, never the provider value. */
+  fields: Partial<Record<ProviderAuthIdentityField, string>>;
 }
 
 export interface DurableBackgroundJob {

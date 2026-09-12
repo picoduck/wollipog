@@ -133,6 +133,10 @@ import type {
   ProviderCredentialScope,
 } from "./provider-auth-recovery.js";
 import {
+  compareProviderAuthIdentity,
+  describeProviderAuthIdentityMismatch,
+} from "./provider-auth-recovery.js";
+import {
   createWorktree,
   createRequestedWorktree,
   attachRequestedWorktree,
@@ -7968,6 +7972,7 @@ export class SessionManager {
         pendingApproval: null,
         providerCredentialScopeId: undefined,
         providerCredentialIdentityId: undefined,
+        providerCredentialIdentityEvidence: undefined,
         providerAuthBlock: undefined,
         providerAuthRetryAttemptedRecoveryId: undefined,
         // The fork's history stops at the checkpoint, so the source's quarantine is not inherited.
@@ -10449,8 +10454,13 @@ export class SessionManager {
     }
     if (observation.status !== "authenticated") return true;
     const expected = current.providerAuthBlock?.expectedIdentityId ?? current.providerCredentialIdentityId;
-    if (expected && observation.identityId && expected !== observation.identityId) {
-      this.parkProviderAuthentication(current, scope, "launch", "not_delivered", true);
+    const expectedEvidence = current.providerAuthBlock?.expectedIdentityEvidence ??
+      current.providerCredentialIdentityEvidence;
+    const identityComparison = compareProviderAuthIdentity(expected, expectedEvidence, observation);
+    if (expected && (!observation.identityId || !identityComparison.matches)) {
+      const reason = describeProviderAuthIdentityMismatch(identityComparison);
+      this.log(`provider account identity mismatch for ${boundedSessionIdForLog(current.sessionId)}: ${reason}`);
+      this.parkProviderAuthentication(current, scope, "launch", "not_delivered", reason);
       return false;
     }
     if (current.providerAuthBlock) {
@@ -10464,6 +10474,9 @@ export class SessionManager {
     this.store.patchMeta(meta.sessionId, {
       providerCredentialScopeId: scope.id,
       ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
+      ...(observation.identityEvidence
+        ? { providerCredentialIdentityEvidence: observation.identityEvidence }
+        : {}),
     });
     if (current.agentId) this.onAgentAuthUpdate?.(current.agentId, { status: "authenticated" });
     return true;
@@ -10648,7 +10661,7 @@ export class SessionManager {
       title: inProgress ? `Signing In — ${provider}` : `Authentication Required — ${provider}`,
       options: this.providerAuthenticationOptions(block, inProgress),
       kind: "authentication",
-      context: { toolName: provider, input: providerAuthenticationGuidance(meta, block, detail) },
+      context: { toolName: provider, input: providerAuthenticationGuidance(meta, block, detail ?? block.reason) },
     };
   }
 
@@ -10657,7 +10670,7 @@ export class SessionManager {
     scope: ProviderCredentialScope,
     phase: "launch" | "turn",
     delivery: "not_delivered" | "uncertain",
-    identityMismatch = false,
+    identityMismatchReason?: string,
     silently = false,
   ): void {
     const prior = meta.providerAuthBlock?.credentialScopeId === scope.id ? meta.providerAuthBlock : undefined;
@@ -10673,15 +10686,28 @@ export class SessionManager {
       ...(prior?.expectedIdentityId ?? meta.providerCredentialIdentityId
         ? { expectedIdentityId: prior?.expectedIdentityId ?? meta.providerCredentialIdentityId }
         : {}),
+      ...(prior?.expectedIdentityEvidence ?? meta.providerCredentialIdentityEvidence
+        ? { expectedIdentityEvidence: prior?.expectedIdentityEvidence ?? meta.providerCredentialIdentityEvidence }
+        : {}),
       ...(prior?.retry ? { retry: prior.retry } : {}),
-      ...(identityMismatch || prior?.identityMismatch ? { identityMismatch: true } : {}),
+      ...(identityMismatchReason || prior?.identityMismatch ? { identityMismatch: true } : {}),
+      ...(identityMismatchReason ?? prior?.reason ? { reason: identityMismatchReason ?? prior?.reason } : {}),
     };
     this.store.patchMeta(meta.sessionId, {
       providerCredentialScopeId: scope.id,
       providerAuthBlock: block,
     });
     this.store.flush(meta.sessionId);
-    if (!silently) this.emitProviderAuthenticationCard(meta, block);
+    if (!silently) {
+      const owner = this.providerAuthenticationOwner(scope.id);
+      if (owner?.sessionId !== meta.sessionId) {
+        const detail = "Authentication is blocked while the Authentication Required card is shown for another session using this provider credential scope.";
+        this.emitEvent(meta.sessionId, { kind: "stderr", text: detail });
+        this.emitStatus(meta.sessionId, "idle", detail);
+      } else {
+        this.emitProviderAuthenticationCard(meta, block);
+      }
+    }
   }
 
   private providerAuthenticationOwner(scopeId: string): SessionMeta | undefined {
@@ -10737,11 +10763,21 @@ export class SessionManager {
       if (this.shuttingDown || observation.status !== "authenticated" || !observation.identityId) return;
       const current = this.store.readMeta(owner.sessionId);
       if (!current?.providerAuthBlock || current.providerAuthBlock.recoveryId !== owner.providerAuthBlock.recoveryId ||
-          current.providerAuthBlock.expectedIdentityId !== observation.identityId) return;
+          !compareProviderAuthIdentity(
+            current.providerAuthBlock.expectedIdentityId,
+            current.providerAuthBlock.expectedIdentityEvidence,
+            observation,
+          ).matches) return;
       if (!await this.waitForAuthenticationTurnSettlement(owner.sessionId)) return;
       if (this.shuttingDown ||
           this.store.readMeta(owner.sessionId)?.providerAuthBlock?.recoveryId !== current.providerAuthBlock.recoveryId) return;
-      await this.completeProviderAuthentication(owner.sessionId, current.providerAuthBlock, observation, false);
+      await this.completeProviderAuthentication(
+        owner.sessionId,
+        current.providerAuthBlock,
+        observation,
+        false,
+        "auth:automatic-retry",
+      );
     }).catch((error) => {
       this.log(`automatic provider authentication revalidation failed: ${errText(error)}`);
     }).finally(() => {
@@ -10766,7 +10802,7 @@ export class SessionManager {
         scope,
         entry.providerReady ? "turn" : "launch",
         entry.providerReady ? "uncertain" : "not_delivered",
-        false,
+        undefined,
         true,
       );
       this.revalidateProviderAuthenticationSilently(scope.id);
@@ -10893,12 +10929,17 @@ export class SessionManager {
       }
       const expected = block.expectedIdentityId;
       const acceptingCurrent = optionId === "auth:accept-current";
-      if (!acceptingCurrent && (!expected || !observation.identityId || expected !== observation.identityId)) {
-        block = { ...block, identityMismatch: true };
+      const identityComparison = compareProviderAuthIdentity(
+        expected,
+        block.expectedIdentityEvidence,
+        observation,
+      );
+      if (!acceptingCurrent && (!expected || !observation.identityId || !identityComparison.matches)) {
+        const reason = describeProviderAuthIdentityMismatch(identityComparison);
+        this.log(`provider account identity mismatch for ${boundedSessionIdForLog(sessionId)}: ${reason}`);
+        block = { ...block, identityMismatch: true, reason };
         this.store.patchMeta(sessionId, { providerAuthBlock: block });
-        this.emitProviderAuthenticationCard(meta, block, expected && observation.identityId
-          ? "A different provider account is authenticated. Confirm it explicitly for this session or sign in to the original account."
-          : "The provider could not prove the original account identity. Confirm the current account explicitly for this session.");
+        this.emitProviderAuthenticationCard(meta, block, reason);
         return;
       }
       if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
@@ -10910,6 +10951,7 @@ export class SessionManager {
         block,
         observation,
         acceptingCurrent,
+        optionId,
       );
     } finally {
       this.providerAuthOperations.delete(block.credentialScopeId);
@@ -10922,12 +10964,17 @@ export class SessionManager {
     targetBlock: NonNullable<SessionMeta["providerAuthBlock"]>,
     observation: ProviderAuthObservation,
     targetOnly: boolean,
+    targetResolutionOptionId: string,
   ): Promise<void> {
     const candidates = targetOnly
       ? this.store.listSessions().filter((meta) => meta.sessionId === targetSessionId)
       : this.store.listSessions().filter((meta) =>
           meta.providerAuthBlock?.credentialScopeId === targetBlock.credentialScopeId &&
-          meta.providerAuthBlock.expectedIdentityId === observation.identityId);
+          compareProviderAuthIdentity(
+            meta.providerAuthBlock.expectedIdentityId,
+            meta.providerAuthBlock.expectedIdentityEvidence,
+            observation,
+          ).matches);
     for (const candidate of candidates) {
       let meta = this.store.readMeta(candidate.sessionId);
       if (!meta) continue;
@@ -10971,6 +11018,9 @@ export class SessionManager {
       this.store.patchMeta(meta.sessionId, {
         providerCredentialScopeId: block.credentialScopeId,
         ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
+        ...(observation.identityEvidence
+          ? { providerCredentialIdentityEvidence: observation.identityEvidence }
+          : {}),
         providerAuthBlock: undefined,
         pendingApproval: null,
         status: "idle",
@@ -10985,7 +11035,9 @@ export class SessionManager {
         this.emitEvent(meta.sessionId, {
           kind: "permission_resolved",
           requestId: providerAuthenticationRequestId(block),
-          optionId: retry ? "auth:automatic-retry" : "auth:revalidated",
+          optionId: meta.sessionId === targetSessionId
+            ? targetResolutionOptionId
+            : "auth:automatic-retry",
         });
       }
       if (retry) {
