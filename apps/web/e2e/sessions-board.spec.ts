@@ -68,6 +68,57 @@ test("the reminder and mode controls use scoped badges and compact mobile icons"
   expect(geometry.contained).toBe(true);
 });
 
+test("the Inbox footer centers readable counts on phones and keeps shortcuts trailing on desktop", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openHarness(page);
+
+  const footer = page.locator('footer[aria-label="Inbox Status and Shortcuts"]');
+  const summary = footer.getByLabel("Inbox Activity Summary");
+  const shortcuts = footer.locator(".inbox-shortcut-rail");
+  await expect(shortcuts).toBeVisible();
+  await expect(shortcuts.getByRole("button", { name: "Reply" })).toBeVisible();
+  const desktopGeometry = await footer.evaluate((element) => {
+    const rail = element.querySelector<HTMLElement>(".inbox-shortcut-rail")!.getBoundingClientRect();
+    const bounds = element.getBoundingClientRect();
+    return {
+      contained: element.scrollWidth <= element.clientWidth,
+      railTrailingGap: bounds.right - rail.right,
+    };
+  });
+  expect(desktopGeometry.contained).toBe(true);
+  expect(desktopGeometry.railTrailingGap).toBeLessThanOrEqual(9);
+
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(shortcuts).toBeHidden();
+    await expect(summary.locator("span")).toHaveText([
+      "0 Running",
+      "0 Queued",
+      "0 Starting",
+      "1 Blocked",
+      "0 Stalled",
+    ]);
+
+    const phoneGeometry = await footer.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const counts = element.querySelector<HTMLElement>(".inbox-activity-summary")!.getBoundingClientRect();
+      return {
+        centered: Math.abs((counts.left + counts.right) / 2 - (bounds.left + bounds.right) / 2),
+        contained: element.scrollWidth <= element.clientWidth,
+        height: bounds.height,
+      };
+    });
+    expect(phoneGeometry.centered).toBeLessThanOrEqual(1);
+    expect(phoneGeometry.contained).toBe(true);
+    expect(phoneGeometry.height).toBe(34);
+  }
+
+  await page.getByRole("radio", { name: "Board" }).click();
+  await expect(footer).toHaveCount(0);
+  await page.getByRole("radio", { name: "List" }).click();
+  await expect(shortcuts).toBeHidden();
+});
+
 test("a returned session explains its snooze and offers state-aware actions", async ({ page }) => {
   await openHarness(page);
   const row = page.locator(".inbox-row-shell", { hasText: "Review Session" });
