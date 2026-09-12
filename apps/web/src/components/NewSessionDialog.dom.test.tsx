@@ -881,6 +881,27 @@ test("Projects mode requires an explicit Project choice and No Project sends exa
   }
 });
 
+test("a late saved-default failure replaces stale loading validation", async () => {
+  let reject!: (reason?: unknown) => void;
+  const pending = new Promise<AgentHarnessDefaultsView>((_resolve, fail) => { reject = fail; });
+  const fixture = await mountFixture({}, undefined, undefined, () => pending);
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await act(async () => { submitWithEnter(fixture.container); });
+    assert.equal(
+      fixture.container.querySelector('.form-error[role="alert"]')?.textContent,
+      "Wait for saved permission defaults to finish loading.",
+    );
+
+    await act(async () => { reject(new ApiError("Unavailable", 503)); });
+    assert.equal(fixture.container.querySelector('.form-error[role="alert"]'), null,
+      "feedback for the superseded loading state is removed when loading becomes retryable");
+    assert.match(fixture.container.textContent!, /Retry Defaults/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("an explicit No Project preset is selected and launchable on mount", async () => {
   const fixture = await mountFixture({}, { projectId: null });
   try {
@@ -957,6 +978,12 @@ test("a selected Location becoming unavailable disables submission and fails clo
     assert.equal(
       fixture.container.querySelector(".form-error")?.textContent,
       "Choose an available Project Location.",
+    );
+    const addLocation = fixture.container.querySelector<HTMLElement>('[data-validation-target="add-location"]');
+    assert.equal(
+      (domWindow.document.activeElement as unknown) === addLocation,
+      true,
+      "when no Location is launchable, focus falls back to the control that can add one",
     );
 
     const stillUnavailableProject: ProjectView = { ...unavailableProject, updatedAt: 2 };

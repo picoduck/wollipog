@@ -502,7 +502,7 @@ export function NewSessionDialog({
   }, [
     projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
     runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled,
-    defaultsReady, presetOverride, orchestrator, orchestratorSupported,
+    defaultsReady, harnessDefaults?.error, presetOverride, orchestrator, orchestratorSupported,
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
     executionTargetId, executionTarget?.id, executionTarget?.available,
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
@@ -537,9 +537,14 @@ export function NewSessionDialog({
     }
   };
 
-  const focusValidationProblem = (selector?: string) => {
-    if (!selector) return;
-    formRef.current?.querySelector<HTMLElement>(selector)?.focus();
+  const focusValidationProblem = (...selectors: Array<string | undefined>) => {
+    for (const selector of selectors) {
+      if (!selector) continue;
+      const target = formRef.current?.querySelector<HTMLElement>(selector);
+      if (!target) continue;
+      target.focus();
+      return;
+    }
   };
 
   const submit = async () => {
@@ -557,10 +562,17 @@ export function NewSessionDialog({
         focusValidationProblem('[role="combobox"][aria-label="Project"]');
       } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !projectLocationLaunchable) {
         setValidationError("Choose an available Project Location.");
-        focusValidationProblem(`[id="${projectLocationOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+        focusValidationProblem(
+          `[id="${projectLocationOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`,
+          '[data-validation-target="add-location"]:not(:disabled)',
+          '[role="combobox"][aria-label="Project"]',
+        );
       } else if (!runnerId) {
         setValidationError("Pick a runner, workspace, and agent.");
-        focusValidationProblem('button[aria-label^="Machine:"]');
+        focusValidationProblem(
+          'button[aria-label^="Machine:"]',
+          '[role="combobox"][aria-label="Project"]',
+        );
       } else if (!workspaceId && !browsedPath) {
         setValidationError("Pick a runner, workspace, and agent.");
         focusValidationProblem('button[aria-label^="Workspace:"]');
@@ -673,7 +685,7 @@ export function NewSessionDialog({
         {projectsSupported && (
             <>
               <div className="field">
-                <label htmlFor={projectInputId}>Project</label>
+                <label className="new-session-field-label" htmlFor={projectInputId}>Project</label>
                 <SearchableCombobox<string>
                   inputId={projectInputId}
                   className="new-session-choice-control"
@@ -760,6 +772,7 @@ export function NewSessionDialog({
               <button
                 type="button"
                 className="btn ghost sm new-session-project-control"
+                data-validation-target="add-location"
                 disabled={selectedProject.canManage === false}
                 title={selectedProject.canManage === false ? "Project management permission is required" : undefined}
                 onClick={() => setAddingLocation(true)}
@@ -895,7 +908,7 @@ export function NewSessionDialog({
           )}
 
           <div className="field">
-            <label htmlFor={agentInputId}>Agent</label>
+            <label className="new-session-field-label" htmlFor={agentInputId}>Agent</label>
             <div className="agent-select">
               <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={15} />
               <SearchableCombobox<string>

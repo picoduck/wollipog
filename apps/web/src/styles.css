@@ -7433,8 +7433,8 @@ button.file-head.source-path-link {
   gap: 6px;
 }
 .field > span,
-.field > label,
-.field-label {
+.field-label,
+.new-session-field-label {
   font-size: var(--text-sm);
   color: var(--text-dim);
   font-weight: 500;
