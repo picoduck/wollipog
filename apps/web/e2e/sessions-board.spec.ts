@@ -145,6 +145,18 @@ test("the Inbox footer centers readable counts on phones and keeps shortcuts tra
   expect(crowdedGeometry.contained).toBe(true);
   expect(crowdedGeometry.summaryContained).toBe(true);
 
+  const overflowingCounts = ["1234 Running", "5678 Queued", "9012 Starting", "3456 Blocked", "7890 Stalled"];
+  await summary.locator("span").evaluateAll((spans, values) => {
+    for (const [index, span] of spans.entries()) span.textContent = values[index]!;
+  }, overflowingCounts);
+  const leadingOverflow = await footer.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const padding = Number.parseFloat(getComputedStyle(element).paddingInlineStart);
+    const firstCount = element.querySelector<HTMLElement>(".inbox-activity-summary span")!.getBoundingClientRect();
+    return bounds.left + padding - firstCount.left;
+  });
+  expect(leadingOverflow, "an over-wide summary keeps its leading count reachable").toBeLessThanOrEqual(0.5);
+
   await page.getByRole("radio", { name: "Board" }).click();
   await expect(footer).toHaveCount(0);
   await page.getByRole("radio", { name: "List" }).click();

@@ -9709,8 +9709,8 @@ body.shell-dock-dragging * {
   .inbox-row-sender { min-width: 0; gap: 4px; }
   .inbox-row-base { display: none; }
   .inbox-row-activity { width: 58px; gap: 0; }
-  .inbox-activity-footer { justify-content: center; justify-content: safe center; gap: 6px; padding-inline: 6px; }
-  .inbox-activity-summary { max-width: 100%; flex: 0 1 auto; justify-content: center; justify-content: safe center; gap: 6px; white-space: nowrap; }
+  .inbox-activity-footer { gap: 6px; padding-inline: 6px; }
+  .inbox-activity-summary { max-width: 100%; flex: 0 1 auto; gap: 6px; margin-right: auto; margin-left: auto; white-space: nowrap; }
   .inbox-shortcut-rail { display: none; }
 }
 
