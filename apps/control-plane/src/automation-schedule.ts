@@ -5,7 +5,31 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const OFFSET_WINDOW_MS = 24 * HOUR_MS;
 const MAX_OFFSET_MODELS = 512;
-const validatedTimezones = new Set<string>();
+// These process-wide caches deliberately trade occasional Intl reconstruction for fixed storage.
+// Map insertion order is the LRU order; hits move entries to the tail before capacity eviction.
+const MAX_VALIDATED_TIMEZONES = 128;
+const MAX_TIMEZONE_FORMATTERS = 128;
+const validatedTimezones = new Map<string, string>();
+
+function lruGet<K, V>(cache: Map<K, V>, key: K): V | undefined {
+  const value = cache.get(key);
+  if (value === undefined) return undefined;
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+function lruSet<K, V>(cache: Map<K, V>, key: K, value: V, limit: number): void {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > limit) cache.delete(cache.keys().next().value!);
+}
+
+function timezoneCacheKey(timezone: string): string {
+  // IANA identifiers are ASCII and Intl accepts them case-insensitively. Folding the cache key
+  // makes accepted case variants share validation, formatter, and offset-model entries.
+  return timezone.toLowerCase();
+}
 
 interface CronField {
   values: number[];
@@ -80,14 +104,19 @@ export function parseCron(expression: string): ParsedCron {
 export function validateTimeZone(timezone: string): string {
   const normalized = timezone.trim();
   if (!normalized || normalized.length > 128) throw new Error("timezone is required");
-  if (validatedTimezones.has(normalized)) return normalized;
+  const key = timezoneCacheKey(normalized);
+  const cached = lruGet(validatedTimezones, key);
+  if (cached) return cached;
+  let canonical: string;
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone: normalized }).format(0);
+    // This runtime identity is only for internal cache/scheduling reuse. Persist the user's input;
+    // IANA alias canonicalization can vary with the JavaScript runtime and its timezone database.
+    canonical = new Intl.DateTimeFormat("en-US", { timeZone: normalized }).resolvedOptions().timeZone;
   } catch {
     throw new Error(`unknown IANA timezone '${normalized}'`);
   }
-  validatedTimezones.add(normalized);
-  return normalized;
+  lruSet(validatedTimezones, key, canonical, MAX_VALIDATED_TIMEZONES);
+  return canonical;
 }
 
 interface LocalParts {
@@ -100,7 +129,8 @@ interface LocalParts {
 
 const formatters = new Map<string, Intl.DateTimeFormat>();
 function formatter(timezone: string): Intl.DateTimeFormat {
-  let value = formatters.get(timezone);
+  const key = timezoneCacheKey(timezone);
+  let value = lruGet(formatters, key);
   if (!value) {
     value = new Intl.DateTimeFormat("en-US", {
       timeZone: timezone,
@@ -111,9 +141,28 @@ function formatter(timezone: string): Intl.DateTimeFormat {
       minute: "2-digit",
       hourCycle: "h23",
     });
-    formatters.set(timezone, value);
+    lruSet(formatters, key, value, MAX_TIMEZONE_FORMATTERS);
   }
   return value;
+}
+
+export function resetTimezoneCachesForTests(): void {
+  validatedTimezones.clear();
+  formatters.clear();
+}
+
+export function timezoneCacheStateForTests(): {
+  validationEntries: number;
+  formatterEntries: number;
+  maxValidationEntries: number;
+  maxFormatterEntries: number;
+} {
+  return {
+    validationEntries: validatedTimezones.size,
+    formatterEntries: formatters.size,
+    maxValidationEntries: MAX_VALIDATED_TIMEZONES,
+    maxFormatterEntries: MAX_TIMEZONE_FORMATTERS,
+  };
 }
 
 function localParts(epoch: number, timezone: string): LocalParts {

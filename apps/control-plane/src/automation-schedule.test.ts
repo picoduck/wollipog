@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { nextCronFire, parseCron, validateTimeZone } from "./automation-schedule.js";
+import {
+  nextCronFire,
+  parseCron,
+  resetTimezoneCachesForTests,
+  timezoneCacheStateForTests,
+  validateTimeZone,
+} from "./automation-schedule.js";
 
 test("strict cron parsing supports lists, ranges, steps, and Sunday alias", () => {
   const parsed = parseCron("*/15 8-10 1,15 * 1-5");
@@ -111,4 +117,81 @@ test("timezone and cursor validation fail closed", () => {
   assert.equal(validateTimeZone(" America/Chicago "), "America/Chicago");
   assert.throws(() => validateTimeZone("Mars/Olympus"), /unknown IANA timezone/);
   assert.throws(() => nextCronFire("0 0 * * *", "UTC", Number.NaN), /non-negative epoch/);
+});
+
+test("timezone case variants share validation and cron formatter work", () => {
+  resetTimezoneCachesForTests();
+  const originalDescriptor = Object.getOwnPropertyDescriptor(Intl, "DateTimeFormat")!;
+  const OriginalDateTimeFormat = Intl.DateTimeFormat;
+  let constructions = 0;
+  Object.defineProperty(Intl, "DateTimeFormat", {
+    ...originalDescriptor,
+    value: function CountingDateTimeFormat(
+      locales?: Intl.LocalesArgument,
+      options?: Intl.DateTimeFormatOptions,
+    ): Intl.DateTimeFormat {
+      constructions += 1;
+      return new OriginalDateTimeFormat(locales, options);
+    },
+  });
+  try {
+    assert.equal(validateTimeZone(" america/chicago "), "America/Chicago");
+    assert.equal(validateTimeZone("AMERICA/CHICAGO"), "America/Chicago");
+    assert.equal(constructions, 1, "a case variant should reuse successful validation");
+
+    const after = Date.UTC(2026, 6, 12, 13, 59);
+    const expected = Date.UTC(2026, 6, 12, 14, 0);
+    assert.equal(nextCronFire("0 9 * * *", "America/Chicago", after), expected);
+    assert.equal(nextCronFire("0 9 * * *", "aMeRiCa/cHiCaGo", after), expected);
+    assert.equal(constructions, 2, "case variants should reuse one scheduling formatter");
+    assert.deepEqual(timezoneCacheStateForTests(), {
+      validationEntries: 1,
+      formatterEntries: 1,
+      maxValidationEntries: 128,
+      maxFormatterEntries: 128,
+    });
+  } finally {
+    Object.defineProperty(Intl, "DateTimeFormat", originalDescriptor);
+    resetTimezoneCachesForTests();
+  }
+});
+
+test("timezone validation and formatter LRUs stay bounded across eviction", () => {
+  resetTimezoneCachesForTests();
+  try {
+    const limits = timezoneCacheStateForTests();
+    const requiredZones = Math.max(limits.maxValidationEntries, limits.maxFormatterEntries) + 1;
+    const zones: string[] = [];
+    const canonicalZones = new Set<string>();
+    for (const zone of Intl.supportedValuesOf("timeZone")) {
+      const canonical = validateTimeZone(zone);
+      if (canonicalZones.has(canonical)) continue;
+      canonicalZones.add(canonical);
+      zones.push(zone);
+      if (zones.length === requiredZones) break;
+    }
+    assert.equal(zones.length, requiredZones, "the test runtime must expose enough IANA timezones");
+    resetTimezoneCachesForTests();
+
+    for (const zone of zones) validateTimeZone(zone);
+    assert.equal(timezoneCacheStateForTests().validationEntries, limits.maxValidationEntries);
+    assert.throws(() => validateTimeZone("Mars/Olympus"), /unknown IANA timezone/);
+    assert.equal(
+      timezoneCacheStateForTests().validationEntries,
+      limits.maxValidationEntries,
+      "invalid timezones must not enter the bounded validation cache",
+    );
+    assert.equal(validateTimeZone(zones[0]!), zones[0], "an evicted valid timezone remains accepted");
+
+    const after = Date.UTC(2026, 0, 1);
+    for (const zone of zones) nextCronFire("0 0 * * *", zone, after);
+    assert.equal(timezoneCacheStateForTests().formatterEntries, limits.maxFormatterEntries);
+    assert.ok(
+      nextCronFire("0 0 * * *", zones[0]!, after) > after,
+      "scheduling remains valid after validation and formatter eviction",
+    );
+    assert.equal(timezoneCacheStateForTests().formatterEntries, limits.maxFormatterEntries);
+  } finally {
+    resetTimezoneCachesForTests();
+  }
 });
