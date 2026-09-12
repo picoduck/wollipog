@@ -28,12 +28,9 @@ import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
 import { orchestratorUnavailableReason, savedSessionPermissionMode } from "../session-preset-defaults.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import {
-  advancedAgentOptions,
   agentMeta,
   agentOptions,
   currentAgentSelectionIssue,
-  isAdvancedAgentId,
-  primaryAgentOptions,
   savedAgentSelection,
 } from "./agent-options.js";
 import { AgentIcon } from "./AgentIcon.js";
@@ -47,7 +44,13 @@ import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../proj
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
-import { ChoiceCards, SegmentedControl, Select } from "./ui/ChoiceControls.js";
+import {
+  ChoiceCards,
+  SearchableCombobox,
+  SegmentedControl,
+  Select,
+  type SearchableComboboxOption,
+} from "./ui/ChoiceControls.js";
 
 /**
  * New Session is intentionally minimal — pick where it runs (runner + agent + workspace) and go.
@@ -104,6 +107,22 @@ export function NewSessionDialog({
     () => [...projects.values()].sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id)),
     [projects],
   );
+  const projectOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
+    const nameCounts = new Map<string, number>();
+    for (const project of projectList) nameCounts.set(project.name, (nameCounts.get(project.name) ?? 0) + 1);
+    return [
+      ...projectList.map((project) => ({
+        value: project.id,
+        label: `${projectSelectionLabel(project, (nameCounts.get(project.name) ?? 0) > 1)}${project.hidden ? " (Hidden)" : ""}`,
+        description: `${project.locations.length} Project Location${project.locations.length === 1 ? "" : "s"}${project.hidden ? ", hidden from the default Projects view" : ""}.`,
+      })),
+      {
+        value: NO_PROJECT_SELECTION,
+        label: "No Project",
+        description: "Run in the selected folder without adding this session to a Project.",
+      },
+    ];
+  }, [projectList]);
   const online = useMemo(() => [...runners.values()].filter((r) => r.status === "online"), [runners]);
   const boxByRunner = useMemo(() => {
     const m = new Map<string, BoxView>();
@@ -181,9 +200,6 @@ export function NewSessionDialog({
   }, [api, instanceScope, defaultsRetry]);
   const defaultsReady = harnessDefaults?.api === api && harnessDefaults.scope === instanceScope && !harnessDefaults.error;
   const [launchSurface, setLaunchSurface] = useState<"direct" | "native_tui">("direct");
-  const [advancedOpen, setAdvancedOpen] = useState(
-    () => isAdvancedAgentId(initialAgentOptions, initialAgentSelection.agentId),
-  );
   const [useWorktree, setUseWorktree] = useState(preset?.worktree ?? false);
   const [executionTargetId, setExecutionTargetId] = useState("");
   const [cloudBudgetUsd, setCloudBudgetUsd] = useState("");
@@ -207,8 +223,18 @@ export function NewSessionDialog({
     () => agentOptions(runner?.agents ?? [], { includeConductor: false }),
     [runner?.agents],
   );
-  const primaryOpts = useMemo(() => primaryAgentOptions(agentOpts), [agentOpts]);
-  const advancedOpts = useMemo(() => advancedAgentOptions(agentOpts), [agentOpts]);
+  const agentComboboxOptions = useMemo<SearchableComboboxOption<string>[]>(() => agentOpts.map((option) => {
+    const metadata = agentMeta(option.agent);
+    return {
+      value: option.agent.id,
+      label: option.label,
+      description: option.disabled
+        ? undefined
+        : `${option.advanced ? "Advanced Agent · " : ""}${metadata}`,
+      disabled: option.disabled,
+      disabledReason: option.disabled ? `Needs setup. ${metadata}` : undefined,
+    };
+  }), [agentOpts]);
   const selectedAgentOption = agentOpts.find((option) => option.agent.id === agentId);
   const executionTargets = (runner?.executionTargets ?? []).filter((target) =>
     (!target.compatibleAgentIds || target.compatibleAgentIds.includes(agentId)) &&
@@ -328,7 +354,6 @@ export function NewSessionDialog({
     const options = agentOptions(r?.agents ?? [], { includeConductor: false });
     const selection = savedAgentSelection(options, agentDefaults[id]);
     setAgentId(selection.agentId);
-    setAdvancedOpen(isAdvancedAgentId(options, selection.agentId));
     setBrowsedPath(null);
     setBrowsing(false);
     setAdditionalDirectories([]);
@@ -348,7 +373,6 @@ export function NewSessionDialog({
     const options = agentOptions(r.agents, { includeConductor: false });
     const selection = savedAgentSelection(options, agentDefaults[loc.runnerId]);
     setAgentId(selection.agentId);
-    setAdvancedOpen(isAdvancedAgentId(options, selection.agentId));
     setBrowsedPath(null);
     setBrowsing(false);
     setAdditionalDirectories([]);
@@ -548,17 +572,18 @@ export function NewSessionDialog({
         {online.length === 0 && <p className="muted">No runners online. Start a runner first.</p>}
         {projectsSupported && (
             <>
-              <label className="field">
+              <div className="field">
                 <span>Project</span>
-                <select aria-label="Project" value={projectSelection} onChange={(event) => pickProject(event.target.value)}>
-                  <option value="">Choose a Project…</option>
-                  {projectList.map((project) => {
-                    const duplicateName = projectList.some((candidate) => candidate.id !== project.id && candidate.name === project.name);
-                    return <option key={project.id} value={project.id}>{projectSelectionLabel(project, duplicateName)}{project.hidden ? " (Hidden)" : ""}</option>;
-                  })}
-                  <option value={NO_PROJECT_SELECTION}>No Project</option>
-                </select>
-              </label>
+                <SearchableCombobox<string>
+                  className="new-session-choice-control"
+                  label="Project"
+                  value={projectSelection || null}
+                  onChange={pickProject}
+                  options={projectOptions}
+                  placeholder="Choose a Project…"
+                  emptyLabel="No Matching Projects"
+                />
+              </div>
               <div className="new-session-project-actions">
                 <span className="muted">
                   {projectSelection === NO_PROJECT_SELECTION
@@ -751,39 +776,35 @@ export function NewSessionDialog({
             <fieldset className="field">
               <legend>Additional Directories (Preview)</legend>
               <span className="muted">Each directory expands this ACP agent's workspace access for this session only.</span>
-              {directoryGrants.map((path) => (
-                <label key={path} className="check-row">
-                  <input
-                    type="checkbox"
-                    checked={additionalDirectories.includes(path)}
-                    onChange={(event) => setAdditionalDirectories((current) => event.target.checked
-                      ? [...current, path]
-                      : current.filter((item) => item !== path))}
-                  />
-                  <span title={path}>{shortenPath(path)}</span>
-                </label>
-              ))}
+              <ChoiceCards<string>
+                multiple
+                label="Additional Directories"
+                value={additionalDirectories}
+                onChange={(path) => setAdditionalDirectories((current) => current.includes(path)
+                  ? current.filter((item) => item !== path)
+                  : [...current, path])}
+                options={directoryGrants.map((path) => ({
+                  value: path,
+                  title: shortenPath(path),
+                  description: <span title={path}>{path}</span>,
+                }))}
+              />
             </fieldset>
           )}
 
           <div className="field">
-            <label htmlFor="new-session-agent">Agent</label>
+            <span>Agent</span>
             <div className="agent-select">
               <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={15} />
-              <select
-                className="new-session-agent-control"
-                id="new-session-agent"
-                value={selectedAgentOption?.advanced ? "" : agentId}
-                onChange={(e) => selectAgent(e.target.value)}
-                aria-label="Agent"
-              >
-                {selectedAgentOption?.advanced && <option value="">Advanced Agent Selected Below</option>}
-                {primaryOpts.map(({ agent: a, label, disabled }) => (
-                  <option key={a.id} value={a.id} disabled={disabled}>
-                    {disabled ? `${label} (Needs Setup)` : label}
-                  </option>
-                ))}
-              </select>
+              <SearchableCombobox<string>
+                className="new-session-choice-control"
+                label="Agent"
+                value={agentId || null}
+                onChange={selectAgent}
+                options={agentComboboxOptions}
+                placeholder="Choose an Agent…"
+                emptyLabel="No Matching Agents"
+              />
             </div>
             {agent && <span className="muted agent-meta">{agentMeta(agent)}</span>}
             {selectionIssue && (
@@ -845,35 +866,6 @@ export function NewSessionDialog({
             {directWslRequiresSafeOrchestrator && !orchestrator &&
               <span className="form-error">Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.</span>}
           </div>
-
-          {advancedOpts.length > 0 && (
-            <details
-              className="advanced-agents"
-              open={advancedOpen}
-              onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
-            >
-              <summary>Advanced Agents</summary>
-              <p className="muted">Non-interactive targets are intended for automation, rollback, or when Codex App Server is unavailable.</p>
-              <div className="advanced-agent-picks" role="radiogroup" aria-label="Advanced Agents">
-                {advancedOpts.map(({ agent: advanced, label, disabled }) => (
-                  <label
-                    className={`advanced-agent-pick ${agentId === advanced.id ? "on" : ""}`}
-                    key={advanced.id}
-                  >
-                    <input
-                      type="radio"
-                      name="advanced-agent"
-                      checked={agentId === advanced.id}
-                      disabled={disabled}
-                      onChange={() => selectAgent(advanced.id)}
-                    />
-                    <AgentIcon driver={advanced.driver ?? "acp"} agentName={advanced.name} size={13} />
-                    <span>{disabled ? `${label} (Needs Setup)` : label}</span>
-                  </label>
-                ))}
-              </div>
-            </details>
-          )}
 
           <div className="field">
             <span>Harness</span>

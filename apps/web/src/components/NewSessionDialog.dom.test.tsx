@@ -2,6 +2,7 @@ import { setExperimentFlag } from "../experiments.js";
 import { LOCAL_INSTANCE_SCOPE } from "../instance-storage.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import "./test-dom-events.js";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -15,11 +16,13 @@ import type {
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
+import { NO_PROJECT_SELECTION } from "../project-session-selection.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { NewSessionDialog, type NewSessionPreset } from "./NewSessionDialog.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { fireDomEvent } from "./test-dom-events.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -30,6 +33,7 @@ for (const [name, value] of Object.entries({
   localStorage: domWindow.localStorage,
   HTMLElement: domWindow.HTMLElement,
   HTMLButtonElement: domWindow.HTMLButtonElement,
+  HTMLInputElement: domWindow.HTMLInputElement,
   HTMLSelectElement: domWindow.HTMLSelectElement,
   HTMLTextAreaElement: domWindow.HTMLTextAreaElement,
   Node: domWindow.Node,
@@ -176,18 +180,35 @@ async function unmountFixture(fixture: Fixture): Promise<void> {
   fixture.container.remove();
 }
 
-function projectSelect(container: HTMLDivElement): HTMLSelectElement {
-  const select = container.querySelector('select[aria-label="Project"]') as HTMLSelectElement | null;
-  assert.ok(select, "Project select is rendered");
-  return select;
+function combobox(container: HTMLDivElement, label: string): HTMLInputElement {
+  const input = container.querySelector(`input[role="combobox"][aria-label="${label}"]`) as HTMLInputElement | null;
+  assert.ok(input, `${label} combobox is rendered`);
+  return input;
 }
 
-function selectProject(container: HTMLDivElement, value: string): void {
-  const select = projectSelect(container);
-  const valueSetter = Object.getOwnPropertyDescriptor(domWindow.HTMLSelectElement.prototype, "value")?.set;
-  assert.ok(valueSetter);
-  valueSetter.call(select, value);
-  select.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
+function setComboboxQuery(input: HTMLInputElement, query: string): void {
+  fireDomEvent.change(input, { target: { value: query } });
+}
+
+function pressComboboxKey(input: HTMLInputElement, key: string): void {
+  input.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }) as never);
+}
+
+function comboboxOptions(container: HTMLDivElement, label: string): HTMLButtonElement[] {
+  return [...container.querySelectorAll<HTMLButtonElement>(
+    `[role="listbox"][aria-label="${label} Options"] [role="option"]`,
+  )];
+}
+
+async function selectProject(container: HTMLDivElement, value: string): Promise<void> {
+  const input = combobox(container, "Project");
+  input.focus();
+  await Promise.resolve();
+  const expected = value === NO_PROJECT_SELECTION ? "No Project" : project.name;
+  const option = [...container.querySelectorAll<HTMLButtonElement>('[role="listbox"][aria-label="Project Options"] [role="option"]')]
+    .find((candidate) => candidate.querySelector(".ui-select-option-body > span")?.textContent?.startsWith(expected));
+  assert.ok(option, `Project options include ${expected}`);
+  option.click();
 }
 
 /**
@@ -246,7 +267,7 @@ test("Project visibility copy names every audience and the new transcript conseq
   for (const [audience, expected] of expectations) {
     const fixture = await mountFixture({ projects: [{ ...project, audience }] });
     try {
-      await act(async () => { selectProject(fixture.container, project.id); });
+      await act(async () => { await selectProject(fixture.container, project.id); });
       const copy = fixture.container.querySelector(".new-session-project-actions")?.textContent ?? "";
       assert.match(copy, new RegExp(expected));
       assert.match(copy, /New session transcripts use the Project's visibility\./);
@@ -264,9 +285,128 @@ test("Project visibility copy stays neutral before selection and fails closed wh
     assert.match(copy(), /Choose a Project to organize the new session, or choose No Project./);
     assert.doesNotMatch(copy(), /transcripts use/);
 
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     assert.match(copy(), /This control plane does not report the Project's visibility./);
     assert.doesNotMatch(copy(), /transcripts use/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Project search uses visible location context to disambiguate duplicate names", async () => {
+  const fork: ProjectView = {
+    ...project,
+    id: "project-2",
+    locations: [{
+      ...project.locations[0]!,
+      id: "location-2",
+      projectId: "project-2",
+      workspaceId: "workspace-2",
+      path: "/repos/wollipog-fork",
+    }],
+  };
+  const duplicateRunner: RunnerView = {
+    ...runner,
+    workspaces: [
+      ...runner.workspaces,
+      { id: "workspace-2", name: "Wollipog Fork", path: "/repos/wollipog-fork" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [duplicateRunner], projects: [project, fork] });
+  try {
+    const input = combobox(fixture.container, "Project");
+    await act(async () => { input.focus(); });
+    assert.equal(comboboxOptions(fixture.container, "Project").length, 3,
+      "both same-named Projects and No Project are inspectable");
+
+    await act(async () => { setComboboxQuery(input, "fork"); });
+    const matches = comboboxOptions(fixture.container, "Project");
+    assert.equal(matches.length, 1);
+    assert.match(matches[0]?.textContent ?? "", /Wollipog — \/repos\/wollipog-fork · runner-1/);
+
+    await act(async () => { pressComboboxKey(input, "Enter"); });
+    assert.match(input.value, /wollipog-fork/);
+    assert.equal(createButton(fixture.container).disabled, false);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("primary, Advanced, and unavailable Agents share one searchable flow", async () => {
+  domWindow.localStorage.clear();
+  const agentRunner: RunnerView = {
+    ...runner,
+    agents: [
+      ...runner.agents,
+      { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: false, authStatus: "unauthenticated" },
+      { id: "codex-exec", name: "Codex", command: "codex", args: ["exec"], env: {}, driver: "codex", available: true },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [agentRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const input = combobox(fixture.container, "Agent");
+    assert.equal(input.value, "Claude Code", "the recommended primary Agent is selected initially");
+    assert.equal(fixture.container.querySelector('select[aria-label="Agent"]'), null);
+    assert.equal(fixture.container.querySelector('[aria-label="Advanced Agents"]'), null);
+
+    await act(async () => { input.focus(); });
+    assert.equal(input.getAttribute("aria-expanded"), "true");
+    const allOptions = comboboxOptions(fixture.container, "Agent");
+    assert.equal(allOptions.length, 3);
+    assert.ok(allOptions.some((option) => /Advanced Agent/.test(option.textContent ?? "")),
+      "the compatibility target is disclosed inside the same list");
+
+    await act(async () => { setComboboxQuery(input, "non-interactive"); });
+    assert.equal(comboboxOptions(fixture.container, "Agent").length, 1);
+    await act(async () => { pressComboboxKey(input, "Enter"); });
+    assert.match(input.value, /Non-Interactive/);
+    assert.match(fixture.container.querySelector(".agent-meta")?.textContent ?? "", /Non-interactive via codex exec/);
+
+    await act(async () => { input.click(); setComboboxQuery(input, "codex login"); });
+    const unavailable = comboboxOptions(fixture.container, "Agent");
+    assert.equal(unavailable.length, 1);
+    assert.equal(unavailable[0]?.getAttribute("aria-disabled"), "true");
+    assert.match(unavailable[0]?.textContent ?? "", /Needs setup.*run `codex login`/);
+    await act(async () => { pressComboboxKey(input, "Enter"); });
+    assert.match(input.value, /codex login/,
+      "refusing an unavailable result leaves the search intact instead of committing it");
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.localStorage.clear();
+  }
+});
+
+test("Additional Directories use shared multiple-choice cards without changing the request", async () => {
+  const grant = "/shared/reference";
+  const acpRunner: RunnerView = {
+    ...runner,
+    agents: [{ id: "gemini", name: "Gemini", command: "gemini", args: [], env: {}, driver: "acp", available: true }],
+    workspaces: [{ ...runner.workspaces[0]!, additionalDirectoryGrants: [grant] }],
+    executionTargets: [{
+      id: "runner-1:in-place",
+      runnerId: "runner-1",
+      name: "Runner Host · in place",
+      kind: "local",
+      workspaceStrategy: "in_place",
+      adapter: "host",
+      boundaries: { filesystem: "host", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+      available: true,
+    }],
+  };
+  const fixture = await mountFixture({ runners: [acpRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    const group = fixture.container.querySelector('[role="group"][aria-label="Additional Directories"]');
+    assert.ok(group);
+    const option = group.querySelector<HTMLButtonElement>('[role="checkbox"]');
+    assert.ok(option);
+    assert.equal(option.getAttribute("aria-checked"), "false");
+
+    await act(async () => { option.click(); });
+    assert.equal(option.getAttribute("aria-checked"), "true");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.deepEqual(fixture.requests[0]?.acpSessionContext, { additionalDirectories: [grant] });
   } finally {
     await unmountFixture(fixture);
   }
@@ -320,7 +460,7 @@ test("retired Conductor stays hidden and native orchestrator selection is sent a
   };
   const fixture = await mountFixture({ runners: [enabledRunner] });
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     assert.equal(fixture.container.textContent?.includes("Conductor-Led Work"), false);
     await choosePermissionPreset(fixture.container, "Orchestrator");
     await act(async () => { createButton(fixture.container).click(); });
@@ -341,7 +481,7 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
       sessionSubscriptions: false, nativeTuiLaunch: true,
     } });
     try {
-      await act(async () => { selectProject(fixture.container, project.id); });
+      await act(async () => { await selectProject(fixture.container, project.id); });
       await choosePermissionPreset(fixture.container, "Orchestrator");
       const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
         .find((button) => button.textContent?.includes("Native TUI"))!;
@@ -376,7 +516,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     capabilities: { sessionSubscriptions: false, nativeTuiLaunch: true },
   });
   try {
-    await act(async () => { selectProject(ordinary.container, project.id); });
+    await act(async () => { await selectProject(ordinary.container, project.id); });
     const tui = [...ordinary.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI"))!;
     assert.ok(tui);
@@ -398,7 +538,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
   }] }));
   try {
-    await act(async () => { selectProject(orchestrator.container, project.id); });
+    await act(async () => { await selectProject(orchestrator.container, project.id); });
     assert.match(orchestrator.container.textContent ?? "",
       /verified Direct WSL bridge and a bubblewrap-isolated runner/u);
     assert.equal(createButton(orchestrator.container).disabled, true);
@@ -416,7 +556,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
   }] }));
   try {
-    await act(async () => { selectProject(protocolOnly.container, project.id); });
+    await act(async () => { await selectProject(protocolOnly.container, project.id); });
     assert.equal(createButton(protocolOnly.container).disabled, true,
       "a v124 runner cannot replace fresh launcher attestation");
   } finally {
@@ -443,7 +583,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
   }] }));
   try {
-    await act(async () => { selectProject(providerMode.container, project.id); });
+    await act(async () => { await selectProject(providerMode.container, project.id); });
     assert.equal(createButton(providerMode.container).disabled, true,
       "safe attestation cannot enable Direct WSL under provider isolation");
     assert.equal(providerMode.requests.length, 0);
@@ -456,7 +596,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
   }] }));
   try {
-    await act(async () => { selectProject(bridged.container, project.id); });
+    await act(async () => { await selectProject(bridged.container, project.id); });
     assert.equal(createButton(bridged.container).disabled, false, "verified bridge enables Direct creation");
     const tui = [...bridged.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI"))!;
@@ -483,7 +623,7 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
       installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
     }] }));
     try {
-      await act(async () => { selectProject(fixture.container, project.id); });
+      await act(async () => { await selectProject(fixture.container, project.id); });
       assert.ok(permissionPresetCard(fixture.container, "Saved Default — Orchestrator"),
         "the saved default names itself on an always-visible card rather than inside a closed menu");
       const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
@@ -508,7 +648,7 @@ test("default loading fails closed, retries, and allows old control planes witho
     return { defaults: [] };
   });
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     assert.equal(createButton(fixture.container).disabled, true);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
@@ -520,7 +660,7 @@ test("default loading fails closed, retries, and allows old control planes witho
   } finally { await unmountFixture(fixture); }
   const legacy = await mountFixture({}, undefined, undefined, async () => { throw new ApiError("Not found", 404); });
   try {
-    await act(async () => { selectProject(legacy.container, project.id); });
+    await act(async () => { await selectProject(legacy.container, project.id); });
     assert.equal(createButton(legacy.container).disabled, false);
     assert.match(legacy.container.textContent!, /Harness Default/);
   } finally { await unmountFixture(legacy); }
@@ -531,7 +671,7 @@ test("late saved-default response completes before enabling creation", async () 
   const pending = new Promise<AgentHarnessDefaultsView>((done) => { resolve = done; });
   const fixture = await mountFixture({}, undefined, undefined, () => pending);
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     assert.equal(createButton(fixture.container).disabled, true);
     assert.match(fixture.container.textContent!, /Loading saved permission defaults/);
     await act(async () => { resolve({ defaults: [] }); });
@@ -550,7 +690,7 @@ test("saved Orchestrator cannot launch on an incompatible runner even through Di
     installations: [], compatibleInstallations: 1, preference: { permissionMode: "orchestrator" },
   }] }));
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     assert.match(fixture.container.textContent!, /runner is too old to orchestrate child sessions/);
     assert.equal(createButton(fixture.container).disabled, true);
     await act(async () => { submitWithEnter(fixture.container); });
@@ -561,10 +701,10 @@ test("saved Orchestrator cannot launch on an incompatible runner even through Di
 test("Projects mode requires an explicit Project choice and No Project sends exact null identities", async () => {
   const fixture = await mountFixture();
   try {
-    assert.equal(projectSelect(fixture.container).value, "", "the only Project is not selected implicitly");
+    assert.equal(combobox(fixture.container, "Project").value, "", "the only Project is not selected implicitly");
     assert.equal(createButton(fixture.container).disabled, true);
 
-    await act(async () => { selectProject(fixture.container, "__no_project__"); });
+    await act(async () => { await selectProject(fixture.container, "__no_project__"); });
     assert.equal(createButton(fixture.container).disabled, false);
 
     await act(async () => { createButton(fixture.container).click(); });
@@ -589,7 +729,7 @@ test("Projects mode requires an explicit Project choice and No Project sends exa
 test("an explicit No Project preset is selected and launchable on mount", async () => {
   const fixture = await mountFixture({}, { projectId: null });
   try {
-    assert.equal(projectSelect(fixture.container).value, "__no_project__");
+    assert.equal(combobox(fixture.container, "Project").value, "No Project");
     assert.equal(createButton(fixture.container).disabled, false);
 
     await act(async () => { createButton(fixture.container).click(); });
@@ -609,12 +749,12 @@ test("a delayed Project preset hydrates once its exact Project and Location arri
     { projectId: project.id, projectLocationId: "location-1" },
   );
   try {
-    assert.equal(projectSelect(fixture.container).value, "");
+    assert.equal(combobox(fixture.container, "Project").value, "");
     assert.equal(createButton(fixture.container).disabled, true);
 
     await act(async () => { fixture.socket.push(snapshot()); });
 
-    assert.equal(projectSelect(fixture.container).value, project.id);
+    assert.equal(combobox(fixture.container, "Project").value, "Wollipog");
     const location = fixture.container.querySelector('[role="radio"][aria-checked="true"]');
     assert.equal(location?.textContent?.includes("/repos/wollipog"), true);
     assert.equal(createButton(fixture.container).disabled, false);
@@ -629,12 +769,12 @@ test("delayed preset hydration never replaces an explicit user choice", async ()
     { projectId: project.id, projectLocationId: "location-1" },
   );
   try {
-    await act(async () => { selectProject(fixture.container, "__no_project__"); });
-    assert.equal(projectSelect(fixture.container).value, "__no_project__");
+    await act(async () => { await selectProject(fixture.container, "__no_project__"); });
+    assert.equal(combobox(fixture.container, "Project").value, "No Project");
 
     await act(async () => { fixture.socket.push(snapshot()); });
 
-    assert.equal(projectSelect(fixture.container).value, "__no_project__");
+    assert.equal(combobox(fixture.container, "Project").value, "No Project");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 1);
     assert.equal(fixture.requests[0]?.projectId, null);
@@ -647,7 +787,7 @@ test("delayed preset hydration never replaces an explicit user choice", async ()
 test("a selected Location becoming unavailable disables submission and fails closed", async () => {
   const fixture = await mountFixture();
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     assert.equal(createButton(fixture.container).disabled, false);
 
     const unavailableProject: ProjectView = {
@@ -671,7 +811,7 @@ test("a selected Location becoming unavailable disables submission and fails clo
 test("removing the selected Project from the live inventory disables submission and fails closed", async () => {
   const fixture = await mountFixture();
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     assert.equal(createButton(fixture.container).disabled, false);
 
     await act(async () => { fixture.socket.push(snapshot({ projects: [] })); });
@@ -699,7 +839,7 @@ test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal 
     },
   });
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     const harness = fixture.container.querySelector('[role="radiogroup"][aria-label="Harness"]');
     assert.ok(harness);
     assert.match(harness.textContent ?? "", /Use structured chat, tool events, approval cards, and manager controls\./);
@@ -757,7 +897,7 @@ test("Native TUI shows the content-free live provider accounting boundary", asyn
     }],
   });
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
@@ -775,7 +915,7 @@ test("Native TUI shows the content-free live provider accounting boundary", asyn
 test("Native TUI is disabled when the control plane does not advertise atomic launch", async () => {
   const fixture = await mountFixture();
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
@@ -801,7 +941,7 @@ test("Native TUI initial launch fails closed against a v66 runner", async () => 
     runners: [{ ...runner, protocolVersion: 66 }],
   });
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
@@ -824,7 +964,7 @@ test("a failed atomic Native TUI launch leaves Terminal closed and surfaces the 
     },
   }, undefined, "provider TUI exited");
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
@@ -856,7 +996,7 @@ test("an ambiguous Native TUI launch retains one session and prevents duplicate 
     { sessionId: retainedId },
   ));
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
@@ -891,7 +1031,7 @@ test("failed Native TUI compensation exposes the retained session and disables r
     { sessionId: retainedId },
   ));
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
@@ -927,7 +1067,7 @@ test("both permission presets are on screen without opening anything", async () 
   };
   const fixture = await mountFixture({ runners: [orchestratorRunner] });
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
 
     const cards = [...permissionPresetGroup(fixture.container).querySelectorAll('[role="radio"]')];
     assert.equal(cards.length, 2, "both presets are rendered");
@@ -953,7 +1093,7 @@ test("an unsupported Orchestrator is disabled and says why, rather than vanishin
   // thing §11.3 forbids. The sentence has to be the SPECIFIC cause, not the union of all four.
   const fixture = await mountFixture({ runners: [{ ...runner, protocolVersion: 67 }] });
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
 
     const orchestrator = permissionPresetCard(fixture.container, "Orchestrator");
     assert.ok(orchestrator, "Orchestrator is rendered even where it cannot be chosen");
@@ -984,7 +1124,7 @@ test("an unavailable Project Location is refused with the availability as its re
     }],
   });
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     const group = fixture.container.querySelector('[role="radiogroup"][aria-label="Project Location"]');
     assert.ok(group, "Project Location renders as a choice group");
 
@@ -1009,7 +1149,7 @@ test("the Location groups and Harness share one control family", async () => {
   // listbox and a segmented control, inside one 520px form.
   const fixture = await mountFixture();
   try {
-    await act(async () => { selectProject(fixture.container, project.id); });
+    await act(async () => { await selectProject(fixture.container, project.id); });
     for (const label of ["Project Location", "Permission Preset", "Harness"]) {
       const group = fixture.container.querySelector(`[role="radiogroup"][aria-label="${label}"]`);
       assert.ok(group, `${label} is a labelled radiogroup`);

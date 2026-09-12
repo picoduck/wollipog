@@ -7669,7 +7669,7 @@ button.file-head.source-path-link {
 button.agent-pick {
   background: transparent;
 }
-/* New Session picks one agent from a grouped dropdown; the provider icon adorns the select. */
+/* New Session picks one agent from a searchable list; the provider icon adorns the editable owner. */
 .btn.sm.new-session-project-control {
   /* Segoe UI's visible ink sits high inside its line box. Preserve the compact desktop control's
      total padding while moving that line box one pixel toward the optical centre. */
@@ -7680,25 +7680,23 @@ button.agent-pick {
   align-items: center;
   gap: 8px;
 }
-.agent-select select.new-session-agent-control {
+.new-session-choice-control {
+  width: 100%;
+  min-width: 0;
+}
+.new-session-choice-control .ui-searchable-combobox-input {
+  min-width: 0;
+}
+.agent-select .new-session-choice-control {
   flex: 1;
   min-width: 0;
-  min-height: 35px;
-  /* Native selects ignore an authored line-height in Chromium. Keep the native widget and caret,
-     establish its control height instead, and apply the same one-pixel optical correction as the
-     Project actions without risking clipped glyphs. */
-  padding-block: 9px 7px;
 }
 .agent-select .agent-icon {
   flex: none;
 }
 @media (max-width: 760px), (pointer: coarse), (hover: none) {
-  .btn.sm.new-session-project-control,
-  .agent-select select.new-session-agent-control {
-    min-height: 44px;
-  }
+  .btn.sm.new-session-project-control { min-height: 44px; }
   .btn.sm.new-session-project-control { padding-block: 14px 12px; }
-  .agent-select select.new-session-agent-control { padding-block: 11px 9px; }
 }
 .agent-meta {
   margin-top: 4px;
@@ -7734,33 +7732,6 @@ button.agent-pick {
 .advanced-agents > p {
   margin: 7px 0;
   font-size: 12px;
-}
-.advanced-agent-picks {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.advanced-agent-pick {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 9px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-dim);
-  text-align: left;
-  cursor: pointer;
-}
-.advanced-agent-pick.on {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  color: var(--text);
-}
-.advanced-agent-pick:has(input:disabled) {
-  cursor: not-allowed;
-  opacity: 0.55;
 }
 /* New-Session "Location" quick-pick — a project's machines/directories (Q2a). */
 .new-session-project-actions {
