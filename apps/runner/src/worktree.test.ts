@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -66,6 +66,24 @@ test("change-request lifecycle parsing requires an exact forge URL and terminal 
   assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: `${gitlab}.evil.test`, state: "merged", sha: gitlabHead }), gitlab), null);
   assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged", sha: gitlabHead }),
     "https://token@gitlab.example.test/team/sub/repo/-/merge_requests/19"), null);
+});
+
+test("merged branch discovery requires the exact branch and head", () => {
+  const branch = "fix/external-pr";
+  const head = "a".repeat(40);
+  const exact = { url: "https://github.com/picoduck/wollipog/pull/983", state: "MERGED", headRefOid: head.toUpperCase(), headRefName: branch };
+  assert.deepEqual(parseMergedWorktreePullRequestForBranch(JSON.stringify([exact]), branch, head), {
+    url: exact.url,
+    state: "merged",
+    headOid: head,
+    provider: "github",
+    kind: "pull_request",
+  });
+  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, state: "CLOSED" }]), branch, head), null);
+  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, headRefName: "fix/other" }]), branch, head), null);
+  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, headRefOid: "b".repeat(40) }]), branch, head), null);
+  assert.equal(parseMergedWorktreePullRequestForBranch(JSON.stringify([{ ...exact, url: "https://example.test/pull/983" }]), branch, head), null);
+  assert.equal(parseMergedWorktreePullRequestForBranch("{}", branch, head), null);
 });
 
 test("git preflight distinguishes a non-repo from a broken context/path", { skip: !haveGit() }, async () => {
@@ -920,9 +938,34 @@ test("merged PR worktrees remain discardable after their remote branches are del
       "s_merged_no_upstream",
       { baseRef: "HEAD", branch: "fix/unproven-merged" },
     );
-    for (const worktree of [automatic.worktree, explicit.worktree, legacyMerged.worktree, unprovenMerged.worktree]) {
+    const discoveredAutomatic = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/discovered-merged-automatic" },
+    );
+    const discoveredExplicit = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/discovered-merged-explicit" },
+    );
+    const unmergedMissingUpstream = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/discovered-unmerged" },
+    );
+    const neverPushed = await manager.requestWorktree(
+      "s_merged_no_upstream",
+      { baseRef: "HEAD", branch: "fix/never-pushed" },
+    );
+    for (const worktree of [
+      automatic.worktree,
+      explicit.worktree,
+      legacyMerged.worktree,
+      unprovenMerged.worktree,
+      discoveredAutomatic.worktree,
+      discoveredExplicit.worktree,
+      unmergedMissingUpstream.worktree,
+    ]) {
       execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
-      if (worktree !== legacyMerged.worktree) {
+      if (![legacyMerged.worktree, discoveredAutomatic.worktree, discoveredExplicit.worktree,
+        unmergedMissingUpstream.worktree].includes(worktree)) {
         await manager.linkWorktreePullRequest(
           "s_merged_no_upstream",
           worktree.path,
@@ -934,6 +977,8 @@ test("merged PR worktrees remain discardable after their remote branches are del
       execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
     }
     const forgeCalls = new Map<string, number>();
+    const discoveryCalls = new Map<string, number>();
+    let enableExplicitDiscovery = false;
     let forgeUnavailablePath: string | undefined;
     let removeSiblingOnResolve: string | undefined;
     (manager as unknown as {
@@ -952,6 +997,30 @@ test("merged PR worktrees remain discardable after their remote branches are del
       return {
         state: "merged",
         headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      };
+    };
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: (
+        path: string,
+        branch: string,
+      ) => Promise<{
+        url: string;
+        state: "merged";
+        headOid: string;
+        provider: "github";
+        kind: "pull_request";
+      } | null>;
+    }).discoverMergedWorktreePullRequest = async (path, branch) => {
+      discoveryCalls.set(path, (discoveryCalls.get(path) ?? 0) + 1);
+      const isDiscoverable = path === discoveredAutomatic.worktree.path ||
+        (enableExplicitDiscovery && path === discoveredExplicit.worktree.path);
+      if (!isDiscoverable) return null;
+      return {
+        url: `https://github.com/picoduck/wollipog/pull/${path === discoveredAutomatic.worktree.path ? "714" : "715"}`,
+        state: "merged",
+        headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        provider: "github",
+        kind: "pull_request",
       };
     };
 
@@ -979,6 +1048,14 @@ test("merged PR worktrees remain discardable after their remote branches are del
 
     assert.equal(existsSync(automatic.worktree.path), false,
       "automatic reconciliation removes the inactive merged worktree without its remote branch");
+    assert.equal(existsSync(discoveredAutomatic.worktree.path), false,
+      "automatic reconciliation discovers and removes an externally opened merged PR worktree");
+    assert.equal(existsSync(discoveredExplicit.worktree.path), true,
+      "an unlinked worktree remains until forge discovery provides exact merged-head proof");
+    assert.equal(existsSync(unmergedMissingUpstream.worktree.path), true,
+      "a deleted upstream without merged-head proof remains protected");
+    assert.equal(existsSync(neverPushed.worktree.path), true,
+      "a never-pushed worktree remains protected");
     assert.equal(existsSync(explicit.worktree.path), true,
       "the worktree still used by a provider remains protected");
     const persistedExplicit = store.readMeta("s_merged_no_upstream")?.worktrees
@@ -1001,6 +1078,21 @@ test("merged PR worktrees remain discardable after their remote branches are del
     await manager.discardWorktree("s_merged_no_upstream", explicit.worktree.path);
     assert.equal(existsSync(explicit.worktree.path), false,
       "explicit discard also accepts the verified merged worktree without its remote branch");
+
+    enableExplicitDiscovery = true;
+    await manager.discardWorktree("s_merged_no_upstream", discoveredExplicit.worktree.path);
+    assert.equal(existsSync(discoveredExplicit.worktree.path), false,
+      "explicit discard discovers an externally opened merged PR before applying the same head proof");
+    await assert.rejects(
+      manager.discardWorktree("s_merged_no_upstream", unmergedMissingUpstream.worktree.path),
+      /branch has no upstream/,
+    );
+    await assert.rejects(
+      manager.discardWorktree("s_merged_no_upstream", neverPushed.worktree.path),
+      /branch has no upstream/,
+    );
+    assert.ok((discoveryCalls.get(discoveredAutomatic.worktree.path) ?? 0) >= 1);
+    assert.ok((discoveryCalls.get(unmergedMissingUpstream.worktree.path) ?? 0) >= 1);
 
     await manager.linkWorktreePullRequest(
       "s_merged_no_upstream",

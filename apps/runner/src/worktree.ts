@@ -771,6 +771,13 @@ export type PullRequestLifecycleProof = {
   state: PullRequestLifecycleState;
   headOid?: string;
 };
+export type DiscoveredMergedPullRequest = {
+  url: string;
+  state: "merged";
+  headOid: string;
+  provider: "github";
+  kind: "pull_request";
+};
 type LinkedChangeRequest = {
   provider: ForgeProvider;
   host: string;
@@ -826,6 +833,40 @@ export function parseWorktreePullRequestState(
   }
 }
 
+/** Accept branch discovery only when GitHub reports a merged pull request for the exact local
+ * branch head. Any matching merged request is sufficient delivery proof; malformed or stale
+ * results remain indistinguishable from no proof. */
+export function parseMergedWorktreePullRequestForBranch(
+  raw: string,
+  expectedBranch: string,
+  expectedHead: string,
+): DiscoveredMergedPullRequest | null {
+  if (!/^[a-f0-9]{40,64}$/iu.test(expectedHead)) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    for (const value of parsed) {
+      if (!value || typeof value !== "object") continue;
+      const item = value as Record<string, unknown>;
+      if (item.state !== "MERGED" || item.headRefName !== expectedBranch ||
+          typeof item.headRefOid !== "string" || item.headRefOid.toLowerCase() !== expectedHead.toLowerCase() ||
+          typeof item.url !== "string") continue;
+      const request = linkedChangeRequest(item.url);
+      if (request?.provider !== "github") continue;
+      return {
+        url: item.url,
+        state: "merged",
+        headOid: item.headRefOid.toLowerCase(),
+        provider: "github",
+        kind: "pull_request",
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Read one exact linked GitHub pull request. Network/auth/shape failures are deliberately
  * indistinguishable from unavailable state: absence of proof is never permission to delete. */
 export async function worktreePullRequestState(
@@ -848,6 +889,42 @@ export async function worktreePullRequestState(
       { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
     );
     return parseWorktreePullRequestState(result.stdout, pullRequestUrl);
+  } catch {
+    return null;
+  }
+}
+
+/** Recover the merged change-request link for a branch pushed by an external workflow. Discovery
+ * is deliberately limited to a configured same-name remote upstream whose tracking ref vanished;
+ * a branch that was never pushed must not gain deletion permission from an unrelated PR. */
+export async function mergedWorktreePullRequestForBranch(
+  worktreePath: string,
+  branch: string,
+  options: WorktreeOptions = {},
+): Promise<DiscoveredMergedPullRequest | null> {
+  const context = options.context ?? nativeContext;
+  try {
+    const remote = (await command(context, worktreePath, ["config", "--get", `branch.${branch}.remote`])).trim();
+    const merge = (await command(context, worktreePath, ["config", "--get", `branch.${branch}.merge`])).trim();
+    if (!remote || remote === "." || merge !== `refs/heads/${branch}`) return null;
+    try {
+      await command(context, worktreePath, ["rev-parse", "--verify", `${branch}@{upstream}`]);
+      return null;
+    } catch {
+      // A configured upstream whose ref disappeared is the only state eligible for forge recovery.
+    }
+    const head = (await command(context, worktreePath, ["rev-parse", "--verify", "HEAD"])).trim();
+    if (!/^[a-f0-9]{40,64}$/u.test(head)) return null;
+    const result = await runContextCommand(
+      context,
+      "gh",
+      [
+        "pr", "list", "--head", branch, "--state", "merged", "--limit", "100",
+        "--json", "url,state,headRefOid,headRefName",
+      ],
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+    );
+    return parseMergedWorktreePullRequestForBranch(result.stdout, branch, head);
   } catch {
     return null;
   }
