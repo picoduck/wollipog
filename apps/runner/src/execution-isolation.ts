@@ -129,6 +129,8 @@ export interface IsolationStateOptions {
   /** Session-private roots that may be populated after launch (for example an agent-requested
    * worktree). They are materialized before sandbox construction and never shared across sessions. */
   additionalWritableRoots?: string[];
+  /** Keep the provider's writable filesystem to its private cwd and transcript state. */
+  orchestratorScratchOnly?: boolean;
   /** Stable attested runner/control-plane owner for state outside dataDir (currently WSL). */
   ownerHash?: string;
   /** Canonical shared provider leaf used by Seatbelt when a home component is symlinked. */
@@ -227,22 +229,40 @@ function seatbeltLiteral(value: string): string {
   return `"${posix.normalize(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
+/** Exactly the roots a Seatbelt session may write to. Anything that must REPORT what the sandbox
+ * permits reads this rather than re-deriving it: a second copy of the list drifts, and a caller
+ * told a path is blocked when the profile in fact grants it waits for a relaunch it never needed. */
+export function seatbeltWritableRoots(
+  state: IsolationStateOptions,
+  home: string,
+  nativeTmp = tmpdir(),
+): string[] {
+  const mapping = statePath(state.driver);
+  const paths = new Set(state.orchestratorScratchOnly
+    ? [state.cwd]
+    : [state.cwd, state.dataDir, nativeTmp, ...(state.additionalWritableRoots ?? [])]);
+  if (mapping) paths.add(state.providerStatePath ?? posix.join(
+    absoluteHome(state.env.HOME ?? home, "HOME on macOS"), ...mapping.relative.split("/"),
+  ));
+  return [...paths];
+}
+
 /** A parameter-free Seatbelt profile. It intentionally grants read access for installed CLI,
- * credential, toolchain, and system compatibility while restricting writes to the worktree,
- * runner data, temporary directory, and the provider's real transcript leaf. Unlike bwrap,
- * Seatbelt cannot mount a per-session transcript leaf over the provider's home path. */
+ * credential, toolchain, and system compatibility while restricting writes to the declared
+ * session roots and the provider's real transcript leaf. Unlike bwrap, Seatbelt cannot mount a
+ * per-session transcript leaf over the provider's home path. */
 export function buildSeatbeltProfile(
   state: IsolationStateOptions,
   home: string,
   network: "inherit" | "deny",
   nativeTmp = tmpdir(),
 ): string {
-  const mapping = statePath(state.driver);
-  const paths = new Set([state.cwd, state.dataDir, nativeTmp, ...(state.additionalWritableRoots ?? [])]);
-  if (mapping) paths.add(state.providerStatePath ?? posix.join(
-    absoluteHome(state.env.HOME ?? home, "HOME on macOS"), ...mapping.relative.split("/"),
-  ));
-  const writeRules = [...paths].map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
+  return renderSeatbeltProfile(seatbeltWritableRoots(state, home, nativeTmp), network);
+}
+
+function renderSeatbeltProfile(writableRoots: string[], network: "inherit" | "deny"): string {
+  const writeRules = writableRoots
+    .map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
   return [
     "(version 1)",
     "(deny default)",
@@ -351,17 +371,18 @@ export async function resolveExecutionIsolation(
       env: { ...state.env, ...(state.env.HOME ? { HOME: home } : {}) },
       ...(providerStatePath ? { providerStatePath: await runtime.realpathNative(providerStatePath) } : {}),
     };
+    const writableRoots = seatbeltWritableRoots(
+      canonicalState,
+      home,
+      await runtime.realpathNative(runtime.nativeTmp()),
+    );
     return {
       backend: "seatbelt",
       command: binary.launch.command,
       args: binary.launch.args,
       network: policy.network,
-      profile: buildSeatbeltProfile(
-        canonicalState,
-        home,
-        policy.network,
-        await runtime.realpathNative(runtime.nativeTmp()),
-      ),
+      profile: renderSeatbeltProfile(writableRoots, policy.network),
+      writableRoots,
     };
   }
   if (policy.mode === "windows-job") {

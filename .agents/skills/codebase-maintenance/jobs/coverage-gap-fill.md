@@ -26,6 +26,14 @@ two-glob form silently dropped every `.tsx` component test and every `.mjs` scri
 whole trees read as near-zero coverage. (The first run proved both defects with a concrete
 counterexample and re-ran corrected; this codifies its command.)
 
+Rank the candidate list by **uncovered branches**, not by line percentage. Under
+`--enable-source-maps`, lcov reports file-header comment blocks, `import` lines,
+`export interface` / `export type` declarations, and function signature lines as uncovered `DA:`
+entries; a small security module can read as 73–81% line coverage while every executable branch
+is taken. One run's four top-ranked "security" candidates by line percentage were entirely this
+artifact, and ranking by branch misses surfaced all three real findings and none of the noise.
+Confirm a line-coverage gap against `BRDA` records before reading the source.
+
 Coverage numbers are the candidate list, not the finding. Low coverage on a trivial getter matters
 less than a single uncovered branch in credential validation. Rank candidates by consequence:
 
@@ -42,6 +50,11 @@ less than a single uncovered branch in credential validation. Rank candidates by
   "this function is untested".
 - Confirm no existing test already covers it through another path. Coverage tools miss indirect
   coverage; check by reading the tests around it.
+- Prove the uncovered branch is reachable before drafting. An uncovered guard can be dead by
+  construction — a comparison whose inputs are already forced equal by an earlier check, a
+  fallthrough after a loop whose body always returns or throws — and a test that drives it is
+  impossible or tautological, which is exactly what `useless-test-deletion` deletes. Report those
+  as `dead-code-sweep` overlap instead. One run found three such guards; none was a finding.
 - Do not propose tests for code the `dead-code-sweep` job has flagged. Report the overlap instead.
 
 ## Report

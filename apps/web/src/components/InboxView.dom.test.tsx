@@ -11,6 +11,9 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
+import { INBOX_COLLAPSED_THREADS_KEY } from "../inbox.js";
+import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
+import { loadSeen, saveSeen } from "../sessions-seen.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -505,23 +508,31 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
     });
   });
 
-  assert.deepEqual(rowTitles(container), ["Session orphaned", "Session watchdog", "Session failed", "Session input", "Session unsnoozed"]);
+  // The session waiting on input leads (#896 orders urgency before recency); the rest keep recency.
+  assert.deepEqual(rowTitles(container), ["Session input", "Session orphaned", "Session watchdog", "Session failed", "Session unsnoozed"]);
   assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 5 Sessions");
   assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 6 Sessions");
   assert.match(container.textContent ?? "", /Background Work Orphaned/);
-  assert.match(container.textContent ?? "", /Continuation Required/);
+  assert.match(container.textContent ?? "", /Result Pending/);
   assert.ok(container.querySelector('[aria-label="Attention: Background Work Orphaned"]'));
-  assert.ok(container.querySelector('[aria-label="Attention: Continuation Required"]'));
+  const watchdogPill = container.querySelector('[aria-label^="Background Work: Result Pending."]');
+  assert.ok(watchdogPill);
+  assert.ok(watchdogPill.classList.contains("background-delivery-pending"));
+  assert.equal(watchdogPill.classList.contains("blocked"), false);
 
   await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
   assert.deepEqual(rowTitles(container), [
-    "Session omitted", "Session ordinary", "Session orphaned", "Session watchdog", "Session failed", "Session input",
+    "Session input", "Session omitted", "Session ordinary", "Session orphaned", "Session watchdog", "Session failed",
   ]);
 
   await act(async () => { (container.querySelector('[title="Active"]') as HTMLButtonElement).click(); });
   await renderView("board");
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")));
   assert.ok(container.querySelector('.card [aria-label="Attention: Background Work Orphaned"]'));
+  const boardWatchdogPill = container.querySelector('.card [aria-label^="Background Work: Result Pending."]');
+  assert.ok(boardWatchdogPill);
+  assert.ok(boardWatchdogPill.classList.contains("background-delivery-pending"));
+  assert.equal(boardWatchdogPill.classList.contains("blocked"), false);
   assert.ok(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
 
   await act(async () => {
@@ -948,6 +959,127 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
 
 });
 
+test("desktop search Enter focuses the exact filtered result set without activating a session", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-search-enter-test",
+    runtimeKey: "inbox-search-enter-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const pushed: unknown[] = [];
+  const spyNavigation: ViewNavigation = {
+    current: () => ({ name: "inbox" }),
+    push: (view) => void pushed.push(view),
+    listen: () => () => {},
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={spyNavigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([session("A", 30), session("B", 20), session("C", 10)]));
+  });
+
+  const search = container.querySelector<HTMLInputElement>(".inbox-search input")!;
+  const filter = async (value: string) => {
+    await act(async () => {
+      search.value = value;
+      fireDomEvent.change(search as never, { target: { value } as never });
+    });
+    await act(async () => { await Promise.resolve(); });
+  };
+  const pressSearchEnter = async (init: KeyboardEventInit = {}) => {
+    await act(async () => {
+      search.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Enter", bubbles: true, cancelable: true, ...init,
+      } as never) as never);
+    });
+  };
+
+  // Enter in the same event batch as the final input change must wait for the deferred filter,
+  // rather than focusing a row from the previous result set.
+  const rowC = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
+    .find((row) => row.textContent?.includes("Session C"))!;
+  await act(async () => { rowC.click(); });
+  search.focus();
+  await act(async () => {
+    search.value = "Session A";
+    fireDomEvent.change(search as never, { target: { value: "Session A" } as never });
+    search.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, cancelable: true,
+    }) as never);
+  });
+  await act(async () => { await Promise.resolve(); });
+  let grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  assert.equal(domWindow.document.activeElement, grid);
+  assert.equal(selectedRowTitle(container), "Session A");
+  assert.equal(grid.getAttribute("aria-rowcount"), "1");
+
+  // A visible selection remains active across a multi-result handoff.
+  await filter("Session");
+  const rowB = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
+    .find((row) => row.textContent?.includes("Session B"))!;
+  await act(async () => { rowB.click(); });
+  search.focus();
+  await pressSearchEnter();
+  grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  assert.equal(domWindow.document.activeElement, grid);
+  assert.equal(search.value, "Session");
+  assert.equal(selectedRowTitle(container), "Session B");
+  let activeDescendant = grid.getAttribute("aria-activedescendant");
+  assert.ok(activeDescendant);
+  assert.ok(domWindow.document.getElementById(activeDescendant), "the active result is mounted");
+  assert.deepEqual(pushed, [], "search Enter moves focus without opening the selected session");
+
+  // Normal list commands now operate on the displayed results.
+  await act(async () => {
+    domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "j", bubbles: true, cancelable: true }));
+  });
+  assert.equal(selectedRowTitle(container), "Session C");
+
+  // A hidden selection is repaired to the first (and only) displayed result.
+  search.focus();
+  await filter("Session A");
+  await pressSearchEnter();
+  grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  assert.equal(domWindow.document.activeElement, grid);
+  assert.equal(selectedRowTitle(container), "Session A");
+  assert.equal(grid.getAttribute("aria-rowcount"), "1");
+
+  // An empty result set keeps focus and has no grid or stale active descendant.
+  search.focus();
+  await filter("does not exist");
+  await pressSearchEnter();
+  assert.equal(domWindow.document.activeElement, search);
+  assert.equal(container.querySelector(".inbox-list"), null);
+  assert.match(container.querySelector(".inbox-zero")?.textContent ?? "", /No Matching Sessions/);
+
+  // Modified and composing Enter remain input-owned even when results exist.
+  await filter("Session");
+  for (const init of [
+    { altKey: true }, { ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { keyCode: 229 },
+  ] satisfies KeyboardEventInit[]) {
+    search.focus();
+    await pressSearchEnter(init);
+    assert.equal(domWindow.document.activeElement, search);
+  }
+  await act(async () => {
+    search.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, cancelable: true, isComposing: true,
+    } as never) as never);
+  });
+  assert.equal(domWindow.document.activeElement, search);
+});
+
 test("board mode shares the Sessions toolbar scope and toggles back to the list", async () => {
   mobileViewport = false;
   setWindowFocused(true);
@@ -1000,6 +1132,14 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   await act(async () => { await Promise.resolve(); });
   assert.equal(container.querySelectorAll(".board .card").length, 1,
     "the toolbar query scopes board mode");
+  search.focus();
+  await act(async () => {
+    search.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, cancelable: true,
+    }) as never);
+  });
+  assert.equal(domWindow.document.activeElement, search,
+    "Enter does not invent a selected-row focus model for the board");
 
   const toggle = container.querySelector(".sessions-view-toggle");
   assert.ok(toggle, "the List / Board toggle lives in the shared toolbar");
@@ -1105,6 +1245,103 @@ test("row and card context menus share one surface, act on their target, and nev
   assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
   assert.deepEqual(pushed, [], "board-card menus never navigate either");
 
+});
+
+test("row and card context menus pin their exact target, reorder immediately, persist, and restore keyboard focus", async () => {
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  saveKeySet(SESSION_PIN_KEY, new Set());
+  cleanup(() => saveKeySet(SESSION_PIN_KEY, new Set()));
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "session-context-pin",
+    runtimeKey: "session-context-pin:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const pushed: unknown[] = [];
+  const spyNavigation: ViewNavigation = {
+    current: () => ({ name: "inbox" }),
+    push: (view) => void pushed.push(view),
+    listen: () => () => {},
+  };
+  const mountView = (viewMode: "list" | "board") => act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={spyNavigation}>
+        <InboxView viewMode={viewMode} rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+
+  await mountView("list");
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
+  assert.equal(selectedRowTitle(container), "Session A");
+
+  // The menu target, not the currently selected row, owns the action.
+  let rowB = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+    .find((row) => row.textContent?.includes("Session B"))!;
+  await act(async () => {
+    rowB.dispatchEvent(new domWindow.MouseEvent("contextmenu", {
+      bubbles: true, cancelable: true, clientX: 50, clientY: 60,
+    }) as never);
+  });
+  let menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  const pin = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((item) => item.textContent === "Pin Session")!;
+  await act(async () => { pin.click(); });
+  assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "pinning dismisses the menu");
+  assert.deepEqual(rowTitles(container), ["Session B", "Session A"], "the targeted session moves immediately");
+  assert.equal(selectedRowTitle(container), "Session A", "right-click pinning never selects its target");
+  assert.deepEqual([...loadKeySet(SESSION_PIN_KEY)], ["B"], "pinning uses the existing browser persistence");
+  const grid = container.querySelector(".inbox-list") as unknown as HTMLElement;
+  assert.equal(domWindow.document.activeElement, grid, "a non-dialog action restores the collection focus");
+  assert.deepEqual(pushed, [], "pinning never navigates into the target");
+
+  // The platform keyboard interaction exposes the state-aware inverse action on the active row.
+  rowB = [...container.querySelectorAll<HTMLElement>(".inbox-row")]
+    .find((row) => row.textContent?.includes("Session B"))!;
+  await act(async () => { rowB.click(); });
+  await act(async () => {
+    grid.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "F10", shiftKey: true, bubbles: true, cancelable: true,
+    }) as never);
+  });
+  menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  assert.equal(menu.getAttribute("aria-label"), "Session Actions for Session B");
+  await act(async () => {
+    menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
+  });
+  const focusedPin = domWindow.document.activeElement as unknown as HTMLButtonElement | null;
+  assert.equal(focusedPin?.textContent, "Unpin Session", "the pin action is arrow-key reachable");
+  await act(async () => { focusedPin!.click(); });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
+  assert.equal(loadKeySet(SESSION_PIN_KEY).size, 0);
+  assert.equal(domWindow.document.activeElement, grid);
+
+  // Board cards use the same action and preserve the canonical pin-aware order within a column.
+  await mountView("board");
+  const cardB = ([...domWindow.document.querySelectorAll(".board .card")] as unknown as HTMLElement[])
+    .find((card) => card.textContent?.includes("Session B"))!;
+  await act(async () => {
+    cardB.dispatchEvent(new domWindow.MouseEvent("contextmenu", {
+      bubbles: true, cancelable: true, clientX: 200, clientY: 120,
+    }) as never);
+  });
+  menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  await act(async () => {
+    [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent === "Pin Session")!.click();
+  });
+  assert.deepEqual(
+    [...domWindow.document.querySelectorAll(".board .card-title")].map((title) => title.textContent),
+    ["Session B", "Session A"],
+  );
+  assert.deepEqual([...loadKeySet(SESSION_PIN_KEY)], ["B"]);
+  assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+  assert.deepEqual(pushed, []);
 });
 
 test("a touch long-press opens the row menu and suppresses the tap it rode in on", async () => {
@@ -1353,6 +1590,200 @@ test("a cancelled press and a source-landed release click both leave the next ba
  * — leaves entries behind here, and the store's one-minute stall clock leaks with them, which is
  * what turned an assertion failure into a multi-minute stall.
  */
+test("InboxView threads a family under its parent and t, Shift+T, p, and the arrows drive it (#896)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-test",
+    runtimeKey: "inbox-thread-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  const approval = { requestId: "ask", title: "Delete the old file?", options: [] };
+  await act(async () => {
+    socket.push(snapshot([
+      session("Lone", 40),
+      session("Parent", 30, { status: "running" }),
+      session("Waiting", 20, { status: "input_required", pendingApproval: approval, parentSessionId: "Parent" }),
+      session("Done", 10, { status: "completed", parentSessionId: "Parent" }),
+    ]));
+  });
+  // The family leads: its blocked child outranks the newer, settled lone session, and the parent
+  // is first inside its thread with the children indented under it.
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Waiting", "Session Done", "Session Lone"]);
+  const shells = () => [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")];
+  assert.deepEqual(shells().map((shell) => shell.className.includes("thread-child")), [false, true, true, false]);
+  assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input");
+  assert.match(container.querySelector(".inbox-thread-family")?.className ?? "", /waiting/);
+  const selectedTitle = () =>
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')?.textContent ?? null;
+  const press = async (key: string, shiftKey = false) => {
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }));
+    });
+  };
+  container.querySelector<HTMLElement>(".inbox-list")!.focus();
+  assert.equal(selectedTitle(), "Session Parent");
+
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"], "a collapsed parent's children leave the list");
+  assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-expanded"), "false");
+  assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input",
+    "the rollup still says a child is waiting while the thread is collapsed");
+  assert.equal(container.querySelector(".inbox-order-update"), null, "hidden children are not a pending reorder");
+  await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 45) }); });
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"], "collapse survives a live update");
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Waiting", "Session Done", "Session Lone"]);
+
+  await press("j");
+  assert.equal(selectedTitle(), "Session Waiting");
+  await press("p");
+  assert.equal(selectedTitle(), "Session Parent", "p selects the parent without collapsing");
+  assert.equal(rowTitles(container).length, 4);
+  await press("j");
+  await press("t");
+  assert.equal(selectedTitle(), "Session Parent", "t from a child collapses its thread and lands on the parent");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
+  await press("T", true);
+  assert.equal(rowTitles(container).length, 4, "Shift+T expands every thread while any is collapsed");
+  await press("T", true);
+  assert.equal(rowTitles(container).length, 2, "Shift+T collapses every thread once all are expanded");
+
+  await press("ArrowRight");
+  assert.equal(rowTitles(container).length, 4, "Right expands a collapsed parent");
+  await press("ArrowRight");
+  assert.equal(selectedTitle(), "Session Waiting", "Right on an expanded parent selects its first child");
+  await press("ArrowLeft");
+  assert.equal(selectedTitle(), "Session Parent", "Left on a child selects the parent");
+  await press("ArrowLeft");
+  assert.equal(rowTitles(container).length, 2, "Left on an expanded parent collapses it");
+
+  // The chevron and the family chip are the pointer path and never select the row.
+  await press("j");
+  assert.equal(selectedTitle(), "Session Lone");
+  await act(async () => { container.querySelector<HTMLButtonElement>(".inbox-thread-toggle")!.click(); });
+  assert.equal(rowTitles(container).length, 4);
+  assert.equal(selectedTitle(), "Session Lone");
+  await act(async () => { container.querySelector<HTMLElement>(".inbox-thread-family")!.click(); });
+  assert.equal(rowTitles(container).length, 2);
+  assert.equal(selectedTitle(), "Session Lone");
+});
+
+test("InboxView keeps a hidden selection on its nearest visible ancestor and Shift+T reaches hidden parents (#896)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  // Collapse state persists per instance, and the previous test left a thread collapsed.
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set());
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-repair-test",
+    runtimeKey: "inbox-thread-repair-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([
+      session("Parent", 30, { status: "running" }),
+      session("Child", 20, { status: "running", parentSessionId: "Parent" }),
+      session("Grandchild", 10, { status: "running", parentSessionId: "Child" }),
+      session("Lone", 5),
+    ]));
+  });
+  const selectedTitle = () =>
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')?.textContent ?? null;
+  const press = async (key: string, shiftKey = false) => {
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }));
+    });
+  };
+  container.querySelector<HTMLElement>(".inbox-list")!.focus();
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
+
+  // Shift+T collapses the root AND the inner parent; the second press must reopen both.
+  await press("T", true);
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
+  await press("T", true);
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
+
+  // An outside change hides the selected row inside a collapsed thread: the selection lands on
+  // the nearest visible ancestor instead of vanishing.
+  await press("j"); await press("j"); await press("j");
+  assert.equal(selectedTitle(), "Session Lone");
+  // t on the inner parent would toggle ITS thread; climb to the root and collapse from there.
+  await press("k"); await press("k"); await press("k"); await press("t");
+  assert.equal(selectedTitle(), "Session Parent");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
+  await press("j");
+  assert.equal(selectedTitle(), "Session Lone");
+  const previewTitle = () => container.querySelector<HTMLElement>(".session-preview-title")?.textContent ?? null;
+  assert.equal(previewTitle(), "Session Lone");
+  await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 5, { parentSessionId: "Parent" }) }); });
+  assert.deepEqual(rowTitles(container), ["Session Parent"]);
+  assert.equal(selectedTitle(), "Session Parent", "the hidden selection surfaces on its collapsed parent");
+  assert.equal(previewTitle(), "Session Parent", "the preview and its actions follow the same projected row");
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Parent", "Session Child", "Session Grandchild", "Session Lone"]);
+  assert.equal(selectedTitle(), "Session Lone", "expanding restores the persisted selection");
+  assert.equal(previewTitle(), "Session Lone");
+});
+
+test("an expanded child inside a collapsed thread is the session marked seen, not its projected parent (#896)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set(["Parent"]));
+  saveSeen({});
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-seen-test",
+    runtimeKey: "inbox-thread-seen-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  // A deep link opened the child while its parent's thread is collapsed: the list projects the
+  // selection onto the parent, but the reader is looking at the child.
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView expandedSessionId="Lone" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([
+      session("Parent", 30, { status: "running" }),
+      session("Lone", 20, { status: "running", parentSessionId: "Parent" }),
+    ]));
+  });
+  assert.equal(container.querySelector(".session-preview-title")?.textContent ?? container.textContent?.includes("Session Lone"), true);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_700)); });
+  const seen = loadSeen();
+  assert.ok("Lone" in seen, "the opened child is marked seen");
+  assert.ok(!("Parent" in seen), "the projected parent is not marked seen in its place");
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set());
+});
+
 test("every mounted root is torn down before the next test starts", () => {
   assert.deepEqual(mountedRoots, [], "a previous test left a React root mounted");
   assert.equal(

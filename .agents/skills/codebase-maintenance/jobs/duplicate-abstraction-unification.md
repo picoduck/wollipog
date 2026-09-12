@@ -9,10 +9,16 @@ callers in ways tests may not catch. Bias hard toward reporting fewer, more cert
 
 Start mechanically, then verify semantically:
 
-- `npx -y jscpd --min-lines 25 --min-tokens 120 --reporters console --silent apps packages` for
-  literal and near-literal duplication;
-- `git grep -n "^export \(async \)\?function \|^export const \|^export class \|^export type \|^export interface "`
-  to build a symbol inventory — types and interfaces included, because the duplicated
+- `npx -y jscpd --min-lines 25 --min-tokens 120 --reporters console --silent apps packages scripts`
+  for literal and near-literal duplication (point `--output` at the scratch directory, never the
+  repository's default `./report`);
+- `git grep -n "^export \(async \)\?function \|^export const \|^export class \|^export type \|^export interface " -- 'apps/**' 'packages/**' 'scripts/*.mjs' 'apps/*/scripts/*.mjs'`
+  to build a symbol inventory. The `scripts/` trees are part of both passes: plain-`node` scripts
+  cannot import `packages/protocol` (its `exports` point at TypeScript source), so constants and
+  helpers get re-declared there by necessity, and a sweep scoped to `apps packages` structurally
+  cannot see those copies. One run found eight cross-tree name collisions only after widening the
+  globs by hand; most were boundary-forced, but that is a conclusion the job must be able to
+  reach, not assume. Types and interfaces are included, because the duplicated
   abstractions in this repository are as often shapes as functions (one run's only finding was
   an `interface` the narrower pattern could not match) — then
   look for families of similar names across packages — the same concept implemented per-package.

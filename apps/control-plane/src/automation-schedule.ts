@@ -1,6 +1,11 @@
 const FIELD_COUNT = 5;
 const MAX_EXPRESSION_LENGTH = 128;
 const SEARCH_DAYS = 366 * 5;
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const OFFSET_WINDOW_MS = 24 * HOUR_MS;
+const MAX_OFFSET_MODELS = 512;
+const validatedTimezones = new Set<string>();
 
 interface CronField {
   values: number[];
@@ -75,11 +80,13 @@ export function parseCron(expression: string): ParsedCron {
 export function validateTimeZone(timezone: string): string {
   const normalized = timezone.trim();
   if (!normalized || normalized.length > 128) throw new Error("timezone is required");
+  if (validatedTimezones.has(normalized)) return normalized;
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: normalized }).format(0);
   } catch {
     throw new Error(`unknown IANA timezone '${normalized}'`);
   }
+  validatedTimezones.add(normalized);
   return normalized;
 }
 
@@ -118,24 +125,83 @@ function localParts(epoch: number, timezone: string): LocalParts {
   };
 }
 
-function sameLocal(left: LocalParts, right: LocalParts): boolean {
-  return left.year === right.year && left.month === right.month && left.day === right.day &&
-    left.hour === right.hour && left.minute === right.minute;
+function localMinute(parts: LocalParts): number {
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
 }
 
-/** Convert one local wall-clock minute to an instant. The final equality check rejects spring-DST
- * gaps; repeated fall-back minutes intentionally resolve to one instant, matching once-per-wall-time cron semantics. */
-function localEpoch(parts: LocalParts, timezone: string): number | null {
-  const desired = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+interface OffsetSegment {
+  start: number;
+  end: number;
+  offset: number;
+}
+
+const offsetModels = new Map<string, OffsetSegment[]>();
+
+function offsetAt(epoch: number, timezone: string): number {
+  return localMinute(localParts(epoch, timezone)) - epoch;
+}
+
+function transitionMinute(start: number, end: number, startOffset: number, timezone: string): number {
+  let low = start;
+  let high = end;
+  while (high - low > MINUTE_MS) {
+    const midpoint = Math.floor((low + (high - low) / 2) / MINUTE_MS) * MINUTE_MS;
+    if (offsetAt(midpoint, timezone) === startOffset) low = midpoint;
+    else high = midpoint;
+  }
+  return high;
+}
+
+/** Build the UTC offset segments which can contain one local day. Probing at hour boundaries is
+ * deliberately independent of cron density; IANA offset regimes persist beyond an hour, while
+ * binary search locates each detected transition to the minute precision cron supports. */
+function offsetModel(year: number, month: number, day: number, timezone: string): OffsetSegment[] {
+  const key = `${timezone}\0${year}-${month}-${day}`;
+  const cached = offsetModels.get(key);
+  if (cached) {
+    offsetModels.delete(key);
+    offsetModels.set(key, cached);
+    return cached;
+  }
+
+  const localDay = Date.UTC(year, month - 1, day);
+  const start = localDay - OFFSET_WINDOW_MS;
+  const end = localDay + 24 * HOUR_MS + OFFSET_WINDOW_MS;
+  const segments: OffsetSegment[] = [];
+  let segmentStart = start;
+  let currentOffset = offsetAt(start, timezone);
+  for (let probe = start + HOUR_MS; probe <= end; probe += HOUR_MS) {
+    const nextOffset = offsetAt(probe, timezone);
+    if (nextOffset === currentOffset) continue;
+    const transition = transitionMinute(probe - HOUR_MS, probe, currentOffset, timezone);
+    segments.push({ start: segmentStart, end: transition, offset: currentOffset });
+    segmentStart = transition;
+    currentOffset = nextOffset;
+  }
+  segments.push({ start: segmentStart, end, offset: currentOffset });
+
+  offsetModels.set(key, segments);
+  if (offsetModels.size > MAX_OFFSET_MODELS) offsetModels.delete(offsetModels.keys().next().value!);
+  return segments;
+}
+
+/** Convert one local wall-clock minute using the existing four-step convergence policy, but answer
+ * offset lookups from the day's model instead of formatting every cron candidate. The convergence
+ * matters: repeated fall-back minutes resolve to one deterministic occurrence, and that occurrence
+ * can differ by zone; spring-forward gaps still fail the final equality check. */
+function localEpoch(parts: LocalParts, model: OffsetSegment[]): number | null {
+  const desired = localMinute(parts);
   let guess = desired;
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    const observed = localParts(guess, timezone);
-    const observedUtc = Date.UTC(observed.year, observed.month - 1, observed.day, observed.hour, observed.minute);
-    const delta = desired - observedUtc;
-    if (delta === 0) return sameLocal(observed, parts) ? guess : null;
+    const segment = model.find((candidate) => guess >= candidate.start && guess < candidate.end);
+    if (!segment) return null;
+    const observed = guess + segment.offset;
+    const delta = desired - observed;
+    if (delta === 0) return guess;
     guess += delta;
   }
-  return sameLocal(localParts(guess, timezone), parts) ? guess : null;
+  const segment = model.find((candidate) => guess >= candidate.start && guess < candidate.end);
+  return segment && guess + segment.offset === desired ? guess : null;
 }
 
 function dayMatches(parsed: ParsedCron, year: number, month: number, day: number): boolean {
@@ -159,9 +225,23 @@ export function nextCronFire(expression: string | ParsedCron, timezone: string, 
     const month = cursor.getUTCMonth() + 1;
     const day = cursor.getUTCDate();
     if (parsed.month.values.includes(month) && dayMatches(parsed, year, month, day)) {
+      const model = offsetModel(year, month, day, zone);
+      const minimumOffset = Math.min(...model.map((segment) => segment.offset));
+      const maximumOffset = Math.max(...model.map((segment) => segment.offset));
+      const lastMinute = parsed.minute.values.at(-1)!;
+      candidateLoop:
       for (const hour of parsed.hour.values) {
+        const hourEnd = Date.UTC(year, month - 1, day, hour, lastMinute);
+        if (hourEnd - minimumOffset <= after) continue;
         for (const minute of parsed.minute.values) {
-          const epoch = localEpoch({ year, month, day, hour, minute }, zone);
+          const parts = { year, month, day, hour, minute };
+          const desired = localMinute(parts);
+          // Offset bounds let dense schedules skip candidates that cannot pass the cursor or beat
+          // the current minimum. The bounds stay valid across fall-back overlaps, so correctness
+          // does not depend on wall-clock ordering matching instant ordering.
+          if (desired - minimumOffset <= after) continue;
+          if (best !== null && desired - maximumOffset >= best) break candidateLoop;
+          const epoch = localEpoch(parts, model);
           if (epoch !== null && epoch > after && (best === null || epoch < best)) best = epoch;
         }
       }

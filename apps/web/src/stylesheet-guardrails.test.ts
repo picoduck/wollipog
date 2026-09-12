@@ -534,6 +534,49 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
  */
 const CLASS_HELPERS = new Set(["clsx", "cn", "classNames", "classnames", "rowClass"]);
 
+/**
+ * Array methods whose OUTPUT elements are their receiver's elements.
+ *
+ * `["row", on ? "is-on" : ""].filter(Boolean).join(" ")` renders exactly the classes the array
+ * literal holds, but the `.join()` reader only followed its immediate receiver, so one chained
+ * call hid every class in the expression and reported all of them as dead CSS. Reading through
+ * these makes a chained `.join()` yield what a direct one yields, however many links deep.
+ *
+ * Kept separate from `CLASS_HELPERS`: those compose classes from their ARGUMENTS, these pass a
+ * RECEIVER along, and conflating the two would read a `.filter()` predicate as class text.
+ */
+const RELAY_METHODS = new Set(["filter", "flat"]);
+
+/**
+ * Array methods that REPLACE each element with whatever their callback returns.
+ *
+ * The receiver's own strings are therefore NOT rendered — `["ghost"].map(() => "row")` renders
+ * `row` and never `ghost` — so reading the receiver here would certify a dead `.ghost` rule as
+ * live, the exact inverse of the bug this fix exists to close. The one exception is a callback
+ * that hands the element straight back, which is how `.map((c) => c)` is used.
+ */
+const MAPPING_METHODS = new Set(["map", "flatMap"]);
+
+/** Nodes that wrap a value without changing it: parentheses and the type-only TypeScript forms. */
+function isTransparent(node: ts.Node): node is ts.ParenthesizedExpression | ts.AsExpression
+  | ts.SatisfiesExpression | ts.NonNullExpression | ts.TypeAssertion {
+  return ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)
+    || ts.isNonNullExpression(node) || ts.isTypeAssertionExpression(node);
+}
+
+/** Strip those wrappers so a check on the node's KIND sees what the value actually is. */
+function transparent(node: ts.Node | undefined): ts.Node | undefined {
+  let inner = node;
+  while (inner && isTransparent(inner)) inner = inner.expression;
+  return inner;
+}
+
+/** An async or generator function wraps its return value, so the value is not what it maps to. */
+function isWrappedResult(node: ts.ArrowFunction | ts.FunctionExpression): boolean {
+  const asyncModifier = node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword);
+  return Boolean(asyncModifier) || (!ts.isArrowFunction(node) && Boolean(node.asteriskToken));
+}
+
 export function classTokens(source: string, fileName = "input.tsx"): Set<string> {
   const out = new Set<string>();
   const add = (text: string) => {
@@ -557,7 +600,7 @@ export function classTokens(source: string, fileName = "input.tsx"): Set<string>
       for (const span of node.templateSpans) { add(span.literal.text); fromValue(span.expression); }
       return;
     }
-    if (ts.isParenthesizedExpression(node)) return fromValue(node.expression);
+    if (isTransparent(node)) return fromValue(node.expression);
     if (ts.isConditionalExpression(node)) {
       // Both arms are values. The CONDITION is not, and that is the whole point.
       fromValue(node.whenTrue);
@@ -580,6 +623,34 @@ export function classTokens(source: string, fileName = "input.tsx"): Set<string>
         : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
       // `[...].join(" ")` and the class-composition helpers pass their arguments through.
       if (name === "join") { fromValue(callee as ts.Node); return; }
+      const relays = RELAY_METHODS.has(name);
+      const maps = MAPPING_METHODS.has(name);
+      if ((relays || maps) && ts.isPropertyAccessExpression(callee)) {
+        // Only the FIRST argument is the callback. `map`/`flatMap` take a `thisArg` second, and
+        // reading that as class text would collect from something that never renders.
+        const callback = maps ? transparent(node.arguments[0]) : undefined;
+        // A relay passes its receiver's elements through, so keep reading down the chain — the
+        // next link is another relay, an array literal, or nothing, each already handled.
+        //
+        // A mapping does NOT relay, however its callback is written. Deciding whether one hands
+        // elements back means proving the parameter is the one returned, unshadowed, unreassigned
+        // and not overridden by a later completion — and getting that wrong certifies dead CSS as
+        // live, silently, because an over-collecting scan leaves the suite green.
+        //
+        // STATED LIMIT: this covers every pass-through, not only `(c) => c`. A callback returning
+        // the element on SOME paths — `(c) => keep ? c : ""` — also loses the receiver's classes,
+        // which are then reported as dead CSS. Nothing here pays that cost: the app has zero
+        // identity mapping callbacks and zero className expressions using map or flatMap at all.
+        // Under-reporting is recoverable by reading the failure; over-reporting is not, because
+        // nothing fails.
+        if (relays) fromValue(callee.expression);
+        // A mapping CALLBACK BODY is class text: `names.map((n) => classFor(n))` writes the class
+        // there and nowhere else. A `.filter()` PREDICATE is not — `c === "hidden"` names no class
+        // it renders — and `.flat()` takes a depth, so only mapping callbacks are read and the
+        // value-not-predicate rule stays intact.
+        if (callback) fromCallbackResult(callback);
+        return;
+      }
       if (CLASS_HELPERS.has(name)) { for (const argument of node.arguments) fromValue(argument); return; }
       return;
     }
@@ -590,6 +661,24 @@ export function classTokens(source: string, fileName = "input.tsx"): Set<string>
         if (ts.isPropertyAssignment(property) && ts.isStringLiteralLike(property.name)) add(property.name.text);
       }
     }
+  };
+
+  /** Collect from what a callback RETURNS — its concise body, or each `return` in its block. */
+  const fromCallbackResult = (input: ts.Node): void => {
+    const node = transparent(input);
+    if (!node || (!ts.isArrowFunction(node) && !ts.isFunctionExpression(node))) return;
+    // An async or generator callback does not map to what it returns: the element becomes a promise
+    // or an iterator, so `items.map(async () => "ghost")` renders neither `ghost` nor anything else
+    // a class scan should believe.
+    if (isWrappedResult(node)) return;
+    if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) { fromValue(node.body); return; }
+    const fromReturns = (inner: ts.Node): void => {
+      // A nested function returns to its own caller, not to the `.map()`, so stop at its boundary.
+      if (inner !== node.body && ts.isFunctionLike(inner)) return;
+      if (ts.isReturnStatement(inner)) { if (inner.expression) fromValue(inner.expression); return; }
+      ts.forEachChild(inner, fromReturns);
+    };
+    fromReturns(node.body);
   };
 
   const walk = (node: ts.Node): void => {
@@ -918,6 +1007,86 @@ test("classTokens takes values and refuses predicates", () => {
   assert.deepEqual([...classTokens('<b className={label ?? "untitled-row"} />')], ["untitled-row"]);
   assert.deepEqual([...classTokens('<b className={clsx("row", { "is-on": enabled })} />')], ["row", "is-on"]);
   assert.deepEqual([...classTokens('<b className={["row", "is-on"].join(" ")} />')], ["row", "is-on"]);
+});
+
+test("classTokens never takes a mapped-away element as a rendered class", () => {
+  // A mapping REPLACES each element, so the receiver's strings do not render and reading them
+  // would certify a dead rule as live — silently, because the suite stays green.
+  assert.deepEqual([...classTokens('<b className={["ghost"].map(() => "row").join(" ")} />')], ["row"]);
+  assert.deepEqual([...classTokens('<b className={["ghost"].flatMap(() => ["row"]).join(" ")} />')], ["row"]);
+  // STATED LIMIT: this holds even for an identity mapping, so `["row"].map((c) => c)` reports
+  // nothing. Recognising identity means proving the parameter is returned unshadowed,
+  // unreassigned and not overridden by a later completion, and every wrong answer there
+  // certifies dead CSS as live. Nothing here writes one: the app has zero identity mapping
+  // callbacks and zero className expressions using map at all. A limit that under-reports is
+  // worth more than reasoning that can silently over-report.
+  assert.deepEqual([...classTokens('<b className={["row"].map((c) => c).join(" ")} />')], []);
+  // The callback RESULT is still read, which is where a mapping writes its classes.
+  assert.deepEqual([...classTokens('<b className={kinds.map((k) => k ? "is-on" : "is-off").join(" ")} />')],
+    ["is-on", "is-off"]);
+  // The second argument is a `thisArg`, not another callback.
+  assert.deepEqual(
+    [...classTokens('<b className={["x"].map((c) => "row", function () { return "ghost"; }).join(" ")} />')],
+    ["row"]);
+  // An async callback maps to a promise and a generator to an iterator, so neither return renders.
+  assert.deepEqual([...classTokens('<b className={items.map(async () => "ghost").join(" ")} />')], []);
+  assert.deepEqual([...classTokens('<b className={items.map(function* () { return "ghost"; }).join(" ")} />')], []);
+});
+
+test("classTokens sees through wrappers that do not change a value", () => {
+  // `as`, `satisfies`, `!` and parentheses are type-level or grouping only. A scan that stops at
+  // them reports a rendered class as dead, which is the failure this whole relay fix addresses.
+  assert.deepEqual([...classTokens('<b className={["row"].filter(Boolean).join(" ") as string} />')], ["row"]);
+  assert.deepEqual([...classTokens('<b className={kinds.map((k) => "is-on" as const).join(" ")} />')], ["is-on"]);
+  assert.deepEqual([...classTokens('<b className={kinds.map((k) => "is-on" satisfies string).join(" ")} />')], ["is-on"]);
+  // A literal under the wrapper, so removing the non-null branch changes the RESULT, not just the
+  // route to it — an assertion that reads the same either way pins nothing.
+  assert.deepEqual([...classTokens('<b className={kinds.map((k) => "is-on"!).join(" ")} />')], ["is-on"]);
+  // `<string>x` is a type assertion only outside TSX, where the same text is a JSX element. A
+  // non-JSX file reaches the DOM by assigning className, which is a context the scanner reads.
+  assert.deepEqual(
+    [...classTokens('el.className = ["row"].filter(Boolean).join(" ") as string;', "input.ts")], ["row"]);
+  assert.deepEqual([...classTokens('el.className = <string>"is-on";', "input.ts")], ["is-on"]);
+  // A wrapper around the CALLBACK itself must not stop it being recognised as one.
+  assert.deepEqual([...classTokens('<b className={kinds.map(((k) => "is-on")).join(" ")} />')], ["is-on"]);
+});
+
+test("classTokens reads through array methods that relay class text", () => {
+  // A chained `.join()` has to yield what a direct one yields. It did not: the `.join()` reader
+  // followed exactly one link, so `.filter(Boolean)` in between made every class in the expression
+  // look like dead CSS — the single most common way this app builds a className.
+  const direct = [...classTokens('<b className={["row", on ? "is-on" : ""].join(" ")} />')];
+  assert.deepEqual(direct, ["row", "is-on"]);
+  assert.deepEqual([...classTokens('<b className={["row", on ? "is-on" : ""].filter(Boolean).join(" ")} />')],
+    direct);
+  assert.deepEqual([...classTokens('<b className={["row", ["is-on"]].flat().join(" ")} />')], direct);
+  // More than one link deep, in either order.
+  assert.deepEqual([...classTokens('<b className={["row", ["is-on"]].flat().filter(Boolean).join(" ")} />')],
+    direct);
+  // A mapping callback is where the class is written when the receiver holds data, not names.
+  assert.deepEqual([...classTokens('<b className={kinds.map((k) => k === "warn" ? "is-warn" : "is-calm").join(" ")} />')],
+    ["is-warn", "is-calm"]);
+  assert.deepEqual([...classTokens('<b className={kinds.map((k) => { if (k) { return "is-on"; } return "is-off"; }).join(" ")} />')],
+    ["is-on", "is-off"]);
+  assert.deepEqual([...classTokens('<b className={kinds.flatMap((k) => ["cell", k.wide ? "is-wide" : ""]).join(" ")} />')],
+    ["cell", "is-wide"]);
+  // The stem rule still holds through a relay: `driver-${id}` leaves `driver-`, which nothing renders.
+  assert.deepEqual([...classTokens('<b className={ids.map((id) => `driver-${id}`).join(" ")} />')], []);
+  // A bare `map(...)` is not an array relay, and reading its receiver would be reading nothing.
+  assert.deepEqual([...classTokens('<b className={map("row").join(" ")} />')], []);
+});
+
+test("classTokens refuses a filter predicate", () => {
+  // Reading through `.filter()` must stay a read of its RECEIVER. Its PREDICATE decides which
+  // classes survive; it does not name one. Taking `c === "hidden"` as class text would certify a
+  // dead `.hidden` rule as rendered — the same false evidence a comparison operand gives anywhere.
+  assert.deepEqual([...classTokens('<b className={["row"].filter((c) => c === "hidden").join(" ")} />')], ["row"]);
+  assert.deepEqual([...classTokens('<b className={["row"].filter((c) => c.startsWith("is-live")).join(" ")} />')],
+    ["row"]);
+  // The two above pass even if the predicate IS read, because `fromValue` already drops a
+  // comparison and a call. This one does not: `||` yields an operand, so `fromValue` would take
+  // "ghost" as class text. It is the case that tells a receiver-only read from an argument read.
+  assert.deepEqual([...classTokens('<b className={["row"].filter((c) => c || "ghost").join(" ")} />')], ["row"]);
 });
 
 test("classTokens sees producers that never touch a className attribute", () => {

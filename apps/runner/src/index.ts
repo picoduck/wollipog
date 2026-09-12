@@ -367,7 +367,7 @@ const metadata: RunnerMetadata = {
   version: VERSION,
   // Pre-discovery config rows go out verbatim so live discovery can still authoritatively
   // fill availability and capabilities; supported native agents gain the runner-owned preset.
-  agents: withOrchestratorPreset(configuredAgentDefinitions, { wslIsolationMode: config.executionIsolation.mode }),
+  agents: withOrchestratorPreset(configuredAgentDefinitions, { isolationMode: config.executionIsolation.mode }),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -571,6 +571,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         registerCredentialAndWait: registerAgentControlCredentialAndWait,
         orchestratorAgent: localAgent,
         executionIsolationMode: config.executionIsolation.mode,
+        orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
       },
       log,
       agentControlHost,
@@ -713,6 +714,8 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
       snapshot: projectSnapshotForCurrentProtocol(msg.snapshot),
     }, controlPlaneProtocolVersion);
   }
+  if (msg.type === "policy_hook_decision_recorded" &&
+      !runnerSupportsProtocol(controlPlaneProtocolVersion, "nativePolicyHookEvents")) return null;
   return projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion);
 }
 
@@ -1109,7 +1112,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       claudeHookFeatureEnabled,
       log,
     );
-    metadata.agents = withOrchestratorPreset(metadata.agents, { wslIsolationMode: config.executionIsolation.mode });
+    metadata.agents = withOrchestratorPreset(metadata.agents, { isolationMode: config.executionIsolation.mode });
     // A definitive native discovery result is newer authoritative evidence than the process-local
     // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
     // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.
@@ -1230,6 +1233,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      if (msg.runnerCapacity && runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) {
+        if (sessions.configureCapacity(msg.runnerCapacity)) {
+          metadata.runtime!.maxConcurrentSessions = msg.runnerCapacity.configuredUnits;
+        }
+      }
       log(`registered (heartbeat every ${msg.heartbeatIntervalMs}ms)`);
       if (ws) startHeartbeat(ws, msg.heartbeatIntervalMs);
       flushOutbox();
@@ -1254,6 +1262,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // dead), but OURS survived the socket blip — re-report every non-empty queue or those
       // prompts stay invisible and uncancelable until the queue next changes.
       sessions.reportQueues();
+      sessions.reportCapacity(true);
+      sessions.reportGovernanceTrips();
       sessions.recoverAllOrphanedWork();
       for (const receipt of durableCommands.recentUpdates()) sendDurableUpdate(receipt);
       for (const receipt of sessionCommandReceipts.recentUpdates()) sendSessionCommandUpdate(receipt);
@@ -1277,6 +1287,31 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`Claude hooks ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
       break;
+    case "record_policy_hook_decision": {
+      runCommandTask("record_policy_hook_decision", (async () => {
+        let recorded: Awaited<ReturnType<SessionManager["recordPolicyHookDecision"]>>;
+        try {
+          recorded = await sessions.recordPolicyHookDecision(msg.sessionId, msg.decision);
+        } catch (error) {
+          log(`policy-hook decision append ${msg.sessionId}: ${errText(error)}`);
+          recorded = {
+            accepted: false,
+            auditId: typeof msg.decision?.auditId === "string" ? msg.decision.auditId : "",
+            error: "decision history append failed",
+          };
+        }
+        sendUp({
+          type: "policy_hook_decision_recorded",
+          requestId: msg.requestId,
+          sessionId: msg.sessionId,
+          auditId: recorded.auditId,
+          accepted: recorded.accepted,
+          ...(recorded.eventSeq !== undefined ? { eventSeq: recorded.eventSeq } : {}),
+          ...(recorded.error ? { error: recorded.error } : {}),
+        });
+      })());
+      break;
+    }
     case "agent_control_credential_registered":
       try {
         const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
@@ -1604,7 +1639,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       void sessions
         .forkConversation(msg.sourceSessionId, msg.targetSessionId, msg.turn, msg.title, msg.deferHistory === true,
-          msg.handoff && destination ? { agent: destination, config: msg.handoff.config } : undefined)
+          msg.handoff && destination ? { agent: destination, config: msg.handoff.config } : undefined,
+          msg.recovery === true)
         .then((result) =>
           sendUp({
             type: "fork_result",
@@ -1614,6 +1650,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             snapshot: result.snapshot,
             events: result.events,
             handoffDraft: result.handoffDraft,
+            retainedPrompt: result.retainedPrompt,
           }),
         )
         .catch((err) =>
@@ -1631,7 +1668,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             phase,
           })
         : undefined;
-      const operation: Promise<{ snapshot: SessionSnapshot; worktree?: SessionWorktreeView }> = msg.operation === "create"
+      const operation: Promise<{
+        snapshot: SessionSnapshot;
+        worktree?: SessionWorktreeView;
+        isolation?: import("@wollipog/protocol").SessionWorktreeIsolationNotice;
+      }> = msg.operation === "create"
         ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress)
         : msg.operation === "attach"
           ? sessions.attachWorktree(msg.sessionId, msg.path)
@@ -1649,6 +1690,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ok: true,
         snapshot: result.snapshot,
         ...(result.worktree ? { worktree: result.worktree } : {}),
+        ...(result.isolation ? { isolation: result.isolation } : {}),
       })).catch((error) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,
@@ -1662,6 +1704,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "rediscover":
       log("rediscover requested");
       void runDiscovery(true);
+      break;
+    case "configure_runner_capacity":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) break;
+      if (sessions.configureCapacity(msg)) {
+        metadata.runtime!.maxConcurrentSessions = msg.configuredUnits;
+        log(`Runner Capacity updated to ${msg.configuredUnits} units (revision ${msg.revision})`);
+      }
       break;
     case "refresh_subscription_usage":
       if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) {
@@ -1917,14 +1966,19 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         consumeCancellation: (shellId) => pendingShellOpenCancellations.consume(shellId),
         sessionCanOpen: (sessionId) => sessions.sessionCanOpen(sessionId),
         resolveTarget: (sessionId) => sessionFilesTarget(sessionId),
+        targetError: (target) => sessionFilesTargetError(target),
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
         resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
+          executionIsolationMode: config.executionIsolation.mode,
+          prepareScratch: (prepared) => sessions.prepareOrchestratorScratch(prepared),
           provision: async (prepared) => {
             prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
             await provisionAgentControl(prepared, {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
+              executionIsolationMode: config.executionIsolation.mode,
+              orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
             }, log, agentControlHost);
             // Even the no-turn MCP configuration probe may initialize provider HOME.
             sessions.acquireAgentTuiProviderHome(prepared);
@@ -1982,9 +2036,10 @@ async function handleHostAction(msg: HostActionMessage): Promise<void> {
     root = msg.path;
     context = { kind: "native" };
   } else {
-    const target = msg.sessionId ? sessionFilesTarget(msg.sessionId) : null;
-    if (!target || target === "pending") {
-      return reply({ ok: false, error: target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session" });
+    const target = msg.sessionId ? await sessionFilesTarget(msg.sessionId) : null;
+    const targetError = sessionFilesTargetError(target);
+    if (targetError || !target || target === "pending" || "invalid" in target) {
+      return reply({ ok: false, error: targetError ?? "unknown session" });
     }
     root = target.root;
     context = target.context;
@@ -2000,20 +2055,48 @@ async function handleHostAction(msg: HostActionMessage): Promise<void> {
  * dashboard only ever names root-relative paths, in this box's own context (native or WSL).
  * "pending" while worktree setup is still in flight: falling back to repoPath in that window
  * would put a shell/browser in the shared base checkout while the agent lands in the worktree. */
-function sessionFilesTarget(sessionId: string): { root: string; context: AgentContext; meta: SessionMeta } | "pending" | null {
+async function sessionFilesTarget(
+  sessionId: string,
+): Promise<{ root: string; context: AgentContext; meta: SessionMeta } | "pending" | { invalid: string } | null> {
   const meta = store.readMeta(sessionId);
   if (!meta || store.isDeleted(sessionId)) return null;
   if (meta.worktreePending && !meta.worktreePath) return "pending";
-  return { root: meta.worktreePath ?? meta.repoPath, context: meta.context, meta };
+  // A selected worktree can disappear or be replaced between turns exactly as it can before a
+  // provider launch, and shells, the Native TUI, and Files would otherwise open on whatever now
+  // occupies the path — or report a bare ENOENT for a directory the user never chose.
+  const failure = await sessions.sessionWorktreeRootFailure(meta);
+  // Verification awaits Git. Answer with metadata read after that window, never the snapshot taken
+  // before it: a selection that moved, or a session deleted, while the proof was in flight would
+  // otherwise be served the coordinate that was proved instead of the one now recorded.
+  const latest = store.readMeta(sessionId);
+  if (!latest || store.isDeleted(sessionId)) return null;
+  if ((latest.worktreePath ?? null) !== (meta.worktreePath ?? null)) {
+    return { invalid: "the session's worktree selection changed while it was being verified — try again" };
+  }
+  if (failure) {
+    return { invalid: `the session's worktree could not be verified: ${failure}` +
+      ` — restore ${latest.worktreePath} or select another worktree for this session` };
+  }
+  return { root: latest.worktreePath ?? latest.repoPath, context: latest.context, meta: latest };
+}
+
+/** The unusable outcomes of sessionFilesTarget(), as one error string. */
+function sessionFilesTargetError(
+  target: Awaited<ReturnType<typeof sessionFilesTarget>>,
+): string | null {
+  if (target === "pending") return WORKTREE_PENDING_ERROR;
+  if (!target) return "unknown session";
+  return "invalid" in target ? target.invalid : null;
 }
 
 const WORKTREE_PENDING_ERROR = "the session's worktree is still being prepared — try again in a moment";
 
 async function handleListSessionFiles(msg: ListSessionFilesRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "list_session_files_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "list_session_files_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     const listing = await listSessionFiles(target.context, target.root, msg.path);
@@ -2024,10 +2107,11 @@ async function handleListSessionFiles(msg: ListSessionFilesRequestMessage): Prom
 }
 
 async function handleReadSessionFile(msg: ReadSessionFileRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     const file = await readSessionFile(target.context, target.root, msg.path);
@@ -2038,10 +2122,11 @@ async function handleReadSessionFile(msg: ReadSessionFileRequestMessage): Promis
 }
 
 async function handleSearchWorkspaceReferences(msg: SearchWorkspaceReferencesRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     const found = await searchWorkspaceReferences(target.context, target.root, msg.query);
@@ -2052,10 +2137,11 @@ async function handleSearchWorkspaceReferences(msg: SearchWorkspaceReferencesReq
 }
 
 async function handleCreateWorkspaceReference(msg: CreateWorkspaceReferenceRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     await inspectWorkspaceReferenceDiff(msg.target, (scope) =>

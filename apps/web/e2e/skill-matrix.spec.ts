@@ -33,6 +33,16 @@ test("capable Windows machines offer WSL agents for direct assignment", async ({
   await dialog.getByRole("button", { name: /^Agents:/ }).click();
   await expect(page.getByRole("option", { name: "WSL Codex", exact: true })).toBeVisible();
 });
+test("unsupported WSL reconciliation detail is visible in the assignment matrix", async ({ page }) => {
+  const detail = "this agent's WSL distribution name is invalid or unsafe";
+  await installSkillMatrixFixture(page, { wslUnsupportedDetail: detail });
+  await page.goto("/skills-removals-e2e.html?matrix=1&wslSkills=1");
+  await page.getByRole("button", { name: /code-review/i }).click();
+  const row = page.getByRole("region", { name: "Machine × Agents", exact: true })
+    .getByRole("row", { name: /^WSL Codex / }).first();
+  await expect(row).toHaveAccessibleName(/^WSL Codex Agent Invocable Unsupported/);
+  await expect(row).toContainText(detail);
+});
 for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
   test(`matrix shows targeting, reports and pins at ${width} in ${theme}`, async ({ page }, info) => {
     await installSkillMatrixFixture(page);

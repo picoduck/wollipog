@@ -14,7 +14,13 @@ import type {
   SessionNamingRunnerErrorCode,
   SessionNamingSettingsView,
 } from "@wollipog/protocol";
-import { runnerSupportsProtocol, sessionNamingAgentFailureCode } from "@wollipog/protocol";
+import {
+  runnerSupportsProtocol,
+  sessionNamingAgentFailureCode,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
+  SESSION_NAMING_TRANSPORT_MARGIN_MS,
+} from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import {
   isRunnerRequestNotSentError,
@@ -613,11 +619,22 @@ export class SessionNamingSettings {
     return explicit !== null || (mode === "session_agent_account" && this.sessionAgentTarget(sessionId) !== null);
   };
 
-  timeoutForSession = (sessionId: string): number => {
+  /** Complete wall-clock budget the runner is given for one naming request: a bounded preparation
+   * allowance plus the provider's generation allowance. A custom endpoint keeps its own configured
+   * budget, which the operator already sized for that endpoint. */
+  runnerBudgetForSession = (sessionId: string): number => {
     const organizationId = this.organizationIdForSession(sessionId);
-    if (!organizationId || this.effectiveMode(organizationId) !== "custom_model_endpoint") return 5_000;
+    if (!organizationId || this.effectiveMode(organizationId) !== "custom_model_endpoint") {
+      return SESSION_NAMING_RUNNER_BUDGET_MS;
+    }
     return this.db.getSessionNamingCustomModel(organizationId)?.timeoutMs ?? this.environment.timeoutMs;
   };
+
+  /** Control-plane supervision budget: the outermost control-plane deadline for a naming request.
+   * It is strictly larger than the runner request deadline, which is itself strictly larger than
+   * the runner's own budget, so no outer layer can expire before the deadline it supervises. */
+  timeoutForSession = (sessionId: string): number =>
+    this.runnerBudgetForSession(sessionId) + SESSION_NAMING_SUPERVISION_MARGIN_MS;
 
   revisionForSession = (sessionId: string): string => {
     const organizationId = this.organizationIdForSession(sessionId);
@@ -861,7 +878,7 @@ export class SessionNamingSettings {
         mode: "custom_model_endpoint",
         messages: request.messages.map((message) => ({ role: message.role, text: message.text })),
         timeoutMs: custom.timeoutMs,
-      }, custom.timeoutMs + 1_000);
+      }, custom.timeoutMs + SESSION_NAMING_TRANSPORT_MARGIN_MS);
       const result = await new Promise<GenerateSessionTitleResultMessage>((resolve, reject) => {
         const aborted = () => {
           this.hub?.cancelRunnerRequest?.(target.runner.runnerId, requestId);
@@ -904,6 +921,7 @@ export class SessionNamingSettings {
       throw new SessionTitleGenerationError("session_unavailable", "preflight");
     }
     const requestId = `session_name_${randomUUID()}`;
+    const runnerBudgetMs = this.runnerBudgetForSession(request.sessionId);
     const resultPromise = this.hub.requestFromRunner(target.runner.runnerId, requestId, {
       type: "generate_session_title",
       requestId,
@@ -917,8 +935,8 @@ export class SessionNamingSettings {
         },
       } : {}),
       messages: request.messages.map((message) => ({ role: message.role, text: message.text })),
-      timeoutMs: this.timeoutForSession(request.sessionId),
-    }, this.timeoutForSession(request.sessionId) + 1_000);
+      timeoutMs: runnerBudgetMs,
+    }, runnerBudgetMs + SESSION_NAMING_TRANSPORT_MARGIN_MS);
     const result = await new Promise<GenerateSessionTitleResultMessage>((resolve, reject) => {
       const aborted = () => {
         this.hub?.cancelRunnerRequest?.(target.runner.runnerId, requestId);

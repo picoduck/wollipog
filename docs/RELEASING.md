@@ -132,6 +132,20 @@ GitHub, replace the generic draft body with release notes, review upgrade behavi
 limitations, sanity-check the exact 34-asset inventory and `SHA256SUMS`, and **Publish**. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
 as a GitHub pre-release automatically.
 
+After publishing, reconcile the repository's security advisories with the release. For every
+published advisory whose `patched_versions` is empty, check whether the tagged commit contains the
+fix (`git merge-base --is-ancestor <fix-commit> vX.Y.Z`) and, if it does, set the patched version
+to `X.Y.Z` on the advisory (Security tab, or
+`gh api -X PATCH repos/picoduck/wollipog/security-advisories/<GHSA-id>` with the `vulnerabilities`
+array). An advisory published from a private fork does not learn about the release on its own:
+GHSA-7w29-232x-g886 shipped its fix in v0.23.0 and still advertised "no patched version" two days
+later, until a maintenance sweep noticed.
+
+```bash
+gh api repos/picoduck/wollipog/security-advisories \
+  --jq '.[] | select(.state == "published") | select(any(.vulnerabilities[]; .patched_versions == null)) | .ghsa_id'
+```
+
 ## Test build without tagging
 
 Actions → **Release** → **Run workflow**, and pick the branch (or tag) to build from the ref

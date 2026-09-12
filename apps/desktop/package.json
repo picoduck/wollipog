@@ -1,6 +1,6 @@
 {
   "name": "@wollipog/desktop",
-  "version": "0.22.0",
+  "version": "0.24.0",
   "private": true,
   "license": "Apache-2.0",
   "description": "Tauri desktop shell wrapping the Wollipog web UI in a native window",
@@ -12,8 +12,8 @@
     "bundle": "tauri build"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.1.0",
-    "esbuild": "^0.25.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "esbuild": "^0.28.2",
     "postject": "^1.0.0-alpha.6"
   }
 }

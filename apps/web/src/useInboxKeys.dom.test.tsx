@@ -38,6 +38,9 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   const action = (name: keyof InboxKeyActions) => () => calls.push(name);
   const actions: InboxKeyActions = {
     next: action("next"), previous: action("previous"), expand: action("expand"),
+    openTopRequest: action("openTopRequest"), toggleThread: action("toggleThread"),
+    toggleAllThreads: action("toggleAllThreads"), goToParent: action("goToParent"),
+    expandThread: action("expandThread"), collapseThread: action("collapseThread"),
     fork: action("fork"),
     nextSplit: action("nextSplit"), previousSplit: action("previousSplit"),
     approve: action("approve"), deny: action("deny"), archive: action("archive"),
@@ -63,6 +66,15 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "f", bubbles: true }));
   assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"]);
+  // Threads (#896): t, Shift+T, p, and the arrow pair, plus F2 for the top request.
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "t", bubbles: true }));
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "T", shiftKey: true, bubbles: true }));
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "p", bubbles: true }));
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "F2", bubbles: true }));
+  assert.deepEqual(calls.slice(6), ["toggleThread", "toggleAllThreads", "goToParent", "expandThread", "collapseThread", "openTopRequest"]);
+  calls.length = 6;
 
   const composer = container.querySelector<HTMLTextAreaElement>('[aria-label="Composer"]')!;
   composer.focus();

@@ -58,7 +58,7 @@ test("direct steering availability requires every UI-known affirmative gate", ()
     [{ supportsSteering: undefined }, /has not verified/i],
     [{ policyPaused: true }, /guardrail decision/i],
     [{ inputPending: true }, /pending agent input/i],
-    [{ queueHeld: true }, /resume the held queue/i],
+    [{ queueHeld: true }, /turn to settle or resolve the visible control-plane decision/i],
     [{ stopPending: true }, /stop request to settle/i],
     [{ sessionStatus: "idle" }, /active provider turn/i],
     [{ sessionStatus: "starting" }, /active provider turn/i],

@@ -27,6 +27,19 @@ import "../styles.css";
 
 const SCHEMES = ["wollipog", ...COLOR_SCHEMES.map((s) => s.value).filter((v) => v !== "wollipog")];
 
+// Establish every root-level cascade input before React creates descendants that consume the
+// custom properties. Changing these during render let Chromium 153 briefly retain dark computed
+// colours on parts of a light tree, depending on where React yielded during the commit.
+const params = new URLSearchParams(window.location.search);
+const theme = params.get("theme") === "light" ? "light" : "dark";
+const scheme = SCHEMES.includes(params.get("scheme") ?? "") ? params.get("scheme")! : "wollipog";
+document.documentElement.setAttribute("data-theme", theme);
+const density = params.get("density") === "comfortable" ? "comfortable" : "compact";
+if (density === "compact") document.documentElement.removeAttribute("data-density");
+else document.documentElement.setAttribute("data-density", density);
+if (scheme === "wollipog") document.documentElement.removeAttribute("data-scheme");
+else document.documentElement.setAttribute("data-scheme", scheme);
+
 const nativeRunner: RunnerView = {
   runnerId: "fixture-native-runner",
   displayName: "Native Workstation",
@@ -66,18 +79,6 @@ const noopRunnerAction = () => {};
 const noopBoxAction = async () => {};
 
 function Sample() {
-  const params = new URLSearchParams(window.location.search);
-  const theme = params.get("theme") === "light" ? "light" : "dark";
-  const scheme = SCHEMES.includes(params.get("scheme") ?? "") ? params.get("scheme")! : "wollipog";
-  document.documentElement.setAttribute("data-theme", theme);
-  // Density is a third axis, and the harness renders it so the spec can measure that Comfortable
-  // actually IS roomier rather than merely declaring different tokens.
-  const density = params.get("density") === "comfortable" ? "comfortable" : "compact";
-  if (density === "compact") document.documentElement.removeAttribute("data-density");
-  else document.documentElement.setAttribute("data-density", density);
-  if (scheme === "wollipog") document.documentElement.removeAttribute("data-scheme");
-  else document.documentElement.setAttribute("data-scheme", scheme);
-
   return (
     <div className="app">
       <main className="main">

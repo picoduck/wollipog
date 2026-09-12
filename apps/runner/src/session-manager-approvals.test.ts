@@ -90,6 +90,190 @@ test("delivered approval emits exactly one permission_resolved and flips box met
   }
 });
 
+test("provider-initiated turn settlement restores idle after an answered approval", () => {
+  const { sm, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:1");
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "provider-ask",
+      title: "Bash: pwd",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Reject", kind: "reject_once" },
+      ],
+    });
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+    sm.resolvePermission("s_perm", "provider-ask", "allow");
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:1");
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("provider-initiated turns enforce governance without claiming the runner queue drain", () => {
+  const { sm, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    let cancellations = 0;
+    entry.client.cancel = () => { cancellations += 1; };
+    store.patchMeta("s_perm", { config: { maxToolCalls: 1 } });
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:1");
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "tool_call",
+      toolCallId: "provider-tool",
+      title: "Bash",
+      toolKind: "execute",
+      status: "in_progress",
+    });
+
+    assert.equal(entry.running, false);
+    assert.equal(entry.providerInitiatedTurnActive, true);
+    assert.equal(cancellations, 1);
+    assert.equal(entry.governanceTripped, "max_tool_calls");
+  } finally {
+    cleanup();
+  }
+});
+
+test("provider-initiated settlement preserves a pending request owned by another lifecycle", () => {
+  const { sm, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = true;
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:2");
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "provider-ask",
+      title: "Bash: pwd",
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+    });
+    // A recovery/authentication lifecycle can replace the provider-owned card before the turn's
+    // result arrives. Settlement must not confuse that current card with its own request.
+    store.patchMeta("s_perm", {
+      status: "input_required",
+      pendingApproval: {
+        requestId: "recovered-question",
+        title: "Choose a recovery path",
+        options: [],
+        kind: "question",
+        questions: [{ id: "path", question: "Which path?", options: [], required: true }],
+      },
+    });
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:2");
+
+    const pending = store.readMeta("s_perm")?.pendingApproval;
+    assert.equal(pending?.requestId, "recovered-question");
+    assert.equal(pending?.additionalRequests, undefined);
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+  } finally {
+    cleanup();
+  }
+});
+
+test("provider-initiated settlement restores running while a queued runner turn drains", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  const entry = (sm as any).active.get("s_perm");
+  let finishPrompt: ((value: "end_turn") => void) | undefined;
+  try {
+    entry.running = false;
+    entry.client.prompt = () => new Promise<"end_turn">((resolve) => {
+      finishPrompt = resolve;
+    });
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:queued");
+    sm.prompt("s_perm", "queued behind provider turn");
+    for (let attempt = 0; attempt < 200 && !finishPrompt; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.ok(finishPrompt, "the queued runner turn owns the active drain");
+
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "provider-ask",
+      title: "Bash: pwd",
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+    });
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:queued");
+
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+    assert.equal(sent.filter((message) => message.type === "session_status").at(-1)?.status, "running");
+  } finally {
+    finishPrompt?.("end_turn");
+    for (let attempt = 0; attempt < 200 && entry.running; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    cleanup();
+  }
+});
+
+test("provider-initiated turns reject stale interrupts and resume the queued FIFO after settlement", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    let cancellations = 0;
+    const prompts: string[] = [];
+    entry.client.cancel = () => { cancellations += 1; };
+    entry.client.prompt = async (text: string) => { prompts.push(text); return "end_turn" as const; };
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:3");
+    const activeQueue = sent.filter((message) => message.type === "session_queue").at(-1);
+    assert.equal(activeQueue?.activeTurnId, "provider:3");
+    assert.equal(sm.interruptTurn("s_perm", "provider:stale"), "stale_turn");
+    assert.equal(sm.interruptTurn("s_perm", "provider:3"), "applied");
+    assert.equal(cancellations, 1);
+    sm.prompt("s_perm", "queued after provider turn");
+    assert.equal(entry.queue.length, 1);
+    assert.deepEqual(prompts, []);
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:3");
+    for (let attempt = 0; attempt < 200 && prompts.length === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(sent.filter((message) => message.type === "session_queue").at(-1)?.activeTurnId, undefined);
+    assert.equal(eventsOf(sent, "turn_interrupted").length, 1);
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.equal(entry.interruptRequested, false);
+    assert.deepEqual(prompts, ["queued after provider turn"]);
+    assert.deepEqual(entry.queue, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("legacy cancellation of an idle provider turn does not discard the next runner prompt", () => {
+  const { sm, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    let cancellations = 0;
+    entry.client.cancel = () => { cancellations += 1; };
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:4");
+    sm.cancel("s_perm");
+
+    assert.equal(cancellations, 1);
+    assert.equal(entry.cancelRequested, false);
+  } finally {
+    cleanup();
+  }
+});
+
 test("approval turnaround telemetry contains duration and dimensions, never session/request content", () => {
   const { sm, sent, cleanup } = makeHarness(true);
   try {

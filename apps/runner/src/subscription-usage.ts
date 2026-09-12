@@ -287,7 +287,6 @@ export function normalizeClaudeRateLimits(
   const root = record(payload);
   if (!root) return null;
   const buckets: SubscriptionUsageBucket[] = [];
-  const claimed = new Set<string>();
   const info = record(root.rate_limit_info ?? root.rateLimitInfo);
   if (info) {
     // `unifiedWindows` is where Claude Code actually reports per-window utilization: one entry per
@@ -313,7 +312,6 @@ export function normalizeClaudeRateLimits(
       const bucket = claudeWindow(rawId, isLimiting ? { ...window, status: info.status } : window, fetchedAt);
       if (!bucket) continue;
       unifiedIds.add(bucket.id);
-      claimed.add(bucket.id);
       buckets.push(bucket);
     }
     // Fold the top-level pair into the window it names. Emitting it separately would stand a
@@ -321,24 +319,12 @@ export function normalizeClaudeRateLimits(
     // arrives for a window `unifiedWindows` already describes.
     if (!limitingId || !unifiedIds.has(limitingId)) {
       const bucket = claudeWindow(limitingId ?? "subscription", info, fetchedAt);
-      if (bucket) {
-        claimed.add(bucket.id);
-        buckets.push(bucket);
-      }
-    }
-  }
-  // `rate_limits` is a forward-compatibility shape no shipping Claude Code emits, so it neither
-  // overrides a window `rate_limit_info` already described nor crowds one out of the control
-  // plane's bucket bound: it is read last, skips claimed ids, and takes only spare capacity.
-  const structured = record(root.rate_limits ?? root.rateLimits);
-  if (structured) {
-    for (const [id, value] of Object.entries(structured)) {
-      if (buckets.length >= MAX_PROVIDER_BUCKETS) break;
-      const bucket = claudeWindow(id, value, fetchedAt);
-      if (bucket && !claimed.has(bucket.id)) buckets.push(bucket);
+      if (bucket) buckets.push(bucket);
     }
   }
   if (buckets.length === 0) return null;
+  // The fallback bucket above can still land on an id a unified window already used — a payload
+  // naming no `rateLimitType` while carrying a `subscription` window does exactly that.
   const deduped = new Map<string, SubscriptionUsageBucket>();
   // Records inside one payload are equally current, so this is a plain field merge: ordering
   // rules belong only to sparse notifications arriving across events.
@@ -348,8 +334,8 @@ export function normalizeClaudeRateLimits(
     provider: "claude",
     state: "available",
     fetchedAt,
-    // Deduplication can only shrink the list, but the cap is what the control plane enforces:
-    // it rejects a snapshot above this many buckets and drops the whole update.
+    // Unified windows are already bounded, but the fallback bucket can put the total one over.
+    // The control plane rejects a snapshot above this many buckets and drops the whole update.
     buckets: [...deduped.values()].slice(0, MAX_PROVIDER_BUCKETS),
   };
 }

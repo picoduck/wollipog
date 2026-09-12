@@ -222,6 +222,28 @@ test("provisioning writes protected composable settings and reuses generic runne
   });
 });
 
+test("Orchestrator never provisions or advertises the disabled policy-hook transport", () => {
+  temp((dir) => {
+    const launch = spec({
+      config: { permissionMode: "orchestrator" },
+      capabilities: {
+        ...capabilities,
+        permissionModes: [...capabilities.permissionModes, "dontAsk", "orchestrator"],
+        elicitation: { ...capabilities.elicitation, dontAsk: ["none"] },
+      },
+    });
+    const registrations: string[] = [];
+    provisionClaudeHooks(launch, {
+      ...config,
+      registerCredential: (_sessionId, tokenHash) => registrations.push(tokenHash),
+    }, () => {}, host(dir));
+    assert.deepEqual(registrations, []);
+    assert.equal(existsSync(claudeHookSettingsPath(dir, launch.sessionId)), false);
+    assert.equal(launch.args.includes("--settings"), false);
+    assert.deepEqual(launch.capabilities?.elicitation?.dontAsk, ["none"]);
+  });
+});
+
 test("policy-hook HTTP transport requires the propagated remote plaintext acknowledgement", () => {
   temp((dir) => {
     const remote = { ...config, controlPlaneUrl: "ws://manager.example.test/runner" };

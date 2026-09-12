@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Virtualizer } from "@tanstack/react-virtual";
 import * as React from "react";
 import { createRef } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -45,9 +46,6 @@ test("logical index fallback survives key churn and clamps to the nearest surviv
 test("late row measurements retain TanStack positional scroll semantics", () => {
   const base = {
     scrollOffset: 500,
-    scrollAdjustments: 0,
-    measured: true,
-    scrollDirection: "forward" as const,
     anchorPending: false,
   };
   assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400 }), true,
@@ -56,12 +54,46 @@ test("late row measurements retain TanStack positional scroll semantics", () => 
     "a late overscanned row below the viewport must not move the reader");
   assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, anchorPending: true }), false,
     "the explicit logical anchor owns corrections while it is pending");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, scrollDirection: "backward" }), true,
-    "an old-width measured row above the viewport compensates while the reader moves backward");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, measured: false, scrollDirection: "backward" }), true,
-    "a first measurement above the viewport still corrects its estimate");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 540, scrollAdjustments: 50 }), true,
-    "TanStack's accumulated batch adjustments extend the effective viewport offset");
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 500 }), false,
+    "a row beginning at the viewport boundary does not need compensation");
+});
+
+test("sequential TanStack measurements fold each adjustment into the public offset", () => {
+  const scrollTargets: number[] = [];
+  const predicateInputs: Array<{ itemStart: number; scrollOffset: number }> = [];
+  const virtualizer = new Virtualizer<Element, Element>({
+    count: 10,
+    getScrollElement: () => null,
+    estimateSize: () => 100,
+    initialRect: { width: 300, height: 200 },
+    initialOffset: 500,
+    observeElementRect: () => () => {},
+    observeElementOffset: () => () => {},
+    scrollToFn: (offset, { adjustments = 0 }) => {
+      scrollTargets.push(offset + adjustments);
+    },
+  });
+  virtualizer.scrollOffset = 500;
+  virtualizer.getTotalSize();
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    const scrollOffset = instance.scrollOffset ?? 0;
+    predicateInputs.push({ itemStart: item.start, scrollOffset });
+    return shouldAdjustVirtualScrollForResize({
+      itemStart: item.start,
+      scrollOffset,
+      anchorPending: false,
+    });
+  };
+
+  virtualizer.resizeItem(0, 180);
+  virtualizer.resizeItem(4, 180);
+
+  assert.deepEqual(predicateInputs, [
+    { itemStart: 0, scrollOffset: 500 },
+    { itemStart: 400, scrollOffset: 580 },
+  ]);
+  assert.deepEqual(scrollTargets, [580, 660]);
+  assert.equal(virtualizer.scrollOffset, 660);
 });
 
 test("width invalidation rebuilds estimates before restoring mounted DOM heights", () => {

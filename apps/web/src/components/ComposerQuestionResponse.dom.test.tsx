@@ -162,6 +162,42 @@ test("Composer Answer Mode renders rich question text and compact plain links", 
   }
 });
 
+test("an unsupported Composer Response keeps focus while remaining non-editable", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Harness
+      client={{ ...api } as ApiClient}
+      requestId="ask-unsupported"
+      questions={[{
+        id: "legacy",
+        question: "Legacy question without a response schema",
+        options: [],
+      }]}
+    />));
+
+    const input = container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(input);
+    input.focus();
+    assert.equal(domWindow.document.activeElement, input);
+    assert.equal(input.readOnly, true);
+    assert.equal(input.disabled, false);
+    assert.equal(input.getAttribute("aria-disabled"), "true");
+    const help = container.querySelector<HTMLElement>(`#${input.getAttribute("aria-describedby")}`);
+    assert.match(help?.textContent ?? "", /question format is unsupported/);
+
+    await act(async () => {
+      input.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "1", bubbles: true }) as never);
+    });
+    assert.equal(input.value, "");
+    assert.equal(domWindow.document.activeElement, input);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("Enter keeps invalid input focused and submits one deterministic choice through the exact request", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

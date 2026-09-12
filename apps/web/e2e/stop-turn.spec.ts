@@ -39,15 +39,24 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   await page.keyboard.press("Shift+Escape");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(1);
 
-  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha"));
-  await expect(page.getByText("Interrupted", { exact: true })).toBeVisible();
-  await expect(page.getByText("Held", { exact: true })).toHaveAttribute(
-    "title",
-    "Held after stopping the active turn; send another prompt to resume",
-  );
   await composer.focus();
   await page.keyboard.press("ArrowUp");
   await expect(composer).toHaveValue("Preserve this queued prompt");
+  await composer.fill("");
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha"));
+  await expect(page.getByText("Interrupted", { exact: true })).toBeVisible();
+  await expect(page.getByText("Held", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("queued-prompt-queued-1")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => {
+    const session = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
+      .find((candidate) => candidate.id === "session-alpha");
+    return { status: session?.status, activeTurnId: session?.activeTurnId, queued: session?.queued ?? [] };
+  })).toEqual({ status: "running", activeTurnId: "queued-1", queued: [] });
+  await composer.focus();
+  await page.keyboard.press("ArrowUp");
+  await expect(composer).toHaveValue("Preserve this queued prompt");
+  await composer.fill("");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
     status: "running",

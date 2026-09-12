@@ -7,15 +7,15 @@ export function ProjectChildDefaults({ project, disabled, onSave }: {
   disabled: boolean;
   onSave: (defaults: ChildSessionDefaults | null) => Promise<unknown>;
 }) {
-  const [cost, setCost] = useState(String(project.childSessionDefaults?.costBudgetUsd ?? 5));
-  const [tools, setTools] = useState(String(project.childSessionDefaults?.maxToolCalls ?? 100));
+  const [cost, setCost] = useState(project.childSessionDefaults ? String(project.childSessionDefaults.costBudgetUsd) : "");
+  const [tools, setTools] = useState(project.childSessionDefaults ? String(project.childSessionDefaults.maxToolCalls) : "");
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (dirty || saving) return;
-    setCost(String(project.childSessionDefaults?.costBudgetUsd ?? 5));
-    setTools(String(project.childSessionDefaults?.maxToolCalls ?? 100));
+    setCost(project.childSessionDefaults ? String(project.childSessionDefaults.costBudgetUsd) : "");
+    setTools(project.childSessionDefaults ? String(project.childSessionDefaults.maxToolCalls) : "");
   }, [project.childSessionDefaults?.costBudgetUsd, project.childSessionDefaults?.maxToolCalls, dirty, saving]);
   const submit = async (defaults: ChildSessionDefaults | null) => {
     setSaving(true);
@@ -26,7 +26,7 @@ export function ProjectChildDefaults({ project, disabled, onSave }: {
   };
   return <section className="project-detail-section" aria-labelledby="child-defaults-heading">
     <h3 id="child-defaults-heading">Child Session Defaults</h3>
-    <p>Agent-created children use these allowances when the parent has no limit. A bounded parent’s remaining allowance takes precedence. These are per-child limits, not a combined budget for the session tree.</p>
+    <p>These fallback per-child limits apply when the caller omits them. A bounded parent’s remaining allowance is always the ceiling. Without Project defaults, omitted limits remain unlimited for an unbounded parent.</p>
     <form className="project-name-form" onSubmit={(event) => {
       event.preventDefault();
       const costBudgetUsd = Number(cost);
@@ -39,17 +39,17 @@ export function ProjectChildDefaults({ project, disabled, onSave }: {
       void submit({ costBudgetUsd, maxToolCalls });
     }}>
       <label className="field"><span>Child Cost Limit (USD)</span>
-        <input type="number" min="0" step="any" required value={cost} disabled={disabled || saving}
+        <input type="number" min="0" step="any" required value={cost} placeholder="No Default" disabled={disabled || saving}
           onChange={(event) => { setCost(event.target.value); setDirty(true); }} />
       </label>
       <label className="field"><span>Child Tool-Call Limit</span>
-        <input type="number" min="1" step="1" required value={tools} disabled={disabled || saving}
+        <input type="number" min="1" step="1" required value={tools} placeholder="No Default" disabled={disabled || saving}
           onChange={(event) => { setTools(event.target.value); setDirty(true); }} />
       </label>
       <button className="btn" type="submit" disabled={disabled || saving}>{saving ? "Saving…" : "Save Child Defaults"}</button>
     </form>
     {error && <p role="alert" className="form-error">{error}</p>}
     <button className="btn" type="button" disabled={disabled || saving || !project.childSessionDefaults}
-      onClick={() => void submit(null)}>Use Installation Defaults</button>
+      onClick={() => void submit(null)}>Remove Child Defaults</button>
   </section>;
 }

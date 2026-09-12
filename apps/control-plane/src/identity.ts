@@ -113,7 +113,12 @@ export function agentCredentialSessionTargetError(
   // All agent credentials are confined here, not only the optional orchestrator preset.
   // The caller computes ancestry from server-owned records; visibility is checked separately.
   const descendantMutation = routePath === "/api/sessions/:id/prompt" ||
-    routePath === "/api/sessions/:id/stop" || routePath === "/api/sessions/:id/archive";
+    routePath === "/api/sessions/:id/stop" || routePath === "/api/sessions/:id/restart" ||
+    routePath === "/api/sessions/:id/config" || routePath === "/api/sessions/:id/archive";
+  // The config service permits a self-target only for maxChildSessions, so a live orchestrator can
+  // raise its own delegation concurrency without gaining authority over its spend/tool ceilings.
+  if (routePath === "/api/sessions/:id/config" &&
+      principal.credentialSessionId === targetSessionId) return null;
   if (descendantMutation || (principal.orchestrator && worktreeRoute)) {
     return principal.credentialSessionId && targetIsDescendant &&
       targetSessionId !== principal.credentialSessionId ? null : "the session credential may manage only its descendants";

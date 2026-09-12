@@ -15,6 +15,8 @@ import type {
   AcpSessionContextConfig,
 } from "@wollipog/protocol";
 import type { SpawnIsolation } from "../spawn.js";
+import type { PoisonedProviderHistory } from "./poisoned-provider-history.js";
+import type { ProviderRejectionShape } from "./provider-rejection-shape.js";
 
 declare const preparedDriverCommandBrand: unique symbol;
 
@@ -107,6 +109,9 @@ export interface DriverCallbacks {
   onBackgroundWork?: (update: DriverBackgroundWorkUpdate) => void;
   /** Exact provider input acknowledgement for the currently active prompt. */
   onPromptAccepted?: () => void;
+  /** A persistent provider began or settled a turn without a runner prompt owning it. The session
+   * manager uses this to keep status, approvals, and governance aligned with the live turn. */
+  onProviderInitiatedTurn?: (state: "started" | "settled", turnId: string) => void;
   /** The provider proved that its resumable conversation coordinate exists. Drivers must not
    * emit this for a locally minted id until provider initialization confirms it. */
   onSessionEstablished?: (providerSessionId: string) => void;
@@ -115,6 +120,15 @@ export interface DriverCallbacks {
   /** A harness request proved that its provider credentials need user action. Raw provider text
    * stays inside the driver because it can contain secrets or authorization URLs. */
   onAuthenticationFailure?: () => void;
+  /** The provider rejected an item already stored in its own conversation history, before
+   * inference. That thread can never accept another turn, so the manager must quarantine it
+   * instead of retrying, continuing, or compacting. Structure only: the offending value stays
+   * inside the driver. */
+  onProviderHistoryUnrecoverable?: (detail: PoisonedProviderHistory) => void;
+  /** The provider rejected an indexed item in the request that the history classifier does not
+   * recognize. Evidence only: it changes nothing about how the error is handled, and carries a
+   * content-free structural shape rather than the provider's message. */
+  onUnclassifiedProviderRejection?: (shape: ProviderRejectionShape) => void;
   onAcpCapabilities?: (capabilities: AcpRuntimeCapabilities) => void;
   /** Session-scoped ACP controls/config; never merge these onto the agent row because two live
    * sessions may advertise different modes or commands. */
@@ -173,6 +187,11 @@ export interface Driver {
 
   /** Provider-native id of the most recently started turn, when the driver exposes one. */
   agentTurnId?(): string | null;
+
+  /** Why the turn that just settled produced no output, in the provider's own words. Only set for
+   * a turn the provider itself ended in error; the session manager attaches it to the durable
+   * receipt so a scheduler sees the cause instead of a bare stop reason. */
+  lastTurnError?(): string | null;
   /** Active steering coordinate, never a retained completed-turn checkpoint. */
   activeSteeringTurnId?(): string | null;
 

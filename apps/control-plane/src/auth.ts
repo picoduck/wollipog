@@ -106,6 +106,7 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/sessions/:id/config",
   "POST /api/sessions/:id/prompt",
   "POST /api/sessions/:id/stop",
+  "POST /api/sessions/:id/restart",
   "POST /api/sessions/:id/archive",
   "POST /api/sessions/:id/worktrees",
   "POST /api/sessions/:id/worktrees/attach",
@@ -134,7 +135,7 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "GET /api/compatibility", "GET /api/runners", "GET /api/sessions", "GET /api/sessions/:id",
   "GET /api/sessions/:id/events", "GET /api/governance/policies",
   "POST /api/sessions", "POST /api/sessions/:id/prompt", "POST /api/sessions/:id/stop",
-  "POST /api/sessions/:id/archive",
+  "POST /api/sessions/:id/restart", "POST /api/sessions/:id/config", "POST /api/sessions/:id/archive",
   "POST /api/sessions/:id/worktrees", "POST /api/sessions/:id/worktrees/attach",
   "POST /api/sessions/:id/worktrees/select", "POST /api/sessions/:id/worktrees/discard",
 ]);

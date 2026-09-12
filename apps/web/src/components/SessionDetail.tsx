@@ -15,6 +15,7 @@ import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
+  validatePromptImageInputs,
   isPolicyApproval,
   pendingRequests,
   isWorkspaceReference,
@@ -118,7 +119,9 @@ import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
+import { resolveContextWindowCapacity } from "../context-window-capacity.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
+import { useAnchoredPopover } from "./anchored-popover.js";
 import {
   followTailControlLabel,
   followTailControlTooltip,
@@ -146,7 +149,7 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreVerticalIcon, PlusIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, InfoIcon, MicIcon, MoreVerticalIcon, PlusIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -425,7 +428,7 @@ export type SessionDetailProps = {
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
   pinnedOpen: boolean;
-  focusComposer?: boolean;
+  composerFocusIntent?: "message" | "reply";
   onComposerFocusConsumed?: () => void;
   onBack?: () => void;
   onExpand?: () => void;
@@ -563,7 +566,7 @@ function SessionDetailLoaded({
   rightPanel,
   onOpenTerminal,
   pinnedOpen,
-  focusComposer,
+  composerFocusIntent,
   onComposerFocusConsumed,
   mode = "expanded",
   onBack,
@@ -889,8 +892,8 @@ function SessionDetailLoaded({
     expectedText: string;
   } | null>(null);
   const [hydrationCommitRevision, setHydrationCommitRevision] = useState(0);
-  const focusComposerRequestedRef = useRef(focusComposer);
-  focusComposerRequestedRef.current = focusComposer;
+  const focusComposerRequestedRef = useRef(composerFocusIntent !== undefined);
+  focusComposerRequestedRef.current = composerFocusIntent !== undefined;
 
   const composerFocusKey = `${instanceScope}\u0000${sessionId}`;
 
@@ -1066,13 +1069,14 @@ function SessionDetailLoaded({
   }, [mode, sessionId, attentionTarget]);
 
   useEffect(() => {
-    if (!focusComposer) return;
+    if (composerFocusIntent !== "message") return;
     const frame = window.requestAnimationFrame(() => {
       focusComposerAtDraftEnd();
       onComposerFocusConsumed?.();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [focusComposer, focusComposerAtDraftEnd, onComposerFocusConsumed, sessionId]);
+  }, [composerFocusIntent, focusComposerAtDraftEnd, onComposerFocusConsumed, sessionId]);
+
   const sessionCaps = resolveCaps(runner, session);
   const effectiveModel = optimisticModel ?? session?.model;
   const selectedModelSupportsImages = modelSupportsImages(sessionCaps, effectiveModel);
@@ -2113,11 +2117,13 @@ function SessionDetailLoaded({
   // Governance outcomes are transcript context, not a persistent header: the decisions whose
   // request has no transcript row of its own are spliced in at their chronological position, and
   // the whole list stays reviewable in the side panel (a full-screen drawer on phones).
-  const governanceDecisions = useGovernanceAudit(
+  const governanceAudit = useGovernanceAudit(
     sessionId,
     `${session.updatedAt}:${session.pendingApproval?.requestId ?? ""}`,
     mode === "expanded",
+    evs?.[0]?.ts,
   );
+  const governanceDecisions = governanceAudit.decisions;
   const timelineItems = useGovernanceTimeline(
     items,
     governanceDecisions,
@@ -2264,9 +2270,13 @@ function SessionDetailLoaded({
   // A guardrail pause (cost budget / tool-call limit) must be resolved via the Continue/Stop card,
   // not bypassed by sending a prompt.
   const policyPaused = isPolicyApproval(session.pendingApproval);
-  const canPrompt = runnerOnline && !terminal && !policyPaused;
+  // A quarantined provider conversation rejects every submission before the model runs, so the
+  // composer must not invite retries that cannot succeed.
+  const historyQuarantine = session.historyQuarantine;
+  const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine;
   const composerPlaceholder = terminal ? `Session is ${session.status}.`
     : !runnerOnline ? "Runner is offline."
+    : historyQuarantine ? "Conversation quarantined. Recover this session to continue."
     : policyPaused ? "Session is paused by guardrails. Review the pending decision to continue."
     : "Do anything";
   const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
@@ -2351,6 +2361,19 @@ function SessionDetailLoaded({
     answerModeFocusRequestRef.current = "answer";
     setAnswerModeRequestId(pendingQuestion.requestId);
   }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+
+  useLayoutEffect(() => {
+    if (composerFocusIntent !== "reply") return;
+    // An Inbox Reply request is contextual: a pending question owns it before the ordinary
+    // composer does. Resolve that ownership during the expansion commit so the very next bare key
+    // cannot escape to the global shortcut layer while focus is waiting on an animation frame.
+    enterAnswerMode();
+    // Acknowledge only after InboxView's expansion frame records the new surface. Clearing the
+    // request in this layout commit would cancel that frame; its replacement sees an ordinary
+    // expansion and moves focus back to the reader.
+    const frame = window.requestAnimationFrame(() => onComposerFocusConsumed?.());
+    return () => window.cancelAnimationFrame(frame);
+  }, [composerFocusIntent, enterAnswerMode, onComposerFocusConsumed, sessionId]);
 
   useLayoutEffect(() => {
     const liveRequestId = pendingQuestion?.requestId ?? null;
@@ -2759,6 +2782,106 @@ function SessionDetailLoaded({
     [api, busy, confirm, mode, navigate, session?.driver, sessionId, showToast],
   );
 
+  /**
+   * Recovery for a quarantined conversation. It never repairs the poisoned thread — that is
+   * impossible — and never deletes it: the original session, its transcript, and its provider
+   * thread stay exactly as they are. What it creates is a usable conversation from the last
+   * checkpoint known to precede the invalid item, with that checkpoint's files, plus any prompt
+   * the session retained unsent while quarantined.
+   */
+  const onRecoverQuarantinedConversation = useCallback(async () => {
+    const quarantine = session.historyQuarantine;
+    if (!quarantine || quarantine.recoveryTurn === undefined || busy || forkInFlightRef.current) return;
+    const handoff = quarantine.recovery === "handoff";
+    if (handoff && !session.agentId) {
+      setError("This session has no agent on its runner, so a fresh conversation cannot be started for it.");
+      return;
+    }
+    if (!await confirm({
+      title: `Recover this session from turn ${quarantine.recoveryTurn}?`,
+      message: handoff
+        ? `A new session starts a fresh provider conversation seeded with a bounded, redacted summary of the visible dialogue through turn ${quarantine.recoveryTurn}, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`
+        : `A new session forks the provider conversation at turn ${quarantine.recoveryTurn}, which excludes the rejected item, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`,
+      confirmLabel: "Recover Session",
+    })) return;
+    const releaseFork = acquireSessionFork(sessionId);
+    if (!releaseFork) {
+      const message = "A conversation fork is already in progress for this session. Wait for it to appear on the Board.";
+      setError(message);
+      if (mode === "preview") showToast(message, { tone: "error" });
+      return;
+    }
+    const generation = viewGenerationRef.current;
+    forkInFlightRef.current = true;
+    setBusy(true);
+    let releaseOnFinish = true;
+    try {
+      const recovered = await api.recoverQuarantinedConversation(
+        sessionId,
+        quarantine.recoveryTurn,
+        handoff
+          ? {
+              agentId: session.agentId!,
+              config: {
+                ...(session.model ? { model: session.model } : {}),
+                ...(session.effort ? { effort: session.effort } : {}),
+                ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}),
+                // The tier is a deliberate cost/latency choice; recovery must not quietly reset it.
+                ...(session.serviceTier ? { serviceTier: session.serviceTier } : {}),
+              },
+            }
+          : undefined,
+      );
+      // Both matter and there is one composer. The handoff draft is what seeds a fresh thread with
+      // the checkpoint dialogue, so it must lead; the retained prompt is the user's own unsent
+      // request, so it follows as the actual instruction. Dropping either would break a promise the
+      // confirmation just made.
+      const context = recovered.handoffDraft;
+      const retained = recovered.retainedPrompt;
+      // Each draft is independently valid, but their attachments are not additive: concatenating
+      // them can exceed the per-prompt image count or aggregate byte budget, or repeat the same
+      // file, leaving a staged draft the composer refuses to send. Merge under the real validator,
+      // and let the user's own attachments win the budget over recovered context.
+      const mimeTypes = session.driver === "codex-app-server"
+        ? CODEX_APP_SERVER_IMAGE_MIME_TYPES
+        : PROMPT_IMAGE_MIME_TYPES;
+      const images: PromptImageInput[] = [];
+      const seen = new Set<string>();
+      let droppedImages = 0;
+      for (const image of [...(retained?.images ?? []), ...(context?.images ?? [])]) {
+        const key = JSON.stringify(image);
+        if (seen.has(key)) { droppedImages += 1; continue; }
+        if (!validatePromptImageInputs([...images, image], mimeTypes).ok) { droppedImages += 1; continue; }
+        seen.add(key);
+        images.push(image);
+      }
+      const body = context && retained?.text
+        ? `${context.text}\n\nYour unsent message follows.\n\n${retained.text}`
+        : context?.text ?? retained?.text ?? "";
+      const text = droppedImages
+        ? `${body}\n\n[${droppedImages} attachment${droppedImages === 1 ? "" : "s"} could not be carried into this draft. Re-attach anything still needed.]`
+        : body;
+      if (text || images.length) {
+        stageComposerDraftHandoff(recovered.id, text, images, instanceScope);
+        await saveComposerDraft(recovered.id, text, images, instanceScope);
+      }
+      if (viewGenerationRef.current === generation) navigate({ name: "session", id: recovered.id });
+    } catch (cause) {
+      const ambiguous = ambiguousForkError(cause);
+      if (ambiguous) releaseOnFinish = false;
+      if (viewGenerationRef.current === generation) {
+        const message = (ambiguous ?? cause as Error).message;
+        setError(message);
+        if (mode === "preview") showToast(message, { tone: "error" });
+      }
+    } finally {
+      if (releaseOnFinish) releaseFork();
+      forkInFlightRef.current = false;
+      setBusy(false);
+    }
+  }, [api, busy, confirm, instanceScope, mode, navigate, session.agentId, session.effort,
+    session.historyQuarantine, session.model, session.permissionMode, sessionId, showToast]);
+
   const queuedEditReconciliation = queuedEdit && queuedEditRecovered
     ? reconcileQueuedEditRecovery(
         queuedEdit.promptId,
@@ -2844,6 +2967,11 @@ function SessionDetailLoaded({
       : busy || forkInProgress || session.queued?.length || ["running", "starting", "queued", "input_required"].includes(session.status) ? "The source session is busy."
       : undefined,
   }), [runnerOnline, runner?.protocolVersion, session.worktreePath, session.queued?.length, session.status, busy, forkInProgress]);
+  const rewindUnavailableReason = session.worktreePath == null
+    ? "A worktree is required."
+    : !runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
+      ? runnerCapabilityRequirement(runner?.protocolVersion, "checkpointRewind", "Checkpoint rewind")
+      : undefined;
   const latestForkAvailability = useMemo(
     () => conversationForkAvailability(latestConversationForkTurn, latestKnownTurn, forkContext),
     [forkContext, latestConversationForkTurn, latestKnownTurn],
@@ -3001,6 +3129,8 @@ function SessionDetailLoaded({
   // The web registry owns app/provider identity, availability, collisions, and menu ranking. The
   // provider wire shape stays unchanged until IDEA-004C adds transport-specific execution modes.
   const agentCaps = resolveCaps(runner, session);
+  const contextWindow = resolveContextWindowCapacity(session, agentCaps?.models ?? []);
+  const hasContextWindow = contextWindow.known;
   // Plan mode is only safe where the driver actually advertises the `plan` approval mode (Claude).
   // Codex silently falls back to a writable sandbox for an unknown mode, so exposing it there would
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
@@ -3986,7 +4116,7 @@ function SessionDetailLoaded({
                 <span className="tag tag-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
               )}
               {session.workspaceName && <span className="tag tag-workspace">{session.workspaceName}</span>}
-              <ContextWindowMeter session={session} />
+              <ContextWindowMeter session={session} resolution={contextWindow} />
               <SessionUsageControl session={session} />
               {isHeartbeatBusy(session.status) && (
                 <ActivityStrip activity={activity} now={activityNow} />
@@ -4057,6 +4187,7 @@ function SessionDetailLoaded({
                 richGitSupported={richGitSupported}
                 items={items}
                 onOpenReview={() => rightPanel.show("review")}
+                onOpenBackgroundWork={() => rightPanel.show("background")}
                 onOpenSourceLocation={openSourceLocation}
               />
             )}
@@ -4160,14 +4291,10 @@ function SessionDetailLoaded({
                       anchorRecoveryPending={anchorRecoveryPending}
                       onVisibleAnchorChange={followTail.onVisibleAnchorChange}
                       onAnchorLost={followTail.onAnchorLost}
-                      // Worktree sessions on a v25+ runner only — persisted checkpoint rows can
-                      // outlive a runner downgrade, and the CP would 409 the click anyway.
-                      onRewind={
-                        mode === "expanded" &&
-                        session.worktreePath != null && runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
-                          ? onRewind
-                          : undefined
-                      }
+                      // Keep checkpoint actions discoverable when the runner or worktree cannot
+                      // currently satisfy them; activation still uses the existing API contract.
+                      onRewind={mode === "expanded" ? onRewind : undefined}
+                      rewindUnavailableReason={rewindUnavailableReason}
                       onFork={mode === "expanded" ? onFork : undefined}
                       handoff={mode === "expanded" ? handoffControls : undefined}
                       onEditAndResend={mode === "expanded" && canPrompt ? openResendAction : undefined}
@@ -4226,64 +4353,75 @@ function SessionDetailLoaded({
                 panes CSS collapses the slot and surfaces the echo inside the status strip. */}
             <TranscriptRecoveryNotice active={transcript.notice === "refreshing"} />
             <div className="transcript-status-strip" aria-label="Transcript Status">
-              <div className="transcript-status-context">
-                {mode === "expanded" && <ContextWindowMeter session={session} />}
-                <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
-              </div>
-              {/* One compact centered cluster: Page Up · follow-state control (with its resume
-                  keycap inside) · Page Down. The pager hints sit directly beside the badge at the
-                  standard inter-control gap instead of being distributed toward the strip edges
-                  (dogfooding IDEA-007/BUG-009, 2026-08-10). */}
-              <div className="follow-tail-control">
-                {mode === "preview" && !isMobile && (
-                  <ShortcutHint label="Page Up" shortcut={shortcutDisplay("inbox-page-up")} />
+              {/* Without a context meter, compact recovery uses the leading grid seat while the
+                  visible live-output/cost group itself remains centered. */}
+              {(mode === "preview" || !hasContextWindow) && (
+                <div className="transcript-status-context transcript-status-context-standalone">
+                  <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
+                </div>
+              )}
+              {/* Keep the two usage indicators beside the live-output control as one centered
+                  status cluster on every viewport. The recovery echo may temporarily replace the
+                  context meter in compact panes, but it owns the same leading seat. */}
+              <div className="transcript-status-cluster">
+                {mode === "expanded" && hasContextWindow && (
+                  <div className="transcript-status-context">
+                    <ContextWindowMeter session={session} resolution={contextWindow} />
+                    <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
+                  </div>
                 )}
-                <button
-                  className={`follow-tail-chip ${followTail.state}`}
-                  data-follow-tail-state={followTail.state}
-                  onClick={followTail.follow}
-                  aria-label={followTailControlLabel(followTail.state, followLabel)}
-                  title={followTailControlTooltip(
-                    followTail.state,
-                    !isMobile,
-                    shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest"),
+                {/* Page Up · follow-state control (with its resume keycap inside) · Page Down.
+                    Preview pager hints stay directly beside the badge at the standard gap. */}
+                <div className="follow-tail-control">
+                  {mode === "preview" && !isMobile && (
+                    <ShortcutHint label="Page Up" shortcut={shortcutDisplay("inbox-page-up")} />
                   )}
-                >
-                  <span aria-live="polite">{followLabel}</span>
-                  {!followTail.isFollowing && <span className="follow-tail-action">Follow Live Output</span>}
-                  {!isMobile && !followTail.isFollowing && (
-                    <kbd
-                      className="follow-tail-kbd"
-                      aria-hidden="true"
-                      data-shortcut-hint={shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
-                    >
-                      {shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
-                    </kbd>
-                  )}
-                </button>
-                {mode === "preview" && !isMobile && !followTail.isFollowing && (
-                  <ShortcutHint label="Page Down" shortcut={shortcutDisplay("inbox-page-down")} shortcutFirst />
-                )}
-              </div>
-              <div className="transcript-status-trailing">
-                {/* Cost only (#781): the context meter one cell over already owns occupancy, and
-                    repeating "25k of 258k context" here made the trailing figure read as a second
-                    context indicator instead of what the session has spent. */}
-                {mode === "expanded" && isMobile && (
-                  <SessionUsageControl session={session} className="transcript-status-usage" />
-                )}
-                <div className="transcript-status-actions">
-                  {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
-                    <ShortcutHint
-                      label="Reply"
-                      shortcut={shortcutDisplay("session-reading-reply")}
-                      title={`Reply (${shortcutDisplay("session-reading-reply")})`}
-                      ariaLabel="Reply"
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={focusComposerAtDraftEnd}
-                    />
+                  <button
+                    className={`follow-tail-chip ${followTail.state}`}
+                    data-follow-tail-state={followTail.state}
+                    onClick={followTail.follow}
+                    aria-label={followTailControlLabel(followTail.state, followLabel)}
+                    title={followTailControlTooltip(
+                      followTail.state,
+                      !isMobile,
+                      shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest"),
+                    )}
+                  >
+                    <span aria-live="polite">{followLabel}</span>
+                    {!followTail.isFollowing && <span className="follow-tail-action">Follow Live Output</span>}
+                    {!isMobile && !followTail.isFollowing && (
+                      <kbd
+                        className="follow-tail-kbd"
+                        aria-hidden="true"
+                        data-shortcut-hint={shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
+                      >
+                        {shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
+                      </kbd>
+                    )}
+                  </button>
+                  {mode === "preview" && !isMobile && !followTail.isFollowing && (
+                    <ShortcutHint label="Page Down" shortcut={shortcutDisplay("inbox-page-down")} shortcutFirst />
                   )}
                 </div>
+                {/* Cost only (#781): the neighboring context meter owns occupancy, while this
+                    control owns cumulative session spend. Both stay adjacent to live output. */}
+                {mode === "expanded" && (
+                  <SessionUsageControl session={session} className="transcript-status-usage" />
+                )}
+              </div>
+              {/* Contextual actions remain in the strip's trailing slack so appearing and
+                  disappearing Reply guidance cannot move the centered status cluster. */}
+              <div className="transcript-status-actions">
+                {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
+                  <ShortcutHint
+                    label="Reply"
+                    shortcut={shortcutDisplay("session-reading-reply")}
+                    title={`Reply (${shortcutDisplay("session-reading-reply")})`}
+                    ariaLabel="Reply"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={focusComposerAtDraftEnd}
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -4302,6 +4440,37 @@ function SessionDetailLoaded({
                   : ""}
             </span>
             {error && <div className="composer-error" role="alert">{error}</div>}
+            {historyQuarantine && (
+              <div className="quarantine-banner" role="status" aria-label="Conversation Quarantined">
+                <div className="quarantine-copy">
+                  <span className="quarantine-title">Conversation Quarantined</span>
+                  <p>
+                    The agent provider rejects an item stored in this conversation&rsquo;s own history, so
+                    prompts fail before the model runs. Sending again or <code>/compact</code> cannot
+                    repair it — both resend the same history.
+                  </p>
+                  <p>
+                    {historyQuarantine.recoveryTurn === undefined
+                      ? "There is no earlier checkpoint to recover from. Your files are unchanged in this session's worktree; start a new session to continue the work."
+                      : `Recovering continues from the checkpoint after turn ${historyQuarantine.recoveryTurn} in a new session with the same files. This session stays here, unchanged, for inspection.`}
+                    {historyQuarantine.retainedPrompt ? " Your last message was kept unsent and moves to the recovered session's composer." : ""}
+                  </p>
+                </div>
+                {historyQuarantine.recoveryTurn !== undefined && (
+                  <div className="quarantine-actions">
+                    <button
+                      type="button"
+                      className="btn primary sm"
+                      disabled={busy || !runnerOnline}
+                      title={runnerOnline ? undefined : "Runner is offline."}
+                      onClick={() => void onRecoverQuarantinedConversation()}
+                    >
+                      Recover Session
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             {retitleFeedback && (
               <div
                 ref={retitleReceiptRef}
@@ -4407,7 +4576,7 @@ function SessionDetailLoaded({
                       <span
                         className={`queued-badge${session.queueHeld ? " held" : ""}`}
                         title={session.queueHeld
-                          ? "Held after stopping the active turn; send another prompt to resume"
+                          ? "Waiting for the active turn or control-plane decision to settle; resolve any visible prompt to continue"
                           : queueTitle}
                       >
                         {queueLabel}
@@ -4666,9 +4835,6 @@ function SessionDetailLoaded({
                     </button>
                   )}
                 </div>
-                {/* Session-level usage lives with the session-level controls, not in the
-                    transcript status strip — the otherwise-empty center of the composer bar. */}
-                {!isMobile && <SessionUsageControl session={session} className="cbar-usage" />}
                 <div className="cbar-right">
                   <ServiceTierControl
                     session={session}
@@ -4783,6 +4949,10 @@ function SessionDetailLoaded({
           onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTarget : undefined}
           items={items}
           governanceDecisions={governanceDecisions}
+          governanceAvailable={governanceAudit.available}
+          governanceHasMore={governanceAudit.hasMore}
+          governanceLoadingOlder={governanceAudit.loadingOlder}
+          onLoadOlderGovernance={governanceAudit.loadOlder}
           parentTurnEventIds={backgroundParentTurnEventIds}
           onOpenParentTurn={revealBackgroundParentTurn}
           backgroundInventoryError={backgroundInventoryError}
@@ -4825,7 +4995,8 @@ function SessionDetailLoaded({
           )}
         </Modal>
       )}
-      {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver} turn={handoffTurn}
+      {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver}
+        sourceServiceTier={session.serviceTier ?? undefined} turn={handoffTurn}
         onClose={() => setHandoffTurn(null)} onCreate={async (agentId, config) => {
           const release = acquireSessionFork(sessionId);
           if (!release) throw new Error("A conversation fork or handoff is already in progress.");
@@ -5578,7 +5749,7 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
 }
 
 /** Codex-style "+" menu in the composer: Attach Image, Plan mode, and the cost budget. */
-function ComposerPlusMenu({
+export function ComposerPlusMenu({
   session,
   planActive,
   planSupported,
@@ -5741,6 +5912,18 @@ function ComposerPlusMenu({
               }
               onCommit={(v) => onApply({ maxToolCalls: v })}
             />
+            <GuardrailInput
+              prefix="↳"
+              label="Live Child Limit"
+              step="1"
+              integer
+              value={session.maxChildSessions}
+              placeholder="4"
+              max="64"
+              emptyMeansNoop
+              hint="A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."
+              onCommit={(v) => onApply({ maxChildSessions: v })}
+            />
           </div>
         </>
       )}
@@ -5764,7 +5947,9 @@ function CheckpointsInput({
   const live = (value ?? []).join(", ");
   const [draft, setDraft] = useState<string | null>(null);
   const inputId = useId();
-  const descriptionId = useId();
+  const hint = `Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again. ` +
+    `Checkpoints at or above the recurring cost threshold do not pause separately.` +
+    (approvedUsd != null ? ` Approved through $${approvedUsd.toFixed(2)}.` : "");
   const commit = () => {
     if (draft === null) return;
     const list = draft.split(/[\s,]+/).map(Number).filter((usd) => Number.isFinite(usd) && usd > 0);
@@ -5779,18 +5964,15 @@ function CheckpointsInput({
         type="text"
         inputMode="decimal"
         placeholder="none"
-        aria-describedby={descriptionId}
         value={draft ?? live}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={commit}
         onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }}
       />
       <span className="plus-budget-copy">
-        <label className="plus-budget-label" htmlFor={inputId}>Cost Checkpoints</label>
-        <span className="plus-budget-hint" id={descriptionId}>
-          Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again.
-          Checkpoints at or above the recurring cost threshold do not pause separately.
-          {approvedUsd != null ? ` Approved through $${approvedUsd.toFixed(2)}.` : ""}
+        <span className="plus-budget-label-row">
+          <label className="plus-budget-label" htmlFor={inputId}>Cost Checkpoints</label>
+          <GuardrailHelp label="Cost Checkpoints" hint={hint} />
         </span>
       </span>
     </div>
@@ -5802,7 +5984,8 @@ function CheckpointsInput({
  * WebSocket echo (or another dashboard's change) can't remount the input mid-edit and discard
  * typing; unfocused, it tracks the live value. Typos (badInput like "1e", or sub-1 values for
  * integer fields that would floor into the clear sentinel) are a no-op + display resync — only a
- * deliberate empty/0 clears. Commits 0 to mean "clear" (the CP maps ≤0 to unlimited).
+ * deliberate empty/0 reaches the caller. Spend/tool callers treat that as clear; the live-child
+ * caller treats it as pausing new child admission.
  */
 function GuardrailInput({
   prefix,
@@ -5810,6 +5993,9 @@ function GuardrailInput({
   step,
   integer,
   value,
+  placeholder = "∞",
+  max,
+  emptyMeansNoop,
   hint,
   onCommit,
 }: {
@@ -5818,29 +6004,37 @@ function GuardrailInput({
   step: string;
   integer?: boolean;
   value: number | null | undefined;
+  placeholder?: string;
+  max?: string;
+  /** This field has no clear sentinel: zero is meaningful, while an empty edit is a no-op. */
+  emptyMeansNoop?: boolean;
   hint: string;
   onCommit: (v: number) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null); // null = not editing
   const inputId = useId();
-  const descriptionId = useId();
   return (
     <div className="plus-budget">
       <span className="plus-budget-prefix" aria-hidden="true">{prefix}</span>
       <input
         id={inputId}
         type="number"
-        aria-describedby={descriptionId}
         min="0"
+        max={max}
         step={step}
-        placeholder="∞"
+        placeholder={placeholder}
         value={draft ?? (value ?? "")}
         onFocus={(e) => setDraft(e.target.value)}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={(e) => {
           if (draft === null) return;
+          if (emptyMeansNoop && draft.trim() === "") {
+            setDraft(null);
+            return;
+          }
           const v = parseFloat(draft);
-          if (e.target.validity.badInput || (integer && Number.isFinite(v) && v > 0 && v < 1)) {
+          if (e.target.validity.badInput || e.target.validity.rangeOverflow || e.target.validity.rangeUnderflow ||
+              (integer && Number.isFinite(v) && v > 0 && v < 1)) {
             setDraft(null); // typo — resync to the live value, don't clear an armed limit
             return;
           }
@@ -5849,10 +6043,48 @@ function GuardrailInput({
         }}
       />
       <span className="plus-budget-copy">
-        <label className="plus-budget-label" htmlFor={inputId}>{label}</label>
-        <span className="plus-budget-hint" id={descriptionId}>{hint}</span>
+        <span className="plus-budget-label-row">
+          <label className="plus-budget-label" htmlFor={inputId}>{label}</label>
+          <GuardrailHelp label={label} hint={hint} />
+        </span>
       </span>
     </div>
+  );
+}
+
+/** Compact, keyboard-dismissible disclosure for guardrail guidance that would otherwise dominate the menu. */
+function GuardrailHelp({ label, hint }: { label: string; hint: string }) {
+  const popover = useAnchoredPopover<HTMLSpanElement, HTMLButtonElement>({
+    width: 224,
+    height: 96,
+    consumeEscape: true,
+  });
+  const popoverId = useId();
+  return (
+    <span
+      ref={popover.rootRef}
+      className={`plus-budget-help${popover.open ? " is-open" : ""}`}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) popover.close();
+      }}
+    >
+      <button
+        ref={popover.anchorRef}
+        className="plus-budget-info"
+        type="button"
+        aria-label={`About ${label}`}
+        aria-expanded={popover.open}
+        aria-controls={popoverId}
+        aria-describedby={popover.open ? popoverId : undefined}
+        title={`About ${label}`}
+        onClick={popover.toggle}
+      >
+        <InfoIcon size={13} />
+      </button>
+      {popover.open && (
+        <span className="plus-budget-help-popover" id={popoverId} role="note" style={popover.style}>{hint}</span>
+      )}
+    </span>
   );
 }
 

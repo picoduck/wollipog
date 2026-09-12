@@ -1,10 +1,9 @@
 import { useId } from "react";
 import type { SessionView } from "@wollipog/protocol";
 import { compactionNote, computeContextFill } from "../context-meter.js";
-import { resolveCaps } from "../caps.js";
-import { advertisedContextWindow, contextWindowDiscrepancy, formatContextWindow } from "../context-window-options.js";
+import type { ContextWindowCapacity } from "../context-window-capacity.js";
+import { contextWindowDiscrepancy, formatContextWindow } from "../context-window-options.js";
 import { formatTokens } from "../format.js";
-import { useStoreSelector } from "../store.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
 
 const RING_RADIUS = 6;
@@ -25,15 +24,12 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
  * window differs from what the selected model advertises, the popover says so instead of
  * silently metering against the wrong size.
  */
-export function ContextWindowMeter({ session }: { session: SessionView }) {
-  const runners = useStoreSelector((s) => s.runners);
-  const models = resolveCaps(runners.get(session.runnerId), session)?.models ?? [];
-  // With no explicit selection the provider launches its default entry, so that entry (not a family
-  // substitute) is what the session advertises.
-  const model = models.find((m) => m.id === session.model) ?? models.find((m) => m.default);
-  const served = session.contextWindow && session.contextWindow > 0 ? session.contextWindow : undefined;
-  const contextWindow = served ?? model?.contextWindow;
-  const discrepancy = contextWindowDiscrepancy(advertisedContextWindow(models, session.model ?? model?.id), served);
+export function ContextWindowMeter({ session, resolution }: {
+  session: SessionView;
+  resolution: ContextWindowCapacity;
+}) {
+  const contextWindow = resolution.capacity;
+  const discrepancy = contextWindowDiscrepancy(resolution.advertised, resolution.served);
   const fill = computeContextFill({
     tokensIn: session.tokensIn,
     tokensOut: session.tokensOut,
@@ -102,7 +98,7 @@ export function ContextWindowMeter({ session }: { session: SessionView }) {
             <div><dt>Used</dt><dd>{formatTokens(used)}</dd></div>
             {/* #806's capacity provenance stays: which window the meter is measuring against is an
                 occupancy fact, unlike the session billing #781 moved out of this panel. */}
-            <div><dt>Capacity</dt><dd>{formatContextWindow(contextWindow!)} · {served ? "Provider Reported" : "Model Catalog"}</dd></div>
+            <div><dt>Capacity</dt><dd>{formatContextWindow(contextWindow!)} · {resolution.source === "served" ? "Provider Reported" : "Model Catalog"}</dd></div>
             <div><dt>Remaining</dt><dd>{formatTokens(remaining)}</dd></div>
           </dl>
           {discrepancy && (

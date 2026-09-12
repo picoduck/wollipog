@@ -79,6 +79,34 @@ test("receipt derivation exposes every durable label and retires only canonical 
   ]);
 });
 
+test("Queue Again retires only for the exact canonical queued-prompt identity", () => {
+  const queuedAgain = attempt("queued-again", "uncertain", {
+    text: "Repeated prompt text",
+    resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-exact" },
+  });
+  const sameTextWrongIdentity: TimelineItem[] = [{
+    kind: "user_message", id: 1, text: "Repeated prompt text", turnId: "queue-other",
+  }];
+  assert.equal(deriveSteeringReceipts([queuedAgain], sameTextWrongIdentity, undefined).length, 1,
+    "prompt text cannot retire a receipt");
+  assert.equal(deriveSteeringReceipts([queuedAgain], [], undefined, true).length, 1,
+    "absence from a partial transcript is not evidence of delivery");
+  assert.deepEqual(deriveSteeringReceipts([queuedAgain], [{
+    kind: "user_message", id: 2, text: "Different rendered text", turnId: "queue-exact",
+  }], undefined, true), [], "exact canonical identity is authoritative even in a partial window");
+  assert.equal(deriveSteeringReceipts([queuedAgain], [{
+    kind: "user_message", id: 3, text: "Steering inside a turn", turnId: "queue-exact",
+    deliveryIntent: "steer",
+  }], undefined).length, 1, "an in-turn steer cannot impersonate queued-prompt delivery");
+  const missingResolutionIdentity = attempt("queued-again-no-id", "converted_to_queue", {
+    queuedPromptId: "queue-original",
+    resolution: { action: "queue_again", state: "applied" },
+  });
+  assert.equal(deriveSteeringReceipts([missingResolutionIdentity], [{
+    kind: "user_message", id: 4, text: "Original queued copy", turnId: "queue-original",
+  }], undefined).length, 1, "the original converted-queue id cannot stand in for a Queue Again id");
+});
+
 test("receipt derivation remains bounded to the projected recovery limit", () => {
   const receipts = deriveSteeringReceipts(
     Array.from({ length: MAX_VISIBLE_STEERING_RECEIPTS + 7 }, (_, index) =>
@@ -183,6 +211,25 @@ test("receipt markup shows bounded reasons, pending resolution copy, disabled ac
   assert.equal((html.match(/disabled=""/g) ?? []).length, 2);
 });
 
+test("a completed Queue Again receipt is clearly settled and manually dismissible", () => {
+  const html = renderToStaticMarkup(<SteeringReceipts
+    attempts={[attempt("queued-again", "uncertain", {
+      reason: "transport_uncertain",
+      resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-1" },
+    })]}
+    timelineItems={[]}
+    onQueueAgain={() => {}}
+    onDismiss={() => {}}
+  />);
+  assert.match(html, /Queued Again/);
+  assert.match(html, /Queued for a later turn\./);
+  assert.doesNotMatch(html, /Transport uncertain\./);
+  assert.match(html, /class="icon-btn steering-receipt-dismiss"/);
+  assert.match(html, /aria-label="Dismiss"/);
+  assert.doesNotMatch(html, /class="steering-receipt-actions"/,
+    "a completed receipt must not reserve a full dismiss-action row");
+});
+
 test("uncertain receipt actions call the matching callback and local pending state disables both", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
@@ -203,7 +250,9 @@ test("uncertain receipt actions call the matching callback and local pending sta
 
   await act(async () => root.render(render()));
   let buttons = [...container.querySelectorAll("button")] as HTMLButtonElement[];
-  assert.deepEqual(buttons.map((button) => button.textContent?.trim()), ["Queue Again", "Dismiss"]);
+  assert.equal(buttons.length, 2);
+  assert.equal(container.querySelector('.steering-receipt-dismiss')?.getAttribute("aria-label"), "Dismiss");
+  assert.equal(container.querySelector('.steering-receipt-actions')?.textContent?.trim(), "Queue Again");
   await act(async () => { buttons[0]!.click(); buttons[1]!.click(); });
   assert.deepEqual(queueAgain, ["actionable"]);
   assert.deepEqual(dismissed, ["actionable"]);
@@ -234,7 +283,10 @@ test("one rejected receipt can be durably dismissed", async () => {
     onDismiss={(submissionId) => { dismissed.push(submissionId); }}
   />));
   const button = container.querySelector("button") as HTMLButtonElement;
-  assert.equal(button.textContent?.trim(), "Dismiss");
+  assert.equal(button.classList.contains("steering-receipt-dismiss"), true);
+  assert.equal(button.getAttribute("aria-label"), "Dismiss");
+  assert.equal(container.querySelector(".steering-receipt-actions"), null,
+    "a rejection uses the compact corner dismissal instead of an action row");
   await act(async () => button.click());
   assert.deepEqual(dismissed, ["rejected-one"]);
 
@@ -290,6 +342,65 @@ test("multiple rejected receipts collapse and clear together without touching ac
 
   await act(async () => root.unmount());
   container.remove();
+});
+
+test("multiple completed Queue Again receipts collapse into one bounded group", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const dismissed: string[] = [];
+  const completed = ["queue-a", "queue-b", "queue-c"].map((submissionId, index) =>
+    attempt(submissionId, "uncertain", {
+      createdAt: 10 - index,
+      resolution: { action: "queue_again", state: "applied", queuedPromptId: `prompt-${index}` },
+    })
+  );
+
+  await act(async () => root.render(<SteeringReceipts
+    attempts={completed}
+    timelineItems={[]}
+    onQueueAgain={() => {}}
+    onDismiss={async (submissionId) => { dismissed.push(submissionId); }}
+  />));
+  const group = container.querySelector('[data-terminal-status="queued_again"]') as HTMLDivElement;
+  assert.ok(group);
+  const toggle = group.querySelector('[aria-controls="queued-again-steering-receipts"]') as HTMLButtonElement;
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.match(toggle.textContent ?? "", /3 Completed Receipts/);
+  assert.equal(container.querySelectorAll('[data-testid^="steering-attempt-"]').length, 0,
+    "collapsed terminal history occupies one compact row");
+  const clearAll = [...group.querySelectorAll("button")]
+    .find((button) => button.textContent?.trim() === "Clear All") as HTMLButtonElement;
+  await act(async () => {
+    clearAll.click();
+    for (let index = 0; index < 6; index += 1) await Promise.resolve();
+  });
+  assert.deepEqual(dismissed, ["queue-a", "queue-b", "queue-c"]);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a late Queue Again resolution is grouped only by its completed receipt status", () => {
+  const html = renderToStaticMarkup(<SteeringReceipts
+    attempts={[
+      attempt("rejected-a", "rejected"),
+      attempt("rejected-b", "rejected"),
+      attempt("hybrid", "rejected", {
+        resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-hybrid" },
+      }),
+      attempt("queued", "uncertain", {
+        resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-ordinary" },
+      }),
+    ]}
+    timelineItems={[]}
+    onQueueAgain={() => {}}
+    onDismiss={() => {}}
+  />);
+  assert.match(html, /2 Rejected Receipts/);
+  assert.match(html, /2 Completed Receipts/);
+  assert.doesNotMatch(html, /3 Rejected Receipts/);
 });
 
 test("applied dismissals stay absent after authoritative session state refreshes", () => {

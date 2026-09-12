@@ -184,7 +184,7 @@ export async function provisionWslBwrapSessionState(
   ownerHash: string,
   sessionKey: string,
   uid: number,
-): Promise<{ root: string; provider: string; relay: string }> {
+): Promise<{ root: string; provider: string; relay: string; scratch: string }> {
   if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error("WSL launcher requires a non-root numeric uid");
   const root = wslBwrapSessionRoot(ownerHash, sessionKey);
   const script = `set -eu
@@ -205,7 +205,7 @@ for owned in /var/lib/wollipog-wsl-launcher /var/lib/wollipog-wsl-launcher/runne
   fi
   /usr/bin/chmod 0711 "$owned"
 done
-for leaf in provider relay; do
+for leaf in provider relay scratch; do
   path="$root/$leaf"
   if test -e "$path" || test -L "$path"; then test -d "$path"; test ! -L "$path"; else /usr/bin/mkdir -- "$path"; fi
   /usr/bin/chown "$uid:$gid" "$path"; /usr/bin/chmod 0700 "$path"
@@ -221,7 +221,7 @@ for stale in "$root/relay"/provider-*.pgid; do
 done
 `;
   await runRootScript(distro, script, [root, String(uid)]);
-  return { root, provider: `${root}/provider`, relay: `${root}/relay` };
+  return { root, provider: `${root}/provider`, relay: `${root}/relay`, scratch: `${root}/scratch` };
 }
 
 export async function cleanupWslBwrapSessionState(

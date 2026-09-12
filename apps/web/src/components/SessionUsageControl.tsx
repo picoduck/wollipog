@@ -1,9 +1,32 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { SessionUsageResponse, SessionView } from "@wollipog/protocol";
+import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL, type SessionUsageResponse, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatCost, formatTokens } from "../format.js";
-import { costProvenanceNote, sessionCostLabel, sessionUsageTotals } from "../session-cost.js";
+import { costProvenanceNote, estimatedCostSourceUrl, sessionCostLabel, sessionUsageTotals } from "../session-cost.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
+import { InfoIcon } from "./Icons.js";
+
+function ProtocolUsageInfo({ detailId }: { detailId: string }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <span className={`session-usage-info${open ? " is-open" : ""}`}>
+      <button
+        type="button"
+        aria-label="About Codex App Server Usage"
+        aria-controls={detailId}
+        aria-expanded={open}
+        title="About Codex App Server Usage"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <InfoIcon size={14} />
+      </button>
+      <span className="session-usage-info-detail" id={detailId} role="note">
+        Historical Codex App Server usage written by runners before protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL} is incomplete because it includes only the final model response. Protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL}+ counts every response in each turn.
+      </span>
+    </span>
+  );
+}
 
 /**
  * The session's cumulative cost, and the usage behind it (#781).
@@ -53,12 +76,13 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
   if (!label) return null;
 
   const provenance = costProvenanceNote(loaded);
+  const provenanceUrl = estimatedCostSourceUrl(loaded);
   const byModel = loaded?.byModel ?? [];
-  // A priced zero is an amount, not a gap: `priceUsage` keeps a provider-reported 0 as
-  // `providerReported`, so a free session reads `$0.00` and only a genuinely unpriced one is
-  // named as unpriced.
+  // A priced zero is an amount, not a gap. The shared label has already chosen between the
+  // current session snapshot and a caught-up ledger, so use that same provenance decision while
+  // detail is pending, failed, or stale instead of making the heading disagree with the control.
   const headCost = formatCost(totals.costUsd)
-    || (loaded && loaded.totals.costSource !== "unpriced" ? "$0.00" : "Not Priced");
+    || (label.priced ? "$0.00" : "Not Priced");
 
   return (
     <span className={`session-usage${popover.open ? " is-open" : ""}${className ? ` ${className}` : ""}`} ref={popover.rootRef}>
@@ -83,7 +107,12 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
           style={popover.style}
         >
           <div className="session-usage-head">
-            <strong>Session Usage</strong>
+            <div className="session-usage-title">
+              <strong>Session Usage</strong>
+              {session.driver === "codex-app-server" && (
+                <ProtocolUsageInfo detailId={`${panelId}-protocol-info`} />
+              )}
+            </div>
             <span>{headCost}</span>
           </div>
           <dl className="session-usage-facts">
@@ -97,7 +126,16 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
             <div><dt>Total Processed</dt><dd>{formatTokens(totals.processedTokens)}</dd></div>
             {totals.cacheSavingsUsd > 0 && <div><dt>Cache Savings</dt><dd>{formatCost(totals.cacheSavingsUsd)}</dd></div>}
           </dl>
-          {provenance && <p className="session-usage-note">{provenance}</p>}
+          {(provenance || provenanceUrl) && (
+            <p className="session-usage-note">
+              {provenanceUrl ? (
+                <>
+                  <a href={provenanceUrl} target="_blank" rel="noreferrer">Estimated API Costs</a>
+                  {loaded?.pricing?.status === "cached" && " (Cached Rates)"}
+                </>
+              ) : provenance}
+            </p>
+          )}
           {breakdownError && <p className="session-usage-note" role="alert">{breakdownError}</p>}
           {byModel.length > 0 && (
             <div className="session-usage-models">

@@ -103,7 +103,22 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Browser End-to-End Tests
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    # Four shards of roughly seven minutes each, against a budget that used to be one run of
+    # twenty-eight. Kept well above the expected duration so an ordinary slow runner does not
+    # cancel a shard, and well below the old thirty so the next doubling of the suite is a loud
+    # failure rather than another year of creeping towards the cap (#842).
+    timeout-minutes: 15
+    strategy:
+      # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
+      # aggregator below reads a cancelled job as a budget hit — so one broken test would be
+      # announced as three timeouts, which is the opposite of a useful signal.
+      fail-fast: false
+      matrix:
+        # The shard COUNT is duplicated in the --shard denominator below because GitHub offers no
+        # way to read the matrix length from inside the job. scripts/workflow-pr-event-contract.test.mjs
+        # asserts the two agree: a matrix of four against --shard=i/3 overruns, and a matrix of
+        # three against --shard=i/4 silently drops a quarter of the suite and still reports green.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -141,12 +156,16 @@ jobs:
         run: pnpm exec playwright install-deps chromium
 
       - name: Remote-Instance Browser End-to-End Tests
-        run: pnpm test:e2e
+        run: pnpm test:e2e --shard=${{ matrix.shard }}/4
 
+      # The production pass is thirty-three seconds and does not shard: it builds the app once and
+      # loads it once. Running it on every shard would be four copies of the same evidence.
       - name: Validate Web Production Build
+        if: matrix.shard == 1
         run: pnpm --filter @wollipog/web build
 
       - name: Rendered Production Browser Smoke
+        if: matrix.shard == 1
         run: pnpm test:e2e:production
 
       # esbuild-only pass (build-binary.mjs --bundle-only): proves the runner and its

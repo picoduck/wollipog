@@ -42,8 +42,13 @@ const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 const MAX_RUNTIME_KEY_BYTES: usize = 160;
 const DEFAULT_REMOTE_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(20);
 const SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(35);
+/// Longest a control-plane rename can take before it answers: the largest configurable runner
+/// naming budget (30s for a custom endpoint) plus the control plane's supervision margin. The
+/// session-agent path is far shorter (15s runner budget + 3s). Keep the read budget above this so
+/// the transport never expires before the deadline it wraps. See the session naming deadline chain
+/// in packages/protocol/src/index.ts.
 #[cfg(test)]
-const MAX_SESSION_NAMING_REQUEST_DURATION: Duration = Duration::from_secs(31);
+const MAX_SESSION_NAMING_REQUEST_DURATION: Duration = Duration::from_secs(33);
 #[cfg(not(test))]
 const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]

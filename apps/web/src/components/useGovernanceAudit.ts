@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
@@ -18,36 +18,210 @@ const NO_ENTRIES: GovernanceAuditEntry[] = [];
 /**
  * The session's governance audit, oldest-first and content-safe.
  *
- * The endpoint is an unpaginated newest-N snapshot, so it is refetched whenever the session
- * revision moves. Audit records are append-only, so an unchanged id list means unchanged content
- * and the previous array identity is kept — without that, every session update would invalidate
- * the derived timeline and force a full row re-projection.
+ * Newest entries are refetched whenever the session revision moves; explicitly or automatically
+ * loaded older pages stay attached beneath that moving tail. Audit ids make overlapping refetches
+ * idempotent while the server cursor preserves the database's tied-timestamp ordering.
  */
-export function useGovernanceAudit(sessionId: string, revision: string, enabled: boolean): GovernanceDecision[] {
+export interface GovernanceAuditState {
+  decisions: GovernanceDecision[];
+  available: boolean;
+  hasMore: boolean;
+  loadingOlder: boolean;
+  loadOlder: () => void;
+}
+
+interface AuditPageState {
+  sessionId: string;
+  entries: GovernanceAuditEntry[];
+  nextBefore?: string;
+  hasMore: boolean;
+  loadedOlder: boolean;
+  loadingOlder: boolean;
+  autoLoadBlocked: boolean;
+}
+
+function mergeAuditEntries(
+  older: readonly GovernanceAuditEntry[],
+  newer: readonly GovernanceAuditEntry[],
+): GovernanceAuditEntry[] {
+  const seen = new Set<string>();
+  const merged: GovernanceAuditEntry[] = [];
+  for (const entry of [...older, ...newer]) {
+    if (seen.has(entry.auditId)) continue;
+    seen.add(entry.auditId);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+function auditPagesOverlap(
+  retained: readonly GovernanceAuditEntry[],
+  newest: readonly GovernanceAuditEntry[],
+): boolean {
+  const retainedIds = new Set(retained.map((entry) => entry.auditId));
+  return newest.some((entry) => retainedIds.has(entry.auditId));
+}
+
+export function useGovernanceAudit(
+  sessionId: string,
+  revision: string,
+  enabled: boolean,
+  oldestTranscriptAt?: number,
+): GovernanceAuditState {
   const api = useApi();
-  const [entries, setEntries] = useState<GovernanceAuditEntry[]>(NO_ENTRIES);
+  const [page, setPage] = useState<AuditPageState>({
+    sessionId: "",
+    entries: NO_ENTRIES,
+    hasMore: false,
+    loadedOlder: false,
+    loadingOlder: false,
+    autoLoadBlocked: false,
+  });
+  const pageRef = useRef(page);
+  pageRef.current = page;
 
   useEffect(() => {
     if (!enabled) {
-      setEntries((previous) => (previous.length ? NO_ENTRIES : previous));
+      setPage((previous) => previous.entries.length || previous.sessionId
+        ? { sessionId: "", entries: NO_ENTRIES, hasMore: false, loadedOlder: false, loadingOlder: false, autoLoadBlocked: false }
+        : previous);
       return;
     }
     let active = true;
     void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT)
       .then((response) => {
         if (active) {
-          setEntries((previous) => sameGovernanceSnapshot(previous, response.entries) ? previous : response.entries);
+          setPage((previous) => {
+            if (previous.sessionId !== sessionId) {
+              return {
+                sessionId,
+                entries: response.entries,
+                nextBefore: response.nextBefore,
+                hasMore: response.hasMore,
+                loadedOlder: false,
+                loadingOlder: false,
+                autoLoadBlocked: false,
+              };
+            }
+            const retainedPagesStillJoin = previous.loadedOlder &&
+              auditPagesOverlap(previous.entries, response.entries);
+            if (previous.loadedOlder && !retainedPagesStillJoin) {
+              return {
+                sessionId,
+                entries: response.entries,
+                nextBefore: response.nextBefore,
+                hasMore: response.hasMore,
+                loadedOlder: false,
+                loadingOlder: false,
+                autoLoadBlocked: false,
+              };
+            }
+            const entries = retainedPagesStillJoin
+              ? mergeAuditEntries(previous.entries, response.entries)
+              : response.entries;
+            return {
+              ...previous,
+              entries: sameGovernanceSnapshot(previous.entries, entries) ? previous.entries : entries,
+              autoLoadBlocked: false,
+              ...(!previous.loadedOlder
+                ? { nextBefore: response.nextBefore, hasMore: response.hasMore }
+                : {}),
+            };
+          });
         }
       })
       .catch(() => {
-        if (active) setEntries((previous) => (previous.length ? NO_ENTRIES : previous));
+        if (active && pageRef.current.sessionId !== sessionId) {
+          setPage({
+            sessionId,
+            entries: NO_ENTRIES,
+            hasMore: false,
+            loadedOlder: false,
+            loadingOlder: false,
+            autoLoadBlocked: false,
+          });
+        }
       });
     return () => {
       active = false;
     };
   }, [api, enabled, revision, sessionId]);
 
-  return useMemo(() => governanceDecisions(entries), [entries]);
+  const loadOlder = useCallback(() => {
+    const current = pageRef.current;
+    if (!enabled || current.sessionId !== sessionId || current.loadingOlder || !current.hasMore || !current.nextBefore) return;
+    const cursor = current.nextBefore;
+    const issuedEntries = current.entries;
+    setPage((value) => value.sessionId === sessionId
+      ? { ...value, loadingOlder: true, autoLoadBlocked: false }
+      : value);
+    void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT, cursor)
+      .then((response) => {
+        setPage((value) => {
+          if (value.sessionId !== sessionId) return value;
+          if (value.entries !== issuedEntries) return { ...value, loadingOlder: false };
+          return {
+            ...value,
+            entries: mergeAuditEntries(response.entries, value.entries),
+            nextBefore: response.nextBefore,
+            hasMore: response.hasMore,
+            loadedOlder: true,
+            loadingOlder: false,
+          };
+        });
+      })
+      .catch(() => {
+        // Retention can prune the opaque cursor between fetches. Rebase on the current newest page
+        // so the user is never left with a permanently enabled button that repeats the same 400.
+        void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT)
+          .then((response) => {
+            setPage((value) => value.sessionId === sessionId ? {
+              sessionId,
+              entries: response.entries,
+              nextBefore: response.nextBefore,
+              hasMore: response.hasMore,
+              loadedOlder: false,
+              loadingOlder: false,
+              // A successful newest-page recovery does not prove the older-page failure was a
+              // stale cursor. Stop automatic retries until a revision or deliberate click.
+              autoLoadBlocked: true,
+            } : value);
+          })
+          .catch(() => {
+            setPage((value) => value.sessionId === sessionId
+              ? { ...value, loadingOlder: false, autoLoadBlocked: true }
+              : value);
+          });
+      });
+  }, [api, enabled, sessionId]);
+
+  useEffect(() => {
+    if (page.sessionId !== sessionId) return;
+    const oldestAuditAt = page.entries[0]?.timestamp;
+    if (Number.isFinite(oldestTranscriptAt) && oldestAuditAt != null &&
+        oldestAuditAt > oldestTranscriptAt! && page.hasMore && !page.loadingOlder && !page.autoLoadBlocked) {
+      loadOlder();
+    }
+  }, [
+    loadOlder,
+    oldestTranscriptAt,
+    page.autoLoadBlocked,
+    page.entries,
+    page.hasMore,
+    page.loadingOlder,
+    page.sessionId,
+    sessionId,
+  ]);
+
+  const visibleEntries = page.sessionId === sessionId ? page.entries : NO_ENTRIES;
+  const decisions = useMemo(() => governanceDecisions(visibleEntries), [visibleEntries]);
+  return {
+    decisions,
+    available: decisions.length > 0 || (page.sessionId === sessionId && page.hasMore),
+    hasMore: page.sessionId === sessionId && page.hasMore,
+    loadingOlder: page.sessionId === sessionId && page.loadingOlder,
+    loadOlder,
+  };
 }
 
 function hasParentItem(items: readonly TimelineItem[], indexes: readonly number[]): boolean {

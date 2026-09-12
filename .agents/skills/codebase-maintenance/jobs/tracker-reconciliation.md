@@ -5,10 +5,23 @@ residue that concurrent issue work leaves behind.
 
 ## Ground Truth
 
-**Tracker against repository.** For each recently closed issue (`gh issue list --state closed
---limit 30`), read its acceptance criteria and check each one against the merged code. Partial
-delivery is the common failure: an issue closed by a PR that implemented most of the checklist.
-For each open issue, check whether it was already fixed incidentally by other work.
+**Tracker against repository.** For each recently closed issue, read its acceptance criteria and
+check each one against the merged code. Select by close date, not creation date:
+
+```
+gh issue list --state closed --limit 100 --json number,title,closedAt,body \
+  --jq 'sort_by(.closedAt) | reverse | .[0:30]'
+```
+
+`gh issue list --state closed --limit 30` on its own orders by creation, so an old issue closed
+this week falls outside the window while a young one crowds in. One run's window silently
+omitted eleven issues closed in the same three days, among them the one whose merged fix
+explained the entire hygiene backlog it was reporting. Partial delivery is the common failure: an
+issue closed by a PR that implemented most of the checklist. For each open issue, check whether it
+was already fixed incidentally by other work. When checking whether a symbol an issue names is
+gone, never pipe `git grep` through `head`: alphabetical path order can fill the window with hits
+from an unrelated package and read as "already removed". Scope the grep to the paths the issue
+names, or count the matches.
 
 **Repository hygiene.** Check for the residue of the issue workflow:
 

@@ -51,6 +51,50 @@ test("WSL helper failures are sanitized into per-target error state", async () =
   assert.match(logs[0]!, /private \/home\/me path secret/u);
 });
 
+test("legacy malformed target collections cannot collapse a failing WSL distribution", async () => {
+  const malformed = [
+    { name: "missing", versionDigest: digest },
+    { name: "scalar", versionDigest: digest, targets: "codex-wsl-Ubuntu" },
+    { name: "mixed", versionDigest: digest, targets: [null, { agentId: 42 },
+      { agentId: "codex-wsl-Ubuntu", invocation: "agent" }] },
+  ] as unknown as Parameters<typeof reconcileWslSkills>[0]["desired"];
+  const wsl = await reconcileWslSkills({
+    dataDir: "C:\\data", ownerHash, agents, desired: malformed,
+    storeRoot: async () => "/mnt/c/data/skills/store",
+    run: async () => { throw new Error("private\nbootstrap failure"); },
+  });
+  assert.deepEqual(wsl.deployed.map((row) => row.name), ["mixed"]);
+  assert.equal(wsl.deployed[0]?.links[0]?.status, "error");
+  assert.equal(wsl.error, "WSL skill reconciliation failed in Ubuntu.");
+
+  const merged = mergeWslSkillsResult({
+    deployed: [
+      { name: "missing", digest, links: [], error: "invalid skill targets" },
+      { name: "native", digest, links: [{ agentId: "codex", status: "linked" }] },
+    ], unmanaged: [], removedLinks: [],
+  }, wsl, agents);
+  assert.equal(merged.deployed.find((row) => row.name === "missing")?.error, "invalid skill targets");
+  assert.equal(merged.deployed.find((row) => row.name === "native")?.links[0]?.status, "linked");
+  assert.equal(merged.deployed.find((row) => row.name === "mixed")?.links[0]?.status, "error");
+});
+
+test("bounded helper diagnostics are sanitized into runner logs", async () => {
+  const logs: string[] = [];
+  const result = await reconcileWslSkills({
+    dataDir: "C:\\data", ownerHash, agents, desired: [], allowRemovals: true,
+    storeRoot: async () => "/mnt/c/data/skills/store",
+    run: async (_context, _command, args) => args[0] === "-c"
+      ? { stdout: "/home/me/.agent-manager/helper.py\n", stderr: "" }
+      : { stdout: JSON.stringify({ deployed: [], unmanaged: [], removedLinks: [],
+          warnings: [`journal\n${"x".repeat(600)}`] }), stderr: "" },
+    log: (message) => logs.push(message),
+  });
+  assert.deepEqual(result, { deployed: [], unmanaged: [], removedLinks: [] });
+  assert.equal(logs.length, 1);
+  assert.match(logs[0]!, /^WSL skill helper: journal x+$/u);
+  assert.ok(logs[0]!.length <= 518);
+});
+
 test("native placeholders are replaced by authoritative WSL link state", () => {
   const merged = mergeWslSkillsResult({
     deployed: [{ name: "review", digest, links: [

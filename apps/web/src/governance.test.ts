@@ -44,18 +44,34 @@ function work(id: number): TimelineItem {
   return { kind: "agent_thought", id, text: `t${id}` } as TimelineItem;
 }
 
-test("hook governance audit has four visibly distinct user-facing outcomes", () => {
+test("hook governance audit has distinct policy, human, timeout, and abandonment outcomes", () => {
   assert.equal(governanceAuditPresentation(entry({
     stage: "policy_decision",
     outcome: "denied",
     actor: { kind: "policy", id: "deny-shell" },
   }))?.label, "Blocked by Policy");
   assert.equal(governanceAuditPresentation(entry({ outcome: "denied" }))?.label, "Denied by You");
+  assert.deepEqual(governanceAuditPresentation(entry({
+    outcome: "denied",
+    actor: { kind: "system", id: "decision-history-unavailable" },
+  })), {
+    label: "Blocked Fail-Closed",
+    detail: "The tool was denied because its approval could not be completed safely.",
+    tone: "denied",
+  });
   assert.equal(governanceAuditPresentation(entry({
     outcome: "timed_out",
     actor: { kind: "system", id: "policy-ask-timeout" },
   }))?.label, "Approval Timed Out");
   assert.equal(governanceAuditPresentation(entry({ outcome: "allowed" }))?.label, "Approved by You");
+  assert.equal(governanceAuditPresentation(entry({
+    outcome: "allowed",
+    actor: { kind: "policy", id: "allow-read" },
+  }))?.label, "Allowed by Policy");
+  assert.equal(governanceAuditPresentation(entry({
+    outcome: "aborted",
+    actor: { kind: "system", id: "session-stopped" },
+  }))?.label, "Approval Aborted");
   assert.equal(governanceAuditPresentation(entry({
     approvalKind: "question",
     stage: "policy_decision",
@@ -68,14 +84,14 @@ test("non-hook audit entries produce no governance outcome", () => {
   assert.equal(governanceAuditPresentation(entry({ approvalKind: "permission" })), null);
 });
 
-test("decisions are deduplicated and totally ordered oldest-first", () => {
+test("decisions are deduplicated, oldest-first, and preserve server order for tied timestamps", () => {
   const decisions = governanceDecisions([
     entry({ auditId: "c", requestId: "hook-c", timestamp: 300 }),
     entry({ auditId: "b", requestId: "hook-b", timestamp: 200 }),
     entry({ auditId: "a", requestId: "hook-a", timestamp: 200 }),
     entry({ auditId: "c", requestId: "hook-c", timestamp: 300 }),
   ]);
-  assert.deepEqual(decisions.map((d) => d.auditId), ["a", "b", "c"]);
+  assert.deepEqual(decisions.map((d) => d.auditId), ["b", "a", "c"]);
   assert.equal(decisions[0]!.decidedBy, "You · device-1");
 });
 
@@ -108,6 +124,27 @@ test("outcomes whose request already renders in place are not annotated twice", 
   assert.deepEqual(transcriptGovernanceDecisions(decisions, items).map((d) => d.auditId), ["h"]);
 });
 
+test("a native hook event suppresses matching audit outcomes but not a later fail-closed override", () => {
+  const decisions = governanceDecisions([
+    entry({ auditId: "policy-row", requestId: "hook-native", stage: "policy_decision", outcome: "denied", actor: { kind: "policy" } }),
+    entry({ auditId: "resolution-row", requestId: "hook-native", outcome: "denied" }),
+    entry({
+      auditId: "fail-closed-row",
+      requestId: "hook-native",
+      outcome: "denied",
+      actor: { kind: "system", id: "decision-history-unavailable" },
+    }),
+  ]);
+  const native: TimelineItem = {
+    kind: "governance_decision",
+    id: 42,
+    decision: { ...decisions[0]!, auditId: "native-resolution", requestId: "hook-native" },
+  };
+  assert.deepEqual(transcriptGovernanceDecisions(decisions, [native]).map((decision) => decision.auditId), [
+    "fail-closed-row",
+  ]);
+});
+
 test("a governance row lands after the last event at or before its timestamp", () => {
   assert.equal(governanceAnchorSeq(events, 250), 2);
   assert.equal(governanceAnchorSeq(events, 300), 3);
@@ -118,6 +155,18 @@ test("a governance row lands after the last event at or before its timestamp", (
   assert.deepEqual(merged.map((item) => item.kind), [
     "agent_message", "agent_message", "governance_decision", "agent_message",
   ]);
+});
+
+test("transcript insertion preserves server order when decisions share an anchor and timestamp", () => {
+  const decisions = governanceDecisions([
+    entry({ auditId: "z-first", requestId: "hook-z", timestamp: 150 }),
+    entry({ auditId: "a-second", requestId: "hook-a", timestamp: 150 }),
+  ]);
+  const merged = mergeGovernanceDecisions([message(1), message(2)], decisions, events.slice(0, 2));
+  assert.deepEqual(
+    merged.flatMap((item) => item.kind === "governance_decision" ? [item.decision.auditId] : []),
+    ["z-first", "a-second"],
+  );
 });
 
 test("an outcome older than the loaded window pins to the window head instead of being dropped", () => {
@@ -157,13 +206,36 @@ test("governance history renders every outcome newest-first behind a closed disc
     entry({ auditId: "b", requestId: "hook-b", timestamp: 200, outcome: "denied" }),
     entry({ auditId: "c", requestId: "hook-c", timestamp: 300, stage: "policy_decision", actor: { kind: "policy", id: "deny-shell" }, outcome: "denied" }),
   ]);
-  const html = renderToStaticMarkup(React.createElement(GovernanceHistoryPanel, { decisions }));
+  const html = renderToStaticMarkup(React.createElement(GovernanceHistoryPanel, { decisions, hasMore: true }));
   assert.deepEqual(
     Array.from(html.matchAll(/data-audit-id="([^"]+)"/g), (match) => match[1]),
     ["c", "b", "a"],
   );
   assert.doesNotMatch(html, /<details open/);
   assert.match(html, /Blocked by Policy/);
+  assert.match(html, />Load Older Decisions<\/button>/);
+});
+
+test("governance history explains an unpresentable page while older decisions remain", () => {
+  const html = renderToStaticMarkup(React.createElement(GovernanceHistoryPanel, {
+    decisions: [],
+    hasMore: true,
+  }));
+  assert.match(html, /No governance decisions are visible in this page yet\./);
+  assert.doesNotMatch(html, /<ol/);
+  assert.match(html, />Load Older Decisions<\/button>/);
+});
+
+test("governance history keeps the paging control focusable while a page loads", () => {
+  const html = renderToStaticMarkup(React.createElement(GovernanceHistoryPanel, {
+    decisions: governanceDecisions([entry({ auditId: "loading" })]),
+    hasMore: true,
+    loadingOlder: true,
+  }));
+  assert.match(html, /aria-busy="true"/);
+  assert.match(html, /aria-disabled="true"/);
+  assert.doesNotMatch(html, / disabled=""/);
+  assert.match(html, />Loading Older Decisions…<\/button>/);
 });
 
 test("a governance row never splits a collapsible work run", () => {

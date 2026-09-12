@@ -715,9 +715,10 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
-  governanceAudit: (id: string, limit = 50) =>
-    req<{ entries: GovernanceAuditEntry[] }>(
-      `/api/sessions/${encodeURIComponent(id)}/governance-audit?limit=${limit}`,
+  governanceAudit: (id: string, limit = 50, before?: string) =>
+    req<{ entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean }>(
+      `/api/sessions/${encodeURIComponent(id)}/governance-audit?limit=${limit}` +
+        (before ? `&before=${encodeURIComponent(before)}` : ""),
     ),
 
   approvalQueue: () => req<{ items: ApprovalQueueItem[] }>("/api/governance/approval-queue"),
@@ -775,6 +776,22 @@ export function createApiClient(transport: ApiTransport) {
   handoff: (id: string, turn: number, agentId: string, config: SessionConfig) =>
     req<SessionView & { handoffDraft: import("@wollipog/protocol").ConversationHandoffDraft }>(`/api/sessions/${id}/fork`, {
       method: "POST", body: JSON.stringify({ turn, handoff: { agentId, config } }),
+    }),
+
+  /** Recover a quarantined provider conversation. `agent` is supplied only when the session's
+   * recorded recovery mode is a fresh-thread handoff; otherwise the provider forks natively.
+   * A retained prompt comes back as text for the composer — it is never submitted. */
+  recoverQuarantinedConversation: (
+    id: string,
+    turn: number,
+    handoff?: { agentId: string; config: SessionConfig },
+  ) =>
+    req<SessionView & {
+      handoffDraft?: import("@wollipog/protocol").ConversationHandoffDraft;
+      retainedPrompt?: { text: string; images: import("@wollipog/protocol").PromptImageInput[] };
+    }>(`/api/sessions/${id}/fork`, {
+      method: "POST",
+      body: JSON.stringify({ turn, recovery: true, ...(handoff ? { handoff } : {}) }),
     }),
 
   search: (q: string) =>
@@ -842,6 +859,12 @@ export function createApiClient(transport: ApiTransport) {
 
   retryStop: (id: string) =>
     req<SessionView>(`/api/sessions/${id}/retry-stop`, { method: "POST" }),
+
+  acknowledgeBackgroundMissingResult: (id: string, continuationId: string) =>
+    req<SessionView>(
+      `/api/sessions/${encodeURIComponent(id)}/background-deliveries/${encodeURIComponent(continuationId)}/acknowledge-missing-result`,
+      { method: "POST" },
+    ),
 
   setReminder: (id: string, body: SetSessionReminderRequest) =>
     req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
@@ -1039,6 +1062,11 @@ export function createApiClient(transport: ApiTransport) {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  updateMachineCapacity: (runnerId: string, body: { configuredUnits: number; expectedRevision: number }) =>
+    req<{ capacity: import("@wollipog/protocol").RunnerCapacityConfiguration }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/capacity`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
 
   // Phase 3: external (CLI-started) sessions on a box.
   listExternalSessions: (runnerId: string, agentId?: string) =>

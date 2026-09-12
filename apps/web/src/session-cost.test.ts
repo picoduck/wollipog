@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionUsageResponse, SessionView, UsageAmount, UsageCostSource } from "@wollipog/protocol";
-import { costProvenanceNote, sessionCostLabel, sessionUsageTotals } from "./session-cost.js";
+import { costProvenanceNote, estimatedCostSourceUrl, sessionCostLabel, sessionUsageTotals } from "./session-cost.js";
 
 function session(overrides: Partial<SessionView> = {}): SessionView {
   return { tokensIn: 0, tokensOut: 0, costUsd: 0, ...overrides } as SessionView;
@@ -121,7 +121,9 @@ test("a provider-reported zero is a real amount once the ledger says so", () => 
   const free = session({ tokensIn: 25_000, tokensOut: 900, costUsd: 0 });
   // Before the ledger answers, the strip cannot tell "free" from "nobody priced it".
   assert.equal(sessionCostLabel(free)?.text, "$—");
-  const priced = sessionCostLabel(free, response({ totals: amount({ costSource: "providerReported" }) }));
+  const priced = sessionCostLabel(free, response({
+    totals: amount({ costSource: "providerReported", processedTokens: 25_900 }),
+  }));
   assert.deepEqual(priced, { text: "$0.00", priced: true, ariaLabel: "Session Usage: $0.00" });
   // An unpriced ledger still refuses to invent an amount.
   assert.equal(
@@ -130,6 +132,35 @@ test("a provider-reported zero is a real amount once the ledger says so", () => 
   );
   // A session that has processed nothing renders nothing, ledger or not.
   assert.equal(sessionCostLabel(session(), response({ totals: amount({ costSource: "providerReported" }) })), null);
+});
+
+test("a caught-up snapshot renders a provider-reported zero before usage detail loads", () => {
+  const label = sessionCostLabel(session({
+    tokensIn: 25_000,
+    tokensOut: 900,
+    costUsd: 0,
+    costSource: "providerReported",
+  }));
+  assert.deepEqual(label, { text: "$0.00", priced: true, ariaLabel: "Session Usage: $0.00" });
+  assert.equal(sessionCostLabel(session({
+    tokensIn: 25_000,
+    tokensOut: 900,
+    costUsd: 0,
+    costSource: "unpriced",
+  }))?.text, "$—");
+});
+
+test("stale detail cannot claim that newer live usage was free", () => {
+  const live = session({ tokensIn: 25_000, tokensOut: 900, costUsd: 0 });
+  const stale = response({
+    totals: amount({
+      inputTokens: 100,
+      outputTokens: 10,
+      processedTokens: 110,
+      costSource: "providerReported",
+    }),
+  });
+  assert.equal(sessionCostLabel(live, stale)?.text, "$—");
 });
 
 test("the ledger's cost is used when the session's running total lags behind it", () => {
@@ -164,7 +195,7 @@ test("cost provenance is stated honestly per source", () => {
   assert.equal(
     costProvenanceNote(response({
       totals: amount({ costSource: "modelPriced" }),
-      pricing: { status: "unavailable", source: "litellm", fetchedAt: null, knownModels: 0 },
+      pricing: { status: "unavailable", source: "https://example.com/rates.json", fetchedAt: null, knownModels: 0 },
     })),
     "No rate table is loaded, so cost is not estimated.",
   );
@@ -176,4 +207,20 @@ test("cost provenance is stated honestly per source", () => {
     costProvenanceNote(response({ totals: amount({ costSource: "unpriced", unpricedRecords: 1 }) })),
     "1 record could not be priced, so this cost is a lower bound.",
   );
+});
+
+test("estimated cost source URLs are limited to browser-safe HTTP links", () => {
+  const withSource = (source: string, status: "fresh" | "cached" | "unavailable" = "fresh") => response({
+    totals: amount({ costSource: "modelPriced" }),
+    pricing: { status, source, fetchedAt: status === "unavailable" ? null : 1, knownModels: status === "unavailable" ? 0 : 1200 },
+  });
+  assert.equal(
+    estimatedCostSourceUrl(withSource("https://example.com/rates.json")),
+    "https://example.com/rates.json",
+  );
+  assert.equal(estimatedCostSourceUrl(withSource("http://localhost:4317/rates.json")), "http://localhost:4317/rates.json");
+  assert.equal(estimatedCostSourceUrl(withSource("javascript:alert(1)")), null);
+  assert.equal(estimatedCostSourceUrl(withSource("litellm")), null);
+  assert.equal(estimatedCostSourceUrl(withSource("https://example.com/rates.json", "unavailable")), null);
+  assert.equal(estimatedCostSourceUrl(response({ totals: amount({ costSource: "providerReported" }) })), null);
 });

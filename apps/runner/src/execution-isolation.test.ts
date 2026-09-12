@@ -45,6 +45,12 @@ test("native macOS and Windows policies resolve only their audited platform adap
   assert.doesNotMatch(seatbelt?.backend === "seatbelt" ? seatbelt.profile : "", /allow network/);
   assert.doesNotMatch(seatbelt?.backend === "seatbelt" ? seatbelt.profile : "", /allow mach/);
   assert.match(seatbelt?.backend === "seatbelt" ? seatbelt.profile : "", /Volumes\/provider-state\/claude\/projects/);
+  assert.deepEqual(seatbelt?.backend === "seatbelt" ? seatbelt.writableRoots : [], [
+    "/Users/me/Work/repo",
+    "/Users/me/Library/Application Support/Wollipog",
+    "/private/var/folders/tmp",
+    "/Volumes/provider-state/claude/projects",
+  ]);
   assert.deepEqual(macCreated, [["/Users/me/.claude/projects"]]);
 
   const windows = await resolveExecutionIsolation(
@@ -84,6 +90,23 @@ test("Seatbelt profile escapes paths and limits its writable surface", () => {
   assert.throws(() => buildSeatbeltProfile({
     driver: "acp", dataDir: "/data", env: {}, sessionId: "s1", cwd: "/repo\nallow default",
   }, "/Users/me", "deny"), /control-free POSIX path/);
+});
+
+test("Orchestrator Seatbelt grants writes only to scratch and provider transcripts", () => {
+  const profile = buildSeatbeltProfile({
+    driver: "claude-code",
+    dataDir: "/Users/me/Library/Application Support/Wollipog",
+    env: { HOME: "/Users/me" },
+    sessionId: "s1",
+    cwd: "/Users/me/Wollipog/orchestrator-scratch",
+    additionalWritableRoots: ["/Users/me/Work/repo"],
+    orchestratorScratchOnly: true,
+  }, "/Users/me", "inherit", "/private/var/folders/tmp");
+  assert.match(profile, /orchestrator-scratch/);
+  assert.match(profile, /\/Users\/me\/\.claude\/projects/);
+  assert.doesNotMatch(profile, /Application Support\/Wollipog/);
+  assert.doesNotMatch(profile, /Users\/me\/Work\/repo/);
+  assert.doesNotMatch(profile, /private\/var\/folders\/tmp/);
 });
 
 test("provider isolation preserves the driver-owned boundary", async () => {
