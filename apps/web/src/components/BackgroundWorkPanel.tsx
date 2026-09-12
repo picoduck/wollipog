@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
   runnerSupportsProtocol,
@@ -10,6 +10,7 @@ import {
 import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { BACKGROUND_DELIVERY_STATUS } from "../background-delivery-status.js";
+import { useApi } from "../api-context.js";
 
 export type BackgroundJobCurrentState =
   | "Running"
@@ -38,7 +39,8 @@ export function backgroundJobCurrentState(
 
 export function backgroundJobDeliveryStage(job: ManagedBackgroundJobView): string {
   if (job.assistantResultPersistedAt != null) return "Result Delivered";
-  if (job.continuationAcceptedAt != null) return "Continuation Accepted";
+  if (job.continuationMissingResultAt != null) return "Result Missing";
+  if (job.continuationAcceptedAt != null) return "Continuation In Flight";
   if (job.continuationSubmittedAt != null) return "Continuation Submitted";
   if (job.continuationQueuedAt != null || (job.terminalObservedAt != null && job.continuationRequired)) {
     return "Continuation Pending";
@@ -75,6 +77,8 @@ function deliveryTimestamp(delivery: BackgroundDeliveryView): number {
     delivery.queuedAt ?? 0,
     delivery.submittedAt ?? 0,
     delivery.acceptedAt ?? 0,
+    delivery.missingResultAt ?? 0,
+    delivery.missingResultAcknowledgedAt ?? 0,
     delivery.runnerResultPersistedAt ?? 0,
     delivery.transcriptProjectedAt ?? 0,
     delivery.notificationQueuedAt ?? 0,
@@ -90,7 +94,10 @@ function deliveryTimestamp(delivery: BackgroundDeliveryView): number {
 
 function deliveryStage(deliveries: readonly BackgroundDeliveryView[]): string {
   if (deliveries.some((delivery) => delivery.runnerResultPersistedAt != null)) return "Result Delivered";
-  if (deliveries.some((delivery) => delivery.acceptedAt != null)) return "Continuation Accepted";
+  if (deliveries.some((delivery) => delivery.missingResultAt != null &&
+      delivery.missingResultAcknowledgedAt == null)) return "Result Missing";
+  if (deliveries.some((delivery) => delivery.missingResultAcknowledgedAt != null)) return "Missing Result Acknowledged";
+  if (deliveries.some((delivery) => delivery.acceptedAt != null)) return "Continuation In Flight";
   if (deliveries.some((delivery) => delivery.submittedAt != null)) return "Continuation Submitted";
   if (deliveries.some((delivery) => delivery.queuedAt != null)) return "Continuation Pending";
   return "Status Unverified";
@@ -162,6 +169,13 @@ export function BackgroundWorkPanel({
   onRetryInventory?: () => void;
   selectedJobId?: string;
 }) {
+  const api = useApi();
+  const [acknowledgingContinuationId, setAcknowledgingContinuationId] = useState<string | null>(null);
+  const [locallyAcknowledged, setLocallyAcknowledged] = useState<ReadonlySet<string>>(() => new Set());
+  const [acknowledgementError, setAcknowledgementError] = useState<{
+    continuationId: string;
+    message: string;
+  } | null>(null);
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
   const jobs = useMemo(() => (session.backgroundJobs ?? []).filter((job) =>
     selectedJobId === undefined || job.id === selectedJobId), [session.backgroundJobs, selectedJobId]);
@@ -236,8 +250,9 @@ export function BackgroundWorkPanel({
             const groupDeliveries = group.deliveries;
             const watchdogDelivery = groupDeliveries.find((delivery) => delivery.watchdogState);
             const watchdogState = watchdogDelivery?.watchdogState;
-            const watchdogStatus = watchdogState ? BACKGROUND_DELIVERY_STATUS[watchdogState] : null;
             const watchdogHighlighted = watchdogDelivery === highlightedWatchdogDelivery;
+            const recoveryDeliveries = groupDeliveries.filter((delivery) =>
+              delivery.watchdogState || delivery.missingResultAt != null);
             const recordedJobCount = groupDeliveries.reduce((total, delivery) => total + delivery.jobCount, 0);
             const recordedTerminalCount = groupDeliveries.reduce(
               (total, delivery) => total + delivery.terminalCount,
@@ -250,6 +265,17 @@ export function BackgroundWorkPanel({
             const deliveryComplete = (groupDeliveries.length > 0 &&
               groupDeliveries.every((delivery) => delivery.runnerResultPersistedAt != null)) ||
               (!groupTruncated && shownDeliveredCount === group.jobs.length);
+            const incompleteDeliveryStage = groupDeliveries.some((delivery) =>
+              delivery.runnerResultPersistedAt == null && delivery.missingResultAt != null &&
+              delivery.missingResultAcknowledgedAt == null)
+              ? "Result Missing"
+              : groupDeliveries.some((delivery) =>
+                delivery.runnerResultPersistedAt == null && delivery.missingResultAcknowledgedAt != null)
+                ? "Missing Result Acknowledged"
+                : groupDeliveries.some((delivery) =>
+                  delivery.runnerResultPersistedAt == null && delivery.acceptedAt != null)
+                  ? "Continuation In Flight"
+                  : "Delivery Pending";
             const parentEventId = parentTurnEventIds.get(group.parentTurnId);
             return (
               <section className={`background-work-group${watchdogHighlighted ? " background-work-group-watchdog" : ""}`}
@@ -282,25 +308,79 @@ export function BackgroundWorkPanel({
                     </span>
                   )}
                 </div>
-                {watchdogStatus && (
-                  <div className="background-delivery-summary" role="group"
-                    aria-labelledby={`background-delivery-summary-${groupIndex}`}>
-                    <strong id={`background-delivery-summary-${groupIndex}`}>{watchdogStatus.label}</strong>
-                    <p>{watchdogStatus.description}</p>
-                    <dl>
-                      <div><dt>Completed</dt><dd>{watchdogStatus.completed}</dd></div>
-                      <div><dt>Still Pending</dt><dd>{watchdogStatus.outstanding}</dd></div>
-                      <div><dt>Recovery</dt><dd>{watchdogStatus.recovery}</dd></div>
-                      <div><dt>Your Action</dt><dd>{watchdogStatus.action}</dd></div>
-                    </dl>
-                    <details>
-                      <summary>Technical Details</summary>
+                {recoveryDeliveries.map((delivery, deliveryIndex) => {
+                  const recoveryState = delivery.watchdogState;
+                  const continuationId = delivery.continuationId;
+                  const acknowledged = delivery.missingResultAcknowledgedAt != null ||
+                    (continuationId != null && locallyAcknowledged.has(continuationId));
+                  const isMissing = delivery.missingResultAt != null;
+                  const status = recoveryState
+                    ? BACKGROUND_DELIVERY_STATUS[recoveryState]
+                    : isMissing ? BACKGROUND_DELIVERY_STATUS.accepted_without_result : null;
+                  const summaryId = `background-delivery-summary-${groupIndex}-${deliveryIndex}`;
+                  return (
+                    <div className="background-delivery-summary" role="group" key={continuationId ?? summaryId}
+                      aria-labelledby={summaryId} data-recovery-state={acknowledged
+                        ? "missing-result-acknowledged"
+                        : recoveryState}>
+                      <strong id={summaryId}>{acknowledged ? "Missing Result Acknowledged" : status?.label}</strong>
+                      <p>{acknowledged
+                        ? "You acknowledged that this continuation ended without a durable result. Its delivery history remains available."
+                        : status?.description}</p>
                       <dl>
-                        <div><dt>Pipeline State</dt><dd><code>{watchdogState}</code></dd></div>
-                        <div><dt>Diagnostic</dt><dd>{watchdogStatus.diagnostic}</dd></div>
+                        {status && !acknowledged && <>
+                          <div><dt>Completed</dt><dd>{status.completed}</dd></div>
+                          <div><dt>Still Pending</dt><dd>{status.outstanding}</dd></div>
+                          <div><dt>Recovery</dt><dd>{status.recovery}</dd></div>
+                          <div><dt>Your Action</dt><dd>{status.action}</dd></div>
+                        </>}
+                        {isMissing && (
+                          <div><dt>Missing Since</dt><dd>{recordedTime(delivery.missingResultAt, now)}</dd></div>
+                        )}
+                        {isMissing && (
+                          <div><dt>Recovery State</dt><dd>{acknowledged
+                            ? delivery.missingResultAcknowledgedAt != null
+                              ? <>Acknowledged {recordedTime(delivery.missingResultAcknowledgedAt, now)}</>
+                              : "Acknowledged"
+                            : "Acknowledgement Required"}</dd></div>
+                        )}
                       </dl>
-                    </details>
-                  </div>
+                      {!acknowledged && recoveryState === "accepted_without_result" && continuationId && (
+                        <button type="button" className="btn ghost sm"
+                          disabled={acknowledgingContinuationId === continuationId}
+                          onClick={() => {
+                            setAcknowledgingContinuationId(continuationId);
+                            setAcknowledgementError(null);
+                            void api.acknowledgeBackgroundMissingResult(session.id, continuationId)
+                              .then(() => setLocallyAcknowledged((current) => new Set(current).add(continuationId)))
+                              .catch((error: unknown) => setAcknowledgementError({
+                                continuationId,
+                                message: error instanceof Error
+                                  ? error.message
+                                  : "Missing-result acknowledgement failed.",
+                              }))
+                              .finally(() => setAcknowledgingContinuationId(null));
+                          }}>
+                          {acknowledgingContinuationId === continuationId
+                            ? "Acknowledging…"
+                            : "Acknowledge Missing Result"}
+                        </button>
+                      )}
+                      <details>
+                        <summary>Technical Details</summary>
+                        <dl>
+                          <div><dt>Pipeline State</dt><dd><code>{acknowledged
+                            ? "missing_result_acknowledged"
+                            : recoveryState}</code></dd></div>
+                          {status && !acknowledged && <div><dt>Diagnostic</dt><dd>{status.diagnostic}</dd></div>}
+                        </dl>
+                      </details>
+                    </div>
+                  );
+                })}
+                {acknowledgementError && groupDeliveries.some((delivery) =>
+                  delivery.continuationId === acknowledgementError.continuationId) && (
+                  <p className="hint warn" role="alert">{acknowledgementError.message}</p>
                 )}
                 <div className="background-work-barrier" role="group"
                   aria-label={deliveryOnly ? "Delivery Receipt Status" : "Barrier Status"}>
@@ -312,8 +392,8 @@ export function BackgroundWorkPanel({
                       : terminalCount < jobCount
                         ? "Waiting for Jobs"
                         : groupTruncated && !deliveryComplete
-                          ? "Status Unverified"
-                          : deliveryComplete ? "Delivered" : "Delivery Pending"}</strong>
+                        ? "Status Unverified"
+                        : deliveryComplete ? "Delivered" : incompleteDeliveryStage}</strong>
                   {notificationStage(groupDeliveries) && <span> · {notificationStage(groupDeliveries)}</span>}
                 </div>
                 {deliveryOnly ? (

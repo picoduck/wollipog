@@ -584,6 +584,7 @@ CREATE TABLE IF NOT EXISTS managed_background_jobs (
   continuation_queued_at     INTEGER,
   continuation_submitted_at  INTEGER,
   continuation_accepted_at   INTEGER,
+  continuation_missing_result_at INTEGER,
   assistant_result_persisted_at INTEGER,
   source_present             INTEGER NOT NULL DEFAULT 1 CHECK (source_present IN (0, 1)),
   last_observed_at           INTEGER NOT NULL,
@@ -600,6 +601,8 @@ CREATE TABLE IF NOT EXISTS managed_background_deliveries (
   queued_at                  INTEGER,
   submitted_at               INTEGER,
   accepted_at                INTEGER,
+  missing_result_at          INTEGER,
+  missing_result_acknowledged_at INTEGER,
   runner_result_persisted_at INTEGER,
   transcript_projected_at    INTEGER,
   projected_event_epoch      INTEGER,
@@ -3413,9 +3416,16 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
+    try {
+      db.exec("ALTER TABLE managed_background_jobs ADD COLUMN continuation_missing_result_at INTEGER");
+    } catch {
+      /* column already present */
+    }
     for (const column of [
       "status_settlement_pending_at INTEGER",
       "status_settled_at INTEGER",
+      "missing_result_at INTEGER",
+      "missing_result_acknowledged_at INTEGER",
     ]) {
       try {
         db.exec(`ALTER TABLE managed_background_deliveries ADD COLUMN ${column}`);
@@ -10439,9 +10449,10 @@ export class ControlPlaneDb {
         (session_id, job_id, parent_turn_id, runner_id, workspace_id, project_location_id,
          launch_type, registered_at, terminal_status,
          terminal_observed_at, continuation_required, continuation_id, continuation_queued_at,
-         continuation_submitted_at, continuation_accepted_at, assistant_result_persisted_at,
+         continuation_submitted_at, continuation_accepted_at, continuation_missing_result_at,
+         assistant_result_persisted_at,
          source_present, last_observed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, job_id) DO UPDATE SET
          parent_turn_id=managed_background_jobs.parent_turn_id,
          runner_id=managed_background_jobs.runner_id,
@@ -10460,6 +10471,7 @@ export class ControlPlaneDb {
          continuation_queued_at=COALESCE(managed_background_jobs.continuation_queued_at, excluded.continuation_queued_at),
          continuation_submitted_at=COALESCE(managed_background_jobs.continuation_submitted_at, excluded.continuation_submitted_at),
          continuation_accepted_at=COALESCE(managed_background_jobs.continuation_accepted_at, excluded.continuation_accepted_at),
+         continuation_missing_result_at=COALESCE(managed_background_jobs.continuation_missing_result_at, excluded.continuation_missing_result_at),
          assistant_result_persisted_at=COALESCE(managed_background_jobs.assistant_result_persisted_at, excluded.assistant_result_persisted_at),
          source_present=1,
          last_observed_at=MAX(managed_background_jobs.last_observed_at, excluded.last_observed_at)`,
@@ -10467,13 +10479,14 @@ export class ControlPlaneDb {
     const upsertDelivery = this.stmt(
       `INSERT INTO managed_background_deliveries
         (session_id, continuation_id, parent_turn_id, queued_at, submitted_at, accepted_at,
-         runner_result_persisted_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         missing_result_at, runner_result_persisted_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, continuation_id) DO UPDATE SET
          parent_turn_id=managed_background_deliveries.parent_turn_id,
          queued_at=COALESCE(managed_background_deliveries.queued_at, excluded.queued_at),
          submitted_at=COALESCE(managed_background_deliveries.submitted_at, excluded.submitted_at),
          accepted_at=COALESCE(managed_background_deliveries.accepted_at, excluded.accepted_at),
+         missing_result_at=COALESCE(managed_background_deliveries.missing_result_at, excluded.missing_result_at),
          runner_result_persisted_at=COALESCE(managed_background_deliveries.runner_result_persisted_at, excluded.runner_result_persisted_at),
          updated_at=MAX(managed_background_deliveries.updated_at, excluded.updated_at)`,
     );
@@ -10492,7 +10505,13 @@ export class ControlPlaneDb {
           !validOptionalBackgroundTimestamp(job.continuationQueuedAt) ||
           !validOptionalBackgroundTimestamp(job.continuationSubmittedAt) ||
           !validOptionalBackgroundTimestamp(job.continuationAcceptedAt) ||
+          !validOptionalBackgroundTimestamp(job.continuationMissingResultAt) ||
           !validOptionalBackgroundTimestamp(job.assistantResultPersistedAt)) continue;
+      // Missing-result is a post-acceptance terminal fact. Ignore an out-of-order marker from a
+      // malformed or incompatible runner rather than manufacturing acknowledgement authority.
+      const continuationMissingResultAt = job.continuationAcceptedAt == null
+        ? null
+        : job.continuationMissingResultAt ?? null;
       upsertJob.run(
         sessionId,
         job.id,
@@ -10509,6 +10528,7 @@ export class ControlPlaneDb {
         job.continuationQueuedAt ?? null,
         job.continuationSubmittedAt ?? null,
         job.continuationAcceptedAt ?? null,
+        continuationMissingResultAt,
         job.assistantResultPersistedAt ?? null,
         1,
         now,
@@ -10521,6 +10541,7 @@ export class ControlPlaneDb {
           job.continuationQueuedAt ?? null,
           job.continuationSubmittedAt ?? null,
           job.continuationAcceptedAt ?? null,
+          continuationMissingResultAt,
           job.assistantResultPersistedAt ?? null,
           now,
         );
@@ -10636,6 +10657,20 @@ export class ControlPlaneDb {
     ).run(now, now, sessionId, continuationId).changes) > 0;
   }
 
+  /** Resolve one terminal missing result without altering acceptance evidence or creating retry
+   * authority. Repeated calls are harmless and a late durable result remains authoritative. */
+  acknowledgeBackgroundMissingResult(sessionId: string, continuationId: string, now: number): boolean {
+    if (!validBackgroundIdentity(sessionId) || !validBackgroundIdentity(continuationId) ||
+        !Number.isSafeInteger(now) || now < 0) return false;
+    return Number(this.stmt(
+      `UPDATE managed_background_deliveries
+          SET missing_result_acknowledged_at=COALESCE(missing_result_acknowledged_at, ?),
+              updated_at=MAX(updated_at, ?)
+        WHERE session_id=? AND continuation_id=? AND missing_result_at IS NOT NULL
+          AND runner_result_persisted_at IS NULL AND missing_result_acknowledged_at IS NULL`,
+    ).run(now, now, sessionId, continuationId).changes) > 0;
+  }
+
   /** A live delivery frame diverted through catch-up hydration by a sequence gap must arm its
    * settlement BEFORE the hydration round-trip: the runner's trailing idle can arrive first, and
    * once the session is idle the projection-time arming would refuse. Creates the durable row
@@ -10685,7 +10720,8 @@ export class ControlPlaneDb {
   listBackgroundDeliveries(sessionId: string, status?: SessionStatus): BackgroundDeliveryView[] {
     const rows = this.stmt(
       `SELECT delivery.continuation_id, delivery.parent_turn_id, delivery.queued_at,
-              delivery.submitted_at, delivery.accepted_at, delivery.runner_result_persisted_at,
+              delivery.submitted_at, delivery.accepted_at, delivery.missing_result_at,
+              delivery.missing_result_acknowledged_at, delivery.runner_result_persisted_at,
               delivery.transcript_projected_at, delivery.notification_queued_at,
               delivery.dashboard_observed_at, delivery.status_settled_at,
               COUNT(job.job_id) AS job_count,
@@ -10698,7 +10734,9 @@ export class ControlPlaneDb {
         GROUP BY delivery.session_id, delivery.continuation_id
         ORDER BY CASE
                    WHEN COALESCE(SUM(job.source_present), 0) > 0
-                     AND delivery.accepted_at IS NOT NULL AND delivery.runner_result_persisted_at IS NULL THEN 0
+                     AND delivery.missing_result_at IS NOT NULL
+                     AND delivery.missing_result_acknowledged_at IS NULL
+                     AND delivery.runner_result_persisted_at IS NULL THEN 0
                    WHEN COALESCE(SUM(job.source_present), 0) > 0
                      AND delivery.runner_result_persisted_at IS NOT NULL AND delivery.transcript_projected_at IS NULL THEN 0
                    WHEN delivery.notification_queued_at IS NOT NULL AND delivery.dashboard_observed_at IS NULL THEN 0
@@ -10713,6 +10751,8 @@ export class ControlPlaneDb {
       queued_at: number | null;
       submitted_at: number | null;
       accepted_at: number | null;
+      missing_result_at: number | null;
+      missing_result_acknowledged_at: number | null;
       runner_result_persisted_at: number | null;
       transcript_projected_at: number | null;
       notification_queued_at: number | null;
@@ -10729,7 +10769,8 @@ export class ControlPlaneDb {
     const views = rows.map((row): BackgroundDeliveryView => {
       let watchdogState: BackgroundDeliveryWatchdogState | undefined;
       if (status !== "stopped" && row.active_job_count > 0 &&
-          row.accepted_at != null && row.runner_result_persisted_at == null) {
+          row.missing_result_at != null && row.missing_result_acknowledged_at == null &&
+          row.runner_result_persisted_at == null) {
         watchdogState = "accepted_without_result";
       } else if (status !== "stopped" && row.active_job_count > 0 &&
                  row.runner_result_persisted_at != null && row.transcript_projected_at == null) {
@@ -10745,6 +10786,10 @@ export class ControlPlaneDb {
         ...(row.queued_at != null ? { queuedAt: row.queued_at } : {}),
         ...(row.submitted_at != null ? { submittedAt: row.submitted_at } : {}),
         ...(row.accepted_at != null ? { acceptedAt: row.accepted_at } : {}),
+        ...(row.missing_result_at != null ? { missingResultAt: row.missing_result_at } : {}),
+        ...(row.missing_result_acknowledged_at != null
+          ? { missingResultAcknowledgedAt: row.missing_result_acknowledged_at }
+          : {}),
         ...(row.runner_result_persisted_at != null ? { runnerResultPersistedAt: row.runner_result_persisted_at } : {}),
         ...(row.transcript_projected_at != null ? { transcriptProjectedAt: row.transcript_projected_at } : {}),
         ...(row.notification_queued_at != null ? { notificationQueuedAt: row.notification_queued_at } : {}),
@@ -10785,7 +10830,7 @@ export class ControlPlaneDb {
       `SELECT job_id, parent_turn_id, launch_type, registered_at, last_observed_at,
               source_present, terminal_status, terminal_observed_at, continuation_required,
               continuation_id, continuation_queued_at, continuation_submitted_at,
-              continuation_accepted_at, assistant_result_persisted_at
+              continuation_accepted_at, continuation_missing_result_at, assistant_result_persisted_at
          FROM managed_background_jobs
         WHERE session_id=?
         ORDER BY CASE
@@ -10809,6 +10854,7 @@ export class ControlPlaneDb {
       continuation_queued_at: number | null;
       continuation_submitted_at: number | null;
       continuation_accepted_at: number | null;
+      continuation_missing_result_at: number | null;
       assistant_result_persisted_at: number | null;
     }>;
     return rows.map((row) => ({
@@ -10825,6 +10871,9 @@ export class ControlPlaneDb {
       ...(row.continuation_queued_at != null ? { continuationQueuedAt: row.continuation_queued_at } : {}),
       ...(row.continuation_submitted_at != null ? { continuationSubmittedAt: row.continuation_submitted_at } : {}),
       ...(row.continuation_accepted_at != null ? { continuationAcceptedAt: row.continuation_accepted_at } : {}),
+      ...(row.continuation_missing_result_at != null
+        ? { continuationMissingResultAt: row.continuation_missing_result_at }
+        : {}),
       ...(row.assistant_result_persisted_at != null
         ? { assistantResultPersistedAt: row.assistant_result_persisted_at }
         : {}),

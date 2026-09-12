@@ -860,6 +860,12 @@ export function createApiClient(transport: ApiTransport) {
   retryStop: (id: string) =>
     req<SessionView>(`/api/sessions/${id}/retry-stop`, { method: "POST" }),
 
+  acknowledgeBackgroundMissingResult: (id: string, continuationId: string) =>
+    req<SessionView>(
+      `/api/sessions/${encodeURIComponent(id)}/background-deliveries/${encodeURIComponent(continuationId)}/acknowledge-missing-result`,
+      { method: "POST" },
+    ),
+
   setReminder: (id: string, body: SetSessionReminderRequest) =>
     req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
       method: "PUT",

@@ -635,7 +635,8 @@ const MAX_RETAINED_DELIVERED_BACKGROUND_JOBS = 128;
 function managedBackgroundWorkState(
   jobs: readonly DurableBackgroundJob[],
 ): "running" | "continuation_pending" | undefined {
-  if (jobs.some((job) => job.continuationRequired && !job.assistantResultPersistedAt)) {
+  if (jobs.some((job) => job.continuationRequired && !job.assistantResultPersistedAt &&
+      !job.continuationMissingResultAt)) {
     return "continuation_pending";
   }
   return jobs.some((job) => !job.terminalStatus) ? "running" : undefined;
@@ -2168,6 +2169,7 @@ export class SessionManager {
       // A durable provider-auth block is authoritative across process restart. Read-only
       // background discovery may still run, but it must not submit an unattended recovery turn.
       reconciled = this.reconcileDeliveredBackgroundContinuations(reconciled);
+      reconciled = this.reconcileMissingBackgroundContinuations(reconciled);
       const automatic = !reconciled.providerAuthBlock && !reconciled.providerHistoryBlock &&
         automaticClaudeRecoveryAllowed(reconciled);
       if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork) {
@@ -7244,13 +7246,17 @@ export class SessionManager {
         this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
         this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       }
-      if (syntheticRecovery && stop !== "cancelled" && stop !== "refusal") {
+      if (syntheticRecovery) {
         if (backgroundJobIds?.length) {
-          if (entry.backgroundPromptAccepted && entry.backgroundAssistantMessagePersisted) {
+          if (stop !== "cancelled" && stop !== "refusal" &&
+              entry.backgroundPromptAccepted && entry.backgroundAssistantMessagePersisted) {
             this.finishBackgroundContinuation(sessionId, backgroundJobIds);
+          } else if (entry.backgroundPromptAccepted) {
+            this.markBackgroundContinuationMissingResult(sessionId, backgroundJobIds);
           }
+        } else if (stop !== "cancelled" && stop !== "refusal") {
+          this.finishOrphanRecovery(sessionId);
         }
-        else this.finishOrphanRecovery(sessionId);
       }
       if (stop !== "cancelled" && stop !== "refusal") {
         this.finishParentTurnBackgroundJobs(sessionId, queued.id);
@@ -7311,7 +7317,10 @@ export class SessionManager {
       if (backgroundJobIds?.length && !entry.backgroundPromptAccepted) {
         this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
         this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      } else if (backgroundJobIds?.length) {
+        this.markBackgroundContinuationMissingResult(sessionId, backgroundJobIds);
       }
+      entry.currentBackgroundJobIds = undefined;
       if (entry.historyIntegrityFailure) return;
       if (!this.active.has(sessionId)) {
         durable?.uncertain("session stopped while provider execution was in progress");
@@ -10010,6 +10019,30 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  /** Provider acceptance is the at-most-once fence. Once that exact turn has ended without a
+   * complete durable result, retain a terminal audit fact instead of replaying or claiming the
+   * continuation is still in flight. */
+  private markBackgroundContinuationMissingResult(sessionId: string, jobIds: string[]): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current?.backgroundJobs) return;
+    const selected = new Set(jobIds);
+    const missingResultAt = Date.now();
+    let changed = false;
+    const backgroundJobs = current.backgroundJobs.map((job) => {
+      if (!selected.has(job.id) || !job.continuationAcceptedAt || job.assistantResultPersistedAt ||
+          job.continuationMissingResultAt) return job;
+      changed = true;
+      return { ...job, continuationMissingResultAt: missingResultAt };
+    });
+    if (!changed) return;
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs,
+      backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
+    });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
+  }
+
   private finishBackgroundContinuation(sessionId: string, jobIds: string[]): void {
     const current = this.store.readMeta(sessionId);
     if (!current?.backgroundJobs) return;
@@ -10127,6 +10160,23 @@ export class SessionManager {
       };
     });
     if (!changed) return meta;
+    return this.store.patchMeta(meta.sessionId, {
+      backgroundJobs,
+      backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
+    }) ?? meta;
+  }
+
+  /** A provider process cannot survive runner restart. Accepted continuations with no delivery
+   * proof are therefore terminal, while submitted-only continuations remain conservatively
+   * uncertain and are never replayed. */
+  private reconcileMissingBackgroundContinuations(meta: SessionMeta): SessionMeta {
+    if (!meta.backgroundJobs?.some((job) => job.continuationAcceptedAt &&
+        !job.assistantResultPersistedAt && !job.continuationMissingResultAt)) return meta;
+    const missingResultAt = Date.now();
+    const backgroundJobs = meta.backgroundJobs.map((job) =>
+      job.continuationAcceptedAt && !job.assistantResultPersistedAt && !job.continuationMissingResultAt
+        ? { ...job, continuationMissingResultAt: missingResultAt }
+        : job);
     return this.store.patchMeta(meta.sessionId, {
       backgroundJobs,
       backgroundWorkState: managedBackgroundWorkState(backgroundJobs),

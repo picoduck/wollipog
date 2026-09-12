@@ -4349,6 +4349,20 @@ app.post("/api/sessions/:id/retry-stop", async (req, reply) => {
   return respond(reply, svc.retryStop(id));
 });
 
+app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result", async (req, reply) => {
+  const { id, continuationId } = req.params as { id: string; continuationId: string };
+  const changed = db.acknowledgeBackgroundMissingResult(id, continuationId, Date.now());
+  const session = db.getSession(id);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  const delivery = session.backgroundDeliveries?.find((item) => item.continuationId === continuationId);
+  if (!delivery) return reply.code(404).send({ error: "background delivery not found" });
+  if (!changed && delivery.missingResultAcknowledgedAt == null && delivery.runnerResultPersistedAt == null) {
+    return reply.code(409).send({ error: "background delivery is not terminally missing" });
+  }
+  if (changed) hub.sessionChangedById(id);
+  return session;
+});
+
 app.post("/api/sessions/:id/config", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const body = (req.body ?? {}) as import("@wollipog/protocol").SessionConfig;

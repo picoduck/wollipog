@@ -2894,8 +2894,29 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
     }), 2_100);
     assert.equal(
       db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState,
+      undefined,
+      "provider acceptance alone remains plausibly in flight",
+    );
+
+    db.updateSessionFromSnapshot("background-delivery", snapshot({
+      id: "background-delivery",
+      driver: "claude_code",
+      backgroundJobs: [{
+        ...baseJob,
+        continuationId: "bgcont-1",
+        continuationQueuedAt: 1_200,
+        continuationSubmittedAt: 1_300,
+        continuationAcceptedAt: 1_400,
+        continuationMissingResultAt: 1_450,
+      }],
+    }), 2_150);
+    assert.equal(
+      db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState,
       "accepted_without_result",
     );
+    assert.equal(db.acknowledgeBackgroundMissingResult("background-delivery", "bgcont-1", 1_475), true);
+    assert.equal(db.acknowledgeBackgroundMissingResult("background-delivery", "bgcont-1", 1_476), false);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState, undefined);
 
     db.updateSessionFromSnapshot("background-delivery", snapshot({
       id: "background-delivery",
@@ -2921,6 +2942,8 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
       parentTurnId: "turn-1",
     }, 1_500);
     const projected = db.getSession("background-delivery")?.backgroundDeliveries?.[0];
+    assert.equal(projected?.missingResultAt, 1_450, "late proof preserves the missing-result audit boundary");
+    assert.equal(projected?.missingResultAcknowledgedAt, 1_475);
     assert.equal(projected?.transcriptProjectedAt, 1_500);
     assert.equal(projected?.notificationQueuedAt, 1_500);
     assert.equal(projected?.watchdogState, "dashboard_observation_pending");
@@ -2988,6 +3011,7 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
         continuationRequired: true,
         continuationId: "bgcont-promote",
         continuationAcceptedAt: 30,
+        continuationMissingResultAt: 31,
       }],
     }), 2_360);
     assert.equal(
@@ -3017,6 +3041,7 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
         id: "job-stopped",
         continuationId: "bgcont-stopped",
         continuationAcceptedAt: 40,
+        continuationMissingResultAt: 41,
       }],
     }), "runner-1", 2_380);
     assert.equal(
@@ -3050,6 +3075,8 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
 
     db = ControlPlaneDb.open(dbPath);
     assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.dashboardObservedAt, 1_600);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.missingResultAcknowledgedAt, 1_475,
+      "missing-result acknowledgement survives a control-plane restart");
     assert.equal(db.getSession("background-delivery")?.backgroundJobs?.[0]?.assistantResultPersistedAt, 1_500,
       "job inventory survives a control-plane restart with its delivery timestamp");
 
@@ -3134,10 +3161,58 @@ test("managed background job views are bounded, prioritize active work, and omit
     "id", "parentTurnId", "launchType", "registeredAt", "lastObservedAt", "sourcePresent",
     "terminalStatus", "terminalObservedAt", "continuationRequired", "continuationId",
     "continuationQueuedAt", "continuationSubmittedAt", "continuationAcceptedAt",
-    "assistantResultPersistedAt",
+    "continuationMissingResultAt", "assistantResultPersistedAt",
   ]);
   assert.ok(view.every((job) => Object.keys(job).every((key) => safeKeys.has(key))),
     "the dashboard projection contains only its explicit privacy-safe allowlist");
+});
+
+test("multiple terminal missing continuations remain individually resolvable", () => {
+  const db = withRunner();
+  const job = (id: string, continuationId: string, missingAt: number) => ({
+    id,
+    parentTurnId: "shared-parent",
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: "agent" as const,
+    registeredAt: missingAt - 30,
+    terminalStatus: "completed" as const,
+    terminalObservedAt: missingAt - 20,
+    continuationRequired: true,
+    continuationId,
+    continuationQueuedAt: missingAt - 10,
+    continuationSubmittedAt: missingAt - 5,
+    continuationAcceptedAt: missingAt - 2,
+    continuationMissingResultAt: missingAt,
+  });
+  db.createSessionFromSnapshot(snapshot({
+    id: "background-multiple-missing",
+    driver: "claude_code",
+    backgroundJobs: [job("job-a", "bgcont-a", 100), job("job-b", "bgcont-b", 200)],
+  }), "runner-1", 300);
+
+  assert.deepEqual(
+    db.getSession("background-multiple-missing")?.backgroundDeliveries?.map((delivery) =>
+      [delivery.continuationId, delivery.watchdogState]).sort(),
+    [["bgcont-a", "accepted_without_result"], ["bgcont-b", "accepted_without_result"]],
+  );
+  assert.equal(db.acknowledgeBackgroundMissingResult("background-multiple-missing", "bgcont-a", 400), true);
+  assert.deepEqual(
+    db.getSession("background-multiple-missing")?.backgroundDeliveries?.map((delivery) =>
+      [delivery.continuationId, delivery.watchdogState, delivery.missingResultAcknowledgedAt]).sort(),
+    [["bgcont-a", undefined, 400], ["bgcont-b", "accepted_without_result", undefined]],
+  );
+  db.appendEvent("background-multiple-missing", {
+    kind: "background_continuation_delivered",
+    continuationId: "bgcont-b",
+    parentTurnId: "shared-parent",
+  }, 500);
+  assert.equal(
+    db.getSession("background-multiple-missing")?.backgroundDeliveries?.find((delivery) =>
+      delivery.continuationId === "bgcont-b")?.watchdogState,
+    "dashboard_observation_pending",
+    "a late valid proof independently clears the missing-result watchdog",
+  );
 });
 
 test("background push receipts are per-endpoint, retryable, capability-authenticated, and restart durable", () => {

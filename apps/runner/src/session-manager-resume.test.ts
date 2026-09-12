@@ -2771,9 +2771,58 @@ test("restart retries queued continuation but never replays a submitted continua
     submitted.manager.shutdownAll();
     submitted.cleanup();
   }
+
+  const accepted = harness({
+    driver: "claude-code",
+    agentId: "claude-code",
+    command: "claude",
+    agentSessionId: "claude-session",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{ ...queuedJob, continuationSubmittedAt: 4, continuationAcceptedAt: 5 }],
+  });
+  try {
+    accepted.manager.reconcileStore();
+    await shortDelay();
+    assert.deepEqual(accepted.prompts, [], "an accepted continuation is never replayed after restart");
+    assert.ok(accepted.store.readMeta("resume-session")?.backgroundJobs?.[0]?.continuationMissingResultAt);
+    assert.equal(accepted.store.readMeta("resume-session")?.backgroundWorkState, undefined);
+  } finally {
+    accepted.manager.shutdownAll();
+    accepted.cleanup();
+  }
 });
 
-test("a partial assistant stream does not complete an accepted continuation", async () => {
+test("an accepted continuation ending without an assistant message becomes terminal", async () => {
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-code",
+    command: "claude",
+    agentSessionId: "claude-session",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "empty-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-empty",
+    }],
+  });
+  try {
+    h.manager.reconcileStore();
+    await shortDelay();
+    await tick();
+    const job = h.store.readMeta("resume-session")?.backgroundJobs?.[0];
+    assert.ok(job?.continuationAcceptedAt);
+    assert.ok(job?.continuationMissingResultAt);
+    assert.equal(job?.assistantResultPersistedAt, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
+    assert.equal(h.prompts.length, 1, "the continuation is submitted at most once");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a partial assistant stream terminally marks an accepted continuation without replay", async () => {
   let h!: ReturnType<typeof harness>;
   h = harness({
     driver: "claude-code",
@@ -2799,7 +2848,8 @@ test("a partial assistant stream does not complete an accepted continuation", as
     assert.ok(job?.continuationSubmittedAt);
     assert.ok(job?.continuationAcceptedAt);
     assert.equal(job?.assistantResultPersistedAt, undefined);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "continuation_pending");
+    assert.ok(job?.continuationMissingResultAt);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
     assert.equal(
       h.store.readEvents("resume-session").some((event) =>
         (event.payload.kind === "stderr" &&

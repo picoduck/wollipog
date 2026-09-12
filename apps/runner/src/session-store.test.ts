@@ -744,6 +744,7 @@ test("v82 snapshots expose bounded background delivery facts without runner-priv
     continuationQueuedAt: 21,
     continuationSubmittedAt: 22,
     continuationAcceptedAt: 23,
+    continuationMissingResultAt: 24,
     assistantResultPersistedAt: 24,
     structuredDeliveryPublishedAt: 25,
   }];
@@ -762,8 +763,12 @@ test("v82 snapshots expose bounded background delivery facts without runner-priv
     continuationQueuedAt: 21,
     continuationSubmittedAt: 22,
     continuationAcceptedAt: 23,
+    continuationMissingResultAt: undefined,
     assistantResultPersistedAt: 24,
   }]);
+  assert.equal(metaToSnapshot(meta({ backgroundJobs }), 133).backgroundJobs?.[0]?.continuationMissingResultAt,
+    undefined, "older control planes never receive the additive terminal-recovery field");
+  assert.equal(metaToSnapshot(meta({ backgroundJobs }), 134).backgroundJobs?.[0]?.continuationMissingResultAt, 24);
   const serialized = JSON.stringify(metaToSnapshot(meta({ backgroundJobs }), 82));
   assert.equal(serialized.includes("tool-secret"), false);
   assert.equal(serialized.includes("provider/artifact"), false);
