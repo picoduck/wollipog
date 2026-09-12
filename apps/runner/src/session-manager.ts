@@ -10238,6 +10238,13 @@ export class SessionManager {
       this.store.patchMeta(sessionId, { pendingApproval });
     }
     this.emitQueue(sessionId);
+    // A queued runner prompt emits running before its persistent driver waits behind this provider
+    // turn. If the provider then opens an ask, input_required supersedes that earlier status. Restore
+    // the runner-owned status when settlement removes the final ask; runPrompt will not emit it again.
+    const meta = this.store.readMeta(sessionId);
+    if (state === "settled" && live.running && meta?.status === "input_required" && !meta.pendingApproval) {
+      this.emitStatus(sessionId, "running");
+    }
     // A queued runner prompt owns status through its normal drain. When no drain exists, this
     // callback is the only lifecycle boundary that can clear an answered provider-owned ask.
     if (!live.running) {
