@@ -139,3 +139,61 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
     container.remove();
   }
 });
+
+test("started prompts retire from partial transcripts using durable user-event evidence", async () => {
+  const container = domWindow.document.createElement("div");
+  domWindow.document.body.append(container);
+  let root = createRoot(container as unknown as HTMLDivElement);
+  const noOp = () => {};
+  const render = async (prompts: PendingPromptView[]) => {
+    await act(async () => {
+      root.render(<PendingPromptBubbles
+        prompts={prompts}
+        // The correlated user_message is deliberately outside the loaded timeline page.
+        deliveredCommandIds={new Set()}
+        liveQueueIds={new Set()}
+        canCancelLive={false}
+        onCancelPending={noOp}
+        onCancelLive={noOp}
+        onDismiss={noOp}
+      />);
+    });
+  };
+  const beforeCapacityRelease = pending({
+    commandId: "admission-queued",
+    state: "queued",
+    attemptCount: 287,
+  });
+  const recoverable = pending({
+    commandId: "uncertain",
+    state: "uncertain",
+    attemptCount: 4,
+    canDismiss: true,
+  });
+  const afterCapacityRelease = {
+    ...beforeCapacityRelease,
+    state: "started" as const,
+    userEventSeq: 991,
+  };
+  try {
+    await render([beforeCapacityRelease, recoverable]);
+    assert.ok(container.querySelector('[data-testid="pending-prompt-admission-queued"]'));
+    assert.match(container.textContent ?? "", /287 Delivery Attempts/);
+
+    await render([afterCapacityRelease, recoverable]);
+    assert.equal(container.querySelector('[data-testid="pending-prompt-admission-queued"]'), null,
+      "the receipt's sequence is authoritative even without its event in the loaded page");
+    assert.ok(container.querySelector('[data-testid="pending-prompt-uncertain"]'),
+      "an uncertain receipt without durable user-event evidence remains recoverable");
+
+    await act(async () => { root.unmount(); });
+    root = createRoot(container as unknown as HTMLDivElement);
+    await render([afterCapacityRelease, recoverable]);
+    assert.equal(container.querySelector('[data-testid="pending-prompt-admission-queued"]'), null,
+      "refresh/reconnect cannot resurrect a durable delivered prompt");
+    assert.ok(container.querySelector('[data-testid="pending-prompt-uncertain"]'));
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
