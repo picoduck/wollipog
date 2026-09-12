@@ -136,12 +136,18 @@ for (const width of [320, 1280]) {
     ] as const;
     for (const [watchdogState, label, description] of cases) {
       await page.evaluate(({ watchdogState }) => {
+        const missing = watchdogState === "accepted_without_result";
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
           backgroundWorkState: undefined,
           backgroundWorkTracking: "managed",
           backgroundJobsAvailable: true,
           backgroundJobs: [],
           backgroundDeliveries: [{
+            ...(missing ? {
+              continuationId: "bgcont-e2e-missing",
+              acceptedAt: Date.now() - 120_000,
+              missingResultAt: Date.now() - 90_000,
+            } : {}),
             parentTurnId: "watchdog-parent",
             jobCount: 1,
             terminalCount: 1,
@@ -189,6 +195,17 @@ for (const width of [320, 1280]) {
       await expect(highlighted.locator(".background-delivery-summary")).toContainText("Recovery");
       await expect(highlighted.locator(".background-delivery-summary")).toContainText("Your Action");
       await expect(highlighted.locator("details code")).not.toBeVisible();
+      if (watchdogState === "accepted_without_result") {
+        await expect(highlighted).toContainText("Missing Since");
+        await expect(highlighted).toContainText("Acknowledgement Required");
+        const acknowledge = highlighted.getByRole("button", { name: "Acknowledge Missing Result" });
+        await expect(acknowledge).toBeVisible();
+        await expect(highlighted.getByRole("button", { name: /Retry/i })).toHaveCount(0);
+        await acknowledge.click();
+        await expect(panel.locator('[data-recovery-state="missing-result-acknowledged"]'))
+          .toContainText("Missing Result Acknowledged");
+        await expect(acknowledge).toHaveCount(0);
+      }
       await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
     }
   });
