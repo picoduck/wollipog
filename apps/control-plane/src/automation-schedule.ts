@@ -109,6 +109,8 @@ export function validateTimeZone(timezone: string): string {
   if (cached) return cached;
   let canonical: string;
   try {
+    // This runtime identity is only for internal cache/scheduling reuse. Persist the user's input;
+    // IANA alias canonicalization can vary with the JavaScript runtime and its timezone database.
     canonical = new Intl.DateTimeFormat("en-US", { timeZone: normalized }).resolvedOptions().timeZone;
   } catch {
     throw new Error(`unknown IANA timezone '${normalized}'`);

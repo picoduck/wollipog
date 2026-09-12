@@ -161,8 +161,17 @@ test("timezone validation and formatter LRUs stay bounded across eviction", () =
   try {
     const limits = timezoneCacheStateForTests();
     const requiredZones = Math.max(limits.maxValidationEntries, limits.maxFormatterEntries) + 1;
-    const zones = Intl.supportedValuesOf("timeZone").slice(0, requiredZones);
+    const zones: string[] = [];
+    const canonicalZones = new Set<string>();
+    for (const zone of Intl.supportedValuesOf("timeZone")) {
+      const canonical = validateTimeZone(zone);
+      if (canonicalZones.has(canonical)) continue;
+      canonicalZones.add(canonical);
+      zones.push(zone);
+      if (zones.length === requiredZones) break;
+    }
     assert.equal(zones.length, requiredZones, "the test runtime must expose enough IANA timezones");
+    resetTimezoneCachesForTests();
 
     for (const zone of zones) validateTimeZone(zone);
     assert.equal(timezoneCacheStateForTests().validationEntries, limits.maxValidationEntries);
