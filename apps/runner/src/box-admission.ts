@@ -1,9 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { RunnerCapacityBlocker } from "@wollipog/protocol";
 
 interface SlotOwner { pid: number; token: string; sessionId: string; agentId: string; }
+
+interface CachedSlotObservation {
+  signature: string;
+  used: number;
+  ownerPids: number[];
+  recheckAt?: number;
+}
+
+interface SlotInspection {
+  used: boolean;
+  ownerPid?: number;
+  recheckAt?: number;
+  invalidatesSnapshot?: boolean;
+}
 
 export interface AdmissionRequest {
   sessionId: string;
@@ -31,6 +45,9 @@ export class BoxAdmission {
   private readonly root: string;
   private readonly token = randomUUID();
   private readonly held = new Map<string, string[]>();
+  /** Diagnostic reads may reuse a root count while its directory generation and live owners are
+   * unchanged. Admission still calls usedSlots() directly and therefore remains authoritative. */
+  private readonly observationCache = new Map<string, CachedSlotObservation>();
 
   constructor(dataDir: string, private limit: number) {
     this.root = join(dataDir, "admission");
@@ -127,6 +144,7 @@ export class BoxAdmission {
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           mkdirSync(slot);
+          this.observationCache.delete(root);
           try {
             writeFileSync(join(slot, "owner.json"), JSON.stringify({
               pid: process.pid,
@@ -159,7 +177,10 @@ export class BoxAdmission {
   private releaseSlot(slot: string): void {
     try {
       const owner = JSON.parse(readFileSync(join(slot, "owner.json"), "utf8")) as SlotOwner;
-      if (owner.token === this.token && this.isOwnedSlot(slot)) rmSync(slot, { recursive: true, force: true });
+      if (owner.token === this.token && this.isOwnedSlot(slot)) {
+        rmSync(slot, { recursive: true, force: true });
+        this.observationCache.delete(dirname(slot));
+      }
     } catch { /* already reclaimed/removed */ }
   }
 
@@ -180,7 +201,7 @@ export class BoxAdmission {
     const usedSlots = (root: string): number => {
       const observed = counts.get(root);
       if (observed !== undefined) return observed;
-      const used = this.usedSlots(root);
+      const used = this.observedSlots(root);
       counts.set(root, used);
       return used;
     };
@@ -249,29 +270,90 @@ export class BoxAdmission {
   }
 
   private usedSlots(root: string): number {
+    // Capture the generation before reading entries. If a sibling mutates the root during this
+    // scan, the cached generation is stale in the safe direction and the next observation rescans.
+    const signature = this.rootSignature(root);
+    let used = 0;
+    let snapshotInvalidated = false;
+    const ownerPids = new Set<number>();
+    let recheckAt: number | undefined;
     try {
-      return readdirSync(root, { withFileTypes: true })
-        .filter((entry) => {
-          if (!entry.isDirectory() || !/^slot-\d+$/.test(entry.name)) return false;
-          return !this.reclaimIfStale(join(root, entry.name));
-        }).length;
+      for (const entry of readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^slot-\d+$/.test(entry.name)) continue;
+        const inspected = this.inspectSlot(join(root, entry.name));
+        snapshotInvalidated ||= inspected.invalidatesSnapshot === true;
+        if (!inspected.used) continue;
+        used++;
+        if (inspected.ownerPid !== undefined) ownerPids.add(inspected.ownerPid);
+        if (inspected.recheckAt !== undefined) {
+          recheckAt = Math.min(recheckAt ?? inspected.recheckAt, inspected.recheckAt);
+        }
+      }
     } catch {
+      // A missing optional quota root is a stable zero. Any other failure may have interrupted a
+      // partial scan, which must never become a reusable diagnostic snapshot.
+      if (signature === "missing") {
+        this.observationCache.set(root, { signature, used: 0, ownerPids: [] });
+      } else {
+        this.observationCache.delete(root);
+      }
       return 0;
     }
+    // A reclamation or vanished listed slot changes this root while it is being scanned. Do not
+    // overwrite inspectSlot's invalidation with the pre-scan generation: on coarse-timestamp
+    // filesystems, a sibling creation could otherwise restore nlink and make the stale count reusable.
+    if (snapshotInvalidated) {
+      this.observationCache.delete(root);
+    } else {
+      this.observationCache.set(root, {
+        signature,
+        used,
+        ownerPids: [...ownerPids],
+        ...(recheckAt === undefined ? {} : { recheckAt }),
+      });
+    }
+    return used;
+  }
+
+  private observedSlots(root: string): number {
+    const cached = this.observationCache.get(root);
+    if (cached && cached.signature === this.rootSignature(root) &&
+        (cached.recheckAt === undefined || Date.now() < cached.recheckAt) &&
+        cached.ownerPids.every((pid) => pid === process.pid || processAlive(pid))) {
+      return cached.used;
+    }
+    return this.usedSlots(root);
+  }
+
+  private rootSignature(root: string): string {
+    try {
+      const stats = statSync(root, { bigint: true });
+      // Some CI filesystems preserve directory timestamps across rapid sibling mutations. A slot
+      // is itself a direct subdirectory, so nlink supplies the missing count-changing generation.
+      return `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.ctimeNs}:${stats.nlink}`;
+    } catch { return "missing"; }
   }
 
   private reclaimIfStale(slot: string): boolean {
+    return !this.inspectSlot(slot).used;
+  }
+
+  private inspectSlot(slot: string): SlotInspection {
     try {
       const owner = JSON.parse(readFileSync(join(slot, "owner.json"), "utf8")) as SlotOwner;
-      if (processAlive(owner.pid)) return false;
+      if (processAlive(owner.pid)) return { used: true, ownerPid: owner.pid };
     } catch {
       // Do not steal a slot in the tiny mkdir→owner-write window. A genuinely abandoned empty or
       // partial directory becomes reclaimable after five seconds.
-      try { if (Date.now() - statSync(slot).mtimeMs < 5_000) return false; } catch { return true; }
+      try {
+        const recheckAt = statSync(slot).mtimeMs + 5_000;
+        if (Date.now() < recheckAt) return { used: true, recheckAt };
+      } catch { return { used: false, invalidatesSnapshot: true }; }
     }
-    if (!this.isOwnedSlot(slot)) return false;
+    if (!this.isOwnedSlot(slot)) return { used: true };
     rmSync(slot, { recursive: true, force: true });
-    return true;
+    this.observationCache.delete(dirname(slot));
+    return { used: false, invalidatesSnapshot: true };
   }
 
   private isOwnedSlot(slot: string): boolean {

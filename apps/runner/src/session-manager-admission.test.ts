@@ -291,7 +291,148 @@ test("one capacity observation scans each lease root once across a large waiter 
     }
     assert.equal(scans.size, 4, "only the global, provider, target, and exclusive roots are relevant");
     assert.deepEqual([...scans.values()], [1, 1, 1, 1], "waiter fan-out does not multiply filesystem scans");
+    const repeated = gate.observe();
+    assert.equal(repeated.usedCapacity, 256);
+    assert.equal(gate.blocker({
+      sessionId: "repeated-provider", agentId: "claude", weight: 1, agentLimit: 1,
+    }, repeated)?.kind, "agent_quota");
+    assert.deepEqual([...scans.values()], [1, 1, 1, 1],
+      "an unchanged cross-process observation reuses every validated root count");
     gate.releaseAll();
+    sibling.releaseAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cached capacity observations detect sibling mutations, partial-slot expiry, and dead owners", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-observation-invalidation-"));
+  try {
+    const gate = new BoxAdmission(root, 2);
+    const sibling = new BoxAdmission(root, 2);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = gate as any;
+    const original = internals.usedSlots.bind(gate) as (path: string) => number;
+    let scans = 0;
+    internals.usedSlots = (path: string) => {
+      scans++;
+      return original(path);
+    };
+
+    assert.equal(gate.observe().usedCapacity, 0);
+    assert.equal(gate.observe().usedCapacity, 0);
+    assert.equal(scans, 1, "unchanged roots reuse their diagnostic count");
+
+    assert.equal(sibling.acquire({ sessionId: "sibling", agentId: "claude", weight: 1 }), true);
+    assert.equal(gate.observe().usedCapacity, 1, "a sibling slot creation changes the root generation");
+    sibling.release("sibling");
+    assert.equal(gate.observe().usedCapacity, 0, "a sibling slot release changes the root generation");
+
+    const admissionRoot = join(root, "admission");
+    const partial = join(admissionRoot, "slot-0");
+    mkdirSync(partial);
+    const now = Date.now();
+    assert.equal(gate.observe().usedCapacity, 1, "a young partial claim remains fail-closed");
+    t.mock.method(Date, "now", () => now + 6_000);
+    assert.equal(gate.observe().usedCapacity, 0, "the partial-claim deadline invalidates an unchanged root");
+    t.mock.restoreAll();
+
+    const dead = join(admissionRoot, "slot-0");
+    mkdirSync(dead);
+    writeFileSync(join(dead, "owner.json"), JSON.stringify({
+      pid: 2_147_483_647,
+      token: "crashed",
+      sessionId: "dead",
+      agentId: "claude",
+    }));
+    internals.observationCache.set(admissionRoot, {
+      signature: internals.rootSignature(admissionRoot),
+      used: 1,
+      ownerPids: [2_147_483_647],
+    });
+    assert.equal(gate.observe().usedCapacity, 0,
+      "a cached owner death triggers authoritative stale-slot recovery");
+    assert.equal(existsSync(dead), false);
+    assert.ok(scans >= 6, "every invalidation path refreshed the cached observation");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("capacity observation caching does not certify concurrent mutations or partial scans", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-observation-races-"));
+  try {
+    const gate = new BoxAdmission(root, 2);
+    const sibling = new BoxAdmission(root, 2);
+    assert.equal(sibling.acquire({ sessionId: "sibling", agentId: "claude", weight: 2 }), true);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = gate as any;
+    const inspectSlot = internals.inspectSlot.bind(gate) as (path: string) => { used: boolean };
+    const rootSignature = internals.rootSignature.bind(gate) as (path: string) => string;
+    let generation = "before-release";
+    let released = false;
+    internals.rootSignature = () => generation;
+    internals.inspectSlot = (path: string) => {
+      const inspected = inspectSlot(path);
+      if (!released) {
+        released = true;
+        sibling.release("sibling");
+        generation = "after-release";
+      }
+      return inspected;
+    };
+    assert.equal(gate.observe().usedCapacity, 1,
+      "the racing scan may conservatively retain the entry it already inspected");
+    internals.inspectSlot = inspectSlot;
+    assert.equal(gate.observe().usedCapacity, 0,
+      "a mutation during the scan leaves the cached generation stale and forces a rescan");
+    internals.rootSignature = rootSignature;
+
+    assert.equal(sibling.acquire({ sessionId: "sibling-again", agentId: "claude", weight: 2 }), true);
+    let inspections = 0;
+    internals.inspectSlot = (path: string) => {
+      if (++inspections === 2) throw new Error("simulated stale-slot cleanup failure");
+      return inspectSlot(path);
+    };
+    assert.equal(gate.observe().usedCapacity, 0, "an interrupted scan preserves the fail-open legacy result");
+    internals.inspectSlot = inspectSlot;
+    assert.equal(gate.observe().usedCapacity, 2,
+      "an interrupted scan is not cached and the next observation retries every slot");
+    sibling.releaseAll();
+
+    const admissionRoot = join(root, "admission");
+    const dead = join(admissionRoot, "slot-0");
+    mkdirSync(dead);
+    writeFileSync(join(dead, "owner.json"), JSON.stringify({
+      pid: 2_147_483_647,
+      token: "crashed",
+      sessionId: "dead",
+      agentId: "claude",
+    }));
+    internals.rootSignature = () => "coarse-filesystem-aba";
+    assert.equal(gate.observe().usedCapacity, 0, "a dead slot is reclaimed during observation");
+    assert.equal(sibling.acquire({ sessionId: "replacement", agentId: "claude", weight: 2 }), true);
+    assert.equal(gate.observe().usedCapacity, 2,
+      "a reclaiming scan is not cached even when a sibling restores the same root signature");
+    internals.rootSignature = rootSignature;
+    sibling.releaseAll();
+
+    assert.equal(sibling.acquire({ sessionId: "vanishing", agentId: "claude", weight: 2 }), true);
+    let releasedBeforeInspection = false;
+    internals.rootSignature = () => "coarse-filesystem-foreign-aba";
+    internals.inspectSlot = (path: string) => {
+      if (!releasedBeforeInspection) {
+        releasedBeforeInspection = true;
+        sibling.releaseAll();
+      }
+      return inspectSlot(path);
+    };
+    assert.equal(gate.observe().usedCapacity, 0, "a sibling can release a listed slot before inspection");
+    internals.inspectSlot = inspectSlot;
+    assert.equal(sibling.acquire({ sessionId: "foreign-replacement", agentId: "claude", weight: 2 }), true);
+    assert.equal(gate.observe().usedCapacity, 2,
+      "a scan containing vanished slots is not cached when a sibling restores the root signature");
+    internals.rootSignature = rootSignature;
     sibling.releaseAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1193,6 +1334,117 @@ test("park-when-needed retires only a resumable idle provider and preserves its 
     assert.equal(store.readMeta("warm")?.config.model, "stable-model");
     assert.deepEqual(manager.liveSessionIds(), ["warm"]);
     manager.stop("warm");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unconfirmed parking retirement is contained while another idle provider releases capacity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-idle-provider-parking-unconfirmed-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    const exits = new Map<string, (code: number | null) => void>();
+    const reports: Array<NonNullable<Extract<RunnerToControlPlane, { type: "runner_capacity_status" }>["status"]>> = [];
+    const logs: string[] = [];
+    let launches = 0;
+    const factory = (
+      _driver: unknown,
+      options: { resumeId?: string },
+      callbacks: { onExit(code: number | null): void },
+    ) => {
+      launches++;
+      const providerId = options.resumeId ?? `provider-${launches}`;
+      exits.set(providerId, callbacks.onExit);
+      const client = {
+        pid: launches,
+        initialize: async () => {},
+        newSession: async () => providerId,
+        prompt: async () => "end_turn" as const,
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => providerId,
+      };
+      if (providerId === "provider-1") {
+        return {
+          ...client,
+          dispose: () => { throw new Error("forced dispose failed"); },
+        };
+      }
+      if (providerId === "provider-2") {
+        return {
+          ...client,
+          close: async () => true,
+          dispose: () => { throw new Error("async forced dispose failed"); },
+        };
+      }
+      return { ...client, close: async () => true };
+    };
+    const manager = new SessionManager(
+      (message) => {
+        if (message.type === "runner_capacity_status") reports.push(message.status);
+      },
+      (message) => logs.push(message),
+      store,
+      "runner",
+      undefined,
+      factory as never,
+      root,
+      3,
+      undefined,
+      undefined,
+      { agentLimits: {}, agentWeights: {}, idleProcessPolicy: "park_when_needed" },
+    );
+    for (const id of ["sync-stuck", "async-stuck", "closable"]) {
+      assert.equal(await manager.start(launchSpec(root, id), `warm ${id}`), true);
+      for (let attempt = 0; attempt < 100 && store.readMeta(id)?.status !== "idle"; attempt++) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(store.readMeta(id)?.status, "idle");
+    }
+
+    assert.equal(await Promise.race([
+      manager.start(launchSpec(root, "new"), "needs capacity"),
+      new Promise<boolean>((_, reject) => setTimeout(
+        () => reject(new Error("a second parking candidate never released capacity")),
+        2_000,
+      )),
+    ]), true);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.closing.get("sync-stuck")?.unconfirmed, true);
+    assert.equal(internals.closing.get("async-stuck")?.unconfirmed, true);
+    assert.equal(internals.admitted.has("sync-stuck"), true,
+      "the synchronously unconfirmed process keeps its resident lease");
+    assert.equal(internals.admitted.has("async-stuck"), true,
+      "the asynchronously unconfirmed process keeps its resident lease");
+    assert.equal(internals.closing.has("closable"), false, "the independent retirement completed exactly");
+    const current = manager.capacityState();
+    assert.equal(current.usedUnits, 3);
+    assert.equal(current.dimensions?.residentProcessUnits.used, 3);
+    assert.equal(current.dimensions?.parkedSessions, 1,
+      "only the exactly retired provider is reported as parked");
+    assert.ok(logs.some((message) => message.includes("parking idle provider sync-stuck remains unconfirmed")));
+    assert.ok(logs.some((message) => message.includes("session async-stuck provider retirement remains unconfirmed")));
+    for (const report of reports) {
+      assert.equal(report.usedUnits, report.dimensions?.residentProcessUnits.used);
+      assert.equal(report.availableUnits, Math.max(0, report.configuredUnits - report.usedUnits));
+      assert.ok((report.dimensions?.parkedSessions ?? 0) <= (report.dimensions?.retainedSessions.used ?? 0));
+    }
+
+    exits.get("provider-1")?.(1);
+    exits.get("provider-2")?.(1);
+    assert.equal(internals.closing.has("sync-stuck"), false);
+    assert.equal(internals.closing.has("async-stuck"), false);
+    assert.equal(internals.admitted.has("sync-stuck"), false);
+    assert.equal(internals.admitted.has("async-stuck"), false);
+    assert.equal(manager.capacityState().dimensions?.parkedSessions, 3,
+      "failed candidates become parked only after their exact exit callbacks");
+    manager.stop("new");
+    await internals.closing.get("new")?.promise;
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
