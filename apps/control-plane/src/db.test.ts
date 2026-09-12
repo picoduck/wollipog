@@ -2918,6 +2918,53 @@ test("background work state round-trips while legacy settled sentinels clear cur
   assert.equal(db.getSession("background-work")?.backgroundWorkState, undefined);
 });
 
+test("runner snapshots ignore missing-result evidence until the continuation is accepted", () => {
+  const db = withRunner();
+  const job = {
+    id: "job-missing-order",
+    parentTurnId: "turn-missing-order",
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: "agent" as const,
+    registeredAt: 1_000,
+    terminalStatus: "completed" as const,
+    terminalObservedAt: 1_100,
+    continuationRequired: true,
+    continuationId: "bgcont-missing-order",
+    continuationMissingResultAt: 1_300,
+  };
+
+  db.createSessionFromSnapshot(snapshot({
+    id: "background-missing-order",
+    driver: "claude_code",
+    backgroundJobs: [job],
+  }), "runner-1", 2_000);
+
+  const unaccepted = db.getSession("background-missing-order");
+  assert.equal(unaccepted?.backgroundJobs?.[0]?.continuationMissingResultAt, undefined,
+    "out-of-order evidence is omitted from the public job lifecycle");
+  assert.equal(unaccepted?.backgroundDeliveries?.[0]?.missingResultAt, undefined,
+    "out-of-order evidence is omitted from the public delivery lifecycle");
+  assert.equal(unaccepted?.backgroundDeliveries?.[0]?.watchdogState, undefined,
+    "out-of-order evidence cannot manufacture an actionable terminal-missing state");
+
+  db.updateSessionFromSnapshot("background-missing-order", snapshot({
+    id: "background-missing-order",
+    driver: "claude_code",
+    backgroundJobs: [{
+      ...job,
+      continuationAcceptedAt: 1_250,
+    }],
+  }), 2_100);
+
+  const accepted = db.getSession("background-missing-order");
+  assert.equal(accepted?.backgroundJobs?.[0]?.continuationMissingResultAt, 1_300);
+  assert.equal(accepted?.backgroundDeliveries?.[0]?.missingResultAt, 1_300);
+  assert.equal(accepted?.backgroundDeliveries?.[0]?.watchdogState, "accepted_without_result",
+    "accepted missing-result evidence remains actionable");
+  db.close();
+});
+
 test("managed background delivery stages survive reconnect, hydration, acknowledgement, and restart", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-background-delivery-"));
   const dbPath = join(root, "control-plane.db");
