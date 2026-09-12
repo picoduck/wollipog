@@ -40,6 +40,26 @@ else document.documentElement.setAttribute("data-density", density);
 if (scheme === "wollipog") document.documentElement.removeAttribute("data-scheme");
 else document.documentElement.setAttribute("data-scheme", scheme);
 
+// Regression-only timing control: keep the exact selectors implicated by the CI failure in a
+// deliberately unfinished cascade after React's content becomes visible. The browser test uses
+// this to prove that visibility is not a sufficient signal for contrast measurement.
+const settleDelayMs = Math.min(Number.parseInt(params.get("settleDelayMs") ?? "0", 10) || 0, 2_000);
+if (settleDelayMs > 0) {
+  document.documentElement.setAttribute("data-contrast-fixture-pending", "true");
+  const pendingStyle = document.createElement("style");
+  pendingStyle.textContent = `
+    [data-contrast-fixture-pending] .slash-detail-disabled,
+    [data-contrast-fixture-pending] .diff-sign {
+      color: var(--bg-elev-1) !important;
+    }
+  `;
+  document.head.append(pendingStyle);
+  window.setTimeout(() => {
+    pendingStyle.remove();
+    document.documentElement.removeAttribute("data-contrast-fixture-pending");
+  }, settleDelayMs);
+}
+
 const nativeRunner: RunnerView = {
   runnerId: "fixture-native-runner",
   displayName: "Native Workstation",
@@ -77,6 +97,67 @@ const box: BoxView = {
 
 const noopRunnerAction = () => {};
 const noopBoxAction = async () => {};
+
+const contrastSelectors = [
+  ".slash-detail-disabled",
+  ".diff-line-add .diff-sign",
+  ".diff-line-del .diff-sign",
+  ".st-running",
+  ".st-input",
+  ".st-done",
+  ".btn.danger",
+];
+
+const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+function contrastStyleSnapshot() {
+  return contrastSelectors.map((selector) => {
+    const element = document.querySelector(selector);
+    if (!element) throw new Error(`Missing contrast fixture selector: ${selector}`);
+    const style = getComputedStyle(element);
+    return [selector, style.color, style.backgroundColor, style.backgroundImage, style.opacity];
+  });
+}
+
+async function markContrastFixtureReady() {
+  if (document.readyState !== "complete") {
+    await new Promise<void>((resolve) => window.addEventListener("load", () => resolve(), { once: true }));
+  }
+  await document.fonts.ready;
+
+  const rootStyle = getComputedStyle(document.documentElement);
+  for (const token of ["--bg", "--text", "--amber-on-tint", "--green-on-tint", "--red-on-tint"]) {
+    if (!rootStyle.getPropertyValue(token).trim()) throw new Error(`Missing contrast token: ${token}`);
+  }
+
+  // The delayed state exists only for the regression test, where it deterministically recreates
+  // the CI ordering: React content is visible while the final cascade is not yet safe to sample.
+  while (document.documentElement.hasAttribute("data-contrast-fixture-pending")) await nextFrame();
+
+  let previous = JSON.stringify(contrastStyleSnapshot());
+  for (;;) {
+    await nextFrame();
+    const current = JSON.stringify(contrastStyleSnapshot());
+    const animationsRunning = document.getAnimations()
+      .some((animation) => animation.playState === "running" || animation.pending);
+    if (current === previous && !animationsRunning) break;
+    previous = current;
+  }
+
+  document.documentElement.setAttribute("data-contrast-fixture-ready", `${scheme}/${theme}`);
+}
+
+function ContrastFixtureReady() {
+  React.useEffect(() => {
+    void markContrastFixtureReady().catch((error: unknown) => {
+      document.documentElement.setAttribute(
+        "data-contrast-fixture-error",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  }, []);
+  return null;
+}
 
 function Sample() {
   return (
@@ -231,6 +312,7 @@ function Sample() {
 createRoot(document.getElementById("root")!).render(
   <ApiProvider>
     <FeedbackProvider>
+      <ContrastFixtureReady />
       <Sample />
     </FeedbackProvider>
   </ApiProvider>,
