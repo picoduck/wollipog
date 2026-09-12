@@ -50,7 +50,7 @@ import {
   handleRovingChoiceKeyDown,
   rovingChoiceTabIndex,
 } from "./components/interactions.js";
-import { cycleFocusZone, escapeOwner } from "./focus-zones.js";
+import { cycleFocusZone, escapeOwner, focusZone } from "./focus-zones.js";
 import { installTerminalExitBoundary } from "./terminal-focus.js";
 import {
   bareDigitPressed,
@@ -529,6 +529,14 @@ export function Shell() {
           event.preventDefault();
           // The Sessions digit opens whichever mode the destination last used.
           navigate(destination === "inbox" ? sessionsDestination(instanceScope) : { name: destination });
+          if (destination === "inbox") {
+            // Cross-view navigation must mount the Sessions surface before focus can move, while
+            // same-view activation still needs to reassert the list/board zone. The shared zone
+            // resolver also supplies the accessible empty-state fallback when no cards exist.
+            window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+              focusZone(document, "list");
+            }));
+          }
         }
         return;
       }

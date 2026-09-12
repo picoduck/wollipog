@@ -27,6 +27,14 @@ function focusTargetForZone(targetDocument: Document, zone: FocusZone): HTMLElem
   ) ?? root;
 }
 
+/** Focus one mounted zone using the same durable target chain as F6 navigation. */
+export function focusZone(targetDocument: Document, zone: FocusZone): FocusZone | null {
+  const target = focusTargetForZone(targetDocument, zone);
+  if (!target) return null;
+  target.focus();
+  return zone;
+}
+
 /** Cycle only through zones mounted on the current surface, with deterministic wraparound. */
 export function cycleFocusZone(
   targetDocument: Document,
@@ -41,8 +49,7 @@ export function cycleFocusZone(
     ? (direction === "next" ? 0 : available.length - 1)
     : (currentIndex + delta + available.length) % available.length;
   const next = available[nextIndex]!;
-  focusTargetForZone(targetDocument, next)?.focus();
-  return next;
+  return focusZone(targetDocument, next);
 }
 
 /** Resolve contextual precedence once; component handlers should not invent their own scopes. */

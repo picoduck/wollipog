@@ -1132,6 +1132,8 @@ export function InboxView({
   const keyActions = useMemo<InboxKeyActions>(() => ({
     next: () => moveSelection("next"),
     previous: () => moveSelection("previous"),
+    first: () => { if (displayedIds[0]) selectRow(displayedIds[0]); },
+    last: () => { if (displayedIds.at(-1)) selectRow(displayedIds.at(-1)!); },
     expand: () => { if (displayedSelection) expand(displayedSelection); },
     openTopRequest: () => { if (displayedSelection) openTopRequest(displayedSelection); },
     toggleThread: () => { if (displayedSelection) toggleThread(displayedSelection); },
@@ -1171,7 +1173,7 @@ export function InboxView({
       const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
       pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
     },
-  }), [activeSplit?.key, archive, collapseThread, decide, displayedSelection, expand, expandThread, goToParent, moveSelection, openTopRequest, previewForkControls, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, toggleAllThreads, togglePin, toggleThread]);
+  }), [activeSplit?.key, archive, collapseThread, decide, displayedIds, displayedSelection, expand, expandThread, goToParent, moveSelection, openTopRequest, previewForkControls, selectRow, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, toggleAllThreads, togglePin, toggleThread]);
   // Board mode has no row selection, so the list's j/k/a/d… vocabulary would act on an invisible
   // row; only the shared toolbar (tabs, search, toggle) stays keyboard-reachable there.
   useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);

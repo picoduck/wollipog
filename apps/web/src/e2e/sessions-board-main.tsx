@@ -33,6 +33,7 @@ import "../styles.css";
  */
 const SCOPE = "sessions-board-e2e";
 const fullShell = new URLSearchParams(location.search).has("full-shell");
+const empty = new URLSearchParams(location.search).has("empty");
 /** An orchestrator with four children and a session with three pending requests (#896). */
 const threads = new URLSearchParams(location.search).has("threads");
 
@@ -148,6 +149,8 @@ if (fullShell) {
     if (value.id === "s-running") delete value.pendingApproval.additionalRequests;
   }
 }
+
+if (empty) sessions.splice(0);
 
 const reminders: SessionReminderView[] = [
   {

@@ -159,6 +159,8 @@ test("the global keyboard layer wires rail navigation, Inbox search, creation, a
   assert.match(app, /if \(isMobile\) return;/);
   assert.match(app, /xtermOwnsKey\(event\.target\)/);
   assert.match(app, /cycleFocusZone\(document, "next"\)/);
+  assert.match(app, /destination === "inbox"[\s\S]{0,500}focusZone\(document, "list"\)/,
+    "the Sessions digit focuses its remembered list or board surface after navigation");
 
 });
 

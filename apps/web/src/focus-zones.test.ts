@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Window } from "happy-dom";
-import { cycleFocusZone, escapeOwner, focusZoneForElement, shortcutScopeForFocus } from "./focus-zones.js";
+import { cycleFocusZone, escapeOwner, focusZone, focusZoneForElement, shortcutScopeForFocus } from "./focus-zones.js";
 
 function escape(modifiers: Partial<Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "defaultPrevented">> = {}) {
   return {
@@ -82,6 +82,34 @@ test("F6 cycling targets the active rail item, Inbox list, and transcript while 
   listZone.setAttribute("inert", "");
   railItem.focus();
   assert.equal(cycleFocusZone(window.document, "next"), "detail");
+});
+
+test("direct zone focus uses the list, empty-state, and board target chain", () => {
+  const window = setup();
+  const listZone = window.document.createElement("section");
+  listZone.dataset.focusZone = "list";
+  const list = window.document.createElement("div");
+  list.className = "inbox-list";
+  list.tabIndex = 0;
+  listZone.append(list);
+  window.document.body.append(listZone);
+
+  assert.equal(focusZone(window.document, "list"), "list");
+  assert.equal(window.document.activeElement, list);
+
+  const empty = window.document.createElement("div");
+  empty.className = "inbox-zero";
+  empty.tabIndex = -1;
+  list.replaceWith(empty);
+  assert.equal(focusZone(window.document, "list"), "list");
+  assert.equal(window.document.activeElement, empty);
+
+  const board = window.document.createElement("div");
+  board.className = "board-wrap";
+  board.tabIndex = -1;
+  empty.replaceWith(board);
+  assert.equal(focusZone(window.document, "list"), "list");
+  assert.equal(window.document.activeElement, board);
 });
 
 test("Escape ownership follows one ordered rung and preserves the terminal boundary", () => {
