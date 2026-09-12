@@ -289,6 +289,69 @@ test("a card's height does not move with selection, unread, or stalled state", a
   }
 });
 
+test("selection stays visually distinct from unread across every palette, theme, and density", async ({ page }) => {
+  await useViewport(page, 1400);
+  await page.locator(".inbox-row-shell").first().evaluate((source) => {
+    const host = document.createElement("div");
+    host.id = "selection-state-fixture";
+    host.style.width = "1000px";
+    for (const states of [[], ["unread"], ["selected"], ["selected", "unread"]]) {
+      const shell = source.cloneNode(true) as HTMLElement;
+      shell.removeAttribute("id");
+      shell.className = "inbox-row-shell";
+      shell.classList.add(...states);
+      host.append(shell);
+    }
+    document.body.append(host);
+  });
+  const shells = page.locator("#selection-state-fixture .inbox-row-shell");
+
+  for (const theme of ["dark", "light"] as const) {
+    for (const scheme of ["wollipog", "github", "one-dark", "dracula", "monokai"] as const) {
+      for (const density of ["compact", "comfortable"] as const) {
+        await page.evaluate(({ theme, scheme, density }) => {
+          document.documentElement.dataset.theme = theme;
+          if (scheme === "wollipog") delete document.documentElement.dataset.scheme;
+          else document.documentElement.dataset.scheme = scheme;
+          if (density === "comfortable") document.documentElement.dataset.density = density;
+          else delete document.documentElement.dataset.density;
+        }, { theme, scheme, density });
+        const visual = await shells.evaluateAll((nodes) => nodes.map((shell) => {
+            const row = shell.querySelector<HTMLElement>(".inbox-row")!;
+            const style = getComputedStyle(row);
+            return {
+              height: row.getBoundingClientRect().height,
+              border: style.borderColor,
+              foreground: style.color,
+              shadow: style.boxShadow,
+              background: style.backgroundImage,
+            };
+        }));
+        const [read, unread, selected, both] = visual;
+        const context = `${scheme}/${theme}/${density}`;
+        expect(unread!.background, `${context}: unread owns its tinted background`).not.toBe(read!.background);
+        expect(selected!.border, `${context}: selection uses the neutral text boundary`).toBe(selected!.foreground);
+        expect(selected!.border, `${context}: selection is not the unread accent border`).not.toBe(unread!.border);
+        expect(selected!.shadow, `${context}: selection is not the unread inset rail`).not.toBe(unread!.shadow);
+        expect(both!.border, `${context}: selected + unread keeps the selection boundary`).toBe(selected!.border);
+        expect(both!.background, `${context}: selected + unread keeps the unread tint`).toBe(unread!.background);
+        expect(both!.shadow, `${context}: selected + unread keeps the unread rail`).toContain("inset");
+        expect(new Set(visual.map((state) => state.height)).size, `${context}: paint causes no reflow`).toBe(1);
+      }
+    }
+  }
+
+  const selectedUnreadButton = shells.nth(3).locator(".inbox-row");
+  await selectedUnreadButton.focus();
+  const focused = await selectedUnreadButton.evaluate((row) => {
+    const style = getComputedStyle(row);
+    return { border: style.borderColor, outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
+  });
+  expect(focused.border).not.toBe("rgba(0, 0, 0, 0)");
+  expect(focused.outlineStyle).toBe("solid");
+  expect(focused.outlineWidth).toBe("2px");
+});
+
 test("the Git line names a branch, admits to none, or admits to not knowing", async ({ page }) => {
   await useViewport(page, 1400);
   const lines = page.locator(".inbox-row-git");

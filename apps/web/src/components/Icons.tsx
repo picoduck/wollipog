@@ -37,6 +37,7 @@ import {
   PanelBottom as LucidePanelBottom,
   PanelRight as LucidePanelRight,
   Pencil as LucidePencil,
+  Pin as LucidePin,
   Plus as LucidePlus,
   RefreshCw as LucideRefreshCw,
   Search as LucideSearch,
@@ -166,6 +167,10 @@ export function ChevronLeftIcon(props: IconProps) {
 
 export function PlusIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePlus} {...props} />;
+}
+
+export function PinIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePin} {...props} />;
 }
 
 export function MoreHorizontalIcon(props: IconProps) {

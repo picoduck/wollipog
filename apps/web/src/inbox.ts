@@ -246,6 +246,25 @@ export interface InboxThreadPosition {
   collapsed: boolean;
 }
 
+/** Every present ancestor promoted by a directly pinned descendant, including nested families. */
+export function inboxPinnedAncestorIds(
+  sessions: readonly Pick<SessionView, "id" | "parentSessionId">[],
+  pinnedSessionIds: ReadonlySet<string>,
+): Set<string> {
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const ancestors = new Set<string>();
+  for (const pinnedId of pinnedSessionIds) {
+    let parentId = byId.get(pinnedId)?.parentSessionId ?? null;
+    const seen = new Set([pinnedId]);
+    while (parentId && byId.has(parentId) && !seen.has(parentId)) {
+      seen.add(parentId);
+      ancestors.add(parentId);
+      parentId = byId.get(parentId)?.parentSessionId ?? null;
+    }
+  }
+  return ancestors;
+}
+
 export function inboxThreadChildState(
   session: Pick<SessionView, "status" | "pendingApproval">,
   stalled: boolean,

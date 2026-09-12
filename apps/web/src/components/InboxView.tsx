@@ -6,6 +6,7 @@ import {
   INBOX_REORDER_SETTLE_MS,
   approvalOptionForIntent,
   buildInboxSplits,
+  inboxPinnedAncestorIds,
   inboxProjectName,
   migrateInboxProjectPins,
   newSessionPresetForInboxSplit,
@@ -466,6 +467,10 @@ export function InboxView({
       reminder: reminders.get(session.id),
     })), [activeSplit?.sessions, normalizedQuery, projects, projectsSupported, reminders, seen]);
   const liveIds = useMemo(() => liveEntries.map((entry) => entry.session.id), [liveEntries]);
+  const pinnedAncestorSessionIds = useMemo(
+    () => inboxPinnedAncestorIds(liveEntries.map((entry) => entry.session), pinnedSessions),
+    [liveEntries, pinnedSessions],
+  );
   liveIdsRef.current = liveIds;
   const structuralOrderKey = JSON.stringify([
     instanceScope,
@@ -1363,6 +1368,7 @@ export function InboxView({
         {boardMode ? (
           <Board
             sessions={boardSessions}
+            pinnedSessionIds={pinnedSessions}
             reminders={reminders}
             stalledSessionIds={stalledSessionIds}
             searchActive={normalizedQuery.length > 0 || (activeSplit?.key ?? null) !== null || reminderMode === "snoozed"}
@@ -1380,6 +1386,7 @@ export function InboxView({
           entries={entries}
           selectedSessionId={displayedSelection}
           pinnedSessionIds={pinnedSessions}
+          pinnedAncestorSessionIds={pinnedAncestorSessionIds}
           stalledSessionIds={stalledSessionIds}
           runningCount={activityCounts.running}
           queuedCount={activityCounts.queued}

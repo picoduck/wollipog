@@ -11,7 +11,7 @@ import {
 import { branchStateLabel, displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
-import { AttentionPills, BackgroundWorkBadge, ThreadDot, quarantinedStatusMeta } from "./common.js";
+import { AttentionPills, BackgroundWorkBadge, SessionPinIndicator, ThreadDot, quarantinedStatusMeta } from "./common.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
 
@@ -22,6 +22,8 @@ export interface InboxRowProps {
   selected: boolean;
   unread: boolean;
   pinned: boolean;
+  /** A collapsed ancestor is promoted by a pin below it without claiming the ancestor is pinned. */
+  containsPinned?: boolean;
   /**
    * 1-based position in the WHOLE inbox, not in the mounted window.
    *
@@ -69,6 +71,7 @@ function InboxRowInner({
   selected,
   unread,
   pinned,
+  containsPinned = false,
   rowIndex,
   threeRow,
   activity,
@@ -327,7 +330,7 @@ function InboxRowInner({
                 Stalled
               </span>
             )}
-            {pinned && <span className="inbox-pin-indicator" aria-label="Pinned Session">●</span>}
+            {pinned ? <SessionPinIndicator /> : containsPinned ? <SessionPinIndicator contains /> : null}
             {unread && <span className="inbox-unread-badge" aria-label="Unread Activity">1</span>}
             {!threeRow && timeLabel}
           </span>

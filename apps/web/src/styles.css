@@ -1443,6 +1443,7 @@ textarea {
   font-size: 11px;
   color: var(--text-faint);
 }
+.card-top-trailing { display: inline-flex; flex: none; align-items: center; gap: 7px; }
 .card-title {
   font-size: 13.5px;
   font-weight: 600;
@@ -9205,6 +9206,20 @@ body.shell-dock-dragging * {
 /* A phone gets a 32px hit area around the same 18px glyph. */
 @media (pointer: coarse) {
   .inbox-thread-toggle { top: calc(var(--inbox-row-pad-y) - 6px); left: calc(var(--inbox-row-pad-x) - 10px); width: 32px; height: 32px; }
+  /* Keep the 32px target, but paint only the original glyph box. A tapped coarse-pointer control
+     may retain :hover; a transparent button cannot leave that desktop fill over the provider. */
+  .inbox-thread-toggle:hover { background: transparent; }
+  .inbox-thread-toggle > span {
+    display: inline-flex;
+    width: 18px;
+    height: 18px;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-xs);
+  }
+  .inbox-thread-toggle:active > span { color: var(--text); background: var(--bg-elev-3); }
+  .inbox-thread-toggle:focus-visible { outline: none; }
+  .inbox-thread-toggle:focus-visible > span { outline: 2px solid var(--accent); outline-offset: 0; }
 }
 /* Children indent under a 2px spine drawn per row: each child row carries the vertical segment for
    its own height (margins included, so consecutive segments join) and a horizontal tick into its
@@ -9296,7 +9311,10 @@ body.shell-dock-dragging * {
 }
 .inbox-row:hover { border-color: var(--border-strong); background: var(--bg-elev-3); }
 .inbox-row-shell.stalled .inbox-row { border-color: color-mix(in srgb, var(--red) 58%, var(--border)); }
-.inbox-row-shell.selected .inbox-row { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.inbox-row-shell.selected .inbox-row {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text) 72%, transparent);
+}
 .inbox-row-shell.unread .inbox-row {
   border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
   background: linear-gradient(
@@ -9316,10 +9334,10 @@ body.shell-dock-dragging * {
   );
 }
 .inbox-row-shell.selected.unread .inbox-row {
-  border-color: var(--accent);
+  border-color: var(--text);
   box-shadow:
     inset 3px 0 0 var(--accent),
-    0 0 0 1px color-mix(in srgb, var(--accent) 75%, transparent);
+    0 0 0 2px color-mix(in srgb, var(--text) 72%, transparent);
 }
 .inbox-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .inbox-row-sender,
@@ -9445,7 +9463,33 @@ body.shell-dock-dragging * {
   line-height: 16px;
 }
 .inbox-row-background-work .background-work-dot { width: 5px; height: 5px; }
-.inbox-pin-indicator { color: var(--accent); font-size: 8px; }
+.inbox-pin-indicator {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border));
+  border-radius: var(--radius-pill);
+  color: var(--accent-on-tint);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.inbox-pin-indicator.contains-pinned {
+  position: relative;
+  border-style: dashed;
+  color: var(--text-dim);
+  background: transparent;
+}
+.inbox-pin-contained-mark {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  padding: 1px;
+  border-radius: var(--radius-pill);
+  color: var(--text);
+  background: var(--bg-elev-2);
+}
 .inbox-status-pill,
 .inbox-unread-badge {
   flex: none;

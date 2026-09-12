@@ -95,12 +95,15 @@ test("a parent row carries the chevron and family chip, and a child row its thre
     assert.equal(selected, 0, "toggling never selects or expands the row");
 
     await act(async () => root.render(<InboxRow optionId="row" session={parent} projectName="Project"
-      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      selected={false} unread={false} pinned={false} containsPinned rowIndex={1} stalled={false} activityNow={0}
       threeRow={false} threadChildren={children} threadCollapsed
       onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
     assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-label"), "Expand Thread");
     assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input",
       "the rollup reads the same while collapsed");
+    assert.ok(container.querySelector('[aria-label="Contains Pinned Session"] svg'));
+    assert.equal(container.querySelector('[aria-label="Pinned Session"]'), null,
+      "the promoted parent never claims the descendant's direct pin");
 
     const child = { ...parent, id: "c1", title: "Child One", parentSessionId: "parent" } as SessionView;
     await act(async () => root.render(<InboxRow optionId="row" session={child} projectName="Project"

@@ -32,6 +32,7 @@ exports.
 | `ChevronRightIcon` | Lucide | `ChevronRight` | Directional disclosure. |
 | `ChevronLeftIcon` | Lucide | `ChevronLeft` | Directional disclosure. |
 | `PlusIcon` | Lucide | `Plus` | Generic add action. |
+| `PinIcon` | Lucide | `Pin` | Pinned session state. |
 | `MoreHorizontalIcon` | Lucide | `Ellipsis` | Horizontal overflow menu. |
 | `MoreVerticalIcon` | Lucide | `EllipsisVertical` | Vertical overflow menu. |
 | `ShareIcon` | Lucide | `Share` | Generic share action. |

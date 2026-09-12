@@ -15,6 +15,7 @@ import {
   durableInboxProjectKey,
   extendInboxHeldOrder,
   inboxProjectName,
+  inboxPinnedAncestorIds,
   migrateInboxProjectPins,
   newSessionPresetForInboxSplit,
   inboxSelectionAfterMove,
@@ -340,6 +341,21 @@ test("sortInboxSessions keeps a family together, placed by its strongest member,
     session("child", { status: "idle", lastEventAt: 2, parentSessionId: "parent" }),
   ], new Set(["child"]));
   assert.deepEqual(pinnedChild.map(({ id }) => id), ["parent", "child", "lone"], "a pinned child pins its family");
+});
+
+test("inboxPinnedAncestorIds finds every present ancestor without treating it as directly pinned", () => {
+  const sessions = [
+    session("parent"),
+    session("child", { parentSessionId: "parent" }),
+    session("grandchild", { parentSessionId: "child" }),
+    session("orphan", { parentSessionId: "missing" }),
+    session("cycle-a", { parentSessionId: "cycle-b" }),
+    session("cycle-b", { parentSessionId: "cycle-a" }),
+  ];
+  assert.deepEqual(
+    [...inboxPinnedAncestorIds(sessions, new Set(["grandchild", "orphan", "cycle-a"]))].sort(),
+    ["child", "cycle-b", "parent"],
+  );
 });
 
 test("threadInboxRows nests children under a present parent and drops a collapsed parent's descendants", () => {

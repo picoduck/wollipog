@@ -36,6 +36,7 @@ const fullShell = new URLSearchParams(location.search).has("full-shell");
 const empty = new URLSearchParams(location.search).has("empty");
 /** An orchestrator with four children and a session with three pending requests (#896). */
 const threads = new URLSearchParams(location.search).has("threads");
+const openAiThreadParent = new URLSearchParams(location.search).get("thread-provider") === "openai";
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -111,7 +112,11 @@ if (threads) {
     session(id, title, column, { parentSessionId: "s-orchestrator", agentName: "Claude Code", driver: "claude-code", ...overrides });
   sessions.push(
     session("s-orchestrator", "Ship the usage and cost overhaul", "running", {
-      status: "running", agentName: "Claude Code", driver: "claude-code", lastEventAt: now - 60_000, updatedAt: now - 60_000,
+      status: "running",
+      agentName: openAiThreadParent ? "Codex" : "Claude Code",
+      driver: openAiThreadParent ? "codex-app-server" : "claude-code",
+      lastEventAt: now - 60_000,
+      updatedAt: now - 60_000,
     }),
     orchestrated("s-child-600", "#600: Add the usage table", "running", { status: "running", lastEventAt: now - 120_000, updatedAt: now - 120_000 }),
     orchestrated("s-child-601", "#601: Link the cost source", "review", {
