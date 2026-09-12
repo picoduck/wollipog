@@ -154,6 +154,7 @@ import {
   requestedWorktreeBoundary,
   sameWorktreePath,
   worktreeHead,
+  mergedWorktreePullRequestForBranch,
   worktreePullRequestState,
   worktreeDiff,
   WorktreeCleanupJournal,
@@ -883,6 +884,7 @@ export class SessionManager {
   /** Test seam for the expensive subprocess; production always uses createWorktree. */
   private createSessionWorktree: typeof createWorktree = createWorktree;
   /** Test seams keep forge availability and destructive Git behavior deterministic. */
+  private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
   /** Test seam keeps provider-home discovery deterministic without writing into a real Claude home. */
@@ -1428,6 +1430,37 @@ export class SessionManager {
     return this.active.delete(sessionId);
   }
 
+  /** Recover linkage for worktrees whose PR was opened outside Wollipog. The forge helper accepts
+   * only an exact merged-head proof, and the session lane keeps a concurrent explicit link from
+   * being overwritten while that proof is fetched. */
+  private async discoverUnlinkedMergedWorktree(
+    sessionId: string,
+    path: string,
+  ): Promise<void> {
+    const initial = this.store.readMeta(sessionId);
+    if (!initial) return;
+    const worktree = this.attributedWorktrees(initial)
+      .find((item) => sameWorktreePath(initial.context, item.path, path));
+    if (!worktree || worktree.source === "attached" || worktree.pullRequest) return;
+    const discovered = await this.discoverMergedWorktreePullRequest(
+      worktree.path,
+      worktree.branch,
+      { context: initial.context },
+    );
+    if (!discovered) return;
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    const current = this.attributedWorktrees(latest)
+      .find((item) => sameWorktreePath(latest.context, item.path, path));
+    if (!current || current.pullRequest || current.branch !== worktree.branch || current.source === "attached") return;
+    const worktrees = this.attributedWorktrees(latest).map((item) =>
+      sameWorktreePath(latest.context, item.path, path)
+        ? { ...item, pullRequest: discovered }
+        : item);
+    const updated = this.store.patchMeta(sessionId, { worktrees });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
   private async discardWorktreeLocked(
     sessionId: string,
     path: string,
@@ -1443,6 +1476,18 @@ export class SessionManager {
     if (!worktree) return { removed: false, reason: "worktree is not linked to this session" };
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
+    }
+    if (options.refreshMergedHead !== false && !worktree.pullRequest) {
+      await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path);
+      const latest = this.store.readMeta(sessionId);
+      if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
+      const current = this.attributedWorktrees(latest)
+        .find((item) => sameWorktreePath(latest.context, item.path, path));
+      if (!current) {
+        return { removed: false, reason: "the worktree record was removed while checking forge state" };
+      }
+      meta = latest;
+      worktree = current;
     }
     const recordedMergedHead = worktree.pullRequest?.state === "merged" &&
       typeof worktree.pullRequest.headOid === "string" &&
@@ -1656,15 +1701,23 @@ export class SessionManager {
             if (!meta || !this.sessionCanOpen(candidate.sessionId)) return;
             await this.recordLegacyWorktreeBranch(meta);
             meta = this.store.readMeta(candidate.sessionId) ?? meta;
-            const linkedPaths = this.attributedWorktrees(meta)
-              .filter((worktree) => worktree.pullRequest)
+            const candidatePaths = this.attributedWorktrees(meta)
+              .filter((worktree) => worktree.pullRequest || worktree.source !== "attached")
               .map((worktree) => worktree.path);
-            for (const path of linkedPaths) {
+            for (const path of candidatePaths) {
               meta = this.store.readMeta(candidate.sessionId);
               if (!meta) continue;
               const reconciliationContext = meta.context;
-              const worktree = this.attributedWorktrees(meta)
+              let worktree = this.attributedWorktrees(meta)
                 .find((item) => sameWorktreePath(reconciliationContext, item.path, path));
+              if (worktree && !worktree.pullRequest) {
+                await this.discoverUnlinkedMergedWorktree(candidate.sessionId, path);
+                const refreshedMeta = this.store.readMeta(candidate.sessionId);
+                if (!refreshedMeta) continue;
+                meta = refreshedMeta;
+                worktree = this.attributedWorktrees(refreshedMeta)
+                  .find((item) => sameWorktreePath(refreshedMeta.context, item.path, path));
+              }
               if (!worktree?.pullRequest) continue;
               let state = worktree.pullRequest.state;
               const needsMergedHead = worktree.source !== "attached" && state === "merged" &&
