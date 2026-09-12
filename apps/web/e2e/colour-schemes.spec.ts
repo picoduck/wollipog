@@ -37,7 +37,9 @@ async function measure(page: Page) {
       // the same colour can arrive as `color(srgb ...)` or `oklab(...)`; reading oklab's 0-1
       // lightness as an RGB byte produced the exact false 1.3:1 failures this harness reported.
       // Let the browser convert its own CSS value to sRGB before doing the WCAG arithmetic.
+      colourProbe.style.color = "";
       colourProbe.style.color = `color-mix(in srgb, ${value} 100%, transparent)`;
+      if (!colourProbe.style.color) throw new Error(`Could not normalise CSS colour: ${value}`);
       const normalised = getComputedStyle(colourProbe).color;
       const srgb = /^color\(\s*srgb/.test(normalised);
       const parts = normalised.match(/-?(?:\d*\.)?\d+(?:e[+-]?\d+)?/gi)?.map(Number) ?? [];
