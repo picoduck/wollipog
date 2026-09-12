@@ -19,7 +19,8 @@ const mcp = { command: "/runner", args: ["agent", "mcp"], env: { WOLLIPOG_PERMIS
 test("orchestrator capability requires a native harness or discovery-verified WSL bridge and never revives conductor", () => {
   const agent: AgentDefinition = { id: "agent", name: "Agent", command: "agent", args: [], env: {}, driver: "codex",
     capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["read-only"] } };
-  assert.deepEqual(withOrchestratorPreset([agent])[0]!.capabilities!.permissionModes, ["read-only", "orchestrator"]);
+  assert.deepEqual(withOrchestratorPreset([agent], { platform: "linux" })[0]!.capabilities!.permissionModes,
+    ["read-only", "orchestrator"]);
   assert.deepEqual(withOrchestratorPreset([{ ...agent, id: "conductor" }]), []);
   for (const unsupported of [{ ...agent, driver: "acp" as const }, { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" } }]) {
     assert.equal(withOrchestratorPreset([unsupported])[0]!.capabilities!.permissionModes!.includes("orchestrator"), false);
@@ -121,11 +122,13 @@ test("only the exact audited native Claude ACP adapter advertises orchestrator",
     source: "config",
   };
   assert.equal(supportsClaudeAgentAcpOrchestrator(configured), true);
-  const advertised = withOrchestratorPreset([configured], { isolationMode: "bwrap" })[0]!.capabilities!;
+  const advertised = withOrchestratorPreset([configured], { platform: "linux", isolationMode: "bwrap" })[0]!.capabilities!;
   assert.deepEqual(advertised.permissionModes, ["orchestrator"]);
   assert.equal(advertised.supportsImages, true);
   assert.equal(advertised.supportsApprovals, true);
-  const secondAdvertisement = withOrchestratorPreset([configured], { isolationMode: "bwrap" })[0]!.capabilities!;
+  const secondAdvertisement = withOrchestratorPreset([configured], {
+    platform: "linux", isolationMode: "bwrap",
+  })[0]!.capabilities!;
   assert.notEqual(advertised.permissionModes, secondAdvertisement.permissionModes,
     "catalog advertisements do not share mutable capability arrays");
   for (const unsupported of [

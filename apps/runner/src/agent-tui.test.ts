@@ -162,6 +162,7 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
       const launch = await prepareAgentTuiLaunch(source, {
         controlPlaneProtocolVersion: PROTOCOL_VERSION,
         executionIsolationMode: "bwrap",
+        platform: "linux",
         prepareScratch: async () => "/scratch",
         provision: (prepared) => provisionAgentControl(prepared, {
           controlPlaneUrl: "ws://127.0.0.1:8787/runner",
@@ -182,21 +183,14 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
       assert.ok(launch);
       assert.equal(launch.cwd, "/scratch");
       assert.equal(launch.env?.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
-      assert.equal(launch.env?.[process.platform === "win32" ? "TEMP" : "TMPDIR"], "/scratch");
+      assert.equal(launch.env?.TMPDIR, "/scratch");
       assert.ok(launch.env?.WOLLIPOG_SESSION_TOKEN_FILE);
       assert.equal(JSON.stringify(source), original);
       if (driver === "claude-code") {
         assert.equal(probes, 0);
-        if (process.platform === "win32") {
-          const tail = launch.args.at(-1) ?? "";
-          assert.ok(tail.includes("--strict-mcp-config"));
-          assert.match(tail, /--tools .*Read/);
-          assert.ok(tail.includes("--setting-sources"));
-        } else {
-          assert.ok(launch.args.includes("--strict-mcp-config"));
-          assert.match(launch.args[launch.args.indexOf("--tools") + 1] ?? "", /Read/);
-          assert.ok(launch.args.includes("--setting-sources"));
-        }
+        assert.ok(launch.args.includes("--strict-mcp-config"));
+        assert.match(launch.args[launch.args.indexOf("--tools") + 1] ?? "", /Read/);
+        assert.ok(launch.args.includes("--setting-sources"));
       } else {
         assert.equal(probes, 1);
         const launchText = launch.args.join(" ");
@@ -210,7 +204,8 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
 test("orchestrator TUI preparation fails closed for old peers, unsupported targets, terminal sessions and probes", async () => {
   const source = meta({ driver: "codex", config: { permissionMode: "orchestrator" } });
   const dependencies = {
-    controlPlaneProtocolVersion: PROTOCOL_VERSION, provision: () => {}, prepareScratch: async () => "/scratch",
+    controlPlaneProtocolVersion: PROTOCOL_VERSION, platform: "linux" as const,
+    provision: () => {}, prepareScratch: async () => "/scratch",
   };
   await assert.rejects(prepareAgentTuiLaunch(source, { ...dependencies, controlPlaneProtocolVersion: 111 }), /current native/);
   await assert.rejects(prepareAgentTuiLaunch({ ...source, context: { kind: "wsl", distro: "test" } }, dependencies), /current native/);

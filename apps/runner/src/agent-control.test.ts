@@ -56,7 +56,9 @@ function spec(driver: SessionLaunchSpec["driver"] = "codex"): SessionLaunchSpec 
 test("orchestrator provisioning restricts native tools and refuses unsupported launch boundaries", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-control-"));
   try {
-    const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root };
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
     const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
       executionIsolationMode: "bwrap" as const,
       orchestratorProjectPaths: ["/other-project", "C:\\other-project"] };
