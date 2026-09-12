@@ -171,6 +171,7 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
           registerCredential: () => {},
         }, () => {}, {
           configDir: dir, execPath: process.execPath, scriptPath: "/runner/cli.ts", execArgv: [], isSea: false,
+          platform: "linux",
         }),
         probe: async (prepared, cwd) => {
           probes++;
