@@ -969,3 +969,56 @@ test("an unsupported Orchestrator is disabled and says why, rather than vanishin
     await unmountFixture(fixture);
   }
 });
+
+test("an unavailable Project Location is refused with the availability as its reason", async () => {
+  // The bespoke `.loc-pick` button used the DOM `disabled` property, which took the option out of
+  // the tab order — so the availability badge explaining WHY it could not be chosen was reachable
+  // by mouse and by nothing else. On ChoiceCards it is `aria-disabled`, and the reason is a
+  // sentence on the card rather than a badge the user has to interpret.
+  const offlineRunner: RunnerView = { ...runner, status: "offline" };
+  const fixture = await mountFixture({
+    runners: [offlineRunner],
+    projects: [{
+      ...project,
+      locations: [{ ...project.locations[0]!, availability: "runner_offline" }],
+    }],
+  });
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    const group = fixture.container.querySelector('[role="radiogroup"][aria-label="Project Location"]');
+    assert.ok(group, "Project Location renders as a choice group");
+
+    const card = [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')][0];
+    assert.ok(card);
+    assert.equal(card.getAttribute("aria-disabled"), "true");
+    assert.match(card.textContent ?? "", /Runner Offline/);
+    assert.match(card.textContent ?? "", /cannot host a session right now/);
+
+    // Refused, not merely styled: clicking must not select it or enable creation.
+    await act(async () => { card.click(); });
+    assert.equal(card.getAttribute("aria-checked"), "false");
+    assert.equal(createButton(fixture.container).disabled, true);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the Location groups and Harness share one control family", async () => {
+  // The point of #832: the same question asked the same way. Before this, the dialog answered
+  // "pick one of N" with two bespoke `.loc-pick` grids, a `.workflow-preset` grid, a custom
+  // listbox and a segmented control, inside one 520px form.
+  const fixture = await mountFixture();
+  try {
+    await act(async () => { selectProject(fixture.container, project.id); });
+    for (const label of ["Project Location", "Permission Preset", "Harness"]) {
+      const group = fixture.container.querySelector(`[role="radiogroup"][aria-label="${label}"]`);
+      assert.ok(group, `${label} is a labelled radiogroup`);
+      assert.ok(group.querySelector(".ui-choice-card"), `${label} uses the shared Choice Card`);
+    }
+    // And nothing bespoke is left from the families this PR retired.
+    assert.equal(fixture.container.querySelector(".loc-pick"), null);
+    assert.equal(fixture.container.querySelector(".workflow-preset"), null);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

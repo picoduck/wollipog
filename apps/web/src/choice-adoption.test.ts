@@ -103,7 +103,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/NewRunDialog.tsx", "workflow-preset", 3],
   ["components/NewSessionDialog.tsx", "agent-pick", 2],
-  ["components/NewSessionDialog.tsx", "loc-pick", 4],
   ["components/NewSessionDialog.tsx", "native-select", 5],
   ["components/OnboardRunnerDialog.tsx", "seg", 2],
   ["components/PeopleDevicesPanel.tsx", "access-choice", 2],
@@ -128,7 +127,10 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   /* Down from 10 on 2026-09-11: the Harness picker adopted ChoiceCards, retiring its bespoke
      `.workflow-preset` radiogroup and its two radios. The remaining seven are the two `.loc-pick`
      Location groups, the Advanced Agents radio group, and the Additional Directories checkbox. */
-  ["components/NewSessionDialog.tsx", "raw-radiogroup", 7],
+  /* Down from 7 on 2026-09-11: both `.loc-pick` Location groups adopted ChoiceCards. The three
+     that remain are the Advanced Agents radio group and the Additional Directories checkbox, which
+     wait on the Agent-selection rework in #218. */
+  ["components/NewSessionDialog.tsx", "raw-radiogroup", 3],
   ["components/OnboardRunnerDialog.tsx", "raw-radiogroup", 2],
   ["components/PeopleDevicesPanel.tsx", "raw-radiogroup", 3],
   ["components/ReviewPanel.tsx", "raw-radiogroup", 9],

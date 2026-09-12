@@ -7771,44 +7771,8 @@ button.agent-pick {
   gap: 12px;
 }
 .new-session-project-actions .muted { flex: 1; }
-.loc-picks {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.loc-pick {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  align-items: flex-start;
-  text-align: left;
-  padding: 7px 10px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  color: var(--text-dim);
-}
-.loc-pick:hover {
-  border-color: var(--accent);
-}
-.loc-pick:disabled {
-  cursor: not-allowed;
-  opacity: 0.62;
-}
-.loc-pick:disabled:hover { border-color: var(--border-strong); }
-.loc-pick.on {
-  border-color: var(--accent);
-  background: var(--bg-elev-2);
-  color: var(--text);
-}
-.loc-host {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 13px;
-  font-weight: 600;
-}
+/* The last of the `.loc-*` family. The bespoke Location cards it belonged to moved onto
+   ChoiceCards; this badge survives as their `status` slot, so it is styled rather than dead. */
 .loc-kind {
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -7824,14 +7788,6 @@ button.agent-pick {
 }
 .loc-kind.loc-local {
   color: var(--text-faint);
-}
-.loc-path {
-  font-size: 11.5px;
-  color: var(--text-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
 }
 
 /* ------------------------------- Misc ----------------------------------- */
@@ -12655,7 +12611,18 @@ body.shell-dock-dragging * {
 .ui-choice-card-icon { display: flex; color: var(--text-dim); }
 .ui-choice-card.is-selected .ui-choice-card-icon { color: var(--accent-on-tint); }
 .ui-choice-card-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.ui-choice-card-title { font-size: var(--text-base); font-weight: var(--weight-medium); }
+.ui-choice-card-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+}
+/* Status sits on the title row and must not inherit its weight, or a badge reads as a second
+   heading. Wrapping is allowed above: at 320px a name plus two badges does not fit one line, and
+   clipping them is what §832 was about. */
+.ui-choice-card-status { display: flex; align-items: center; gap: var(--space-2); font-weight: var(--weight-normal); }
 .ui-choice-card-desc { font-size: var(--text-sm); color: var(--text-dim); }
 .ui-choice-card-reason { font-size: var(--text-xs); color: var(--amber-on-tint); }
 /* The MARKER is what says one-of versus many-of before you click a second card: a ring that fills

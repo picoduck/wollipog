@@ -249,6 +249,19 @@ export function SegmentedControl<T extends string>({
 export interface ChoiceCardOption<T extends string> {
   value: T;
   title: string;
+  /**
+   * Short status shown BESIDE the title — a kind, a state, an availability.
+   *
+   * §11.1 names "options that need descriptions or status" as this primitive's remit, and the
+   * Location pickers are the status half: a machine name alone does not say whether it is local or
+   * SSH, or whether it can host a session right now. It sits on the title row rather than in
+   * `description`, because a badge that wraps under a path reads as part of the path.
+   *
+   * It joins the option's accessible name, which is intended: "runner-1, Local, Available" is what
+   * a screen-reader user needs to choose between two machines. Callers must therefore pass text, or
+   * mark decorative parts `aria-hidden` themselves.
+   */
+  status?: ReactNode;
   description?: ReactNode;
   icon?: ReactNode;
   disabled?: boolean;
@@ -327,7 +340,10 @@ export function ChoiceCards<T extends string>({
           >
             {option.icon && <span className="ui-choice-card-icon" aria-hidden="true">{option.icon}</span>}
             <span className="ui-choice-card-body">
-              <span className="ui-choice-card-title">{option.title}</span>
+              <span className="ui-choice-card-title">
+                {option.title}
+                {option.status && <span className="ui-choice-card-status">{option.status}</span>}
+              </span>
               {option.description && <span className="ui-choice-card-desc">{option.description}</span>}
               {option.disabled && option.disabledReason && (
                 <small className="ui-choice-card-reason">{option.disabledReason}</small>

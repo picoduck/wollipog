@@ -39,7 +39,6 @@ import {
 import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
-import { handleRovingChoiceKeyDown, rovingChoiceTabIndex } from "./interactions.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
@@ -579,34 +578,45 @@ export function NewSessionDialog({
             <div className="field">
               <span>Project Location</span>
               {selectedProject.locations.length > 0 ? (
-                <div className="loc-picks" role="radiogroup" aria-label="Project Location" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-                  {selectedProject.locations.map((location) => {
-                    const r = runners.get(location.runnerId);
-                    const display = runnerDisplay(r, boxByRunner.get(location.runnerId), location.runnerId);
-                    const selected = location.id === projectLocationId;
-                    const launchable = isLaunchableProjectLocation(location, runners);
-                    return (
-                      <button
-                        type="button"
-                        key={location.id}
-                        role="radio"
-                        aria-checked={selected}
-                        aria-disabled={!launchable}
-                        disabled={!launchable}
-                        tabIndex={launchable && (selected || (!projectLocationLaunchable && location.id === projectLocationsAvailable[0]?.id)) ? 0 : -1}
-                        className={`loc-pick ${selected ? "on" : ""}`}
-                        onClick={() => pickProjectLocation(location)}
-                      >
-                        <span className="loc-host">
-                          {display.name}
-                          <span className={`loc-kind loc-${display.kind}`}>{display.kind === "ssh" ? "SSH" : "Local"}</span>
-                          <span className={`project-availability availability-${location.availability}`}>{projectAvailabilityLabel(location.availability)}</span>
-                        </span>
-                        <span className="loc-path" title={location.path}>{shortenPath(location.path)}</span>
-                      </button>
+                <ChoiceCards<string>
+                  label="Project Location"
+                  value={projectLocationId || null}
+                  onChange={(id) => {
+                    const location = selectedProject.locations.find((item) => item.id === id);
+                    if (location) pickProjectLocation(location);
+                  }}
+                  options={selectedProject.locations.map((location) => {
+                    const display = runnerDisplay(
+                      runners.get(location.runnerId),
+                      boxByRunner.get(location.runnerId),
+                      location.runnerId,
                     );
+                    const launchable = isLaunchableProjectLocation(location, runners);
+                    return {
+                      value: location.id,
+                      title: display.name,
+                      // The kind and the availability are STATUS, not description: they say what
+                      // this Location is and whether it can host a session, which is the whole
+                      // basis for choosing between two of them.
+                      status: (
+                        <>
+                          <span className={`loc-kind loc-${display.kind}`}>{display.kind === "ssh" ? "SSH" : "Local"}</span>
+                          <span className={`project-availability availability-${location.availability}`}>
+                            {projectAvailabilityLabel(location.availability)}
+                          </span>
+                        </>
+                      ),
+                      description: <span title={location.path}>{shortenPath(location.path)}</span>,
+                      disabled: !launchable,
+                      // The availability label already names the cause — Runner Offline, Workspace
+                      // Missing, Runner Removed — so the reason restates it as a sentence rather
+                      // than inventing a second vocabulary for the same states.
+                      disabledReason: launchable
+                        ? undefined
+                        : `${projectAvailabilityLabel(location.availability)} — this Location cannot host a session right now.`,
+                    };
                   })}
-                </div>
+                />
               ) : (
                 <div className="project-manager-empty compact">
                   <strong>No Project Locations</strong>
@@ -638,33 +648,34 @@ export function NewSessionDialog({
           {locations.length > 1 && (
             <div className="field">
               <span>Location</span>
-              <div className="loc-picks" role="radiogroup" aria-label="Workspace Location" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-                {locations.map((loc, locationIndex) => {
-                  const r = runners.get(loc.runnerId);
-                  const disp = runnerDisplay(r, boxByRunner.get(loc.runnerId), loc.runnerId);
-                  const ws = r?.workspaces.find((w) => w.id === loc.workspaceId);
-                  const on = runnerId === loc.runnerId && workspaceId === loc.workspaceId && !browsedPath;
-                  return (
-                    <button
-                      type="button"
-                      key={workspaceLocationKey(loc.runnerId, loc.workspaceId)}
-                      role="radio"
-                      aria-checked={on}
-                      tabIndex={rovingChoiceTabIndex(on, registeredLocationSelected, locationIndex)}
-                      className={`loc-pick ${on ? "on" : ""}`}
-                      onClick={() => pickLocation(loc)}
-                    >
-                      <span className="loc-host">
-                        {disp.name}
-                        <span className={`loc-kind loc-${disp.kind}`}>{disp.kind === "ssh" ? "SSH" : "Local"}</span>
-                      </span>
-                      <span className="loc-path" title={ws?.path}>
-                        {ws?.path ? shortenPath(ws.path) : loc.workspaceId}
-                      </span>
-                    </button>
+              {/* The legacy workspace quick-pick, on the same primitive as Project Location so
+                  the two read identically. No option here is ever unavailable: `locations` is
+                  already filtered to runners that are online and still advertise the workspace. */}
+              <ChoiceCards<string>
+                label="Workspace Location"
+                value={browsedPath ? null : workspaceLocationKey(runnerId, workspaceId)}
+                onChange={(key) => {
+                  const picked = locations.find(
+                    (loc) => workspaceLocationKey(loc.runnerId, loc.workspaceId) === key,
                   );
+                  if (picked) pickLocation(picked);
+                }}
+                options={locations.map((loc) => {
+                  const runnerForLocation = runners.get(loc.runnerId);
+                  const disp = runnerDisplay(runnerForLocation, boxByRunner.get(loc.runnerId), loc.runnerId);
+                  const ws = runnerForLocation?.workspaces.find((w) => w.id === loc.workspaceId);
+                  return {
+                    value: workspaceLocationKey(loc.runnerId, loc.workspaceId),
+                    title: disp.name,
+                    status: (
+                      <span className={`loc-kind loc-${disp.kind}`}>{disp.kind === "ssh" ? "SSH" : "Local"}</span>
+                    ),
+                    description: (
+                      <span title={ws?.path}>{ws?.path ? shortenPath(ws.path) : loc.workspaceId}</span>
+                    ),
+                  };
                 })}
-              </div>
+              />
               <span className="muted">Choose from {locations.length} known workspace Locations.</span>
             </div>
           )}
