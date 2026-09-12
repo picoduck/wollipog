@@ -163,7 +163,7 @@ export function SnoozeDialog({
             },
             {
               value: "regardless", title: "Regardless",
-              description: "Return only at the scheduled time; attention-required lifecycle states remain discoverable.",
+              description: "Return only at the scheduled time. Approvals, questions, and failures remain available on the session in Snoozed.",
             },
           ]}
           onChange={setWakePolicy}

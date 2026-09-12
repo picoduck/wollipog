@@ -4,8 +4,9 @@ Session reminders (the **Snooze Session** action) are per-user Inbox organizatio
 pause, restart, archive, or otherwise change the runtime or lifecycle state of a session.
 
 - **Until Activity** wakes for a scheduled instant or qualifying agent response, approval,
-  question, failure, or managed background result. **Regardless** wakes only on schedule. Safety and
-  input-required states remain visible in the ordinary Inbox while snoozed.
+  question, failure, or managed background result. **Regardless** wakes only on schedule. While
+  either policy is pending, the session appears only in **Snoozed**, where safety and input-required
+  states remain visible and actionable.
 - Each stored schedule includes an absolute instant, the IANA time zone shown when it was created,
   and the original expression. `in N days` means exactly N elapsed 24-hour periods. Exact local
   date/time input is previewed as an absolute zoned instant; ambiguous numeric dates are rejected.
