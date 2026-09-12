@@ -324,9 +324,24 @@ test("capacity status deterministically summarizes blocker groups beyond the wir
     );
 
     gate.controlPlaneProtocolVersion = () => 134;
+    gate.activeTurnWaiters.set("legacy-active-turn", {
+      sessionId: "legacy-active-turn", agentId: "claude", weight: 1,
+    });
     const legacy = manager.capacityState();
-    assert.equal(legacy.blockers?.at(-1)?.kind, "runner_capacity",
+    assert.ok(legacy.blockers?.some((blocker) => blocker.kind === "runner_capacity"),
       "an older control plane receives a bounded report in its closed vocabulary");
+    assert.equal(
+      new Set(legacy.blockers?.map((blocker) =>
+        `${blocker.kind}:${blocker.agentId ?? ""}:${blocker.targetId ?? ""}`)).size,
+      legacy.blockers?.length,
+      "legacy snapshots contain only one row for each dashboard blocker key",
+    );
+    assert.equal(
+      legacy.blockers?.reduce((sum, blocker) => sum + (blocker.waitingSessions ?? 0), 0),
+      legacy.queuedSessions,
+      "coalescing the legacy capacity and overflow rows keeps the waiter total exact",
+    );
+    gate.activeTurnWaiters.clear();
     gate.controlPlaneProtocolVersion = () => 135;
 
     gate.admissionQueue.splice(0);
@@ -659,6 +674,86 @@ test("non-running retained background metadata does not cancel a provider at cap
     internals.reconcileAuthoritativeBackgroundWorkPermit("orphaned", entry, false);
     assert.equal(cancellations, 0);
     assert.equal(internals.activeTurnAdmitted.has("orphaned"), false);
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("idle background rediscovery at active-turn capacity reports retained work without cancellation", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-idle-background-rediscovery-capacity-"));
+  try {
+    const sent: RunnerToControlPlane[] = [];
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("rediscovered"), status: "idle" });
+    const manager = new SessionManager(
+      (message) => sent.push(message), () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    let cancellations = 0;
+    const entry = {
+      sessionId: "rediscovered",
+      running: false,
+      providerInitiatedTurnActive: false,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => { cancellations++; }, agentSessionId: () => null },
+    };
+    internals.active.set("rediscovered", entry);
+
+    internals.onDriverBackgroundWork("rediscovered", {
+      state: "running",
+      pendingTaskIds: ["artifact-task"],
+      jobs: [{ id: "artifact-task", launchType: "unknown", startedAt: 1 }],
+    });
+
+    assert.equal(cancellations, 0);
+    assert.equal(internals.activeTurnAdmitted.has("rediscovered"), false);
+    assert.equal(store.readMeta("rediscovered")?.backgroundWorkState, "running");
+    assert.equal(store.readMeta("rediscovered")?.orphanedWork, undefined);
+    assert.equal(sent.some((message) => message.type === "session_event" &&
+      message.payload.kind === "error" && /Active Turn Capacity/.test(message.payload.message)), false);
+    internals.releaseActiveTurn("holder");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launch-time background reconciliation at capacity cannot cancel the initializing provider", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-launch-background-reconcile-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta("holder"), status: "idle" });
+    store.create({ ...meta("launching"), status: "starting", backgroundWorkState: "running",
+      pendingBackgroundTaskIds: ["seed-task"] });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.acquireActiveTurn("holder"), true);
+    let cancellations = 0;
+    const entry = {
+      sessionId: "launching",
+      running: false,
+      providerInitiatedTurnActive: false,
+      status: "starting",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => { cancellations++; }, agentSessionId: () => null },
+    };
+    internals.active.set("launching", entry);
+
+    internals.reconcileAuthoritativeBackgroundWorkPermit("launching", entry, true);
+
+    assert.equal(cancellations, 0);
+    assert.equal(internals.activeTurnAdmitted.has("launching"), false);
     internals.releaseActiveTurn("holder");
     manager.shutdownAll();
   } finally {

@@ -1088,8 +1088,13 @@ export class SessionManager {
         ...(agentRelevant ? {} : { agentId: undefined }),
         ...(targetRelevant ? {} : { targetId: undefined }),
       };
-      const key = JSON.stringify([normalized.kind, normalized.agentId ?? null, normalized.targetId ?? null,
-        blocker.limitUnits, blocker.requiredUnits]);
+      // Before capacity dimensions, the wire identity is only kind/agent/target. Coalesce on that
+      // same identity so legacy dashboards never receive duplicate keys for a resident-capacity
+      // row, an active-turn row down-converted to runner_capacity, or the overflow aggregate.
+      const key = JSON.stringify(supportsDimensions
+        ? [normalized.kind, normalized.agentId ?? null, normalized.targetId ?? null,
+            blocker.limitUnits, blocker.requiredUnits]
+        : [normalized.kind, normalized.agentId ?? null, normalized.targetId ?? null]);
       const previous = grouped.get(key);
       grouped.set(key, { ...normalized, waitingSessions: (previous?.waitingSessions ?? 0) + 1 });
     };
@@ -3675,15 +3680,31 @@ export class SessionManager {
     }
     const retained = blockers.filter((blocker) => selected.has(blocker));
     const omitted = blockers.filter((blocker) => !selected.has(blocker));
+    const omittedWaiters = omitted.reduce(
+      (sum, blocker) => sum + (blocker.waitingSessions ?? 0), 0,
+    );
+    const supportsDimensions = runnerSupportsProtocol(
+      this.controlPlaneProtocolVersion(),
+      "runnerCapacityDimensions",
+    );
+    if (!supportsDimensions) {
+      const legacyCapacityIndex = retained.findIndex((blocker) => blocker.kind === "runner_capacity");
+      if (legacyCapacityIndex >= 0) {
+        const legacyCapacity = retained[legacyCapacityIndex]!;
+        retained[legacyCapacityIndex] = {
+          ...legacyCapacity,
+          waitingSessions: (legacyCapacity.waitingSessions ?? 0) + omittedWaiters,
+        };
+        return retained;
+      }
+    }
     retained.push({
-      kind: runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "runnerCapacityDimensions")
-        ? "diagnostic_overflow"
-        : "runner_capacity",
+      kind: supportsDimensions ? "diagnostic_overflow" : "runner_capacity",
       description: `${omitted.length} additional capacity bottlenecks are summarized`,
       usedUnits,
       limitUnits: this.maxConcurrentSessions,
       requiredUnits: 1,
-      waitingSessions: omitted.reduce((sum, blocker) => sum + (blocker.waitingSessions ?? 0), 0),
+      waitingSessions: omittedWaiters,
     });
     return retained;
   }
@@ -3776,9 +3797,11 @@ export class SessionManager {
     }
     if (this.activeTurnAdmitted.has(sessionId)) return;
     // Orphaned and continuation-pending metadata describes retained work, not a provider that is
-    // executing right now. Preserve an already-held parent-turn permit, but do not manufacture a
-    // new one (or cancel an otherwise healthy provider) until a running callback proves execution.
-    if (!executing) return;
+    // executing right now. A filesystem inspection can also rediscover an uncertain artifact and
+    // report it as running while the provider is idle or still initializing. Preserve that work as
+    // retained diagnostics, but only enforce fail-closed admission when a manager-owned provider
+    // turn proves that this process generation is executing.
+    if (!executing || (!entry.running && !entry.providerInitiatedTurnActive)) return;
     if (this.activeTurnAdmission.acquire(this.activeTurnRequest(sessionId))) {
       this.activeTurnAdmitted.add(sessionId);
       this.reportCapacity();
