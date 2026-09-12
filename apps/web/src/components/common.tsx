@@ -23,6 +23,7 @@ export function SessionPinIndicator({ contains = false }: { contains?: boolean }
   return (
     <span
       className={`inbox-pin-indicator${contains ? " contains-pinned" : ""}`}
+      role="img"
       aria-label={label}
       title={label}
     >

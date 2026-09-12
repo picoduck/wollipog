@@ -322,6 +322,7 @@ test("selection stays visually distinct from unread across every palette, theme,
             return {
               height: row.getBoundingClientRect().height,
               border: style.borderColor,
+              foreground: style.color,
               shadow: style.boxShadow,
               background: style.backgroundImage,
             };
@@ -329,6 +330,7 @@ test("selection stays visually distinct from unread across every palette, theme,
         const [read, unread, selected, both] = visual;
         const context = `${scheme}/${theme}/${density}`;
         expect(unread!.background, `${context}: unread owns its tinted background`).not.toBe(read!.background);
+        expect(selected!.border, `${context}: selection uses the neutral text boundary`).toBe(selected!.foreground);
         expect(selected!.border, `${context}: selection is not the unread accent border`).not.toBe(unread!.border);
         expect(selected!.shadow, `${context}: selection is not the unread inset rail`).not.toBe(unread!.shadow);
         expect(both!.border, `${context}: selected + unread keeps the selection boundary`).toBe(selected!.border);

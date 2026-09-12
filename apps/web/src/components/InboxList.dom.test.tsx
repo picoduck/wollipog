@@ -126,6 +126,7 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
   const pinned = rows[0]!.querySelector('[aria-label="Pinned Session"]');
   assert.ok(pinned);
   assert.ok(pinned.querySelector("svg"), "the pin is a recognizable shape, not the old status dot");
+  assert.equal(pinned.getAttribute("role"), "img", "the standalone Board signal remains exposed by assistive tech");
   assert.equal(pinned.getAttribute("title"), "Pinned Session");
   assert.equal(rows[0]!.children.length, 1,
     "selection must not expand a session row with embedded shortcut actions");
