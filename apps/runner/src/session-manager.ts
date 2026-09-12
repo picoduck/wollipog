@@ -11190,7 +11190,7 @@ export class SessionManager {
     const options = block.identityMismatch ? [{
       optionId: "auth:accept-current",
       name: "Use Current Account",
-      description: "Explicitly accept the newly authenticated account for this session only.",
+      description: "Explicitly accept the current authenticated state for this session only.",
       kind: "allow_once",
     }] : [];
     if (block.canStartLogin) {

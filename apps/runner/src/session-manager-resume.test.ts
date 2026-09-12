@@ -1473,6 +1473,49 @@ test("accepting an authenticated observation without an account anchor clears th
   }
 });
 
+test("evidence-free identity mismatch offers accurate redacted recovery guidance", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "codex", canStartLogin: false, configuredCredential: true }),
+    revalidate: async () => ({ status: "authenticated", identityId: "opaque-current-credential-digest" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "codex",
+    command: "codex",
+    agentId: "codex-native",
+    env: { OPENAI_API_KEY: "current-secret" },
+    providerCredentialScopeId: "shared-scope",
+    providerCredentialIdentityId: "opaque-recorded-credential-digest",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "must remain held");
+    for (let index = 0; index < 8; index += 1) await tick();
+    const blocked = h.store.readMeta("resume-session")!;
+    const guidance = blocked.pendingApproval?.context?.input ?? "";
+    const options = blocked.pendingApproval?.options ?? [];
+
+    assert.equal(blocked.providerAuthBlock?.identityMismatch, true);
+    assert.match(guidance, /cannot match the current authenticated state to the state recorded for this session/i);
+    assert.match(guidance, /cannot determine whether the account changed/i);
+    assert.match(guidance, /Choose Use Current Account/);
+    assert.match(guidance, /choose Recheck Authentication/);
+    assert.doesNotMatch(guidance, /current-secret|opaque-current|opaque-recorded/);
+    assert.deepEqual(options.slice(0, 2).map((option) => option.name), [
+      "Use Current Account",
+      "Recheck Authentication",
+    ]);
+    assert.equal(
+      options[0]?.description,
+      "Explicitly accept the current authenticated state for this session only.",
+    );
+    assert.deepEqual(h.prompts, [], "mismatch remains fail-closed until explicit acceptance");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("genuine account changes park with redacted field evidence in block and log", async () => {
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
