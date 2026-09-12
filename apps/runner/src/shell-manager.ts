@@ -268,7 +268,7 @@ export class ShellManager {
     child.stdin.on("error", () => {
       /* surfaced via exit below */
     });
-    child.once("error", (err) => {
+    const onError = (err: Error) => {
       // spawn failure (ENOENT etc.) — surface as stderr then a null exit.
       if (live.exited) return;
       live.exited = true;
@@ -276,10 +276,10 @@ export class ShellManager {
       live.exitCode = null;
       this.cb.onExit(shellId, sessionId, null, live.outputSeq);
       if (live.forgetAfterExit) this.shells.delete(shellId);
-    });
+    };
     // "close", not "exit": close fires only after stdio has fully drained, so no output chunk
     // can arrive after the exit notification (exit can fire with data still buffered).
-    child.once("close", (code) => {
+    const onClose = (code: number | null) => {
       if (live.exited) return;
       live.exited = true;
       flushDecoders(); // a trailing partial character must land before the exit
@@ -287,7 +287,16 @@ export class ShellManager {
       live.exitCode = code;
       this.cb.onExit(shellId, sessionId, code, live.outputSeq);
       if (live.forgetAfterExit) this.shells.delete(shellId);
-    });
+    };
+    // Node 26 gives ChildProcess a typed event map. Narrow the process union before subscribing so
+    // its overloads are not intersected with the process-shaped ConPTY emitter's overloads.
+    if (child instanceof WindowsConptyProcess) {
+      child.once("error", onError);
+      child.once("close", onClose);
+    } else {
+      child.once("error", onError);
+      child.once("close", onClose);
+    }
     return { pty };
   }
 
