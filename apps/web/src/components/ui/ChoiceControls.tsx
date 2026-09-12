@@ -312,11 +312,13 @@ export function ChoiceCards<T extends string>({
   label,
   multiple,
   className,
+  id,
 }: {
   options: readonly ChoiceCardOption<T>[];
   onChange: (value: T) => void;
   label: string;
   className?: string;
+  id?: string;
 } & ({ multiple: true; value: readonly NoInfer<T>[] } | { multiple?: false; value: NoInfer<T> | null })) {
   // The mode decides the shape, so the types cannot disagree with it: a single mode given an array
   // silently selected nothing, and a multiple mode given a scalar selected one card and then could
@@ -335,6 +337,7 @@ export function ChoiceCards<T extends string>({
   })));
   return (
     <div
+      id={id}
       className={`ui-choice-cards${className ? ` ${className}` : ""}`}
       role={multiple ? "group" : "radiogroup"}
       aria-label={label}
@@ -430,6 +433,7 @@ export function SearchableCombobox<T extends string>({
   emptyLabel = "No Matches",
   disabled = false,
   className,
+  inputId,
 }: {
   options: readonly SearchableComboboxOption<T>[];
   value: T | null;
@@ -440,6 +444,8 @@ export function SearchableCombobox<T extends string>({
   emptyLabel?: string;
   disabled?: boolean;
   className?: string;
+  /** Optional DOM id for associating a visible label with the editable owner. */
+  inputId?: string;
 }) {
   const generatedId = useId();
   const listboxId = `${generatedId}-listbox`;
@@ -521,6 +527,7 @@ export function SearchableCombobox<T extends string>({
       ref={rootRef}
     >
       <input
+        id={inputId}
         ref={inputRef}
         type="text"
         role="combobox"
@@ -1043,7 +1050,10 @@ export function Select<T extends string>({
         onClick={() => { if (!disabled) (open ? popover.close(true) : openAt(options.findIndex((o) => o.value === value))); }}
         onKeyDown={(event) => {
           if (disabled) return;
-          if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ") {
+          // Modified Enter belongs to an enclosing form's explicit shortcut; only plain Enter
+          // owns this trigger's ordinary open-listbox behavior.
+          const unmodifiedEnter = event.key === "Enter" && !event.ctrlKey && !event.metaKey;
+          if (event.key === "ArrowDown" || event.key === "ArrowUp" || unmodifiedEnter || event.key === " ") {
             event.preventDefault();
             openAt(event.key === "ArrowUp" ? lastEnabledIndex : options.findIndex((o) => o.value === value));
           }
