@@ -150,7 +150,7 @@ test("provider-initiated settlement preserves a pending request owned by another
   const { sm, store, cleanup } = makeHarness(true);
   try {
     const entry = (sm as any).active.get("s_perm");
-    entry.running = false;
+    entry.running = true;
     (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:2");
     (sm as any).onDriverEvent("s_perm", {
       kind: "permission_request",
@@ -177,6 +177,45 @@ test("provider-initiated settlement preserves a pending request owned by another
     assert.equal(pending?.additionalRequests, undefined);
     assert.equal(store.readMeta("s_perm")?.status, "input_required");
   } finally {
+    cleanup();
+  }
+});
+
+test("provider-initiated settlement restores running while a queued runner turn drains", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  const entry = (sm as any).active.get("s_perm");
+  let finishPrompt: ((value: "end_turn") => void) | undefined;
+  try {
+    entry.running = false;
+    entry.client.prompt = () => new Promise<"end_turn">((resolve) => {
+      finishPrompt = resolve;
+    });
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:queued");
+    sm.prompt("s_perm", "queued behind provider turn");
+    for (let attempt = 0; attempt < 200 && !finishPrompt; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.ok(finishPrompt, "the queued runner turn owns the active drain");
+
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "provider-ask",
+      title: "Bash: pwd",
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+    });
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:queued");
+
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+    assert.equal(sent.filter((message) => message.type === "session_status").at(-1)?.status, "running");
+  } finally {
+    finishPrompt?.("end_turn");
+    for (let attempt = 0; attempt < 200 && entry.running; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
     cleanup();
   }
 });
