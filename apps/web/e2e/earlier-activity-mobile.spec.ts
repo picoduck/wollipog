@@ -181,6 +181,7 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
         __stopPrependSamples?: () => Array<{ offset: number | null; scrollTop: number }>;
       }).__stopPrependSamples?.() ?? [];
     });
+    expect(samples.length, "the painted-frame sampler must observe at least one frame").toBeGreaterThan(0);
     expect(samples.filter((sample) => sample.offset === null), JSON.stringify(samples)).toHaveLength(0);
     expect(Math.max(...samples.map((sample) => Math.abs(sample.offset! - before.offset))), JSON.stringify(samples))
       .toBeLessThan(1);

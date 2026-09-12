@@ -470,6 +470,8 @@ test("the app shortens by the occluded band", async ({ page }) => {
       return Math.round(full - shortened);
     }, { message: "the root must lose exactly the occluded height" })
     .toBe(KEYBOARD);
+  const shortened = await page.evaluate(() => document.getElementById("root")!.getBoundingClientRect().height);
+  expect(Math.round(full - shortened), "the root must stay exactly clear of the occluded height").toBe(KEYBOARD);
 });
 
 for (const theme of THEMES) {
@@ -825,17 +827,19 @@ async function expectEveryPrimaryDestinationUsable(page: Page) {
  */
 const RAIL_HEIGHT = { min: 48, max: 96 } as const;
 
-async function expectRailAt(page: Page, occluded: number) {
+async function expectRailAt(page: Page, occluded: number, { settle = true } = {}) {
   const rail = page.locator(".app-rail");
   const { width, height } = page.viewportSize()!;
   const expectedBottom = height - occluded;
   // The stylesheet deliberately retains a 1ms reduced-motion transition so transitionend still
   // fires. Chromium 153 can expose that interpolation to the first protocol geometry read after
   // the inset write; wait for the rail's settled position before checking its exact contract.
-  await expect.poll(async () => {
-    const current = await rail.boundingBox();
-    return current ? Math.abs(current.y + current.height - expectedBottom) : Number.POSITIVE_INFINITY;
-  }, { message: `the rail never settled on the ${occluded}px occluded band` }).toBeLessThan(2);
+  if (settle) {
+    await expect.poll(async () => {
+      const current = await rail.boundingBox();
+      return current ? Math.abs(current.y + current.height - expectedBottom) : Number.POSITIVE_INFINITY;
+    }, { message: `the rail never settled on the ${occluded}px occluded band` }).toBeLessThan(2);
+  }
   const box = (await rail.boundingBox())!;
   expect(box.y + box.height, `the rail's bottom edge must sit on the ${occluded}px occluded band`)
     .toBeGreaterThan(height - occluded - 2);
@@ -968,15 +972,15 @@ test("closing the keyboard puts everything back", async ({ page }) => {
   await openKeyboard(page);
   await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
   await expectInset(page, "");
+  // Both sides, not just "back where it was". The starting position was itself unchecked above, so
+  // `translateY(100px)` in the phone media query with a `html[style*="--keyboard-inset"]` override
+  // back to `none` put the closed rail 100px below the screen with the whole suite green: every
+  // keyboard-open assertion saw the override, and closing returned to the same off-screen place.
   await expectRailAt(page, 0);
 
   const after = (await rail.boundingBox())!;
   expect(Math.round(after.y), "the rail must return to where it started").toBe(Math.round(before.y));
   await expectEveryPrimaryDestinationUsable(page);
-  // Both sides, not just "back where it was". The starting position was itself unchecked above, so
-  // `translateY(100px)` in the phone media query with a `html[style*="--keyboard-inset"]` override
-  // back to `none` put the closed rail 100px below the screen with the whole suite green: every
-  // keyboard-open assertion saw the override, and closing returned to the same off-screen place.
 });
 
 /**
@@ -1192,15 +1196,15 @@ test.describe("while a text field is focused", () => {
     // A checkbox holds focus after a tap and opens nothing; hiding on it strands the navigation
     // hidden until the user happens to focus something else.
     await page.locator(".main-body input[type=checkbox]").focus();
-    await expectRailAt(page, 0);
+    await expectRailAt(page, 0, { settle: false });
     // A read-only text input likewise: production's Share Link field is one, tapped exactly to
     // select and copy — no keyboard appears and no viewport event would ever restore the rail.
     await page.locator(".main-body input[readonly]").focus();
-    await expectRailAt(page, 0);
+    await expectRailAt(page, 0, { settle: false });
     // The rail's own destinations too: a selector loosened to `.app:has(:focus)` removes the bar
     // in response to the user reaching for it.
     await page.locator(".rail-destinations > .rail-item").first().focus();
-    await expectRailAt(page, 0);
+    await expectRailAt(page, 0, { settle: false });
     await expectEveryPrimaryDestinationUsable(page);
   });
 });
@@ -1217,7 +1221,7 @@ test.describe("with a fine pointer", () => {
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches),
       "without touch emulation this context must report a fine pointer").toBe(false);
     await page.locator(".main-body textarea").focus();
-    await expectRailAt(page, 0);
+    await expectRailAt(page, 0, { settle: false });
     await expectEveryPrimaryDestinationUsable(page);
   });
 });
