@@ -318,7 +318,9 @@ export class BoxAdmission {
   private rootSignature(root: string): string {
     try {
       const stats = statSync(root, { bigint: true });
-      return `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.ctimeNs}`;
+      // Some CI filesystems preserve directory timestamps across rapid sibling mutations. A slot
+      // is itself a direct subdirectory, so nlink supplies the missing count-changing generation.
+      return `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.ctimeNs}:${stats.nlink}`;
     } catch { return "missing"; }
   }
 

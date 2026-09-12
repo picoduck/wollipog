@@ -81,6 +81,8 @@ try {
   const cyclesElapsedMs = performance.now() - cyclesStartedAt;
   assert.equal(residentLeaseRootScans, 1,
     "active-turn reports must reuse the unchanged 256-slot resident observation");
+  assert.equal(activeTurnLeaseRootScans, TURN_BOUNDARY_CYCLES * 3 + 1,
+    "each active-turn cycle needs one authoritative and two diagnostic root scans");
   assert.ok(cyclesElapsedMs < MAX_TURN_BOUNDARY_ELAPSED_MS,
     `turn-boundary diagnostics took ${cyclesElapsedMs.toFixed(1)}ms ` +
     `(limit ${MAX_TURN_BOUNDARY_ELAPSED_MS}ms)`);
