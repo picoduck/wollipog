@@ -380,6 +380,95 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   await expect(list.locator(".inbox-row-title").first()).toHaveText("Overflow Session 36");
 });
 
+for (const scenario of [
+  {
+    name: "above the saved viewport",
+    patch: { status: "running", activeTurnId: "moved-above", lastEventAt: 2_000 },
+    direction: "up",
+  },
+  {
+    name: "below the saved viewport",
+    patch: { status: "idle", activeTurnId: null, lastEventAt: -2_000 },
+    direction: "down",
+  },
+  {
+    name: "inside the saved viewport",
+    patch: null,
+    direction: "still",
+  },
+] as const) test(`Escape reveals a selected Inbox row ${scenario.name}`, async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 760 });
+  await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-live-scroll&fullShell=1");
+  const list = page.getByRole("grid", { name: "Sessions", exact: true });
+  await expect(list.locator("[data-virtual-total='36']")).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+
+  await list.evaluate((element) => {
+    element.scrollTop = Math.round((element.scrollHeight - element.clientHeight) * 0.52);
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await settlePreviewLayout(page);
+  const selected = page.getByRole("row", { name: /Overflow Session 18/ });
+  await expect(selected).toBeVisible();
+  await selected.click();
+  await selected.evaluate((row) => {
+    const list = row.closest<HTMLElement>(".inbox-list")!;
+    const rowRect = row.getBoundingClientRect();
+    const viewport = list.getBoundingClientRect();
+    list.scrollTop += (rowRect.top + rowRect.bottom - viewport.top - viewport.bottom) / 2;
+    list.dispatchEvent(new Event("scroll"));
+  });
+  await settlePreviewLayout(page);
+  const selectedKey = await selected.evaluate((row) =>
+    row.closest<HTMLElement>("[data-virtual-row]")?.dataset.virtualKey ?? null);
+  expect(selectedKey).not.toBeNull();
+  const before = await list.evaluate((element) => element.scrollTop);
+
+  await page.getByRole("button", { name: "Expand Session" }).click();
+  await expect(page.getByRole("region", { name: "Session Activity" })).toBeVisible();
+  await settlePreviewLayout(page, 2);
+  if (scenario.patch) {
+    await page.evaluate(({ patch }) => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-overflow-17", patch);
+    }, { patch: scenario.patch });
+  }
+
+  await page.getByRole("region", { name: "Session Activity" }).focus();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "Session Activity" })).toHaveCount(0);
+  await expect(list).toBeFocused();
+  const selectedAfter = list.locator('.inbox-row-shell[aria-selected="true"]');
+  await expect(selectedAfter).toContainText("Overflow Session 18");
+  const activeId = await list.getAttribute("aria-activedescendant");
+  expect(activeId).not.toBeNull();
+  await expect(page.locator(`#${activeId}`)).toBeAttached();
+  await expect(page.locator(`#${activeId}`)).toBeInViewport();
+  expect(await selectedAfter.evaluate((row) =>
+    row.closest<HTMLElement>("[data-virtual-row]")?.dataset.virtualKey ?? null)).toBe(selectedKey);
+
+  const after = await list.evaluate((element) => element.scrollTop);
+  if (scenario.direction === "up") expect(after).toBeLessThan(before);
+  else if (scenario.direction === "down") expect(after).toBeGreaterThan(before);
+  // Virtual row measurement can refine the restored anchor by less than half a 76px desktop row.
+  else expect(Math.abs(after - before)).toBeLessThan(40);
+  if (scenario.direction !== "still") {
+    const edges = await selectedAfter.evaluate((row) => {
+      const viewport = row.closest<HTMLElement>(".inbox-list")!.getBoundingClientRect();
+      const rowRect = row.getBoundingClientRect();
+      return { rowTop: rowRect.top, rowBottom: rowRect.bottom, viewportTop: viewport.top, viewportBottom: viewport.bottom };
+    });
+    const nearestEdgeDelta = scenario.direction === "up"
+      ? edges.rowTop - edges.viewportTop
+      : edges.viewportBottom - edges.rowBottom;
+    // Allow fractional virtual measurements and integer scrollTop rounding while still ruling out
+    // centering or any other movement substantially larger than the minimum reveal delta.
+    expect(Math.abs(nearestEdgeDelta)).toBeLessThanOrEqual(5);
+  }
+
+  await list.press(scenario.direction === "down" ? "k" : "j");
+  await expect(list.locator('.inbox-row-shell[aria-selected="true"]')).not.toContainText("Overflow Session 18");
+});
+
 test("real Inbox preview paging keeps ownership while live output streams", async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
   const reader = page.getByRole("region", { name: "Session Preview Activity" });

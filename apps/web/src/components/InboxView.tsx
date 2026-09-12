@@ -54,6 +54,7 @@ import { Board } from "./Board.js";
 import type { SessionsViewMode } from "../sessions-view-mode.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
+import { virtualTargetScrollAdjustment } from "./MeasuredVirtualList.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 
@@ -270,6 +271,8 @@ export function InboxView({
   const displayedIdsRef = useRef<string[]>([]);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const previousSurfaceRef = useRef<{ expanded: boolean; sessionId: string | null } | null>(null);
+  const listRevealFrameRef = useRef<number | null>(null);
+  const cancelListRevealRef = useRef<(() => void) | null>(null);
   const expandedSessionIdRef = useRef(expandedSessionId);
   expandedSessionIdRef.current = expandedSessionId;
   const mountedRef = useRef(true);
@@ -369,6 +372,7 @@ export function InboxView({
       mountedRef.current = false;
       if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
       if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+      cancelListRevealRef.current?.();
     };
   }, []);
 
@@ -579,6 +583,7 @@ export function InboxView({
   const surfaceSessionId = expandedSessionId ?? selectedSession?.id ?? null;
 
   useLayoutEffect(() => {
+    cancelListRevealRef.current?.();
     const previous = previousSurfaceRef.current;
     if (previous?.expanded === expanded && previous.sessionId === surfaceSessionId) return;
     const frame = window.requestAnimationFrame(() => {
@@ -592,10 +597,56 @@ export function InboxView({
         // that moveSelection() had just performed, one animation frame earlier.
         if (listRef.current) listRef.current.scrollTop = inboxScrollPositions.get(instanceScope) ?? 0;
         listRef.current?.focus();
+        const list = listRef.current;
+        if (list && displayedSelection) {
+          // aria-activedescendant requires InboxList to pin the selected virtual row, even when it
+          // lies outside the ordinary rendered range. Use that mounted row to reveal by the
+          // smallest possible delta after the cached viewport is restored. Repeat briefly because
+          // the virtualizer can refine offscreen estimates as measured rows settle.
+          let framesRemaining = 8;
+          const cancelReveal = () => {
+            if (listRevealFrameRef.current !== null) window.cancelAnimationFrame(listRevealFrameRef.current);
+            listRevealFrameRef.current = null;
+            list.removeEventListener("wheel", cancelReveal);
+            list.removeEventListener("pointerdown", cancelReveal);
+            list.removeEventListener("touchstart", cancelReveal);
+            list.removeEventListener("keydown", cancelReveal);
+            if (cancelListRevealRef.current === cancelReveal) cancelListRevealRef.current = null;
+          };
+          cancelListRevealRef.current = cancelReveal;
+          list.addEventListener("wheel", cancelReveal, { passive: true });
+          list.addEventListener("pointerdown", cancelReveal, { passive: true });
+          list.addEventListener("touchstart", cancelReveal, { passive: true });
+          list.addEventListener("keydown", cancelReveal);
+          const revealSelection = () => {
+            listRevealFrameRef.current = null;
+            if (expandedSessionIdRef.current !== null) {
+              cancelReveal();
+              return;
+            }
+            const row = list.querySelector<HTMLElement>(`#inbox-session-${encodeResourceId(displayedSelection)}`);
+            if (row) {
+              const rowRect = row.getBoundingClientRect();
+              const viewport = list.getBoundingClientRect();
+              const adjustment = virtualTargetScrollAdjustment({
+                align: "auto",
+                rowStart: rowRect.top,
+                rowEnd: rowRect.bottom,
+                viewportStart: viewport.top,
+                viewportEnd: viewport.bottom,
+              });
+              if (Math.abs(adjustment) >= 0.5) list.scrollTop += adjustment;
+            }
+            framesRemaining -= 1;
+            if (framesRemaining > 0) listRevealFrameRef.current = window.requestAnimationFrame(revealSelection);
+            else cancelReveal();
+          };
+          revealSelection();
+        }
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [expanded, focusComposerSessionId, instanceScope, surfaceSessionId, attentionTarget]);
+  }, [attentionTarget, displayedSelection, expanded, focusComposerSessionId, instanceScope, surfaceSessionId]);
 
   const scheduleOrderRelease = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
