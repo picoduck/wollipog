@@ -5507,7 +5507,7 @@ export class SessionsService {
     const activeParentLocation = parent.projectLocationId
       ? this.db.projectLocation(parent.projectLocationId)
       : null;
-    const resolvedParentWorkspaceId = parent.projectId
+    const resolvedParentWorkspaceId = parent.projectId && activeParentLocation
       ? parent.workspaceId ?? (workspacePath
         ? this.db.resolveImportedSessionLocation(parent.runnerId, workspacePath).workspaceId
         : null)
