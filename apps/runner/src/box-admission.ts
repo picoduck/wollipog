@@ -1,9 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { RunnerCapacityBlocker } from "@wollipog/protocol";
 
 interface SlotOwner { pid: number; token: string; sessionId: string; agentId: string; }
+
+interface CachedSlotObservation {
+  signature: string;
+  used: number;
+  ownerPids: number[];
+  recheckAt?: number;
+}
+
+interface SlotInspection {
+  used: boolean;
+  ownerPid?: number;
+  recheckAt?: number;
+}
 
 export interface AdmissionRequest {
   sessionId: string;
@@ -31,6 +44,9 @@ export class BoxAdmission {
   private readonly root: string;
   private readonly token = randomUUID();
   private readonly held = new Map<string, string[]>();
+  /** Diagnostic reads may reuse a root count while its directory generation and live owners are
+   * unchanged. Admission still calls usedSlots() directly and therefore remains authoritative. */
+  private readonly observationCache = new Map<string, CachedSlotObservation>();
 
   constructor(dataDir: string, private limit: number) {
     this.root = join(dataDir, "admission");
@@ -127,6 +143,7 @@ export class BoxAdmission {
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           mkdirSync(slot);
+          this.observationCache.delete(root);
           try {
             writeFileSync(join(slot, "owner.json"), JSON.stringify({
               pid: process.pid,
@@ -159,7 +176,10 @@ export class BoxAdmission {
   private releaseSlot(slot: string): void {
     try {
       const owner = JSON.parse(readFileSync(join(slot, "owner.json"), "utf8")) as SlotOwner;
-      if (owner.token === this.token && this.isOwnedSlot(slot)) rmSync(slot, { recursive: true, force: true });
+      if (owner.token === this.token && this.isOwnedSlot(slot)) {
+        rmSync(slot, { recursive: true, force: true });
+        this.observationCache.delete(dirname(slot));
+      }
     } catch { /* already reclaimed/removed */ }
   }
 
@@ -180,7 +200,7 @@ export class BoxAdmission {
     const usedSlots = (root: string): number => {
       const observed = counts.get(root);
       if (observed !== undefined) return observed;
-      const used = this.usedSlots(root);
+      const used = this.observedSlots(root);
       counts.set(root, used);
       return used;
     };
@@ -249,29 +269,67 @@ export class BoxAdmission {
   }
 
   private usedSlots(root: string): number {
+    let used = 0;
+    const ownerPids = new Set<number>();
+    let recheckAt: number | undefined;
     try {
-      return readdirSync(root, { withFileTypes: true })
-        .filter((entry) => {
-          if (!entry.isDirectory() || !/^slot-\d+$/.test(entry.name)) return false;
-          return !this.reclaimIfStale(join(root, entry.name));
-        }).length;
-    } catch {
-      return 0;
+      for (const entry of readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^slot-\d+$/.test(entry.name)) continue;
+        const inspected = this.inspectSlot(join(root, entry.name));
+        if (!inspected.used) continue;
+        used++;
+        if (inspected.ownerPid !== undefined) ownerPids.add(inspected.ownerPid);
+        if (inspected.recheckAt !== undefined) {
+          recheckAt = Math.min(recheckAt ?? inspected.recheckAt, inspected.recheckAt);
+        }
+      }
+    } catch { /* a missing root has no used slots */ }
+    this.observationCache.set(root, {
+      signature: this.rootSignature(root),
+      used,
+      ownerPids: [...ownerPids],
+      ...(recheckAt === undefined ? {} : { recheckAt }),
+    });
+    return used;
+  }
+
+  private observedSlots(root: string): number {
+    const cached = this.observationCache.get(root);
+    if (cached && cached.signature === this.rootSignature(root) &&
+        (cached.recheckAt === undefined || Date.now() < cached.recheckAt) &&
+        cached.ownerPids.every((pid) => pid === process.pid || processAlive(pid))) {
+      return cached.used;
     }
+    return this.usedSlots(root);
+  }
+
+  private rootSignature(root: string): string {
+    try {
+      const stats = statSync(root, { bigint: true });
+      return `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.ctimeNs}`;
+    } catch { return "missing"; }
   }
 
   private reclaimIfStale(slot: string): boolean {
+    return !this.inspectSlot(slot).used;
+  }
+
+  private inspectSlot(slot: string): SlotInspection {
     try {
       const owner = JSON.parse(readFileSync(join(slot, "owner.json"), "utf8")) as SlotOwner;
-      if (processAlive(owner.pid)) return false;
+      if (processAlive(owner.pid)) return { used: true, ownerPid: owner.pid };
     } catch {
       // Do not steal a slot in the tiny mkdir→owner-write window. A genuinely abandoned empty or
       // partial directory becomes reclaimable after five seconds.
-      try { if (Date.now() - statSync(slot).mtimeMs < 5_000) return false; } catch { return true; }
+      try {
+        const recheckAt = statSync(slot).mtimeMs + 5_000;
+        if (Date.now() < recheckAt) return { used: true, recheckAt };
+      } catch { return { used: false }; }
     }
-    if (!this.isOwnedSlot(slot)) return false;
+    if (!this.isOwnedSlot(slot)) return { used: true };
     rmSync(slot, { recursive: true, force: true });
-    return true;
+    this.observationCache.delete(dirname(slot));
+    return { used: false };
   }
 
   private isOwnedSlot(slot: string): boolean {

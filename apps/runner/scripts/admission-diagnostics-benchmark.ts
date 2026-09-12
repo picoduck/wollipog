@@ -7,6 +7,7 @@ import { SessionManager } from "../src/session-manager.js";
 import { SessionStore } from "../src/session-store.js";
 
 const WAITER_COUNT = 50_000;
+const TURN_BOUNDARY_CYCLES = 1_000;
 const MAX_ELAPSED_MS = 5_000;
 const root = mkdtempSync(join(tmpdir(), "wollipog-capacity-benchmark-"));
 
@@ -31,11 +32,19 @@ try {
     weight: 256,
   }), true);
 
-  let leaseRootScans = 0;
+  let residentLeaseRootScans = 0;
   const usedSlots = internals.boxAdmission.usedSlots.bind(internals.boxAdmission) as (path: string) => number;
   internals.boxAdmission.usedSlots = (path: string): number => {
-    leaseRootScans++;
+    residentLeaseRootScans++;
     return usedSlots(path);
+  };
+  let activeTurnLeaseRootScans = 0;
+  const activeTurnUsedSlots = internals.activeTurnAdmission.usedSlots.bind(
+    internals.activeTurnAdmission,
+  ) as (path: string) => number;
+  internals.activeTurnAdmission.usedSlots = (path: string): number => {
+    activeTurnLeaseRootScans++;
+    return activeTurnUsedSlots(path);
   };
   for (let index = 0; index < WAITER_COUNT; index++) {
     internals.admissionQueue.push({
@@ -55,16 +64,32 @@ try {
   assert.equal(status.blockers?.length, 256);
   assert.equal(status.blockers?.at(-1)?.kind, "diagnostic_overflow");
   assert.equal(status.blockers?.reduce((sum, blocker) => sum + (blocker.waitingSessions ?? 0), 0), WAITER_COUNT);
-  assert.equal(leaseRootScans, 1, "the global lease root must be scanned once, not once per waiter");
+  assert.equal(residentLeaseRootScans, 1, "the global lease root must be scanned once, not once per waiter");
   assert.ok(elapsedMs < MAX_ELAPSED_MS,
     `capacity diagnostics took ${elapsedMs.toFixed(1)}ms (limit ${MAX_ELAPSED_MS}ms)`);
+
+  internals.admissionQueue.length = 0;
+  const cyclesStartedAt = performance.now();
+  for (let index = 0; index < TURN_BOUNDARY_CYCLES; index++) {
+    const sessionId = `active-turn-${index}`;
+    assert.equal(internals.activeTurnAdmission.acquire({ sessionId, agentId: "claude", weight: 1 }), true);
+    manager.reportCapacity();
+    internals.activeTurnAdmission.release(sessionId);
+    manager.reportCapacity();
+  }
+  const cyclesElapsedMs = performance.now() - cyclesStartedAt;
+  assert.equal(residentLeaseRootScans, 1,
+    "active-turn reports must reuse the unchanged 256-slot resident observation");
   console.log(JSON.stringify({
     waiters: WAITER_COUNT,
     capacity: 256,
     blockerObjects: status.blockers?.length,
-    leaseRootScans,
+    residentLeaseRootScans,
+    activeTurnLeaseRootScans,
     elapsedMs: Number(elapsedMs.toFixed(1)),
     maxElapsedMs: MAX_ELAPSED_MS,
+    turnBoundaryCycles: TURN_BOUNDARY_CYCLES,
+    turnBoundaryElapsedMs: Number(cyclesElapsedMs.toFixed(1)),
   }));
   manager.shutdownAll();
 } finally {

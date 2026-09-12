@@ -291,8 +291,69 @@ test("one capacity observation scans each lease root once across a large waiter 
     }
     assert.equal(scans.size, 4, "only the global, provider, target, and exclusive roots are relevant");
     assert.deepEqual([...scans.values()], [1, 1, 1, 1], "waiter fan-out does not multiply filesystem scans");
+    const repeated = gate.observe();
+    assert.equal(repeated.usedCapacity, 256);
+    assert.equal(gate.blocker({
+      sessionId: "repeated-provider", agentId: "claude", weight: 1, agentLimit: 1,
+    }, repeated)?.kind, "agent_quota");
+    assert.deepEqual([...scans.values()], [1, 1, 1, 1],
+      "an unchanged cross-process observation reuses every validated root count");
     gate.releaseAll();
     sibling.releaseAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cached capacity observations detect sibling mutations, partial-slot expiry, and dead owners", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-observation-invalidation-"));
+  try {
+    const gate = new BoxAdmission(root, 2);
+    const sibling = new BoxAdmission(root, 2);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = gate as any;
+    const original = internals.usedSlots.bind(gate) as (path: string) => number;
+    let scans = 0;
+    internals.usedSlots = (path: string) => {
+      scans++;
+      return original(path);
+    };
+
+    assert.equal(gate.observe().usedCapacity, 0);
+    assert.equal(gate.observe().usedCapacity, 0);
+    assert.equal(scans, 1, "unchanged roots reuse their diagnostic count");
+
+    assert.equal(sibling.acquire({ sessionId: "sibling", agentId: "claude", weight: 1 }), true);
+    assert.equal(gate.observe().usedCapacity, 1, "a sibling slot creation changes the root generation");
+    sibling.release("sibling");
+    assert.equal(gate.observe().usedCapacity, 0, "a sibling slot release changes the root generation");
+
+    const admissionRoot = join(root, "admission");
+    const partial = join(admissionRoot, "slot-0");
+    mkdirSync(partial);
+    const now = Date.now();
+    assert.equal(gate.observe().usedCapacity, 1, "a young partial claim remains fail-closed");
+    t.mock.method(Date, "now", () => now + 6_000);
+    assert.equal(gate.observe().usedCapacity, 0, "the partial-claim deadline invalidates an unchanged root");
+    t.mock.restoreAll();
+
+    const dead = join(admissionRoot, "slot-0");
+    mkdirSync(dead);
+    writeFileSync(join(dead, "owner.json"), JSON.stringify({
+      pid: 2_147_483_647,
+      token: "crashed",
+      sessionId: "dead",
+      agentId: "claude",
+    }));
+    internals.observationCache.set(admissionRoot, {
+      signature: internals.rootSignature(admissionRoot),
+      used: 1,
+      ownerPids: [2_147_483_647],
+    });
+    assert.equal(gate.observe().usedCapacity, 0,
+      "a cached owner death triggers authoritative stale-slot recovery");
+    assert.equal(existsSync(dead), false);
+    assert.ok(scans >= 6, "every invalidation path refreshed the cached observation");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1193,6 +1254,102 @@ test("park-when-needed retires only a resumable idle provider and preserves its 
     assert.equal(store.readMeta("warm")?.config.model, "stable-model");
     assert.deepEqual(manager.liveSessionIds(), ["warm"]);
     manager.stop("warm");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unconfirmed parking retirement is contained while another idle provider releases capacity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-idle-provider-parking-unconfirmed-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    const exits = new Map<string, (code: number | null) => void>();
+    const reports: Array<NonNullable<Extract<RunnerToControlPlane, { type: "runner_capacity_status" }>["status"]>> = [];
+    const logs: string[] = [];
+    let launches = 0;
+    const factory = (
+      _driver: unknown,
+      options: { resumeId?: string },
+      callbacks: { onExit(code: number | null): void },
+    ) => {
+      launches++;
+      const providerId = options.resumeId ?? `provider-${launches}`;
+      exits.set(providerId, callbacks.onExit);
+      const client = {
+        pid: launches,
+        initialize: async () => {},
+        newSession: async () => providerId,
+        prompt: async () => "end_turn" as const,
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => providerId,
+      };
+      if (providerId === "provider-1") {
+        return {
+          ...client,
+          dispose: () => { throw new Error("forced dispose failed"); },
+        };
+      }
+      return { ...client, close: async () => true };
+    };
+    const manager = new SessionManager(
+      (message) => {
+        if (message.type === "runner_capacity_status") reports.push(message.status);
+      },
+      (message) => logs.push(message),
+      store,
+      "runner",
+      undefined,
+      factory as never,
+      root,
+      2,
+      undefined,
+      undefined,
+      { agentLimits: {}, agentWeights: {}, idleProcessPolicy: "park_when_needed" },
+    );
+    for (const id of ["stuck", "closable"]) {
+      assert.equal(await manager.start(launchSpec(root, id), `warm ${id}`), true);
+      for (let attempt = 0; attempt < 100 && store.readMeta(id)?.status !== "idle"; attempt++) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(store.readMeta(id)?.status, "idle");
+    }
+
+    assert.equal(await Promise.race([
+      manager.start(launchSpec(root, "new"), "needs capacity"),
+      new Promise<boolean>((_, reject) => setTimeout(
+        () => reject(new Error("a second parking candidate never released capacity")),
+        2_000,
+      )),
+    ]), true);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(internals.closing.get("stuck")?.unconfirmed, true);
+    assert.equal(internals.admitted.has("stuck"), true, "the unconfirmed process keeps its resident lease");
+    assert.equal(internals.closing.has("closable"), false, "the independent retirement completed exactly");
+    const current = manager.capacityState();
+    assert.equal(current.usedUnits, 2);
+    assert.equal(current.dimensions?.residentProcessUnits.used, 2);
+    assert.equal(current.dimensions?.parkedSessions, 1,
+      "only the exactly retired provider is reported as parked");
+    assert.ok(logs.some((message) => message.includes("parking idle provider stuck remains unconfirmed")));
+    for (const report of reports) {
+      assert.equal(report.usedUnits, report.dimensions?.residentProcessUnits.used);
+      assert.equal(report.availableUnits, Math.max(0, report.configuredUnits - report.usedUnits));
+      assert.ok((report.dimensions?.parkedSessions ?? 0) <= (report.dimensions?.retainedSessions.used ?? 0));
+    }
+
+    exits.get("provider-1")?.(1);
+    assert.equal(internals.closing.has("stuck"), false);
+    assert.equal(internals.admitted.has("stuck"), false);
+    assert.equal(manager.capacityState().dimensions?.parkedSessions, 2,
+      "the failed candidate becomes parked only after its exact exit callback");
+    manager.stop("new");
+    await internals.closing.get("new")?.promise;
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

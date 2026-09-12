@@ -503,6 +503,9 @@ interface ProviderRetirement {
   acceptPromptsDuringHandoff: boolean;
   /** Pressure parking preserves the durable idle session and is reflected in capacity accounting. */
   parking: boolean;
+  /** The retirement attempt settled without exact exit proof. Its lifecycle fence remains, but a
+   * separate idle provider may be tried without waiting forever on this process. */
+  unconfirmed: boolean;
   /** Temporary launch generation that accepts prompts while a pressure park is retiring. */
   parkingGeneration?: number;
 }
@@ -867,8 +870,8 @@ export class SessionManager {
   private readonly activeTurnWaiters = new Map<string, AdmissionRequest>();
   private readonly activeTurnAdmitted = new Set<string>();
   private activeTurnRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  /** At most one pressure retirement may be unconfirmed. This prevents one admission burst from
-   * retiring every eligible warm process before the first released unit is observed. */
+  /** Parking retirements remain serialized while an exact exit is pending. Once an attempt settles
+   * unconfirmed, its per-session fence remains resident without blocking another safe candidate. */
   private readonly parkingSessions = new Set<string>();
   /** Lazily reconciled durable-session inventory. The first v135 report may scan the store; hot
    * turn-boundary reports remain O(1) in retained-session count. */
@@ -3867,7 +3870,9 @@ export class SessionManager {
   }
 
   private parkOneIdleProvider(): boolean {
-    if (this.idleProcessPolicy !== "park_when_needed" || this.parkingSessions.size > 0 ||
+    const parkingAttemptPending = [...this.parkingSessions].some((sessionId) =>
+      this.closing.get(sessionId)?.unconfirmed !== true);
+    if (this.idleProcessPolicy !== "park_when_needed" || parkingAttemptPending ||
         !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "runnerCapacityDimensions")) return false;
     const candidate = [...this.active.entries()]
       .filter(([sessionId, entry]) => this.idleProviderCanPark(sessionId, entry))
@@ -3892,11 +3897,20 @@ export class SessionManager {
     // releaseActiveTurn() can publish a transient "parked" count while this process is still alive.
     this.deleteActiveSession(sessionId, entry, false, false);
     this.log(`parking idle provider ${sessionId} to release resident process capacity`);
-    this.beginProviderRetirement(sessionId, entry, {
-      parking: true,
-      parkingGeneration,
-      acceptPromptsDuringHandoff: true,
-    });
+    try {
+      this.beginProviderRetirement(sessionId, entry, {
+        parking: true,
+        parkingGeneration,
+        acceptPromptsDuringHandoff: true,
+      });
+    } catch (error) {
+      // beginProviderRetirement deliberately preserves the exact-client fence when forced disposal
+      // fails. Pressure drainage is best-effort, so contain that lifecycle error at this candidate.
+      this.log(`parking idle provider ${sessionId} remains unconfirmed: ${errText(error)}`);
+      this.refreshCapacityInventorySession(sessionId);
+      this.reportCapacity();
+      return false;
+    }
     this.refreshCapacityInventorySession(sessionId);
     this.reportCapacity();
     return true;
@@ -8821,6 +8835,7 @@ export class SessionManager {
       preserveLock: options.preserveLock ?? false,
       acceptPromptsDuringHandoff: options.acceptPromptsDuringHandoff ?? false,
       parking: options.parking ?? false,
+      unconfirmed: false,
       ...(options.parkingGeneration === undefined ? {} : { parkingGeneration: options.parkingGeneration }),
     };
     this.closing.set(sessionId, retirement);
@@ -8829,6 +8844,7 @@ export class SessionManager {
         entry.client.dispose({ forceImmediate: true });
         this.completeProviderRetirement(sessionId, retirement);
       } catch (error) {
+        retirement.unconfirmed = true;
         this.log(`session ${sessionId} provider retirement remains unconfirmed: ${errText(error)}`);
         // Keep `closing` installed as the exact-client fence, but preserve the synchronous Stop
         // result contract so the control plane does not acknowledge an unconfirmed stop as success.
@@ -8841,7 +8857,9 @@ export class SessionManager {
       (error) => {
         // No exit proof exists. Retain every ownership boundary until this exact client later
         // reports exit or runner shutdown successfully disposes it.
+        retirement.unconfirmed = true;
         this.log(`session ${sessionId} provider retirement remains unconfirmed: ${errText(error)}`);
+        if (retirement.parking && !this.shuttingDown) setImmediate(() => this.drainAdmissionQueue());
       },
     );
     return retirement;
