@@ -9651,6 +9651,34 @@ body.shell-dock-dragging * {
 }
 .session-preview-meta .tag { flex: none; }
 
+/*
+ * The Sessions list card stacks into three rows at or below the TABLET breakpoint, not the phone one
+ * (#901).
+ *
+ * #877 put the agent, project, and Git identity on line one with the signals column trailing. That
+ * is three groups competing for one line, and between 760px and about 900px there is not enough of
+ * it: the Git identity is what gives way. Measured on the layout fixture at 770px, on a card
+ * carrying four attention pills beyond its lifecycle pill and Stalled, the branch name was left
+ * 13px wide — present, not readable. The same card keeps 143px at 900px and 243px at 1000px.
+ *
+ * The three-row card already solves this by giving the Git state a line of its own, where a crowded
+ * signals column cannot reach it. So the fix is which widths use it, not how either shape is built,
+ * and the threshold is the breakpoint this stylesheet already documents: --bp-tablet.
+ *
+ * Only the three rules that MAKE the stack live here. The phone block below keeps what a phone
+ * cannot afford but a tablet can — the base ref, and the narrower activity strip.
+ */
+@media (max-width: 900px) {
+  /* Dissolving the lead wrapper puts the sender and the Git line back at their own grid areas, which
+     is #782's card exactly. Below this width InboxRow renders no wrapper at all; the rule covers the
+     frame during a resize where the media query has flipped and React has not re-rendered yet. */
+  .inbox-row-lead { display: contents; }
+  /* The badge is on line three here, so line two is the title and the strip again and needs no floor
+     of its own. Left at 20px it would add a pixel to every stacked card. */
+  .inbox-row-copy { min-height: auto; }
+  .inbox-row-meta { gap: 6px; }
+}
+
 @media (max-width: 760px) {
   .inbox-toolbar { align-items: stretch; flex-direction: column-reverse; padding: 8px 10px 0; }
   .inbox-zero kbd { display: none; }
@@ -9658,15 +9686,9 @@ body.shell-dock-dragging * {
   .inbox-search { width: 100%; min-width: 0; flex: 1; margin-bottom: 0; }
   .inbox-search input { width: auto; flex: 1; opacity: 1; pointer-events: auto; }
   .inbox-search-key { display: inline-block; }
-  /* #782's three-line stack, unchanged, and the reason #877 is a desktop-only change: a phone has
-     no width to put the Git state beside the sender, so it gets a line of its own — with the
-     background badge on it, because those are the two things a phone reader has no other way to
-     see. A phone drops only what it cannot afford: the base ref, and a few cells off the strip.
-     A phone renders no lead wrapper, so this rule normally matches nothing. It exists for the frame
-     during a resize where the media query has already flipped and React has not re-rendered yet:
-     dissolving the box puts the sender and the Git line back at their own grid areas instead of
-     stacking line one on top of itself for a paint. */
-  .inbox-row-lead { display: contents; }
+  /* A phone drops what a tablet can still afford: the base ref off the Git line, and a few cells
+     off the activity strip. The three-line STACK itself is no longer a phone rule — it starts at
+     the tablet breakpoint now (#901), in the block above. */
   /* A phone has no width for a 26px indent or the chip's words: the spine narrows and the family
      chip keeps only its dots, which still say how many children and which of them wait (#896). */
   .inbox-row-shell.thread-child { margin-left: 14px; }
@@ -9675,9 +9697,6 @@ body.shell-dock-dragging * {
   .inbox-row-shell.thread-child .inbox-row-primary-cell::before { width: 6px; }
   .inbox-thread-family { gap: 0; padding-right: 5px; }
   .inbox-thread-family-text { display: none; }
-  /* The badge is on line three here, so line two is the title and the strip again and needs no
-     floor of its own. Left at 20px it would add a pixel to every phone card. */
-  .inbox-row-copy { min-height: auto; }
   /* A phone's first line has the sender and up to three pills side by side; the time moved to
      line three in #934. The sender is what gives way there, so every pixel the cluster does not
      need is the agent's name: the card spends its densest line on spacing rather than on words.
@@ -9689,7 +9708,6 @@ body.shell-dock-dragging * {
   .inbox-status-pill { padding: 0 4px; }
   .inbox-row-sender { min-width: 0; gap: 4px; }
   .inbox-row-base { display: none; }
-  .inbox-row-meta { gap: 6px; }
   .inbox-row-activity { width: 58px; gap: 0; }
   .inbox-activity-footer { gap: 6px; padding-inline: 6px; }
   .inbox-activity-summary { gap: 6px; }
