@@ -125,9 +125,9 @@ cleanup journals retain their exact unscoped layout until explicit offline adopt
 mode remains the broadest compatibility default but takes an exclusive whole-HOME lease shared by
 Claude, Codex, ACP, Seatbelt, Windows Job, and Agent TUI launches. Protocol-v124 Direct WSL bwrap is
 available only for freshly discovered Codex/Claude structured drivers in the Orchestrator preset:
-the target-local launcher pins the authoritative cwd and writable sources through bwrap exec, and a
-root-owned per-session state anchor plus a target-local HOME lease bounds provider state and relay
-lifetime. Direct WSL provider mode, generic ACP, conversation fork/state adoption, and WSL Native TUI
+the target-local launcher pins a session-private scratch cwd and writable sources through bwrap exec,
+and a root-owned per-session state anchor plus a target-local HOME lease bounds provider state,
+scratch, and relay lifetime. Direct WSL provider mode, generic ACP, conversation fork/state adoption, and WSL Native TUI
 remain fail-closed. Use a supported native, container, or cloud execution target for those modes.
 
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's

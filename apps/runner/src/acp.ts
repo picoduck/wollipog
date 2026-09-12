@@ -317,7 +317,7 @@ export class AcpClient {
       cwd,
       mcpServers,
       ...(additionalDirectories?.length ? { additionalDirectories: [...additionalDirectories] } : {}),
-      ...(this.orchestrator ? { _meta: orchestratorAcpSessionMeta() } : {}),
+      ...(this.orchestrator ? { _meta: orchestratorAcpSessionMeta(additionalDirectories ?? []) } : {}),
     };
   }
 

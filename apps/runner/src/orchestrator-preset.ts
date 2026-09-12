@@ -15,6 +15,41 @@ export const CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION = "0.75.1";
 const CLAUDE_AGENT_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp";
 const CLAUDE_AGENT_ACP_REPOSITORY = "https://github.com/agentclientprotocol/claude-agent-acp";
 
+const ORCHESTRATOR_CLAUDE_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash"];
+const ORCHESTRATOR_CLAUDE_BASH_RULES = [
+  "git log", "git log *", "git diff", "git diff *", "git show", "git show *",
+  "git blame *", "git status", "git status *", "git worktree list", "git worktree list *",
+  "git branch", "git branch *",
+  "gh issue list", "gh issue list *", "gh issue view *", "gh issue status", "gh issue status *",
+  "gh issue edit * --add-assignee *", "gh issue edit * --remove-assignee *",
+  "gh issue edit * --add-label *", "gh issue edit * --remove-label *", "gh issue comment *",
+  "gh pr list", "gh pr list *", "gh pr view *", "gh pr checks *", "gh pr diff *", "gh pr status",
+  "gh pr status *",
+];
+
+export function orchestratorInstructions(projectPaths: readonly string[]): string {
+  const locations = [...new Set(projectPaths.filter(Boolean))];
+  return [
+    "You are running with the Wollipog Orchestrator preset. Plan, delegate to child sessions, and verify their results; do not implement project changes yourself.",
+    "Your working directory is private per-session scratch space. You may create notes and ledgers there, but nowhere else.",
+    locations.length
+      ? `Project locations are read-only: ${locations.map((path) => JSON.stringify(path)).join(", ")}.`
+      : "Project locations are read-only and may be inspected by absolute path.",
+    "You may read and search project files and user skill directories, inspect Git history and branches, read GitHub issues, pull requests, checks, review threads, and comments, search or fetch the web, and use Wollipog session-management tools.",
+    "GitHub writes are limited to assigning or unassigning issues, changing issue labels, and posting plan or status comments.",
+    "Do not edit project files, run builds, tests, or typechecks in a project location, commit, push, create branches or worktrees for yourself, open pull requests, merge, or perform control-plane mutations outside descendant session management.",
+    "If a requested operation is outside that boundary, explain that the Orchestrator preset refuses it and delegate the implementation to a child session.",
+  ].join("\n");
+}
+
+function claudeAllowedTools(): string[] {
+  return [
+    "mcp__wollipog__*",
+    ...ORCHESTRATOR_CLAUDE_TOOLS.filter((tool) => tool !== "Bash"),
+    ...ORCHESTRATOR_CLAUDE_BASH_RULES.map((rule) => `Bash(${rule})`),
+  ];
+}
+
 function acpOrchestratorCapabilities(): AgentCapabilities {
   return {
     models: [],
@@ -59,19 +94,21 @@ export function assertClaudeAgentAcpOrchestratorIdentity(
   }
 }
 
-/** Runner-owned metadata interpreted by the exact adapter release above. Empty built-in tools plus
- * a sole allowlisted Wollipog MCP server are the enforcement boundary; client-service refusal in
- * AcpClient is defense in depth. User/project settings and hooks are excluded at query creation. */
-export function orchestratorAcpSessionMeta(): Record<string, unknown> {
+/** Runner-owned metadata interpreted by the exact adapter release above. Its explicit built-in
+ * allowlist, restricted Bash patterns, and sole Wollipog MCP server form the adapter boundary;
+ * client-service refusal in AcpClient is defense in depth. User/project settings and hooks are
+ * excluded at query creation. */
+export function orchestratorAcpSessionMeta(projectPaths: readonly string[] = []): Record<string, unknown> {
   return {
     claudeCode: {
       options: {
-        tools: [],
-        allowedTools: ["mcp__wollipog__*"],
+        tools: ORCHESTRATOR_CLAUDE_TOOLS,
+        allowedTools: claudeAllowedTools(),
         disallowedTools: [
-          "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Agent", "Task",
-          "WebFetch", "WebSearch",
+          "Write", "Edit", "MultiEdit", "NotebookEdit", "Agent", "Task",
         ],
+        permissionMode: "dontAsk",
+        systemPrompt: { type: "preset", preset: "claude_code", append: orchestratorInstructions(projectPaths) },
         settingSources: [],
         settings: { disableAllHooks: true },
         hooks: {},
@@ -127,27 +164,38 @@ function toml(value: unknown): string {
   throw new Error("unsupported orchestrator MCP configuration value");
 }
 
-/** The native harness removes execution tools; the control plane independently scopes the
- * credential. Unknown feature flags fail launch rather than falling back to an unrestricted mode. */
+/** The native harness grants only the planning surface described above; the control plane
+ * independently scopes the credential. Unknown feature flags fail launch rather than falling back
+ * to an unrestricted mode. */
 export function orchestratorLaunchArgs(
   driver: SessionLaunchSpec["driver"],
   mcp: { command: string; args: string[]; env: Record<string, string> },
+  projectPaths: readonly string[] = [],
 ): string[] {
+  const instructions = orchestratorInstructions(projectPaths);
   if (driver === "claude-code") {
-    return ["--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--allowedTools", "mcp__wollipog__*",
-      "--disallowedTools", "Bash,Write,Edit,MultiEdit,NotebookEdit,Agent,Task",
+    return ["--tools", ORCHESTRATOR_CLAUDE_TOOLS.join(","), "--strict-mcp-config", "--disable-slash-commands",
+      "--permission-mode", "dontAsk", "--allowedTools", claudeAllowedTools().join(","),
+      "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit,Agent,Task",
+      "--append-system-prompt", instructions,
+      ...projectPaths.flatMap((path) => ["--add-dir", path]),
       "--setting-sources", "", "--settings", '{"disableAllHooks":true}'];
   }
   if (driver !== "codex" && driver !== "codex-app-server") {
-    throw new Error("the orchestrator preset requires a native harness that can disable execution tools");
+    throw new Error("the orchestrator preset requires a native harness that can enforce its planning boundary");
   }
   return [
     "--strict-config",
-    ...["shell_tool", "unified_exec", "js_repl", "code_mode", "apps", "plugins", "hooks",
+    ...["apps", "plugins", "hooks",
       "multi_agent", "browser_use", "computer_use", "image_generation"].flatMap((feature) => ["--disable", feature]),
-    "-c", 'sandbox_mode="read-only"',
+    "-c", 'sandbox_mode="workspace-write"',
+    "-c", "sandbox_workspace_write.writable_roots=[]",
+    "-c", "sandbox_workspace_write.network_access=true",
+    "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+    "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
     "-c", 'approval_policy="never"',
-    "-c", 'web_search="disabled"',
+    "-c", 'web_search="live"',
+    "-c", `developer_instructions=${toml(instructions)}`,
     "-c", `mcp_servers=${toml({ wollipog: { ...mcp, enabled: true } })}`,
   ];
 }
@@ -156,7 +204,7 @@ export function orchestratorLaunchArgs(
 export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunchSpec["driver"]): string[] {
   const result: string[] = [];
   // Retire the old misspelling too: persisted launch arguments may predate the fix.
-  const claudeFlags = new Set(["--tools", "--allowedTools", "--disallowedTools", "--mcp-config", "--settings", "--setting-sources", "--settings-sources"]);
+  const claudeFlags = new Set(["--tools", "--allowedTools", "--disallowedTools", "--mcp-config", "--settings", "--setting-sources", "--settings-sources", "--permission-mode", "--append-system-prompt", "--add-dir"]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     const flag = arg.split("=")[0]!;
@@ -164,6 +212,7 @@ export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunc
       if (claudeFlags.has(flag) && !arg.includes("=")) i++;
       continue;
     }
+    if (driver === "claude-code" && ["--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"].includes(flag)) continue;
     if (driver !== "claude-code" && flag === "--strict-config") continue;
     if (driver !== "claude-code" && ["--yolo", "--dangerously-bypass-approvals-and-sandbox", "--full-auto", "--approve-for-me", "--search", "--dangerously-bypass-hook-trust"].includes(flag)) continue;
     if (driver !== "claude-code" && ["-s", "--sandbox", "-a", "--ask-for-approval", "-C", "--cd", "--add-dir"].includes(flag)) {
@@ -176,7 +225,7 @@ export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunc
     }
     if (driver !== "claude-code" && (flag === "-c" || flag === "--config")) {
       const setting = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1] ?? "";
-      if (/^(?:features\.|mcp_servers[.=]|sandbox_mode=|approval_policy=|web_search=)/.test(setting)) {
+      if (/^(?:features\.|mcp_servers[.=]|sandbox_mode=|sandbox_workspace_write\.|approval_policy=|web_search=|developer_instructions=)/.test(setting)) {
         if (!arg.includes("=")) i++;
         continue;
       }

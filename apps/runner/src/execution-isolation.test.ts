@@ -92,6 +92,23 @@ test("Seatbelt profile escapes paths and limits its writable surface", () => {
   }, "/Users/me", "deny"), /control-free POSIX path/);
 });
 
+test("Orchestrator Seatbelt grants writes only to scratch and provider transcripts", () => {
+  const profile = buildSeatbeltProfile({
+    driver: "claude-code",
+    dataDir: "/Users/me/Library/Application Support/Wollipog",
+    env: { HOME: "/Users/me" },
+    sessionId: "s1",
+    cwd: "/Users/me/Wollipog/orchestrator-scratch",
+    additionalWritableRoots: ["/Users/me/Work/repo"],
+    orchestratorScratchOnly: true,
+  }, "/Users/me", "inherit", "/private/var/folders/tmp");
+  assert.match(profile, /orchestrator-scratch/);
+  assert.match(profile, /\/Users\/me\/\.claude\/projects/);
+  assert.doesNotMatch(profile, /Application Support\/Wollipog/);
+  assert.doesNotMatch(profile, /Users\/me\/Work\/repo/);
+  assert.doesNotMatch(profile, /private\/var\/folders\/tmp/);
+});
+
 test("provider isolation preserves the driver-owned boundary", async () => {
   assert.equal(await resolveExecutionIsolation(provider, { kind: "native" }, {
     platform: "win32",

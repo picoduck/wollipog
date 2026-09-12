@@ -204,7 +204,8 @@ function removeAgentControlLaunchState(
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
   spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "command" | "args" | "env"> &
-    Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext">>,
+    Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext" | "workspacePath">> &
+    { repoPath?: string; worktreePath?: string | null },
   config: {
     controlPlaneUrl: string;
     controlPlaneProtocolVersion: number | null;
@@ -217,6 +218,8 @@ export function provisionAgentControl(
     orchestratorAgent?: AgentDefinition;
     /** Direct WSL is proven only by the target-local bwrap launcher. */
     executionIsolationMode?: "provider" | "bwrap" | "seatbelt" | "windows-job";
+    /** Operator-configured Project Locations exposed read-only to an Orchestrator. */
+    orchestratorProjectPaths?: string[];
   },
   log: (message: string) => void,
   host: AgentControlHost,
@@ -227,6 +230,12 @@ export function provisionAgentControl(
   const nativeHostExecution = context.kind === "native" && targetIsHost;
   const wslOrchestrator = context.kind === "wsl" && targetIsHost && spec.config?.permissionMode === "orchestrator";
   const orchestrator = spec.config?.permissionMode === "orchestrator";
+  const orchestratorProjectPaths = [...new Set([
+    ...(config.orchestratorProjectPaths ?? []),
+    spec.workspacePath,
+    spec.repoPath,
+    spec.worktreePath ?? undefined,
+  ].filter((path): path is string => typeof path === "string" && path.length > 0))];
   const structuredDriver = ["codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp");
   const orchestratorAgent = config.orchestratorAgent;
   const wslAgentControl = orchestratorAgent?.wslAgentControl;
@@ -303,7 +312,7 @@ export function provisionAgentControl(
       };
       spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
       spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
-      spec.args.push(...orchestratorLaunchArgs(spec.driver, helperLaunch));
+      spec.args.push(...orchestratorLaunchArgs(spec.driver, helperLaunch, orchestratorProjectPaths));
       if (spec.driver === "claude-code") spec.args.push("--mcp-config", WSL_AGENT_CONTROL_PRIVATE_MCP);
       wslLaunches.set(spec.sessionId, {
         protocolVersion: WSL_AGENT_CONTROL_PROTOCOL,
@@ -358,10 +367,13 @@ export function provisionAgentControl(
       };
       // Ambient/user ACP context is not part of the audited boundary. The sole MCP definition is
       // materialized from runner-owned environment references immediately before session/new.
-      spec.acpSessionContext = { mcpServers: [server] };
+      spec.acpSessionContext = {
+        mcpServers: [server],
+        ...(orchestratorProjectPaths.length ? { additionalDirectories: orchestratorProjectPaths } : {}),
+      };
     } else {
       spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
-      spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp));
+      spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp, orchestratorProjectPaths));
     }
   }
 

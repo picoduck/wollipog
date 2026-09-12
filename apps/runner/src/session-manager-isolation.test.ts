@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriverOptions } from "./drivers/driver.js";
@@ -9,6 +9,8 @@ import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js";
+import { providerStateKey } from "./execution-isolation.js";
+import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
 import { requestedWorktreeBoundary, setStatfsForTests } from "./worktree.js";
 
 /** Cloud placements snapshot the session's real host worktree and launch re-proves that exact
@@ -293,7 +295,26 @@ test("WSL bwrap rejection precedes preparation, state migration, root resolution
   }
 });
 
-test("safe Direct WSL uses one target-resolved cwd for isolation, driver construction, and session creation", async () => {
+test("Orchestrator scratch is session-private and removed with native session state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-scratch-"));
+  try {
+    const store = new SessionStore(root);
+    const row = { ...meta(), config: { permissionMode: "orchestrator" as const } };
+    store.create(row);
+    const manager = new SessionManager(() => {}, () => {}, store, "runner");
+    const scratch = await manager.prepareOrchestratorScratch(row);
+    assert.equal(scratch, join(store.sessionPath("s1"), "orchestrator-scratch"));
+    assert.equal(existsSync(scratch), true);
+    writeFileSync(join(scratch, "plan.md"), "private planning state");
+    store.remove("s1");
+    assert.equal(existsSync(scratch), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("safe Direct WSL uses one scratch cwd for isolation, driver construction, and session creation", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-authoritative-cwd-"));
   try {
     const store = new SessionStore(root);
@@ -311,12 +332,14 @@ test("safe Direct WSL uses one target-resolved cwd for isolation, driver constru
     let captured: DriverOptions | undefined;
     let newSessionCwd: string | undefined;
     let isolationInput: unknown;
+    const ownerHash = "a".repeat(64);
+    const scratch = `${wslBwrapSessionRoot(ownerHash, providerStateKey("s1"))}/scratch`;
     const safeIsolation = {
       backend: "wsl-bwrap" as const,
       distro: "Ubuntu",
       command: "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1",
       args: [],
-      cwd: "/work/canonical",
+      cwd: scratch,
       network: "deny" as const,
       wslAgentControl: {
         protocolVersion: 1 as const,
@@ -353,17 +376,18 @@ test("safe Direct WSL uses one target-resolved cwd for isolation, driver constru
     // launch is authorized, no pre-launch or provider path retains the untrusted requested alias.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (manager as any).authorizeSafeWslLaunch = () => true;
+    (manager as any).runnerOwnerHash = ownerHash;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = manager as any;
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
     assert.deepEqual(isolationInput, {
       driver: "codex-app-server", dataDir: join(root, ".runner-data"), env: {},
-      sessionId: "s1", cwd: "/work/requested",
+      sessionId: "s1", cwd: scratch, orchestratorScratchOnly: true, ownerHash,
     });
-    assert.equal(captured?.cwd, "/work/canonical");
-    assert.equal(newSessionCwd, "/work/canonical");
-    assert.equal(internals.active.get("s1")?.cwd, "/work/canonical");
+    assert.equal(captured?.cwd, scratch);
+    assert.equal(newSessionCwd, scratch);
+    assert.equal(internals.active.get("s1")?.cwd, scratch);
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

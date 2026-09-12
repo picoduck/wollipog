@@ -2623,6 +2623,7 @@ test("runner-side capability gate rejects stale optional flags and image input",
   };
   assert.match(claudeCapabilityError({ effort: "max" }, [], capabilities)!, /effort/);
   assert.match(claudeCapabilityError({ permissionMode: "auto" }, [], capabilities)!, /permission mode/);
+  assert.equal(claudeCapabilityError({ permissionMode: "orchestrator" }, [], capabilities), null);
   assert.match(claudeCapabilityError({}, [{ mimeType: "image/png", data: "x" }], capabilities)!, /image input/);
   assert.equal(claudeCapabilityError({ effort: "low", permissionMode: "acceptEdits" }, [], capabilities), null);
 });

@@ -167,7 +167,7 @@ export class CodexDriver implements Driver {
       const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
 
       const cfg = this.config;
-      const sandbox = cfg.permissionMode === "orchestrator" ? "read-only"
+      const sandbox = cfg.permissionMode === "orchestrator" ? "workspace-write"
         : cfg.permissionMode && SANDBOX_MODES.has(cfg.permissionMode) ? cfg.permissionMode : "workspace-write";
 
       // model/effort apply to both first turn and resume.

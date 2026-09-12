@@ -571,6 +571,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         registerCredentialAndWait: registerAgentControlCredentialAndWait,
         orchestratorAgent: localAgent,
         executionIsolationMode: config.executionIsolation.mode,
+        orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
       },
       log,
       agentControlHost,
@@ -1969,11 +1970,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
         resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
+          prepareScratch: (prepared) => sessions.prepareOrchestratorScratch(prepared),
           provision: async (prepared) => {
             prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
             await provisionAgentControl(prepared, {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
+              orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
             }, log, agentControlHost);
             // Even the no-turn MCP configuration probe may initialize provider HOME.
             sessions.acquireAgentTuiProviderHome(prepared);

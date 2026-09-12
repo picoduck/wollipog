@@ -141,12 +141,17 @@ test("only the exact audited native Claude ACP adapter advertises orchestrator",
   }), false);
 });
 
-test("Claude ACP orchestrator metadata and live identity are exact and fail closed", () => {
-  const meta = orchestratorAcpSessionMeta() as {
+test("Claude ACP orchestrator metadata grants planning tools while preserving the implementation boundary", () => {
+  const meta = orchestratorAcpSessionMeta(["/repo"]) as {
     claudeCode: { options: Record<string, unknown> };
   };
-  assert.deepEqual(meta.claudeCode.options.tools, []);
-  assert.deepEqual(meta.claudeCode.options.allowedTools, ["mcp__wollipog__*"]);
+  assert.deepEqual(meta.claudeCode.options.tools, ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash"]);
+  const allowed = meta.claudeCode.options.allowedTools as string[];
+  for (const tool of ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "mcp__wollipog__*",
+    "Bash(git diff *)", "Bash(gh issue comment *)"]) assert.ok(allowed.includes(tool));
+  assert.equal(allowed.some((tool) => tool.includes("git push") || tool.includes("gh pr create")), false);
+  assert.equal(meta.claudeCode.options.permissionMode, "dontAsk");
+  assert.match(JSON.stringify(meta.claudeCode.options.systemPrompt), /Project locations are read-only.*\/repo/s);
   assert.deepEqual(meta.claudeCode.options.settingSources, []);
   assert.deepEqual(meta.claudeCode.options.settings, { disableAllHooks: true });
   assert.deepEqual(meta.claudeCode.options.mcpServers, {});
@@ -163,19 +168,28 @@ test("Claude ACP orchestrator metadata and live identity are exact and fail clos
   ]) assert.throws(() => assertClaudeAgentAcpOrchestratorIdentity(implementation), /launch refused/);
 });
 
-test("native orchestrator flags disable execution, hooks, and ambient tool sources", () => {
-  const claude = orchestratorLaunchArgs("claude-code", mcp);
-  assert.equal(claude[claude.indexOf("--tools") + 1], "");
+test("native orchestrator flags enable bounded planning while disabling implementation and ambient tool sources", () => {
+  const claude = orchestratorLaunchArgs("claude-code", mcp, ["/repo"]);
+  assert.match(claude[claude.indexOf("--tools") + 1] ?? "", /Read/);
+  assert.equal(claude[claude.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(claude[claude.indexOf("--add-dir") + 1], "/repo");
+  assert.match(claude[claude.indexOf("--allowedTools") + 1] ?? "", /Bash\(git log \*\)/);
+  assert.doesNotMatch(claude[claude.indexOf("--allowedTools") + 1] ?? "", /git push|gh pr create/);
   assert.ok(claude.includes("--strict-mcp-config"));
   assert.ok(claude.includes("--setting-sources"), "use the option recognized by the Claude CLI");
   assert.equal(claude[claude.indexOf("--setting-sources") + 1], "");
   assert.equal(claude.includes("--settings-sources"), false, "the historical spelling prevents launch");
   assert.ok(claude.includes('{"disableAllHooks":true}'));
-  const codex = orchestratorLaunchArgs("codex", mcp);
-  for (const setting of ['sandbox_mode="read-only"', 'approval_policy="never"', 'web_search="disabled"']) assert.ok(codex.includes(setting));
-  for (const feature of ["shell_tool", "unified_exec", "js_repl", "code_mode", "hooks", "multi_agent", "plugins", "apps"]) {
+  const codex = orchestratorLaunchArgs("codex", mcp, ["/repo"]);
+  for (const setting of ['sandbox_mode="workspace-write"', "sandbox_workspace_write.writable_roots=[]",
+    "sandbox_workspace_write.network_access=true", 'approval_policy="never"', 'web_search="live"']) assert.ok(codex.includes(setting));
+  for (const feature of ["hooks", "multi_agent", "plugins", "apps"]) {
     assert.equal(codex[codex.indexOf(feature) - 1], "--disable");
   }
+  for (const feature of ["shell_tool", "unified_exec", "js_repl", "code_mode"]) {
+    assert.equal(codex.includes(feature), false);
+  }
+  assert.match(codex.find((arg) => arg.startsWith("developer_instructions=")) ?? "", /Project locations are read-only/);
   assert.throws(() => orchestratorLaunchArgs("acp", mcp), /native harness/);
 });
 
@@ -184,6 +198,9 @@ test("resume replaces stale safety flags without stacking managed MCP configurat
     const flags = orchestratorLaunchArgs(driver, mcp);
     assert.deepEqual(stripOrchestratorLaunchArgs(["--model", "example", ...flags], driver), ["--model", "example"]);
   }
+  assert.deepEqual(stripOrchestratorLaunchArgs([
+    "--model", "example", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+  ], "claude-code"), ["--model", "example"]);
   assert.deepEqual(stripOrchestratorLaunchArgs(["--yolo", "--sandbox=workspace-write", "-a", "on-request", "-C", "/other", "--enable", "shell_tool"], "codex"), []);
 });
 

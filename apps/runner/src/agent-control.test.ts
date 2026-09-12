@@ -88,7 +88,7 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
     };
     provisionAgentControl(acp, { ...control, orchestratorAgent: acpAgent }, () => {}, host);
     assert.deepEqual(acp.args, acpAgent.args);
-    assert.equal(acp.acpSessionContext?.additionalDirectories, undefined);
+    assert.deepEqual(acp.acpSessionContext?.additionalDirectories, ["/repo"]);
     assert.deepEqual(acp.acpSessionContext?.mcpServers?.map((server) => server.name), ["wollipog"]);
     const acpMcp = acp.acpSessionContext?.mcpServers?.[0];
     assert.equal(acpMcp?.type, "stdio");

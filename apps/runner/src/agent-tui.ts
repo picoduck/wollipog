@@ -17,6 +17,7 @@ export async function prepareAgentTuiLaunch(
   dependencies: {
     controlPlaneProtocolVersion: number | null;
     provision(meta: SessionMeta): Promise<void> | void;
+    prepareScratch(meta: SessionMeta): Promise<string>;
     probe?: typeof codexOrchestratorMcpArgs;
   },
 ): Promise<ShellProcessLaunch | null> {
@@ -29,14 +30,16 @@ export async function prepareAgentTuiLaunch(
   if (!["idle", "starting", "running", "input_required"].includes(meta.status)) {
     throw new Error("Orchestrator Native TUI requires an active session; resume the session first.");
   }
+  const cwd = await dependencies.prepareScratch(meta);
   const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
   await dependencies.provision(prepared);
   if (prepared.driver !== "claude-code") {
     prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
-      prepared, prepared.worktreePath ?? prepared.repoPath,
+      prepared, cwd,
     ));
   }
-  return agentTuiLaunch(prepared);
+  const launch = agentTuiLaunch(prepared);
+  return launch ? { ...launch, cwd } : null;
 }
 
 function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
