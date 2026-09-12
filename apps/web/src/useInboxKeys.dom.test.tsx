@@ -72,6 +72,20 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "f", bubbles: true }));
   assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"]);
+  const callsBeforeModifiedGridKeys = [...calls];
+  for (const modifier of ["ctrlKey", "metaKey", "altKey", "shiftKey"] as const) {
+    for (const key of ["ArrowDown", "ArrowUp", "Home", "End"]) {
+      const modified = new domWindow.KeyboardEvent("keydown", {
+        key,
+        [modifier]: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      domWindow.dispatchEvent(modified);
+      assert.equal(modified.defaultPrevented, false, `${modifier}+${key} retains its native default`);
+    }
+  }
+  assert.deepEqual(calls, callsBeforeModifiedGridKeys, "modified grid keys do not select another session");
   // Threads (#896): t, Shift+T, p, and the arrow pair, plus F2 for the top request.
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "t", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "T", shiftKey: true, bubbles: true }));

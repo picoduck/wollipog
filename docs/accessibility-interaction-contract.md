@@ -36,6 +36,11 @@ equivalent is T on the grid (Shift+T for every thread, P to select a child's par
 and Right arrows as the conventional secondary path). Global palette, help, navigation, and
 focus-zone shortcuts remain available without invoking Inbox row actions.
 
+While the Inbox grid owns focus, bare Arrow Up/Down select adjacent sessions and bare Home/End
+select the first/last session. Modified variants remain available to the browser or another
+registered shortcut. In the preview focus zone, End instead jumps to the latest preview event and
+resumes following; the shortcut reference describes both contexts in one End entry.
+
 `SessionDetailLoaded` remains the coordinator for the single send/fork busy gate, composer-draft
 hydration and flush, view-generation fencing, fork leasing, timeline recovery, and the one shared
 git-status reader. Presentation leaves are split at stable boundaries:
