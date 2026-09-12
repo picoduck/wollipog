@@ -42,6 +42,29 @@ expect(resolvedGridRows).toBe(2);
 expect(badge.right - (card.right - padding)).toBeLessThanOrEqual(0.5);
 ```
 
+### Relative Is Necessary, Not Sufficient
+
+Comparing two measurements removes the machine-specific constant. It does not make the comparison
+machine-independent, because **the two sides can scale differently**.
+
+#947 asserted that an agent's first word is not clipped by its label's box — a `Range` over those
+characters against that box. Two measurements, no constant, exactly the rule above. It passed on a
+developer machine and failed on CI by 6.328125px, consistently across all three retries. The word's
+advance width comes from the text; the box it has to fit inside is whatever the pills beside it left
+over. Only one of those follows the font.
+
+The app asks for `"Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif`. A
+developer box here resolves that to Noto Sans and the CI runner to DejaVu Sans, about 8% wider —
+enough to move the outcome. `fc-match "Segoe UI"` tells you what a given machine will use.
+
+So when an assertion's **margin** depends on text advance width, measure it twice: once in the
+ambient face, once with a wide face pinned — having first proved that face actually resolved, because
+an absent family falls through to the ambient one and the second pass silently re-measures the first.
+`inbox-threads.spec.ts` has a working implementation. #984 tracks lifting it into a shared helper.
+
+An assertion that compares two text measurements which scale together, or that reads a structural
+fact such as a resolved track count, needs only the ambient pass.
+
 ### There is no automated check for this — yet
 
 A static scanner was built for it and then withdrawn. It is worth knowing why, because the reason is
