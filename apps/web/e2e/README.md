@@ -88,7 +88,7 @@ sub-pixel bounds). A narrow failure reports the reason, observed value, bound, a
 required margin. `expectGeometryPoll` applies the same check after a polled upper bound settles.
 
 Ten percent comes from the measured distribution, not a guessed renderer allowance. The #931
-regression observed 42 against a bound of 40: 5% headroom. The 51 margin-bearing assertion sites in
+regression observed 42 against a bound of 40: 5% headroom. The 53 margin-bearing assertion sites in
 `inbox-row-layout.spec.ts`, the suite's densest geometry spec, were run with
 `GEOMETRY_MARGIN_REPORT=1`; the smallest healthy size or spacing margin was 40%, and the smallest
 half-pixel agreement margin was 50%. Ten percent is therefore twice the known failure and one
@@ -109,10 +109,11 @@ Not every geometry assertion has a safety margin. Keep ordinary `expect` for the
   only to choose an interaction coordinate.
 
 The current suite audit found 34 specs that read a bounding rectangle. The margin-bearing assertions
-in the densest one use the runtime helper; its one equality-at-zero invariant is called out beside
-the bare assertion. The remaining readings fall into the classes above. This classification is a
-review record, not a source scanner: the withdrawn scanner produced both bypasses and false
-positives, while only the running browser can say how much margin a bound actually has. New numeric
+in the densest one use the runtime helper; its three equality-valid structural comparisons are
+called out beside their bare assertions. The remaining readings fall into the classes above. This
+classification is a review record, not a source scanner: the withdrawn scanner produced both
+bypasses and false positives, while only the running browser can say how much margin a bound
+actually has. New numeric
 bounds whose safety depends on room to spare must use the helper and state why the bound is safe.
 
 ## Other Conventions

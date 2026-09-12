@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { TABLET_BREAKPOINT_PX } from "../src/components/useIsMobile.js";
-import { expectGeometry, expectGeometryPoll } from "./geometry-margins";
+import { expectGeometry, expectGeometryPoll } from "./geometry-margins.js";
 
 /** At or below this width the card is #782's three-row stack; above it, #877's two-row card (#901). */
 const stacked = (width: number): boolean => width <= TABLET_BREAKPOINT_PX;
@@ -350,9 +350,9 @@ for (const width of [390, 770, 1000, 1400]) {
         badgeOverflowRight: badge.getBoundingClientRect().right - rightEdge,
         // Nothing on a shared line may be drawn over anything else.
         pillClearsBadge: badge.getBoundingClientRect().left - pill.getBoundingClientRect().right,
-        sameLineAsSender: Math.abs(
+        senderLineDelta: Math.abs(
           branch.getBoundingClientRect().top - sender.getBoundingClientRect().top,
-        ) <= 4,
+        ),
       };
     });
 
@@ -365,11 +365,13 @@ for (const width of [390, 770, 1000, 1400]) {
       .toBeLessThanOrEqual(0.5);
     if (!stacked(width)) {
       // The branch shares line one with the sender and starts clear of it, rather than under it.
-      expect(geometry.sameLineAsSender).toBe(true);
-      expectGeometry(geometry.branchLeft - geometry.senderRight, "the branch starts after the sender")
-        .toBeGreaterThanOrEqual(0);
+      expectGeometry(geometry.senderLineDelta, "the branch shares the sender's line")
+        .toBeLessThanOrEqual(4);
+      // Exact contact is valid; this is a structural ordering invariant, not a safety margin.
+      expect(geometry.branchLeft).toBeGreaterThanOrEqual(geometry.senderRight);
     } else {
-      expect(geometry.sameLineAsSender).toBe(false);
+      expectGeometry(geometry.senderLineDelta, "the stacked branch leaves the sender's line")
+        .toBeGreaterThan(4);
       expectGeometry(geometry.pillClearsBadge, "the pull-request pill clears the background-work badge")
         .toBeGreaterThanOrEqual(-0.5);
     }
@@ -492,8 +494,8 @@ for (const width of [901, 1400]) {
     expect(geometry.ellipsis).toBe("ellipsis");
     expectGeometry(geometry.branchWidth, "the branch stays readable after a long sender label")
       .toBeGreaterThan(40);
-    expectGeometry(geometry.branchLeft - geometry.senderRight, "the branch starts after the long sender")
-      .toBeGreaterThanOrEqual(0);
+    // Exact contact is valid; this is a structural ordering invariant, not a safety margin.
+    expect(geometry.branchLeft).toBeGreaterThanOrEqual(geometry.senderRight);
   });
 }
 
@@ -664,11 +666,17 @@ test("crossing the breakpoint keeps the reader's row and the list's geometry", a
     // Polled on the predicate itself: a width change opens a new measurement epoch, and the
     // re-seeded rows settle over the next frame or two. What must never settle is an overlap or a
     // hole between consecutive cards.
-    await expect.poll(async () => {
-      const { mounted, overlap, gap } = await worstNeighbours();
-      return { neighbours: mounted > 1, overlapping: overlap > 0.5, holed: gap >= 24 };
-    }, { message: `neighbouring cards across ${from} to ${to}` })
-      .toEqual({ neighbours: true, overlapping: false, holed: false });
+    await expect.poll(async () => (await worstNeighbours()).mounted, {
+      message: `neighbouring cards mount across ${from} to ${to}`,
+    }).toBeGreaterThan(1);
+    await expectGeometryPoll(
+      async () => (await worstNeighbours()).overlap,
+      `neighbouring cards do not overlap across ${from} to ${to}`,
+    ).toBeLessThanOrEqual(0.5);
+    await expectGeometryPoll(
+      async () => (await worstNeighbours()).gap,
+      `neighbouring cards do not leave a hole across ${from} to ${to}`,
+    ).toBeLessThan(24);
   }
   await expect(list).toBeVisible();
 });
