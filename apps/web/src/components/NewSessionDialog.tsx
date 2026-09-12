@@ -47,6 +47,7 @@ import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
 import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
+import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
 import { ChoiceCards, SegmentedControl } from "./ui/ChoiceControls.js";
 
 /**
@@ -255,9 +256,24 @@ export function NewSessionDialog({
   const nativeTuiHostTarget = hostExecutionTarget;
   const orchestratorTuiSupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorNativeTui");
   const orchestratorTuiHostContext = !orchestrator || (agent?.context?.kind ?? "native") === "native";
-  const nativeTuiSupported = nativeTuiLaunchSupported && (!orchestrator || orchestratorTuiSupported) &&
-    nativeTuiRunnerSupported && nativeTuiStartFenceSupported &&
-    nativeTuiHostTarget && orchestratorTuiHostContext && !selectedAgentOption?.disabled;
+  // Availability DERIVED from the sentence that explains it, so the control and its reason cannot
+  // disagree. The hand-assembled predicate this replaces enumerated the same conditions a second
+  // time, which is how `selectedAgentOption?.disabled` came to grey the option out with no message.
+  const nativeTuiUnavailable = nativeTuiUnavailableReason({
+    launchSupported: nativeTuiLaunchSupported,
+    agentReady: !selectedAgentOption?.disabled,
+    orchestrator,
+    orchestratorTuiSupported,
+    orchestratorTuiHostContext,
+    runnerSupported: nativeTuiRunnerSupported,
+    startFenceSupported: nativeTuiStartFenceSupported,
+    hostExecutionTarget: nativeTuiHostTarget,
+    orchestratorTuiRequirement: runnerCapabilityRequirement(
+      runner?.protocolVersion, "orchestratorNativeTui", "Orchestrator Native TUI",
+    ),
+    startFenceHint: nativeTuiStartFenceHint,
+  });
+  const nativeTuiSupported = nativeTuiUnavailable === undefined;
   const workspace = runner?.workspaces.find((item) => item.id === workspaceId);
   const directoryGrants = !browsedPath && (agent?.driver ?? "acp") === "acp"
     ? (workspace?.additionalDirectoryGrants ?? [])
@@ -849,51 +865,32 @@ export function NewSessionDialog({
 
           <div className="field">
             <span>Harness</span>
-            <div className="workflow-preset-grid" role="radiogroup" aria-label="Harness" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={launchSurface === "direct"}
-                tabIndex={launchSurface === "direct" ? 0 : -1}
-                className={`workflow-preset ${launchSurface === "direct" ? "on" : ""}`}
-                onClick={() => setLaunchSurface("direct")}
-              >
-                <strong>Direct</strong>
-                <span>Use structured chat, tool events, approval cards, and manager controls.</span>
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={launchSurface === "native_tui"}
-                tabIndex={launchSurface === "native_tui" ? 0 : -1}
-                disabled={!nativeTuiSupported}
-                className={`workflow-preset ${launchSurface === "native_tui" ? "on" : ""}`}
-                onClick={() => setLaunchSurface("native_tui")}
-              >
-                <strong>Native TUI</strong>
-                <span>Open a separate provider conversation in Terminal. Usage accounting is unavailable.</span>
-              </button>
-            </div>
-            {!nativeTuiLaunchSupported && (
-              <span className="muted">Native TUI launch requires a newer control plane.</span>
-            )}
-            {orchestrator && !orchestratorTuiSupported && (
-              <span className="muted">{runnerCapabilityRequirement(
-                runner?.protocolVersion, "orchestratorNativeTui", "Orchestrator Native TUI",
-              )}</span>
-            )}
-            {orchestrator && orchestratorTuiSupported && !orchestratorTuiHostContext && (
-              <span className="muted">Orchestrator Native TUI is unavailable for WSL agents. Use a native host.</span>
-            )}
-            {nativeTuiLaunchSupported && !nativeTuiRunnerSupported && (
-              <span className="muted">Native TUI requires a supported Claude Code or Codex agent on a Windows or Linux runner.</span>
-            )}
-            {nativeTuiLaunchSupported && nativeTuiRunnerSupported && !nativeTuiStartFenceSupported && (
-              <span className="muted">{nativeTuiStartFenceHint}</span>
-            )}
-            {nativeTuiLaunchSupported && nativeTuiRunnerSupported && nativeTuiStartFenceSupported && !nativeTuiHostTarget && (
-              <span className="muted">Native TUI currently runs only on the host execution target.</span>
-            )}
+            {/* Two fixed options that each need a sentence: the shape ChoiceCard exists for.
+                The six mutually exclusive muted spans that used to sit below this group are now the
+                unavailable option's own `disabledReason`, so the control and its explanation arrive
+                together instead of as siblings a screen reader meets separately. */}
+            <ChoiceCards<"direct" | "native_tui">
+              label="Harness"
+              value={launchSurface}
+              onChange={setLaunchSurface}
+              options={[
+                {
+                  value: "direct",
+                  title: "Direct",
+                  description: "Use structured chat, tool events, approval cards, and manager controls.",
+                },
+                {
+                  value: "native_tui",
+                  title: "Native TUI",
+                  description: "Open a separate provider conversation in Terminal. Usage accounting is unavailable.",
+                  // `aria-disabled` rather than the `disabled` attribute the bespoke button used:
+                  // that removed the option from the tab order entirely, so a keyboard user could
+                  // not reach the reason it is unavailable.
+                  disabled: !nativeTuiSupported,
+                  disabledReason: nativeTuiUnavailable,
+                },
+              ]}
+            />
             {launchSurface === "native_tui" && (
               <span className="muted">Usage Accounting: Unavailable. No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Sessions with cost budgets, cost checkpoints, or tool-call limits must use Direct. {nativeTuiAccountingExplanation && <>{nativeTuiAccountingExplanation} </>}Manager policy hook status appears after launch.</span>
             )}

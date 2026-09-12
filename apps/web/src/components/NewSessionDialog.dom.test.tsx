@@ -190,6 +190,19 @@ function selectProject(container: HTMLDivElement, value: string): void {
   select.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
 }
 
+/**
+ * Whether a ChoiceCard option is refused, by the attribute the primitive actually uses.
+ *
+ * `ChoiceCards` marks an unavailable option `aria-disabled` rather than setting the `disabled`
+ * property, deliberately: the DOM property removes the control from the tab order, so a keyboard
+ * user could not reach the option to hear why it is unavailable. The Harness group moved onto the
+ * primitive, so its assertions moved onto the same contract.
+ */
+function cardRefused(card: Element | undefined): boolean {
+  assert.ok(card, "the card is rendered even when it cannot be chosen");
+  return card.getAttribute("aria-disabled") === "true";
+}
+
 function createButton(container: HTMLDivElement): HTMLButtonElement {
   const button = [...container.querySelectorAll("button")].find((candidate) =>
     candidate.textContent?.trim() === "Create Session");
@@ -333,7 +346,7 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
       const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
         .find((button) => button.textContent?.includes("Native TUI"))!;
       assert.ok(tui);
-      assert.equal(tui.disabled, protocolVersion < 112);
+      assert.equal(cardRefused(tui), protocolVersion < 112);
       if (protocolVersion === 112) {
         await act(async () => { tui.click(); });
         await act(async () => { createButton(fixture.container).click(); });
@@ -367,7 +380,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     const tui = [...ordinary.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI"))!;
     assert.ok(tui);
-    assert.equal(tui.disabled, false, "ordinary WSL Native TUI remains available");
+    assert.equal(cardRefused(tui), false, "ordinary WSL Native TUI remains available");
     await act(async () => { tui.click(); });
     assert.equal(createButton(ordinary.container).disabled, false,
       "ordinary WSL Native TUI remains launchable rather than only selectable");
@@ -447,7 +460,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
     assert.equal(createButton(bridged.container).disabled, false, "verified bridge enables Direct creation");
     const tui = [...bridged.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI"))!;
-    assert.equal(tui.disabled, true, "WSL Orchestrator Native TUI stays fail-closed");
+    assert.equal(cardRefused(tui), true, "WSL Orchestrator Native TUI stays fail-closed");
     await choosePermissionPreset(bridged.container, "Orchestrator");
     await act(async () => { createButton(bridged.container).click(); });
     assert.equal(bridged.requests[0]?.launchSurface, undefined, "the omitted field is the Direct launch default");
@@ -475,7 +488,7 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
         "the saved default names itself on an always-visible card rather than inside a closed menu");
       const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
         .find((button) => button.textContent?.includes("Native TUI"))!;
-      assert.equal(tui.disabled, protocolVersion < 112);
+      assert.equal(cardRefused(tui), protocolVersion < 112);
       if (protocolVersion === 112) {
         await act(async () => { tui.click(); });
         assert.match(fixture.container.textContent!, /spending and tool calls are not included/);
@@ -694,7 +707,10 @@ test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal 
     const native = [...harness.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
-    assert.equal(native.disabled, false);
+    // `cardRefused`, not `.disabled`: ChoiceCards never sets the DOM property, so asserting it is
+    // `false` would pass even for a refused card. The click below only means something if the
+    // option is genuinely selectable.
+    assert.equal(cardRefused(native), false);
 
     await act(async () => { native.click(); });
     assert.match(
@@ -763,8 +779,11 @@ test("Native TUI is disabled when the control plane does not advertise atomic la
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
-    assert.equal(native.disabled, true);
-    assert.match(fixture.container.textContent ?? "", /requires a newer control plane/);
+    assert.equal(cardRefused(native), true);
+    // The reason now lives ON the refused card rather than in a sibling paragraph, so assert it
+    // there — a sentence elsewhere in the dialog would satisfy the old container-wide match while
+    // the control itself explained nothing.
+    assert.match(native.textContent ?? "", /requires a newer control plane/);
   } finally {
     await unmountFixture(fixture);
   }
@@ -786,8 +805,9 @@ test("Native TUI initial launch fails closed against a v66 runner", async () => 
     const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
       .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
     assert.ok(native);
-    assert.equal(native.disabled, true);
-    assert.match(fixture.container.textContent ?? "", /Initial Native TUI launch requires protocol v67/);
+    assert.equal(cardRefused(native), true);
+    // The start-fence hint is the refused card's own reason now, not a sibling paragraph.
+    assert.match(native.textContent ?? "", /Initial Native TUI launch requires protocol v67/);
   } finally {
     await unmountFixture(fixture);
   }
