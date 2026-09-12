@@ -15,17 +15,23 @@ import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
+  validatePromptImageInputs,
   isPolicyApproval,
+  pendingRequests,
+  isWorkspaceReference,
   isTerminal,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   providerSupportsConversationFork,
   type PromptImageInput,
-  type QueuedPromptDraft,
+  type CreateWorkspaceReferenceRequest,
   type QueuedPromptView,
   type SessionConfig,
+  type SessionReminderView,
   type SessionView,
   type SourceLocation,
+  type WorkspaceReference,
+  type WorkspaceReferenceCandidate,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -46,6 +52,7 @@ import {
   SessionStatusIndicators,
 } from "./common.js";
 import { EventTimeline, type TimelineRevealRequest } from "./EventTimeline.js";
+import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
@@ -58,7 +65,7 @@ import {
   queuedPromptsWithControls,
   shouldShowOptimisticPrompt,
 } from "./PendingPromptBubbles.js";
-import { ApprovalsControl, ModelEffortControl } from "./ComposerControls.js";
+import { ApprovalsControl, ModelEffortControl, ServiceTierControl } from "./ComposerControls.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
 import { deriveGitPresentation } from "../pinned-summary.js";
@@ -105,13 +112,16 @@ import {
   type ConversationForkAvailability,
 } from "../session-actions.js";
 import { SessionApprovalRegion } from "./SessionApproval.js";
-import { GovernanceAuditTrail } from "./GovernanceAuditTrail.js";
+import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
+import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
-import { sessionPreviewUsage } from "../session-preview.js";
+import { resolveContextWindowCapacity } from "../context-window-capacity.js";
+import { SessionUsageControl } from "./SessionUsageControl.js";
+import { useAnchoredPopover } from "./anchored-popover.js";
 import {
   followTailControlLabel,
   followTailControlTooltip,
@@ -123,7 +133,7 @@ import {
   useFollowTail,
 } from "../useFollowTail.js";
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
-import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
+import { VIRTUAL_VIEWPORT_INTENT_EVENT, virtualViewportIntentDirection } from "../viewport-intent.js";
 import { inTypingContext, matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
 import { useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
 import {
@@ -139,7 +149,7 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreVerticalIcon, PlusIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, InfoIcon, MicIcon, MoreVerticalIcon, PlusIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -154,6 +164,7 @@ import {
   type ProviderComposerCommand,
 } from "../composer-commands.js";
 import { SlashCommandMenu, slashCommandOptionId } from "./SlashCommandMenu.js";
+import { WorkspaceReferencePicker } from "./WorkspaceReferencePicker.js";
 import {
   captureComposerFocus,
   focusComposerAtEnd,
@@ -164,10 +175,12 @@ import {
   restoreRememberedComposerFocus,
 } from "../composer-focus.js";
 import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
+import { useQuestionResponseStyle } from "../question-response-style.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
-import { IncrementalSubagentProjector, selectedSubagentId } from "../subagents.js";
+import { IncrementalSubagentProjector } from "../subagents.js";
+import { workerRoster, isCurrentWorker } from "../worker-roster.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
 import {
   projectAssignmentAudienceConfirmation,
@@ -178,13 +191,36 @@ import {
 } from "../session-project-assignment.js";
 import { durableInboxProjectKey, INBOX_NO_PROJECT_SPLIT_KEY } from "../inbox.js";
 import { ChoiceCards, type ChoiceCardOption } from "./ui/ChoiceControls.js";
+import {
+  clearDurableQueuedEditRecoveriesForAccount,
+  clearDurableQueuedEditRecovery,
+  clearRuntimeQueuedEditRecoveriesForInstance,
+  clearRuntimeQueuedEditRecovery,
+  cloneQueuedPromptEditRecovery,
+  loadDurableQueuedEditRecovery,
+  loadRuntimeQueuedEditRecovery,
+  queuedEditRecoveryAccountKey,
+  reconcileQueuedEditRecovery,
+  refreshDurableQueuedEditRecovery,
+  saveDurableQueuedEditRecovery,
+  storeRuntimeQueuedEditRecovery,
+  type QueuedEditRecoveryScope,
+  type QueuedPromptEditRecovery,
+  type QueuedPromptEditState,
+} from "../queued-edit-recovery.js";
+import { materializePromptImages } from "../prompt-image-materialization.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
 const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 const EARLIER_ACTIVITY_REARM_FRAMES = 8;
-const EARLIER_ACTIVITY_TOUCH_IDLE_MS = 180;
+/** One reader gesture rarely maps to one scroll event: a wheel tick or reading key under smooth
+ * scrolling, and a touch drag with its momentum, each emit a stream of scroll events. An armed
+ * traversal survives that stream while it keeps moving upward and expires after this idle gap. */
+const EARLIER_ACTIVITY_INTENT_IDLE_MS = 180;
+/** A finger must travel this far downward at the head before it counts as asking for history. */
+const EARLIER_ACTIVITY_HEAD_DRAG_PX = 24;
 /** Opening recovery may add at most the same 2,000 raw events that server-side turn alignment
  * searches. This keeps a pathological single turn bounded while normal underfilled readers need
  * only one or two pages. */
@@ -195,11 +231,27 @@ const OPENING_HISTORY_HEADROOM_PX = EARLIER_ACTIVITY_TRIGGER_PX;
 
 type EarlierActivityIntent = "single-scroll" | "touch-traversal";
 
+/** A scrollable descendant (a tool output, a diff, a code block) that can still move upward
+ * consumes the gesture itself; the reader region only sees the event because it bubbles, so the
+ * direct head evaluation must not treat it as a request for earlier activity. */
+function nestedScrollerConsumesUpwardInput(target: EventTarget | null, reader: HTMLElement): boolean {
+  let node = target as Partial<HTMLElement> | null;
+  while (node && node !== reader) {
+    if (typeof node.scrollTop === "number" && node.scrollTop > 0.5 &&
+        (node.scrollHeight ?? 0) > (node.clientHeight ?? 0) + 1) {
+      return true;
+    }
+    node = node.parentElement ?? null;
+  }
+  return false;
+}
+
 type ComposerMutationKind = "send" | "steer" | "promote" | "edit" | "stop";
 type ComposerMutationEntry = {
   token: symbol;
   kind: ComposerMutationKind;
   draft?: { text: string; images: PromptImageInput[]; revision?: string };
+  queuedEdit?: QueuedPromptEditRecovery;
   displaced?: ComposerMutationEntry;
 };
 const composerMutationRegistry = new Map<string, ComposerMutationEntry>();
@@ -207,24 +259,79 @@ const composerMutationRecoveries = new Map<string, { text: string; images: Promp
 const MAX_COMPOSER_MUTATION_RECOVERIES = 20;
 const composerMutationListeners = new Map<string, Set<() => void>>();
 
-interface QueuedPromptEditState extends QueuedPromptDraft {
-  submissionId?: string;
-  submissionFingerprint?: string;
-  displacedDraft: { text: string; images: PromptImageInput[] };
-}
-
 function composerMutationKey(instanceScope: string, sessionId: string): string {
   return `${instanceScope}\u0000${sessionId}`;
+}
+
+/** Forget page-lifetime composer state when an authenticated instance is retired or replaced. */
+export function clearSessionDetailComposerRuntimeForInstance(instanceScope: string): void {
+  const prefix = `${instanceScope}\u0000`;
+  const affected = new Set<string>();
+  for (const registry of [composerMutationRegistry, composerMutationRecoveries]) {
+    for (const key of registry.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      registry.delete(key);
+      affected.add(key);
+    }
+  }
+  clearRuntimeQueuedEditRecoveriesForInstance(instanceScope);
+  for (const key of affected) notifyComposerMutation(key);
 }
 
 function notifyComposerMutation(key: string): void {
   for (const listener of composerMutationListeners.get(key) ?? []) listener();
 }
 
+function queuedPromptEditMutationRecovery(
+  mutation: ComposerMutationEntry | undefined,
+): QueuedPromptEditRecovery | undefined {
+  if (!mutation) return undefined;
+  if (mutation.kind === "edit" && mutation.queuedEdit) return mutation.queuedEdit;
+  return queuedPromptEditMutationRecovery(mutation.displaced);
+}
+
+function recoveryWithDisplacedDraft(
+  recovery: QueuedPromptEditRecovery,
+  draft: Pick<ComposerDraft, "text" | "images"> | null | undefined,
+): QueuedPromptEditRecovery {
+  if (draft === undefined) return recovery;
+  const { displacedDraftStoredSeparately: _storedSeparately, ...edit } = recovery.edit;
+  return {
+    ...recovery,
+    edit: {
+      ...edit,
+      displacedDraft: draft !== null
+        ? { text: draft.text, images: draft.images.map((image) => ({ ...image })) }
+        : recovery.edit.displacedDraft,
+    },
+  };
+}
+
+function updateQueuedPromptEditMutationRecovery(
+  key: string,
+  recovery: QueuedPromptEditRecovery,
+): void {
+  const current = composerMutationRegistry.get(key);
+  if (!current) return;
+  const update = (entry: ComposerMutationEntry): ComposerMutationEntry => {
+    if (entry.kind === "edit" && entry.queuedEdit) {
+      return { ...entry, queuedEdit: cloneQueuedPromptEditRecovery(recovery) };
+    }
+    if (!entry.displaced) return entry;
+    const displaced = update(entry.displaced);
+    return displaced === entry.displaced ? entry : { ...entry, displaced };
+  };
+  const next = update(current);
+  if (next === current) return;
+  composerMutationRegistry.set(key, next);
+  notifyComposerMutation(key);
+}
+
 function reserveComposerMutation(
   key: string,
   kind: ComposerMutationKind,
   draft?: ComposerMutationEntry["draft"],
+  queuedEdit?: QueuedPromptEditRecovery,
 ): ComposerMutationEntry | null {
   const current = composerMutationRegistry.get(key);
   if (current && (kind !== "stop" || current.kind === "stop")) return null;
@@ -233,6 +340,7 @@ function reserveComposerMutation(
     token: Symbol(kind),
     kind,
     ...(draft ? { draft } : {}),
+    ...(queuedEdit ? { queuedEdit: cloneQueuedPromptEditRecovery(queuedEdit) } : {}),
     ...(current ? { displaced: current } : {}),
   };
   composerMutationRegistry.set(key, entry);
@@ -316,10 +424,11 @@ export type SessionDetailProps = {
   sessionId: string;
   mode?: SessionDetailMode;
   sourceLocation?: SourceLocation;
+  attentionTarget?: import("../navigation.js").AttentionTarget;
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
   pinnedOpen: boolean;
-  focusComposer?: boolean;
+  composerFocusIntent?: "message" | "reply";
   onComposerFocusConsumed?: () => void;
   onBack?: () => void;
   onExpand?: () => void;
@@ -329,6 +438,8 @@ export type SessionDetailProps = {
   onDeny?: () => void;
   onArchive?: () => void;
   onSnooze?: () => void;
+  reminder?: SessionReminderView;
+  onDismissReminder?: () => void;
   /** App-shell control cluster (editor, pinned/terminal/panel toggles) rendered in the unified
    * session bar when it replaces the app-level top bar on desktop. */
   topbarControls?: ReactNode;
@@ -351,6 +462,14 @@ type MessageActionState = {
 };
 
 class AmbiguousForkError extends Error {}
+
+function findWorkspaceReferenceTrigger(text: string, caret: number): { start: number; query: string } | null {
+  const before = text.slice(0, caret);
+  const match = /(^|\s)@([^\s@]*)$/u.exec(before);
+  if (!match) return null;
+  const query = match[2] ?? "";
+  return { start: caret - query.length - 1, query };
+}
 
 function ambiguousForkError(cause: unknown): AmbiguousForkError | null {
   if (!forkFailureIsAmbiguous(cause instanceof ApiError ? cause.status : undefined)) return null;
@@ -443,10 +562,11 @@ export function SessionDetail(props: SessionDetailProps) {
 function SessionDetailLoaded({
   sessionId,
   sourceLocation,
+  attentionTarget,
   rightPanel,
   onOpenTerminal,
   pinnedOpen,
-  focusComposer,
+  composerFocusIntent,
   onComposerFocusConsumed,
   mode = "expanded",
   onBack,
@@ -457,6 +577,8 @@ function SessionDetailLoaded({
   onDeny,
   onArchive,
   onSnooze,
+  reminder,
+  onDismissReminder,
   topbarControls,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
@@ -523,6 +645,7 @@ function SessionDetailLoaded({
   });
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const runnerOnline = runner?.status === "online";
+  const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const stopBeforeArchiveSupported = useStoreSelector((s) => s.stopBeforeArchiveSupported);
   const richGitSupported = runnerSupportsProtocol(runner?.protocolVersion, "gitVisibility");
   const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
@@ -538,15 +661,61 @@ function SessionDetailLoaded({
   const [text, setText] = useState("");
   const draftDirty = useRef(false);
   const [busy, setBusy] = useState(false);
+  const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
+  const [restartPending, setRestartPending] = useState(false);
   const [steeringBusy, setSteeringBusy] = useState(false);
   const [queuedEditBusy, setQueuedEditBusy] = useState(false);
   const [queuedEdit, setQueuedEdit] = useState<QueuedPromptEditState | null>(null);
+  const [queuedEditRecovered, setQueuedEditRecovered] = useState(false);
+  const [queuedEditAccountKey, setQueuedEditAccountKey] = useState<string | null>(null);
+  const queuedEditAccountKeyRef = useRef<string | null>(null);
   const queuedEditRef = useRef<QueuedPromptEditState | null>(null);
   queuedEditRef.current = queuedEdit;
   useEffect(() => {
     setQueuedEdit(null);
     setQueuedEditBusy(false);
+    setQueuedEditRecovered(false);
   }, [sessionId]);
+  useEffect(() => {
+    if (mode !== "expanded" || conn !== "online") return;
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    let retryDelayMs = 1_000;
+    const loadIdentity = () => {
+      void api.getIdentity().then(({ context }) => {
+        if (cancelled) return;
+        const nextAccountKey = queuedEditRecoveryAccountKey(context.organizationId, context.userId);
+        const priorAccountKey = queuedEditAccountKeyRef.current;
+        if (priorAccountKey && priorAccountKey !== nextAccountKey) {
+          clearDurableQueuedEditRecoveriesForAccount(instanceScope, priorAccountKey);
+          clearSessionDetailComposerRuntimeForInstance(instanceScope);
+          queuedEditRef.current = null;
+          setQueuedEdit(null);
+          setQueuedEditBusy(false);
+          setQueuedEditRecovered(false);
+          setError(null);
+        }
+        queuedEditAccountKeyRef.current = nextAccountKey;
+        setQueuedEditAccountKey(nextAccountKey);
+      }).catch(() => {
+        if (cancelled) return;
+        // Do not guess an account scope. Retry with bounded backoff so a transient identity error
+        // cannot disable queued editing for the lifetime of an otherwise-online view.
+        retryTimer = window.setTimeout(loadIdentity, retryDelayMs);
+        retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
+      });
+    };
+    loadIdentity();
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [api, conn, instanceScope, mode]);
+  const queuedEditRecoveryScope = useMemo<QueuedEditRecoveryScope | null>(() =>
+    queuedEditAccountKey
+      ? { instanceScope, accountKey: queuedEditAccountKey, sessionId }
+      : null,
+  [instanceScope, queuedEditAccountKey, sessionId]);
   const queueSteeringInFlightRef = useRef(new Set<string>());
   const steeringResolutionInFlightRef = useRef(new Set<string>());
   const [queueSteeringPending, setQueueSteeringPending] = useState<ReadonlySet<string>>(() => new Set());
@@ -560,6 +729,12 @@ function SessionDetailLoaded({
   >(null);
   const retitlePending = retitleFeedback?.state === "running";
   const retitleInFlightRef = useRef(false);
+  const retitleFocusRestoreRef = useRef<{
+    generation: number;
+    sessionId: string;
+    composer: ReturnType<typeof captureComposerFocus>;
+  } | null>(null);
+  const retitleRetryPointerActivationRef = useRef(false);
   const [pendingPromptAction, setPendingPromptAction] = useState<string>();
   const sendRequestBusy = busy || activeComposerMutation?.kind === "send";
   const steeringRequestBusy = steeringBusy || activeComposerMutation?.kind === "steer" ||
@@ -574,6 +749,7 @@ function SessionDetailLoaded({
   const [error, setError] = useState<string | null>(null);
   const [messageAction, setMessageAction] = useState<MessageActionState | null>(null);
   const messageActionReturnFocusRef = useRef<HTMLElement | null>(null);
+  const revealOrdinaryComposerRef = useRef<(focus: "always" | "answer-owned") => void>(() => {});
   const forkInFlightRef = useRef(false);
   const readForkInProgress = useCallback(() => sessionForkInProgress(sessionId), [sessionId]);
   const forkInProgress = useSyncExternalStore(
@@ -604,11 +780,12 @@ function SessionDetailLoaded({
     settleFrame: null as number | null,
     readerIntent: null as EarlierActivityIntent | null,
     readerIntentTop: null as number | null,
-    touchActive: false,
+    inputHeld: false,
     nativeTouchActive: false,
     touchInputY: null as number | null,
+    touchStartY: null as number | null,
     touchTraversalStarted: false,
-    touchEndTimer: null as number | null,
+    intentIdleTimer: null as number | null,
     readerIntentMovedUp: false,
   });
   const openingHistoryFillRef = useRef({
@@ -623,6 +800,14 @@ function SessionDetailLoaded({
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
   const slashListboxId = `session-slash-${useId().replace(/:/g, "")}`;
+  const workspaceListboxId = `session-workspace-${useId().replace(/:/g, "")}`;
+  const [workspaceResults, setWorkspaceResults] = useState<WorkspaceReferenceCandidate[]>([]);
+  const [workspaceSearchBusy, setWorkspaceSearchBusy] = useState(false);
+  const [workspaceSearchError, setWorkspaceSearchError] = useState<string | null>(null);
+  const [workspaceSearchTruncated, setWorkspaceSearchTruncated] = useState(false);
+  const [activeWorkspaceResult, setActiveWorkspaceResult] = useState(0);
+  const [workspaceDismissedFor, setWorkspaceDismissedFor] = useState<string | null>(null);
+  const [inspectedWorkspaceReference, setInspectedWorkspaceReference] = useState<WorkspaceReference | null>(null);
   const [dragActive, setDragActive] = useState(false);
   // Up-arrow history recall (-1 = editing/not browsing). Prior prompts come from the timeline.
   const [histIdx, setHistIdx] = useState(-1);
@@ -633,8 +818,53 @@ function SessionDetailLoaded({
   const dragDepth = useRef(0); // enter/leave bubble from children — count depth so the overlay doesn't stick
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const answerInputRef = useRef<HTMLInputElement>(null);
+  const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
+  const attentionEntryScope = useRef<string | null>(null);
+  useEffect(() => {
+    if (mode !== "expanded") return;
+    const scope = `${session.id}:${session.eventEpoch ?? 0}`;
+    if (attentionEntryScope.current === scope) return;
+    attentionEntryScope.current = scope;
+    if (session.pendingApproval?.ownerToolUseId || session.pendingApproval?.additionalRequests?.length) {
+      rightPanelRef.current.show("subagents");
+    }
+  }, [mode, session.id, session.eventEpoch, session.pendingApproval]);
+  const backgroundInventoryRequestRef = useRef<string | null>(null);
+  const [backgroundInventoryError, setBackgroundInventoryError] = useState<string | null>(null);
+  const [backgroundInventoryAttempt, setBackgroundInventoryAttempt] = useState(0);
+  const retryBackgroundInventory = useCallback(() => {
+    backgroundInventoryRequestRef.current = null;
+    setBackgroundInventoryError(null);
+    setBackgroundInventoryAttempt((attempt) => attempt + 1);
+  }, []);
+  useEffect(() => {
+    if (mode !== "expanded" || !rightPanel.open || !["background", "subagents"].includes(rightPanel.mode) ||
+        session.backgroundJobsAvailable !== true || session.backgroundJobs !== undefined) {
+      if (session.backgroundJobs !== undefined || mode !== "expanded" ||
+          !rightPanel.open || !["background", "subagents"].includes(rightPanel.mode)) {
+        backgroundInventoryRequestRef.current = null;
+        setBackgroundInventoryError(null);
+      }
+      return;
+    }
+    const requestKey = `${session.id}:${recoveryGeneration}`;
+    if (backgroundInventoryRequestRef.current === requestKey) return;
+    backgroundInventoryRequestRef.current = requestKey;
+    setBackgroundInventoryError(null);
+    let current = true;
+    void api.session(session.id)
+      .then(({ session: loaded }) => {
+        if (current) loadSession(loaded);
+      })
+      .catch((cause: unknown) => {
+        if (current) setBackgroundInventoryError((cause as Error).message);
+      });
+    return () => { current = false; };
+  }, [api, backgroundInventoryAttempt, loadSession, mode, recoveryGeneration,
+    rightPanel.mode, rightPanel.open, session.backgroundJobs, session.backgroundJobsAvailable, session.id]);
   const composerComposingRef = useRef(false);
   const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
   const composerExplicitFocusTransferRef = useRef(false);
@@ -650,6 +880,7 @@ function SessionDetailLoaded({
   }>());
   const composerDraftLoaderRef = useRef(composerDraftLoader);
   composerDraftLoaderRef.current = composerDraftLoader;
+  const draftHydrationKeyRef = useRef<string | null>(null);
   const draftHydratedSessionRef = useRef<string | null>(null);
   const suppressedDraftRef = useRef<{ sessionId: string; revision?: string } | null>(null);
   const pendingHydrationCaretRef = useRef<{
@@ -661,8 +892,8 @@ function SessionDetailLoaded({
     expectedText: string;
   } | null>(null);
   const [hydrationCommitRevision, setHydrationCommitRevision] = useState(0);
-  const focusComposerRequestedRef = useRef(focusComposer);
-  focusComposerRequestedRef.current = focusComposer;
+  const focusComposerRequestedRef = useRef(composerFocusIntent !== undefined);
+  focusComposerRequestedRef.current = composerFocusIntent !== undefined;
 
   const composerFocusKey = `${instanceScope}\u0000${sessionId}`;
 
@@ -801,6 +1032,7 @@ function SessionDetailLoaded({
     composerDraftVersionRef.current += 1;
     commandSubmissionRetryRef.current = null;
     setBusy(false);
+    setRestartPending(false);
     setSteeringBusy(false);
     setQueueSteeringPending(new Set());
     setSteeringResolutionPending(new Map());
@@ -819,19 +1051,32 @@ function SessionDetailLoaded({
   }, [sessionId]);
 
   useLayoutEffect(() => {
-    if (mode !== "expanded" || focusComposerRequestedRef.current) return;
+    const pending = retitleFocusRestoreRef.current;
+    retitleFocusRestoreRef.current = null;
+    if (retitleFeedback !== null || pending === null) return;
+    if (pending.sessionId !== sessionId || viewGenerationRef.current !== pending.generation) return;
+    const input = inputRef.current;
+    if (!input || input.ownerDocument.activeElement !== input.ownerDocument.body) return;
+    if (restoreComposerFocus(input, pending.composer)) {
+      reportComposerFocus(sessionId, "restore", input, false);
+    }
+  }, [retitleFeedback, sessionId]);
+
+  useLayoutEffect(() => {
+    if (mode !== "expanded" || focusComposerRequestedRef.current || attentionTarget) return;
     const frame = window.requestAnimationFrame(() => scrollRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
-  }, [mode, sessionId]);
+  }, [mode, sessionId, attentionTarget]);
 
   useEffect(() => {
-    if (!focusComposer) return;
+    if (composerFocusIntent !== "message") return;
     const frame = window.requestAnimationFrame(() => {
       focusComposerAtDraftEnd();
       onComposerFocusConsumed?.();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [focusComposer, focusComposerAtDraftEnd, onComposerFocusConsumed, sessionId]);
+  }, [composerFocusIntent, focusComposerAtDraftEnd, onComposerFocusConsumed, sessionId]);
+
   const sessionCaps = resolveCaps(runner, session);
   const effectiveModel = optimisticModel ?? session?.model;
   const selectedModelSupportsImages = modelSupportsImages(sessionCaps, effectiveModel);
@@ -852,11 +1097,12 @@ function SessionDetailLoaded({
     composerDraftVersionRef.current += 1;
     invalidateComposerMutationRecovery(mutationKey);
   }, [mutationKey]);
-  const { images, onPaste, addFiles, remove, clear, replace } = usePastedImages(
+  const { images, onPaste, addFiles, addWorkspaceReference, remove, clear, replace } = usePastedImages(
     markDraftDirty,
     setError,
     allowedImageMimeTypes,
   );
+  const actualImages = images.filter((attachment) => !isWorkspaceReference(attachment));
   const draftState = useRef<{ text: string; images: PromptImageInput[] }>({ text: "", images: [] });
   draftState.current = { text, images };
   const updateComposerSelection = useCallback((start: number, end = start) => {
@@ -875,18 +1121,59 @@ function SessionDetailLoaded({
     updateComposerSelection(caret);
     setSlashDismissedFor(`${next}\u0000${caret}`);
   }, [updateComposerSelection]);
+  const persistQueuedPromptEditRecovery = useCallback((recovery: QueuedPromptEditRecovery): boolean =>
+    queuedEditRecoveryScope !== null &&
+      saveDurableQueuedEditRecovery(queuedEditRecoveryScope, recovery),
+  [queuedEditRecoveryScope]);
+  const storeQueuedPromptEditRecovery = useCallback((
+    key: string,
+    recovery: QueuedPromptEditRecovery,
+  ): boolean => {
+    if (!queuedEditRecoveryScope) return false;
+    storeRuntimeQueuedEditRecovery(key, queuedEditRecoveryScope.accountKey, recovery);
+    return persistQueuedPromptEditRecovery(recovery);
+  }, [persistQueuedPromptEditRecovery, queuedEditRecoveryScope]);
+  const clearQueuedPromptEditRecovery = useCallback((key: string): void => {
+    clearRuntimeQueuedEditRecovery(key);
+    if (queuedEditRecoveryScope) clearDurableQueuedEditRecovery(queuedEditRecoveryScope);
+  }, [queuedEditRecoveryScope]);
+  const restoreQueuedPromptEditRecovery = useCallback((
+    recovery: QueuedPromptEditRecovery,
+    pending: boolean,
+    preserveDraft = false,
+  ) => {
+    revealOrdinaryComposerRef.current("answer-owned");
+    const restored = cloneQueuedPromptEditRecovery(recovery);
+    queuedEditRef.current = restored.edit;
+    setQueuedEdit(restored.edit);
+    setQueuedEditRecovered(true);
+    setQueuedEditBusy(pending);
+    if (!preserveDraft) {
+      draftState.current = restored.draft;
+      setProgrammaticComposerText(restored.draft.text);
+      replace(restored.draft.images);
+      setHistIdx(-1);
+    }
+    setError(restored.error ?? null);
+    commandSubmissionRetryRef.current = null;
+    suppressedDraftRef.current = pending ? { sessionId } : null;
+    draftHydratedSessionRef.current = sessionId;
+    pendingHydrationCaretRef.current = null;
+    pendingComposerFocusRestoreRef.current = null;
+  }, [replace, sessionId, setProgrammaticComposerText]);
   // Hold-to-talk dictation (browser SpeechRecognition; hidden when unsupported).
   const dictation = useVoiceDictation((phrase) => {
+    revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     const next = appendTranscript(draftState.current.text, phrase);
     setProgrammaticComposerText(next);
   });
   const insertSideChatDraft = useCallback((response: string) => {
+    revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     const next = appendTranscript(draftState.current.text, response);
     setProgrammaticComposerText(next);
-    window.requestAnimationFrame(focusComposerAtDraftEnd);
-  }, [focusComposerAtDraftEnd, markDraftDirty, setProgrammaticComposerText]);
+  }, [markDraftDirty, setProgrammaticComposerText]);
   // Shared git status: the composer branch chip + the right panel's Review mode read one
   // fetch. Called before the !session guard — hooks must run unconditionally.
   // Inbox previews render neither the composer Git chip, pinned summary, nor Review panel. Do not
@@ -939,6 +1226,8 @@ function SessionDetailLoaded({
   useEffect(() => {
     const generation = ++viewGenerationRef.current;
     retitleInFlightRef.current = false;
+    retitleFocusRestoreRef.current = null;
+    retitleRetryPointerActivationRef.current = false;
     setRetitleFeedback(null);
     return () => {
       if (viewGenerationRef.current === generation) viewGenerationRef.current += 1;
@@ -957,15 +1246,55 @@ function SessionDetailLoaded({
     // for this session transition so inline test/app wrappers cannot restart hydration on every
     // render, while a deliberate loader replacement made with the next session is still observed.
     const loadDraftForSession = composerDraftLoaderRef.current;
-    draftDirty.current = false;
-    composerComposingRef.current = false;
-    draftHydratedSessionRef.current = null;
-    suppressedDraftRef.current = null;
-    pendingHydrationCaretRef.current = null;
-    pendingHydrationCommitRef.current = null;
-    void (async () => {
-      let draft = await loadDraftForSession(sessionId, instanceScope);
+    const hydrationKeyChanged = draftHydrationKeyRef.current !== mutationKey;
+    if (hydrationKeyChanged) {
+      draftHydrationKeyRef.current = mutationKey;
+      draftDirty.current = false;
+      composerComposingRef.current = false;
+      draftHydratedSessionRef.current = null;
+      suppressedDraftRef.current = null;
+      pendingHydrationCaretRef.current = null;
+      pendingHydrationCommitRef.current = null;
+    }
+    const pendingQueuedEdit = queuedPromptEditMutationRecovery(activeComposerMutation);
+    const queuedEditAtHydrationStart = queuedEditRef.current;
+    // A locally opened edit owns the composer. Identity can settle later and reveal a runtime or
+    // durable recovery, but only the in-process mutation recovery is allowed to supersede it.
+    if (!hydrationKeyChanged && queuedEditRef.current && !pendingQueuedEdit) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const runtimeQueuedEdit = queuedEditRecoveryScope
+      ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+      : undefined;
+    const storedQueuedEdit = queuedEditRecoveryScope
+      ? loadDurableQueuedEditRecovery(queuedEditRecoveryScope)
+      : undefined;
+    const durableQueuedEdit = storedQueuedEdit && !storedQueuedEdit.error
+      ? { ...storedQueuedEdit, error: "The prior queued message edit outcome was not recorded. Check the current queue before retrying." }
+      : storedQueuedEdit;
+    let queuedEditRecovery = pendingQueuedEdit ?? runtimeQueuedEdit ?? durableQueuedEdit;
+    const commitOrdinaryDraftHydration = (draft: ComposerDraft | null) => {
       if (cancelled) return;
+      if (draft && !draftDirty.current) {
+        // Defer completion until a layout effect observes the controlled textarea's committed
+        // value. Promise settlement and animation-frame ordering cannot prove that React has
+        // written the hydrated text to the DOM yet.
+        pendingHydrationCommitRef.current = { sessionId, expectedText: draft.text };
+        setProgrammaticComposerText(draft.text, draft.text.length, true);
+        replace(draft.images);
+        commandSubmissionRetryRef.current = draft.commandSubmission ?? null;
+        consumeComposerDraftHandoff(sessionId, draft, instanceScope);
+        setHydrationCommitRevision((revision) => revision + 1);
+      } else {
+        draftHydratedSessionRef.current = sessionId;
+        pendingHydrationCaretRef.current = null;
+        pendingComposerFocusRestoreRef.current = null;
+      }
+    };
+    const reconcileOrdinaryDraftHydration = async (initialDraft: ComposerDraft | null) => {
+      let draft = initialDraft;
       const currentMutation = composerMutationRegistry.get(mutationKey);
       // The request can settle while IndexedDB hydration is in flight. Re-read after release so a
       // stale pre-delete result cannot resurrect a successfully submitted reservation.
@@ -996,26 +1325,116 @@ function SessionDetailLoaded({
         draftHydratedSessionRef.current = sessionId;
         pendingHydrationCaretRef.current = null;
         pendingComposerFocusRestoreRef.current = null;
-      } else if (draft && !draftDirty.current) {
-        // Defer completion until a layout effect observes the controlled textarea's committed
-        // value. Promise settlement and animation-frame ordering cannot prove that React has
-        // written the hydrated text to the DOM yet.
-        pendingHydrationCommitRef.current = { sessionId, expectedText: draft.text };
-        setProgrammaticComposerText(draft.text, draft.text.length, true);
-        replace(draft.images);
-        commandSubmissionRetryRef.current = draft.commandSubmission ?? null;
-        consumeComposerDraftHandoff(sessionId, draft, instanceScope);
-        setHydrationCommitRevision((revision) => revision + 1);
       } else {
-        draftHydratedSessionRef.current = sessionId;
-        pendingHydrationCaretRef.current = null;
-        pendingComposerFocusRestoreRef.current = null;
+        commitOrdinaryDraftHydration(draft);
       }
+    };
+    if (queuedEditRecovery && !pendingQueuedEdit && draftDirty.current && queuedEditRef.current === null) {
+      const displacedDraft = {
+        text: draftState.current.text,
+        images: draftState.current.images.map((image) => ({ ...image })),
+      };
+      queuedEditRecovery = {
+        ...recoveryWithDisplacedDraft(queuedEditRecovery, displacedDraft),
+      };
+      // Identity can settle after the user has already begun a new ordinary draft. Keep that work
+      // in both draft storage and the recovery's displaced-draft slot before showing the recovery.
+      void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+      if (queuedEditRecoveryScope) {
+        saveDurableQueuedEditRecovery(queuedEditRecoveryScope, queuedEditRecovery);
+        storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
+      }
+    }
+    if (queuedEditRecovery) {
+      const finishRecoveryRestore = (
+        candidate: QueuedPromptEditRecovery,
+        expectedDurableRecovery?: QueuedPromptEditRecovery,
+        ordinaryDraft?: ComposerDraft | null,
+      ) => {
+        if (cancelled) return;
+        if (queuedEditRef.current && !pendingQueuedEdit &&
+            (!hydrationKeyChanged || queuedEditRef.current !== queuedEditAtHydrationStart)) return;
+        let restored = candidate;
+        let displacedDraftChanged = false;
+        if (draftDirty.current && queuedEditRef.current === null) {
+          const displacedDraft = {
+            text: draftState.current.text,
+            images: draftState.current.images.map((image) => ({ ...image })),
+          };
+          restored = recoveryWithDisplacedDraft(restored, displacedDraft);
+          displacedDraftChanged = true;
+          void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+        }
+        if (queuedEditRecoveryScope && expectedDurableRecovery) {
+          const refresh = refreshDurableQueuedEditRecovery(
+            queuedEditRecoveryScope,
+            expectedDurableRecovery,
+            restored,
+          );
+          if (refresh === "stale") {
+            clearRuntimeQueuedEditRecovery(mutationKey);
+            void reconcileOrdinaryDraftHydration(ordinaryDraft ?? null);
+            return;
+          }
+          if (refresh === "conflict") {
+            clearRuntimeQueuedEditRecovery(mutationKey);
+            const current = loadDurableQueuedEditRecovery(queuedEditRecoveryScope);
+            if (!current) {
+              void reconcileOrdinaryDraftHydration(ordinaryDraft ?? null);
+              return;
+            }
+            let latest = !current.error
+              ? { ...current, error: "The prior queued message edit outcome was not recorded. Check the current queue before retrying." }
+              : current;
+            if (latest.edit.displacedDraftStoredSeparately && ordinaryDraft !== undefined) {
+              latest = recoveryWithDisplacedDraft(latest, ordinaryDraft);
+            }
+            if (draftDirty.current && queuedEditRef.current === null) {
+              latest = recoveryWithDisplacedDraft(latest, {
+                text: draftState.current.text,
+                images: draftState.current.images.map((image) => ({ ...image })),
+              });
+            }
+            storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, latest);
+            restoreQueuedPromptEditRecovery(latest, false);
+            return;
+          }
+        } else if (queuedEditRecoveryScope && displacedDraftChanged) {
+          saveDurableQueuedEditRecovery(queuedEditRecoveryScope, restored);
+        }
+        if (!runtimeQueuedEdit && queuedEditRecoveryScope) {
+          storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
+        }
+        restoreQueuedPromptEditRecovery(restored, pendingQueuedEdit !== undefined);
+      };
+      if (queuedEditRecovery.edit.displacedDraftStoredSeparately) {
+        void (async () => {
+          let displaced: ComposerDraft | null | undefined;
+          try { displaced = await loadDraftForSession(sessionId, instanceScope); } catch { /* retain compact text */ }
+          if (displaced === undefined) return;
+          finishRecoveryRestore(
+            recoveryWithDisplacedDraft(queuedEditRecovery, displaced),
+            storedQueuedEdit,
+            displaced,
+          );
+        })();
+      } else {
+        finishRecoveryRestore(queuedEditRecovery);
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
+    void (async () => {
+      const draft = await loadDraftForSession(sessionId, instanceScope);
+      if (cancelled) return;
+      await reconcileOrdinaryDraftHydration(draft);
     })();
     return () => {
       cancelled = true;
     };
-  }, [instanceScope, sessionId, replace, setProgrammaticComposerText]);
+  }, [instanceScope, mutationKey, queuedEditRecoveryScope, sessionId, replace, restoreQueuedPromptEditRecovery,
+    setProgrammaticComposerText]);
 
   useLayoutEffect(() => {
     const commit = pendingHydrationCommitRef.current;
@@ -1047,22 +1466,125 @@ function SessionDetailLoaded({
   }, [hydrationCommitRevision, sessionId]);
 
   useEffect(() => {
-    if (activeComposerMutation || suppressedDraftRef.current?.sessionId !== sessionId) return;
+    if (activeComposerMutation) return;
+    // An ordinary locally initiated queued edit already owns the composer. Leave a recovery that
+    // another tab publishes recoverable until this edit is saved or cancelled.
+    if (queuedEditRef.current && !queuedEditRecovered) return;
+    let queuedEditRecovery = (queuedEditRecoveryScope
+      ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+      : undefined) ??
+      (queuedEditRecoveryScope ? loadDurableQueuedEditRecovery(queuedEditRecoveryScope) : undefined);
+    if (queuedEditRecovery) {
+      suppressedDraftRef.current = null;
+      const openQueuedEdit = queuedEditRef.current;
+      const preserveQueuedEditDraft = draftDirty.current &&
+        openQueuedEdit?.promptId === queuedEditRecovery.edit.promptId;
+      if (preserveQueuedEditDraft) {
+        storeQueuedPromptEditRecovery(mutationKey, {
+          ...queuedEditRecovery,
+          draft: draftState.current,
+        });
+      } else if (draftDirty.current && openQueuedEdit === null) {
+        const displacedDraft = {
+          text: draftState.current.text,
+          images: draftState.current.images.map((image) => ({ ...image })),
+        };
+        queuedEditRecovery = {
+          ...recoveryWithDisplacedDraft(queuedEditRecovery, displacedDraft),
+        };
+        void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+        if (queuedEditRecoveryScope) {
+          saveDurableQueuedEditRecovery(queuedEditRecoveryScope, queuedEditRecovery);
+          storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
+        }
+      }
+      if (queuedEditRecovery.edit.displacedDraftStoredSeparately) {
+        let cancelled = false;
+        const loadDraftForSession = composerDraftLoaderRef.current;
+        void (async () => {
+          let displaced: ComposerDraft | null | undefined;
+          try { displaced = await loadDraftForSession(sessionId, instanceScope); } catch { /* retain compact text */ }
+          if (displaced === undefined || cancelled || (queuedEditRef.current && !queuedEditRecovered)) return;
+          const openQueuedEditAfterLoad = queuedEditRef.current;
+          if (openQueuedEditAfterLoad && openQueuedEditAfterLoad.promptId !== queuedEditRecovery.edit.promptId) return;
+          let preserveDraftAfterLoad = draftDirty.current && openQueuedEditAfterLoad?.promptId === queuedEditRecovery.edit.promptId;
+          let restored = recoveryWithDisplacedDraft(queuedEditRecovery, displaced);
+          if (preserveDraftAfterLoad) {
+            restored = {
+              ...restored,
+              draft: {
+                text: draftState.current.text,
+                images: draftState.current.images.map((image) => ({ ...image })),
+              },
+            };
+          } else if (draftDirty.current && openQueuedEditAfterLoad === null) {
+            const currentDisplacedDraft = {
+              text: draftState.current.text,
+              images: draftState.current.images.map((image) => ({ ...image })),
+            };
+            restored = recoveryWithDisplacedDraft(queuedEditRecovery, currentDisplacedDraft);
+            void saveComposerDraft(
+              sessionId,
+              currentDisplacedDraft.text,
+              currentDisplacedDraft.images,
+              instanceScope,
+            );
+            preserveDraftAfterLoad = false;
+          }
+          if (queuedEditRecoveryScope) {
+            const refresh = refreshDurableQueuedEditRecovery(
+              queuedEditRecoveryScope,
+              queuedEditRecovery,
+              restored,
+            );
+            if (refresh === "stale" || refresh === "conflict") {
+              clearRuntimeQueuedEditRecovery(mutationKey);
+              return;
+            }
+            storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
+          }
+          restoreQueuedPromptEditRecovery(restored, false, preserveDraftAfterLoad);
+        })();
+        return () => { cancelled = true; };
+      }
+      restoreQueuedPromptEditRecovery(queuedEditRecovery, false, preserveQueuedEditDraft);
+      return;
+    }
+    if (suppressedDraftRef.current?.sessionId !== sessionId) return;
+    const completedQueuedEdit = queuedEditRef.current !== null;
+    if (completedQueuedEdit) {
+      draftDirty.current = false;
+      queuedEditRef.current = null;
+      setQueuedEdit(null);
+      setQueuedEditRecovered(false);
+      setQueuedEditBusy(false);
+      setError(null);
+      draftState.current = { text: "", images: [] };
+      setProgrammaticComposerText("", 0);
+      replace([]);
+      commandSubmissionRetryRef.current = null;
+    }
     let cancelled = false;
     let completed = false;
     const suppressed = suppressedDraftRef.current;
+    const interactionVersion = composerInteractionVersionRef.current;
     suppressedDraftRef.current = null;
     void loadComposerDraft(sessionId, instanceScope).then((draft) => {
       completed = true;
       const recoveryDraft = composerMutationRecoveries.get(mutationKey);
       if (cancelled) return;
-      if (draftDirty.current) {
+      const editedAfterRestoreStarted = composerInteractionVersionRef.current !== interactionVersion;
+      if (draftDirty.current && (!completedQueuedEdit || editedAfterRestoreStarted)) {
         composerMutationRecoveries.delete(mutationKey);
         return;
       }
       const restored = draft ?? (recoveryDraft ? { ...recoveryDraft, updatedAt: Date.now() } : null);
       composerMutationRecoveries.delete(mutationKey);
-      if (!restored) return;
+      if (!restored) {
+        if (completedQueuedEdit) draftHydratedSessionRef.current = sessionId;
+        return;
+      }
+      revealOrdinaryComposerRef.current("answer-owned");
       setProgrammaticComposerText(restored.text);
       replace(restored.images);
       commandSubmissionRetryRef.current = restored.commandSubmission ?? null;
@@ -1074,7 +1596,8 @@ function SessionDetailLoaded({
       cancelled = true;
       if (!completed && suppressedDraftRef.current === null) suppressedDraftRef.current = suppressed;
     };
-  }, [activeComposerMutation, instanceScope, sessionId, replace, setProgrammaticComposerText]);
+  }, [activeComposerMutation, instanceScope, mutationKey, queuedEditRecovered, queuedEditRecoveryScope, sessionId, replace,
+    restoreQueuedPromptEditRecovery, setProgrammaticComposerText, storeQueuedPromptEditRecovery]);
 
   // Coalesce rapid edits so typing beside a large base64 attachment does not rewrite it on every
   // keystroke. Dirty edits save even while hydration is pending; unmount cleanup below flushes
@@ -1082,7 +1605,30 @@ function SessionDetailLoaded({
   useEffect(() => {
     if (!draftDirty.current) return;
     const timer = window.setTimeout(() => {
-      if (queuedEditRef.current) return;
+      if (queuedEditRef.current) {
+        const recovery = queuedEditRecoveryScope
+          ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+          : undefined;
+        if (recovery) {
+          storeQueuedPromptEditRecovery(mutationKey, {
+            ...recovery,
+            edit: queuedEditRef.current,
+            draft: draftState.current,
+          });
+        } else {
+          const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
+          if (pending) {
+            const updated = {
+              ...pending,
+              edit: queuedEditRef.current,
+              draft: draftState.current,
+            };
+            updateQueuedPromptEditMutationRecovery(mutationKey, updated);
+            persistQueuedPromptEditRecovery(updated);
+          }
+        }
+        return;
+      }
       const latest = draftState.current;
       const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
       if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
@@ -1092,11 +1638,36 @@ function SessionDetailLoaded({
       void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [images, instanceScope, sessionId, text]);
+  }, [images, instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope, sessionId,
+    storeQueuedPromptEditRecovery, text]);
 
   useEffect(
     () => () => {
-      if (!draftDirty.current || queuedEditRef.current) return;
+      if (!draftDirty.current) return;
+      if (queuedEditRef.current) {
+        const recovery = queuedEditRecoveryScope
+          ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+          : undefined;
+        if (recovery) {
+          storeQueuedPromptEditRecovery(mutationKey, {
+            ...recovery,
+            edit: queuedEditRef.current,
+            draft: draftState.current,
+          });
+        } else {
+          const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
+          if (pending) {
+            const updated = {
+              ...pending,
+              edit: queuedEditRef.current,
+              draft: draftState.current,
+            };
+            updateQueuedPromptEditMutationRecovery(mutationKey, updated);
+            persistQueuedPromptEditRecovery(updated);
+          }
+        }
+        return;
+      }
       const latest = draftState.current;
       const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
       if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
@@ -1105,7 +1676,8 @@ function SessionDetailLoaded({
       }
       void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
     },
-    [instanceScope, sessionId],
+    [instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope, sessionId,
+      storeQueuedPromptEditRecovery],
   );
 
   // Mark the session seen while it is open so the inbox unread badge stays current.
@@ -1232,36 +1804,71 @@ function SessionDetailLoaded({
 
   const clearEarlierActivityIntent = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
-    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
-    state.touchEndTimer = null;
+    if (state.intentIdleTimer !== null) window.clearTimeout(state.intentIdleTimer);
+    state.intentIdleTimer = null;
     state.readerIntent = null;
     state.readerIntentTop = null;
     state.readerIntentMovedUp = false;
-    state.touchActive = false;
+    state.inputHeld = false;
     state.nativeTouchActive = false;
     state.touchInputY = null;
+    state.touchStartY = null;
     state.touchTraversalStarted = false;
   }, []);
+
+  // Expire an armed traversal once its scroll stream goes quiet, unless the reader still holds the
+  // finger or button that started it. A prepend, a live row, or a reveal that scrolls later must
+  // never inherit intent from input the reader finished long ago.
+  const deferEarlierActivityIdleEnd = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (!state.readerIntent) return;
+    if (state.intentIdleTimer !== null) window.clearTimeout(state.intentIdleTimer);
+    state.intentIdleTimer = window.setTimeout(() => {
+      state.intentIdleTimer = null;
+      if (!state.inputHeld && state.readerIntent) clearEarlierActivityIntent();
+    }, EARLIER_ACTIVITY_INTENT_IDLE_MS);
+  }, [clearEarlierActivityIntent]);
 
   const markEarlierActivityIntent = useCallback((
     intent: EarlierActivityIntent,
     touchInputY: number | null = null,
   ) => {
     const state = automaticEarlierLoadRef.current;
-    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
-    state.touchEndTimer = null;
+    if (state.intentIdleTimer !== null) window.clearTimeout(state.intentIdleTimer);
+    state.intentIdleTimer = null;
     state.readerIntent = intent;
     state.readerIntentTop = scrollRef.current?.scrollTop ?? null;
     state.readerIntentMovedUp = false;
-    state.touchActive = intent === "touch-traversal";
+    state.inputHeld = intent === "touch-traversal";
     state.touchInputY = touchInputY;
+    state.touchStartY = touchInputY;
     state.touchTraversalStarted = false;
     cancelEarlierActivitySettle();
-  }, [cancelEarlierActivitySettle]);
+    // A touch stays armed while the finger is down; a single scroll must produce its stream soon.
+    if (intent === "single-scroll") deferEarlierActivityIdleEnd();
+  }, [cancelEarlierActivitySettle, deferEarlierActivityIdleEnd]);
 
   const markSingleEarlierActivityIntent = useCallback(() => {
     markEarlierActivityIntent("single-scroll");
   }, [markEarlierActivityIntent]);
+
+  // A scrollbar press stays armed for as long as the button is held: the drag it starts may begin
+  // well after the idle window and still end at the head.
+  const markPointerEarlierActivityIntent = useCallback((target: HTMLElement) => {
+    markEarlierActivityIntent("single-scroll");
+    const state = automaticEarlierLoadRef.current;
+    state.inputHeld = true;
+    const view = target.ownerDocument.defaultView ?? window;
+    const release = () => {
+      view.removeEventListener("pointerup", release);
+      view.removeEventListener("pointercancel", release);
+      if (state.readerIntent !== "single-scroll" || !state.inputHeld) return;
+      state.inputHeld = false;
+      deferEarlierActivityIdleEnd();
+    };
+    view.addEventListener("pointerup", release);
+    view.addEventListener("pointercancel", release);
+  }, [deferEarlierActivityIdleEnd, markEarlierActivityIntent]);
 
   const markTouchEarlierActivityIntent = useCallback((clientY: number | null = null) => {
     markEarlierActivityIntent("touch-traversal", clientY);
@@ -1283,24 +1890,12 @@ function SessionDetailLoaded({
     state.touchInputY = clientY;
   }, []);
 
-  const deferTouchEarlierActivityEnd = useCallback(() => {
-    const state = automaticEarlierLoadRef.current;
-    if (state.readerIntent !== "touch-traversal") return;
-    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
-    state.touchEndTimer = window.setTimeout(() => {
-      state.touchEndTimer = null;
-      if (!state.touchActive && state.readerIntent === "touch-traversal") {
-        clearEarlierActivityIntent();
-      }
-    }, EARLIER_ACTIVITY_TOUCH_IDLE_MS);
-  }, [clearEarlierActivityIntent]);
-
   const finishTouchEarlierActivityIntent = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
     if (state.readerIntent !== "touch-traversal") return;
-    state.touchActive = false;
-    deferTouchEarlierActivityEnd();
-  }, [deferTouchEarlierActivityEnd]);
+    state.inputHeld = false;
+    deferEarlierActivityIdleEnd();
+  }, [deferEarlierActivityIdleEnd]);
 
   const finishPointerTouchEarlierActivityIntent = useCallback(() => {
     if (automaticEarlierLoadRef.current.nativeTouchActive) return;
@@ -1341,7 +1936,9 @@ function SessionDetailLoaded({
   useEffect(() => cancelEarlierActivitySettle, [cancelEarlierActivitySettle, timelineHistoryKey]);
   useEffect(() => clearEarlierActivityIntent, [clearEarlierActivityIntent, timelineHistoryKey]);
 
-  const maybeLoadEarlier = useCallback((scroll: HTMLElement) => {
+  // `source` names what delivered the reader here: the scroll stream of a gesture, or explicit
+  // upward input at the head, where the browser has no scroll event left to emit.
+  const maybeLoadEarlier = useCallback((scroll: HTMLElement, source: "scroll" | "input" = "scroll") => {
     const state = automaticEarlierLoadRef.current;
     if (state.historyKey !== timelineHistoryKey) {
       cancelEarlierActivitySettle();
@@ -1352,19 +1949,29 @@ function SessionDetailLoaded({
       state.readerStarted = false;
     }
     const readerIntent = state.readerIntent;
-    if (eventWindow?.hasOlder !== true || eventWindow.loadingOlder || eventWindow.error ||
-        eventWindow.baseSeq <= 1 || state.requestedBase !== null || state.settling ||
-        !readerIntent) {
+    if (eventWindow?.hasOlder !== true || eventWindow.error || eventWindow.baseSeq <= 1 || !readerIntent) {
       clearEarlierActivityIntent();
+      return;
+    }
+    if (eventWindow.loadingOlder || state.requestedBase !== null || state.settling) {
+      // A page in flight or a prepend still settling is a pause, not an answer. Keep the traversal
+      // armed under its idle expiry: the prepend that follows moves the reader away from the head,
+      // which reads as forward movement and releases it; a stream that outlives the settle window
+      // can still load once the window closes.
+      if (!state.inputHeld) deferEarlierActivityIdleEnd();
       return;
     }
 
     const previousIntentTop = state.readerIntentTop;
     const movedUp = previousIntentTop !== null && scroll.scrollTop < previousIntentTop - 1;
     const movedDown = previousIntentTop !== null && scroll.scrollTop > previousIntentTop + 1;
-    if (readerIntent === "touch-traversal" && movedUp &&
-        (state.touchActive || state.touchTraversalStarted)) {
-      state.touchTraversalStarted = true;
+    if (movedDown) {
+      // Reading forward is never a request for history, whatever armed the traversal.
+      clearEarlierActivityIntent();
+      return;
+    }
+    if (movedUp && (readerIntent === "single-scroll" || state.inputHeld || state.touchTraversalStarted)) {
+      state.touchTraversalStarted = readerIntent === "touch-traversal";
       state.readerIntentMovedUp = true;
     }
 
@@ -1387,19 +1994,19 @@ function SessionDetailLoaded({
       initialTriggerTop,
     );
     if (scroll.scrollTop > triggerTop) {
-      // A wheel tick or reading-key scroll is a single scroll. Touch, however, emits a stream of
-      // scroll events for one drag and its momentum. Keep that traversal armed while it continues
-      // upward so the first event cannot consume intent before a later event reaches the head.
-      if (readerIntent === "touch-traversal" && !movedDown) {
-        state.readerIntentTop = scroll.scrollTop;
-        if (state.touchEndTimer !== null) deferTouchEarlierActivityEnd();
-      } else {
-        clearEarlierActivityIntent();
-      }
+      // Keep the traversal armed while its stream continues upward. A gesture that starts above
+      // the trigger and lands inside it, or at the head itself, is exactly the one that must load;
+      // consuming its intent on the first event would strand the reader at the manual control.
+      state.readerIntentTop = scroll.scrollTop;
+      if (!state.inputHeld) deferEarlierActivityIdleEnd();
       return;
     }
-    if (readerIntent === "touch-traversal" && (!state.readerIntentMovedUp || movedDown)) {
-      if (movedDown) clearEarlierActivityIntent();
+    // Explicit input at the head stands in for the scroll movement that cannot happen there; above
+    // the head, that same input still has a scroll stream on the way, so leave it to that path.
+    const atHead = scroll.scrollTop < 1;
+    if (source === "input" && !atHead) return;
+    if (readerIntent === "touch-traversal" && !state.readerIntentMovedUp &&
+        !(source === "input" && state.touchTraversalStarted)) {
       return;
     }
 
@@ -1407,7 +2014,25 @@ function SessionDetailLoaded({
     state.readerStarted = true;
     state.nextTriggerTop = null;
     if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
-  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, deferTouchEarlierActivityEnd, eventWindow, loadOlder, timelineHistoryKey]);
+  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, deferEarlierActivityIdleEnd, eventWindow, loadOlder, timelineHistoryKey]);
+
+  // At the head, upward input produces no scroll event, so the scroll path can never see it.
+  // Evaluate the armed intent directly, but only when the reader cannot scroll further up.
+  const requestEarlierFromInputAtHead = useCallback(() => {
+    const scroll = scrollRef.current;
+    if (!scroll || scroll.scrollTop >= 1) return;
+    maybeLoadEarlier(scroll, "input");
+  }, [maybeLoadEarlier]);
+
+  const requestEarlierFromTouchAtHead = useCallback((clientY: number | null, target: EventTarget | null) => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.readerIntent !== "touch-traversal" || !state.touchTraversalStarted) return;
+    if (clientY === null || state.touchStartY === null) return;
+    if (clientY - state.touchStartY < EARLIER_ACTIVITY_HEAD_DRAG_PX) return;
+    const scroll = scrollRef.current;
+    if (!scroll || nestedScrollerConsumesUpwardInput(target, scroll)) return;
+    requestEarlierFromInputAtHead();
+  }, [requestEarlierFromInputAtHead]);
 
   const loadEarlierFromControl = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
@@ -1473,13 +2098,39 @@ function SessionDetailLoaded({
   useEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
-    scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markSingleEarlierActivityIntent);
-    return () => scroll.removeEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markSingleEarlierActivityIntent);
-  }, [markSingleEarlierActivityIntent]);
+    // Session Reading keys and Inbox paging claim the viewport right before a programmatic
+    // scroll. A downward claim is never a request for history; an upward one at the head has no
+    // scroll event to ride on, exactly like an upward reading key on the region itself.
+    const markProgrammaticIntent = (event: Event) => {
+      const direction = virtualViewportIntentDirection(event);
+      if (direction === "down") return;
+      markSingleEarlierActivityIntent();
+      if (direction === "up") requestEarlierFromInputAtHead();
+    };
+    scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markProgrammaticIntent);
+    return () => scroll.removeEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markProgrammaticIntent);
+  }, [markSingleEarlierActivityIntent, requestEarlierFromInputAtHead]);
 
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
   const items = useTimeline(sessionId, evs);
+  // Governance outcomes are transcript context, not a persistent header: the decisions whose
+  // request has no transcript row of its own are spliced in at their chronological position, and
+  // the whole list stays reviewable in the side panel (a full-screen drawer on phones).
+  const governanceAudit = useGovernanceAudit(
+    sessionId,
+    `${session.updatedAt}:${session.pendingApproval?.requestId ?? ""}`,
+    mode === "expanded",
+    evs?.[0]?.ts,
+  );
+  const governanceDecisions = governanceAudit.decisions;
+  const timelineItems = useGovernanceTimeline(
+    items,
+    governanceDecisions,
+    evs,
+    session.status === "running" || session.status === "starting",
+    timelineHistoryKey,
+  );
   const observedLastEventAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || undefined;
   const activeTurnProgressProjector = useRef<IncrementalActiveTurnProgress | null>(null);
   activeTurnProgressProjector.current ??= new IncrementalActiveTurnProgress();
@@ -1505,7 +2156,22 @@ function SessionDetailLoaded({
     descriptor.availability === "live" &&
     ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
   [items, runnerOnline, session.status]);
-  const preferredActiveSubagentId = selectedSubagentId(activeSubagents);
+  const rosterSessions = useStoreSelector((state) => state.sessions);
+  const rosterRuns = useStoreSelector((state) => state.runs);
+  const rosterRunners = useStoreSelector((state) => state.runners);
+  const activeWorkerCount = useMemo(() => workerRoster(session, activeSubagents,
+    (session.runId ? rosterRuns.get(session.runId)?.sessionIds ?? [] : []).flatMap((id) => {
+      const member = rosterSessions.get(id);
+      return member ? [member] : [];
+    }), (id) => rosterRunners.get(id)?.status === "online").filter(isCurrentWorker).length,
+  [session, activeSubagents, rosterSessions, rosterRuns, rosterRunners]);
+  const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
+    ? undefined
+    : session.backgroundWorkState;
+  const backgroundParentTurnEventIds = useMemo(() => new Map(items
+    .filter((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
+      item.kind === "user_message" && Boolean(item.turnId))
+    .map((item) => [item.turnId!, item.id] as const)), [items]);
 
   // Prior user prompts for ↑ history recall (chronological; recall walks from newest backward).
   const timelineUserPrompts = useMemo(
@@ -1604,7 +2270,30 @@ function SessionDetailLoaded({
   // A guardrail pause (cost budget / tool-call limit) must be resolved via the Continue/Stop card,
   // not bypassed by sending a prompt.
   const policyPaused = isPolicyApproval(session.pendingApproval);
-  const canPrompt = runnerOnline && !terminal && !policyPaused;
+  // A quarantined provider conversation rejects every submission before the model runs, so the
+  // composer must not invite retries that cannot succeed.
+  const historyQuarantine = session.historyQuarantine;
+  const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine;
+  const composerPlaceholder = terminal ? `Session is ${session.status}.`
+    : !runnerOnline ? "Runner is offline."
+    : historyQuarantine ? "Conversation quarantined. Recover this session to continue."
+    : policyPaused ? "Session is paused by guardrails. Review the pending decision to continue."
+    : "Do anything";
+  const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
+  const composerQuestions = (() => {
+    const approvalQuestions = pendingQuestion?.questions ?? [];
+    if (approvalQuestions.length > 0 || !pendingQuestion) return approvalQuestions;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item?.kind === "question" && item.requestId === pendingQuestion.requestId && item.answered === undefined) {
+        return item.questions;
+      }
+    }
+    return approvalQuestions;
+  })();
+  const canAnswerPendingQuestion = pendingQuestion !== null && composerQuestions.length > 0 &&
+    (pendingQuestion.recoveryReason !== "provider_restart" || pendingQuestion.recoveryAction === "resume_answer");
+  const questionResponseStyle = useQuestionResponseStyle();
   const steeringAvailabilityInput = {
     runnerProtocolVersion: runner?.protocolVersion,
     runnerOnline,
@@ -1625,6 +2314,153 @@ function SessionDetailLoaded({
     activeTurnId: session.activeTurnId,
   });
   const [activePane, setActivePane] = useState<"reader" | "composer">("reader");
+  const [answerModeRequestId, setAnswerModeRequestId] = useState<string | null>(null);
+  const answerModeExplicitRequestRef = useRef<string | null>(null);
+  const answerModeArrivalRef = useRef({
+    requestId: null as string | null,
+    style: questionResponseStyle,
+    answerable: false,
+  });
+  const answerModeFocusRequestRef = useRef<"answer" | "message" | null>(null);
+  const answerFocusRequestIdRef = useRef<string | null>(pendingQuestion?.requestId ?? null);
+  const composerAnswerActive = canAnswerPendingQuestion && answerModeRequestId === pendingQuestion.requestId;
+  const activeAnswerModeRequestRef = useRef<string | null>(composerAnswerActive ? answerModeRequestId : null);
+  activeAnswerModeRequestRef.current = composerAnswerActive ? answerModeRequestId : null;
+  const answerModeRegion = answerInputRef.current?.closest<HTMLElement>(".composer-answer") ?? null;
+  const answerFocusOwnedBeforeRender = answerModeRegion !== null &&
+    answerModeRegion.contains(answerInputRef.current!.ownerDocument.activeElement);
+
+  const revealOrdinaryComposer = useCallback((focus: "always" | "answer-owned") => {
+    const input = answerInputRef.current;
+    const activeElement = input?.ownerDocument.activeElement ?? null;
+    const region = input?.closest<HTMLElement>(".composer-answer") ?? null;
+    const shouldFocus = focus === "always" || (region !== null && region.contains(activeElement));
+    answerModeExplicitRequestRef.current = null;
+    answerModeFocusRequestRef.current = shouldFocus && composerAnswerActive ? "message" : null;
+    setAnswerModeRequestId(null);
+    if (!composerAnswerActive && shouldFocus) window.requestAnimationFrame(focusComposerAtDraftEnd);
+  }, [composerAnswerActive, focusComposerAtDraftEnd]);
+  revealOrdinaryComposerRef.current = revealOrdinaryComposer;
+
+  const exitAnswerMode = useCallback(() => {
+    if (!answerModeRequestId || activeAnswerModeRequestRef.current !== answerModeRequestId) return;
+    revealOrdinaryComposer("always");
+  }, [answerModeRequestId, revealOrdinaryComposer]);
+  const enterAnswerMode = useCallback(() => {
+    if (!canAnswerPendingQuestion) {
+      focusComposerAtDraftEnd();
+      return;
+    }
+    answerModeExplicitRequestRef.current = pendingQuestion.requestId;
+    setActivePane("composer");
+    if (composerAnswerActive) {
+      answerModeFocusRequestRef.current = null;
+      answerInputRef.current?.focus();
+      return;
+    }
+    answerModeFocusRequestRef.current = "answer";
+    setAnswerModeRequestId(pendingQuestion.requestId);
+  }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+
+  useLayoutEffect(() => {
+    if (composerFocusIntent !== "reply") return;
+    // An Inbox Reply request is contextual: a pending question owns it before the ordinary
+    // composer does. Resolve that ownership during the expansion commit so the very next bare key
+    // cannot escape to the global shortcut layer while focus is waiting on an animation frame.
+    enterAnswerMode();
+    // Acknowledge only after InboxView's expansion frame records the new surface. Clearing the
+    // request in this layout commit would cancel that frame; its replacement sees an ordinary
+    // expansion and moves focus back to the reader.
+    const frame = window.requestAnimationFrame(() => onComposerFocusConsumed?.());
+    return () => window.cancelAnimationFrame(frame);
+  }, [composerFocusIntent, enterAnswerMode, onComposerFocusConsumed, sessionId]);
+
+  useLayoutEffect(() => {
+    const liveRequestId = pendingQuestion?.requestId ?? null;
+    const requestChanged = answerFocusRequestIdRef.current !== liveRequestId;
+    answerFocusRequestIdRef.current = liveRequestId;
+    if (requestChanged && answerModeExplicitRequestRef.current !== liveRequestId) {
+      answerModeExplicitRequestRef.current = null;
+    }
+    if (requestChanged && answerModeFocusRequestRef.current === "answer") {
+      answerModeFocusRequestRef.current = null;
+    }
+    if (!composerAnswerActive && answerFocusOwnedBeforeRender) {
+      answerModeFocusRequestRef.current = null;
+      focusComposerAtDraftEnd();
+      return;
+    }
+    const requested = answerModeFocusRequestRef.current;
+    if (composerAnswerActive && requested === "answer") {
+      answerModeFocusRequestRef.current = null;
+      answerInputRef.current?.focus();
+    } else if (!composerAnswerActive && requested === "message") {
+      answerModeFocusRequestRef.current = null;
+      focusComposerAtDraftEnd();
+    }
+  }, [answerFocusOwnedBeforeRender, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId]);
+
+  useEffect(() => {
+    const previous = answerModeArrivalRef.current;
+    const requestId = pendingQuestion?.requestId ?? null;
+    const answerable = composerQuestions.length > 0;
+    const requestChanged = previous.requestId !== requestId;
+    const styleChanged = previous.style !== questionResponseStyle;
+    const answerabilityChanged = previous.answerable !== answerable;
+    const nextArrival = { requestId, style: questionResponseStyle, answerable };
+    if (!requestId || questionResponseStyle !== "composer" || !answerable) {
+      answerModeExplicitRequestRef.current = null;
+      answerModeArrivalRef.current = nextArrival;
+      if (!requestId || styleChanged || answerabilityChanged) setAnswerModeRequestId(null);
+      return;
+    }
+    if (answerModeExplicitRequestRef.current !== requestId) answerModeExplicitRequestRef.current = null;
+    if (requestChanged || styleChanged || answerabilityChanged) {
+      answerModeArrivalRef.current = nextArrival;
+      let cancelled = false;
+      let frame: number | null = null;
+      let remainingHydrationFrames = 120;
+      const chooseInitialMode = () => {
+        if (cancelled) return;
+        if (answerModeExplicitRequestRef.current === requestId) {
+          setAnswerModeRequestId(requestId);
+          return;
+        }
+        if (queuedEditRef.current) {
+          setAnswerModeRequestId(null);
+          return;
+        }
+        // The ordinary draft hydrates asynchronously. Deciding before that boundary would hide a
+        // restored draft behind Answer Mode instead of showing the explicit waiting prompt.
+        if (draftHydratedSessionRef.current !== sessionId) {
+          remainingHydrationFrames -= 1;
+          if (remainingHydrationFrames <= 0) {
+            setAnswerModeRequestId(null);
+            return;
+          }
+          frame = window.requestAnimationFrame(chooseInitialMode);
+          return;
+        }
+        const hasOrdinaryDraft = Boolean(draftState.current.text.trim() || draftState.current.images.length || queuedEditRef.current);
+        if (!hasOrdinaryDraft && inputRef.current?.ownerDocument.activeElement === inputRef.current) {
+          // Auto-entry normally leaves focus alone. If it removes the currently focused ordinary
+          // composer, transfer that existing focus into Answer Mode so bare reading shortcuts do
+          // not become armed while the user keeps typing.
+          answerModeFocusRequestRef.current = "answer";
+        }
+        setAnswerModeRequestId(hasOrdinaryDraft ? null : requestId);
+      };
+      chooseInitialMode();
+      return () => {
+        cancelled = true;
+        if (frame !== null) window.cancelAnimationFrame(frame);
+        // StrictMode simulates an unmount/remount without recreating refs. Restore the observation
+        // only when this effect still owns it so the replacement effect can make the decision.
+        if (answerModeArrivalRef.current === nextArrival) answerModeArrivalRef.current = previous;
+      };
+    }
+    answerModeArrivalRef.current = nextArrival;
+  }, [composerQuestions.length, pendingQuestion?.requestId, questionResponseStyle, sessionId]);
 
   const clearStopTurnAttempt = useCallback(() => {
     stopTurnAttemptRef.current += 1;
@@ -1857,6 +2693,10 @@ function SessionDetailLoaded({
     else if (restore.state === "paused") followTail.pause();
     else followTail.preview();
   }, [followTail.follow, followTail.pause, followTail.preview]);
+  const revealBackgroundParentTurn = useCallback((eventId: number) => {
+    if (isMobile) rightPanelRef.current.close();
+    revealCurrentOperation(eventId);
+  }, [isMobile, revealCurrentOperation]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({
     beginProgrammaticScroll: followTail.beginProgrammaticScroll,
     follow: followTail.follow,
@@ -1869,10 +2709,10 @@ function SessionDetailLoaded({
     deny: () => onDeny?.(),
     archive: () => onArchive?.(),
     snooze: () => onSnooze?.(),
-    reply: focusComposerAtDraftEnd,
+    reply: canAnswerPendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
-  }), [focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze]);
+  }), [canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze]);
   useSessionReadingKeys({
     enabled: mode === "expanded" && !isMobile,
     sessionId,
@@ -1942,7 +2782,136 @@ function SessionDetailLoaded({
     [api, busy, confirm, mode, navigate, session?.driver, sessionId, showToast],
   );
 
+  /**
+   * Recovery for a quarantined conversation. It never repairs the poisoned thread — that is
+   * impossible — and never deletes it: the original session, its transcript, and its provider
+   * thread stay exactly as they are. What it creates is a usable conversation from the last
+   * checkpoint known to precede the invalid item, with that checkpoint's files, plus any prompt
+   * the session retained unsent while quarantined.
+   */
+  const onRecoverQuarantinedConversation = useCallback(async () => {
+    const quarantine = session.historyQuarantine;
+    if (!quarantine || quarantine.recoveryTurn === undefined || busy || forkInFlightRef.current) return;
+    const handoff = quarantine.recovery === "handoff";
+    if (handoff && !session.agentId) {
+      setError("This session has no agent on its runner, so a fresh conversation cannot be started for it.");
+      return;
+    }
+    if (!await confirm({
+      title: `Recover this session from turn ${quarantine.recoveryTurn}?`,
+      message: handoff
+        ? `A new session starts a fresh provider conversation seeded with a bounded, redacted summary of the visible dialogue through turn ${quarantine.recoveryTurn}, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`
+        : `A new session forks the provider conversation at turn ${quarantine.recoveryTurn}, which excludes the rejected item, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`,
+      confirmLabel: "Recover Session",
+    })) return;
+    const releaseFork = acquireSessionFork(sessionId);
+    if (!releaseFork) {
+      const message = "A conversation fork is already in progress for this session. Wait for it to appear on the Board.";
+      setError(message);
+      if (mode === "preview") showToast(message, { tone: "error" });
+      return;
+    }
+    const generation = viewGenerationRef.current;
+    forkInFlightRef.current = true;
+    setBusy(true);
+    let releaseOnFinish = true;
+    try {
+      const recovered = await api.recoverQuarantinedConversation(
+        sessionId,
+        quarantine.recoveryTurn,
+        handoff
+          ? {
+              agentId: session.agentId!,
+              config: {
+                ...(session.model ? { model: session.model } : {}),
+                ...(session.effort ? { effort: session.effort } : {}),
+                ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}),
+                // The tier is a deliberate cost/latency choice; recovery must not quietly reset it.
+                ...(session.serviceTier ? { serviceTier: session.serviceTier } : {}),
+              },
+            }
+          : undefined,
+      );
+      // Both matter and there is one composer. The handoff draft is what seeds a fresh thread with
+      // the checkpoint dialogue, so it must lead; the retained prompt is the user's own unsent
+      // request, so it follows as the actual instruction. Dropping either would break a promise the
+      // confirmation just made.
+      const context = recovered.handoffDraft;
+      const retained = recovered.retainedPrompt;
+      // Each draft is independently valid, but their attachments are not additive: concatenating
+      // them can exceed the per-prompt image count or aggregate byte budget, or repeat the same
+      // file, leaving a staged draft the composer refuses to send. Merge under the real validator,
+      // and let the user's own attachments win the budget over recovered context.
+      const mimeTypes = session.driver === "codex-app-server"
+        ? CODEX_APP_SERVER_IMAGE_MIME_TYPES
+        : PROMPT_IMAGE_MIME_TYPES;
+      const images: PromptImageInput[] = [];
+      const seen = new Set<string>();
+      let droppedImages = 0;
+      for (const image of [...(retained?.images ?? []), ...(context?.images ?? [])]) {
+        const key = JSON.stringify(image);
+        if (seen.has(key)) { droppedImages += 1; continue; }
+        if (!validatePromptImageInputs([...images, image], mimeTypes).ok) { droppedImages += 1; continue; }
+        seen.add(key);
+        images.push(image);
+      }
+      const body = context && retained?.text
+        ? `${context.text}\n\nYour unsent message follows.\n\n${retained.text}`
+        : context?.text ?? retained?.text ?? "";
+      const text = droppedImages
+        ? `${body}\n\n[${droppedImages} attachment${droppedImages === 1 ? "" : "s"} could not be carried into this draft. Re-attach anything still needed.]`
+        : body;
+      if (text || images.length) {
+        stageComposerDraftHandoff(recovered.id, text, images, instanceScope);
+        await saveComposerDraft(recovered.id, text, images, instanceScope);
+      }
+      if (viewGenerationRef.current === generation) navigate({ name: "session", id: recovered.id });
+    } catch (cause) {
+      const ambiguous = ambiguousForkError(cause);
+      if (ambiguous) releaseOnFinish = false;
+      if (viewGenerationRef.current === generation) {
+        const message = (ambiguous ?? cause as Error).message;
+        setError(message);
+        if (mode === "preview") showToast(message, { tone: "error" });
+      }
+    } finally {
+      if (releaseOnFinish) releaseFork();
+      forkInFlightRef.current = false;
+      setBusy(false);
+    }
+  }, [api, busy, confirm, instanceScope, mode, navigate, session.agentId, session.effort,
+    session.historyQuarantine, session.model, session.permissionMode, sessionId, showToast]);
+
+  const queuedEditReconciliation = queuedEdit && queuedEditRecovered
+    ? reconcileQueuedEditRecovery(
+        queuedEdit.promptId,
+        queuedEdit.editRevision,
+        session.queued,
+        conn === "online" && snapshotLoaded && runnerOnline,
+      )
+    : null;
+  const queuedEditRetryable = queuedEditReconciliation === null ||
+    queuedEditReconciliation.status === "retryable";
   const canSend = canPrompt && (text.trim().length > 0 || images.length > 0);
+  const restartFromComposer = useCallback(async () => {
+    if (session.status !== "stopped" || session.stopOperation?.status === "stop_failed" ||
+      !runnerOnline || busy || restartPending) return;
+    const generation = viewGenerationRef.current;
+    setError(null);
+    setBusy(true);
+    setRestartPending(true);
+    try {
+      loadSession(await api.restart(session.id));
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+    } finally {
+      if (viewGenerationRef.current === generation) {
+        setRestartPending(false);
+        setBusy(false);
+      }
+    }
+  }, [api, busy, loadSession, restartPending, runnerOnline, session.id, session.status,
+    session.stopOperation?.status]);
   const primaryComposerAction = composerPrimaryAction({
     canStopTurn,
     hasContent: text.length > 0 || images.length > 0,
@@ -1990,6 +2959,19 @@ function SessionDetailLoaded({
     turn,
     conversationForkAvailability(turn, latestKnownTurn, forkContext),
   ])), [conversationCheckpointTurns, forkContext, latestKnownTurn]);
+  const handoffControls = useMemo(() => ({
+    open: setHandoffTurn,
+    reason: !runnerOnline ? "The runner is offline."
+      : !runnerSupportsProtocol(runner?.protocolVersion, "conversationHandoff") ? "Update the runner to support checkpoint handoffs."
+      : !session.worktreePath ? "A worktree is required."
+      : busy || forkInProgress || session.queued?.length || ["running", "starting", "queued", "input_required"].includes(session.status) ? "The source session is busy."
+      : undefined,
+  }), [runnerOnline, runner?.protocolVersion, session.worktreePath, session.queued?.length, session.status, busy, forkInProgress]);
+  const rewindUnavailableReason = session.worktreePath == null
+    ? "A worktree is required."
+    : !runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
+      ? runnerCapabilityRequirement(runner?.protocolVersion, "checkpointRewind", "Checkpoint rewind")
+      : undefined;
   const latestForkAvailability = useMemo(
     () => conversationForkAvailability(latestConversationForkTurn, latestKnownTurn, forkContext),
     [forkContext, latestConversationForkTurn, latestKnownTurn],
@@ -2050,6 +3032,7 @@ function SessionDetailLoaded({
 
   const prepareResend = useCallback((draft: { text: string; images: PromptImageInput[] }) => {
     if (!canPrompt) throw new Error("This session cannot accept a new turn right now.");
+    revealOrdinaryComposerRef.current("always");
     draftDirty.current = true;
     composerDraftVersionRef.current += 1;
     draftState.current = draft;
@@ -2098,13 +3081,14 @@ function SessionDetailLoaded({
   // "Agent is working" state (items 1 + 2): true the instant a send is optimistically pending
   // (before status flips) and for the whole turn while the runner reports running/starting.
   const showOptimistic = pending != null && timelineUserPrompts.length <= sendBaselineRef.current;
-  const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
   // A request id owns an immutable question schema. Keep the timeline context stable across
   // heartbeat, usage, and lifecycle snapshots that replace the surrounding SessionView.
   const timelinePendingQuestion = useMemo(() => pendingQuestion ? {
     requestId: pendingQuestion.requestId,
     questions: pendingQuestion.questions ?? [],
-  } : null, [session.id, pendingQuestion?.requestId]);
+    recoveryReason: pendingQuestion.recoveryReason,
+    recoveryAction: pendingQuestion.recoveryAction,
+  } : null, [session.id, pendingQuestion?.requestId, pendingQuestion?.recoveryReason, pendingQuestion?.recoveryAction]);
   const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
   const handlePendingQuestionAvailabilityChange = useCallback((requestId: string, available: boolean) => {
     setInlineQuestionRequestId((current) => available
@@ -2145,30 +3129,101 @@ function SessionDetailLoaded({
   // The web registry owns app/provider identity, availability, collisions, and menu ranking. The
   // provider wire shape stays unchanged until IDEA-004C adds transport-specific execution modes.
   const agentCaps = resolveCaps(runner, session);
+  const contextWindow = resolveContextWindowCapacity(session, agentCaps?.models ?? []);
+  const hasContextWindow = contextWindow.known;
   // Plan mode is only safe where the driver actually advertises the `plan` approval mode (Claude).
   // Codex silently falls back to a writable sandbox for an unknown mode, so exposing it there would
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
   const planSupported = (agentCaps?.permissionModes ?? []).includes("plan");
   const composerCommands = useMemo(() => buildComposerCommandRegistry({
-    context: { planSupported, canStopTurn },
+    context: { planSupported, canStopTurn, canRespond: canAnswerPendingQuestion },
     providerCommands: mapProviderComposerCommands(
       agentCaps?.slashCommands ?? [],
       providerCommandAttachmentPolicy,
     ),
-  }), [agentCaps?.slashCommands, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
+  }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
   const slashTrigger = useMemo(
     () => composerSelection.start === composerSelection.end
       ? findComposerCommandTrigger(text, composerSelection.start)
       : null,
     [composerSelection.end, composerSelection.start, text],
   );
+  const workspaceReferencesSupported = runnerSupportsProtocol(runner?.protocolVersion, "workspaceReferences");
+  const workspaceTrigger = useMemo(
+    () => workspaceReferencesSupported && composerSelection.start === composerSelection.end
+      ? findWorkspaceReferenceTrigger(text, composerSelection.start)
+      : null,
+    [composerSelection.end, composerSelection.start, text, workspaceReferencesSupported],
+  );
+  const workspaceDismissKey = workspaceTrigger ? `${text}\u0000${composerSelection.start}` : null;
+  const workspacePickerOpen = canPrompt && workspaceTrigger !== null && workspaceDismissedFor !== workspaceDismissKey;
+  useEffect(() => {
+    if (!workspacePickerOpen || !workspaceTrigger?.query) {
+      setWorkspaceResults([]);
+      setWorkspaceSearchBusy(false);
+      setWorkspaceSearchError(null);
+      setWorkspaceSearchTruncated(false);
+      setActiveWorkspaceResult(0);
+      return;
+    }
+    let current = true;
+    const timer = window.setTimeout(() => {
+      setWorkspaceSearchBusy(true);
+      setWorkspaceSearchError(null);
+      void api.searchWorkspaceReferences(sessionId, workspaceTrigger.query).then((result) => {
+        if (!current) return;
+        setWorkspaceResults(result.results);
+        setWorkspaceSearchTruncated(result.truncated);
+        setActiveWorkspaceResult(0);
+      }).catch((cause: unknown) => {
+        if (!current) return;
+        setWorkspaceResults([]);
+        setWorkspaceSearchError((cause as Error).message);
+      }).finally(() => {
+        if (current) setWorkspaceSearchBusy(false);
+      });
+    }, 150);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [api, sessionId, workspacePickerOpen, workspaceTrigger?.query]);
+
+  const attachWorkspaceTarget = useCallback(async (target: CreateWorkspaceReferenceRequest) => {
+    if (!workspaceReferencesSupported) {
+      setError(runnerCapabilityRequirement(runner?.protocolVersion, "workspaceReferences", "Workspace references"));
+      return;
+    }
+    try {
+      const { reference } = await api.createWorkspaceReference(sessionId, target);
+      const outcome = addWorkspaceReference(reference);
+      if (outcome !== "limit") setError(null);
+      if (outcome === "added") showToast(`Attached ${reference.path}.`);
+      if (outcome === "duplicate") showToast(`${reference.path} is already attached.`);
+      window.requestAnimationFrame(() => inputRef.current?.focus());
+    } catch (cause) {
+      setError((cause as Error).message);
+    }
+  }, [addWorkspaceReference, api, runner?.protocolVersion, sessionId, showToast, workspaceReferencesSupported]);
+
+  const selectWorkspaceCandidate = (candidate: WorkspaceReferenceCandidate) => {
+    if (!workspaceTrigger) return;
+    const nextText = text.slice(0, workspaceTrigger.start) + text.slice(composerSelection.start);
+    markDraftDirty();
+    setProgrammaticComposerText(nextText, workspaceTrigger.start);
+    setWorkspaceDismissedFor(null);
+    void attachWorkspaceTarget({
+      path: candidate.path,
+      kind: candidate.isDirectory ? "directory" : "file",
+    });
+  };
   const slashMatches = useMemo(() => {
     if (!slashTrigger) return [];
     const ranked = rankComposerCommands(composerCommands, slashTrigger.query).map((match) => match.command);
     return slashTrigger.query ? ranked : ranked.filter((command) => command.available);
   }, [composerCommands, slashTrigger]);
   const slashDismissKey = slashTrigger ? `${text}\u0000${composerSelection.start}` : null;
-  const paletteOpen = canPrompt && slashMatches.length > 0 && slashDismissedFor !== slashDismissKey;
+  const paletteOpen = !workspacePickerOpen && canPrompt && slashMatches.length > 0 && slashDismissedFor !== slashDismissKey;
   const selectedSlashCommandId = retainActiveComposerCommandId(activeSlashCommandId, slashMatches);
   const selectedSlashCommand = slashMatches.find((command) => command.id === selectedSlashCommandId);
   const selectedSlashCommandIndex = selectedSlashCommand
@@ -2228,7 +3283,9 @@ function SessionDetailLoaded({
     void saveComposerDraft(sessionId, "", images, instanceScope);
   };
 
-  const requestSessionRetitle = async () => {
+  const requestSessionRetitle = async (
+    composerFocus?: ReturnType<typeof captureComposerFocus>,
+  ) => {
     if (retitleInFlightRef.current) return;
     const generation = viewGenerationRef.current;
     retitleInFlightRef.current = true;
@@ -2236,6 +3293,12 @@ function SessionDetailLoaded({
     try {
       await api.retitleSession(sessionId);
       if (viewGenerationRef.current !== generation) return;
+      const receipt = retitleReceiptRef.current;
+      const restoreComposerAfterReceipt = composerFocus !== undefined
+        && receipt?.ownerDocument.activeElement === receipt;
+      retitleFocusRestoreRef.current = restoreComposerAfterReceipt
+        ? { generation, sessionId, composer: composerFocus }
+        : null;
       setRetitleFeedback(null);
       showToast("Session renamed.", { tone: "success" });
     } catch (cause) {
@@ -2282,6 +3345,15 @@ function SessionDetailLoaded({
           await requestSessionRetitle();
           return;
         }
+        if (invocation.command.name === "respond") {
+          if (args) {
+            setError("Direct /respond answers are not supported. Use /respond to enter Answer Mode.");
+            return;
+          }
+          clearAppCommandText();
+          enterAnswerMode();
+          return;
+        }
         if (invocation.command.name === "plan") {
           togglePlan(args === "off" ? false : args === "on" ? true : !planActive);
           clearAppCommandText();
@@ -2297,7 +3369,7 @@ function SessionDetailLoaded({
       Boolean(invocation.command.providerCommandId && invocation.command.catalogRevision);
     const preservesAttachments = invocation.kind === "command" &&
       invocation.command.attachmentPolicy === "preserve";
-    if (images.length && !preservesAttachments && !modelSupportsImages(sessionCaps, effectiveModel)) {
+    if (actualImages.length && !preservesAttachments && !modelSupportsImages(sessionCaps, effectiveModel)) {
       setError("The selected model does not support image input. Remove the attachment or choose an image-capable model.");
       return;
     }
@@ -2450,7 +3522,7 @@ function SessionDetailLoaded({
       return;
     }
     const outgoing = text.trim();
-    if (images.length && !modelSupportsImages(sessionCaps, effectiveModel)) {
+    if (actualImages.length && !modelSupportsImages(sessionCaps, effectiveModel)) {
       setError("The selected model does not support image input. Remove the attachment or choose an image-capable model.");
       return;
     }
@@ -2584,6 +3656,7 @@ function SessionDetailLoaded({
       setError(availability.reason);
       return;
     }
+    if (composerAnswerActive) exitAnswerMode();
     const generation = viewGenerationRef.current;
     const displacedDraft = {
       text: draftState.current.text,
@@ -2599,6 +3672,7 @@ function SessionDetailLoaded({
       const editState = { ...exact, displacedDraft };
       queuedEditRef.current = editState;
       setQueuedEdit(editState);
+      setQueuedEditRecovered(false);
       setProgrammaticComposerText(exact.text);
       replace(exact.images);
       setHistIdx(-1);
@@ -2612,52 +3686,159 @@ function SessionDetailLoaded({
 
   const cancelQueuedPromptEdit = () => {
     if (!queuedEdit || queuedEditBusy) return;
+    revealOrdinaryComposerRef.current("always");
     const displaced = queuedEdit.displacedDraft;
     markDraftDirty();
+    clearQueuedPromptEditRecovery(mutationKey);
     queuedEditRef.current = null;
     setQueuedEdit(null);
+    setQueuedEditRecovered(false);
     draftState.current = displaced;
     setProgrammaticComposerText(displaced.text);
     replace(displaced.images);
     setHistIdx(-1);
     setError(null);
     void saveComposerDraft(sessionId, displaced.text, displaced.images, instanceScope);
-    window.requestAnimationFrame(focusComposerAtDraftEnd);
+  };
+
+  const useRecoveredQueuedEditAsNewMessage = async () => {
+    if (!queuedEdit || !queuedEditRecovered || queuedEditBusy) return;
+    revealOrdinaryComposerRef.current("always");
+    const generation = viewGenerationRef.current;
+    const recoveredEdit = queuedEdit;
+    const draftVersion = composerDraftVersionRef.current;
+    const retainedDraft = {
+      text: draftState.current.text,
+      images: draftState.current.images.map((image) => ({ ...image })),
+    };
+    setError(null);
+    setQueuedEditBusy(true);
+    try {
+      const materializedImages = await materializePromptImages(retainedDraft.images, api.artifactExport);
+      if (viewGenerationRef.current !== generation || queuedEditRef.current !== recoveredEdit) return;
+      if (composerDraftVersionRef.current !== draftVersion) {
+        setError("Recovered message was not converted because the composer changed. Try again.");
+        return;
+      }
+      const recoveredDraft = { text: retainedDraft.text, images: materializedImages };
+      const saved = await saveComposerDraft(sessionId, recoveredDraft.text, recoveredDraft.images, instanceScope);
+      if (viewGenerationRef.current !== generation || queuedEditRef.current !== recoveredEdit) return;
+      if (composerDraftVersionRef.current !== draftVersion) {
+        const displaced = recoveredEdit.displacedDraft;
+        await saveComposerDraft(sessionId, displaced.text, displaced.images, instanceScope);
+        if (viewGenerationRef.current !== generation || queuedEditRef.current !== recoveredEdit) return;
+        setError("Recovered message was not converted because the composer changed. Try again.");
+        return;
+      }
+      if (!saved) {
+        setError("Recovered message was not converted because the ordinary draft could not be saved safely.");
+        return;
+      }
+      markDraftDirty();
+      clearQueuedPromptEditRecovery(mutationKey);
+      setQueuedEditBusy(false);
+      queuedEditRef.current = null;
+      setQueuedEdit(null);
+      setQueuedEditRecovered(false);
+      draftState.current = recoveredDraft;
+      replace(recoveredDraft.images);
+      setHistIdx(-1);
+      setError(null);
+      window.requestAnimationFrame(focusComposerAtDraftEnd);
+    } catch (cause) {
+      if (viewGenerationRef.current === generation && queuedEditRef.current === recoveredEdit) {
+        setError(`Recovered message was not converted because an attachment could not be retained. ${(cause as Error).message}`);
+      }
+    } finally {
+      if (viewGenerationRef.current === generation && queuedEditRef.current === recoveredEdit) {
+        setQueuedEditBusy(false);
+      }
+    }
   };
 
   const saveQueuedPromptEdit = async () => {
-    if (!queuedEdit || queuedEditBusy || composerMutationRegistry.has(mutationKey)) return;
+    if (!queuedEdit || queuedEditBusy || !queuedEditRetryable || composerMutationRegistry.has(mutationKey)) return;
     const submittedDraft = {
       text: text.trim(),
       images: images.map((image) => ({ ...image })),
     };
     if (!submittedDraft.text && submittedDraft.images.length === 0) return;
-    const submissionFingerprint = JSON.stringify(submittedDraft);
-    const submissionId = queuedEdit.submissionId && queuedEdit.submissionFingerprint === submissionFingerprint
-      ? queuedEdit.submissionId
-      : browserRandomUUID();
-    if (queuedEdit.submissionId !== submissionId) {
-      const nextEdit = { ...queuedEdit, submissionId, submissionFingerprint };
-      queuedEditRef.current = nextEdit;
-      setQueuedEdit((current) => current?.promptId === queuedEdit.promptId ? nextEdit : current);
+    if (!queuedEditRecoveryScope) {
+      setError("Queued message edit was not sent because authenticated recovery storage is not ready.");
+      return;
     }
-    const mutation = reserveComposerMutation(mutationKey, "edit", submittedDraft);
+    let recovery: QueuedPromptEditRecovery = { edit: queuedEdit, draft: submittedDraft };
+    const mutation = reserveComposerMutation(mutationKey, "edit", submittedDraft, recovery);
     if (!mutation) return;
     const generation = viewGenerationRef.current;
+    let editAccepted = false;
     setQueuedEditBusy(true);
     setError(null);
     try {
+      // Browser paste data is base64 and can legitimately exceed localStorage quotas. Upload every
+      // image first, then persist the compact immutable references before submitting the edit.
+      // Artifact creation is not a queued-edit submission and references remain safe to retry.
+      const editImageCount = queuedEdit.images.length;
+      let preparedImages: PromptImageInput[];
+      try {
+        preparedImages = await api.preparePromptImages(sessionId, [
+          ...queuedEdit.images,
+          ...submittedDraft.images,
+        ]);
+      } catch (cause) {
+        if (viewGenerationRef.current === generation) {
+          setError(`Queued message edit was not sent. ${(cause as Error).message}`);
+        }
+        return;
+      }
+      const preparedEditImages = preparedImages.slice(0, editImageCount);
+      const preparedDraft = {
+        text: submittedDraft.text,
+        images: preparedImages.slice(editImageCount),
+      };
+      const submissionFingerprint = JSON.stringify(preparedDraft);
+      const submissionId = queuedEdit.submissionId && queuedEdit.submissionFingerprint === submissionFingerprint
+        ? queuedEdit.submissionId
+        : browserRandomUUID();
+      const editForAttempt: QueuedPromptEditState = {
+        ...queuedEdit,
+        images: preparedEditImages,
+        // The ordinary draft remains in IndexedDB/local draft storage. It is not part of this
+        // queued-edit submission and must not create authenticated server artifacts merely to
+        // compact the recovery record.
+        displacedDraft: queuedEdit.displacedDraft,
+        submissionId,
+        submissionFingerprint,
+      };
+      recovery = { edit: editForAttempt, draft: preparedDraft };
+      updateQueuedPromptEditMutationRecovery(mutationKey, recovery);
+      updateComposerMutationDraft(mutationKey, mutation.token, preparedDraft);
+      if (viewGenerationRef.current === generation) {
+        queuedEditRef.current = editForAttempt;
+        setQueuedEdit(editForAttempt);
+        draftState.current = preparedDraft;
+        replace(preparedDraft.images);
+      }
+      if (!persistQueuedPromptEditRecovery(recovery)) {
+        if (viewGenerationRef.current === generation) {
+          setError("Queued message edit was not sent because its recovery could not be saved safely.");
+        }
+        return;
+      }
       await api.editQueuedPrompt(sessionId, queuedEdit.promptId, {
         submissionId,
         expectedRevision: queuedEdit.editRevision,
-        text: submittedDraft.text,
-        images: submittedDraft.images,
+        text: preparedDraft.text,
+        images: preparedDraft.images,
       });
+      editAccepted = true;
+      clearQueuedPromptEditRecovery(mutationKey);
       if (viewGenerationRef.current !== generation) return;
-      const displaced = queuedEdit.displacedDraft;
+      const displaced = editForAttempt.displacedDraft;
       markDraftDirty();
       queuedEditRef.current = null;
       setQueuedEdit(null);
+      setQueuedEditRecovered(false);
       draftState.current = displaced;
       setProgrammaticComposerText(displaced.text);
       replace(displaced.images);
@@ -2665,8 +3846,23 @@ function SessionDetailLoaded({
       await saveComposerDraft(sessionId, displaced.text, displaced.images, instanceScope);
       window.requestAnimationFrame(focusComposerAtDraftEnd);
     } catch (cause) {
-      // The edited draft deliberately remains in place after every stale/racing failure.
-      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+      // A departed view cannot display the failure, so retain the typed edit separately from its
+      // displaced ordinary draft. A definitive runner acceptance must never enter recovery even
+      // if restoring that displaced draft later hits a local storage error.
+      const failureMessage = editAccepted
+        ? (cause as Error).message
+        : `Queued message edit was not confirmed. ${(cause as Error).message}`;
+      if (!editAccepted) {
+        const latestRecovery = queuedPromptEditMutationRecovery(
+          composerMutationRegistry.get(mutationKey),
+        ) ?? recovery;
+        storeQueuedPromptEditRecovery(mutationKey, {
+          ...latestRecovery,
+          error: failureMessage,
+        });
+        if (viewGenerationRef.current === generation) setQueuedEditRecovered(true);
+      }
+      if (viewGenerationRef.current === generation) setError(failureMessage);
     } finally {
       releaseComposerMutation(mutationKey, mutation.token);
       if (viewGenerationRef.current === generation) setQueuedEditBusy(false);
@@ -2737,7 +3933,7 @@ function SessionDetailLoaded({
     if (queuedEdit && e.key === "Enter" && !e.metaKey && !e.ctrlKey && !composing) {
       if (!enterKeystrokeSends(e.shiftKey)) return;
       e.preventDefault();
-      void saveQueuedPromptEdit();
+      if (queuedEditRetryable) void saveQueuedPromptEdit();
       return;
     }
     // Steering owns exact Ctrl+Enter before slash-palette selection. The composed slash text is
@@ -2746,6 +3942,26 @@ function SessionDetailLoaded({
       e.preventDefault();
       void steerDraft();
       return;
+    }
+    if (workspacePickerOpen) {
+      const plainKey = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
+      if (e.key === "Escape" && plainKey) {
+        e.preventDefault();
+        setWorkspaceDismissedFor(workspaceDismissKey);
+        return;
+      }
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && plainKey && workspaceResults.length) {
+        e.preventDefault();
+        setActiveWorkspaceResult((current) => e.key === "ArrowDown"
+          ? (current + 1) % workspaceResults.length
+          : (current - 1 + workspaceResults.length) % workspaceResults.length);
+        return;
+      }
+      if ((e.key === "Tab" || e.key === "Enter") && plainKey && workspaceResults[activeWorkspaceResult]) {
+        e.preventDefault();
+        selectWorkspaceCandidate(workspaceResults[activeWorkspaceResult]!);
+        return;
+      }
     }
     if (paletteOpen) {
       const plainKey = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
@@ -2808,7 +4024,6 @@ function SessionDetailLoaded({
     }
   };
 
-  const usage = sessionPreviewUsage(session);
   const currentProjectName = projectsSupported
     ? (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName ?? "No Project"
     : session.workspaceName ?? "No Workspace";
@@ -2826,6 +4041,8 @@ function SessionDetailLoaded({
           onBack={onBack ?? (() => navigate({ name: "inbox" }))}
           onArchive={onArchive}
           onSnooze={onSnooze}
+          reminder={reminder}
+          onDismissReminder={onDismissReminder}
           forkAvailability={latestForkAvailability}
           onFork={() => {
             if (latestForkAvailability.available) void onFork(latestForkAvailability.forkTurn);
@@ -2843,10 +4060,22 @@ function SessionDetailLoaded({
           )}
           topbarControls={topbarControls}
           changeStatus={changeStatus}
-          activeSubagents={preferredActiveSubagentId ? {
-            count: activeSubagents.length,
-            onOpen: () => openSubagent(preferredActiveSubagentId),
+          activeSubagents={activeWorkerCount ? {
+            count: activeWorkerCount,
+            workers: true,
+            onOpen: () => rightPanel.show("subagents"),
           } : undefined}
+          onOpenBackgroundWork={() => rightPanel.show("background")}
+          onOpenAttention={() => {
+            const requests = pendingRequests(session.pendingApproval);
+            // Navigation makes the target reload-safe; the direct state transition also makes a
+            // repeat press reopen a panel that was closed while the route stayed unchanged.
+            rightPanel.show("subagents");
+            navigate({ name: "session", id: session.id, attention: {
+              eventEpoch: session.eventEpoch ?? 0,
+              ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
+            } });
+          }}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
@@ -2857,25 +4086,38 @@ function SessionDetailLoaded({
             <h2 className="session-preview-title">{session.title}</h2>
             <div className="session-preview-meta">
               <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-              {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
-              {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-                <UntrackedBackgroundWorkBadge />
+              {visibleBackgroundWorkState && <BackgroundWorkBadge state={visibleBackgroundWorkState} onOpen={() => {
+                rightPanel.show("background");
+                onExpand?.();
+              }} />}
+              {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+                <UntrackedBackgroundWorkBadge onOpen={() => {
+                  rightPanel.show("background");
+                  onExpand?.();
+                }} />
               )}
               {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
                 <BackgroundDeliveryBadge
                   state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
+                  onOpen={() => {
+                    rightPanel.show("background");
+                    onExpand?.();
+                  }}
                 />
               )}
               {session.backgroundDeliveries?.flatMap((delivery) => delivery.notifications ?? []).slice(-2).map((receipt) => (
-                <BackgroundNotificationBadge key={receipt.deliveryId} state={receipt.state} />
+                <BackgroundNotificationBadge key={receipt.deliveryId} state={receipt.state} onOpen={() => {
+                  rightPanel.show("background");
+                  onExpand?.();
+                }} />
               ))}
               <span className="tag tag-machine" title={session.runnerId}>{runnerDisp.name}</span>
               {session.agentName && (
                 <span className="tag tag-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
               )}
               {session.workspaceName && <span className="tag tag-workspace">{session.workspaceName}</span>}
-              <ContextWindowMeter session={session} />
-              {usage && <span className="tag tag-usage" aria-label={`Usage: ${usage}`}>{usage}</span>}
+              <ContextWindowMeter session={session} resolution={contextWindow} />
+              <SessionUsageControl session={session} />
               {isHeartbeatBusy(session.status) && (
                 <ActivityStrip activity={activity} now={activityNow} />
               )}
@@ -2912,12 +4154,6 @@ function SessionDetailLoaded({
             // virtual list can keep it reachable at its canonical transcript position.
             questionInTimeline={questionInTimeline}
           />
-          {mode === "expanded" && (
-            <GovernanceAuditTrail
-              sessionId={session.id}
-              revision={`${session.updatedAt}:${session.pendingApproval?.requestId ?? ""}`}
-            />
-          )}
           <div
             className="detail-main"
             data-active-pane={activePane}
@@ -2951,6 +4187,7 @@ function SessionDetailLoaded({
                 richGitSupported={richGitSupported}
                 items={items}
                 onOpenReview={() => rightPanel.show("review")}
+                onOpenBackgroundWork={() => rightPanel.show("background")}
                 onOpenSourceLocation={openSourceLocation}
               />
             )}
@@ -2966,15 +4203,23 @@ function SessionDetailLoaded({
                 maybeLoadEarlier(event.currentTarget);
               }}
               onWheel={(event) => {
-                markSingleEarlierActivityIntent();
+                if (event.deltaY < 0) {
+                  markSingleEarlierActivityIntent();
+                  if (!nestedScrollerConsumesUpwardInput(event.target, event.currentTarget)) {
+                    requestEarlierFromInputAtHead();
+                  }
+                }
                 followTail.onWheel(event);
               }}
               onPointerDown={(event) => {
                 if (event.pointerType === "touch") markTouchEarlierActivityIntent(event.clientY);
-                else markSingleEarlierActivityIntent();
+                else markPointerEarlierActivityIntent(event.currentTarget);
               }}
               onPointerMove={(event) => {
-                if (event.pointerType === "touch") markTouchEarlierActivityMovement(event.clientY);
+                if (event.pointerType === "touch") {
+                  markTouchEarlierActivityMovement(event.clientY);
+                  requestEarlierFromTouchAtHead(event.clientY, event.target);
+                }
                 followTail.onPointerMove(event);
               }}
               onPointerUp={(event) => {
@@ -2988,7 +4233,9 @@ function SessionDetailLoaded({
                 followTail.onTouchStart();
               }}
               onTouchMove={(event) => {
-                markTouchEarlierActivityMovement(event.touches[0]?.clientY ?? null);
+                const clientY = event.touches[0]?.clientY ?? null;
+                markTouchEarlierActivityMovement(clientY);
+                requestEarlierFromTouchAtHead(clientY, event.target);
               }}
               onTouchEnd={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
               onTouchCancel={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
@@ -2996,7 +4243,10 @@ function SessionDetailLoaded({
                 if (event.defaultPrevented) return;
                 if (inTypingContext(event.currentTarget.ownerDocument)) return;
                 if (mode !== "expanded" && !isFollowTailResumeKey(event)) return;
-                if (isFollowTailUpwardReadingKey(event)) markSingleEarlierActivityIntent();
+                if (isFollowTailUpwardReadingKey(event)) {
+                  markSingleEarlierActivityIntent();
+                  requestEarlierFromInputAtHead();
+                }
                 if (!followTail.onKeyDown(event)) return;
                 event.preventDefault();
               }}
@@ -3029,7 +4279,8 @@ function SessionDetailLoaded({
                 <>
                   {items.length > 0 && (
                     <EventTimeline
-                      items={items}
+                      driver={session.driver}
+                      items={timelineItems}
                       sessionActive={isTimelineSessionActive(session.status)}
                       onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                       onOpenSourceLocation={openSourceLocation}
@@ -3040,15 +4291,12 @@ function SessionDetailLoaded({
                       anchorRecoveryPending={anchorRecoveryPending}
                       onVisibleAnchorChange={followTail.onVisibleAnchorChange}
                       onAnchorLost={followTail.onAnchorLost}
-                      // Worktree sessions on a v25+ runner only — persisted checkpoint rows can
-                      // outlive a runner downgrade, and the CP would 409 the click anyway.
-                      onRewind={
-                        mode === "expanded" &&
-                        session.worktreePath != null && runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
-                          ? onRewind
-                          : undefined
-                      }
+                      // Keep checkpoint actions discoverable when the runner or worktree cannot
+                      // currently satisfy them; activation still uses the existing API contract.
+                      onRewind={mode === "expanded" ? onRewind : undefined}
+                      rewindUnavailableReason={rewindUnavailableReason}
                       onFork={mode === "expanded" ? onFork : undefined}
+                      handoff={mode === "expanded" ? handoffControls : undefined}
                       onEditAndResend={mode === "expanded" && canPrompt ? openResendAction : undefined}
                       onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
                       editInForkTargets={mode === "expanded" ? editInForkTargets : undefined}
@@ -3073,8 +4321,11 @@ function SessionDetailLoaded({
                       <div className="bubble user-bubble">
                         {pending.images.length > 0 && (
                           <div className="bubble-images">
-                            {pending.images.map((img, i) => (
+                            {pending.images.filter((attachment) => !isWorkspaceReference(attachment)).map((img, i) => (
                               <PromptImageView key={"artifactId" in img ? img.artifactId : i} image={img} alt={`attachment ${i + 1}`} />
+                            ))}
+                            {pending.images.filter(isWorkspaceReference).map((reference) => (
+                              <span className="workspace-reference-chip is-readonly" key={reference.artifactId}>@{reference.path}</span>
                             ))}
                           </div>
                         )}
@@ -3102,67 +4353,75 @@ function SessionDetailLoaded({
                 panes CSS collapses the slot and surfaces the echo inside the status strip. */}
             <TranscriptRecoveryNotice active={transcript.notice === "refreshing"} />
             <div className="transcript-status-strip" aria-label="Transcript Status">
-              <div className="transcript-status-context">
-                {mode === "expanded" && <ContextWindowMeter session={session} />}
-                <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
-              </div>
-              {/* One compact centered cluster: Page Up · follow-state control (with its resume
-                  keycap inside) · Page Down. The pager hints sit directly beside the badge at the
-                  standard inter-control gap instead of being distributed toward the strip edges
-                  (dogfooding IDEA-007/BUG-009, 2026-08-10). */}
-              <div className="follow-tail-control">
-                {mode === "preview" && !isMobile && (
-                  <ShortcutHint label="Page Up" shortcut={shortcutDisplay("inbox-page-up")} />
+              {/* Without a context meter, compact recovery uses the leading grid seat while the
+                  visible live-output/cost group itself remains centered. */}
+              {(mode === "preview" || !hasContextWindow) && (
+                <div className="transcript-status-context transcript-status-context-standalone">
+                  <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
+                </div>
+              )}
+              {/* Keep the two usage indicators beside the live-output control as one centered
+                  status cluster on every viewport. The recovery echo may temporarily replace the
+                  context meter in compact panes, but it owns the same leading seat. */}
+              <div className="transcript-status-cluster">
+                {mode === "expanded" && hasContextWindow && (
+                  <div className="transcript-status-context">
+                    <ContextWindowMeter session={session} resolution={contextWindow} />
+                    <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
+                  </div>
                 )}
-                <button
-                  className={`follow-tail-chip ${followTail.state}`}
-                  data-follow-tail-state={followTail.state}
-                  onClick={followTail.follow}
-                  aria-label={followTailControlLabel(followTail.state, followLabel)}
-                  title={followTailControlTooltip(
-                    followTail.state,
-                    !isMobile,
-                    shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest"),
+                {/* Page Up · follow-state control (with its resume keycap inside) · Page Down.
+                    Preview pager hints stay directly beside the badge at the standard gap. */}
+                <div className="follow-tail-control">
+                  {mode === "preview" && !isMobile && (
+                    <ShortcutHint label="Page Up" shortcut={shortcutDisplay("inbox-page-up")} />
                   )}
-                >
-                  <span aria-live="polite">{followLabel}</span>
-                  {!followTail.isFollowing && <span className="follow-tail-action">Follow Live Output</span>}
-                  {!isMobile && !followTail.isFollowing && (
-                    <kbd
-                      className="follow-tail-kbd"
-                      aria-hidden="true"
-                      data-shortcut-hint={shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
-                    >
-                      {shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
-                    </kbd>
-                  )}
-                </button>
-                {mode === "preview" && !isMobile && !followTail.isFollowing && (
-                  <ShortcutHint label="Page Down" shortcut={shortcutDisplay("inbox-page-down")} shortcutFirst />
-                )}
-              </div>
-              <div className="transcript-status-trailing">
-                {mode === "expanded" && isMobile && usage && (
-                  <span
-                    className="transcript-status-usage"
-                    title={`Session usage: ${usage}`}
-                    aria-label={`Usage: ${usage}`}
+                  <button
+                    className={`follow-tail-chip ${followTail.state}`}
+                    data-follow-tail-state={followTail.state}
+                    onClick={followTail.follow}
+                    aria-label={followTailControlLabel(followTail.state, followLabel)}
+                    title={followTailControlTooltip(
+                      followTail.state,
+                      !isMobile,
+                      shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest"),
+                    )}
                   >
-                    {usage}
-                  </span>
-                )}
-                <div className="transcript-status-actions">
-                  {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
-                    <ShortcutHint
-                      label="Reply"
-                      shortcut={shortcutDisplay("session-reading-reply")}
-                      title={`Reply (${shortcutDisplay("session-reading-reply")})`}
-                      ariaLabel="Reply"
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={focusComposerAtDraftEnd}
-                    />
+                    <span aria-live="polite">{followLabel}</span>
+                    {!followTail.isFollowing && <span className="follow-tail-action">Follow Live Output</span>}
+                    {!isMobile && !followTail.isFollowing && (
+                      <kbd
+                        className="follow-tail-kbd"
+                        aria-hidden="true"
+                        data-shortcut-hint={shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
+                      >
+                        {shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
+                      </kbd>
+                    )}
+                  </button>
+                  {mode === "preview" && !isMobile && !followTail.isFollowing && (
+                    <ShortcutHint label="Page Down" shortcut={shortcutDisplay("inbox-page-down")} shortcutFirst />
                   )}
                 </div>
+                {/* Cost only (#781): the neighboring context meter owns occupancy, while this
+                    control owns cumulative session spend. Both stay adjacent to live output. */}
+                {mode === "expanded" && (
+                  <SessionUsageControl session={session} className="transcript-status-usage" />
+                )}
+              </div>
+              {/* Contextual actions remain in the strip's trailing slack so appearing and
+                  disappearing Reply guidance cannot move the centered status cluster. */}
+              <div className="transcript-status-actions">
+                {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
+                  <ShortcutHint
+                    label="Reply"
+                    shortcut={shortcutDisplay("session-reading-reply")}
+                    title={`Reply (${shortcutDisplay("session-reading-reply")})`}
+                    ariaLabel="Reply"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={focusComposerAtDraftEnd}
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -3181,8 +4440,40 @@ function SessionDetailLoaded({
                   : ""}
             </span>
             {error && <div className="composer-error" role="alert">{error}</div>}
+            {historyQuarantine && (
+              <div className="quarantine-banner" role="status" aria-label="Conversation Quarantined">
+                <div className="quarantine-copy">
+                  <span className="quarantine-title">Conversation Quarantined</span>
+                  <p>
+                    The agent provider rejects an item stored in this conversation&rsquo;s own history, so
+                    prompts fail before the model runs. Sending again or <code>/compact</code> cannot
+                    repair it — both resend the same history.
+                  </p>
+                  <p>
+                    {historyQuarantine.recoveryTurn === undefined
+                      ? "There is no earlier checkpoint to recover from. Your files are unchanged in this session's worktree; start a new session to continue the work."
+                      : `Recovering continues from the checkpoint after turn ${historyQuarantine.recoveryTurn} in a new session with the same files. This session stays here, unchanged, for inspection.`}
+                    {historyQuarantine.retainedPrompt ? " Your last message was kept unsent and moves to the recovered session's composer." : ""}
+                  </p>
+                </div>
+                {historyQuarantine.recoveryTurn !== undefined && (
+                  <div className="quarantine-actions">
+                    <button
+                      type="button"
+                      className="btn primary sm"
+                      disabled={busy || !runnerOnline}
+                      title={runnerOnline ? undefined : "Runner is offline."}
+                      onClick={() => void onRecoverQuarantinedConversation()}
+                    >
+                      Recover Session
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             {retitleFeedback && (
               <div
+                ref={retitleReceiptRef}
                 className="retitle-receipt"
                 data-status={retitleFeedback.state}
                 role="region"
@@ -3201,9 +4492,25 @@ function SessionDetailLoaded({
                     <button
                       type="button"
                       className="btn ghost sm retitle-receipt-retry"
+                      onPointerDown={() => {
+                        retitleRetryPointerActivationRef.current = true;
+                      }}
+                      onPointerCancel={() => {
+                        retitleRetryPointerActivationRef.current = false;
+                      }}
+                      onKeyDown={() => {
+                        retitleRetryPointerActivationRef.current = false;
+                      }}
                       onClick={(event) => {
-                        event.currentTarget.closest<HTMLElement>(".retitle-receipt")?.focus();
-                        void requestSessionRetitle();
+                        const input = inputRef.current;
+                        const keyboardActivation = event.detail === 0
+                          && !retitleRetryPointerActivationRef.current;
+                        retitleRetryPointerActivationRef.current = false;
+                        const composerFocus = keyboardActivation && input
+                          ? captureComposerFocus(input)
+                          : undefined;
+                        retitleReceiptRef.current?.focus();
+                        void requestSessionRetitle(composerFocus);
                       }}
                     >
                       Retry Rename
@@ -3255,6 +4562,8 @@ function SessionDetailLoaded({
                     ? "Steering is being submitted for this queued message."
                     : !availability.available
                       ? availability.reason
+                      : composerRequestBusy
+                        ? "Wait for the current message request to finish."
                       : "Promote this queued message into the active turn.";
                   const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting;
                   return (
@@ -3267,14 +4576,14 @@ function SessionDetailLoaded({
                       <span
                         className={`queued-badge${session.queueHeld ? " held" : ""}`}
                         title={session.queueHeld
-                          ? "Held after stopping the active turn; send another prompt to resume"
+                          ? "Waiting for the active turn or control-plane decision to settle; resolve any visible prompt to continue"
                           : queueTitle}
                       >
                         {queueLabel}
                       </span>
                       <span className="queued-text">
-                        {q.hasImages && <span className="queued-img" aria-hidden="true">🖼 </span>}
-                        {q.text || (q.hasImages ? "(image)" : "")}
+                        {q.hasImages && <span className="queued-img" aria-hidden="true">📎 </span>}
+                        {q.text || (q.hasImages ? "(attachment)" : "")}
                         {q.durableDeliveryError && (
                           <span className="queued-error"> — {q.durableDeliveryError}</span>
                         )}
@@ -3290,6 +4599,12 @@ function SessionDetailLoaded({
                         >
                           {locallyPromoting || q.steeringState === "promoting" ? "Steering…" : "Steer"}
                         </button>
+                        {(!availability.available || locallyPromoting || composerRequestBusy) && (
+                          <details className="queued-steer-info">
+                            <summary aria-label="Why Steering Is Unavailable">ⓘ</summary>
+                            <span role="status">{queueTitle}</span>
+                          </details>
+                        )}
                         <button
                           type="button"
                           className="btn ghost sm queued-edit"
@@ -3334,27 +4649,44 @@ function SessionDetailLoaded({
             )}
             {queuedEdit && (
               <div className="queued-edit-banner" role="status">
-                <span>Editing Queued Message</span>
-                <button
-                  type="button"
-                  className="btn ghost sm"
-                  disabled={queuedEditBusy}
-                  onClick={cancelQueuedPromptEdit}
-                >
-                  Cancel Edit
-                </button>
+                <div className="queued-edit-copy">
+                  <span>{queuedEditRecovered ? "Recovered Queued Message" : "Editing Queued Message"}</span>
+                  {queuedEditReconciliation && queuedEditReconciliation.status !== "retryable" && (
+                    <span className="queued-edit-reason">{queuedEditReconciliation.reason}</span>
+                  )}
+                </div>
+                <div className="queued-edit-actions">
+                  {queuedEditRecovered && (
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      disabled={queuedEditBusy}
+                      onClick={() => void useRecoveredQueuedEditAsNewMessage()}
+                    >
+                      Use as New Message
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    disabled={queuedEditBusy}
+                    onClick={cancelQueuedPromptEdit}
+                  >
+                    {queuedEditRecovered ? "Dismiss Recovery" : "Cancel Edit"}
+                  </button>
+                </div>
               </div>
             )}
             <div
-              className={`composer-box${dragActive ? " drag-over" : ""}`}
+              className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}`}
               onDragEnter={(e) => {
-                if (!canPrompt) return;
+                if (!canPrompt || composerAnswerActive) return;
                 e.preventDefault();
                 dragDepth.current += 1; // dragenter/leave fire per child; count so leaving a child doesn't clear
                 setDragActive(true);
               }}
               onDragOver={(e) => {
-                if (canPrompt) e.preventDefault(); // required for the element to be a valid drop target
+                if (canPrompt && !composerAnswerActive) e.preventDefault(); // required for the element to be a valid drop target
               }}
               onDragLeave={() => {
                 dragDepth.current = Math.max(0, dragDepth.current - 1);
@@ -3364,11 +4696,26 @@ function SessionDetailLoaded({
                 e.preventDefault();
                 dragDepth.current = 0;
                 setDragActive(false);
-                if (!canPrompt) return;
+                if (!canPrompt || composerAnswerActive) return;
                 const files = Array.from(e.dataTransfer.files);
                 if (files.length) void addFiles(files);
               }}
             >
+              {pendingQuestion && (
+                <ComposerQuestionResponse
+                  sessionId={session.id}
+                  requestId={pendingQuestion.requestId}
+                  questions={composerQuestions}
+                  runnerOnline={runnerOnline}
+                  active={composerAnswerActive}
+                  showWaiting={questionResponseStyle === "composer"}
+                  inputRef={answerInputRef}
+                  onEnter={enterAnswerMode}
+                  onExit={exitAnswerMode}
+                  onSessionUpdate={loadSession}
+                />
+              )}
+              {!composerAnswerActive && <>
               {dragActive && (
                 <div className="composer-dropzone">
                   {selectedModelSupportsImages ? "Drop images to attach" : "Selected model does not support images"}
@@ -3384,7 +4731,19 @@ function SessionDetailLoaded({
                   onSelectCommand={commitSlashCommand}
                 />
               )}
-              <ImageStrip images={images} onRemove={remove} />
+              {workspacePickerOpen && (
+                <WorkspaceReferencePicker
+                  listboxId={workspaceListboxId}
+                  results={workspaceResults}
+                  activeIndex={activeWorkspaceResult}
+                  busy={workspaceSearchBusy}
+                  error={workspaceSearchError}
+                  truncated={workspaceSearchTruncated}
+                  query={workspaceTrigger?.query ?? ""}
+                  onSelect={selectWorkspaceCandidate}
+                />
+              )}
+              <ImageStrip images={images} onRemove={remove} onInspectReference={setInspectedWorkspaceReference} />
               {commandPreservesAttachedImages && (
                 <div className="composer-attachment-notice" role="status">
                   {DURABLE_COMMAND_ATTACHMENT_NOTICE}
@@ -3395,12 +4754,14 @@ function SessionDetailLoaded({
                 className="composer-input"
                 role="combobox"
                 aria-autocomplete="list"
-                aria-expanded={paletteOpen}
+                aria-expanded={paletteOpen || workspacePickerOpen}
                 aria-busy={steeringRequestBusy || retitlePending || undefined}
-                aria-controls={paletteOpen ? slashListboxId : undefined}
-                aria-activedescendant={paletteOpen && selectedSlashCommandId
-                  ? slashCommandOptionId(slashListboxId, selectedSlashCommandId)
-                  : undefined}
+                aria-controls={workspacePickerOpen ? workspaceListboxId : paletteOpen ? slashListboxId : undefined}
+                aria-activedescendant={workspacePickerOpen && workspaceResults[activeWorkspaceResult]
+                  ? `${workspaceListboxId}-${activeWorkspaceResult}`
+                  : paletteOpen && selectedSlashCommandId
+                    ? slashCommandOptionId(slashListboxId, selectedSlashCommandId)
+                    : undefined}
                 value={text}
                 onFocus={(event) => {
                   composerExplicitFocusTransferRef.current = false;
@@ -3441,11 +4802,12 @@ function SessionDetailLoaded({
                     e.currentTarget.selectionEnd,
                   );
                   setSlashDismissedFor(null);
+                  setWorkspaceDismissedFor(null);
                   if (histIdx !== -1) setHistIdx(-1); // typing exits history browsing
                 }}
                 onKeyDown={onKeyDown}
                 onPaste={onPaste}
-                placeholder={canPrompt ? "Do anything" : terminal ? `Session is ${session.status}.` : "Runner is offline."}
+                placeholder={composerPlaceholder}
                 rows={2}
                 disabled={!canPrompt}
               />
@@ -3473,15 +4835,18 @@ function SessionDetailLoaded({
                     </button>
                   )}
                 </div>
-                {/* Session-level usage lives with the session-level controls, not in the
-                    transcript status strip — the otherwise-empty center of the composer bar. */}
-                {usage && !isMobile && (
-                  <span className="cbar-usage" title={`Session usage: ${usage}`} aria-label={`Usage: ${usage}`}>
-                    {usage}
-                  </span>
-                )}
                 <div className="cbar-right">
-                  <ModelEffortControl session={session} apply={applyConfig} />
+                  <ServiceTierControl
+                    session={session}
+                    apply={applyConfig}
+                    pendingModel={() => pendingConfig.current.model}
+                    pendingServiceTier={() => pendingConfig.current.serviceTier}
+                  />
+                  <ModelEffortControl
+                    session={session}
+                    apply={applyConfig}
+                    pendingEffort={() => pendingConfig.current.effort}
+                  />
                   {dictation.supported && (
                     <button
                       type="button"
@@ -3503,7 +4868,19 @@ function SessionDetailLoaded({
                       <MicIcon size={14} />
                     </button>
                   )}
-                  {primaryComposerAction === "send" ? (
+                  {session.status === "stopped" && session.stopOperation?.status !== "stop_failed" ? (
+                    <button
+                      type="button"
+                      className="send-btn"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onClick={() => void restartFromComposer()}
+                      disabled={!runnerOnline || composerRequestBusy}
+                      title={restartPending ? "Restarting Session" : "Restart Session"}
+                      aria-label={restartPending ? "Restarting Session" : "Restart Session"}
+                    >
+                      {restartPending ? <Spinner /> : <RefreshIcon size={14} />}
+                    </button>
+                  ) : primaryComposerAction === "send" ? (
                     <button
                       className="send-btn"
                       /* Keep focus in the textarea, like the dictation button above. On a phone
@@ -3514,9 +4891,13 @@ function SessionDetailLoaded({
                          keyboard open after sending, which is the chat convention. */
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={queuedEdit ? saveQueuedPromptEdit : send}
-                      disabled={!canSend || composerRequestBusy}
+                      disabled={!canSend || composerRequestBusy || (queuedEdit !== null && !queuedEditRetryable)}
                       title={queuedEdit
-                        ? enterKeySetting === "send"
+                        ? !queuedEditRetryable
+                          ? queuedEditReconciliation && "reason" in queuedEditReconciliation
+                            ? queuedEditReconciliation.reason
+                            : "This recovered queued edit cannot be retried yet."
+                          : enterKeySetting === "send"
                           ? "Save Queued Message (Enter)"
                           : isTouchPhone ? "Save Queued Message" : "Save Queued Message (Shift+Enter)"
                         : enterKeySetting === "send"
@@ -3543,6 +4924,7 @@ function SessionDetailLoaded({
                   )}
                 </div>
               </div>
+              </>}
             </div>
             {/* No context footer under the composer: project identity lives in the session bar's
                 breadcrumb, and git, agent, model, and host facts live in the pinned summary. */}
@@ -3555,16 +4937,82 @@ function SessionDetailLoaded({
           session={session}
           earlierActivityUnloaded={isPartialHistory(eventWindow)}
           sourceLocation={sourceLocation}
+          attentionTarget={attentionTarget}
           onOpenSourceLocation={openSourceLocation}
           onClearSourceLocation={clearSourceLocation}
           runnerOnline={runnerOnline}
           runnerProtocolVersion={runner?.protocolVersion}
           git={git}
+          forge={gitSummary.summary?.forge}
           onOpenTerminal={onOpenTerminal}
           onInsertSideChatDraft={insertSideChatDraft}
+          onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTarget : undefined}
           items={items}
+          governanceDecisions={governanceDecisions}
+          governanceAvailable={governanceAudit.available}
+          governanceHasMore={governanceAudit.hasMore}
+          governanceLoadingOlder={governanceAudit.loadingOlder}
+          onLoadOlderGovernance={governanceAudit.loadOlder}
+          parentTurnEventIds={backgroundParentTurnEventIds}
+          onOpenParentTurn={revealBackgroundParentTurn}
+          backgroundInventoryError={backgroundInventoryError}
+          onRetryBackgroundInventory={retryBackgroundInventory}
         />}
       </div>
+      {mode === "expanded" && inspectedWorkspaceReference && (
+        <Modal
+          title="Workspace Reference"
+          onClose={() => setInspectedWorkspaceReference(null)}
+          footer={<button className="btn primary" type="button" onClick={() => setInspectedWorkspaceReference(null)}>Done</button>}
+        >
+          <dl className="workspace-reference-details">
+            <dt>Path</dt><dd><code>{inspectedWorkspaceReference.path}</code></dd>
+            <dt>Reference Type</dt><dd>{inspectedWorkspaceReference.kind === "diff" ? "Diff Lines" : inspectedWorkspaceReference.kind === "lines" ? "File Lines" : inspectedWorkspaceReference.kind === "directory" ? "Folder" : "File"}</dd>
+            {inspectedWorkspaceReference.startLine !== undefined && (
+              <><dt>Line Range</dt><dd>{inspectedWorkspaceReference.startLine}–{inspectedWorkspaceReference.endLine}</dd></>
+            )}
+            {inspectedWorkspaceReference.side && (
+              <><dt>Diff Side</dt><dd>{inspectedWorkspaceReference.side === "left" ? "Base" : "Worktree"}</dd></>
+            )}
+            {inspectedWorkspaceReference.diffScope && (
+              <><dt>Diff Scope</dt><dd>{inspectedWorkspaceReference.diffScope.replace("_", " ")}</dd></>
+            )}
+            <dt>Revision</dt><dd><code>{inspectedWorkspaceReference.targetFingerprint.slice(0, 12)}</code></dd>
+          </dl>
+          <p className="muted">The runner will verify this path, workspace, and revision again before delivery.</p>
+          {inspectedWorkspaceReference.kind !== "directory" && inspectedWorkspaceReference.kind !== "diff" && (
+            <button
+              className="btn ghost"
+              type="button"
+              onClick={() => {
+                openSourceLocation({ path: inspectedWorkspaceReference.path, line: inspectedWorkspaceReference.startLine });
+                rightPanel.show("files");
+                setInspectedWorkspaceReference(null);
+              }}
+            >
+              Open in Files
+            </button>
+          )}
+        </Modal>
+      )}
+      {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver}
+        sourceServiceTier={session.serviceTier ?? undefined} turn={handoffTurn}
+        onClose={() => setHandoffTurn(null)} onCreate={async (agentId, config) => {
+          const release = acquireSessionFork(sessionId);
+          if (!release) throw new Error("A conversation fork or handoff is already in progress.");
+          let releaseOnFinish = true;
+          try {
+            const child = await api.handoff(sessionId, handoffTurn, agentId, config);
+            if (!child.handoffDraft) throw new Error("The runner returned no handoff draft.");
+            stageComposerDraftHandoff(child.id, child.handoffDraft.text, child.handoffDraft.images, instanceScope);
+            await saveComposerDraft(child.id, child.handoffDraft.text, child.handoffDraft.images, instanceScope);
+            setHandoffTurn(null); navigate({ name: "session", id: child.id });
+          } catch (cause) {
+            const ambiguous = ambiguousForkError(cause);
+            if (ambiguous) { releaseOnFinish = false; throw ambiguous; }
+            throw cause;
+          } finally { if (releaseOnFinish) release(); }
+        }} />}
       {mode === "expanded" && messageAction && (
         <MessageActionDialog
           key={`${messageAction.mode}-${messageAction.item.id}`}
@@ -4301,7 +5749,7 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
 }
 
 /** Codex-style "+" menu in the composer: Attach Image, Plan mode, and the cost budget. */
-function ComposerPlusMenu({
+export function ComposerPlusMenu({
   session,
   planActive,
   planSupported,
@@ -4380,7 +5828,7 @@ function ComposerPlusMenu({
         <>
           <div className="plus-backdrop" onClick={() => popover.close(true)} />
           <div
-            className="plus-pop"
+            className="plus-pop composer-plus-pop"
             id={popover.panelId}
             ref={popover.panelRef}
             role="dialog"
@@ -4441,21 +5889,40 @@ function ComposerPlusMenu({
             <div className="plus-section">Guardrails</div>
             <GuardrailInput
               prefix="$"
+              label="Recurring Cost Threshold"
               step="0.5"
               value={session.costBudgetUsd}
-              hint="pause + ask when spend reaches this"
+              hint="Pauses when spend reaches this amount. Continue advances the next threshold by another equal allowance."
               onCommit={(v) => onApply({ costBudgetUsd: v })}
+            />
+            <CheckpointsInput
+              value={session.costCheckpointsUsd ?? null}
+              approvedUsd={session.costCheckpointApprovedUsd ?? null}
+              onCommit={(list) => onApply({ costCheckpointsUsd: list })}
             />
             <GuardrailInput
               prefix="#"
+              label="Tool-Call Threshold"
               step="1"
               integer
               value={session.maxToolCalls}
               hint={
-                "pause + ask after N tool calls" +
-                (session.maxToolCalls != null && session.toolCallCount != null ? ` · ${session.toolCallCount} used` : "")
+                "Pauses after this many tool calls." +
+                (session.maxToolCalls != null && session.toolCallCount != null ? ` ${session.toolCallCount} used.` : "")
               }
               onCommit={(v) => onApply({ maxToolCalls: v })}
+            />
+            <GuardrailInput
+              prefix="↳"
+              label="Live Child Limit"
+              step="1"
+              integer
+              value={session.maxChildSessions}
+              placeholder="4"
+              max="64"
+              emptyMeansNoop
+              hint="A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."
+              onCommit={(v) => onApply({ maxChildSessions: v })}
             />
           </div>
         </>
@@ -4465,43 +5932,109 @@ function ComposerPlusMenu({
 }
 
 /**
+ * Soft cost checkpoints as a comma-separated dollar list ("1, 2.5"). Each parks the session once
+ * with a Continue/Stop card ahead of the hard budget; an empty commit clears them.
+ */
+function CheckpointsInput({
+  value,
+  approvedUsd,
+  onCommit,
+}: {
+  value: number[] | null;
+  approvedUsd: number | null;
+  onCommit: (list: number[]) => void;
+}) {
+  const live = (value ?? []).join(", ");
+  const [draft, setDraft] = useState<string | null>(null);
+  const inputId = useId();
+  const hint = `Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again. ` +
+    `Checkpoints at or above the recurring cost threshold do not pause separately.` +
+    (approvedUsd != null ? ` Approved through $${approvedUsd.toFixed(2)}.` : "");
+  const commit = () => {
+    if (draft === null) return;
+    const list = draft.split(/[\s,]+/).map(Number).filter((usd) => Number.isFinite(usd) && usd > 0);
+    setDraft(null);
+    if (list.join(",") !== (value ?? []).join(",")) onCommit(list);
+  };
+  return (
+    <div className="plus-budget">
+      <span className="plus-budget-prefix" aria-hidden="true">$…</span>
+      <input
+        id={inputId}
+        type="text"
+        inputMode="decimal"
+        placeholder="none"
+        value={draft ?? live}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }}
+      />
+      <span className="plus-budget-copy">
+        <span className="plus-budget-label-row">
+          <label className="plus-budget-label" htmlFor={inputId}>Cost Checkpoints</label>
+          <GuardrailHelp label="Cost Checkpoints" hint={hint} />
+        </span>
+      </span>
+    </div>
+  );
+}
+
+/**
  * A guardrail numeric input. A controlled draft shadows the server value only WHILE editing, so a
  * WebSocket echo (or another dashboard's change) can't remount the input mid-edit and discard
  * typing; unfocused, it tracks the live value. Typos (badInput like "1e", or sub-1 values for
  * integer fields that would floor into the clear sentinel) are a no-op + display resync — only a
- * deliberate empty/0 clears. Commits 0 to mean "clear" (the CP maps ≤0 to unlimited).
+ * deliberate empty/0 reaches the caller. Spend/tool callers treat that as clear; the live-child
+ * caller treats it as pausing new child admission.
  */
 function GuardrailInput({
   prefix,
+  label,
   step,
   integer,
   value,
+  placeholder = "∞",
+  max,
+  emptyMeansNoop,
   hint,
   onCommit,
 }: {
   prefix: string;
+  label: string;
   step: string;
   integer?: boolean;
   value: number | null | undefined;
+  placeholder?: string;
+  max?: string;
+  /** This field has no clear sentinel: zero is meaningful, while an empty edit is a no-op. */
+  emptyMeansNoop?: boolean;
   hint: string;
   onCommit: (v: number) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null); // null = not editing
+  const inputId = useId();
   return (
     <div className="plus-budget">
-      <span className="plus-budget-prefix">{prefix}</span>
+      <span className="plus-budget-prefix" aria-hidden="true">{prefix}</span>
       <input
+        id={inputId}
         type="number"
         min="0"
+        max={max}
         step={step}
-        placeholder="∞"
+        placeholder={placeholder}
         value={draft ?? (value ?? "")}
         onFocus={(e) => setDraft(e.target.value)}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={(e) => {
           if (draft === null) return;
+          if (emptyMeansNoop && draft.trim() === "") {
+            setDraft(null);
+            return;
+          }
           const v = parseFloat(draft);
-          if (e.target.validity.badInput || (integer && Number.isFinite(v) && v > 0 && v < 1)) {
+          if (e.target.validity.badInput || e.target.validity.rangeOverflow || e.target.validity.rangeUnderflow ||
+              (integer && Number.isFinite(v) && v > 0 && v < 1)) {
             setDraft(null); // typo — resync to the live value, don't clear an armed limit
             return;
           }
@@ -4509,8 +6042,49 @@ function GuardrailInput({
           onCommit(Number.isFinite(v) && v > 0 ? (integer ? Math.floor(v) : v) : 0);
         }}
       />
-      <span className="plus-budget-hint">{hint}</span>
+      <span className="plus-budget-copy">
+        <span className="plus-budget-label-row">
+          <label className="plus-budget-label" htmlFor={inputId}>{label}</label>
+          <GuardrailHelp label={label} hint={hint} />
+        </span>
+      </span>
     </div>
+  );
+}
+
+/** Compact, keyboard-dismissible disclosure for guardrail guidance that would otherwise dominate the menu. */
+function GuardrailHelp({ label, hint }: { label: string; hint: string }) {
+  const popover = useAnchoredPopover<HTMLSpanElement, HTMLButtonElement>({
+    width: 224,
+    height: 96,
+    consumeEscape: true,
+  });
+  const popoverId = useId();
+  return (
+    <span
+      ref={popover.rootRef}
+      className={`plus-budget-help${popover.open ? " is-open" : ""}`}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) popover.close();
+      }}
+    >
+      <button
+        ref={popover.anchorRef}
+        className="plus-budget-info"
+        type="button"
+        aria-label={`About ${label}`}
+        aria-expanded={popover.open}
+        aria-controls={popoverId}
+        aria-describedby={popover.open ? popoverId : undefined}
+        title={`About ${label}`}
+        onClick={popover.toggle}
+      >
+        <InfoIcon size={13} />
+      </button>
+      {popover.open && (
+        <span className="plus-budget-help-popover" id={popoverId} role="note" style={popover.style}>{hint}</span>
+      )}
+    </span>
   );
 }
 

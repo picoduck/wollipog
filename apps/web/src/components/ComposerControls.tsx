@@ -6,6 +6,7 @@ import type {
   SessionConfig,
   SessionView,
 } from "@wollipog/protocol";
+import { runnerSupportsProtocol } from "@wollipog/protocol";
 import {
   permissionModeDescription,
   permissionModeEmptyLabel,
@@ -21,10 +22,16 @@ import {
   resolveEffectiveCaps,
   type ElicitationAvailability,
 } from "../caps.js";
+import {
+  collapseContextWindowVariants,
+  contextWindowChoice,
+  contextWindowOptionAcceptsEffort,
+  type ContextWindowChoice,
+} from "../context-window-options.js";
 import { useStoreSelector } from "../store.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { Modal } from "./common.js";
-import { InfoIcon, ShieldIcon } from "./Icons.js";
+import { InfoIcon, ServiceTierIcon, ShieldIcon } from "./Icons.js";
 
 type Apply = (patch: Partial<SessionConfig>) => void;
 
@@ -34,8 +41,11 @@ function useSessionConfig(session: SessionView) {
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const caps = resolveCaps(runner, session);
   const effectiveCaps = resolveEffectiveCaps(runner, session);
-  const models = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
-  const permModes = (caps?.permissionModes ?? []).filter((p) => p !== "plan");
+  const listedModels = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
+  // The orchestration tool boundary is established at process creation and cannot
+  // safely be entered or escaped by changing a live provider permission mode.
+  const permModes = session.permissionMode === "orchestrator" ? ["orchestrator"]
+    : (caps?.permissionModes ?? []).filter((p) => p !== "plan" && p !== "orchestrator");
 
   const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort, caps);
   const modelVal = effective.model?.id ?? "";
@@ -43,9 +53,14 @@ function useSessionConfig(session: SessionView) {
   const modelEfforts = effective.efforts;
   const effortVal = effective.effort ?? "";
   const permVal = permissionModeForDisplay(session.permissionMode, permModes, session.driver);
+  // Context-window variants of one base (`opus` / `opus[1m]`) are one Model entry plus a Context
+  // Window group; both come only from provider-stated windows, so most catalogs collapse nothing.
+  const models = collapseContextWindowVariants(listedModels, modelVal || session.model);
+  const contextChoice = contextWindowChoice(listedModels, modelVal || session.model);
   return {
     caps,
     models,
+    contextChoice,
     modelSource: caps?.modelSource,
     permModes,
     modelVal,
@@ -67,7 +82,7 @@ function BarMenu({ align = "left", label, title, permissionMode = false, childre
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "composer-control-menu");
   return (
-    <div className={`cbar-menu ${align}`}>
+    <div className={`cbar-menu ${align}${permissionMode ? " permission-mode-menu" : ""}`}>
       <button
         ref={menu.triggerRef}
         type="button"
@@ -100,22 +115,54 @@ interface MenuModelChoice {
   defaultEffort?: string;
 }
 
-/** Pure leaf so the two independent menu-radio groups retain an executable semantic contract. */
+/** One menu-radio option shared by the Model, Context Window, and Effort groups. */
+function MenuRadioOption({ checked, title, onSelect, children }: {
+  checked: boolean;
+  title?: string;
+  onSelect: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={checked}
+      className={`cbar-opt${checked ? " on" : ""}`}
+      title={title}
+      onClick={onSelect}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Pure leaf so the independent menu-radio groups retain an executable semantic contract. */
 export function ModelEffortMenuChoices({
   models,
   modelSource,
   modelVal,
   selectedModel,
+  contextChoice,
   modelEfforts,
+  agentEffortLevels,
   effortVal,
+  pendingEffort,
   apply,
 }: {
   models: MenuModelChoice[];
   modelSource?: string;
   modelVal: string;
   selectedModel?: MenuModelChoice;
+  /** Present only when the provider lists two windows for the selected model's base. */
+  contextChoice?: ContextWindowChoice | null;
   modelEfforts: string[];
+  /** The agent's own effort levels, which a variant advertising none of its own inherits. */
+  agentEffortLevels?: readonly string[];
   effortVal: string;
+  /** Reads the effort staged for the next prompt, at click time. `effortVal` comes from the session
+   * and only catches up after `setConfig` round-trips, so a selection made moments ago is not in it
+   * yet; undefined means nothing is staged. */
+  pendingEffort?: () => string | undefined;
   apply: Apply;
 }) {
   return (
@@ -124,30 +171,59 @@ export function ModelEffortMenuChoices({
         <div role="group" aria-label="Model">
           <div className="plus-section" role="presentation">Model{modelSource === "cached" ? " (cached)" : ""}</div>
           {models.map((model) => (
-            <button
+            <MenuRadioOption
               key={model.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={model.id === modelVal}
-              className={`cbar-opt${model.id === modelVal ? " on" : ""}`}
+              checked={model.id === modelVal}
               title={model.description}
-              onClick={() => apply({ model: model.id, effort: "" })}
+              onSelect={() => apply({ model: model.id, effort: "", serviceTier: "" })}
             >
               {model.displayName ?? model.id}
-            </button>
+            </MenuRadioOption>
+          ))}
+        </div>
+      )}
+      {contextChoice && (
+        <div role="group" aria-label="Context Window">
+          <div className="plus-section" role="presentation">Context Window</div>
+          {contextChoice.options.map((option) => (
+            <MenuRadioOption
+              key={option.id}
+              checked={option.id === contextChoice.selectedId}
+              title={`${option.contextWindow.toLocaleString()} tokens; applies to the next turn`}
+              // A window switch keeps the effort: variants of one base share their effort levels.
+              // Always send the key. The control plane reads an omitted effort on a model patch as
+              // "no effort chosen" and resolves back to the model's default, and an omitted key
+              // also cannot clear an effort already staged in the composer's pending config, which
+              // would then ride along with the next prompt. `""` is the established reset (the
+              // Model group above uses it), so an effort the target variant would reject as
+              // unsupported becomes that variant's own default instead of a 409.
+              // Read the staged effort at click time: an effort chosen moments ago is not in
+              // `effortVal` until `setConfig` round-trips, and it must not be reset by this switch.
+              onSelect={() => {
+                const staged = pendingEffort?.();
+                const effort = staged ?? effortVal;
+                apply({
+                  model: option.id,
+                  effort: contextWindowOptionAcceptsEffort(option, effort, agentEffortLevels) ? effort : "",
+                  serviceTier: "",
+                });
+              }}
+            >
+              {option.label}
+            </MenuRadioOption>
           ))}
         </div>
       )}
       {modelEfforts.length > 0 && (
         <div role="group" aria-label="Reasoning Effort">
           <div className="plus-section" role="presentation">Effort</div>
-          <button type="button" role="menuitemradio" aria-checked={!effortVal} className={`cbar-opt${!effortVal ? " on" : ""}`} onClick={() => apply({ effort: "" })}>
+          <MenuRadioOption checked={!effortVal} onSelect={() => apply({ effort: "" })}>
             {selectedModel?.defaultEffort ? `Default (${selectedModel.defaultEffort})` : "Default"}
-          </button>
+          </MenuRadioOption>
           {modelEfforts.map((effort) => (
-            <button key={effort} type="button" role="menuitemradio" aria-checked={effort === effortVal} className={`cbar-opt${effort === effortVal ? " on" : ""}`} onClick={() => apply({ effort })}>
+            <MenuRadioOption key={effort} checked={effort === effortVal} onSelect={() => apply({ effort })}>
               {effortLabel(effort)}
-            </button>
+            </MenuRadioOption>
           ))}
         </div>
       )}
@@ -160,12 +236,17 @@ export function modelEffortControlLabel(selectedModel: MenuModelChoice | undefin
   return selectedModel?.displayName || modelVal || "Model";
 }
 
-export function ModelEffortControl({ session, apply }: { session: SessionView; apply: Apply }) {
-  const { models, modelSource, modelVal, selectedModel, modelEfforts, effortVal } = useSessionConfig(session);
+export function ModelEffortControl(
+  { session, apply, pendingEffort }: { session: SessionView; apply: Apply; pendingEffort?: () => string | undefined },
+) {
+  const { caps, models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal } = useSessionConfig(session);
   if (models.length === 0 && modelEfforts.length === 0) return null;
+  const pickerModel = models.find((model) => model.id === modelVal) ?? selectedModel;
+  const selectedWindow = contextChoice?.options.find((option) => option.id === contextChoice.selectedId);
   const label = (
     <>
-      <span className="cbar-model">{modelEffortControlLabel(selectedModel, modelVal)}</span>
+      <span className="cbar-model">{modelEffortControlLabel(pickerModel, modelVal)}</span>
+      {selectedWindow && <span className="cbar-context">{selectedWindow.label}</span>}
       {effortVal && <span className="cbar-effort">{effortLabel(effortVal)}</span>}
     </>
   );
@@ -173,17 +254,127 @@ export function ModelEffortControl({ session, apply }: { session: SessionView; a
     <BarMenu
       align="right"
       label={label}
-      title={modelSource === "cached" ? "Model metadata is cached; Rediscover to refresh" : "Model & reasoning effort (applies next turn)"}
+      title={modelSource === "cached"
+        ? "Model metadata is cached; Rediscover to refresh"
+        : contextChoice
+          ? "Model, context window & reasoning effort (applies next turn)"
+          : "Model & reasoning effort (applies next turn)"}
     >
       {() => <ModelEffortMenuChoices
         models={models}
         modelSource={modelSource}
         modelVal={modelVal}
         selectedModel={selectedModel}
+        contextChoice={contextChoice}
         modelEfforts={modelEfforts}
+        agentEffortLevels={caps?.effortLevels}
         effortVal={effortVal}
+        pendingEffort={pendingEffort}
         apply={apply}
       />}
+    </BarMenu>
+  );
+}
+
+interface ServiceTierChoice {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export function serviceTierChoices(
+  capabilities: AgentCapabilities | undefined,
+  modelId: string | null | undefined,
+  selectedTier: string | null | undefined,
+): { choices: ServiceTierChoice[]; selected: ServiceTierChoice } | null {
+  const exactModel = modelId && modelId !== "default"
+    ? capabilities?.models.find((candidate) => candidate.id === modelId)
+    : undefined;
+  const model = modelId && modelId !== "default"
+    ? exactModel
+    : capabilities?.models.find((candidate) => candidate.default && !candidate.hidden)
+      ?? capabilities?.models.find((candidate) => !candidate.hidden);
+  if (!model?.serviceTiers?.length) return null;
+  const choices: ServiceTierChoice[] = [
+    { id: "default", name: "Standard", description: "Standard response speed. Applies to the next turn." },
+    ...model.serviceTiers
+      .filter((tier) => tier.id !== "default")
+      .map((tier) => ({
+        id: tier.id,
+        name: tier.name,
+        description: `${tier.description ? `${tier.description} ` : ""}Applies to the next turn.`,
+      })),
+  ];
+  const preferred = selectedTier || model.defaultServiceTier || "default";
+  return { choices, selected: choices.find((choice) => choice.id === preferred) ?? choices[0]! };
+}
+
+export function ServiceTierMenuChoices({ state, apply, close }: {
+  state: NonNullable<ReturnType<typeof serviceTierChoices>>;
+  apply: Apply;
+  close: () => void;
+}) {
+  return (
+    <div role="group" aria-label="Service Tier">
+      <div className="plus-section" role="presentation">Service Tier</div>
+      {state.choices.map((choice) => (
+        <MenuRadioOption
+          key={choice.id}
+          checked={choice.id === state.selected.id}
+          title={choice.description}
+          onSelect={() => {
+            apply({ serviceTier: choice.id });
+            close();
+          }}
+        >
+          <span className="cbar-service-tier-option">
+            <span className="cbar-service-tier-name">
+              {choice.id.toLowerCase() === "fast" && <ServiceTierIcon size={13} />}
+              {choice.name}
+            </span>
+            <span className="cbar-service-tier-description">{choice.description}</span>
+          </span>
+        </MenuRadioOption>
+      ))}
+    </div>
+  );
+}
+
+/** Separate from reasoning effort: this is a model/account-advertised Codex scheduling tier. */
+export function ServiceTierControl({
+  session,
+  apply,
+  pendingModel,
+  pendingServiceTier,
+}: {
+  session: SessionView;
+  apply: Apply;
+  pendingModel?: () => string | undefined;
+  pendingServiceTier?: () => string | undefined;
+}) {
+  const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
+  const capabilities = resolveEffectiveCaps(runner, session);
+  const state = session.driver === "codex-app-server" && runnerSupportsProtocol(runner?.protocolVersion, "codexServiceTiers")
+    ? serviceTierChoices(
+        capabilities,
+        pendingModel?.() ?? session.model,
+        pendingServiceTier?.() ?? session.serviceTier,
+      )
+    : null;
+  if (!state) return null;
+  const fast = state.selected.id.toLowerCase() === "fast";
+  return (
+    <BarMenu
+      align="right"
+      label={(
+        <span className={`cbar-service-tier${fast ? " fast" : ""}`}>
+          {fast && <ServiceTierIcon size={13} />}
+          {state.selected.name}
+        </span>
+      )}
+      title={`Service Tier: ${state.selected.name}. Applies to the next turn.`}
+    >
+      {(close) => <ServiceTierMenuChoices state={state} apply={apply} close={close} />}
     </BarMenu>
   );
 }

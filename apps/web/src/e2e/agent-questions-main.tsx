@@ -1,10 +1,12 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { SessionQuestionBanner } from "../components/SessionApproval.js";
-import { setQuestionResponseStyle } from "../question-response-style.js";
+import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
+import { EventTimeline } from "../components/EventTimeline.js";
+import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
 import { inTypingContext } from "../shortcuts.js";
 import { isFollowTailResumeKey } from "../useFollowTail.js";
 import "../styles.css";
@@ -13,22 +15,26 @@ interface AnswerCall {
   sessionId: string;
   requestId: string;
   answers: Record<string, string | string[]>;
+  action?: "submit" | "dismiss";
 }
 
 declare global {
   interface Window {
     agentQuestionCalls: AnswerCall[];
     replaceAgentQuestion(): void;
+    clearAgentQuestion(): void;
     releaseAgentQuestion(): void;
     setAgentQuestionOnline(online: boolean): void;
   }
 }
 
 const params = new URLSearchParams(window.location.search);
-setQuestionResponseStyle(params.get("style") === "text" ? "text" : "interactive");
+setQuestionResponseStyle(["composer", "text"].includes(params.get("style") ?? "") ? "composer" : "interactive");
 const initialOnline = params.get("offline") !== "1";
 const shouldFail = params.get("failure") === "1";
 const renderInFallbackSlot = params.get("slot") === "1";
+const recoveryRequired = params.get("recovery") === "1";
+const recoveryCanResume = recoveryRequired && params.get("resume") === "1";
 let shouldHold = params.get("hold") === "1";
 let releasePending: (() => void) | null = null;
 
@@ -42,6 +48,25 @@ const shortQuestions: AgentQuestion[] = [{
     { label: "Python", description: "Use a standalone script." },
   ],
 }];
+
+const signedEvidenceUrl = "https://evidence.example/private/mobile-capture.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=temporary-access-key&X-Amz-Signature=very-long-private-signature#full-resolution";
+const richQuestions: AgentQuestion[] = [
+  {
+    id: "target",
+    header: "Target",
+    question: `Choose **one** deployment target.\n\n- \`staging\` for verification\n- production after approval`,
+    context: `Review the [release guide](https://docs.example/release) and evidence at ${signedEvidenceUrl}`,
+    options: [{ label: "Staging" }, { label: "Production" }],
+  },
+  {
+    id: "checks",
+    header: "Checks",
+    question: "Select the required checks:\n\n1. **Unit tests**\n2. Browser tests",
+    context: `Keep ${signedEvidenceUrl} available for comparison.`,
+    multiSelect: true,
+    options: [{ label: "Unit Tests" }, { label: "Browser Tests" }],
+  },
+];
 
 const longDescription = "A deliberately long description that wraps across several lines on a narrow phone while remaining understandable and tappable.";
 const longQuestions: AgentQuestion[] = [
@@ -144,12 +169,25 @@ const formQuestions: AgentQuestion[] = [
 window.agentQuestionCalls = [];
 
 function Fixture() {
+  const responseStyle = useQuestionResponseStyle();
   const [requestId, setRequestId] = useState("ask-1");
   const [questions, setQuestions] = useState(
-    params.get("set") === "long" ? longQuestions : params.get("set") === "forms" ? formQuestions : shortQuestions,
+    params.get("set") === "long"
+      ? longQuestions
+      : params.get("set") === "forms"
+        ? formQuestions
+        : params.get("set") === "rich"
+          ? richQuestions
+          : params.get("set") === "rich-single" ? richQuestions.slice(0, 1) : shortQuestions,
   );
   const [runnerOnline, setRunnerOnline] = useState(initialOnline);
   const [resolved, setResolved] = useState(false);
+  const [answerActive, setAnswerActive] = useState(responseStyle === "composer");
+  const answerInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!resolved && responseStyle === "composer") setAnswerActive(true);
+  }, [requestId, resolved, responseStyle]);
 
   window.replaceAgentQuestion = () => {
     setRequestId("ask-2");
@@ -157,6 +195,7 @@ function Fixture() {
     setResolved(false);
   };
   window.releaseAgentQuestion = () => releasePending?.();
+  window.clearAgentQuestion = () => setResolved(true);
   window.setAgentQuestionOnline = (online) => setRunnerOnline(online);
 
   const client = useMemo(() => ({
@@ -165,7 +204,12 @@ function Fixture() {
       sessionId: string,
       body: { requestId: string; answers: Record<string, string | string[]> },
     ) => {
-      window.agentQuestionCalls.push({ sessionId, requestId: body.requestId, answers: body.answers });
+      window.agentQuestionCalls.push({
+        sessionId,
+        requestId: body.requestId,
+        answers: body.answers,
+        action: (body as { action?: "submit" | "dismiss" }).action,
+      });
       if (shouldHold) {
         shouldHold = false;
         await new Promise<void>((resolve) => { releasePending = resolve; });
@@ -176,17 +220,46 @@ function Fixture() {
   }), []) as ApiClient;
 
   const questionContent = resolved ? (
-    <p role="status">Question Answered</p>
+    <>
+      <p role="status">Question Answered</p>
+      <EventTimeline items={[{
+        kind: "question",
+        id: 1,
+        requestId,
+        questions,
+        answered: true,
+      }]} />
+    </>
   ) : (
     <SessionQuestionBanner
       sessionId="agent-question-session"
       requestId={requestId}
       questions={questions}
+      recoveryReason={recoveryRequired ? "provider_restart" : undefined}
+      recoveryAction={recoveryCanResume ? "resume_answer" : undefined}
       runnerOnline={runnerOnline}
       onSessionUpdate={() => setResolved(true)}
       showKeyHints={false}
     />
   );
+  const composerContent = !resolved && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume) ? (
+    <div className="composer">
+      <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
+        <ComposerQuestionResponse
+          sessionId="agent-question-session"
+          requestId={requestId}
+          questions={questions}
+          runnerOnline={runnerOnline}
+          active={answerActive}
+          showWaiting
+          inputRef={answerInputRef}
+          onEnter={() => setAnswerActive(true)}
+          onExit={() => setAnswerActive(false)}
+          onSessionUpdate={() => setResolved(true)}
+        />
+      </div>
+    </div>
+  ) : null;
 
   return (
     <ApiProvider client={client}>
@@ -206,11 +279,11 @@ function Fixture() {
                 <div className="detail-reader">
                   <div className="detail-scroll">Activity Unavailable</div>
                 </div>
-                <div className="composer"><div className="composer-box">Composer</div></div>
+                {composerContent}
               </div>
             </div>
           </div>
-        ) : questionContent}
+        ) : <>{questionContent}{composerContent}</>}
       </main>
     </ApiProvider>
   );

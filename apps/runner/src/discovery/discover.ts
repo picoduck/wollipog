@@ -18,13 +18,16 @@ import type {
 import { capabilitiesFor } from "../catalog.js";
 import {
   applyClaudeAgentEnvironment,
+  applyNativeClaudeGitBashReadiness,
   claudeCapabilitiesFromProbe,
   probeNativeClaudeCode,
   probeWslClaudeCode,
+  resolveNativeClaudeGitBash,
   unavailableClaudeCode,
 } from "./claude-code.js";
 import { probeNativeCodexAppServer, probeWslCodexAppServer, unavailableCodexAppServer } from "./codex-app-server.js";
 import { discoverAgentModels, type AgentModelDiscovery } from "./models.js";
+import { unavailableNativeTuiAccounting } from "./native-tui-accounting.js";
 import { listWslDistros, resolveInWsl, resolveNative, run, type ResolvedLaunch } from "./resolve.js";
 
 /** Where each driver keeps user-defined slash commands / prompts ($HOME-relative). */
@@ -68,6 +71,34 @@ async function wslSlashCommands(distro: string, driver: AgentDriverKind): Promis
   return out;
 }
 
+/** Discovery is only a UI/admission precondition. The root-installed launcher repeats every
+ * executable and kernel check immediately before preparing a launch, so this cannot become an
+ * authority-bearing pathname check. Keep the probe fixed to distro-owned system paths. */
+async function probeWslSafeLauncher(distro: string, nodeRuntime: string | undefined): Promise<{ bwrapRuntime: string } | null> {
+  if (!nodeRuntime?.startsWith("/") || /[\0\r\n]/u.test(nodeRuntime)) return null;
+  const script = [
+    "set -eu",
+    "node=$1",
+    "test \"$(id -u)\" != 0",
+    "compiler=$(readlink -f /usr/bin/cc); case \"$compiler\" in /usr/bin/*) ;; *) exit 125;; esac",
+    "for file in \"$compiler\" /usr/bin/bwrap \"$node\"; do",
+    "  test -f \"$file\" && test ! -L \"$file\"",
+    "  while test \"$file\" != /; do",
+    "    test ! -L \"$file\"; test \"$(stat -c %u \"$file\")\" = 0",
+    "    mode=$(stat -c %a \"$file\"); test $((0$mode & 022)) = 0",
+    "    file=${file%/*}; test -n \"$file\" || file=/",
+    "  done",
+    "done",
+    "/usr/bin/bwrap --help",
+  ].join("\n");
+  const result = await run("wsl.exe", ["-d", distro, "--exec", "sh", "-c", script, "wollipog-probe", nodeRuntime], { timeoutMs: 5_000 });
+  if (result.code !== 0) return null;
+  const help = `${result.stdout}\n${result.stderr}`;
+  return ["--bind-fd", "--ro-bind-fd"].every((flag) => help.includes(flag))
+    ? { bwrapRuntime: "/usr/bin/bwrap" }
+    : null;
+}
+
 /** Curated capabilities + the agent's discovered slash commands. Dynamic model discovery is applied
  * to the merged agent list afterward (enrichAgentModels), so config + discovered agents share it. */
 function withSlashCommands(driver: AgentDriverKind, slashCommands: AgentSlashCommand[]): AgentCapabilities | undefined {
@@ -84,10 +115,15 @@ function verifiedCodexAppServerCapabilities(
   return caps && compatibility.status === "supported" ? { ...caps, supportsSteering: true } : caps;
 }
 
-function withoutConfiguredProviderSteering(agent: AgentDefinition): AgentDefinition {
-  if ((agent.driver !== "codex-app-server" && agent.driver !== "claude-code") || !agent.capabilities?.supportsSteering) return agent;
+function withoutConfiguredProviderAttestations(agent: AgentDefinition): AgentDefinition {
+  // Native TUI accounting is a live provider-contract attestation, never configuration. A stale
+  // persisted value must not survive when a v121 runner cannot rediscover the same launch.
+  const { nativeTuiAccounting: _unverifiedAccounting, ...withoutAccounting } = agent;
+  if ((agent.driver !== "codex-app-server" && agent.driver !== "claude-code") || !agent.capabilities?.supportsSteering) {
+    return withoutAccounting;
+  }
   const { supportsSteering: _unverified, ...capabilities } = agent.capabilities;
-  return { ...agent, capabilities };
+  return { ...withoutAccounting, capabilities };
 }
 
 /** `driver|context` key so agents sharing an execution context read the same model source once. */
@@ -250,6 +286,7 @@ export function unavailableCodexAgentDefinition(
     capabilities: withSlashCommands("codex-app-server", []),
     source: "discovered",
     codexAppServer: unavailableCodexAppServer(),
+    nativeTuiAccounting: unavailableNativeTuiAccounting("codex", undefined, false),
   };
 }
 
@@ -274,6 +311,7 @@ export function unavailableClaudeAgentDefinition(
     capabilities: withSlashCommands("claude-code", []),
     source: "discovered",
     claudeCode,
+    nativeTuiAccounting: unavailableNativeTuiAccounting("claude-code", undefined, false),
   };
 }
 
@@ -286,6 +324,15 @@ export function parseVersion(s: string): string | undefined {
 }
 
 type AuthStatus = "authenticated" | "unauthenticated" | "unknown";
+
+export function supportedWslAgentControlNodeRuntime(
+  launch: ResolvedLaunch | null,
+  versionOutput: string,
+): string | undefined {
+  if (!launch?.command.startsWith("/") || launch.args.length !== 0) return undefined;
+  const major = Number(versionOutput.trim().match(/^v(\d+)\./u)?.[1]);
+  return Number.isInteger(major) && major >= 22 ? launch.command : undefined;
+}
 
 async function nativeProbe(k: KnownAgent, launch: ResolvedLaunch): Promise<{ version?: string; authStatus: AuthStatus }> {
   const v = await run(launch.command, [...launch.args, "--version"], { timeoutMs: 5000 });
@@ -344,7 +391,10 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         if (k.bin === "claude") found.push(unavailableClaudeAgentDefinition("claude-code", "Claude Code", { kind: "native" }));
         return;
       }
-      const claudeCode = k.bin === "claude" ? await probeNativeClaudeCode(bin.launch, bin.via) : undefined;
+      const gitBashPath = k.bin === "claude" ? await resolveNativeClaudeGitBash() : undefined;
+      const claudeCode = k.bin === "claude"
+        ? applyNativeClaudeGitBashReadiness(await probeNativeClaudeCode(bin.launch, bin.via), gitBashPath)
+        : undefined;
       const { version, authStatus } = claudeCode
         ? { version: claudeCode.installedVersion, authStatus: claudeCode.auth.status }
         : await nativeProbe(k, bin.launch);
@@ -361,7 +411,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         // The logical name is the stable launch-target identity — the node-wrapped launch's
         // command ("node") and entry file (possibly cli.js/index.js) identify nothing.
         bin: k.bin,
-        env: {},
+        env: gitBashPath ? { CLAUDE_CODE_GIT_BASH_PATH: gitBashPath } : {},
         driver: k.driver,
         context: { kind: "native" },
         version,
@@ -373,6 +423,11 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         source: "discovered",
         ...(codexAppServer ? { codexAppServer } : {}),
         ...(claudeCode ? { claudeCode } : {}),
+        nativeTuiAccounting: unavailableNativeTuiAccounting(
+          k.bin === "claude" ? "claude-code" : "codex",
+          version,
+          k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
+        ),
       };
       found.push(...(codexAppServer ? codexAgentDefinitions(base, codexAppServer, slashCommands) : [base]));
     }),
@@ -383,7 +438,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
   await Promise.all(
     distros.flatMap((distro) =>
       KNOWN.map(async (k) => {
-        const bin = await resolveInWsl(distro, k.bin);
+        const [bin, node] = await Promise.all([resolveInWsl(distro, k.bin), resolveInWsl(distro, "node")]);
         if (!bin) {
           if (k.bin === "codex") {
             found.push(unavailableCodexAgentDefinition(
@@ -401,10 +456,16 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           }
           return;
         }
-        const [baseProbe, slash] = await Promise.all([
+        const [baseProbe, slash, nodeVersion, safeLauncher] = await Promise.all([
           k.bin === "claude" ? probeWslClaudeCode(distro, bin.launch, bin.via) : wslProbe(distro, k, bin.launch),
           wslSlashCommands(distro, k.driver),
+          node ? run("wsl.exe", ["-d", distro, "--exec", node.launch.command, ...node.launch.args, "--version"], { timeoutMs: 5_000 }) : null,
+          probeWslSafeLauncher(distro, node?.launch.command),
         ]);
+        const agentControlRuntime = supportedWslAgentControlNodeRuntime(
+          node?.launch ?? null,
+          nodeVersion?.code === 0 ? nodeVersion.stdout || nodeVersion.stderr : "",
+        );
         const claudeCode = k.bin === "claude" ? baseProbe as NonNullable<AgentDefinition["claudeCode"]> : undefined;
         const { version, authStatus } = claudeCode
           ? { version: claudeCode.installedVersion, authStatus: claudeCode.auth.status }
@@ -427,8 +488,18 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
             ? claudeCapabilitiesFromProbe(catalogCapabilities, claudeCode)
             : catalogCapabilities,
           source: "discovered",
+          ...(agentControlRuntime
+            ? { wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: agentControlRuntime,
+                ...(safeLauncher ? { safeLauncherProtocolVersion: 1 as const,
+                  bwrapRuntime: safeLauncher.bwrapRuntime } : {}) } }
+            : {}),
           ...(codexAppServer ? { codexAppServer } : {}),
           ...(claudeCode ? { claudeCode } : {}),
+          nativeTuiAccounting: unavailableNativeTuiAccounting(
+            k.bin === "claude" ? "claude-code" : "codex",
+            version,
+            k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
+          ),
         };
         found.push(...(codexAppServer ? codexAgentDefinitions(base, codexAppServer, slash) : [base]));
       }),
@@ -487,9 +558,9 @@ function launchKeys(a: AgentDefinition): string[] {
  * Discovered agents that don't match a config entry are appended as new entries.
  */
 export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDefinition[]): AgentDefinition[] {
-  // Config selects a driver but cannot attest to a live provider steering contract. Strip any
-  // stale steering flag first; only a matching discovery result below may restore it.
-  const safeConfigAgents = configAgents.map(withoutConfiguredProviderSteering);
+  // Config selects a driver but cannot attest to live provider contracts. Strip stale steering
+  // and Native TUI accounting claims first; only matching discovery may restore them.
+  const safeConfigAgents = configAgents.map(withoutConfiguredProviderAttestations);
   // Index every discovered agent under ALL of its identities (bin key + launch shape), so both
   // a bare config name and a config entry pinning the exact resolved launch find their match.
   const byKey = new Map<string, AgentDefinition>();
@@ -498,7 +569,10 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
   }
   const enriched = safeConfigAgents.map((c) => {
     const d = launchKeys(c).map((k) => byKey.get(k)).find(Boolean);
-    if (!d) return c;
+    if (!d) {
+      const { wslAgentControl: _unverifiedWslAgentControl, ...configured } = c;
+      return configured;
+    }
     // A bare path-less config command ("codex") is a pointer, not a launch override — and it
     // spawns via the daemon's non-login PATH, which is exactly where version-manager installs
     // are invisible. Adopt discovery's RESOLVED launch (absolute command + base args) so the
@@ -508,6 +582,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
     return applyCodexAgentEnvironment(applyClaudeAgentEnvironment({
       ...c,
       ...(adoptLaunch ? { command: d.command, args: [...(d.args ?? [])] } : {}),
+      env: { ...(d.env ?? {}), ...(c.env ?? {}) },
       version: c.version ?? d.version,
       authStatus: c.authStatus ?? d.authStatus,
       available: c.available ?? d.available,
@@ -516,8 +591,11 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
       codexAppServer: d.codexAppServer ?? c.codexAppServer,
       codexBillingSource: c.codexBillingSource ?? d.codexBillingSource,
       claudeCode: d.claudeCode ?? c.claudeCode,
+      // Fresh discovery is the only authority. Config and old-runner values never attest support.
+      nativeTuiAccounting: d.nativeTuiAccounting,
       registry: d.registry ?? c.registry,
       acp: d.acp ?? c.acp,
+      wslAgentControl: d.wslAgentControl,
       capabilities: c.capabilities
         ? c.driver === "claude-code" && d.capabilities
           ? {

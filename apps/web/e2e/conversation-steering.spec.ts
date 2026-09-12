@@ -42,6 +42,36 @@ test.beforeEach(async ({ page }) => {
   await openSteeringSession(page);
 });
 
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+  test(`disabled steering explains the live reason accessibly at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const reason = "Wollipog has not confirmed an active provider turn.";
+    await page.evaluate((reason) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      queued: [{ id: "coordinate-queue", text: "Keep this message and attachment", hasImages: true,
+        steerable: false, steerDisabledReason: reason }],
+    }), reason);
+    const row = page.getByTestId("queued-prompt-coordinate-queue");
+    await expect(row.getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
+    const info = row.getByLabel("Why Steering Is Unavailable");
+    await info.focus();
+    await page.keyboard.press("Enter");
+    await expect(row.getByRole("status")).toHaveText(reason);
+    await info.click();
+    await expect(row.getByRole("status")).toBeHidden();
+    await info.click();
+    await expect(row.getByRole("status")).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("steering-explanation.png") });
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(0);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      queued: [{ id: "coordinate-queue", text: "Keep this message and attachment", hasImages: true,
+        steerable: true }],
+    }));
+    await expect(info).toHaveCount(0);
+    await expect(row.getByRole("button", { name: "Steer Queued Message" })).toBeEnabled();
+    await expect(row).toContainText("Keep this message and attachment");
+  });
+}
+
 test("Ctrl+Enter steers without an optimistic echo while Enter, Shift+Enter, IME, and slash selection keep their contracts", async ({ page }) => {
   const composer = page.locator(".composer-input");
 
@@ -359,7 +389,9 @@ test("steering gates fail closed across protocol, provider, active-turn, held-qu
   }));
   await composer.fill("held queue");
   await page.keyboard.press("Control+Enter");
-  await expect(page.getByText("Send a normal prompt to resume the held queue before steering.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveText(
+    "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
+  );
   await expect.poll(requests).toBe(0);
   await expect(page.getByTestId("queued-prompt-queue-ineligible").getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
   await expect(page.getByTestId("queued-prompt-queue-legacy").getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
@@ -421,6 +453,99 @@ test("queued promotion uses stable queue identity and reconciles one canonical a
   await expect(page.getByText("Promote this exact prompt", { exact: true })).toHaveCount(1);
 });
 
+test("recovered queued-edit attachments become self-contained ordinary draft images", async ({ page }) => {
+  await page.evaluate(() => {
+    const image = {
+      artifactId: "artifact-recovered-image",
+      mimeType: "image/png",
+      sizeBytes: 68,
+      sha256: "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+    };
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(99);
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      queued: [{
+        id: "queue-recovered",
+        text: "Changed elsewhere",
+        hasImages: true,
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "newer-revision",
+      }],
+    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.seedQueuedEditRecovery("session-alpha", {
+      edit: {
+        promptId: "queue-recovered",
+        text: "Original queued content",
+        images: [],
+        editRevision: "original-revision",
+        displacedDraft: { text: "Ordinary draft", images: [] },
+      },
+      draft: { text: "Keep this recovered message", images: [image] },
+      error: "The queued message changed before this edit was confirmed.",
+    });
+  });
+
+  await reopenSteeringSession(page);
+  await expect(page.getByText("Recovered Queued Message", { exact: true })).toBeVisible();
+  await expect(page.locator(".composer-input")).toHaveValue("Keep this recovered message");
+  await expect(page.locator(".image-thumb img")).toBeVisible();
+
+  await page.getByRole("button", { name: "Use as New Message" }).click();
+  await expect(page.getByText("Recovered Queued Message", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".composer-input")).toHaveValue("Keep this recovered message");
+  await expect(page.locator(".image-thumb img")).toHaveAttribute("src", /^data:image\/png;base64,/);
+  await expect.poll(() => page.evaluate(async () =>
+    (await window.__WOLLIPOG_PROJECT_INBOX_E2E__.composerDraft("session-alpha"))?.images,
+  )).toEqual([{
+    mimeType: "image/png",
+    data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  }]);
+});
+
+test("an oversized recovered attachment set stays recoverable and reports the limit", async ({ page }) => {
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(99);
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      queued: [{
+        id: "queue-recovered-oversized",
+        text: "Changed elsewhere",
+        hasImages: true,
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "newer-revision",
+      }],
+    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.seedQueuedEditRecovery("session-alpha", {
+      edit: {
+        promptId: "queue-recovered-oversized",
+        text: "Original queued content",
+        images: [],
+        editRevision: "original-revision",
+        displacedDraft: { text: "Ordinary draft", images: [] },
+      },
+      draft: {
+        text: "Keep this oversized recovered message",
+        images: Array.from({ length: 7 }, (_, index) => ({
+          artifactId: `artifact-recovered-image-${index}`,
+          mimeType: "image/png",
+          sizeBytes: 68,
+          sha256: "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+        })),
+      },
+      error: "The queued message changed before this edit was confirmed.",
+    });
+  });
+
+  await reopenSteeringSession(page);
+  await expect(page.getByText("Recovered Queued Message", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Use as New Message" }).click();
+
+  await expect(page.getByText("Recovered Queued Message", { exact: true })).toBeVisible();
+  await expect(page.locator(".composer-input")).toHaveValue("Keep this oversized recovered message");
+  await expect(page.locator(".composer-error")).toContainText("at most 6 images may be attached");
+});
+
 test("a definite direct rejection preserves the draft and never creates a transcript bubble", async ({ page }) => {
   const composer = page.locator(".composer-input");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextSteeringResult());
@@ -471,6 +596,63 @@ test("durable receipts render every disposition and uncertain recovery actions",
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringResolutionRequests()[1]))
     .toMatchObject({ submissionId: "receipt-uncertain-dismiss", action: "dismiss" });
 });
+
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+  test(`completed Queue Again receipts reconcile and dismiss safely at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.evaluate(() => {
+      const base = {
+        turnId: "turn-original", source: "direct" as const, state: "uncertain" as const,
+        reason: "transport_uncertain" as const, createdAt: 10,
+      };
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+        queued: [
+          { id: "queue-delivered", text: "Repeated prompt text" },
+          { id: "queue-manual", text: "Keep this queued prompt" },
+        ],
+        steeringAttempts: [
+          { ...base, submissionId: "queue-again-delivered", text: "Repeated prompt text", updatedAt: 11,
+            resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-delivered" } },
+          { ...base, submissionId: "queue-again-manual", text: "Keep this queued prompt", updatedAt: 12,
+            resolution: { action: "queue_again", state: "applied", queuedPromptId: "queue-manual" } },
+        ],
+      });
+    });
+
+    const completedGroup = page.locator('[data-terminal-status="queued_again"]');
+    await expect(completedGroup).toBeVisible();
+    await expect(completedGroup).toContainText("2 Completed Receipts");
+    expect((await completedGroup.boundingBox())!.height).toBeLessThanOrEqual(48);
+    await completedGroup.getByRole("button", { name: /Completed Receipts/ }).click();
+    const delivered = receipt(page, "queue-again-delivered");
+    const manual = receipt(page, "queue-again-manual");
+    await expect(delivered).toContainText("Queued for a later turn.");
+    await expect(delivered).not.toContainText("Transport uncertain.");
+    await expect(manual.getByRole("button", { name: "Dismiss" })).toBeVisible();
+    await expect(manual.locator(".steering-receipt-dismiss")).toHaveAttribute("title", "Dismiss");
+    await expect(manual.locator(".steering-receipt-actions")).toHaveCount(0);
+    await page.screenshot({ path: test.info().outputPath(`queue-again-settled-${viewport.width}.png`) });
+
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage(
+      "session-alpha", "Repeated prompt text", "queue-other",
+    ));
+    await expect(delivered).toBeVisible();
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage(
+      "session-alpha", "Canonical delivered prompt", "queue-delivered",
+    ));
+    await expect(delivered).toHaveCount(0);
+
+    await manual.getByRole("button", { name: "Dismiss" }).click();
+    await expect(manual).toHaveCount(0);
+    await expect(page.getByTestId("queued-prompt-queue-manual")).toContainText("Keep this queued prompt");
+    await expect.poll(() => page.evaluate(() =>
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringResolutionRequests().at(-1)
+    )).toMatchObject({ submissionId: "queue-again-manual", action: "dismiss" });
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSnapshot());
+    await expect(manual).toHaveCount(0);
+    await expect(page.getByTestId("queued-prompt-queue-manual")).toBeVisible();
+  });
+}
 
 test("concurrent uncertainty resolutions retain independent pending UI", async ({ page }) => {
   await page.evaluate(() => {

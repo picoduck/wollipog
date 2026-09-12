@@ -4,8 +4,59 @@
 import type { SessionMeta } from "./session-store.js";
 import type { ShellProcessLaunch } from "./shell-manager.js";
 import { windowsCommandLine } from "./windows-conpty.js";
+import { runnerSupportsProtocol } from "@wollipog/protocol";
+import {
+  codexOrchestratorMcpArgs,
+  supportsNativeOrchestratorBoundary,
+  type OrchestratorIsolationMode,
+} from "./orchestrator-preset.js";
+import { windowsCmdInvocationSpec } from "./windows-cmd.js";
 
 const TUI_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
+
+/** Durable metadata intentionally omits credentials. Rebuild runner-owned launch state for
+ * each TUI and probe at its exact cwd, including manual attachment after a runner restart. */
+export async function prepareAgentTuiLaunch(
+  meta: SessionMeta,
+  dependencies: {
+    controlPlaneProtocolVersion: number | null;
+    provision(meta: SessionMeta): Promise<void> | void;
+    prepareScratch(meta: SessionMeta): Promise<string>;
+    probe?: typeof codexOrchestratorMcpArgs;
+    platform?: NodeJS.Platform;
+    executionIsolationMode?: OrchestratorIsolationMode;
+  },
+): Promise<ShellProcessLaunch | null> {
+  if (meta.config?.permissionMode !== "orchestrator") return agentTuiLaunch(meta);
+  const platform = dependencies.platform ?? process.platform;
+  if (!runnerSupportsProtocol(dependencies.controlPlaneProtocolVersion, "orchestratorNativeTui") ||
+      meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host") ||
+      !TUI_DRIVERS.has(meta.driver)) {
+    throw new Error("Orchestrator Native TUI requires a current native host harness and control plane.");
+  }
+  if (!supportsNativeOrchestratorBoundary(
+    meta.driver, platform, dependencies.executionIsolationMode,
+  )) {
+    throw new Error("Orchestrator Native TUI requires an attested native filesystem boundary for this harness.");
+  }
+  if (!["idle", "starting", "running", "input_required"].includes(meta.status)) {
+    throw new Error("Orchestrator Native TUI requires an active session; resume the session first.");
+  }
+  const cwd = await dependencies.prepareScratch(meta);
+  const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
+  await dependencies.provision(prepared);
+  prepared.env = {
+    ...prepared.env,
+    ...(platform === "win32" ? { TEMP: cwd, TMP: cwd } : { TMPDIR: cwd }),
+  };
+  if (prepared.driver !== "claude-code") {
+    prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
+      prepared, cwd,
+    ));
+  }
+  const launch = agentTuiLaunch(prepared, { platform, comspec: process.env.ComSpec });
+  return launch ? { ...launch, cwd } : null;
+}
 
 function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
   return driver === "claude-code"
@@ -21,17 +72,6 @@ function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
     : ["OPENAI_API_KEY"];
 }
 
-function cmdTailQuoteArg(arg: string, command = false): string {
-  // The complete /s /c tail is itself quoted. The executable token stays protected by its own
-  // balanced quotes, where careting path metacharacters corrupts lookup. Data arguments are parsed
-  // again by cmd after the outer pair is stripped and need metacharacter carets at that stage.
-  if (/[\r\n]/.test(arg)) throw new Error("agent TUI cmd argument contains CR/LF");
-  if (arg.includes("%")) throw new Error("agent TUI cmd argument contains %, which cmd.exe would expand");
-  if (arg === "") return '""';
-  if (!/[ \t"&|<>^()!]/.test(arg)) return arg;
-  return `"${arg.replace(command ? /["^]/g : /["&|<>^()]/g, "^$&")}"`;
-}
-
 export function agentTuiLaunch(
   meta: SessionMeta,
   host: { platform: NodeJS.Platform; comspec?: string } = {
@@ -44,16 +84,16 @@ export function agentTuiLaunch(
   if (host.platform === "win32" && meta.context.kind === "native") {
     // Configured CLIs may be .cmd shims. ConPTY calls CreateProcess directly, so route the exact
     // non-prompt argv through cmd.exe with a single, cmd-specific quoting pass.
-    const commandLine = [cmdTailQuoteArg(meta.command, true), ...meta.args.map((arg) => cmdTailQuoteArg(arg))].join(" ");
-    const comspec = host.comspec || "cmd.exe";
+    const spec = windowsCmdInvocationSpec(meta.command, meta.args, host);
+    const tail = spec.args.at(-1)!;
     return {
-      command: comspec,
-      args: ["/d", "/s", "/c", commandLine],
+      command: spec.file,
+      args: spec.args,
       env: meta.env,
       scrubInheritedEnv: scrub,
       // cmd.exe parses its /c tail itself. Wrapping the complete tail in one quote pair is the
       // canonical /s form; applying CommandLineToArgvW escaping to it again corrupts inner quotes.
-      verbatimCommandLine: `${windowsCommandLine(comspec, ["/d", "/s", "/c"])} "${commandLine}"`,
+      verbatimCommandLine: `${windowsCommandLine(spec.file, spec.args.slice(0, -1))} ${tail}`,
     };
   }
   return { command: meta.command, args: [...meta.args], env: meta.env, scrubInheritedEnv: scrub };

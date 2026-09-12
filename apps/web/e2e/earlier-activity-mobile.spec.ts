@@ -110,16 +110,23 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
     };
     let sampling = true;
     state.__prependSamples = [];
-    const sample = () => {
-      if (!sampling) return;
-      const current = element.querySelector<HTMLElement>(`[data-virtual-key='${anchor.key}']`);
-      state.__prependSamples!.push({
-        offset: current ? current.getBoundingClientRect().top - element.getBoundingClientRect().top : null,
-        scrollTop: element.scrollTop,
+    const samplePaintedFrame = () => {
+      requestAnimationFrame(() => {
+        // Sample from the next task, after this rendering opportunity. Chromium 153 may run this
+        // callback before a later rAF callback applies the pre-paint anchor correction; reading in
+        // the callback itself mistakes that callback ordering for a frame shown to the reader.
+        setTimeout(() => {
+          if (!sampling) return;
+          const current = element.querySelector<HTMLElement>(`[data-virtual-key='${anchor.key}']`);
+          state.__prependSamples!.push({
+            offset: current ? current.getBoundingClientRect().top - element.getBoundingClientRect().top : null,
+            scrollTop: element.scrollTop,
+          });
+          samplePaintedFrame();
+        }, 0);
       });
-      requestAnimationFrame(sample);
     };
-    requestAnimationFrame(sample);
+    samplePaintedFrame();
     state.__stopPrependSamples = () => {
       sampling = false;
       return state.__prependSamples ?? [];
@@ -174,6 +181,7 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
         __stopPrependSamples?: () => Array<{ offset: number | null; scrollTop: number }>;
       }).__stopPrependSamples?.() ?? [];
     });
+    expect(samples.length, "the painted-frame sampler must observe at least one frame").toBeGreaterThan(0);
     expect(samples.filter((sample) => sample.offset === null), JSON.stringify(samples)).toHaveLength(0);
     expect(Math.max(...samples.map((sample) => Math.abs(sample.offset! - before.offset))), JSON.stringify(samples))
       .toBeLessThan(1);
@@ -181,4 +189,48 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
     await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
   }
   expect(consoleErrors.filter((message) => message.includes("same key"))).toEqual([]);
+});
+
+test("a downward finger drag at the head loads the next page without a scroll event", async ({ page }) => {
+  await page.goto("/recovery-notice-e2e.html?pagination=resolve&pagination-delay=300&height=720&width=412");
+
+  const reader = page.locator(".detail-scroll");
+  const control = page.locator(".transcript-earlier-activity");
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
+  await reader.dispatchEvent("wheel", { deltaY: -40 });
+  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await page.waitForTimeout(250);
+  await reader.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.waitForTimeout(250);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+  await expect(control).toBeInViewport();
+
+  const dispatchTouch = async (type: "touchstart" | "touchmove" | "touchend", clientY?: number) =>
+    reader.evaluate((element, [kind, y]) => {
+      const event = new Event(kind as string, { bubbles: true });
+      Object.defineProperty(event, "touches", { value: y === null ? [] : [{ clientY: y }] });
+      element.dispatchEvent(event);
+    }, [type, clientY ?? null] as const);
+
+  // A short touch is a tap or a jitter, never a request for history.
+  await dispatchTouch("touchstart", 100);
+  await dispatchTouch("touchmove", 110);
+  await dispatchTouch("touchend");
+  await page.waitForTimeout(250);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+
+  // A genuine downward drag at the head has no scroll event to ride on, yet it means "earlier".
+  await dispatchTouch("touchstart", 100);
+  await dispatchTouch("touchmove", 118);
+  await dispatchTouch("touchmove", 140);
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+  await dispatchTouch("touchmove", 170);
+  await dispatchTouch("touchend");
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
+  await expect(control).toContainText("Loading Earlier Activity…");
+  await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
 });

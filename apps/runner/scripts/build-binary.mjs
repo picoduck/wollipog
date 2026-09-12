@@ -57,10 +57,18 @@ if (process.argv.includes("--bundle-only")) {
 const seaConfig = join(buildDir, "sea-config.json");
 const blob = join(buildDir, "runner.blob");
 const assets = {};
+if (process.platform === "darwin") {
+  const helper = join(buildDir, "macos-skill-snapshots");
+  execFileSync("/usr/bin/clang", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror",
+    "-Wno-deprecated-declarations", join(runner, "native", "macos-skill-snapshots.c"), "-o", helper],
+  { stdio: "inherit" });
+  assets["wollipog/macos-skill-snapshots"] = helper;
+}
 if (process.platform === "win32") {
   const require = createRequire(import.meta.url);
   const packageJson = require.resolve("node-pty/package.json");
   assets["node-pty/conpty.node"] = join(dirname(packageJson), "prebuilds", `win32-${process.arch}`, "conpty.node");
+  assets["wollipog/wsl-bwrap-launcher.c"] = join(runner, "native", "wsl-bwrap-launcher.c");
 }
 writeFileSync(seaConfig, JSON.stringify({
   main: bundle,

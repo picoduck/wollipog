@@ -1547,6 +1547,7 @@ export class Store {
   private state: State;
   private readonly listeners = new Set<() => void>();
   private inboxPersistenceEnabled = true;
+  private attentionActivation = 0;
 
   constructor(
     initialView: View = { name: "inbox" },
@@ -1584,12 +1585,23 @@ export class Store {
   };
 
   navigate = (view: View): void => {
-    if (sameView(this.state.view, view)) return;
-    this.dispatch({ type: "navigate", view });
-    this.onNavigate?.(view);
+    const activated = view.name === "session" && view.attention
+      ? { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }
+      : view;
+    if (sameView(this.state.view, activated)) {
+      if (activated.name === "session" && activated.attention) this.dispatch({ type: "navigate", view: activated });
+      return;
+    }
+    this.dispatch({ type: "navigate", view: activated });
+    this.onNavigate?.(activated);
   };
   navigateFromHistory = (view: View): void => {
-    if (!sameView(this.state.view, view)) this.dispatch({ type: "navigate", view });
+    const activated = view.name === "session" && view.attention
+      ? { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }
+      : view;
+    if (!sameView(this.state.view, activated) || (activated.name === "session" && activated.attention)) {
+      this.dispatch({ type: "navigate", view: activated });
+    }
   };
   setInboxPersistenceEnabled = (enabled: boolean): void => {
     if (enabled === this.inboxPersistenceEnabled) return;
@@ -1920,8 +1932,8 @@ export function StoreProvider({
       for (const [id, s] of cur) {
         const show = (payload: NotifyPayload) => notifier.show(payload, {
           instanceId: connection.instanceId,
-          onClick: (id) => {
-            const view = { name: "session" as const, id };
+          onClick: (id, attention) => {
+            const view = { name: "session" as const, id, ...(attention ? { attention } : {}) };
             if (navigationRef.current?.activate) navigationRef.current.activate(view);
             else store.navigate(view);
           },
@@ -1960,6 +1972,12 @@ function useStoreHandle(): Store {
   const ctx = useContext(StoreContext);
   if (!ctx) throw new Error("useStore must be used within StoreProvider");
   return ctx;
+}
+
+/** Whether a store is mounted above. Views that also render standalone (tests, harness pages)
+ * gate their store-backed children on this instead of throwing. */
+export function useHasStore(): boolean {
+  return useContext(StoreContext) !== null;
 }
 
 /** Stable action handles (never cause re-renders). */

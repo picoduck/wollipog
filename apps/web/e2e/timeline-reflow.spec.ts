@@ -607,7 +607,7 @@ test("timeline reader disables browser-native scroll anchoring", async ({ page }
 });
 
 for (const width of [320, 390]) {
-  for (const questionStyle of ["interactive", "text"] as const) {
+  for (const questionStyle of ["interactive", "composer"] as const) {
     test(`structured transcript rows stay inside a ${width}px phone reader with ${questionStyle} questions`, async ({ page }) => {
       await page.addInitScript((style) => {
         localStorage.setItem("wollipog.question-response-style", style);
@@ -616,10 +616,12 @@ for (const width of [320, 390]) {
       await page.goto("/timeline-reflow-e2e.html?overflow=1");
       const reader = page.getByTestId("reader");
       await expect(page.getByText("Automated Review")).toBeVisible();
+      await expect(page.getByRole("button", { name: /2 Tool Calls Auto-Approved · High Risk/ })).toBeVisible();
       await expectTranscriptWidthContained(page);
 
       await page.getByRole("button", { name: /Worked/ }).click();
       await expect(page.locator(".tl-tool")).toBeVisible();
+      await expect(page.getByText("Automated Review")).toHaveCount(3);
       await expectTranscriptWidthContained(page);
       const diff = page.locator(".diff");
       await expect(diff).toBeVisible();

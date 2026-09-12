@@ -30,10 +30,12 @@ import {
   type GitActionRequestMessage,
   type HeartbeatMessage,
   type HostActionMessage,
+  type CreateWorkspaceReferenceRequestMessage,
   type ListDirectoryRequestMessage,
   type ListSessionFilesRequestMessage,
   type OS,
   type ReadSessionFileRequestMessage,
+  type SearchWorkspaceReferencesRequestMessage,
   type RegisterMessage,
   type ReprocessSessionMessage,
   type RunnerMetadata,
@@ -44,24 +46,24 @@ import {
   type SessionSnapshot,
   type SessionWorktreeView,
   type SkillsSyncManifestMessage,
+  type SkillAdoptionMessage,
+  type SkillAdoptionRecoveryMessage,
   type StartSessionMessage,
 } from "@wollipog/protocol";
 import {
   loadConfig,
   parseArgs,
   parseEnv,
+  projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
+  resolveRunnerLocalAgentEnvironment,
   type RunnerConfig,
 } from "./config.js";
 import {
-  fenceConductorAdvertisement,
-  withConductorAgent,
-  defaultConductorHost,
-  provisionConductor,
   removeConductorMcpConfig,
   sweepConductorMcpConfigs,
   stageRunnerCredentialFile,
-} from "./conductor.js";
+} from "./runner-credential-file.js";
 import {
   applyClaudeHookCapability,
   claudeHookRunnerConfigDir,
@@ -81,8 +83,10 @@ import {
   removeAgentControlFiles,
   sweepAgentControlFiles,
 } from "./agent-control.js";
+import { stripOrchestratorLaunchArgs, withOrchestratorPreset } from "./orchestrator-preset.js";
 import {
   GitOpError,
+  gitDiff,
   resolveGitActionExecution,
   runGitAction,
   runPodReconcile,
@@ -121,9 +125,15 @@ import {
 } from "./external/acp-sessions.js";
 import { listDirectory } from "./fs-browse.js";
 import { discoverEditors, runHostAction } from "./host-actions.js";
-import { listSessionFiles, readSessionFile } from "./session-files.js";
+import {
+  createWorkspaceReference,
+  inspectWorkspaceReferenceDiff,
+  listSessionFiles,
+  readSessionFile,
+  searchWorkspaceReferences,
+} from "./session-files.js";
 import { ShellManager } from "./shell-manager.js";
-import { agentTuiLaunch } from "./agent-tui.js";
+import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
 import {
@@ -144,6 +154,14 @@ import {
   storedSkillVersionAvailable,
   type ReconcileSkillEntry,
 } from "./skills.js";
+import { mergeWslSkillsResult, reconcileWslSkills } from "./wsl-skills.js";
+import { MachineSkillSnapshots } from "./skill-snapshots.js";
+import { handleSkillAdoption } from "./skill-adoption-command.js";
+import {
+  listSkillAdoptionRecovery,
+  recoveryResult,
+  restoreSkillAdoptionRecovery,
+} from "./skill-adoption-recovery.js";
 import { ChunkedSkillsSyncAssembler, type ChunkedSyncStep } from "./skills-sync.js";
 import { VERSION } from "./version.js";
 import { overlayAcpAuthStatus, type AcpAuthRuntime } from "./acp-auth-status.js";
@@ -299,7 +317,6 @@ const stagedRunnerCredential = stageRunnerCredentialFile(
 );
 const runnerCredentialFile = stagedRunnerCredential.activePath;
 const conductorHost = {
-  ...defaultConductorHost(),
   // The pre-attestation default root also used ~/.agent-manager/conductor. Always add an
   // attested leaf so startup sweeping can never delete unattributable legacy configurations.
   configDir: resolve(config.dataDir, "conductor", "runner-instances", dataDirLease.ownerHash),
@@ -317,14 +334,18 @@ const runnerHostname = hostname();
 const sessionNamingCustomModel = new RunnerSessionNamingCustomModel(resolve(config.dataDir, "session-naming"));
 const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHostname, config.containerTargets);
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
-const configuredAgentDefinitions = config.agents.map((a) => {
+const configuredAgentDefinitions = config.agents.filter((a) => a.id !== "conductor").map((a) => {
   const driver = a.driver ?? "acp";
+  // Git Bash is a non-secret native-provider prerequisite. Project only that one resolved value
+  // into runner-local metadata so Windows readiness can honor literal/fromEnv agent config while
+  // all credentials remain redacted from discovery and the control plane.
+  const projectedEnv = projectAgentDiscoveryEnvironment(a);
   return {
     id: a.id,
     name: a.name,
     command: a.command,
     args: a.args ?? [],
-    env: {},
+    env: projectedEnv,
     // env is redacted above, so the discovery merge cannot see a configured OPENAI_API_KEY.
     // Carry the non-secret fact that auth is configured (literal or fromEnv) as an auth
     // assertion, or the auth gate would disable a deliberately API-keyed Codex whose
@@ -345,8 +366,8 @@ const metadata: RunnerMetadata = {
   os: detectOs(),
   version: VERSION,
   // Pre-discovery config rows go out verbatim so live discovery can still authoritatively
-  // fill availability and capabilities; conductor synthesis happens after every merge.
-  agents: configuredAgentDefinitions,
+  // fill availability and capabilities; supported native agents gain the runner-owned preset.
+  agents: withOrchestratorPreset(configuredAgentDefinitions, { isolationMode: config.executionIsolation.mode }),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -368,21 +389,33 @@ const metadata: RunnerMetadata = {
 // Configured agents are the baseline; discovery augments them (config wins on conflict).
 const configAgents = metadata.agents;
 const acpAuthStatus = new Map<string, AcpAuthRuntime>();
+const freshSafeWslLaunches = new Set<string>();
 
-/** The control plane receives neither values nor fromEnv reference names. The synthesized
- * conductor is fenced here — at send time, with the CURRENT socket's negotiated version — so a
- * cached list can never carry it to a pre-v91 control plane, and a list merged before
- * registration still advertises it to a v91+ control plane on the post-register re-push. */
+function safeWslLaunchKey(value: Pick<AgentDefinition, "command" | "args" | "driver" | "context">): string | null {
+  if (value.context?.kind !== "wsl") return null;
+  return JSON.stringify([value.context.distro, value.driver ?? "acp", value.command, ...(value.args ?? [])]);
+}
+
+/** Never advertise secret environment data, retired identities, or an orchestration preset
+ * to a control plane that cannot enforce its credential boundary. */
 function agentsForControlPlane() {
-  return fenceConductorAdvertisement(metadata.agents, controlPlaneProtocolVersion)
-    .map((agent) => ({ ...agent, env: {} }));
+  return metadata.agents.filter((agent) => agent.id !== "conductor")
+    .map((agent) => ({ ...agent, env: {},
+      ...((!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionOrchestration") ||
+          ((agent.context?.kind ?? "native") === "wsl" &&
+            (!runnerSupportsProtocol(controlPlaneProtocolVersion, "wslSafeLauncher") ||
+              agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
+              config.executionIsolation.mode !== "bwrap"))) && agent.capabilities
+        ? { capabilities: { ...agent.capabilities, permissionModes: agent.capabilities.permissionModes?.filter((mode) => mode !== "orchestrator") } }
+        : {}),
+    }));
 }
 
 /** Resolve exact configured/discovered agent env at the last responsible moment. */
 function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, context: AgentContext): Record<string, string> {
-  const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
-  if (configured) return resolveAgentEnvironment(configured);
   const exact = agentId ? metadata.agents.find((agent) => agent.id === agentId) : undefined;
+  const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
+  if (configured) return resolveRunnerLocalAgentEnvironment(configured, exact?.env);
   return { ...(exact?.env ?? resolveLaunchForDriver(metadata.agents, driver, context)?.env ?? {}) };
 }
 
@@ -440,6 +473,32 @@ const registerPolicyHookCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "policy_hook_credential", sessionId, tokenHash });
 const registerAgentControlCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "agent_control_credential", sessionId, tokenHash });
+const pendingAgentControlRegistrations = new Map<string, {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+const agentControlRegistrationKey = (sessionId: string, tokenHash: string) => `${sessionId}\0${tokenHash}`;
+const registerAgentControlCredentialAndWait = (sessionId: string, tokenHash: string): Promise<void> => {
+  const key = agentControlRegistrationKey(sessionId, tokenHash);
+  if (pendingAgentControlRegistrations.has(key)) {
+    return Promise.reject(new Error("duplicate Agent Control credential registration"));
+  }
+  return new Promise<void>((resolvePromise, reject) => {
+    const timer = setTimeout(() => {
+      pendingAgentControlRegistrations.delete(key);
+      reject(new Error("Agent Control credential was not acknowledged within 10 seconds"));
+    }, 10_000);
+    timer.unref?.();
+    pendingAgentControlRegistrations.set(key, { resolve: resolvePromise, reject, timer });
+    try { registerAgentControlCredential(sessionId, tokenHash); }
+    catch (error) {
+      clearTimeout(timer);
+      pendingAgentControlRegistrations.delete(key);
+      reject(error as Error);
+    }
+  });
+};
 // The box's on-disk session store (source of truth, shared across runner instances on this box).
 const store = new SessionStore(resolve(config.dataDir, "sessions"));
 store.scrubLegacyAgentEnv();
@@ -450,6 +509,7 @@ const sessionCommandReceipts = new SessionCommandReceiptStore(
 );
 sessionCommandReceipts.prune();
 const sessionNaming = new SessionNamingExecutor({
+  preflight: (agent) => sessions.preflightSessionNamingExecution(agent),
   authorize: (agent, env, cwd) => sessions.prepareSessionNamingExecution(agent, env, cwd),
 });
 // The resolver closes over `metadata`, so it always sees the LIVE agent list (discovery replaces
@@ -487,16 +547,8 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   config.agents.map((agent) => agent.context ?? { kind: "native" as const }),
   async (meta) => {
     meta.env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
-    provisionConductor(
-      meta,
-      {
-        controlPlaneUrl: config.controlPlaneUrl,
-        tokenFile: runnerCredentialFile,
-        allowInsecureTransport,
-      },
-      log,
-      conductorHost,
-    );
+    if (meta.agentId === "conductor") throw new Error("The Conductor agent is retired; create an ordinary session to orchestrate children.");
+    const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
     provisionClaudeHooks(
       meta,
       {
@@ -509,13 +561,17 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       log,
       claudeHookHost,
     );
-    provisionAgentControl(
+    await provisionAgentControl(
       meta,
       {
         controlPlaneUrl: config.controlPlaneUrl,
         controlPlaneProtocolVersion,
         allowInsecureTransport,
         registerCredential: registerAgentControlCredential,
+        registerCredentialAndWait: registerAgentControlCredentialAndWait,
+        orchestratorAgent: localAgent,
+        executionIsolationMode: config.executionIsolation.mode,
+        orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
       },
       log,
       agentControlHost,
@@ -550,6 +606,18 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     subscriptionUsage.observe(agentId, driver, context, update);
   },
   config.workspaces.map((workspace) => workspace.path),
+  (meta) => {
+    if (meta.config.permissionMode !== "orchestrator" || meta.context.kind !== "wsl" ||
+        meta.executionTarget && meta.executionTarget.adapter !== "host") return false;
+    const agent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
+    if (!agent || agent.wslAgentControl?.safeLauncherProtocolVersion !== 1 ||
+        agent.context?.kind !== "wsl" || agent.context.distro !== meta.context.distro ||
+        agent.driver !== meta.driver || agent.command !== meta.command) return false;
+    const args = stripOrchestratorLaunchArgs(meta.args, meta.driver);
+    const key = safeWslLaunchKey({ ...meta, args });
+    return !!key && freshSafeWslLaunches.has(key) && args.length === agent.args.length &&
+      agent.args.every((arg, index) => arg === args[index]);
+  },
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
@@ -646,10 +714,21 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
       snapshot: projectSnapshotForCurrentProtocol(msg.snapshot),
     }, controlPlaneProtocolVersion);
   }
+  if (msg.type === "policy_hook_decision_recorded" &&
+      !runnerSupportsProtocol(controlPlaneProtocolVersion, "nativePolicyHookEvents")) return null;
   return projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion);
 }
 
 function sendUp(msg: RunnerToControlPlane): void {
+  if (msg.type === "session_status" && ["completed", "failed", "stopped"].includes(msg.status)) {
+    removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
+    for (const [key, pending] of pendingAgentControlRegistrations) {
+      if (!key.startsWith(`${msg.sessionId}\0`)) continue;
+      clearTimeout(pending.timer);
+      pendingAgentControlRegistrations.delete(key);
+      pending.reject(new Error(`Agent Control registration ended with session status ${msg.status}`));
+    }
+  }
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
     let projected: RunnerToControlPlane | null;
     try {
@@ -809,6 +888,7 @@ function startTrackedSession(
  * arrives on this process; removal sweeps and store GC never run before then, so a fresh runner
  * cannot tear down links deployed by its previous incarnation on a scan-only pass. */
 let lastDesiredSkills: ReconcileSkillEntry[] | null = null;
+const machineSkillSnapshots = new MachineSkillSnapshots({ home: homedir(), agents: () => metadata.agents });
 const chunkedSkillsSync = new ChunkedSkillsSyncAssembler({
   runnerId: config.runnerId,
   needsContent: (entry) =>
@@ -859,7 +939,8 @@ function queueSkillsReconcile(requestId?: string): void {
     // authoritative list, and replaying it under an older requestId still reports converged truth.
     const desired = lastDesiredSkills;
     try {
-      const result = await reconcileSkills({
+      const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
+      let result = await reconcileSkills({
         dataDir: config.dataDir,
         home: homedir(),
         agents: metadata.agents,
@@ -867,13 +948,24 @@ function queueSkillsReconcile(requestId?: string): void {
         // Content frames are published immediately to bound memory. While their completion fence
         // is pending, suppress removal/GC so an interleaved discovery pass cannot reclaim that
         // newly cached digest (especially when previousVersionMinutes is configured to zero).
-        allowRemovals: desired !== null && !chunkedSkillsSync.inProgress,
+        allowRemovals,
         log,
         acquireProviderHomeLease: () =>
           sessions.acquireSkillReconciliationProviderHome(homedir()),
         removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
         previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
       });
+      if (process.platform === "win32" && metadata.agents.some((agent) => agent.context?.kind === "wsl")) {
+        const wsl = await reconcileWslSkills({
+          dataDir: config.dataDir,
+          ownerHash: dataDirLease.ownerHash,
+          agents: metadata.agents,
+          desired: desired ?? [],
+          allowRemovals,
+          log,
+        });
+        result = mergeWslSkillsResult(result, wsl, metadata.agents);
+      }
       sendUp(skillsStateMessage(config.runnerId, result, requestId));
     } catch (error) {
       sendUp({
@@ -886,6 +978,63 @@ function queueSkillsReconcile(requestId?: string): void {
         error: `skill reconcile failed: ${errText(error)}`,
       });
     }
+  };
+  skillsReconcileQueue = skillsReconcileQueue.then(run, run);
+}
+
+function queueSkillAdoption(msg: SkillAdoptionMessage): void {
+  const run = async () => {
+    const result = handleSkillAdoption({
+      message: msg,
+      runnerId: config.runnerId,
+      home: homedir(),
+      dataDir: config.dataDir,
+      agents: metadata.agents,
+      snapshots: machineSkillSnapshots,
+      desired: lastDesiredSkills,
+      acquireProviderHomeLease: () => sessions.acquireSkillReconciliationProviderHome(homedir()),
+    });
+    sendUp(result);
+    // A completed or interrupted transaction may have changed the source path. Reconcile and
+    // inventory run next in the same queue so no link/GC pass can interleave with adoption.
+    if (result.status !== "rejected") queueSkillsReconcile();
+  };
+  skillsReconcileQueue = skillsReconcileQueue.then(run, run);
+}
+
+function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
+  const run = async () => {
+    if (msg.runnerId !== config.runnerId) {
+      sendUp(recoveryResult(config.runnerId, msg.requestId, {
+        status: "blocked",
+        error: "Recovery targeted a different runner.",
+      }));
+      return;
+    }
+    if (msg.operation === "list") {
+      const listed = listSkillAdoptionRecovery(homedir(), config.dataDir, metadata.agents);
+      sendUp(recoveryResult(config.runnerId, msg.requestId, { status: "listed", ...listed }));
+      return;
+    }
+    if (msg.operation !== "restore" || msg.confirmation !== "explicit" || !msg.operationId) {
+      sendUp(recoveryResult(config.runnerId, msg.requestId, {
+        status: "blocked",
+        error: "Restore requires one explicitly confirmed recovery operation.",
+      }));
+      return;
+    }
+    const result = restoreSkillAdoptionRecovery({
+      home: homedir(),
+      dataDir: config.dataDir,
+      agents: metadata.agents,
+      operationId: msg.operationId,
+      acquireProviderHomeLease: () => sessions.acquireSkillReconciliationProviderHome(homedir()),
+    });
+    sendUp(recoveryResult(config.runnerId, msg.requestId, result));
+    // A restore attempt can move a managed link or source directory. Publish converged inventory
+    // next in this same queue and keep reconcile/store GC out of every recovery transaction.
+    if (result.status === "restored" || result.status === "not_needed" ||
+        result.status === "recovery_required") queueSkillsReconcile();
   };
   skillsReconcileQueue = skillsReconcileQueue.then(run, run);
 }
@@ -947,19 +1096,23 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       discoverEditors(),
     ]);
     const discovered = [...nativeAgents, ...registryAgents];
+    freshSafeWslLaunches.clear();
+    for (const agent of nativeAgents) {
+      if (agent.wslAgentControl?.safeLauncherProtocolVersion !== 1) continue;
+      const key = safeWslLaunchKey(agent);
+      if (key) freshSafeWslLaunches.add(key);
+    }
     // Enrich the merged list with dynamic per-version/context models (live app-server model/list,
     // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
-    // The conductor is synthesized AFTER the merge — inside discovery, a configured claude entry
-    // sharing the launch key would silently suppress it via the merge's usedKeys check.
     metadata.agents = applyClaudeHookCapability(
-      await enrichAgentModels(withConductorAgent(
-        mergeAgents(configAgents, discovered),
-      ), {
+      await enrichAgentModels(
+        mergeAgents(configAgents, discovered).filter((agent) => agent.id !== "conductor"), {
         refresh: refreshModels,
       }),
       claudeHookFeatureEnabled,
       log,
     );
+    metadata.agents = withOrchestratorPreset(metadata.agents, { isolationMode: config.executionIsolation.mode });
     // A definitive native discovery result is newer authoritative evidence than the process-local
     // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
     // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.
@@ -1080,6 +1233,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      if (msg.runnerCapacity && runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) {
+        if (sessions.configureCapacity(msg.runnerCapacity)) {
+          metadata.runtime!.maxConcurrentSessions = msg.runnerCapacity.configuredUnits;
+        }
+      }
       log(`registered (heartbeat every ${msg.heartbeatIntervalMs}ms)`);
       if (ws) startHeartbeat(ws, msg.heartbeatIntervalMs);
       flushOutbox();
@@ -1104,6 +1262,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // dead), but OURS survived the socket blip — re-report every non-empty queue or those
       // prompts stay invisible and uncancelable until the queue next changes.
       sessions.reportQueues();
+      sessions.reportCapacity(true);
+      sessions.reportGovernanceTrips();
       sessions.recoverAllOrphanedWork();
       for (const receipt of durableCommands.recentUpdates()) sendDurableUpdate(receipt);
       for (const receipt of sessionCommandReceipts.recentUpdates()) sendSessionCommandUpdate(receipt);
@@ -1112,7 +1272,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       log(`registration rejected: ${msg.reason}`);
       // Keep the staged bytes for the reconnect loop. A transient rejection can be followed by a
       // successful registration with the same pending token; discarding here would make promote()
-      // a no-op and leave conductor processes on the revoked prior credential after cutover.
+      // a no-op and leave runner credential consumers on the revoked prior credential after cutover.
       ws?.close();
       break;
     case "policy_hook_credential_registered":
@@ -1127,14 +1287,60 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`Claude hooks ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
       break;
+    case "record_policy_hook_decision": {
+      runCommandTask("record_policy_hook_decision", (async () => {
+        let recorded: Awaited<ReturnType<SessionManager["recordPolicyHookDecision"]>>;
+        try {
+          recorded = await sessions.recordPolicyHookDecision(msg.sessionId, msg.decision);
+        } catch (error) {
+          log(`policy-hook decision append ${msg.sessionId}: ${errText(error)}`);
+          recorded = {
+            accepted: false,
+            auditId: typeof msg.decision?.auditId === "string" ? msg.decision.auditId : "",
+            error: "decision history append failed",
+          };
+        }
+        sendUp({
+          type: "policy_hook_decision_recorded",
+          requestId: msg.requestId,
+          sessionId: msg.sessionId,
+          auditId: recorded.auditId,
+          accepted: recorded.accepted,
+          ...(recorded.eventSeq !== undefined ? { eventSeq: recorded.eventSeq } : {}),
+          ...(recorded.error ? { error: recorded.error } : {}),
+        });
+      })());
+      break;
+    }
     case "agent_control_credential_registered":
       try {
-        if (msg.accepted) markAgentControlCredentialReady(agentControlHost.configDir, msg.sessionId, msg.tokenHash);
+        const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
+        const pending = pendingAgentControlRegistrations.get(pendingKey);
+        if (msg.accepted) {
+          markAgentControlCredentialReady(agentControlHost.configDir, msg.sessionId, msg.tokenHash);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingAgentControlRegistrations.delete(pendingKey);
+            pending.resolve();
+          }
+        }
         else {
           markAgentControlCredentialRejected(agentControlHost.configDir, msg.sessionId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingAgentControlRegistrations.delete(pendingKey);
+            pending.reject(new Error(msg.error ?? "Agent Control credential registration was rejected"));
+          }
           log(`agent control ${msg.sessionId}: credential registration rejected (${msg.error ?? "unknown session binding"})`);
         }
       } catch (error) {
+        const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
+        const pending = pendingAgentControlRegistrations.get(pendingKey);
+        if (pending) {
+          clearTimeout(pending.timer);
+          pendingAgentControlRegistrations.delete(pendingKey);
+          pending.reject(error as Error);
+        }
         markAgentControlCredentialRejected(agentControlHost.configDir, msg.sessionId);
         log(`agent control ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
@@ -1145,21 +1351,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log("ignored start_session with malformed prompt images");
         break;
       }
-      // Provision the conductor BEFORE sessions.start(): start() persists spec.args/config
-      // into the box store's meta, so the injected MCP flags survive restarts and the
-      // resume path reuses them. A provisioning failure fails the session loudly — a
-      // conductor without its manager tools would only look broken in confusing ways.
+      // Provision managed hooks before persisting launch metadata; refuse retired identities.
       try {
-        provisionConductor(
-          msg.spec,
-          {
-            controlPlaneUrl: config.controlPlaneUrl,
-            tokenFile: runnerCredentialFile,
-                allowInsecureTransport,
-          },
-          log,
-          conductorHost,
-        );
+        if (msg.spec.agentId === "conductor") throw new Error("The Conductor agent is retired.");
         provisionClaudeHooks(
           msg.spec,
           {
@@ -1273,16 +1467,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       const lifecycle = durableLifecycle(claim.handle);
       if (msg.command.type === "start_session") {
         try {
-          provisionConductor(
-            msg.command.spec,
-            {
-              controlPlaneUrl: config.controlPlaneUrl,
-              tokenFile: runnerCredentialFile,
-                    allowInsecureTransport,
-            },
-            log,
-            conductorHost,
-          );
+          if (msg.command.spec.agentId === "conductor") throw new Error("The Conductor agent is retired.");
           provisionClaudeHooks(
             msg.command.spec,
             {
@@ -1300,7 +1485,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           break;
         }
         startTrackedSession(msg.command, lifecycle);
-      } else {
+      } else if (msg.command.type === "prompt_session") {
         try {
           sessions.prompt(
             msg.command.sessionId,
@@ -1312,6 +1497,18 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           );
         } catch (error) {
           lifecycle.failed(`prompt acceptance failed: ${errText(error)}`);
+        }
+      } else {
+        try {
+          sessions.answerRecoveredQuestion(
+            msg.command.sessionId,
+            msg.command.requestId,
+            msg.command.recoveryId,
+            msg.command.answers,
+            lifecycle,
+          );
+        } catch (error) {
+          lifecycle.failed(`recovered answer acceptance failed: ${errText(error)}`);
         }
       }
       break;
@@ -1346,6 +1543,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "stop_session":
       try {
         sessions.stop(msg.sessionId);
+        if (store.readMeta(msg.sessionId)?.config?.permissionMode === "orchestrator") {
+          shells.closeForSession(msg.sessionId, "agent_tui");
+        }
         if (msg.operationId) {
           sendUp({
             type: "stop_session_result",
@@ -1368,6 +1568,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "rearm_governance":
       sessions.rearmGovernance(msg.sessionId, msg.config, msg.holdFor);
+      break;
+    case "priced_session_cost":
+      sessions.syncPricedSessionCost(msg.sessionId, msg.costUsd);
       break;
     case "delete_session":
       sessionStarts.cancel(msg.sessionId);
@@ -1429,8 +1632,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "fork_session": {
+      const destination = msg.handoff ? metadata.agents.find((agent) => agent.id === msg.handoff!.agentId) : undefined;
+      if (msg.handoff && !destination) {
+        sendUp({ type: "fork_result", requestId: msg.requestId, ok: false, error: "destination agent is not installed on this runner" });
+        break;
+      }
       void sessions
-        .forkConversation(msg.sourceSessionId, msg.targetSessionId, msg.turn, msg.title, msg.deferHistory === true)
+        .forkConversation(msg.sourceSessionId, msg.targetSessionId, msg.turn, msg.title, msg.deferHistory === true,
+          msg.handoff && destination ? { agent: destination, config: msg.handoff.config } : undefined,
+          msg.recovery === true)
         .then((result) =>
           sendUp({
             type: "fork_result",
@@ -1439,6 +1649,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             error: result.error,
             snapshot: result.snapshot,
             events: result.events,
+            handoffDraft: result.handoffDraft,
+            retainedPrompt: result.retainedPrompt,
           }),
         )
         .catch((err) =>
@@ -1447,8 +1659,21 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "session_worktree": {
-      const operation: Promise<{ snapshot: SessionSnapshot; worktree?: SessionWorktreeView }> = msg.operation === "create"
-        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef })
+      const reportProgress = msg.operation === "create" && msg.progress === true &&
+        runnerSupportsProtocol(controlPlaneProtocolVersion, "progressAwareSessionWorktrees")
+        ? (phase: import("@wollipog/protocol").SessionWorktreeProgressPhase) => sendUp({
+            type: "session_worktree_progress",
+            requestId: msg.requestId,
+            sessionId: msg.sessionId,
+            phase,
+          })
+        : undefined;
+      const operation: Promise<{
+        snapshot: SessionSnapshot;
+        worktree?: SessionWorktreeView;
+        isolation?: import("@wollipog/protocol").SessionWorktreeIsolationNotice;
+      }> = msg.operation === "create"
+        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress)
         : msg.operation === "attach"
           ? sessions.attachWorktree(msg.sessionId, msg.path)
           : msg.operation === "select"
@@ -1460,12 +1685,17 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void operation.then((result) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        operation: msg.operation,
         ok: true,
         snapshot: result.snapshot,
         ...(result.worktree ? { worktree: result.worktree } : {}),
+        ...(result.isolation ? { isolation: result.isolation } : {}),
       })).catch((error) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        operation: msg.operation,
         ok: false,
         error: errText(error),
       }));
@@ -1474,6 +1704,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "rediscover":
       log("rediscover requested");
       void runDiscovery(true);
+      break;
+    case "configure_runner_capacity":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) break;
+      if (sessions.configureCapacity(msg)) {
+        metadata.runtime!.maxConcurrentSessions = msg.configuredUnits;
+        log(`Runner Capacity updated to ${msg.configuredUnits} units (revision ${msg.revision})`);
+      }
       break;
     case "refresh_subscription_usage":
       if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) {
@@ -1637,6 +1874,17 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       lastDesiredSkills = msg.skills;
       queueSkillsReconcile(msg.requestId);
       break;
+    case "skill_snapshot":
+      if (msg.runnerId === config.runnerId) sendUp(machineSkillSnapshots.handle(msg));
+      break;
+    case "skill_adoption":
+      queueSkillAdoption(msg);
+      break;
+    case "skill_adoption_recovery":
+      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "machineSkillAdoptionRecovery")) {
+        queueSkillAdoptionRecovery(msg);
+      }
+      break;
     case "skills_sync_manifest":
       beginChunkedSkillsSync(msg);
       break;
@@ -1704,6 +1952,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "read_session_file":
       runCommandTask("read_session_file", handleReadSessionFile(msg));
       break;
+    case "search_workspace_references":
+      runCommandTask("search_workspace_references", handleSearchWorkspaceReferences(msg));
+      break;
+    case "create_workspace_reference":
+      runCommandTask("create_workspace_reference", handleCreateWorkspaceReference(msg));
+      break;
     case "shell_open": {
       runCommandTask("shell_open", handleShellOpenCommand(msg, {
         waitForSessionStart: (sessionId) => sessionStarts.wait(sessionId),
@@ -1712,19 +1966,35 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         consumeCancellation: (shellId) => pendingShellOpenCancellations.consume(shellId),
         sessionCanOpen: (sessionId) => sessions.sessionCanOpen(sessionId),
         resolveTarget: (sessionId) => sessionFilesTarget(sessionId),
-        resolveAgentTuiLaunch: (meta) => {
-          const launch = agentTuiLaunch(meta);
-          if (launch) sessions.acquireAgentTuiProviderHome(meta);
-          return launch;
+        targetError: (target) => sessionFilesTargetError(target),
+        launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
+        resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
+          controlPlaneProtocolVersion,
+          executionIsolationMode: config.executionIsolation.mode,
+          prepareScratch: (prepared) => sessions.prepareOrchestratorScratch(prepared),
+          provision: async (prepared) => {
+            prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
+            await provisionAgentControl(prepared, {
+              controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
+              allowInsecureTransport, registerCredential: registerAgentControlCredential,
+              executionIsolationMode: config.executionIsolation.mode,
+              orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
+            }, log, agentControlHost);
+            // Even the no-turn MCP configuration probe may initialize provider HOME.
+            sessions.acquireAgentTuiProviderHome(prepared);
+          },
+        }),
+        open: (message, target, launch) => {
+          if (launch) sessions.acquireAgentTuiProviderHome({ ...target.meta, env: launch.env ?? {} });
+          return shells.open(
+            message.shellId,
+            message.sessionId,
+            target.root,
+            target.context,
+            { cols: message.cols, rows: message.rows },
+            { name: message.name, createdAt: message.createdAt, kind: message.kind, launch },
+          );
         },
-        open: (message, target, launch) => shells.open(
-          message.shellId,
-          message.sessionId,
-          target.root,
-          target.context,
-          { cols: message.cols, rows: message.rows },
-          { name: message.name, createdAt: message.createdAt, kind: message.kind, launch },
-        ),
         send: (result) => sendUp(result),
         errorText: (error) => errText(error),
       }));
@@ -1766,9 +2036,10 @@ async function handleHostAction(msg: HostActionMessage): Promise<void> {
     root = msg.path;
     context = { kind: "native" };
   } else {
-    const target = msg.sessionId ? sessionFilesTarget(msg.sessionId) : null;
-    if (!target || target === "pending") {
-      return reply({ ok: false, error: target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session" });
+    const target = msg.sessionId ? await sessionFilesTarget(msg.sessionId) : null;
+    const targetError = sessionFilesTargetError(target);
+    if (targetError || !target || target === "pending" || "invalid" in target) {
+      return reply({ ok: false, error: targetError ?? "unknown session" });
     }
     root = target.root;
     context = target.context;
@@ -1784,20 +2055,48 @@ async function handleHostAction(msg: HostActionMessage): Promise<void> {
  * dashboard only ever names root-relative paths, in this box's own context (native or WSL).
  * "pending" while worktree setup is still in flight: falling back to repoPath in that window
  * would put a shell/browser in the shared base checkout while the agent lands in the worktree. */
-function sessionFilesTarget(sessionId: string): { root: string; context: AgentContext; meta: SessionMeta } | "pending" | null {
+async function sessionFilesTarget(
+  sessionId: string,
+): Promise<{ root: string; context: AgentContext; meta: SessionMeta } | "pending" | { invalid: string } | null> {
   const meta = store.readMeta(sessionId);
-  if (!meta) return null;
+  if (!meta || store.isDeleted(sessionId)) return null;
   if (meta.worktreePending && !meta.worktreePath) return "pending";
-  return { root: meta.worktreePath ?? meta.repoPath, context: meta.context, meta };
+  // A selected worktree can disappear or be replaced between turns exactly as it can before a
+  // provider launch, and shells, the Native TUI, and Files would otherwise open on whatever now
+  // occupies the path — or report a bare ENOENT for a directory the user never chose.
+  const failure = await sessions.sessionWorktreeRootFailure(meta);
+  // Verification awaits Git. Answer with metadata read after that window, never the snapshot taken
+  // before it: a selection that moved, or a session deleted, while the proof was in flight would
+  // otherwise be served the coordinate that was proved instead of the one now recorded.
+  const latest = store.readMeta(sessionId);
+  if (!latest || store.isDeleted(sessionId)) return null;
+  if ((latest.worktreePath ?? null) !== (meta.worktreePath ?? null)) {
+    return { invalid: "the session's worktree selection changed while it was being verified — try again" };
+  }
+  if (failure) {
+    return { invalid: `the session's worktree could not be verified: ${failure}` +
+      ` — restore ${latest.worktreePath} or select another worktree for this session` };
+  }
+  return { root: latest.worktreePath ?? latest.repoPath, context: latest.context, meta: latest };
+}
+
+/** The unusable outcomes of sessionFilesTarget(), as one error string. */
+function sessionFilesTargetError(
+  target: Awaited<ReturnType<typeof sessionFilesTarget>>,
+): string | null {
+  if (target === "pending") return WORKTREE_PENDING_ERROR;
+  if (!target) return "unknown session";
+  return "invalid" in target ? target.invalid : null;
 }
 
 const WORKTREE_PENDING_ERROR = "the session's worktree is still being prepared — try again in a moment";
 
 async function handleListSessionFiles(msg: ListSessionFilesRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "list_session_files_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "list_session_files_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     const listing = await listSessionFiles(target.context, target.root, msg.path);
@@ -1808,16 +2107,53 @@ async function handleListSessionFiles(msg: ListSessionFilesRequestMessage): Prom
 }
 
 async function handleReadSessionFile(msg: ReadSessionFileRequestMessage): Promise<void> {
-  const target = sessionFilesTarget(msg.sessionId);
-  if (!target || target === "pending") {
-    const error = target === "pending" ? WORKTREE_PENDING_ERROR : "unknown session";
-    return sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: false, error });
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
   }
   try {
     const file = await readSessionFile(target.context, target.root, msg.path);
     sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: true, ...file });
   } catch (err) {
     sendUp({ type: "read_session_file_result", requestId: msg.requestId, ok: false, error: errText(err) });
+  }
+}
+
+async function handleSearchWorkspaceReferences(msg: SearchWorkspaceReferencesRequestMessage): Promise<void> {
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
+  }
+  try {
+    const found = await searchWorkspaceReferences(target.context, target.root, msg.query);
+    sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: true, ...found });
+  } catch (err) {
+    sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false, error: errText(err) });
+  }
+}
+
+async function handleCreateWorkspaceReference(msg: CreateWorkspaceReferenceRequestMessage): Promise<void> {
+  const target = await sessionFilesTarget(msg.sessionId);
+  const targetError = sessionFilesTargetError(target);
+  if (targetError || !target || target === "pending" || "invalid" in target) {
+    return sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: false,
+      error: targetError ?? "unknown session" });
+  }
+  try {
+    await inspectWorkspaceReferenceDiff(msg.target, (scope) =>
+      withGitExecutionContext(target.context, () => gitDiff(target.root, scope, {
+        useWorktree: Boolean(target.meta.worktreePath),
+        lastTurnBaseTree: target.meta.lastTurnBaseTree,
+      })),
+    );
+    const reference = await createWorkspaceReference(target.context, target.root, msg.target);
+    sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: true, reference });
+  } catch (err) {
+    sendUp({ type: "create_workspace_reference_result", requestId: msg.requestId, ok: false, error: errText(err) });
   }
 }
 
@@ -2077,8 +2413,14 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
       const resolved = validatePodReconciliationMetadata(execution.cwd, meta, source);
       return { podReconciliation: await runPodReconcile(execution.cwd, resolved.sourceWorktreePath, msg.action) };
     });
-    if (msg.action.kind === "open_pr" && data.pr?.createdWithGh) {
-      await sessions.linkWorktreePullRequest(msg.sessionId, execution.cwd, data.pr.url);
+    if (msg.action.kind === "open_pr" && (data.pr?.created ?? data.pr?.createdWithGh)) {
+      await sessions.linkWorktreePullRequest(
+        msg.sessionId,
+        execution.cwd,
+        data.pr.url,
+        data.pr.provider,
+        data.pr.kind,
+      );
     }
     sendUp({ type: "git_result", requestId: msg.requestId, ok: true, data });
   } catch (err) {

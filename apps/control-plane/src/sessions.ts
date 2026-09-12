@@ -5,7 +5,8 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
-import {
+import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
+  addPendingRequest, removePendingRequest, pendingRequests,
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
   PROMPT_IMAGE_MIME_TYPES,
@@ -14,9 +15,12 @@ import {
   isGuardrailApproval,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   isPromptImageReference,
+  isWorkspaceReference,
   isPolicyApproval,
   isTerminal,
+  isOrchestratorOnlyCapabilities,
   mergeSessionCapabilities,
+  nativeTuiHasTrackedGuardrails,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   validatePromptImageInputs,
@@ -36,6 +40,7 @@ import {
   type CreateWorkflowRunResult,
   type CreateWorkflowInstanceRequest,
   type CreateSessionRequest,
+  type CreateWorkspaceReferenceRequest,
   type DirectoryEntry,
   type DurableSessionCommand,
   type DurableSessionCommandResultMessage,
@@ -46,8 +51,11 @@ import {
   type GovernanceAuditEntry,
   type GovernanceAuditOutcome,
   type GovernanceAuditStage,
+  type GovernanceTrippedMessage,
   type GovernancePolicy,
   type GitSummaryInfo,
+  type ForgeReviewReconciliation,
+  type ForgeReviewSyncInfo,
   type GitHubReviewSyncInfo,
   type GitHubReviewReconciliation,
   type InvokeSessionCommandRequest,
@@ -57,6 +65,7 @@ import {
   type PendingApproval,
   type PolicyHookEvaluationRequest,
   type PolicyHookEvaluationResponse,
+  type RecordPolicyHookDecisionMessage,
   type PodContextEntry,
   type PodMemberRole,
   type PodOrchestrationActionResult,
@@ -66,6 +75,8 @@ import {
   type PodView,
   type OS,
   type SessionFileEntry,
+  type WorkspaceReference,
+  type WorkspaceReferenceCandidate,
   type PromptImageInput,
   type PromptImageReference,
   type QueuedPromptView,
@@ -79,6 +90,7 @@ import {
   type ResourceScope,
   type ReviewFindingsResponse,
   type RunnerProtocolCapability,
+  type RunnerCapacityBlocker,
   type SessionConfig,
   type SessionEventPayload,
   type SessionLaunchSpec,
@@ -105,6 +117,8 @@ import {
   type WorkflowInstanceView,
   type WorkflowNodeDefinition,
   type WorkflowNodeOutcome,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
 } from "@wollipog/protocol";
 import {
   MAX_PENDING_STEERING_RESOLUTION_REPLAYS,
@@ -112,12 +126,16 @@ import {
   type AgentLaunch,
   type ControlPlaneDb,
 } from "./db.js";
+import { questionPolicyAnswers } from "./question-policy.js";
+import type { SessionEvent } from "@wollipog/protocol";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
+import { childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
+import { NATIVE_TUI_DAILY_BUDGET_ERROR, NATIVE_TUI_TRACKED_GUARDRAILS_ERROR } from "./native-tui-launch.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
-import {
+import { type GuardrailFields, normalizeCostCheckpoints,
   approvalForDecision,
-  conductorSafetyPolicy,
+  sessionSpawnSafetyPolicy,
   evaluateApprovalPolicies,
   evaluateHookApprovalPolicies,
   evaluatePolicies,
@@ -150,18 +168,29 @@ import {
 } from "./pod-orchestration.js";
 import {
   boundedSessionTitleContext,
+  isLessSpecificSessionTitle,
   normalizeGeneratedSessionTitle,
   SessionTitleGenerationError,
   type SessionTitleGenerator,
 } from "./session-title-generator.js";
+
+/** A quarantined provider conversation rejects every submission before inference runs, so the
+ * control plane refuses one here rather than recording a delivery the provider will never accept.
+ * The same check exists on the runner, which owns the authoritative quarantine. */
+const QUARANTINED_CONVERSATION_ERROR =
+  "this conversation was quarantined — retrying and /compact cannot repair the provider's stored history; recover the session to continue";
 
 type Logger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
 
 export const EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS = 30_000;
 export const EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS = 45_000;
 export const STEERING_REQUEST_TIMEOUT_MS = 15_000;
+/** Leave headroom inside the hook sidecar's 1.5s HTTP deadline for request parsing and response. */
+export const POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS = 1_000;
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
+/** One day beyond the browser's seven-day queued-edit recovery window. */
+export const PREPARED_PROMPT_IMAGE_RETENTION_MS = 8 * 24 * 60 * 60_000;
 const SESSION_COMMAND_RETRY_MAX_MS = 30_000;
 const SESSION_COMMAND_RECEIPT_ERROR_MAX_CHARS = 512;
 export const SESSION_STOP_RETRY_INTERVAL_MS = 10_000;
@@ -326,6 +355,33 @@ function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
 }
 
+/** HTTP bodies are structurally cast at the route boundary. Validate the guardrail values before
+ * arithmetic, persistence, or Native TUI coexistence checks so SQLite coercion cannot turn a
+ * malformed value into a silently armed limit. Finite non-positive values retain clear semantics. */
+function sessionGuardrailConfigError(config: unknown): string | null {
+  if (config === undefined) return null;
+  if (!config || typeof config !== "object" || Array.isArray(config)) return "config must be an object";
+  const candidate = config as Record<string, unknown>;
+  for (const key of ["costBudgetUsd", "maxToolCalls"] as const) {
+    const value = candidate[key];
+    if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
+      return `${key} must be a finite number`;
+    }
+  }
+  if (candidate.maxChildSessions !== undefined &&
+      (!Number.isSafeInteger(candidate.maxChildSessions) ||
+        (candidate.maxChildSessions as number) < 0 || (candidate.maxChildSessions as number) > 64)) {
+    return "maxChildSessions must be an integer from 0 to 64";
+  }
+  const checkpoints = candidate.costCheckpointsUsd;
+  if (checkpoints !== undefined && (!Array.isArray(checkpoints) || checkpoints.some(
+    (value) => typeof value !== "number" || !Number.isFinite(value),
+  ))) {
+    return "costCheckpointsUsd must be an array of finite numbers";
+  }
+  return null;
+}
+
 function sessionTitleFailureMessage(error: SessionTitleGenerationError): string {
   if (error.code === "account_unavailable") {
     return "The session naming account, provider, or billing boundary changed or is no longer authenticated. Review Session Naming settings and try again.";
@@ -414,7 +470,8 @@ function validateModelImageSupport(
   capabilities: AgentCapabilities | undefined,
   modelId: string | null | undefined,
 ): ReturnType<typeof validatePromptImages> {
-  if (!images.length || !capabilities) return { ok: true };
+  const actualImages = images.filter((image) => !isWorkspaceReference(image));
+  if (!actualImages.length || !capabilities) return { ok: true };
   if (!capabilities.supportsImages) return { ok: false, error: "this agent installation does not support image input" };
   const model = capabilities.models.find((candidate) => candidate.id === modelId)
     ?? capabilities.models.find((candidate) => candidate.default && !candidate.hidden)
@@ -424,13 +481,26 @@ function validateModelImageSupport(
     : { ok: true };
 }
 
+function modelSupportsServiceTier(
+  model: AgentCapabilities["models"][number] | undefined,
+  serviceTier: string,
+): boolean {
+  return serviceTier === "default" || Boolean(model?.serviceTiers?.some((tier) => tier.id === serviceTier));
+}
+
 /** Discovery is authoritative for optional CLI knobs. Old runners omit capabilities and retain
  * their legacy permissive behavior; current runners reject stale UI/persisted values server-side. */
 export function capabilityConfigError(
   config: SessionConfig | undefined,
   capabilities: AgentCapabilities | undefined,
 ): string | null {
+  if (config?.permissionMode === "orchestrator" && !capabilities?.permissionModes?.includes("orchestrator")) {
+    return "the orchestrator preset requires explicit support from this agent installation";
+  }
   if (!config || !capabilities) return null;
+  // This catalog-only ACP marker proves only runner-owned orchestration. Provider controls stay
+  // unknown/permissive until the session publishes its authoritative ACP capability record.
+  if (isOrchestratorOnlyCapabilities(capabilities)) return null;
   if (config.model && capabilities.models.length && !capabilities.models.some((model) => model.id === config.model)) {
     return `model ${JSON.stringify(config.model)} is not supported by this agent installation`;
   }
@@ -443,6 +513,19 @@ export function capabilityConfigError(
       : capabilities.effortLevels;
     if (!supportedEfforts.includes(config.effort)) {
       return "effort " + JSON.stringify(config.effort) + " is not supported by this agent installation";
+    }
+  }
+  if (config.serviceTier) {
+    const selectedModel = config.model
+      ? capabilities.models.find((model) => model.id === config.model)
+      : capabilities.models.find((model) => model.default && !model.hidden)
+        ?? capabilities.models.find((model) => !model.hidden);
+    const serviceTiers = selectedModel?.serviceTiers ?? [];
+    if (!serviceTiers.length) {
+      return "service tier selection is not supported by this model or agent installation";
+    }
+    if (!modelSupportsServiceTier(selectedModel, config.serviceTier)) {
+      return `service tier ${JSON.stringify(config.serviceTier)} is not supported by this model`;
     }
   }
   if (config.permissionMode && !(capabilities.permissionModes ?? []).includes(config.permissionMode)) {
@@ -470,9 +553,7 @@ export function normalizeClaudePersistedConfig(
   const configuredMode = config.permissionMode;
   const permissionMode = configuredMode && (capabilities.permissionModes ?? []).includes(configuredMode)
     ? configuredMode
-    : agentId === CONDUCTOR_AGENT_ID && (capabilities.permissionModes ?? []).includes("default")
-      ? "default"
-      : undefined;
+    : configuredMode === "orchestrator" ? "orchestrator" : undefined;
   return { ...config, effort, permissionMode };
 }
 
@@ -512,6 +593,28 @@ function claudeCatalogFamily(value: string): string | null {
 const EFFORT_FALLBACK_ORDER = ["high", "medium", "low", "xhigh", "max", "minimal"] as const;
 
 export type EffectiveModelEffort = { model: string; effort: string };
+
+/** Resolve a model-specific Codex service tier. Unsupported or stale persisted values heal to
+ * the advertised default; callers validate explicit input first. `default` is Standard speed. */
+export function resolveEffectiveServiceTier(
+  config: Pick<SessionConfig, "model" | "serviceTier">,
+  capabilities: AgentCapabilities | undefined,
+  driver: AgentDriverKind,
+): string | undefined {
+  if (driver !== "codex-app-server" || !capabilities?.models.length) return undefined;
+  const model = config.model
+    ? capabilities.models.find((candidate) => candidate.id === config.model)
+    : capabilities.models.find((candidate) => candidate.default && !candidate.hidden)
+      ?? capabilities.models.find((candidate) => !candidate.hidden);
+  if (!model?.serviceTiers?.length) return undefined;
+  const advertisedDefault = model.defaultServiceTier && modelSupportsServiceTier(model, model.defaultServiceTier)
+    ? model.defaultServiceTier
+    : "default";
+  const requested = config.serviceTier || advertisedDefault;
+  return modelSupportsServiceTier(model, requested)
+    ? requested
+    : advertisedDefault;
+}
 
 /** Resolve provider defaults into an explicit, capability-compatible pair without relying on discovery order. */
 export function resolveEffectiveModelEffort(
@@ -614,27 +717,16 @@ export function defaultPermissionModeForNewSession(
   return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
 }
 
-/** Conductor clamp: sessions of the "conductor" agent must stay in permissionMode "default" —
- * the only mode where every mcp__manager__ mutation parks on a human Allow/Reject card. Any other
- * mode (notably the driver's "acceptEdits" fallback) would let the conductor drive the manager
- * ungated. Returns the rejection text, or null when the config is acceptable. */
-function conductorConfigError(agentId: string | null | undefined, config: SessionConfig | undefined): string | null {
-  if (agentId !== CONDUCTOR_AGENT_ID) return null;
-  if (config?.permissionMode && config.permissionMode !== "default") {
-    return `the conductor only runs in permissionMode "default" (got "${config.permissionMode}")`;
-  }
-  return null;
-}
-
 function workflowMemberCapabilityError(
   agentId: string,
   config: SessionConfig | undefined,
   launch: AgentLaunch,
   orchestrator: boolean,
 ): string | null {
-  const effectiveConfig = orchestrator && agentId === CONDUCTOR_AGENT_ID
-    ? { ...config, permissionMode: "default" }
-    : config;
+  if (config?.serviceTier && launch.driver !== "codex-app-server") {
+    return `${agentId}: service tier selection is supported only by Codex app-server sessions`;
+  }
+  const effectiveConfig = config;
   const error = capabilityConfigError(effectiveConfig, launch.capabilities);
   return error ? `${agentId}: ${error}` : null;
 }
@@ -646,6 +738,16 @@ export function workflowRunCapabilityError(
   db: ControlPlaneDb,
   req: CreateWorkflowRunRequest,
 ): string | null {
+  if (req.config?.serviceTier && !runnerSupportsProtocol(
+    db.getRunner(req.runnerId)?.protocolVersion,
+    "codexServiceTiers",
+  )) {
+    return runnerCapabilityRequirement(
+      db.getRunner(req.runnerId)?.protocolVersion,
+      "codexServiceTiers",
+      "Codex Service Tier selection",
+    );
+  }
   const definition = db.getWorkflowDefinition(req.workflowId, req.workflowVersion);
   if (!definition) return null;
   const logicalAgentIds = [...new Set(definition.nodes
@@ -697,6 +799,13 @@ function questionAuditContent(
   const secretIds = new Set((pending.questions ?? []).filter((question) => question.secret).map((question) => question.id));
   if (secretIds.size === 0) return answers;
   return Object.fromEntries(Object.entries(answers).filter(([id]) => !secretIds.has(id)));
+}
+
+function recoveredQuestionCommandId(sessionId: string, requestId: string, recoveryId: string): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([sessionId, requestId, recoveryId]), "utf8")
+    .digest("hex");
+  return `answer_${digest}`;
 }
 
 function sessionCommandPayloadDigest(input: {
@@ -797,6 +906,7 @@ function workflowArtifactPage(rows: WorkflowArtifactView[], limit: number): Work
 }
 
 export class SessionsService {
+  private readonly automaticQuestions = new Map<string, Set<string>>();
   /** Sessions with an in-flight lazy history fetch, so a burst of gapped live events fans into one. */
   private readonly hydrating = new Map<string, Promise<void>>();
   /** Sessions that saw another gap WHILE a fetch was in flight — forces one more pass afterward so a
@@ -809,6 +919,7 @@ export class SessionsService {
    * the cross-restart fence, so an abandoned request can never overwrite newer state. */
   private readonly titleGenerationEpochs = new Map<string, number>();
   private readonly titleGenerationControllers = new Map<string, AbortController>();
+  private readonly titleGenerationOwnership = new Map<string, "generated" | "user">();
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -821,7 +932,8 @@ export class SessionsService {
     private readonly notify?: (prev: SessionView, view: SessionView) => void,
     private readonly steeringRequestTimeoutMs = STEERING_REQUEST_TIMEOUT_MS,
     private readonly titleGenerator?: SessionTitleGenerator,
-    private readonly titleGenerationTimeoutMs: number | ((sessionId: string) => number) = 5_000,
+    private readonly titleGenerationTimeoutMs: number | ((sessionId: string) => number) =
+      SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS,
     private readonly titleGenerationEnabled?: (sessionId: string) => boolean,
     private readonly titleGenerationRevision?: (sessionId: string) => string,
   ) {
@@ -1359,8 +1471,17 @@ export class SessionsService {
     return this.db.listGovernanceAudit(sessionId, limit);
   }
 
+  governanceAuditPage(
+    sessionId: string,
+    limit = 200,
+    before?: string,
+  ): ServiceResult<{ entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean }> {
+    const page = this.db.governanceAuditPage(sessionId, limit, before);
+    return page ? ok(page) : fail("governance audit cursor is invalid for this session", 400);
+  }
+
   governancePolicies(): GovernancePolicy[] {
-    return [conductorSafetyPolicy(), ...this.db.listGovernancePolicies()];
+    return [sessionSpawnSafetyPolicy(), ...this.db.listGovernancePolicies()];
   }
 
   /** Authenticated, content-minimized transport endpoint used by the runner's Claude hook. */
@@ -1806,6 +1927,116 @@ export class SessionsService {
     });
   }
 
+  /** Evaluate one hook invocation and, for v130 peers, fence its terminal response behind the
+   * runner-owned event append. The hook process cannot release the matching provider tool call
+   * until this promise settles, so the runner allocates the decision's sequence first even when
+   * its provider adapter later delivers events in a batch. */
+  async evaluatePolicyHookCausally(
+    sessionId: string,
+    input: unknown,
+    hookCanPollDurableAsk = false,
+  ): Promise<ServiceResult<PolicyHookEvaluationResponse>> {
+    const result = this.evaluatePolicyHook(sessionId, input, hookCanPollDurableAsk);
+    if (!result.ok || !result.data ||
+        (result.data.decision !== "allow" && result.data.decision !== "deny")) return result;
+
+    const parsed = parsePolicyHookRequest(input);
+    if (!parsed.ok || parsed.value.hookEventName !== "PreToolUse" || !parsed.value.toolUseId) {
+      return result;
+    }
+    const session = this.db.getSession(sessionId);
+    if (!session || !runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "nativePolicyHookEvents",
+    )) return result;
+
+    const requestId = policyHookRequestId(sessionId, parsed.value);
+    const audit = this.db.policyHookDecisionAudit(sessionId, requestId);
+    const failClosed = (): ServiceResult<PolicyHookEvaluationResponse> => {
+      const approval = this.db.getPolicyHookApproval(sessionId, requestId);
+      const now = Date.now();
+      const deniedAudit: Omit<GovernanceAuditEntry, "auditId"> = audit
+        ? {
+            requestId,
+            approvalKind: "policy_hook",
+            stage: "resolution",
+            outcome: "denied",
+            actor: { kind: "system", id: "decision-history-unavailable" },
+            scope: audit.scope,
+            ...(audit.governancePolicyId ? { governancePolicyId: audit.governancePolicyId } : {}),
+            timestamp: now,
+          }
+        : this.governanceAuditRecord(
+            session,
+            {
+              requestId,
+              kind: "policy_hook",
+              ...(parsed.value.context ? { context: parsed.value.context } : {}),
+            },
+            "resolution",
+            "denied",
+            { kind: "system", id: "decision-history-unavailable" },
+            now,
+            approval?.governancePolicyId
+              ? { governancePolicyId: approval.governancePolicyId }
+              : {},
+          );
+      try {
+        this.db.failClosedPolicyHookDecision(sessionId, requestId, now, deniedAudit);
+      } catch (error) {
+        this.log.warn(`failed to persist policy-hook fail-closed resolution for ${sessionId}: ${
+          error instanceof Error ? error.message : "unknown database error"
+        }`);
+      }
+      return ok({
+        decision: "deny",
+        reason: "Policy decision history could not be recorded; the tool was blocked fail-closed.",
+      });
+    };
+    if (!audit || audit.stage !== "resolution" ||
+        !["allowed", "denied", "timed_out", "aborted"].includes(audit.outcome)) {
+      return failClosed();
+    }
+    const appendRequestId = `policy_hook_event_${randomUUID()}`;
+    const message: RecordPolicyHookDecisionMessage = {
+      type: "record_policy_hook_decision",
+      requestId: appendRequestId,
+      sessionId,
+      decision: {
+        auditId: audit.auditId,
+        requestId: audit.requestId,
+        stage: audit.stage,
+        outcome: audit.outcome,
+        actor: audit.actor,
+        ...(audit.governancePolicyId ? { governancePolicyId: audit.governancePolicyId } : {}),
+        toolCallId: parsed.value.toolUseId,
+      },
+    };
+    try {
+      const recorded = await this.hub.requestFromRunner(
+        session.runnerId,
+        appendRequestId,
+        message,
+        POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS,
+      );
+      if (recorded.type !== "policy_hook_decision_recorded" ||
+          recorded.sessionId !== sessionId || recorded.auditId !== audit.auditId ||
+          !recorded.accepted || !Number.isSafeInteger(recorded.eventSeq) || recorded.eventSeq! < 1) {
+        return failClosed();
+      }
+      return result;
+    } catch (error) {
+      this.log.warn(
+        `policy-hook event append failed for ${sessionId}: ${
+          isRunnerRequestTimeoutError(error) ? "runner acknowledgement timed out"
+            : isRunnerRequestNotSentError(error) ? "runner is offline"
+              : error instanceof Error ? error.message : "unknown runner error"
+        }`,
+      );
+      return failClosed();
+    }
+  }
+
   /** Expire durable asks even when their hook process is gone, then promote the next queued ask. */
   reconcilePolicyHookTimeouts(now = Date.now(), sessionId?: string): number {
     const affected = new Set<string>();
@@ -1917,31 +2148,33 @@ export class SessionsService {
     // The inbox is global across active board filters, but archived sessions are intentionally
     // excluded: they are absent from the live session snapshot that drives refreshes.
     for (const session of this.db.listSessions()) {
-      const approval = session.pendingApproval;
-      // Authentication method selection has no provider-neutral cancel contract. It remains on
-      // the single-session card and is never advertised as bulk-rejectable.
-      if (!approval || approval.kind === "authentication" || isTerminal(session.status)) continue;
-      const provenance = this.db.governanceRequestProvenance(session.id, approval.requestId) ?? {
-        source: "session" as const,
-        requestedAt: session.updatedAt,
-        actor: { kind: "agent" as const, id: session.agentId ?? session.driver },
-        scope: approvalScope(session, approval),
-      };
-      items.push({
-        sessionId: session.id,
-        requestId: approval.requestId,
-        sessionTitle: session.title,
-        runnerId: session.runnerId,
-        runnerOnline: this.hub.isRunnerOnline(session.runnerId),
-        ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}),
-        ...(session.agentId ? { agentId: session.agentId } : {}),
-        ...(session.agentName ? { agentName: session.agentName } : {}),
-        approval,
-        provenance,
-        bulkActions: ["reject"],
-      });
+      for (const approval of pendingRequests(session.pendingApproval)) {
+        // Authentication selection has no provider-neutral cancel contract. Keep it on the
+        // session card; never advertise it as bulk-rejectable.
+        if (approval.kind === "authentication" || isTerminal(session.status)) continue;
+        const provenance = this.db.governanceRequestProvenance(session.id, approval.requestId) ?? {
+          source: "session" as const,
+          requestedAt: session.updatedAt,
+          actor: { kind: "agent" as const, id: session.agentId ?? session.driver },
+          scope: approvalScope(session, approval),
+        };
+        items.push({
+          sessionId: session.id,
+          requestId: approval.requestId,
+          sessionTitle: session.title,
+          runnerId: session.runnerId,
+          runnerOnline: this.hub.isRunnerOnline(session.runnerId),
+          ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}),
+          ...(session.agentId ? { agentId: session.agentId } : {}),
+          ...(session.agentName ? { agentName: session.agentName } : {}),
+          approval,
+          provenance,
+          bulkActions: ["reject"],
+        });
+      }
     }
-    return items.sort((a, b) => a.provenance.requestedAt - b.provenance.requestedAt || a.sessionId.localeCompare(b.sessionId));
+    return items.sort((a, b) => a.provenance.requestedAt - b.provenance.requestedAt ||
+      a.sessionId.localeCompare(b.sessionId) || a.requestId.localeCompare(b.requestId));
   }
 
   reviewFindings(sessionId: string): ServiceResult<ReviewFindingsResponse> {
@@ -1959,6 +2192,20 @@ export class SessionsService {
   }> {
     if (!this.db.getSession(sessionId)) return fail("session not found", 404);
     const reconciliation = this.db.reconcileGitHubReviewFindings(sessionId, sync);
+    return ok({
+      findings: this.db.listReviewFindings(sessionId),
+      summary: this.db.reviewFindingSummary(sessionId),
+      reconciliation,
+    });
+  }
+
+  reconcileForgeReviewFindings(sessionId: string, sync: ForgeReviewSyncInfo): ServiceResult<{
+    findings: ReviewFinding[];
+    summary: ReviewFindingsResponse["summary"];
+    reconciliation: ForgeReviewReconciliation;
+  }> {
+    if (!this.db.getSession(sessionId)) return fail("session not found", 404);
+    const reconciliation = this.db.reconcileForgeReviewFindings(sessionId, sync);
     return ok({
       findings: this.db.listReviewFindings(sessionId),
       summary: this.db.reviewFindingSummary(sessionId),
@@ -2138,6 +2385,32 @@ export class SessionsService {
     ));
   }
 
+  /** A promoted control-plane card keeps its visible request id, while reconnect replay uses the
+   * runner trip's deterministic id. Record a terminal result under both identities so a stale
+   * duplicate cannot resurrect a trip that was already continued, stopped, or dismissed. */
+  private recordRunnerGuardrailResolution(
+    session: SessionView,
+    request: PendingApproval,
+    outcome: GovernanceAuditOutcome,
+    actor: GovernanceActor,
+    now: number,
+    options: { content?: unknown; optionId?: string | null } = {},
+  ): void {
+    this.recordGovernanceAudit(session, request, "resolution", outcome, actor, now, options);
+    const replayRequestId = runnerGuardrailRequestId(request);
+    if (replayRequestId && replayRequestId !== request.requestId) {
+      this.recordGovernanceAudit(
+        session,
+        { ...request, requestId: replayRequestId },
+        "resolution",
+        outcome,
+        actor,
+        now,
+        options,
+      );
+    }
+  }
+
   private governanceAuditRecord(
     session: SessionView,
     request: Pick<PendingApproval, "requestId" | "kind" | "context">,
@@ -2198,7 +2471,7 @@ export class SessionsService {
     inputs: PromptImageInput[],
     actor: GovernanceActor = { kind: "system", id: "prompt-image" },
     allowRunArtifacts = false,
-  ): ServiceResult<PromptImageReference[]> {
+  ): ServiceResult<PromptImageInput[]> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const validation = validateImagesForDriver(inputs, session.driver);
@@ -2207,9 +2480,13 @@ export class SessionsService {
     const cleanup = () => {
       for (const artifactId of created) this.db.deleteWorkflowArtifact(artifactId);
     };
-    const references: PromptImageReference[] = [];
+    const references: PromptImageInput[] = [];
     try {
       for (const input of inputs) {
+        if (isWorkspaceReference(input)) {
+          references.push(input);
+          continue;
+        }
         if (isPromptImageReference(input)) {
           const preflight = this.db.workflowArtifactExportPreflight(input.artifactId);
           const artifact = preflight?.artifact;
@@ -2261,7 +2538,7 @@ export class SessionsService {
   prepareQueuedPromptEditImages(
     sessionId: string,
     inputs: PromptImageInput[],
-  ): ServiceResult<PromptImageReference[]> {
+  ): ServiceResult<PromptImageInput[]> {
     return this.externalizePromptImages(sessionId, inputs, { kind: "human", id: "local" });
   }
 
@@ -2282,16 +2559,32 @@ export class SessionsService {
     }
     if (!this.db.getSession(sessionId)) return fail("session not found", 404);
     const now = Date.now();
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const expiresAt = now + PREPARED_PROMPT_IMAGE_RETENTION_MS;
+    let reusable: WorkflowArtifactView | null;
+    try {
+      reusable = this.db.findPreparedPromptImageArtifact(
+        sessionId,
+        mimeType,
+        bytes.byteLength,
+        sha256,
+        expiresAt,
+      );
+    } catch {
+      return fail("prompt image artifact could not be stored", 500);
+    }
+    if (reusable) return ok(this.promptImageReference(reusable), 200);
     const artifact: WorkflowArtifactView = {
       artifactId: shortId("art_"), sessionId, kind: "screenshot",
       name: `prompt-image-${now}`, mimeType, encoding: "base64",
-      sizeBytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex"),
+      sizeBytes: bytes.byteLength, sha256,
       createdBy: actor, metadata: { purpose: "prompt_image" }, createdAt: now,
     };
     try {
-      this.db.createWorkflowArtifactBytes(artifact, bytes);
+      this.db.createWorkflowArtifactBytes(artifact, bytes, { preparedPromptImageExpiresAt: expiresAt });
       return ok(this.promptImageReference(artifact), 201);
     } catch {
+      try { this.db.deleteWorkflowArtifact(artifact.artifactId); } catch { /* startup/maintenance retries blob cleanup */ }
       return fail("prompt image artifact could not be stored", 500);
     }
   }
@@ -2303,8 +2596,25 @@ export class SessionsService {
     runnerId: string,
     workspaceId: string | null,
     allowProjectWithoutLocation = false,
+    parentSessionId?: string,
+    workspacePath?: string,
   ): ServiceResult<{ projectId?: string | null; projectLocationId?: string | null }> {
     const explicit = req.projectId !== undefined || req.projectLocationId !== undefined;
+    if (!explicit && parentSessionId) {
+      const parent = this.db.getSession(parentSessionId);
+      if (!parent) return fail("parent session not found", 404);
+      if (!parent.projectId) return ok({ projectId: null, projectLocationId: null });
+      const assignmentWorkspaceId = workspaceId ?? (workspacePath
+        ? this.db.resolveImportedSessionLocation(runnerId, workspacePath).workspaceId
+        : null);
+      const location = assignmentWorkspaceId
+        ? this.db.findProjectLocationForProject(parent.projectId, runnerId, assignmentWorkspaceId)
+        : null;
+      if (!location || location.availability !== "available") {
+        return fail("the parent Project has no available Location matching the selected runner and workspace", 409);
+      }
+      return ok({ projectId: parent.projectId, projectLocationId: location.id });
+    }
     if (!explicit) return ok({});
     if (req.projectId === null) {
       if (req.projectLocationId != null) return fail("No Project sessions cannot have a project location", 400);
@@ -2320,7 +2630,10 @@ export class SessionsService {
     const location = this.db.projectLocation(req.projectLocationId);
     if (!location || location.projectId !== req.projectId) return fail("project location does not belong to project", 409);
     if (location.availability === "runner_removed") return fail("project location is no longer available", 409);
-    if (location.runnerId !== runnerId || location.workspaceId !== workspaceId) {
+    const assignmentWorkspaceId = workspaceId ?? (workspacePath
+      ? this.db.resolveImportedSessionLocation(runnerId, workspacePath).workspaceId
+      : null);
+    if (location.runnerId !== runnerId || location.workspaceId !== assignmentWorkspaceId) {
       return fail("project location does not match the selected runner and workspace", 409);
     }
     return ok({ projectId: req.projectId, projectLocationId: req.projectLocationId });
@@ -2342,6 +2655,138 @@ export class SessionsService {
     return ok(projectScope);
   }
 
+  private sessionSpawnGate(
+    parentSessionId: string,
+    request: { title?: string; agentId: string },
+    childCount = 1,
+  ): ServiceResult<null> {
+    const parent = this.db.getSession(parentSessionId);
+    if (!parent) return fail("parent session not found", 404);
+    const now = Date.now();
+    const toolName = "wollipog.create_session";
+    const decision = evaluateApprovalPolicies({
+      scope: approvalScope(parent, { context: { toolName } }),
+      status: parent.status === "input_required" ? "running" : parent.status,
+      costUsd: parent.costUsd,
+      toolCallCount: parent.toolCallCount ?? 0,
+      escalated: false,
+    }, [
+      ...this.db.listGovernancePolicies(),
+      sessionSpawnSafetyPolicy(this.db.sessionHasIndividualOwner(parent.id)),
+    ]);
+    const fingerprint = createHash("sha256").update(JSON.stringify({
+      request,
+      ...(childCount === 1 ? {} : { childCount }),
+      parentSessionId,
+      ordinal: this.db.childSessionAllocations(parentSessionId).count,
+    })).digest("hex");
+    const requestId = `spawn_${fingerprint}`;
+    this.reconcilePolicyHookTimeouts(now, parentSessionId);
+    const stored = this.db.getPolicyHookApproval(parentSessionId, requestId);
+    if (stored) {
+      if (stored.status === "allowed") return ok(null);
+      if (stored.status !== "pending" && stored.status !== "queued") {
+        return fail("child session creation was rejected or its approval expired", 403);
+      }
+      this.db.touchPolicyHookApproval(parentSessionId, requestId, now);
+      this.db.promoteNextPolicyHookApproval(parentSessionId, now);
+      this.hub.sessionChangedById(parentSessionId);
+      return fail(`Child creation requires approval in parent session ${parentSessionId} (request ${requestId}). Retry the same request after approval.`, 428);
+    }
+    const approval: PendingApproval = {
+      requestId,
+      kind: "policy_hook",
+      title: `${parent.title} requests ${childCount === 1 ? "a child" : `${childCount} children`}: ${request.title || request.agentId}`.slice(0, 240),
+      context: { toolName },
+      governancePolicyId: decision.policy!.policyId,
+      options: [
+        { optionId: "allow", name: childCount === 1 ? "Create Child" : "Create Children", kind: "allow_once" },
+        { optionId: "deny", name: "Reject", kind: "reject_once" },
+      ],
+      ...(decision.policy?.askTimeout ? { expiresAt: now + decision.policy.askTimeout * 1000 } : {}),
+    };
+    const audits = [
+      this.governanceAuditRecord(parent, approval, "request", "pending", { kind: "agent", id: parentSessionId }, now),
+      this.governanceAuditRecord(parent, approval, "policy_decision",
+        decision.effect === "ask" ? "asked" : decision.effect === "allow" ? "allowed" : "denied",
+        { kind: "policy", id: decision.policy!.policyId }, now),
+    ];
+    if (decision.effect === "ask") {
+      const begun = this.db.beginPolicyHookApproval({
+        sessionId: parentSessionId, requestId, requestFingerprint: fingerprint,
+        governancePolicyId: decision.policy!.policyId, approval, expiresAt: approval.expiresAt, audits, now,
+      });
+      if (begun.kind === "conflict") return fail("another request already owns this child creation approval", 409);
+      this.notifyTransition(parent, parentSessionId);
+      this.hub.sessionChangedById(parentSessionId);
+      return fail(`Child creation requires approval in parent session ${parentSessionId} (request ${requestId}). Retry the same request after approval.`, 428);
+    }
+    this.db.recordTerminalPolicyHookDecision({
+      sessionId: parentSessionId, requestId, requestFingerprint: fingerprint,
+      governancePolicyId: decision.policy!.policyId,
+      status: decision.effect === "allow" ? "allowed" : "denied", approval, audits, now,
+    });
+    return decision.effect === "allow" ? ok(null) : fail("child session creation is denied by policy", 403);
+  }
+
+  private runMemberConfig(
+    request: Pick<CreateRunRequest, "config" | "costBudgetUsd" | "maxToolCalls">,
+    agentCreated: boolean,
+  ): SessionConfig {
+    const config = { ...(request.config ?? {}) };
+    if (agentCreated) {
+      // Preserve explicit zero/invalid values so child admission rejects, rather than silently
+      // replacing them with defaults. Human run normalization retains its existing semantics.
+      if (request.costBudgetUsd !== undefined) config.costBudgetUsd = request.costBudgetUsd;
+      if (request.maxToolCalls !== undefined) config.maxToolCalls = request.maxToolCalls;
+    } else {
+      if (request.costBudgetUsd && request.costBudgetUsd > 0) config.costBudgetUsd = request.costBudgetUsd;
+      const maxCalls = request.maxToolCalls != null ? Math.floor(request.maxToolCalls) : 0;
+      if (maxCalls > 0) config.maxToolCalls = maxCalls;
+    }
+    return config;
+  }
+
+  /** Preflight the whole fan-out before creating a run or delivering any member. Planning
+   * uses virtual reservations; db.createSession persists each reservation with its child. */
+  private admitRunChildren(
+    parentSessionId: string | undefined,
+    configs: SessionConfig[],
+    request: { title?: string; agentId: string },
+  ): ServiceResult<SessionConfig[]> {
+    if (!parentSessionId || configs.length === 0) return ok(configs);
+    const parent = this.db.getSession(parentSessionId);
+    if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
+      return fail("the creating parent session is no longer active", 409);
+    }
+    const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
+    if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount) {
+      const remaining = Math.max(0, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount);
+      return fail(`the parent session has ${remaining} remaining live child slot${remaining === 1 ? "" : "s"}; raise maxChildSessions before creating this run`, 409);
+    }
+    const applied: SessionConfig[] = [];
+    for (const config of configs) {
+      if (config.maxChildSessions !== undefined && (!Number.isSafeInteger(config.maxChildSessions) ||
+          config.maxChildSessions < 0 || config.maxChildSessions > 64)) {
+        return fail("maxChildSessions must be an integer from 0 to 64", 400);
+      }
+      const guarded = childSessionGuardrails({
+        ...parent,
+        costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
+        toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
+      }, config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
+      parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
+      if ("error" in guarded) return fail(guarded.error, 409);
+      applied.push(guarded.config);
+      reserved.count++;
+      reserved.liveCount++;
+      reserved.costBudgetUsd += guarded.config.costBudgetUsd ?? 0;
+      reserved.maxToolCalls += guarded.config.maxToolCalls ?? 0;
+    }
+    const gate = this.sessionSpawnGate(parentSessionId, request, configs.length);
+    return gate.ok ? ok(applied) : fail(gate.error!, gate.status);
+  }
+
   private conductorRemovedFromDiscovery(runnerId: string): boolean {
     return this.db.getRunner(runnerId)?.agentsRefreshed === true &&
       !this.db.getAgentLaunch(runnerId, CONDUCTOR_AGENT_ID);
@@ -2354,8 +2799,38 @@ export class SessionsService {
     cleanupUndelivered = false,
     initiallyArchived = false,
     allowProjectWithoutLocation = false,
-    creationContext?: { defaultOwnerUserId?: string },
+    creationContext?: { defaultOwnerUserId?: string; parentSessionId?: string },
   ): ServiceResult<SessionView> {
+    // Attribution is supplied only by the authenticated route, never by the request payload.
+    const spawnRequest = req;
+    const configInputError = sessionGuardrailConfigError(req.config);
+    if (configInputError) return fail(configInputError, 400);
+    if (req.agentId === CONDUCTOR_AGENT_ID) {
+      return fail("The Conductor agent is retired; select an ordinary agent to orchestrate child sessions.", 409);
+    }
+    const parentSessionId = creationContext?.parentSessionId;
+    let parentSession: SessionView | null = null;
+    if (parentSessionId) {
+      const parent = this.db.getSession(parentSessionId);
+      if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
+        return fail("the creating parent session is no longer active", 409);
+      }
+      parentSession = parent;
+      const allocated = this.db.childSessionAllocations(parentSessionId);
+      const guarded = childSessionGuardrails({
+        ...parent,
+        costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
+        toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
+      }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
+      parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
+      if ("error" in guarded) return fail(guarded.error, 409);
+      req = { ...req, config: guarded.config };
+    }
+    if (req.config?.maxChildSessions !== undefined &&
+        (!Number.isSafeInteger(req.config.maxChildSessions) || req.config.maxChildSessions < 0 ||
+          req.config.maxChildSessions > 64)) {
+      return fail("maxChildSessions must be an integer from 0 to 64", 400);
+    }
     const snapshotCommand = delivery?.commandSnapshots?.[0];
     if (delivery?.commandSnapshots &&
         (delivery.commandSnapshots.length !== 1 || snapshotCommand?.type !== "start_session")) {
@@ -2494,12 +2969,16 @@ export class SessionsService {
     const images = snapshotCommand?.type === "start_session" ? (snapshotCommand.initialImages ?? []) : (req.images ?? []);
     const imageValidation = validateImagesForDriver(images, launch.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
-    if (images.length) {
+    if (images.some(isWorkspaceReference)) {
+      const unsupported = this.capabilityFailure(req.runnerId, "workspaceReferences", "Workspace references");
+      if (unsupported) return unsupported;
+    }
+    if (images.some((image) => !isWorkspaceReference(image))) {
       const unsupported = this.capabilityFailure(req.runnerId, "promptImageReferences", "Prompt image attachments");
       if (unsupported) return unsupported;
-      if (delivery && !snapshotCommand) {
-        return fail("pre-staged session creation cannot carry unexternalized prompt images", 409);
-      }
+    }
+    if (images.length && delivery && !snapshotCommand) {
+      return fail("pre-staged session creation cannot carry unexternalized prompt attachments", 409);
     }
     const agentCapabilities = snapshotSpec?.capabilities ??
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
@@ -2526,7 +3005,7 @@ export class SessionsService {
           requestedConfig.permissionMode = preference.permissionMode;
         }
       }
-      if (req.agentId !== CONDUCTOR_AGENT_ID && requestedConfig.permissionMode === undefined) {
+      if (requestedConfig.permissionMode === undefined) {
         requestedConfig.permissionMode = defaultPermissionModeForNewSession(launch.driver, agentCapabilities);
       }
       const explicitConfigError = capabilityConfigError(
@@ -2537,7 +3016,43 @@ export class SessionsService {
       if (resolved.error) return fail(resolved.error, 409);
       if (resolved.value) Object.assign(requestedConfig, resolved.value);
     }
+    const supportsServiceTiers = runnerSupportsProtocol(
+      this.db.getRunner(req.runnerId)?.protocolVersion,
+      "codexServiceTiers",
+    );
+    if (requestedConfig.serviceTier && launch.driver !== "codex-app-server") {
+      return fail("service tier selection is supported only by Codex app-server sessions", 409);
+    }
+    if (requestedConfig.serviceTier && !supportsServiceTiers) {
+      return this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection")!;
+    }
+    const serviceTier = supportsServiceTiers
+      ? resolveEffectiveServiceTier(requestedConfig, agentCapabilities, launch.driver)
+      : undefined;
+    if (serviceTier) requestedConfig.serviceTier = serviceTier;
+    else delete requestedConfig.serviceTier;
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
+    if (requestedConfig.permissionMode === "orchestrator") {
+      if (req.launchSurface === "native_tui") {
+        const tuiUnsupported = this.capabilityFailure(req.runnerId, "orchestratorNativeTui", "Orchestrator Native TUI");
+        if (tuiUnsupported) return tuiUnsupported;
+      }
+      const unsupported = this.capabilityFailure(req.runnerId, "sessionOrchestration", "Orchestrator preset");
+      if (unsupported) return unsupported;
+      const contextKind = launch.context?.kind ?? "native";
+      const wslDirect = contextKind === "wsl" && req.launchSurface !== "native_tui" &&
+        ["codex", "codex-app-server", "claude-code"].includes(launch.driver) &&
+        this.capabilityFailure(req.runnerId, "wslAgentControlBridge", "Direct WSL Agent Control") === null &&
+        this.capabilityFailure(req.runnerId, "wslSafeLauncher", "Direct WSL safe launcher") === null &&
+        launch.wslAgentControl?.safeLauncherProtocolVersion === 1 &&
+        launch.wslAgentControl.bwrapRuntime === "/usr/bin/bwrap" &&
+        this.db.getRunner(req.runnerId)?.runtime?.executionIsolation?.mode === "bwrap";
+      if (!(["codex", "codex-app-server", "claude-code"].includes(launch.driver) ||
+          (launch.driver === "acp" && req.launchSurface !== "native_tui")) ||
+          (contextKind !== "native" && !wslDirect) || executionTarget.adapter !== "host") {
+        return fail("the orchestrator preset requires a supported native host harness or verified Direct WSL bridge", 409);
+      }
+    }
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);
     if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
@@ -2549,17 +3064,18 @@ export class SessionsService {
     const titleSource = snapshotSpec?.titleSource ?? (req.title?.trim() ? "user" as const : "generated" as const);
     // Cloned so the clamp below never mutates the caller's request object.
     const config = { ...requestedConfig };
-    // Conductor clamp, seam 1/4: reject an explicit non-default mode, and FORCE "default" when
-    // absent — the New Session dialog sends no config and the driver would fall back to
-    // "acceptEdits" (no gate at all). The forced value persists to the DB, rides the launch
-    // spec, and echoes into every later prompt_session config.
-    const conductorErr = conductorConfigError(req.agentId, config);
-    if (conductorErr) return fail(conductorErr, 409);
-    if (req.agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
     if (config.costBudgetUsd !== undefined && config.costBudgetUsd <= 0) delete config.costBudgetUsd;
     if (config.maxToolCalls !== undefined) {
       config.maxToolCalls = Math.floor(config.maxToolCalls);
       if (config.maxToolCalls <= 0) delete config.maxToolCalls;
+    }
+    if (config.costCheckpointsUsd !== undefined) {
+      const checkpoints = normalizeCostCheckpoints(config.costCheckpointsUsd);
+      if (checkpoints) config.costCheckpointsUsd = checkpoints;
+      else delete config.costCheckpointsUsd;
+    }
+    if (req.launchSurface === "native_tui" && nativeTuiHasTrackedGuardrails(config)) {
+      return fail(NATIVE_TUI_TRACKED_GUARDRAILS_ERROR, 409);
     }
     if (executionTarget.adapter === "cloud") {
       const policy = executionTarget.policy?.cost;
@@ -2573,12 +3089,13 @@ export class SessionsService {
     }
     const workspaceId = snapshotSpec ? snapshotSpec.workspaceId : (adHoc ? null : req.workspaceId);
     const requestedProject = this.requestedProjectAssignment(
-      req, req.runnerId, workspaceId, allowProjectWithoutLocation,
+      req, req.runnerId, workspaceId, allowProjectWithoutLocation, parentSessionId, workspacePath,
     );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
-    let sessionScope = scope;
+    let sessionScope = scope ?? (parentSession ? this.db.sessionScope(parentSession.id) ?? undefined : undefined);
+    if (parentSession && !sessionScope) return fail("parent session ownership is unavailable", 409);
     if (requestedProject.data.projectId) {
       const projectSessionScope = this.sessionScopeForProjectAssignment(
         requestedProject.data,
@@ -2594,6 +3111,16 @@ export class SessionsService {
         return fail("session access is broader than project access", 409);
       }
       sessionScope ??= projectSessionScope.data;
+    }
+    // The owner's daily allowance is checked against the scope the session will ACTUALLY carry:
+    // the explicit one, the Project's, or what the workspace/runner confers — resolved above, so
+    // a user-owned Project on an organization workspace cannot slip past its owner's budget.
+    const effectiveSessionScope = this.db.effectiveSessionScope(req.runnerId, workspaceId, sessionScope);
+    const admissionDenied = this.dailyBudgetAdmissionError(effectiveSessionScope);
+    if (admissionDenied) return fail(admissionDenied, 409);
+    if (req.launchSurface === "native_tui" && effectiveSessionScope?.owner.kind === "user" &&
+        this.db.getUsageDailyBudget(effectiveSessionScope.organizationId).perUserUsd !== null) {
+      return fail(NATIVE_TUI_DAILY_BUDGET_ERROR, 409);
     }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
@@ -2647,10 +3174,14 @@ export class SessionsService {
     }
     // A thrown staging failure leaves no CP resource to orphan. Re-entering with the same
     // deterministic ID reuses the exact row if materialization completed before a crash.
+    if (parentSessionId && !existing) {
+      const gate = this.sessionSpawnGate(parentSessionId, spawnRequest);
+      if (!gate.ok) return fail(gate.error!, gate.status);
+    }
     if (delivery) delivery.stage(plan!);
-
     const session = existing ?? this.db.createSession({
       id,
+      parentSessionId,
       runnerId: req.runnerId,
       workspaceId,
       ...requestedProject.data,
@@ -2674,6 +3205,9 @@ export class SessionsService {
     }
     if (config.maxToolCalls && Math.floor(config.maxToolCalls) > 0) {
       this.db.updateSessionMaxToolCalls(id, Math.floor(config.maxToolCalls), now);
+    }
+    if (config.costCheckpointsUsd?.length) {
+      this.db.updateSessionCostCheckpoints(id, config.costCheckpointsUsd, now);
     }
     if (!snapshotCommand && images.length) {
       const externalized = this.externalizePromptImages(id, images);
@@ -2736,6 +3270,30 @@ export class SessionsService {
     return ok(this.db.getSession(id)!, 201);
   }
 
+  promptFromUser(
+    userId: string,
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[] = [],
+    slashCommand?: string,
+    config?: SessionConfig,
+  ): ServiceResult<SessionView> {
+    // Capture the exact fired row before admission. If another client snoozes again while the
+    // prompt is being delivered, its revision or identity changes and the acknowledgment cannot
+    // remove that newer intent.
+    const observedReminder = this.db.getSessionReminder(sessionId, userId);
+    const result = this.prompt(sessionId, text, images, slashCommand, config);
+    if (!result.ok || observedReminder?.state !== "fired") return result;
+    const removed = this.db.removeSessionReminder(
+      sessionId,
+      userId,
+      observedReminder.revision,
+      observedReminder.reminderId,
+    );
+    if (removed.kind === "removed") this.hub.sessionReminderRemoved(userId, sessionId);
+    return result;
+  }
+
   prompt(
     sessionId: string,
     text: string,
@@ -2753,10 +3311,20 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
+    const configInputError = sessionGuardrailConfigError(requestedConfig);
+    if (configInputError) return fail(configInputError, 400);
+    const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, requestedConfig);
+    if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
+    const incomingMode = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config?.permissionMode : config?.permissionMode;
+    if (incomingMode !== undefined && (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
+      return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
+    }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
+    if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     // A guardrail pause must be resolved (Continue / Stop) via approve(), not bypassed by sending a
     // new prompt — otherwise the next turn runs without the user acknowledging the breach.
     if (session.pendingApproval?.kind === "cost_budget") {
@@ -2767,6 +3335,15 @@ export class SessionsService {
     }
     if (isGuardrailApproval(session.pendingApproval)) {
       return fail("tool-call limit reached — choose Continue or Stop before sending another prompt", 409);
+    }
+    // The owner's daily allowance is a fleet-wide fact: another of their sessions may have spent
+    // it since this one last settled, so it is checked before a new turn is admitted, and the
+    // session is parked with the card rather than silently refused.
+    const daily = this.dailyBudgetFor(sessionId);
+    if (daily && daily.spentUsd >= daily.budgetUsd) {
+      this.gateOnPolicy(sessionId, Date.now());
+      this.hub.sessionChangedById(sessionId);
+      return fail("daily budget reached — new turns pause until the day rolls over or an owner or admin raises it", 409);
     }
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     const admissionQueuedPrompt = !delivery &&
@@ -2782,10 +3359,14 @@ export class SessionsService {
     const effectiveText = snapshotCommand?.type === "prompt_session" ? snapshotCommand.text : text;
     const effectiveImages = snapshotCommand?.type === "prompt_session" ? (snapshotCommand.images ?? []) : images;
     const effectiveSlashCommand = snapshotCommand?.type === "prompt_session" ? snapshotCommand.slashCommand : slashCommand;
-    const effectiveConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
+    const effectiveConfig = requestedConfig;
     const imageValidation = validateImagesForDriver(effectiveImages, session.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
-    if (effectiveImages.length) {
+    if (effectiveImages.some(isWorkspaceReference)) {
+      const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+      if (unsupported) return unsupported;
+    }
+    if (effectiveImages.some((image) => !isWorkspaceReference(image))) {
       const unsupported = this.capabilityFailure(session.runnerId, "promptImageReferences", "Prompt image attachments");
       if (unsupported) return unsupported;
     }
@@ -2800,10 +3381,19 @@ export class SessionsService {
     let resolvedEffectiveConfig = effectiveConfig;
     if (!snapshotCommand) {
       if (effectiveConfig) {
+        const { serviceTier: explicitServiceTier, ...explicitConfigWithoutServiceTier } = effectiveConfig;
         const explicitConfigError = capabilityConfigError(
-          claudeModelConfigForValidation(effectiveConfig, agentCapabilities, session.driver), agentCapabilities,
+          claudeModelConfigForValidation(explicitConfigWithoutServiceTier, agentCapabilities, session.driver),
+          agentCapabilities,
         );
         if (explicitConfigError) return fail(explicitConfigError, 409);
+        if (explicitServiceTier) {
+          const serviceTierError = capabilityConfigError({
+            model: effectiveConfig.model ?? session.model ?? undefined,
+            serviceTier: explicitServiceTier,
+          }, agentCapabilities);
+          if (serviceTierError) return fail(serviceTierError, 409);
+        }
       }
       const resolved = resolveEffectiveModelEffort({
         model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
@@ -2811,6 +3401,23 @@ export class SessionsService {
       }, agentCapabilities, session.driver);
       if (resolved.error) return fail(resolved.error, 409);
       if (resolved.value) resolvedEffectiveConfig = { ...effectiveConfig, ...resolved.value };
+      const supportsServiceTiers = runnerSupportsProtocol(
+        this.db.getRunner(session.runnerId)?.protocolVersion,
+        "codexServiceTiers",
+      );
+      if (effectiveConfig?.serviceTier && session.driver !== "codex-app-server") {
+        return fail("service tier selection is supported only by Codex app-server sessions", 409);
+      }
+      if (effectiveConfig?.serviceTier && !supportsServiceTiers) {
+        return this.capabilityFailure(session.runnerId, "codexServiceTiers", "Codex Service Tier selection")!;
+      }
+      const serviceTier = supportsServiceTiers
+        ? resolveEffectiveServiceTier({
+            model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
+            serviceTier: effectiveConfig?.serviceTier ?? (effectiveConfig?.model ? undefined : session.serviceTier ?? undefined),
+          }, agentCapabilities, session.driver)
+        : undefined;
+      resolvedEffectiveConfig = { ...resolvedEffectiveConfig, serviceTier };
     }
     const validationConfig = resolvedEffectiveConfig
       ? claudeModelConfigForValidation(resolvedEffectiveConfig, agentCapabilities, session.driver)
@@ -2823,10 +3430,6 @@ export class SessionsService {
       const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
       if (configCapabilityError) return fail(configCapabilityError, 409);
     }
-    // Conductor clamp, seam 3/4: the prompt-time config path also updates permissionMode —
-    // reject before updateSessionConfig can persist an ungated mode.
-    const conductorErr = conductorConfigError(session.agentId, effectiveConfig);
-    if (conductorErr) return fail(conductorErr, 409);
 
     const now = Date.now();
     // A config sent alongside the prompt applies to THIS turn (atomic change + send). A CLI
@@ -2835,11 +3438,13 @@ export class SessionsService {
     const mergedConfig = snapshotCommand ? {
       model: effectiveConfig?.model,
       effort: effectiveConfig?.effort,
+      serviceTier: effectiveConfig?.serviceTier,
       permissionMode: effectiveConfig?.permissionMode,
     } : normalizeClaudePersistedConfig(
       {
         model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
         effort: resolvedEffectiveConfig?.effort ?? session.effort ?? undefined,
+        serviceTier: resolvedEffectiveConfig?.serviceTier,
         permissionMode: effectiveConfig?.permissionMode ?? session.permissionMode ?? undefined,
       },
       agentCapabilities,
@@ -2874,6 +3479,7 @@ export class SessionsService {
       config: {
         model: mergedConfig.model ?? undefined,
         effort: mergedConfig.effort ?? undefined,
+        ...(mergedConfig.serviceTier ? { serviceTier: mergedConfig.serviceTier } : {}),
         permissionMode: mergedConfig.permissionMode ?? undefined,
         ...(effectiveCostBudgetUsd != null ? { costBudgetUsd: effectiveCostBudgetUsd } : {}),
         ...(effectiveMaxToolCalls != null ? { maxToolCalls: effectiveMaxToolCalls } : {}),
@@ -2887,6 +3493,7 @@ export class SessionsService {
       effectiveConfig ||
       mergedConfig.model !== (session.model ?? undefined) ||
       mergedConfig.effort !== (session.effort ?? undefined) ||
+      mergedConfig.serviceTier !== (session.serviceTier ?? undefined) ||
       mergedConfig.permissionMode !== (session.permissionMode ?? undefined)
     ) {
       this.db.updateSessionConfig(
@@ -2903,6 +3510,9 @@ export class SessionsService {
     if (effectiveConfig?.maxToolCalls !== undefined) {
       const floored = Math.floor(effectiveConfig.maxToolCalls);
       this.db.updateSessionMaxToolCalls(sessionId, floored > 0 ? floored : null, now);
+    }
+    if (effectiveConfig?.costCheckpointsUsd !== undefined) {
+      this.db.updateSessionCostCheckpoints(sessionId, normalizeCostCheckpoints(effectiveConfig.costCheckpointsUsd), now);
     }
     // Current runners accept ordinary user prompts through the same durable, idempotent receipt
     // lane used by scheduler commands. Persistence happens before success is returned; retries
@@ -2932,6 +3542,7 @@ export class SessionsService {
         this.log.warn(`durable prompt flush deferred for ${sessionId}: ${(error as Error).message}`);
       }
     } else {
+      if (command.type !== "prompt_session") return fail("session prompt command is malformed", 409);
       const delivered = this.hub.sendToRunner(session.runnerId, command);
       if (!delivered) {
         this.db.updateSessionStatus(sessionId, session.status, Date.now());
@@ -2978,6 +3589,23 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  private activeAgentTuiGuardrailError(session: SessionView, config: SessionConfig | undefined): string | null {
+    const resultingGuardrails = {
+      costBudgetUsd: config?.costBudgetUsd !== undefined
+        ? (config.costBudgetUsd > 0 ? config.costBudgetUsd : undefined)
+        : session.costBudgetUsd ?? undefined,
+      maxToolCalls: config?.maxToolCalls !== undefined
+        ? (Math.floor(config.maxToolCalls) > 0 ? Math.floor(config.maxToolCalls) : undefined)
+        : session.maxToolCalls ?? undefined,
+      costCheckpointsUsd: config?.costCheckpointsUsd !== undefined
+        ? normalizeCostCheckpoints(config.costCheckpointsUsd) ?? undefined
+        : session.costCheckpointsUsd ?? undefined,
+    };
+    return nativeTuiHasTrackedGuardrails(resultingGuardrails) && this.db.listShells(session.id).some(
+      (shell) => shell.kind === "agent_tui" && shell.status !== "exited",
+    ) ? NATIVE_TUI_TRACKED_GUARDRAILS_ERROR : null;
+  }
+
   /** Change model/effort/approval mode mid-session (applies to the next turn). */
   setConfig(
     sessionId: string,
@@ -2986,6 +3614,18 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const configInputError = sessionGuardrailConfigError(config);
+    if (configInputError) return fail(configInputError, 400);
+    if (actor.kind === "agent" && actor.id === sessionId &&
+        (config.maxChildSessions === undefined ||
+          Object.keys(config).some((key) => key !== "maxChildSessions"))) {
+      return fail("an agent may change only its own maxChildSessions", 403);
+    }
+    const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, config);
+    if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
+    if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
+      return fail("the orchestrator preset is fixed at session creation; start a new session to change it", 409);
+    }
     const agentCapabilities = mergeSessionCapabilities(
       this.db.getRunner(session.runnerId)?.agents.find((agent) => agent.id === session.agentId)?.capabilities,
       session.driver === "acp"
@@ -2994,87 +3634,152 @@ export class SessionsService {
           ? { elicitation: session.agentCapabilities.elicitation }
           : undefined,
     );
+    const { serviceTier: explicitServiceTier, ...explicitConfigWithoutServiceTier } = config;
     const explicitConfigError = capabilityConfigError(
-      claudeModelConfigForValidation(config, agentCapabilities, session.driver), agentCapabilities,
+      claudeModelConfigForValidation(explicitConfigWithoutServiceTier, agentCapabilities, session.driver),
+      agentCapabilities,
     );
     if (explicitConfigError) return fail(explicitConfigError, 409);
+    if (explicitServiceTier) {
+      const serviceTierError = capabilityConfigError({
+        model: config.model ?? session.model ?? undefined,
+        serviceTier: explicitServiceTier,
+      }, agentCapabilities);
+      if (serviceTierError) return fail(serviceTierError, 409);
+    }
     const resolvedModelEffort = resolveEffectiveModelEffort({
       model: config.model ?? session.model ?? undefined,
       effort: config.effort ?? (config.model ? undefined : session.effort ?? undefined),
     }, agentCapabilities, session.driver);
     if (resolvedModelEffort.error) return fail(resolvedModelEffort.error, 409);
     if (resolvedModelEffort.value) config = { ...config, ...resolvedModelEffort.value };
+    const supportsServiceTiers = runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "codexServiceTiers",
+    );
+    if (config.serviceTier && session.driver !== "codex-app-server") {
+      return fail("service tier selection is supported only by Codex app-server sessions", 409);
+    }
+    if (config.serviceTier && !supportsServiceTiers) {
+      return this.capabilityFailure(session.runnerId, "codexServiceTiers", "Codex Service Tier selection")!;
+    }
+    const serviceTier = supportsServiceTiers
+      ? resolveEffectiveServiceTier({
+          model: config.model ?? session.model ?? undefined,
+          serviceTier: config.serviceTier ?? (config.model ? undefined : session.serviceTier ?? undefined),
+        }, agentCapabilities, session.driver)
+      : undefined;
+    config = { ...config, serviceTier };
     const validationConfig = claudeModelConfigForValidation(config, agentCapabilities, session.driver);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
     if (configCapabilityError) return fail(configCapabilityError, 409);
-    // Conductor clamp, seam 2/4: guardrail-only writes (costBudgetUsd/maxToolCalls) pass; any
-    // permissionMode other than "default" is refused so the confirm gate can't be switched off.
-    const conductorErr = conductorConfigError(session.agentId, config);
-    if (conductorErr) return fail(conductorErr, 409);
     const merged = normalizeClaudePersistedConfig({
       model: config.model ?? session.model ?? undefined,
       effort: config.effort ?? session.effort ?? undefined,
+      serviceTier,
       permissionMode: config.permissionMode ?? session.permissionMode ?? undefined,
     }, agentCapabilities, session.agentId, session.driver);
-    this.db.updateSessionConfig(sessionId, merged, Date.now());
+    const now = Date.now();
+    this.db.updateSessionConfig(sessionId, merged, now);
     // Guardrails ride their own columns so config writes never clobber them. Only touch one when
     // the caller explicitly sent a value: a positive number sets the limit, 0/negative clears it.
     if (config.costBudgetUsd !== undefined) {
-      this.db.updateSessionCostBudget(sessionId, config.costBudgetUsd > 0 ? config.costBudgetUsd : null, Date.now());
+      this.db.updateSessionCostBudget(sessionId, config.costBudgetUsd > 0 ? config.costBudgetUsd : null, now);
     }
     if (config.maxToolCalls !== undefined) {
       // Floor BEFORE the positivity check: 0.5 must clear (floored 0), not store a phantom 0
       // that looks armed in the UI but never gates.
       const floored = Math.floor(config.maxToolCalls);
-      this.db.updateSessionMaxToolCalls(sessionId, floored > 0 ? floored : null, Date.now());
+      this.db.updateSessionMaxToolCalls(sessionId, floored > 0 ? floored : null, now);
+    }
+    if (config.costCheckpointsUsd !== undefined) {
+      // An empty list clears the checkpoints and the approved level with them.
+      this.db.updateSessionCostCheckpoints(sessionId, normalizeCostCheckpoints(config.costCheckpointsUsd), now);
+    }
+    if (config.maxChildSessions !== undefined) {
+      this.db.updateSessionMaxChildSessions(sessionId, config.maxChildSessions, now);
     }
     // A guardrail change while parked on a policy card must re-evaluate: drop the (possibly
     // stale) card and re-gate — re-parks with a fresh card if a rule still trips, otherwise
     // unlocks the composer. Without this, raising a limit leaves the session 409-locked behind
     // a card whose rule no longer trips, and Continue would blind-clear the new limit.
-    const guardrailChanged = config.costBudgetUsd !== undefined || config.maxToolCalls !== undefined;
+    const thresholdChanged = config.costBudgetUsd !== undefined || config.maxToolCalls !== undefined;
+    const guardrailChanged = thresholdChanged ||
+      config.costCheckpointsUsd !== undefined;
     const parked = session.pendingApproval;
-    if (guardrailChanged && parked && isGuardrailApproval(parked)) {
-      const now = Date.now();
-      const configured = this.db.getSession(sessionId)!;
-      const holdFor = firstAsk(evaluatePolicies({
-        status: "idle",
-        costUsd: configured.costUsd,
-        toolCallCount: configured.toolCallCount ?? 0,
-      }, rulesFromSession(configured)))?.rule.kind;
-      const thresholdPatch: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
-      if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
-      if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
-      const runner = this.db.getRunner(session.runnerId);
-      if (runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
-        const sent = this.hub.sendToRunner(session.runnerId, {
-          type: "rearm_governance",
-          sessionId,
-          config: thresholdPatch,
-          ...(holdFor ? { holdFor } : {}),
-        });
-        if (!sent) {
-          this.recordGovernanceAudit(session, parked, "resolution", "delivery_failed", actor, now, { content: config });
-          this.db.updateSessionConfig(sessionId, {
-            model: session.model ?? undefined,
-            effort: session.effort ?? undefined,
-            permissionMode: session.permissionMode ?? undefined,
-          }, now);
-          if (config.costBudgetUsd !== undefined) {
-            this.db.updateSessionCostBudget(sessionId, session.costBudgetUsd ?? null, now, session.costBudgetStepUsd ?? null);
-          }
-          if (config.maxToolCalls !== undefined) {
-            this.db.updateSessionMaxToolCalls(sessionId, session.maxToolCalls ?? null, now, session.maxToolCallsStep ?? null);
-          }
-          return fail("runner is offline", 409);
-        }
+    const parkedGuardrail = pendingRequests(parked).find((request) => isGuardrailApproval(request));
+    const configured = this.db.getSession(sessionId)!;
+    const holdFor = parkedGuardrail
+      ? this.runnerHoldAfter(configured, this.guardrailFields(configured))
+      : undefined;
+    const thresholdPatch: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
+    if (config.costBudgetUsd !== undefined) thresholdPatch.costBudgetUsd = configured.costBudgetUsd ?? null;
+    if (config.maxToolCalls !== undefined) thresholdPatch.maxToolCalls = configured.maxToolCalls ?? null;
+    const rollback = () => {
+      this.db.restoreSessionConfig(sessionId, {
+        model: session.model ?? undefined,
+        effort: session.effort ?? undefined,
+        serviceTier: session.serviceTier ?? undefined,
+        permissionMode: session.permissionMode ?? undefined,
+      }, session.resolvedModel ?? null, session.contextWindow ?? null, now);
+      if (config.costBudgetUsd !== undefined) {
+        this.db.updateSessionCostBudget(sessionId, session.costBudgetUsd ?? null, now, session.costBudgetStepUsd ?? null);
       }
-      this.db.setPendingApproval(sessionId, null);
-      this.db.updateSessionStatus(sessionId, "idle", now);
-      this.recordGovernanceAudit(session, parked, "resolution", "dismissed", actor, now, { content: config });
-      this.gateOnPolicy(sessionId, now);
+      if (config.maxToolCalls !== undefined) {
+        this.db.updateSessionMaxToolCalls(sessionId, session.maxToolCalls ?? null, now, session.maxToolCallsStep ?? null);
+      }
+      if (config.costCheckpointsUsd !== undefined) {
+        this.db.restoreSessionCostCheckpoints(
+          sessionId,
+          session.costCheckpointsUsd ?? null,
+          session.costCheckpointApprovedUsd ?? null,
+          now,
+        );
+      }
+      if (config.maxChildSessions !== undefined) {
+        this.db.updateSessionMaxChildSessions(sessionId, session.maxChildSessions ?? null, now);
+      }
+    };
+    // Every live threshold edit is a runner round trip, including explicit clears. A parked card
+    // also needs a re-arm when only a control-plane checkpoint changed so its queue hold follows
+    // the freshly evaluated rule. Persist first for one authoritative computed snapshot, but roll
+    // the whole config request back if that live runner cannot receive it.
+    const runner = this.db.getRunner(session.runnerId);
+    if (!isTerminal(session.status) && (thresholdChanged || (guardrailChanged && parkedGuardrail)) &&
+        runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
+      const sent = this.hub.sendToRunner(session.runnerId, {
+        type: "rearm_governance",
+        sessionId,
+        config: thresholdPatch,
+        ...(holdFor ? { holdFor } : {}),
+      });
+      if (!sent) {
+        if (parkedGuardrail) {
+          this.recordRunnerGuardrailResolution(
+            session,
+            parkedGuardrail,
+            "delivery_failed",
+            actor,
+            now,
+            { content: config },
+          );
+        }
+        rollback();
+        return fail("runner is offline", 409);
+      }
+    }
+    if (guardrailChanged && parkedGuardrail) {
+      const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, parkedGuardrail.requestId);
+      this.db.setPendingApproval(sessionId, remaining);
+      this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
+      this.recordRunnerGuardrailResolution(session, parkedGuardrail, "dismissed", actor, now, { content: config });
+      if (!remaining) this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
       this.clearSettledPolicyResumeStatus(sessionId);
+    } else if (guardrailChanged && !parked) {
+      // A soft rule armed on an unparked session that already exceeds it must park now: nothing on
+      // the runner will cancel the turn, so the next prompt would otherwise be admitted first.
+      this.gateOnPolicy(sessionId, now, true, true);
     }
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated);
@@ -3120,8 +3825,18 @@ export class SessionsService {
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
+    // `/compact` arrives through this lane; compaction is inference over the same stored history.
+    if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     if (session.pendingApproval?.kind === "cost_budget") {
       return fail("cost budget reached — choose Continue or Stop before invoking a provider command", 409);
+    }
+    // A provider command is a billable turn like any prompt, so the owner's daily allowance is
+    // checked here too, parking the session with the card rather than silently refusing.
+    const dailyForCommand = this.dailyBudgetFor(sessionId);
+    if (dailyForCommand && dailyForCommand.spentUsd >= dailyForCommand.budgetUsd) {
+      this.gateOnPolicy(sessionId, Date.now());
+      this.hub.sessionChangedById(sessionId);
+      return fail("daily budget reached — new turns pause until the day rolls over or an owner or admin raises it", 409);
     }
     if (session.pendingApproval?.kind === "policy_hook") {
       return fail("a tool approval is pending — choose Allow or Deny before invoking a provider command", 409);
@@ -3323,6 +4038,7 @@ export class SessionsService {
 
   private steeringRequestSha256(request: SteerRequest, text: string): string {
     const images = (request.images ?? []).map((image) => {
+      if (isWorkspaceReference(image)) return image;
       if (isPromptImageReference(image)) {
         return { mimeType: image.mimeType, sizeBytes: image.sizeBytes, sha256: image.sha256 };
       }
@@ -3433,9 +4149,16 @@ export class SessionsService {
     if (!activeTurnId || activeTurnId !== request.turnId) {
       return fail("the active turn changed before it could be steered", 409);
     }
+    if (promotion) {
+      const queued = this.hub.queuedPromptForSession(sessionId, request.promotePromptId!);
+      if (queued?.steerable === false) {
+        return fail(queued.steerDisabledReason ?? "This queued message cannot currently be steered.", 409);
+      }
+    }
     const configSnapshot: SessionConfig = {
       ...(session.model ? { model: session.model } : {}),
       ...(session.effort ? { effort: session.effort } : {}),
+      ...(session.serviceTier ? { serviceTier: session.serviceTier } : {}),
       ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}),
       ...(session.costBudgetUsd != null ? { costBudgetUsd: session.costBudgetUsd } : {}),
       ...(session.maxToolCalls != null ? { maxToolCalls: session.maxToolCalls } : {}),
@@ -3444,7 +4167,11 @@ export class SessionsService {
       const modelImageValidation = validateModelImageSupport(images, agentCapabilities, session.model ?? undefined);
       if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
     }
-    let commandImages: PromptImageReference[] = [];
+    if (!promotion && images.some(isWorkspaceReference)) {
+      const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+      if (unsupported) return unsupported;
+    }
+    let commandImages: PromptImageInput[] = [];
     if (!promotion && images.length) {
       const externalized = this.externalizePromptImages(sessionId, images);
       if (!externalized.ok || !externalized.data) {
@@ -3453,7 +4180,9 @@ export class SessionsService {
       commandImages = externalized.data;
     }
     const ownedArtifactIds = commandImages.flatMap((image, index) =>
-      isPromptImageReference(images[index]) ? [] : [image.artifactId]
+      isWorkspaceReference(image) || isPromptImageReference(images[index]) || !isPromptImageReference(image)
+        ? []
+        : [image.artifactId]
     );
     const requestId = `steer_${randomUUID().slice(0, 12)}`;
     let created;
@@ -3907,6 +4636,16 @@ export class SessionsService {
     if (session.archived) {
       return fail("unarchive the session before restarting it", 409);
     }
+    if (session.parentSessionId && isTerminal(session.status)) {
+      const parent = this.db.getSession(session.parentSessionId);
+      if (parent) {
+        const allocated = this.db.childSessionAllocations(parent.id);
+        const cap = parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP;
+        if (allocated.liveCount >= cap) {
+          return fail("the parent session has 0 remaining live child slots; raise maxChildSessions before restarting this child", 409);
+        }
+      }
+    }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (!session.agentId) return fail("session is missing its agent", 400);
@@ -3929,8 +4668,23 @@ export class SessionsService {
       if (capabilityFailure) return capabilityFailure;
     }
 
-
     const now = Date.now();
+    const serviceTier = runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "codexServiceTiers",
+    ) ? resolveEffectiveServiceTier({
+        model: session.model ?? undefined,
+        serviceTier: session.serviceTier ?? undefined,
+      }, launch.capabilities, launch.driver)
+      : undefined;
+    if (serviceTier !== (session.serviceTier ?? undefined)) {
+      this.db.updateSessionConfig(sessionId, {
+        model: session.model ?? undefined,
+        effort: session.effort ?? undefined,
+        serviceTier,
+        permissionMode: session.permissionMode ?? undefined,
+      }, now);
+    }
     const restartLaunchId = hasStopIntent ? randomUUID() : undefined;
     const spec: SessionLaunchSpec = {
       sessionId,
@@ -3957,6 +4711,7 @@ export class SessionsService {
       config: {
         model: session.model ?? undefined,
         effort: session.effort ?? undefined,
+        serviceTier,
         permissionMode: session.permissionMode ?? undefined,
         costBudgetUsd: session.costBudgetUsd ?? undefined,
         maxToolCalls: session.maxToolCalls ?? undefined,
@@ -3993,9 +4748,10 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
-    const pending = session.pendingApproval;
+    const pending = pendingRequests(session.pendingApproval).find((request) => request.requestId === requestId) ?? session.pendingApproval;
     if (!pending) return fail("no pending question for this session", 409);
     if (pending.requestId !== requestId) return fail("question request id does not match the pending one", 409);
+    if (pending.expiresAt != null && pending.expiresAt <= Date.now()) return fail("question request has expired", 409);
     if (pending.kind !== "question") return fail("the pending approval is not a question", 409);
     // Answers ride verbatim into the agent's updatedInput — reject anything the pending card
     // never offered (unknown keys, wrong select shape, un-offered labels) WITHOUT clearing the
@@ -4003,6 +4759,76 @@ export class SessionsService {
     const invalid = validateQuestionAnswers(pending.questions ?? [], answers, action);
     if (invalid) return fail(`invalid answers: ${invalid}`, 400);
     const auditContent = questionAuditContent(pending, answers);
+
+    if (pending.recoveryReason === "provider_restart" && action === "submit") {
+      if (pending.ownerToolUseId) {
+        return fail("the child answer channel ended when the provider restarted; dismiss this question", 409);
+      }
+      if (pending.recoveryAction !== "resume_answer") {
+        return fail("the original answer channel ended when the runner restarted; dismiss this question and continue with a new prompt", 409);
+      }
+      if ((pending.questions ?? []).some((question) => question.secret)) {
+        return fail("recovered secret answers cannot be stored for durable delivery; dismiss this question and continue with a new prompt", 409);
+      }
+      if (!pending.recoveryId) {
+        return fail("the recovered question has no stable occurrence identity; dismiss it and continue with a new prompt", 409);
+      }
+      const capabilityFailure = this.capabilityFailure(
+        session.runnerId,
+        "resumableQuestionAnswers",
+        "Recovered structured-question answers",
+      );
+      if (capabilityFailure) return capabilityFailure;
+      const command: DurableSessionCommand = {
+        type: "answer_recovered_question",
+        sessionId,
+        requestId,
+        recoveryId: pending.recoveryId,
+        answers,
+      };
+      const now = Date.now();
+      try {
+        const staged = this.promptOutbox.stageRecoveredAnswer(
+          sessionId,
+          session.runnerId,
+          command,
+          now,
+          recoveredQuestionCommandId(sessionId, requestId, pending.recoveryId),
+        );
+        if (staged.disposition === "terminal") {
+          return fail(
+            "the previous delivery attempt may already have reached the provider; dismiss this question or inspect the durable receipt before continuing",
+            409,
+          );
+        }
+      } catch (error) {
+        return fail(`recovered answer could not be persisted: ${(error as Error).message}`, 409);
+      }
+      // Persistence is the acceptance boundary. Clear the card only after the durable command is
+      // staged; reconnect/timer delivery can now safely retry the same identity without a second
+      // provider turn.
+      const remaining = removePendingRequest(session.pendingApproval, requestId);
+      this.db.setPendingApproval(sessionId, remaining);
+      this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "running", now);
+      this.recordGovernanceAudit(
+        session,
+        pending,
+        "resolution",
+        "answered",
+        actor,
+        now,
+        { content: auditContent },
+      );
+      this.gateOnPolicy(sessionId, now);
+      this.reconcilePolicyHookTimeouts(now, sessionId);
+      try {
+        this.promptOutbox.flush(now, session.runnerId);
+      } catch (error) {
+        this.log.warn(`recovered question answer flush deferred for ${sessionId}: ${(error as Error).message}`);
+      }
+      this.hub.sessionChangedById(sessionId);
+      return ok(this.db.getSession(sessionId)!);
+    }
 
     const sent = this.hub.sendToRunner(session.runnerId, { type: "answer_question", sessionId, requestId, answers, action });
     if (!sent) {
@@ -4015,8 +4841,15 @@ export class SessionsService {
     const now = Date.now();
     // The runner records question_resolved into the box log and streams it back (same
     // no-duplicate rule as permission_resolved); update local state for immediate feedback.
-    this.db.setPendingApproval(sessionId, null);
-    this.db.updateSessionStatus(sessionId, "running", now);
+    const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, requestId);
+    this.db.setPendingApproval(sessionId, remaining);
+    this.db.updateSessionStatus(
+      sessionId,
+      remaining ? "input_required" : pending.recoveryReason === "provider_restart" && action === "dismiss"
+        ? session.status === "input_required" ? "idle" : session.status
+        : "running",
+      now,
+    );
     this.recordGovernanceAudit(
       session,
       pending,
@@ -4045,9 +4878,10 @@ export class SessionsService {
     // Only resolve the approval the session is actually waiting on. A stale click,
     // duplicate POST, or wrong id must not clear pendingApproval / unblock the column
     // while the runner ignores the unknown id and the agent stays parked.
-    const pending = session.pendingApproval;
+    const pending = pendingRequests(session.pendingApproval).find((request) => request.requestId === requestId) ?? session.pendingApproval;
     if (!pending) return fail("no pending approval for this session", 409);
     if (pending.requestId !== requestId) return fail("approval request id does not match the pending one", 409);
+    if (pending.expiresAt != null && pending.expiresAt <= now) return fail("approval request has expired", 409);
 
     // A hook ask is already parked inside Claude's live PreToolUse invocation. Persist the
     // terminal decision for that SAME process to observe on its next poll; never cancel the turn
@@ -4106,6 +4940,50 @@ export class SessionsService {
       return ok(this.db.getSession(sessionId)!);
     }
 
+    // The v105 soft cards have no runner-side threshold to re-arm: Continue records what the user
+    // accepted (the checkpoint, or that the budget cannot see spend) and re-gates so the next
+    // tripped rule parks immediately; a daily-budget Continue only re-checks the allowance.
+    if (pending.kind === "cost_checkpoint" || pending.kind === "cost_unpriced" || pending.kind === "daily_budget") {
+      if (optionId === "continue") {
+        // Work out what this Continue would record, and what the runner should hold for after it,
+        // BEFORE anything persists: a failed delivery must leave the card and the policy state
+        // exactly as they were, or a retry would find and approve the NEXT checkpoint.
+        const next = pending.kind === "cost_checkpoint"
+          ? rulesFromSession(session).find((rule): rule is Extract<PolicyRule, { kind: "cost_checkpoint" }> => rule.kind === "cost_checkpoint")
+          : undefined;
+        const prospective: GuardrailFields = {
+          ...this.guardrailFields(session),
+          ...(next ? { costCheckpointApprovedUsd: Math.max(session.costCheckpointApprovedUsd ?? 0, next.checkpointUsd) } : {}),
+          ...(pending.kind === "cost_unpriced" ? { costUnpricedAcknowledged: true } : {}),
+        };
+        const holdFor = this.runnerHoldAfter(session, prospective);
+        if (!this.rearmRunnerAfterCard(session, holdFor)) {
+          this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, now, { optionId });
+          return fail("runner is offline", 409);
+        }
+        if (next) this.db.approveSessionCostCheckpoint(sessionId, next.checkpointUsd, now);
+        else if (pending.kind === "cost_unpriced") this.db.acknowledgeSessionCostUnpriced(sessionId, now);
+        this.db.setPendingApproval(sessionId, null);
+        // These cards never cancelled the provider turn: a session parked mid-turn is still
+        // running, and only one parked at a settle frame goes back to idle.
+        this.db.updateSessionStatus(sessionId, this.db.policyResumeStatus(sessionId) === "idle" ? "idle" : "running", now);
+        this.recordGovernanceAudit(session, pending, "resolution", "allowed", actor, now, { optionId });
+        this.gateOnPolicy(sessionId, now);
+        this.reconcilePolicyHookTimeouts(now, sessionId);
+        this.clearSettledPolicyResumeStatus(sessionId);
+      } else {
+        // Declining stops the turn and records nothing, so the same checkpoint asks again on the
+        // next turn that crosses it.
+        this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
+        this.db.setPendingApproval(sessionId, null);
+        this.sendStopCommand(session.runnerId, sessionId);
+        this.db.updateSessionStatus(sessionId, "stopped", now);
+        this.recordGovernanceAudit(session, pending, "resolution", "denied", actor, now, { optionId });
+      }
+      this.hub.sessionChangedById(sessionId);
+      return ok(this.db.getSession(sessionId)!);
+    }
+
     // Continue advances the absolute threshold by the original allowance window. A v47 runner may
     // have cancelled the in-flight turn and held queued prompts at the threshold, so deliver its
     // re-arm BEFORE mutating CP state. Older runners retain the between-turn behavior and receive
@@ -4113,25 +4991,39 @@ export class SessionsService {
     if (isGuardrailApproval(pending)) {
       if (optionId === "continue") {
         const runner = this.db.getRunner(session.runnerId);
-        const nextConfig: Pick<SessionConfig, "costBudgetUsd" | "maxToolCalls"> = {};
+        const nextConfig: { costBudgetUsd?: number | null; maxToolCalls?: number | null } = {};
         if (pending.kind === "cost_budget") {
           const step = session.costBudgetStepUsd ?? session.costBudgetUsd;
-          if (!session.costBudgetUsd || !step) return fail("cost guardrail has no re-arm window", 409);
-          nextConfig.costBudgetUsd = Math.max(session.costBudgetUsd, session.costUsd) + step;
+          if (pending.runnerGuardrail && session.costBudgetUsd == null) {
+            nextConfig.costBudgetUsd = null;
+          } else {
+            if (!session.costBudgetUsd || !step) return fail("cost guardrail has no re-arm window", 409);
+            const observed = Math.max(session.costUsd, pending.runnerGuardrail?.observed ?? session.costUsd);
+            nextConfig.costBudgetUsd = pending.runnerGuardrail && session.costBudgetUsd > observed
+              ? session.costBudgetUsd
+              : Math.max(session.costBudgetUsd, observed) + step;
+          }
         } else {
           const step = session.maxToolCallsStep ?? session.maxToolCalls;
-          if (!session.maxToolCalls || !step) return fail("tool guardrail has no re-arm window", 409);
-          nextConfig.maxToolCalls = Math.max(session.maxToolCalls, session.toolCallCount ?? 0) + step;
+          if (pending.runnerGuardrail && session.maxToolCalls == null) {
+            nextConfig.maxToolCalls = null;
+          } else {
+            if (!session.maxToolCalls || !step) return fail("tool guardrail has no re-arm window", 409);
+            const observed = Math.max(session.toolCallCount ?? 0, pending.runnerGuardrail?.observed ?? 0);
+            nextConfig.maxToolCalls = pending.runnerGuardrail && session.maxToolCalls > observed
+              ? session.maxToolCalls
+              : Math.max(session.maxToolCalls, observed) + step;
+          }
         }
-        const prospectiveRules = rulesFromSession({
-          costBudgetUsd: nextConfig.costBudgetUsd ?? session.costBudgetUsd,
-          maxToolCalls: nextConfig.maxToolCalls ?? session.maxToolCalls,
+        // Every rule, not only the two runner-owned thresholds: a checkpoint or the owner's daily
+        // allowance that trips after this re-arm must keep the runner's queue held too.
+        const holdFor = this.runnerHoldAfter(session, {
+          ...this.guardrailFields(session),
+          costBudgetUsd: Object.hasOwn(nextConfig, "costBudgetUsd")
+            ? nextConfig.costBudgetUsd : session.costBudgetUsd,
+          maxToolCalls: Object.hasOwn(nextConfig, "maxToolCalls")
+            ? nextConfig.maxToolCalls : session.maxToolCalls,
         });
-        const holdFor = firstAsk(evaluatePolicies({
-          status: "idle",
-          costUsd: session.costUsd,
-          toolCallCount: session.toolCallCount ?? 0,
-        }, prospectiveRules))?.rule.kind;
         if (runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) {
           const sent = this.hub.sendToRunner(session.runnerId, {
             type: "rearm_governance",
@@ -4140,17 +5032,23 @@ export class SessionsService {
             ...(holdFor ? { holdFor } : {}),
           });
           if (!sent) {
-            this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, now, { optionId });
+            this.recordRunnerGuardrailResolution(session, pending, "delivery_failed", actor, now, { optionId });
             return fail("runner is offline", 409);
           }
         }
-        this.db.setPendingApproval(sessionId, null);
-        if (pending.kind === "cost_budget") this.db.rearmSessionCostBudget(sessionId, session.costUsd, now);
-        else this.db.rearmSessionMaxToolCalls(sessionId, session.toolCallCount ?? 0, now);
-        this.db.updateSessionStatus(sessionId, "idle", now);
+        const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, pending.requestId);
+        this.db.setPendingApproval(sessionId, remaining);
+        if (pending.kind === "cost_budget") {
+          if (nextConfig.costBudgetUsd != null && nextConfig.costBudgetUsd !== session.costBudgetUsd) {
+            this.db.updateSessionCostBudget(sessionId, nextConfig.costBudgetUsd, now, session.costBudgetStepUsd);
+          }
+        } else if (nextConfig.maxToolCalls != null && nextConfig.maxToolCalls !== session.maxToolCalls) {
+          this.db.updateSessionMaxToolCalls(sessionId, nextConfig.maxToolCalls, now, session.maxToolCallsStep);
+        }
+        this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
         // Asks are serialized through the single approval slot: if ANOTHER rule is also tripped,
         // park again immediately with its own card instead of waiting for the next turn settle.
-        this.gateOnPolicy(sessionId, now);
+        if (!remaining) this.gateOnPolicy(sessionId, now);
         this.reconcilePolicyHookTimeouts(now, sessionId);
         this.clearSettledPolicyResumeStatus(sessionId);
       } else {
@@ -4159,10 +5057,9 @@ export class SessionsService {
         this.sendStopCommand(session.runnerId, sessionId);
         this.db.updateSessionStatus(sessionId, "stopped", now);
       }
-      this.recordGovernanceAudit(
+      this.recordRunnerGuardrailResolution(
         session,
         pending,
-        "resolution",
         optionId === "continue" ? "allowed" : "denied",
         actor,
         now,
@@ -4181,6 +5078,9 @@ export class SessionsService {
 
     // Deliver first; only mutate state if the runner actually received it, so an
     // offline runner can't make us lose the pending approval irrecoverably.
+    if (pending.kind !== "question" && optionId !== null && !pending.options.some((option) => option.optionId === optionId)) {
+      return fail("approval option is not offered by this request", 409);
+    }
     const sent = this.hub.sendToRunner(
       session.runnerId,
       pending.kind === "question"
@@ -4198,8 +5098,9 @@ export class SessionsService {
     // A DISMISSED question stays "running": the deny reaches the agent mid-turn and it carries
     // on — marking the session idle here would unblock git mutations (stage/commit/PR) that are
     // deliberately gated off while a turn is in flight.
-    this.db.setPendingApproval(sessionId, null);
-    this.db.updateSessionStatus(sessionId, pending.kind === "question" || optionId ? "running" : "idle", now);
+    const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, requestId);
+    this.db.setPendingApproval(sessionId, remaining);
+    this.db.updateSessionStatus(sessionId, remaining ? "input_required" : pending.kind === "question" || optionId ? "running" : "idle", now);
     const selected = optionId == null ? undefined : pending.options.find((option) => option.optionId === optionId);
     const outcome: GovernanceAuditOutcome = pending.kind === "question"
       ? "dismissed"
@@ -4246,6 +5147,7 @@ export class SessionsService {
   private cancelTitleGeneration(sessionId: string): void {
     this.titleGenerationControllers.get(sessionId)?.abort();
     this.titleGenerationControllers.delete(sessionId);
+    this.titleGenerationOwnership.delete(sessionId);
     this.titleGenerationEpochs.delete(sessionId);
   }
 
@@ -4269,15 +5171,19 @@ export class SessionsService {
     const messages = boundedSessionTitleContext(
       this.db.listSessionTitleContextEvents(sessionId),
       (text) => redactOperationalTranscriptText(text, sensitivePaths),
+      [...(session.worktrees ?? [])].sort((left, right) =>
+        Number(left?.path === session.worktreePath) - Number(right?.path === session.worktreePath)),
     );
     if (!messages.length) return fail("the session has no completed conversation context to name", 409);
 
     const epoch = this.bumpTitleGenerationEpoch(sessionId);
     const expectedTitle = session.title;
     const expectedSource = session.titleSource ?? "generated";
+    const preserveSpecificity = expectedSource !== "generated" || this.db.hasSemanticSessionTitle(sessionId);
     const expectedGenerationRevision = this.titleGenerationRevision?.(sessionId);
     const controller = new AbortController();
     this.titleGenerationControllers.set(sessionId, controller);
+    this.titleGenerationOwnership.set(sessionId, ownership);
     const configuredTimeout = typeof this.titleGenerationTimeoutMs === "function"
       ? this.titleGenerationTimeoutMs(sessionId) : this.titleGenerationTimeoutMs;
     let timedOut = false;
@@ -4300,6 +5206,12 @@ export class SessionsService {
       }
       const title = normalizeGeneratedSessionTitle(rawTitle);
       if (!title) throw new SessionTitleGenerationError("invalid_result", "output_validation");
+      if (preserveSpecificity && isLessSpecificSessionTitle(current.title, title)) {
+        // Explicit requests still take ownership when retaining the better existing title.
+        if (ownership === "user") this.db.setSemanticSessionTitle(sessionId, current.title, Date.now(), ownership);
+        this.hub.sessionChangedById(sessionId);
+        return ok({ title: current.title });
+      }
       this.db.setSemanticSessionTitle(sessionId, title, Date.now(), ownership);
       this.hub.sessionChangedById(sessionId);
       return ok({ title });
@@ -4318,6 +5230,7 @@ export class SessionsService {
       clearTimeout(timeout);
       if (this.titleGenerationControllers.get(sessionId) === controller) {
         this.titleGenerationControllers.delete(sessionId);
+        this.titleGenerationOwnership.delete(sessionId);
         this.titleGenerationEpochs.delete(sessionId);
       }
     });
@@ -4376,8 +5289,15 @@ export class SessionsService {
     let linkedLocation = false;
     if (projectId !== null) {
       if (!this.db.getProject(projectId)) return fail("project not found", 404);
-      const location = session.workspaceId
-        ? this.db.findProjectLocationForProject(projectId, session.runnerId, session.workspaceId)
+      const adHocWorkspaceId = session.workspaceId === null
+        ? this.db.resolveImportedSessionLocation(
+            session.runnerId,
+            this.db.getAdHocWorkspacePath(sessionId) ?? "",
+          ).workspaceId
+        : null;
+      const assignmentWorkspaceId = session.workspaceId ?? adHocWorkspaceId;
+      const location = assignmentWorkspaceId
+        ? this.db.findProjectLocationForProject(projectId, session.runnerId, assignmentWorkspaceId)
         : null;
       if (!location) {
         if (!options.linkLocation) {
@@ -4578,10 +5498,19 @@ export class SessionsService {
     const config: SessionConfig = {
       ...(parent.model ? { model: parent.model } : {}),
       ...(parent.effort ? { effort: parent.effort } : {}),
+      ...(parent.serviceTier && runnerSupportsProtocol(
+        this.db.getRunner(parent.runnerId)?.protocolVersion,
+        "codexServiceTiers",
+      ) ? { serviceTier: parent.serviceTier } : {}),
       ...(parent.permissionMode ? { permissionMode: parent.permissionMode } : {}),
     };
     const activeParentLocation = parent.projectLocationId
       ? this.db.projectLocation(parent.projectLocationId)
+      : null;
+    const resolvedParentWorkspaceId = parent.projectId && activeParentLocation
+      ? parent.workspaceId ?? (workspacePath
+        ? this.db.resolveImportedSessionLocation(parent.runnerId, workspacePath).workspaceId
+        : null)
       : null;
     const inheritedProject = parent.projectId === null
       ? { projectId: null, projectLocationId: null }
@@ -4591,7 +5520,7 @@ export class SessionsService {
             projectLocationId: activeParentLocation?.projectId === parent.projectId &&
               activeParentLocation.availability !== "runner_removed" &&
               activeParentLocation.runnerId === parent.runnerId &&
-              activeParentLocation.workspaceId === parent.workspaceId
+              activeParentLocation.workspaceId === resolvedParentWorkspaceId
               ? activeParentLocation.id
               : null,
           }
@@ -4713,7 +5642,10 @@ export class SessionsService {
     req: CreateWorkflowRunRequest,
     actor: GovernanceActor = { kind: "human", id: "local" },
     delivery?: PreStagedDeliveryOptions,
+    creationContext?: { parentSessionId?: string },
   ): ServiceResult<CreateWorkflowRunResult> {
+    const parentSessionId = creationContext?.parentSessionId;
+    if (parentSessionId && delivery) return fail("agent-created workflow runs cannot use automation delivery snapshots", 409);
     if (!req || typeof req !== "object" || Array.isArray(req)) return fail("workflow run request is malformed", 400);
     const allowed = new Set([
       "runnerId", "workspaceId", "projectId", "projectLocationId", "workflowId", "workflowVersion", "task", "title", "useWorktree",
@@ -4742,11 +5674,17 @@ export class SessionsService {
       ? snapshotStarts[0].spec.workspacePath
       : this.db.getWorkspacePath(req.runnerId, req.workspaceId);
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
-    const requestedProject = this.requestedProjectAssignment(req, req.runnerId, req.workspaceId);
+    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
+    const requestedProject = this.requestedProjectAssignment(
+      req, req.runnerId, req.workspaceId, false, parentSessionId,
+    );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
-    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
+    if (req.config?.serviceTier) {
+      const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection");
+      if (unsupported) return unsupported;
+    }
     this.ensureBuiltinWorkflows();
     const definition = this.db.getWorkflowDefinition(req.workflowId, req.workflowVersion);
     if (!definition) return fail("workflow definition not found", 404);
@@ -4837,9 +5775,18 @@ export class SessionsService {
     if (!workerSessionScope.ok || !workerSessionScope.data) {
       return fail(workerSessionScope.error ?? "workflow session ownership is unavailable", workerSessionScope.status);
     }
+    let childSessionScope = workerSessionScope.data;
+    if (parentSessionId) {
+      const parentScope = this.db.sessionScope(parentSessionId);
+      if (!parentScope) return fail("parent session ownership is unavailable", 409);
+      if (!this.db.scopeAudienceContainedWithMembership(parentScope, workerSessionScope.data)) {
+        return fail("parent session access is broader than the selected Project or execution Location", 409);
+      }
+      childSessionScope = parentScope;
+    }
     // Trusted orchestrators require organization scope for organization workflow tools. When a
     // Project is narrower, keep only that infrastructure session explicitly outside the Project;
-    // every worker still adopts the selected Project scope and identity.
+    // every ordinary workflow child still adopts the inherited Project and parent scope.
     const orchestratorProject = members.some((member) => member.orchestrator) &&
       requestedProject.data.projectId && orchestratorScope &&
       !this.db.scopeAudienceContainedWithMembership(
@@ -4856,6 +5803,12 @@ export class SessionsService {
       );
     }
 
+    const memberConfig = this.runMemberConfig(req, Boolean(parentSessionId));
+    const spawnRequest = { title: req.title, agentId: members.map((member) => member.agentId).join(", "),
+      operation: "workflow", request: req, members: members.map((member) => ({ roleId: member.roleId, agentId: member.agentId })) };
+    const admitted = this.admitRunChildren(parentSessionId, members.map(() => ({ ...memberConfig })), spawnRequest);
+    if (!admitted.ok || !admitted.data) return fail(admitted.error!, admitted.status);
+
     const now = Date.now();
     const runId = shortId("r_");
     const title = (req.title?.trim() || req.task.trim().slice(0, 60) || definition.name).slice(0, 120);
@@ -4871,18 +5824,19 @@ export class SessionsService {
 
     const sessions: SessionView[] = [];
     const starts: Array<{ spec: SessionLaunchSpec; orchestrator: boolean }> = [];
-    for (const member of members) {
+    for (const [memberIndex, member] of members.entries()) {
       const id = shortId("s_");
-      const config = { ...(req.config ?? {}) };
-      if (member.agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
-      if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
-      const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
+      const config = admitted.data[memberIndex]!;
+      const maxCalls = parentSessionId ? config.maxToolCalls : req.maxToolCalls;
+      const runMaxCalls = maxCalls != null ? Math.floor(maxCalls) : 0;
+      const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
       if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
       const memberTitle = `${title} · ${member.orchestrator ? "orchestrator" : member.roleId}`.slice(0, 120);
       const useWorktree = member.orchestrator ? false : (req.useWorktree ?? true);
       const memberProject = member.orchestrator ? orchestratorProject : requestedProject.data;
       const session = this.db.createSession({
         id,
+        parentSessionId,
         runnerId: req.runnerId,
         workspaceId: req.workspaceId,
         ...memberProject,
@@ -4893,11 +5847,13 @@ export class SessionsService {
         runId,
         driver: member.launch.driver,
         config,
-        scope: member.orchestrator ? orchestratorScope! : workerSessionScope.data,
+        scope: member.orchestrator ? orchestratorScope! : childSessionScope,
         now,
       });
-      if (req.costBudgetUsd && req.costBudgetUsd > 0) this.db.updateSessionCostBudget(id, req.costBudgetUsd, now);
+      const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;
+      if (costBudget && costBudget > 0) this.db.updateSessionCostBudget(id, costBudget, now);
       if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(id, runMaxCalls, now);
+      if (runCheckpoints) this.db.updateSessionCostCheckpoints(id, runCheckpoints, now);
       this.db.addRunMember(runId, id, member.roleId);
       const view = this.db.getSession(id) ?? session;
       this.hub.sessionChanged(view);
@@ -5025,12 +5981,12 @@ export class SessionsService {
     const title = (req.title?.trim() || req.task.trim().slice(0, 60) || definition.name).slice(0, 120);
     const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
     const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
+    const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
     const planned = members.map((member, index) => {
       const id = memberIds[index]!;
       const snapshot = delivery.commandSnapshots?.[index];
       const config = { ...(snapshot?.type === "start_session" ? snapshot.spec.config : req.config) };
       if (!snapshot) {
-        if (member.agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
         if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
         if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
       }
@@ -5163,6 +6119,7 @@ export class SessionsService {
         this.db.updateSessionCostBudget(item.id, req.costBudgetUsd, now);
       }
       if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(item.id, runMaxCalls, now);
+      if (runCheckpoints) this.db.updateSessionCostCheckpoints(item.id, runCheckpoints, now);
       this.db.addRunMember(runId, item.id, item.member.roleId);
       const view = this.db.getSession(item.id) ?? session;
       this.hub.sessionChanged(view);
@@ -5826,7 +6783,8 @@ export class SessionsService {
       .filter((session): session is SessionView => Boolean(session));
   }
 
-  createRun(req: CreateRunRequest): ServiceResult<{ run: RunView; sessions: SessionView[] }> {
+  createRun(req: CreateRunRequest, creationContext?: { parentSessionId?: string }): ServiceResult<{ run: RunView; sessions: SessionView[] }> {
+    const parentSessionId = creationContext?.parentSessionId;
     if (!req.agentIds?.length) return fail("at least one agent is required");
     if (req.agentIds.length > MAX_UI_SESSION_SUBSCRIPTIONS) {
       return fail(`at most ${MAX_UI_SESSION_SUBSCRIPTIONS} agents are allowed in one run`);
@@ -5834,38 +6792,61 @@ export class SessionsService {
     if (typeof req.task !== "string" || !req.task.trim()) return fail("a task is required");
     const workspacePath = this.db.getWorkspacePath(req.runnerId, req.workspaceId);
     if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
-    const requestedProject = this.requestedProjectAssignment(req, req.runnerId, req.workspaceId);
+    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
+    const requestedProject = this.requestedProjectAssignment(
+      req, req.runnerId, req.workspaceId, false, parentSessionId,
+    );
     if (!requestedProject.ok || !requestedProject.data) {
       return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
     }
-    const sessionScope = this.sessionScopeForProjectAssignment(
+    const projectSessionScope = this.sessionScopeForProjectAssignment(
       requestedProject.data,
       this.db.workspaceScope(req.runnerId, req.workspaceId) ?? this.db.runnerScope(req.runnerId),
     );
-    if (!sessionScope.ok || !sessionScope.data) {
-      return fail(sessionScope.error ?? "run session ownership is unavailable", sessionScope.status);
+    if (!projectSessionScope.ok || !projectSessionScope.data) {
+      return fail(projectSessionScope.error ?? "run session ownership is unavailable", projectSessionScope.status);
     }
-    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
+    let sessionScope = projectSessionScope.data;
+    if (parentSessionId) {
+      const parentScope = this.db.sessionScope(parentSessionId);
+      if (!parentScope) return fail("parent session ownership is unavailable", 409);
+      if (!this.db.scopeAudienceContainedWithMembership(parentScope, projectSessionScope.data)) {
+        return fail("parent session access is broader than the selected Project or execution Location", 409);
+      }
+      sessionScope = parentScope;
+    }
+    // Every member session carries the run's scope, so an owner over their daily allowance
+    // cannot launch a fleet of new turns through a run either.
+    const runAdmissionDenied = this.dailyBudgetAdmissionError(sessionScope);
+    if (runAdmissionDenied) return fail(runAdmissionDenied, 409);
 
     // Resolve every agent before creating the run so we never persist an empty run.
     const resolved: { agentId: string; launch: AgentLaunch }[] = [];
     const unknown: string[] = [];
     for (const agentId of req.agentIds) {
-      // Conductor clamp, seam 4/4: the run dialog default-selects EVERY agent (conductor
-      // included) and the run config is shared across members. Validate in this PRE-PERSIST
-      // loop so a rejected conductor member fails the whole request atomically — no partial
-      // run, no orphan member sessions.
-      const conductorErr = conductorConfigError(agentId, req.config);
-      if (conductorErr) return fail(conductorErr, 409);
+      if (agentId === CONDUCTOR_AGENT_ID) return fail("the conductor agent is retired", 409);
       const launch = this.db.getAgentLaunch(req.runnerId, agentId);
       const configCapabilityError = capabilityConfigError(req.config, launch?.capabilities);
       if (configCapabilityError) return fail(`${agentId}: ${configCapabilityError}`, 409);
+      if (req.config?.serviceTier && launch?.driver !== "codex-app-server") {
+        return fail(`${agentId}: service tier selection is supported only by Codex app-server sessions`, 409);
+      }
+      if (req.config?.serviceTier) {
+        const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection");
+        if (unsupported) return unsupported;
+      }
       if (launch) resolved.push({ agentId, launch });
       else unknown.push(agentId);
     }
     if (!resolved.length) {
       return fail(`no known agents on runner '${req.runnerId}': ${unknown.join(", ")}`, 404);
     }
+
+    const memberConfig = this.runMemberConfig(req, Boolean(parentSessionId));
+    const spawnRequest = { title: req.title, agentId: resolved.map((member) => member.agentId).join(", "),
+      operation: "run", request: req, members: resolved.map((member) => member.agentId) };
+    const admitted = this.admitRunChildren(parentSessionId, resolved.map(() => ({ ...memberConfig })), spawnRequest);
+    if (!admitted.ok || !admitted.data) return fail(admitted.error!, admitted.status);
 
     const now = Date.now();
     const runId = shortId("r_");
@@ -5881,21 +6862,19 @@ export class SessionsService {
     });
 
     const sessions: SessionView[] = [];
-    for (const { agentId, launch } of resolved) {
+    for (const [memberIndex, { agentId, launch }] of resolved.entries()) {
       const id = shortId("s_");
       // Multi-agent runs always isolate in their own worktree (brief: don't let
       // multiple agents write the same working tree).
-      // Per-member clone: a conductor member is forced to "default" (like createSession) so
-      // the persisted row, the launch spec, AND every later prompt's config echo carry the
-      // gate — otherwise the NULL row would echo undefined and the driver's "acceptEdits"
-      // fallback would run the manager tools ungated from turn 2 on.
-      const config = { ...(req.config ?? {}) };
-      if (agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
-      if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
-      const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
+      // Clone per member so guardrail normalization never changes the shared request.
+      const config = admitted.data[memberIndex]!;
+      const maxCalls = parentSessionId ? config.maxToolCalls : req.maxToolCalls;
+      const runMaxCalls = maxCalls != null ? Math.floor(maxCalls) : 0;
+      const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
       if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
       const session = this.db.createSession({
         id,
+        parentSessionId,
         runnerId: req.runnerId,
         workspaceId: req.workspaceId,
         ...requestedProject.data,
@@ -5906,12 +6885,14 @@ export class SessionsService {
         runId,
         driver: launch.driver,
         config,
-        scope: sessionScope.data,
+        scope: sessionScope,
         now,
       });
       // Run-level guardrails apply to every member session; each member gates independently.
-      if (req.costBudgetUsd && req.costBudgetUsd > 0) this.db.updateSessionCostBudget(id, req.costBudgetUsd, now);
+      const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;
+      if (costBudget && costBudget > 0) this.db.updateSessionCostBudget(id, costBudget, now);
       if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(id, runMaxCalls, now);
+      if (runCheckpoints) this.db.updateSessionCostCheckpoints(id, runCheckpoints, now);
       this.db.addRunMember(runId, id, agentId);
       this.hub.sessionChanged(this.db.getSession(id) ?? session);
       // The runner emits the user_message into the box store (source of truth) when it runs the
@@ -5954,6 +6935,7 @@ export class SessionsService {
     worktreePath?: string | null,
     fromRunnerId?: string,
     controlPlaneLaunchId?: string,
+    capacityWait?: RunnerCapacityBlocker,
   ): void {
     const session = this.db.getSession(sessionId);
     if (!session) return;
@@ -5980,6 +6962,11 @@ export class SessionsService {
       }
     }
     if (worktreePath !== undefined) this.db.setWorktreePath(sessionId, worktreePath);
+    if (status === "input_required" && !session.pendingApproval && this.automaticQuestions.get(sessionId)?.size) {
+      this.hub.sessionChangedById(sessionId);
+      return;
+    }
+    if (isTerminal(status) || status === "idle" || status === "running") this.automaticQuestions.delete(sessionId);
     // A control-plane terminal decision must not be resurrected by a stale or
     // in-flight runner status event.
     if (isTerminal(session.status) && !admittedReplacement) {
@@ -5989,7 +6976,7 @@ export class SessionsService {
     // A trailing idle must not pass THROUGH a parked guardrail card: updateSessionStatus would
     // wipe it and the re-gate would mint a fresh requestId, invalidating an in-flight
     // Continue/Stop click (and flickering the card). The pause is CP state — keep it sticky.
-    if (status === "idle" && isPolicyApproval(session.pendingApproval)) {
+    if (status === "idle" && hasPolicyApproval(session.pendingApproval)) {
       this.db.notePolicyResumeStatus(sessionId, "idle");
       this.hub.sessionChangedById(sessionId);
       return;
@@ -5997,10 +6984,15 @@ export class SessionsService {
     if (status !== "idle" && !isTerminal(status)) {
       this.db.clearPolicyResumeStatus(sessionId);
     }
+    const childAttention = !isTerminal(status) &&
+      pendingRequests(session.pendingApproval).some((request) => request.ownerToolUseId);
     if (isTerminal(status)) {
       this.abortPolicyHookApprovals(session, Date.now(), "provider-session-ended");
     }
-    this.db.updateSessionStatus(sessionId, status, Date.now());
+    this.db.updateSessionStatus(sessionId, childAttention ? "input_required" : status, Date.now());
+    if (!childAttention && status === "queued" && capacityWait) {
+      this.db.setSessionCapacityWait(sessionId, capacityWait);
+    }
     // If the session ended while an approval was pending, clear the stale card.
     if (isTerminal(status) && session.pendingApproval) {
       this.db.setPendingApproval(sessionId, null);
@@ -6022,6 +7014,74 @@ export class SessionsService {
     this.hub.sessionChangedById(sessionId);
   }
 
+  /** Materialize the decision for a runner-owned cancellation even when the control-plane rule
+   * was changed or cleared before the trip arrived. Duplicate/reconnect notices retain one card,
+   * and an unrelated unanswered request keeps ownership of the visible primary slot. */
+  onGovernanceTripped(runnerId: string, message: GovernanceTrippedMessage): void {
+    const session = this.db.getSession(message.sessionId);
+    if (!session || session.runnerId !== runnerId || session.archived || isTerminal(session.status)) return;
+    if (typeof message.tripId !== "string" || !message.tripId || message.tripId.length > 128 ||
+        (message.kind !== "cost_budget" && message.kind !== "max_tool_calls") ||
+        !Number.isFinite(message.threshold) || message.threshold <= 0 ||
+        !Number.isFinite(message.observed) || message.observed < message.threshold ||
+        (message.kind === "max_tool_calls" &&
+          (!Number.isSafeInteger(message.threshold) || !Number.isSafeInteger(message.observed)))) {
+      this.log.warn(`ignoring malformed governance trip for ${message.sessionId} from ${runnerId}`);
+      return;
+    }
+    const requestId = `runner-${message.kind}:${message.tripId}`;
+    const pending = pendingRequests(session.pendingApproval);
+    if (pending.some((request) => request.runnerGuardrail?.tripId === message.tripId &&
+        request.runnerGuardrail.kind === message.kind)) return;
+    if (this.db.hasTerminalGovernanceResolution(message.sessionId, requestId)) return;
+    const alreadyAsked = this.db.hasGovernanceAuditEntry(
+      message.sessionId,
+      requestId,
+      "policy_decision",
+      "asked",
+    );
+    const existing = pending.find((request) =>
+      request.kind === message.kind && !request.runnerGuardrail);
+    const title = message.kind === "cost_budget"
+      ? `Runner paused at the $${message.threshold.toFixed(2)} cost threshold. Continue with the current guardrails?`
+      : `Runner paused at ${message.threshold} distinct tool calls. Continue with the current guardrails?`;
+    const runnerGuardrail = {
+      tripId: message.tripId,
+      kind: message.kind,
+      threshold: message.threshold,
+      observed: message.observed,
+    };
+    // Cost usage reaches the CP before the runner's following trip frame, so the CP may already
+    // have parked the same crossing. Promote that card with the runner evidence instead of asking
+    // twice (and advancing the threshold twice). Keep its request identity for an in-flight click;
+    // the separate runner request id below makes reconnect replay idempotent.
+    const approval: PendingApproval = existing ? { ...existing, runnerGuardrail } : {
+      requestId,
+      kind: message.kind,
+      title,
+      options: [
+        { optionId: "continue", name: "Continue", kind: "allow_once" },
+        { optionId: "cancel", name: "Stop", kind: "reject_once" },
+      ],
+      runnerGuardrail,
+    };
+    const now = Date.now();
+    this.db.setPendingApproval(message.sessionId, existing
+      ? replacePendingApproval(session.pendingApproval, approval)
+      : appendPendingApproval(session.pendingApproval, approval));
+    if (session.status === "idle") this.db.notePolicyResumeStatus(message.sessionId, "idle");
+    this.db.updateSessionStatus(message.sessionId, "input_required", now);
+    if (!alreadyAsked) {
+      this.recordGovernanceAudit(session, { ...approval, requestId }, "policy_decision", "asked",
+        { kind: "system", id: "runner-governance" }, now, {
+          policyRule: message.kind === "cost_budget"
+            ? { kind: "cost_budget", budgetUsd: message.threshold }
+            : { kind: "max_tool_calls", maxCalls: message.threshold },
+        });
+    }
+    this.hub.sessionChangedById(message.sessionId);
+  }
+
   private reconcileWorkflowSessionStatus(sessionId: string, status: SessionStatus, now: number): void {
     for (const attempt of this.db.activeWorkflowAttemptsForSession(sessionId)) {
       if (status === "idle" || status === "completed") {
@@ -6039,18 +7099,103 @@ export class SessionsService {
    * updateSessionStatus() clears the card as the session lands on idle. Rules are pure and the
    * inputs re-derived each call, so re-application is idempotent. Returns true if it gated.
    */
-  private gateOnPolicy(sessionId: string, now: number): boolean {
+  /** The owner's daily allowance and spend, when the session belongs to a user in an
+   * organization that set one. Three statements at most on the ingestion path: owner, budget,
+   * today's sum. */
+  private dailyBudgetFor(sessionId: string): { budgetUsd: number; spentUsd: number } | null {
+    const owner = this.db.sessionOwnerUser(sessionId);
+    return owner ? this.dailyBudgetForOwner(owner.organizationId, owner.userId) : null;
+  }
+
+  /** The 409 message when a user-owned scope's daily allowance is spent, else null. */
+  private dailyBudgetAdmissionError(scope: ResourceScope | null | undefined): string | null {
+    if (scope?.owner.kind !== "user") return null;
+    const daily = this.dailyBudgetForOwner(scope.organizationId, scope.owner.userId);
+    if (!daily || daily.spentUsd < daily.budgetUsd) return null;
+    return `daily budget reached — $${daily.spentUsd.toFixed(2)} of $${daily.budgetUsd.toFixed(2)} today; new sessions wait for the day to roll over or an owner or admin to raise it`;
+  }
+
+  private dailyBudgetForOwner(organizationId: string, userId: string): { budgetUsd: number; spentUsd: number } | null {
+    const budget = this.db.getUsageDailyBudget(organizationId).perUserUsd;
+    if (budget == null || budget <= 0) return null;
+    return { budgetUsd: budget, spentUsd: this.db.userCostTodayUsd(organizationId, userId) };
+  }
+
+  /** The guardrail fields the rule builder reads for a session, including the owner's allowance. */
+  private guardrailFields(session: SessionView): GuardrailFields {
+    return { ...session, dailyBudget: this.dailyBudgetFor(session.id) };
+  }
+
+  /** What to tell a runner to hold its queue for after a threshold change. A runner-enforced rule
+   * names itself. A control-plane-only rule (checkpoint, unpriced, daily budget) asks a v105 runner
+   * for a queue-only hold; an older runner has no such hold and is released, so its queued turns
+   * run past a soft card (they still stop at the runner-owned thresholds). */
+  private runnerHoldAfter(session: SessionView, fields: GuardrailFields): RunnerHoldKind | undefined {
+    const rules = rulesFromSession(fields);
+    const ask = firstAsk(evaluatePolicies({
+      status: "idle",
+      costUsd: session.costUsd,
+      toolCallCount: session.toolCallCount ?? 0,
+      unpriced: rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(session.id),
+    }, rules))?.rule.kind;
+    if (!ask) return undefined;
+    const hard = runnerHoldFor(ask);
+    if (hard) return hard;
+    const runner = this.db.getRunner(session.runnerId);
+    return runnerSupportsProtocol(runner?.protocolVersion, "controlPlaneQueueHold") ? "control_plane" : undefined;
+  }
+
+  /** Releases or re-holds a runner's queue around a control-plane card. Re-sends the CURRENT
+   * thresholds, which a runner applies idempotently, so the hold flag always travels with a
+   * non-empty patch. Older runners pick the thresholds up with the next prompt. */
+  private rearmRunnerAfterCard(session: SessionView, holdFor: RunnerHoldKind | undefined): boolean {
+    const runner = this.db.getRunner(session.runnerId);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "governanceRearm")) return true;
+    if (holdFor === "control_plane" && !runnerSupportsProtocol(runner?.protocolVersion, "controlPlaneQueueHold")) {
+      holdFor = undefined;
+    }
+    // No threshold rides along: a re-arm's thresholds are applied to every queued prompt, and a
+    // soft card changes none of them. A v105 runner applies a hold change on its own.
+    return this.hub.sendToRunner(session.runnerId, {
+      type: "rearm_governance",
+      sessionId: session.id,
+      config: {},
+      ...(holdFor ? { holdFor } : {}),
+    });
+  }
+
+  private gateOnPolicy(sessionId: string, now: number, fanOut = true, softOnly = false): boolean {
     const s = this.db.getSession(sessionId);
     if (!s || s.pendingApproval) return false;
-    const rules = rulesFromSession(s);
+    const rules = rulesFromSession(this.guardrailFields(s));
     if (rules.length === 0) return false;
     // sessionView already computed the count when the guardrail is armed — don't re-query.
     const toolCallCount = s.toolCallCount ?? 0;
-    const ask = firstAsk(evaluatePolicies({ status: s.status, costUsd: s.costUsd, toolCallCount }, rules));
+    // The unpriced check costs a ledger read, so it runs only when a rule can act on it.
+    const unpriced = rules.some((rule) => rule.kind === "cost_unpriced") && this.db.sessionUsageUnpriced(sessionId);
+    const ask = firstAsk(evaluatePolicies({ status: s.status, costUsd: s.costUsd, toolCallCount, unpriced }, rules));
     if (!ask) return false;
+    // A runner-enforced threshold armed on a live session is the runner's to trip: it receives
+    // the threshold with the config write, cancels at the crossing, and settles into this gate.
+    // Parking on it here would show a hard card the runner knows nothing about.
+    if (softOnly && runnerHoldFor(ask.rule.kind)) return false;
     const approval = approvalForDecision(ask, sessionId, now);
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
+    // A control-plane-only card must also stop the runner draining queued prompts behind the
+    // turn it parks; the runner-owned thresholds already tripped on the runner itself.
+    if (!runnerHoldFor(ask.rule.kind)) this.rearmRunnerAfterCard(s, "control_plane");
     this.db.setPendingApproval(sessionId, approval);
+    // The daily allowance is the owner's, not this session's: every other live session they own
+    // is parked now, before a queued turn elsewhere can dequeue behind the breach.
+    if (ask.rule.kind === "daily_budget" && fanOut) {
+      const owner = this.db.sessionOwnerUser(sessionId);
+      if (owner) {
+        // One bounded pass from the session that crossed the line; siblings never fan out again.
+        for (const siblingId of this.db.listOpenSessionIdsForOwner(owner.organizationId, owner.userId)) {
+          if (siblingId !== sessionId) this.gateOnPolicy(siblingId, now, false);
+        }
+      }
+    }
     this.db.updateSessionStatus(sessionId, "input_required", now);
     this.recordGovernanceAudit(s, approval, "policy_decision", "asked", { kind: "policy", id: ask.rule.kind }, now, {
       policyRule: ask.rule,
@@ -6105,6 +7250,26 @@ export class SessionsService {
     }
   }
 
+  /** Canonical user-message identity is durable delivery evidence whether it arrives live or
+   * through either history protocol. Steering evidence reconciles a locally uncertain direct
+   * attempt; an ordinary turn retires only the Queue Again receipt with that exact queue id. */
+  private reconcileSteeringFromUserMessage(
+    sessionId: string,
+    payload: SessionEventPayload,
+    now: number,
+  ): boolean {
+    if (payload.kind !== "user_message" || typeof payload.turnId !== "string") return false;
+    if (payload.deliveryIntent === "steer" && typeof payload.submissionId === "string") {
+      return this.db.resolveSteeringAttemptFromUserMessage(
+        sessionId, payload.submissionId, payload.turnId, now,
+      );
+    }
+    if (payload.deliveryIntent !== "steer") {
+      return this.db.retireQueuedAgainSteeringReceiptFromUserMessage(sessionId, payload.turnId, now);
+    }
+    return false;
+  }
+
   /** Mirror transport-health provenance for both live ingestion and history hydration without
    * duplicating the same durable transition when a reconnect replays an already-audited event. */
   private recordPolicyTransportAudit(
@@ -6151,6 +7316,11 @@ export class SessionsService {
     const shouldGenerateInitialTitle = Boolean(this.titleGenerator) && isCompletedUserMessage &&
       generatedOwnership && !this.db.hasCompletedUserMessage(sessionId) &&
       (!this.titleGenerationEnabled || this.titleGenerationEnabled(sessionId));
+    const shouldRefineTitle = Boolean(this.titleGenerator) && generatedOwnership &&
+      (payload.kind === "agent_response_completed" ||
+        (payload.kind === "agent_message" && payload.final === true && !payload.parentToolUseId && Boolean(payload.text.trim()))) &&
+      !this.db.hasCompletedAgentMessage(sessionId) &&
+      this.db.hasCompletedUserMessage(sessionId) && this.titleGenerationOwnership.get(sessionId) !== "user";
     // Keep the runner-seq cursor gap-free: if a live event is ahead of our high-water (we hydrated a
     // session whose earlier history we haven't pulled yet), don't append it out of order and skip
     // past the gap — pull the ordered history from the box (which includes this event) instead.
@@ -6214,15 +7384,7 @@ export class SessionsService {
         throw error;
       }
     }
-    const steeringEvidence = payload.kind === "user_message" && payload.deliveryIntent === "steer" &&
-      typeof payload.submissionId === "string" && typeof payload.turnId === "string"
-      ? { submissionId: payload.submissionId, turnId: payload.turnId }
-      : null;
-    const reconciledSteering = steeringEvidence
-      ? this.db.resolveSteeringAttemptFromUserMessage(
-        sessionId, steeringEvidence.submissionId, steeringEvidence.turnId, now,
-      )
-      : false;
+    const reconciledSteering = this.reconcileSteeringFromUserMessage(sessionId, payload, now);
     const commandEvidence = payload.kind === "user_message" ? payload.commandInvocation : undefined;
     const reconciledCommand = commandEvidence
       ? this.db.resolveSessionCommandInvocationFromUserMessage(
@@ -6237,7 +7399,7 @@ export class SessionsService {
           now,
         )
       : false;
-    this.hub.sessionEvent(ev);
+    if (payload.kind !== "question_request") this.hub.sessionEvent(ev);
     if (reconciledSteering || reconciledCommand ||
         payload.kind === "background_continuation_delivered") {
       this.hub.sessionChangedById(sessionId);
@@ -6246,6 +7408,7 @@ export class SessionsService {
     // Preserve the authoritative history event, but never let a late permission/question/policy
     // event recreate an approval card or move the control-plane session out of stopped.
     if (this.db.hasSessionStopIntent(sessionId)) {
+      if (payload.kind === "question_request") this.hub.sessionEvent(ev, { suppressReminderWake: true });
       this.db.updateSessionStatus(sessionId, "stopped", now);
       this.sendStopCommand(session.runnerId, sessionId);
       this.hub.sessionChangedById(sessionId);
@@ -6262,7 +7425,7 @@ export class SessionsService {
       const t = titleFromPrompt(payload.text);
       if (t) this.db.setSessionTitle(sessionId, t, now, "generated");
     }
-    if (shouldGenerateInitialTitle) {
+    if (shouldGenerateInitialTitle || shouldRefineTitle) {
       // Fire-and-forget: the normal turn has already entered the runner independently.
       const started = this.generateSessionTitle(sessionId, "generated");
       if (started.ok) void started.data!.completion;
@@ -6272,9 +7435,23 @@ export class SessionsService {
     // authoritative session total and already includes delegated work, so accruing both would
     // inflate context meters and budget gates.
     if (payload.kind === "token_usage" && !payload.parentToolUseId) {
+      // v106 runners enforce this authoritative cumulative price during the live turn. The frame
+      // carries no provider credential or transcript content, and older runners retain their
+      // provider-reported local-cost behavior.
+      if (runnerSupportsProtocol(
+        this.db.getRunner(session.runnerId)?.protocolVersion,
+        "pricedSessionCost",
+      )) {
+        this.hub.sendToRunner(session.runnerId, {
+          type: "priced_session_cost",
+          sessionId,
+          costUsd: this.db.sessionCostUsd(sessionId),
+        });
+      }
       // Guardrail card gate: pause + ask once a policy rule trips. A v47 runner independently
-      // cancels the active turn at the normalized usage threshold. Also re-applied at turn-settle
-      // (onSessionStatus) so a trailing idle can't wipe it.
+      // cancels the active turn at the normalized usage threshold; v106 also applies that gate to
+      // the acknowledged control-plane price. Re-applied at turn-settle (onSessionStatus) so a
+      // trailing idle can't wipe it.
       // A mid-turn park is an attention moment — push it (no-op unless the gate flipped status).
       this.gateOnPolicy(sessionId, now);
       this.notifyTransition(session, sessionId);
@@ -6282,6 +7459,7 @@ export class SessionsService {
 
     if (payload.kind === "permission_request") {
       const approval: PendingApproval = {
+        ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
         requestId: payload.requestId,
         title: payload.title,
         options: payload.options,
@@ -6368,10 +7546,13 @@ export class SessionsService {
           optionId,
         });
         if (sent) {
-          this.db.setPendingApproval(sessionId, null);
+          const current = this.db.getSession(sessionId)?.pendingApproval;
+          const remaining = pendingRequests(current).some((request) => request.ownerToolUseId)
+            ? removePendingRequest(current, approval.requestId) : null;
+          this.db.setPendingApproval(sessionId, remaining);
           // A deny (including null-option cancellation) returns control to the still-active agent
           // turn just like a selected reject_once, so both auto effects remain running here.
-          this.db.updateSessionStatus(sessionId, "running", now);
+          this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "running", now);
           this.recordGovernanceAudit(
             session,
             approval,
@@ -6393,7 +7574,10 @@ export class SessionsService {
         });
       }
 
-      this.db.setPendingApproval(sessionId, approval);
+      this.db.setPendingApproval(
+        sessionId,
+        addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
+      );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       // Push BEFORE any runner-side trailing status event (which would then be a non-transition).
       this.notifyTransition(session, sessionId);
@@ -6418,6 +7602,7 @@ export class SessionsService {
       // Structured agent question — same approval slot, kind "question"; the web renders a
       // question card and answers via POST /api/sessions/:id/answer.
       const approval: PendingApproval = {
+        ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
         requestId: payload.requestId,
         title: payload.questions[0]?.question ?? "The agent has a question",
         options: [],
@@ -6435,6 +7620,7 @@ export class SessionsService {
       );
       const occupiedHook = this.db.getSession(sessionId)?.pendingApproval;
       if (occupiedHook?.kind === "policy_hook") {
+        this.hub.sessionEvent(ev, { suppressReminderWake: true });
         const sent = this.hub.sendToRunner(session.runnerId, {
           type: "answer_question",
           sessionId,
@@ -6454,7 +7640,37 @@ export class SessionsService {
         this.hub.sessionChangedById(sessionId);
         return;
       }
-      this.db.setPendingApproval(sessionId, approval);
+      const automatic = questionPolicyAnswers(payload.questions, this.db.listGovernancePolicies(), this.db.sessionOwnerUser(sessionId), session);
+      if (automatic) {
+        const sent = this.hub.sendToRunner(session.runnerId, {
+          type: "answer_question", sessionId, requestId: approval.requestId,
+          answers: automatic.answers, action: "submit",
+        });
+        for (const policy of automatic.policies) {
+          this.recordGovernanceAudit(session, approval, "policy_decision", sent ? "answered" : "delivery_failed",
+            { kind: "policy", id: policy.policyId }, now, { governancePolicyId: policy.policyId });
+        }
+        if (sent) {
+          this.hub.sessionEvent(ev, { suppressReminderWake: true });
+          const requests = this.automaticQuestions.get(sessionId) ?? new Set<string>();
+          requests.add(approval.requestId);
+          this.automaticQuestions.set(sessionId, requests);
+          const attribution: Extract<SessionEventPayload, { kind: "question_policy_answered" }> = {
+            kind: "question_policy_answered", requestId: approval.requestId, questionEventSeq: ev.seq,
+            policies: automatic.policies.map(({ policyId, name }) => ({ policyId, name })),
+          };
+          this.db.recordQuestionPolicyAnswer(sessionId, payload.questions, attribution, now, runnerSeq);
+          this.hub.sessionEvent(this.db.appendEvent(sessionId, attribution, now));
+          this.gateOnPolicy(sessionId, now);
+          this.hub.sessionChangedById(sessionId);
+          return;
+        }
+      }
+      this.hub.sessionEvent(ev);
+      this.db.setPendingApproval(
+        sessionId,
+        addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
+      );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       this.notifyTransition(session, sessionId);
     }
@@ -6463,8 +7679,13 @@ export class SessionsService {
     // policy card has re-taken the slot (approve() re-gates after a displaced guardrail pause);
     // the runner's trailing resolution must not wipe that re-parked card.
     if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
+      if (payload.kind === "question_resolved") {
+        const requests = this.automaticQuestions.get(sessionId);
+        requests?.delete(payload.requestId);
+        if (!requests?.size) this.automaticQuestions.delete(sessionId);
+      }
       if (!isPolicyApproval(this.db.getSession(sessionId)?.pendingApproval)) {
-        this.db.setPendingApproval(sessionId, null);
+        this.db.setPendingApproval(sessionId, removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, payload.requestId));
       }
       this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -6478,6 +7699,7 @@ export class SessionsService {
     const now = Date.now();
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
+        this.automaticQuestions.delete(s.id);
         this.abortPolicyHookApprovals(s, now, "runner-disconnected");
         // A disconnect stop is provisional — reconnect hydration can restore this exact run, and
         // an armed delivery-settlement marker must survive to suppress its trailing Ready.
@@ -6593,7 +7815,7 @@ export class SessionsService {
           // snapshot. The old invocation cannot resume, so never resurrect its durable card.
           this.abortPolicyHookApprovals(existing, now, "provider-session-inactive");
           this.db.clearPolicyResumeStatus(snap.id);
-        } else if (snap.status === "idle" && isPolicyApproval(existing.pendingApproval)) {
+        } else if (snap.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
           this.db.notePolicyResumeStatus(snap.id, "idle");
         } else if (snap.status !== "idle") {
           this.db.clearPolicyResumeStatus(snap.id);
@@ -6686,7 +7908,7 @@ export class SessionsService {
     if (isTerminal(runtimeSnapshot.status)) {
       this.abortPolicyHookApprovals(existing, now, "provider-session-ended");
       this.db.clearPolicyResumeStatus(snapshot.id);
-    } else if (runtimeSnapshot.status === "idle" && isPolicyApproval(existing.pendingApproval)) {
+    } else if (runtimeSnapshot.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
       this.db.notePolicyResumeStatus(snapshot.id, "idle");
     } else if (runtimeSnapshot.status !== "idle") {
       this.db.clearPolicyResumeStatus(snapshot.id);
@@ -6699,7 +7921,10 @@ export class SessionsService {
       this.rehydrate.add(snapshot.id);
       void this.hydrateHistory(snapshot.id);
     }
-    if (runtimeSnapshot.costUsd > existing.costUsd) {
+    // The ledger may price a token residual the runner reported at zero cost (Codex), so the
+    // settled session total, not the runner's figure, decides whether a budget gate re-evaluates.
+    if (runtimeSnapshot.status === "idle" || runtimeSnapshot.costUsd > existing.costUsd ||
+        this.db.sessionCostUsd(snapshot.id) > existing.costUsd) {
       this.gateOnPolicy(snapshot.id, now);
       this.notifyTransition(existing, snapshot.id);
     }
@@ -6754,26 +7979,38 @@ export class SessionsService {
     payload: SessionEventPayload,
   ): PendingApproval | null {
     if (payload.kind === "permission_request") {
-      return {
+      return addPendingRequest(trailingAsk, {
         requestId: payload.requestId,
         title: payload.title,
         options: payload.options,
         ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
         ...(payload.context ? { context: payload.context } : {}),
-      };
+        ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+      });
     }
     if (payload.kind === "question_request") {
-      return {
+      return addPendingRequest(trailingAsk, {
         requestId: payload.requestId,
         title: payload.questions[0]?.question ?? "The agent has a question",
         options: [],
         kind: "question",
         questions: payload.questions,
-      };
+        ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+      });
     }
-    if ((payload.kind === "permission_resolved" || payload.kind === "question_resolved") &&
-        trailingAsk?.requestId === payload.requestId) return null;
+    if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
+      return removePendingRequest(trailingAsk, payload.requestId);
+    }
     return trailingAsk;
+  }
+
+  /** Reconstruct CP-owned attribution after a runner-history cache reset, without delivering
+   * another answer. Runner sequence/epoch and question digest identify the exact occurrence. */
+  private restoreQuestionPolicyAttribution(event: SessionEvent): SessionEvent | null {
+    if (event.payload.kind !== "question_request") return null;
+    const stored = this.db.questionPolicyAnswer(event);
+    if (!stored) return null;
+    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp);
   }
 
   private settleHydratedAsk(sessionId: string, trailingAsk: PendingApproval | null): void {
@@ -6884,16 +8121,25 @@ export class SessionsService {
           return;
         }
         let projectedBackgroundDelivery = false;
+        let projectedSteering = false;
         for (let i = 0; i < applied.events.length; i++) {
-          this.hub.sessionEvent(applied.events[i]!);
+          const event = applied.events[i]!;
+          const answered = event.payload.kind === "question_request" &&
+            this.db.questionPolicyAnswer(event) !== null;
+          this.hub.sessionEvent(event, { suppressReminderWake: answered });
           trailingAsk = this.updateTrailingAsk(trailingAsk, applied.events[i]!.payload);
           const payload = applied.events[i]!.payload;
+          if (this.reconcileSteeringFromUserMessage(sessionId, payload, event.ts)) projectedSteering = true;
           if (payload.kind === "background_continuation_delivered") projectedBackgroundDelivery = true;
           if (payload.kind === "policy_transport") {
             this.recordPolicyTransportAudit(session, payload, applied.events[i]!.ts);
           }
         }
-        if (projectedBackgroundDelivery) this.hub.sessionChangedById(sessionId);
+        for (const event of applied.events) {
+          const attribution = this.restoreQuestionPolicyAttribution(event);
+          if (attribution) this.hub.sessionEvent(attribution);
+        }
+        if (projectedBackgroundDelivery || projectedSteering) this.hub.sessionChangedById(sessionId);
         afterSeq = page.nextAfterSeq;
         if (!page.hasMore) break;
       }
@@ -6926,6 +8172,7 @@ export class SessionsService {
       // card and the ask is unanswerable. Usage events are deliberately NOT accrued here
       // (snapshots carry authoritative totals; accruing hydrated token_usage double-counts).
       let trailingAsk: PendingApproval | null = null;
+      let projectedSteering = false;
       for (const e of [...res.events].sort((a, b) => a.seq - b.seq)) {
         if (e.seq <= this.db.getHydratedSeq(sessionId)) continue;
         const prepared = this.externalizeEventOrOriginal(sessionId, e.payload, e.ts);
@@ -6942,8 +8189,11 @@ export class SessionsService {
           cleanupEventPayloadArtifacts(this.db, prepared.artifactIds);
           throw error;
         }
-        this.hub.sessionEvent(ev);
+        const attribution = this.restoreQuestionPolicyAttribution(ev);
+        this.hub.sessionEvent(ev, { suppressReminderWake: attribution !== null });
+        if (attribution) this.hub.sessionEvent(attribution);
         trailingAsk = this.updateTrailingAsk(trailingAsk, ev.payload);
+        if (this.reconcileSteeringFromUserMessage(sessionId, ev.payload, ev.ts)) projectedSteering = true;
         if (ev.payload.kind === "background_continuation_delivered") {
           this.hub.sessionChangedById(sessionId);
         }
@@ -6951,6 +8201,7 @@ export class SessionsService {
           this.recordPolicyTransportAudit(session, ev.payload, ev.ts);
         }
       }
+      if (projectedSteering) this.hub.sessionChangedById(sessionId);
       // Park the recovered ask ONLY when the session is really waiting on it: status is owned
       // by the un-gapped session_status channel (input_required there = the runner is parked),
       // and an existing card (a fresher live ask, a policy pause, a snapshot-carried card)
@@ -7085,6 +8336,50 @@ export class SessionsService {
       if (res.type !== "read_session_file_result") return fail("unexpected runner reply", 502);
       if (!res.ok) return fail(res.error ?? "could not read that file", 502);
       return ok({ path: res.path ?? path, content: res.content, size: res.size, truncated: res.truncated, binary: res.binary });
+    } catch (err) {
+      return fail((err as Error).message, 504);
+    }
+  }
+
+  async searchWorkspaceReferences(
+    sessionId: string,
+    query: string,
+  ): Promise<ServiceResult<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+    if (unsupported) return unsupported;
+    const requestId = `wsr_search_${randomUUID().slice(0, 8)}`;
+    try {
+      const res = await this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "search_workspace_references", requestId, sessionId, query,
+      }, 20_000);
+      if (res.type !== "search_workspace_references_result") return fail("unexpected runner reply", 502);
+      if (!res.ok) return fail(res.error ?? "could not search workspace paths", 502);
+      return ok({ results: res.results ?? [], truncated: res.truncated === true });
+    } catch (err) {
+      return fail((err as Error).message, 504);
+    }
+  }
+
+  async createWorkspaceReference(
+    sessionId: string,
+    target: CreateWorkspaceReferenceRequest,
+  ): Promise<ServiceResult<WorkspaceReference>> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+    if (unsupported) return unsupported;
+    const requestId = `wsr_create_${randomUUID().slice(0, 8)}`;
+    try {
+      const res = await this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "create_workspace_reference", requestId, sessionId, target,
+      }, 30_000);
+      if (res.type !== "create_workspace_reference_result") return fail("unexpected runner reply", 502);
+      if (!res.ok || !res.reference) return fail(res.error ?? "could not attach that workspace target", 409);
+      return ok(res.reference);
     } catch (err) {
       return fail((err as Error).message, 504);
     }
@@ -7275,4 +8570,53 @@ export class SessionsService {
       return fail((err as Error).message, 504);
     }
   }
+}
+
+type RunnerHoldKind = RunnerGuardrailKind | "control_plane";
+
+function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | undefined {
+  return kind === "cost_budget" || kind === "max_tool_calls" ? kind : undefined;
+}
+
+function hasPolicyApproval(pending: PendingApproval | null | undefined): boolean {
+  return pendingRequests(pending).some((request) => isPolicyApproval(request));
+}
+
+/** Unlike addPendingRequest (which intentionally gives a CP policy card exclusive ownership), a
+ * runner trip must wait behind an unrelated provider request without replacing it. */
+function appendPendingApproval(
+  current: PendingApproval | null | undefined,
+  next: PendingApproval,
+): PendingApproval {
+  const requests = pendingRequests(current);
+  if (requests.some((request) => request.requestId === next.requestId)) return current!;
+  const [first, ...rest] = [...requests, next];
+  return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
+}
+
+/** A live provider ask owns the primary card, but it cannot erase a runner trip: that trip already
+ * cancelled the turn and holds the FIFO until its own Continue/Stop decision. CP-only soft cards
+ * keep their historical displacement semantics and are re-derived after the provider ask settles. */
+function addPendingRequestPreservingRunnerGuardrails(
+  current: PendingApproval | null | undefined,
+  next: PendingApproval,
+): PendingApproval {
+  const runnerCards = pendingRequests(current).filter((request) => request.runnerGuardrail);
+  let combined = addPendingRequest(current, next);
+  for (const runnerCard of runnerCards) combined = appendPendingApproval(combined, runnerCard);
+  return combined;
+}
+
+function runnerGuardrailRequestId(request: PendingApproval): string | null {
+  const trip = request.runnerGuardrail;
+  return trip ? `runner-${trip.kind}:${trip.tripId}` : null;
+}
+
+function replacePendingApproval(
+  current: PendingApproval | null | undefined,
+  replacement: PendingApproval,
+): PendingApproval {
+  const [first, ...rest] = pendingRequests(current).map((request) =>
+    request.requestId === replacement.requestId ? replacement : request);
+  return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
 }

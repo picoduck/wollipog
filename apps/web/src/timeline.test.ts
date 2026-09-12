@@ -15,6 +15,49 @@ import {
 } from "./timeline.js";
 
 let seq = 0;
+test("policy attribution stays visible through the runner question resolution", () => {
+  const timeline = deriveTimeline([
+    ev({ kind: "question_request", requestId: "ask", questions: [{ id: "q", question: "Review?", options: [] }] }),
+    ev({ kind: "question_policy_answered", requestId: "ask", policies: [{ policyId: "routine", name: "Routine Review" }] }),
+    ev({ kind: "question_resolved", requestId: "ask", answered: true }),
+  ]);
+  const question = timeline.find((item) => item.kind === "question");
+  assert.equal(question?.answered, true);
+  assert.deepEqual(question?.answeredByPolicies, ["Routine Review"]);
+});
+test("replayed attribution targets the original occurrence when a provider reuses question IDs", () => {
+  const first = ev({ kind: "question_request", requestId: "same", questions: [] });
+  const second = ev({ kind: "question_request", requestId: "same", questions: [] });
+  const timeline = deriveTimeline([first, second, ev({
+    kind: "question_policy_answered", requestId: "same", questionEventSeq: first.seq,
+    policies: [{ policyId: "routine", name: "Routine Review" }],
+  })]);
+  const questions = timeline.filter((item) => item.kind === "question");
+  assert.equal(questions[0]?.answered, true);
+  assert.equal(questions[1]?.answered, undefined);
+});
+test("a provider-rejected policy answer does not claim a successful policy resolution", () => {
+  const timeline = deriveTimeline([
+    ev({ kind: "question_request", requestId: "ask", questions: [] }),
+    ev({ kind: "question_policy_answered", requestId: "ask", policies: [{ policyId: "routine", name: "Routine Review" }] }),
+    ev({ kind: "question_resolved", requestId: "ask", answered: false }),
+  ]);
+  const question = timeline.find((item) => item.kind === "question");
+  assert.equal(question?.answered, false);
+  assert.equal(question?.answeredByPolicies, undefined);
+});
+test("indexed replay attribution cannot overwrite an already rejected question", () => {
+  const request = ev({ kind: "question_request", requestId: "ask", questions: [] });
+  const timeline = deriveTimeline([
+    request,
+    ev({ kind: "question_resolved", requestId: "ask", answered: false }),
+    ev({ kind: "question_policy_answered", requestId: "ask", questionEventSeq: request.seq,
+      policies: [{ policyId: "routine", name: "Routine Review" }] }),
+  ]);
+  const question = timeline.find((item) => item.kind === "question");
+  assert.equal(question?.answered, false);
+  assert.equal(question?.answeredByPolicies, undefined);
+});
 function ev(payload: SessionEventPayload): SessionEvent {
   seq += 1;
   return { id: seq, sessionId: "s", seq, ts: seq, payload };
@@ -830,8 +873,9 @@ test("a later authentication recovery creates a new historical card after resolu
   );
 });
 
-test("review_decision renders as a standalone visible timeline item", () => {
+test("allowed review decisions collapse inside their turn work while preserving audit details", () => {
   const items = deriveTimeline([
+    ev({ kind: "user_message", text: "Inspect the repository" }),
     ev({
       kind: "review_decision",
       reviewId: "review-1",
@@ -840,18 +884,175 @@ test("review_decision renders as a standalone visible timeline item", () => {
       riskLevel: "low",
       rationale: "read-only operation",
     }),
+    ev({ kind: "tool_call", toolCallId: "tool-1", title: "Search", status: "completed" }),
   ]);
-  assert.equal(items.length, 1);
-  assert.deepEqual(items[0], {
+  assert.equal(items.length, 3);
+  assert.deepEqual(items[1], {
     kind: "review_decision",
-    id: items[0]!.id,
+    id: items[1]!.id,
     reviewId: "review-1",
     reviewer: { kind: "agent", id: "codex-guardian" },
     outcome: "allowed",
     riskLevel: "low",
     rationale: "read-only operation",
+    createdAt: items[1]!.id,
   });
-  assert.equal(groupTimeline(items)[0]!.kind, "item");
+  const groups = groupTimeline(items);
+  assert.deepEqual(groups.map((group) => group.kind), ["item", "work"]);
+  assert.deepEqual(groups[1]!.kind === "work" ? groups[1]!.items.map((item) => item.kind) : [], [
+    "review_decision",
+    "tool_call",
+  ]);
+});
+
+test("native policy-hook decisions retain the runner sequence between exact tool lifecycle events", () => {
+  const tool = ev({ kind: "tool_call", toolCallId: "tool-native", title: "Write", status: "pending" });
+  const decision = ev({
+    kind: "policy_hook_decision",
+    auditId: "audit-native",
+    requestId: "hook-native",
+    stage: "resolution",
+    outcome: "allowed",
+    actor: { kind: "human", id: "device-1" },
+    governancePolicyId: "policy-native",
+    toolCallId: "tool-native",
+  });
+  const update = ev({ kind: "tool_call_update", toolCallId: "tool-native", status: "completed" });
+  const items = deriveTimeline([tool, decision, update]);
+
+  assert.deepEqual(items.map((item) => item.kind), ["tool_call", "governance_decision"]);
+  const native = items[1];
+  assert.ok(native?.kind === "governance_decision");
+  assert.equal(native.id, decision.seq);
+  assert.deepEqual(native.decision, {
+    auditId: "audit-native",
+    requestId: "hook-native",
+    label: "Approved by You",
+    detail: "The suspended tool invocation resumed.",
+    tone: "allowed",
+    decidedBy: "You · device-1",
+    policyId: "policy-native",
+    timestamp: decision.ts,
+  });
+});
+
+test("native policy-hook decisions render policy allows and abandoned approvals", () => {
+  const items = deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "tool-allow", title: "Read", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-allow",
+      requestId: "hook-allow",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "policy", id: "allow-read" },
+      toolCallId: "tool-allow",
+    }),
+    ev({ kind: "tool_call", toolCallId: "tool-aborted", title: "Write", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-aborted",
+      requestId: "hook-aborted",
+      stage: "resolution",
+      outcome: "aborted",
+      actor: { kind: "system", id: "session-stopped" },
+      toolCallId: "tool-aborted",
+    }),
+    ev({ kind: "tool_call", toolCallId: "tool-policy-aborted", title: "Edit", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-policy-aborted",
+      requestId: "hook-policy-aborted",
+      stage: "resolution",
+      outcome: "aborted",
+      actor: { kind: "policy", id: "policy-stopped" },
+      toolCallId: "tool-policy-aborted",
+    }),
+  ]);
+  const decisions = items.flatMap((item) => item.kind === "governance_decision" ? [item.decision] : []);
+  assert.deepEqual(decisions.map((decision) => decision.label), [
+    "Allowed by Policy", "Approval Aborted", "Approval Aborted",
+  ]);
+  assert.equal(decisions.at(-1)?.tone, "denied", "native and audit fallback tones agree for aborts");
+});
+
+test("native policy-hook system denials identify the fail-closed safety boundary", () => {
+  const items = deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "tool-fail-closed", title: "Write", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-fail-closed",
+      requestId: "hook-fail-closed",
+      stage: "resolution",
+      outcome: "denied",
+      actor: { kind: "system", id: "decision-history-unavailable" },
+      toolCallId: "tool-fail-closed",
+    }),
+  ]);
+  const decision = items.find((item) => item.kind === "governance_decision");
+  assert.ok(decision?.kind === "governance_decision");
+  assert.equal(decision.decision.label, "Blocked Fail-Closed");
+  assert.equal(decision.decision.detail,
+    "The tool was denied because its approval could not be completed safely.");
+  assert.equal(decision.decision.decidedBy, "System · decision-history-unavailable");
+});
+
+test("routine native policy-hook allows stay inside one Worked block across tools", () => {
+  const items = deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "tool-one", title: "Read", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-one",
+      requestId: "hook-one",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "policy", id: "allow-read" },
+      toolCallId: "tool-one",
+    }),
+    ev({ kind: "tool_call", toolCallId: "tool-two", title: "Write", status: "pending" }),
+    ev({
+      kind: "policy_hook_decision",
+      auditId: "audit-two",
+      requestId: "hook-two",
+      stage: "resolution",
+      outcome: "allowed",
+      actor: { kind: "human", id: "device-1" },
+      toolCallId: "tool-two",
+    }),
+  ]);
+  const groups = groupTimeline(items);
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0]?.kind === "work" ? groups[0].items.map((item) => item.kind) : [], [
+    "tool_call", "governance_decision", "tool_call", "governance_decision",
+  ]);
+});
+
+test("exceptional automated review outcomes stay prominent and split allowed summaries", () => {
+  const items = deriveTimeline([
+    ev({
+      kind: "review_decision",
+      reviewId: "allowed-before",
+      reviewer: { kind: "policy", id: "routine" },
+      outcome: "allowed",
+    }),
+    ev({
+      kind: "review_decision",
+      reviewId: "denied",
+      reviewer: { kind: "agent", id: "guardian" },
+      outcome: "denied",
+      riskLevel: "high",
+    }),
+    ev({
+      kind: "review_decision",
+      reviewId: "allowed-after",
+      reviewer: { kind: "policy", id: "routine" },
+      outcome: "allowed",
+    }),
+  ]);
+
+  const groups = groupTimeline(items);
+  assert.deepEqual(groups.map((group) => group.kind), ["work", "item", "work"]);
+  assert.equal(groups[1]!.kind === "item" ? groups[1]!.item.kind : null, "review_decision");
 });
 
 test("checkpoint + checkpoint_restored render as standalone divider items", () => {
@@ -1130,4 +1331,21 @@ test("deriveSidePaneContent: the side pane shows the TOP-LEVEL plan, not a subag
     deriveTimeline([ev({ kind: "plan", entries: [{ content: "sub only", status: "pending" }], parentToolUseId: "task1" })]),
   );
   assert.equal(only.plan[0]!.content, "sub only");
+});
+
+test("a turn's parentless usage is stamped on its user message and later reports add to it", () => {
+  const items = deriveTimeline([
+    { id: 1, sessionId: "s", seq: 1, ts: 1_000, payload: { kind: "user_message", text: "go", images: [] } },
+    { id: 2, sessionId: "s", seq: 2, ts: 1_500, payload: { kind: "token_usage", inputTokens: 100, outputTokens: 40, cachedInputTokens: 900, cacheCreationInputTokens: 50, costUsd: 0.02, model: "claude-fable-5-1", parentToolUseId: "sub" } },
+    { id: 3, sessionId: "s", seq: 3, ts: 2_000, payload: { kind: "token_usage", inputTokens: 100, outputTokens: 40, cachedInputTokens: 900, cacheCreationInputTokens: 50, costUsd: 0.02, model: "claude-fable-5-1" } },
+    { id: 4, sessionId: "s", seq: 4, ts: 2_100, payload: { kind: "token_usage", inputTokens: 10, outputTokens: 4 } },
+    { id: 5, sessionId: "s", seq: 5, ts: 3_000, payload: { kind: "user_message", text: "again", images: [] } },
+    { id: 6, sessionId: "s", seq: 6, ts: 3_500, payload: { kind: "token_usage", inputTokens: 7, outputTokens: 3 } },
+  ]);
+  const users = items.filter((item) => item.kind === "user_message") as Array<Extract<TimelineItem, { kind: "user_message" }>>;
+  assert.deepEqual(users[0]!.turnUsage, {
+    inputTokens: 110, outputTokens: 44, cachedInputTokens: 900, cacheCreationTokens: 50, costUsd: 0.02, model: "claude-fable-5-1",
+  }, "subagent usage never lands on the turn; every parentless report for the turn adds to it");
+  assert.deepEqual(users[1]!.turnUsage, { inputTokens: 7, outputTokens: 3, cachedInputTokens: 0, cacheCreationTokens: 0 });
+  assert.equal("costUsd" in users[1]!.turnUsage!, false, "an unpriced turn carries no cost rather than $0");
 });

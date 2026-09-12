@@ -9,6 +9,8 @@ import {
   validSkillFilePath,
   validSkillName,
   type AgentDefinition,
+  type AgentContext,
+  type ResourceScope,
   type DeployedSkillState,
   type SkillFile,
   type SkillInvocationPolicy,
@@ -29,6 +31,60 @@ export interface SkillVersionSummary {
   note?: string;
   manifest?: unknown;
   files?: SkillFile[];
+  gitSource?: SkillGitSource & { path: string; commit: string };
+  machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
+    context?: AgentContext };
+}
+
+export interface SkillGitSource { url: string; ref: string; subdirectory: string }
+export interface SkillVersionPreview { version: SkillVersionSummary; currentVersion: SkillVersionSummary | null }
+export interface MachineSkillVersionPreview {
+  policy: { versionId: string | null; revision: string } | null;
+  currentVersion: SkillVersionSummary | null;
+  proposedVersion: SkillVersionSummary;
+  expectedLatestVersionId: string;
+}
+export interface MachineSkillVersionPolicy { policy: { versionId: string | null; revision: string } | null }
+export interface MachineSkillDiscovery { discoveryId: string; candidates: import("@wollipog/protocol").MachineSkillCandidate[] }
+export interface MachineSkillPreview {
+  previewId: string; candidate: import("@wollipog/protocol").MachineSkillCandidate;
+  files: SkillFile[]; previousFiles: SkillFile[]; digest: string;
+  executablePaths?: string[];
+  disposition: "new" | "identical" | "update"; assignmentCount: number;
+}
+export interface MachineSkillAdoptionPreflight {
+  status: "blocked" | "prerequisites_met";
+  mutationSupported: boolean;
+  blockers: string[];
+  advisories: string[];
+  adoptionToken?: string;
+  sharedReaders: string[];
+  source: { candidate: import("@wollipog/protocol").MachineSkillCandidate; digest: string; checkedAt: number };
+  notice: string;
+}
+export interface MachineSkillAdoptionResult {
+  status: "adopted" | "rejected" | "recovery_required";
+  operationId?: string;
+  backupDirectory?: string;
+  error?: string;
+}
+export interface MachineSkillRecovery {
+  operations: import("@wollipog/protocol").SkillAdoptionRecoveryOperation[];
+  truncated: boolean;
+}
+export interface MachineSkillRecoveryResult {
+  status: "restored" | "not_needed" | "blocked" | "recovery_required";
+  operation?: import("@wollipog/protocol").SkillAdoptionRecoveryOperation;
+  error?: string;
+}
+export interface SkillGitPreview {
+  previewId: string;
+  candidates: Array<{
+    name: string; path: string; commit: string; digest: string; files: SkillFile[];
+    previousFiles: SkillFile[]; source: SkillGitSource;
+    disposition: "new" | "update" | "identical"; assignmentCount: number;
+    executablePaths: string[];
+  }>;
 }
 
 export interface SkillSummary {
@@ -37,6 +93,7 @@ export interface SkillSummary {
   description?: string | null;
   groupId?: string | null;
   source?: string;
+  gitSource?: SkillVersionSummary["gitSource"];
   latestVersion?: SkillVersionSummary | null;
   assignmentCount?: number;
 }
@@ -45,7 +102,10 @@ export interface SkillGroupView {
   id: string;
   name: string;
   sortOrder?: number;
+  scope?: ResourceScope;
 }
+
+export type SkillGroupAssignmentView = Omit<SkillAssignmentView, "skillId"> & { groupId: string };
 
 export type SkillAgentSelector =
   | { kind: "all" }
@@ -82,6 +142,8 @@ export interface ReportedSkillsState {
 }
 
 export interface RunnerSkillsResponse {
+  /** Dashboard-only fetch failure; never interpret it as an authoritative empty desired state. */
+  loadError?: string;
   desired: RunnerDesiredSkill[];
   reported: ReportedSkillsState | null;
   /** Capability of the runner binary, independent of whether any removal event exists. */
@@ -95,7 +157,7 @@ export function normalizeRemovalReporting(value: unknown): NonNullable<RunnerSki
 /* Wrapped-or-bare payload aliases for the list routes, so the API client stays honest about the
  * two shapes the concurrent control-plane workstream may settle on. */
 export type SkillListPayload = SkillSummary[] | { skills?: SkillSummary[] };
-export type SkillGroupListPayload = SkillGroupView[] | { groups?: SkillGroupView[] };
+export type SkillGroupListPayload = SkillGroupView[] | { groups?: SkillGroupView[]; creationScope?: ResourceScope | null };
 export type SkillAssignmentListPayload = SkillAssignmentView[] | { assignments?: SkillAssignmentView[] };
 export type SkillAssignmentPayload = SkillAssignmentView | { assignment?: SkillAssignmentView };
 export type SkillDetailPayload = SkillSummary | { skill?: SkillSummary };
@@ -191,17 +253,18 @@ export function invocationLabel(invocation: SkillInvocationPolicy): string {
   return invocation === "manual" ? "Manual Only" : "Agent Invocable";
 }
 
-/** Drivers the runner reconciler can deploy to in the MVP (native contexts only). */
+/** Drivers the runner reconciler can deploy to. */
 const DEPLOYABLE_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
 
 /** Agents on this machine that skill deployment can actually reach. The pickers list these so an
- * assignment cannot be aimed at an ACP or WSL agent the reconciler would only mark unsupported. */
-export function skillEligibleAgents(agents: ReadonlyArray<AgentDefinition>): AgentDefinition[] {
+ * assignment cannot be aimed at an ACP or unsupported execution context. */
+export function skillEligibleAgents(agents: ReadonlyArray<AgentDefinition>, includeWsl = false): AgentDefinition[] {
   // The synthesized conductor shares its donor Claude's harness directory, so as a deploy
   // target it is a duplicate row: deploying "to the conductor" is deploying to Claude again.
   return agents.filter((agent) =>
     agent.id !== "conductor" &&
-    DEPLOYABLE_DRIVERS.has(agent.driver ?? "acp") && (agent.context?.kind ?? "native") === "native");
+    DEPLOYABLE_DRIVERS.has(agent.driver ?? "acp") &&
+    ((agent.context?.kind ?? "native") === "native" || (includeWsl && agent.context?.kind === "wsl")));
 }
 
 /* --- Deploy status derivation --- */
@@ -234,12 +297,16 @@ function badge(status: SkillDeployStatus, detail?: string): SkillDeployBadge {
  * way must be surfaced over everything else the report says (conflict); an explicit error next;
  * anything not yet reconciled to the desired digest and every target linked is pending. */
 export function skillDeployBadge(input: {
+  loadError?: string;
+  loading?: boolean;
   runnerOnline: boolean;
   desired: Pick<RunnerDesiredSkill, "versionDigest" | "targets"> | undefined;
   reported: ReportedSkillsState | null | undefined;
   skillName: string;
 }): SkillDeployBadge {
   if (!input.runnerOnline) return badge("offline");
+  if (input.loading) return badge("pending", "Skills status has not loaded.");
+  if (input.loadError) return badge("error", input.loadError);
   if (!input.desired) return badge("pending", "No assignment targets this machine yet.");
   const deployed = input.reported?.deployed?.find((entry) => entry.name === input.skillName);
   if (!deployed) {

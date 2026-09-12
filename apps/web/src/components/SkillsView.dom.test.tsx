@@ -11,8 +11,10 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import type { RunnerSkillsResponse } from "../skills.js";
 import { SkillsView } from "./SkillsView.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -177,7 +179,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.match(pageText(), /Deployed/);
   assert.match(pageText(), /Unmanaged Skills/);
   assert.match(pageText(), /local-notes/);
-  assert.match(pageText(), /arrives later/);
+  assert.match(pageText(), /can then be adopted with an explicit recovery-aware confirmation/);
   assert.match(pageText(), /Recent Link Removals/);
   assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/);
   assert.match(pageText(), /No longer in the desired skill list\./);

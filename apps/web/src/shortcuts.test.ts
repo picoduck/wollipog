@@ -90,6 +90,10 @@ test("shortcut labels follow the current platform without changing definitions",
   assert.equal(shortcutDisplay("inbox-follow-latest-end", false), "End");
   assert.equal(shortcutDisplay("inbox-expand", false), "Enter");
   assert.equal(shortcutDisplay("inbox-fork", false), "F");
+  assert.equal(shortcutDisplay("inbox-toggle-thread", false), "T");
+  assert.equal(shortcutDisplay("inbox-toggle-all-threads", false), "Shift+T");
+  assert.equal(shortcutDisplay("inbox-expand-thread", false), "→");
+  assert.equal(shortcutDisplay("inbox-collapse-thread", false), "←");
   assert.equal(shortcutDisplay("exit-terminal", true), "Ctrl+Esc");
   assert.equal(shortcutDisplay("stop-turn", false), "Shift+Esc");
   assert.equal(shortcutDisplay("steer-turn", false), "Ctrl+Enter");
@@ -164,7 +168,9 @@ test("sequence matching completes inside 600ms and cancels on mismatch, timeout,
 
 test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
   const expected = [
-    "inbox-next", "inbox-previous", "inbox-expand", "inbox-fork", "inbox-next-split", "inbox-previous-split",
+    "inbox-next", "inbox-previous", "inbox-expand", "inbox-open-top-request", "inbox-toggle-thread",
+    "inbox-toggle-all-threads", "inbox-go-to-parent", "inbox-expand-thread", "inbox-collapse-thread",
+    "inbox-fork", "inbox-next-split", "inbox-previous-split",
     "inbox-approve", "inbox-deny", "inbox-archive", "inbox-snooze", "inbox-pin", "inbox-unread",
     "inbox-reply", "inbox-page-down", "inbox-page-up", "inbox-follow-latest", "inbox-follow-latest-end",
   ];

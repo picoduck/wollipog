@@ -60,6 +60,25 @@ view unmounts cannot hijack later navigation. Transcript history Retry remains s
 performs only an idempotent history GET. Timeline error rows remain informational because they do
 not carry enough delivery correlation to identify a safe prompt retry.
 
+## Queued edit recovery
+
+A queued-message edit is written to browser recovery storage before Wollipog submits it. A failed
+or interrupted request therefore retains the exact text, attachments, queue identity, expected
+revision, idempotency identity, and displaced ordinary draft across page reloads and installed-app
+restarts. Recovery is partitioned by organization user, control-plane instance, and Session. It is
+removed after definitive success, explicit dismissal or reuse, an authenticated account change,
+or instance removal. A temporary pairing interruption preserves it.
+
+Recovered edits are retried only when an authoritative live queue still exposes the same prompt ID
+at the same editable revision. Offline or incomplete projections leave recovery intact, while a
+changed or missing target disables in-place retry and offers the recovered content as a deliberate
+new-message draft. Durable recovery retains at most 20 entries and 2 MiB of serialized data per
+instance. Entries expire seven days after their latest save; expiry is applied on every recovery
+read or write. If the browser cannot safely store the recovery, Wollipog keeps the current editor
+and does not submit the queued edit. Rehydrating a separately stored displaced draft refreshes the
+existing logical recovery operation without renewing its expiry or advancing it past a concurrent
+success, dismissal, account cleanup, or instance-removal tombstone.
+
 ## Stop Redelivery Policy
 
 A Stop is a durable intent, not evidence that runtime capacity was released. Its operation ID stays
@@ -157,6 +176,13 @@ The runner owns this metadata task independently of the agent turn and prompt qu
   timeout clamp, and return only a normalized 120-character title plus a sanitized status. Provider
   processes also inherit the runner's configured execution-isolation, network, provider-HOME lease,
   and shared-store admission boundaries; an unavailable boundary fails back to prompt text.
+- That 15-second budget is split rather than shared: preparation (neutral directory, provider
+  authentication, process start) is capped at 3 seconds and the provider keeps the remaining 12 for
+  generation, so ordinary preparation variance no longer shortens the provider's allowance.
+  Preparation that overruns its own cap fails fast instead of handing the provider a fraction of a
+  second. Each enclosing deadline is strictly larger than the one it supervises — runner budget 15s,
+  control-plane runner request 16s, control-plane abort 17s, desktop remote read budget 35s — so no
+  outer transport can expire before the naming deadline it wraps.
 - Each runner admits at most two concurrent naming tasks and twelve starts per minute. Overload,
   timeouts, provider errors, missing accounts, unsupported providers, and older runners all fail
   closed to the prompt-derived title.

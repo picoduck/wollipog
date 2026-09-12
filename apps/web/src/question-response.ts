@@ -25,6 +25,10 @@ function offeredLabel(question: AgentQuestion, token: string): string | null {
     const index = Number(token) - 1;
     return question.options[index]?.label ?? null;
   }
+  return offeredLiteralLabel(question, token);
+}
+
+function offeredLiteralLabel(question: AgentQuestion, token: string): string | null {
   const caseExact = question.options.find((option) => option.label === token);
   if (caseExact) return caseExact.label;
   const normalized = token.toLowerCase();
@@ -57,6 +61,16 @@ function splitChoiceTokens(value: string): { tokens?: string[]; error?: string }
   return { tokens: tokens.filter(Boolean) };
 }
 
+function offeredSingleLabel(question: AgentQuestion, value: string): string | null {
+  const direct = offeredLabel(question, value);
+  if (direct) return direct;
+  const parsed = splitChoiceTokens(value);
+  if (parsed.error || parsed.tokens?.length !== 1 || parsed.tokens[0] === value) return null;
+  // Quotes are emitted by formatQuestionChoiceLabels to preserve punctuation. Treat their token
+  // as an explicit label, including numeric labels that ordinary typed-entry syntax treats as ordinals.
+  return offeredLiteralLabel(question, parsed.tokens[0]!);
+}
+
 export function formatQuestionChoiceLabels(labels: readonly string[]): string {
   return labels.map((label) => /[",]/.test(label) ? `"${label.replace(/"/g, '""')}"` : label).join(", ");
 }
@@ -68,7 +82,7 @@ export function offeredQuestionChoices(question: AgentQuestion, rawValue: string
   const value = rawValue.trim();
   if (!value) return [];
   if (!question.multiSelect) {
-    const label = offeredLabel(question, value);
+    const label = offeredSingleLabel(question, value);
     return label ? [label] : null;
   }
   const wholeLabel = offeredLabel(question, value);
@@ -113,7 +127,7 @@ export function resolveQuestionResponse(question: AgentQuestion, rawValue: strin
     return { answer: labels };
   }
 
-  const label = offeredLabel(question, value);
+  const label = offeredSingleLabel(question, value);
   if (label) return { answer: label };
   if (!question.allowOther) {
     return { error: "Enter a displayed number or unambiguous option label." };
@@ -122,7 +136,7 @@ export function resolveQuestionResponse(question: AgentQuestion, rawValue: strin
   return freeTextError ? { error: `Response ${freeTextError}.` } : { answer: value };
 }
 
-/** Validate an explicit Interactive Form Other response without applying Text Entry's displayed
+/** Validate an explicit Interactive Form Other response without applying Composer Response's displayed
  * number or offered-label syntax. */
 function resolveQuestionOtherResponse(question: AgentQuestion, rawValue: string): ResolvedQuestionResponse {
   if (!isAnswerableAgentQuestion(question) || question.multiSelect || !question.allowOther) {
@@ -225,10 +239,31 @@ export function questionDraftAnswers(
 }
 
 const questionDraftStore = new Map<string, Record<string, QuestionResponseDraft>>();
+const pendingQuestionOperations = new Map<string, { token: symbol; expiresAt: number }>();
 const QUESTION_DRAFT_LIMIT = 50;
+const QUESTION_OPERATION_LEASE_MS = 60_000;
 
 function draftKey(sessionId: string, requestId: string): string {
   return `${sessionId}\u0000${requestId}`;
+}
+
+/** Prevent two mounted response surfaces from delivering the same live request concurrently. */
+export function claimQuestionResponseOperation(
+  sessionId: string,
+  requestId: string,
+  now = Date.now(),
+): (() => void) | null {
+  const key = draftKey(sessionId, requestId);
+  const pending = pendingQuestionOperations.get(key);
+  if (pending && pending.expiresAt > now) return null;
+  const token = Symbol(key);
+  pendingQuestionOperations.set(key, { token, expiresAt: now + QUESTION_OPERATION_LEASE_MS });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (pendingQuestionOperations.get(key)?.token === token) pendingQuestionOperations.delete(key);
+  };
 }
 
 /** Page-lifetime drafts let the question surface survive transcript virtualization. */

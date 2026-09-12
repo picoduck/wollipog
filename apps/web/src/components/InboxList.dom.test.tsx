@@ -187,7 +187,8 @@ test("inbox list keeps live row content and the visible touch target while inter
       status: "input_required",
     }));
   });
-  assert.match(container.textContent ?? "", /Approval arrived while targeting/);
+  // The status is the live row content now. #664 took the preview off the row, so the same
+  // re-render is observed through the badge it also carried rather than through preview text.
   assert.match(container.textContent ?? "", /Input Required/);
 
   await act(async () => {

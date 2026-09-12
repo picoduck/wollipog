@@ -2,6 +2,7 @@ import React, { useCallback, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  buildConversationHandoff,
   type AgentSlashCommand,
   type CreateSessionRequest,
   type ControlPlaneToUi,
@@ -26,6 +27,11 @@ import {
 } from "@wollipog/protocol";
 import type { ProviderComposerCommand } from "../composer-commands.js";
 import { loadComposerDraft, type ComposerDraft } from "../composer-drafts.js";
+import {
+  queuedEditRecoveryAccountKey,
+  saveDurableQueuedEditRecovery,
+  type QueuedPromptEditRecovery,
+} from "../queued-edit-recovery.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -36,9 +42,10 @@ import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
-import type { RightPanelState } from "../components/RightPanel.js";
+import { useRightPanelState } from "../components/RightPanel.js";
 import { useIsMobile } from "../components/useIsMobile.js";
-import { Header } from "../App.js";
+import { Header, Shell } from "../App.js";
+import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
@@ -177,6 +184,131 @@ function initialModel(): FixtureModel {
     initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
     initial.projects[0]!.totalSessionCount = initial.sessions.length;
   }
+  if (SCENARIO === "inbox-row-layout") {
+    // The shapes #664 has to survive at once: a title long enough to fill any viewport, a branch
+    // name long enough to fill the third line on its own, a default base ref that must stay hidden,
+    // a non-default one that must show, and rows with no worktree at all that stay two lines.
+    const rows: Array<[string, string, Partial<SessionView>]> = [
+      ["session-long-branch", "Restructure Inbox Rows so the Title Fades and the Activity Strip Is Always Visible", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/long",
+        worktrees: [{
+          id: "wt-long",
+          path: "/repos/alpha/.agent-worktrees/long",
+          branch: "fix/issue-664-restructure-inbox-rows-so-the-activity-strip-is-always-visible",
+          baseRef: "origin/main",
+          source: "created",
+          pullRequest: { url: "https://github.com/picoduck/wollipog/pull/664", state: "open" },
+        }],
+      }],
+      ["session-stacked-base", "Short Title", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/stacked",
+        worktrees: [{
+          id: "wt-stacked",
+          path: "/repos/alpha/.agent-worktrees/stacked",
+          branch: "fix/issue-664-follow-up",
+          baseRef: "fix/issue-664-restructure-inbox-rows-so-the-activity-strip-is-always-visible",
+          source: "created",
+          pullRequest: { url: "https://github.com/picoduck/wollipog/pull/665", state: "merged" },
+        }],
+      }],
+      // Session titles are derived from the opening prompt, so they get long. This one is long
+      // enough to clip at 1400px, which is where the strip used to look safe.
+      // Line three's own version of the #664 failure: if anything on it refuses to shrink, the
+      // branch collapses before it yields and the PR pill is pushed past the line's clip.
+      ["session-long-base", "Stacked on a Long Base", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/long-base",
+        worktrees: [{
+          id: "wt-long-base",
+          path: "/repos/alpha/.agent-worktrees/long-base",
+          branch: "fix/issue-664-restructure-inbox-rows-so-the-activity-strip-is-always-visible",
+          baseRef: "release/2027-q1-hardening-of-the-inbox-virtualisation-and-activity-strip-measurement-path",
+          source: "created",
+          pullRequest: { url: "https://github.com/picoduck/wollipog/pull/666", state: "closed" },
+        }],
+      }],
+      // #679: this repository's default is `develop`, so an explicit `origin/main` base is a
+      // deliberate choice the row has to keep. Before the default branch was carried, the name
+      // heuristic suppressed it.
+      ["session-nondefault-repo", "Branched From Main in a Develop-Default Repository", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/develop-default",
+        worktrees: [{
+          id: "wt-develop-default",
+          path: "/repos/alpha/.agent-worktrees/develop-default",
+          branch: "fix/issue-679-default-branch",
+          baseRef: "origin/main",
+          defaultBranch: "develop",
+          source: "created",
+        }],
+      }],
+      ["session-default-repo", "Branched From the Default of a Develop-Default Repository", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/develop-base",
+        worktrees: [{
+          id: "wt-develop-base",
+          path: "/repos/alpha/.agent-worktrees/develop-base",
+          branch: "fix/issue-679-follow-up",
+          baseRef: "origin/develop",
+          defaultBranch: "develop",
+          source: "created",
+        }],
+      }],
+      ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {}],
+      ["session-plain", "Plain", {}],
+      // #782: line three is unconditional, so the scenario has to carry every combination of branch
+      // state and background work — that product is exactly what used to make cards two, three, or
+      // four lines tall. Appended, so the indices the #664 and #679 assertions use are untouched.
+      ["session-no-branch-waiting", "No Branch, Waiting on an External Job", {
+        backgroundWorkState: "running",
+      }],
+      ["session-branch-waiting", "A Long Branch and a Badge on the Same Line", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/waiting",
+        worktrees: [{
+          id: "wt-waiting",
+          path: "/repos/alpha/.agent-worktrees/waiting",
+          branch: "fix/issue-782-keep-every-session-card-at-three-rows-and-always-show-git-branch-state",
+          baseRef: "release/2027-q1-hardening-of-the-inbox-virtualisation-and-activity-strip-measurement-path",
+          source: "created",
+          pullRequest: { url: "https://github.com/picoduck/wollipog/pull/782", state: "open" },
+        }],
+        backgroundWorkState: "running",
+      }],
+      // An active worktree the inventory never described: honest "Branch Unavailable", not "No Branch".
+      ["session-branch-unknown", "Worktree Held, Branch Never Reported", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/unreported",
+        backgroundWorkState: "continuation_pending",
+      }],
+      ["session-orphaned", "Orphaned Background Work Beside a Branch", {
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/orphaned",
+        worktrees: [{
+          id: "wt-orphaned",
+          path: "/repos/alpha/.agent-worktrees/orphaned",
+          branch: "fix/issue-782-orphaned",
+          source: "created",
+        }],
+        backgroundWorkState: "orphaned",
+      }],
+    ];
+    initial.sessions = rows.map(([id, title, extra], index) => {
+      const value = session(id, title, "alpha", "alpha-workspace");
+      Object.assign(value, {
+        status: "running",
+        activeTurnId: `turn-${id}`,
+        updatedAt: 100 - index,
+        lastEventAt: 100 - index,
+        ...extra,
+      });
+      return value;
+    });
+    initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
+    initial.projects[0]!.totalSessionCount = initial.sessions.length;
+  }
   if (SCENARIO === "imported-location") {
     Object.assign(initial.projects.find((candidate) => candidate.id === "gamma")!, { canManage: true });
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-no-project")!, {
@@ -200,6 +332,31 @@ function initialModel(): FixtureModel {
         supportsApprovals: true,
         supportsSteering: true,
       },
+    });
+  }
+  if (SCENARIO === "conversation-handoff") {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+      // A deliberate non-default tier that the destination model below does not advertise, so the
+      // dialog must say so rather than substitute a default.
+      serviceTier: "flex",
+    });
+  }
+  if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff") {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+      model: "gpt-5", effort: "high",
+      historyQuarantine: {
+        reason: "oversized_tool_call", detectedAt: 1,
+        recoveryTurn: 1, recovery: SCENARIO === "history-quarantine-handoff" ? "handoff" : "fork",
+        ...(SCENARIO === "history-quarantine" ? { retainedPrompt: true } : {}),
+      },
+    });
+  }
+  if (SCENARIO === "composer-restart") {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      status: "stopped",
+      activeTurnId: null,
     });
   }
   if (SCENARIO === "git-visibility") {
@@ -329,6 +486,13 @@ let pendingCancelTurnSettlement: (() => void) | null = null;
 let deferNextPromptRequest = false;
 let pendingPromptSettlement: (() => void) | null = null;
 const promptRequests: PromptFixtureRequest[] = [];
+/** Handoff requests the fixture observed, so a spec can prove which config actually crossed the
+ * boundary rather than inferring it from the resulting session. */
+const handoffRequests: Array<{ id: string; turn: number; agentId: string; config: SessionConfig }> = [];
+/** Recovery requests the fixture observed, so a spec can prove the client asked for the recorded
+ * safe checkpoint and never submitted a prompt into the quarantined conversation. */
+const recoveryRequests: Array<{ id: string; turn: number; handoff?: { agentId: string; config: SessionConfig } }> = [];
+const restartRequests: string[] = [];
 const sessionCommandRequests: SessionCommandFixtureRequest[] = [];
 let failNextSessionCommandResponse = false;
 let deferNextSessionCommandResponse = false;
@@ -353,6 +517,23 @@ const steeringResolutionRequests: Array<{
 let deferredSteeringResolutionCount = 0;
 const pendingSteeringResolutionSettlements = new Map<string, () => void>();
 const sessionEvents = new Map<string, SessionEvent[]>();
+if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff") {
+  sessionEvents.set("session-alpha", [
+    { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Summarize the release notes.", final: true } },
+    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "Summarized the release notes.", final: true } },
+    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
+    { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "user_message", text: "Now scan every changed file.", final: true } },
+    { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "error", message: "The agent provider rejected this conversation's stored history: the recorded tool call at history position 675 cannot be resent. Its arguments field is 1,426,210 characters, over the provider's limit of 1,048,576." } },
+  ]);
+}
+if (SCENARIO === "conversation-handoff") {
+  sessionEvents.set("session-alpha", [
+    { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
+    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "checkpoint", turn: 1, tree: "tree-before-turn" } },
+    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
+    { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "conversation_checkpoint", turn: 1 } },
+  ]);
+}
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
 if (SCENARIO === "preview-follow" || SCENARIO === "scroll-restore" ||
     SCENARIO === "preview-opening-fill") {
@@ -476,6 +657,13 @@ const runner: RunnerView = {
   lastSeen: 1,
   protocolVersion: PROTOCOL_VERSION,
 };
+if (SCENARIO === "conversation-handoff") runner.agents.push({
+  id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code",
+  authStatus: "authenticated", available: true,
+  capabilities: { models: [{ id: "opus", displayName: "Opus", inputModalities: ["text", "image"],
+      serviceTiers: [{ id: "priority", name: "Priority" }] }],
+    effortLevels: ["high"], permissionModes: ["default", "plan"], supportsImages: true, supportsApprovals: true, slashCommands: [] },
+});
 
 const activePod: PodView = {
   id: "pod-active",
@@ -638,6 +826,26 @@ function settleSteeringAttempt(
 
 const client = {
   ...api,
+  getIdentity: async () => ({
+    context: {
+      userId: "fixture-user",
+      userName: "Fixture User",
+      organizationId: "fixture-organization",
+      organizationName: "Fixture Organization",
+      role: "owner" as const,
+      deviceId: "fixture-device",
+      localBootstrap: false,
+    },
+    organizations: [],
+    memberships: [],
+    teams: [],
+  }),
+  artifactExport: async () => {
+    const encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    return new Blob([bytes], { type: "image/png" });
+  },
   git: async (id: string) => {
     await waitForGitFixture(id, "status");
     if (unavailableGitSessions.has(id)) return {};
@@ -653,6 +861,11 @@ const client = {
     return { summary: structuredClone(fixture.summary) };
   },
   workflowInstances: async () => [],
+  agentHarnessDefaults: async () => ({ defaults: FIXTURE_QUERY.get("orchestratorDefault") === "1" ? [{
+    agentId: "codex", driver: "codex-app-server" as const, context: { kind: "native" as const },
+    name: "Codex", installations: [], compatibleInstallations: 1,
+    preference: { permissionMode: "orchestrator" },
+  }] : [] }),
   runWorkflowArtifacts: async () => ({ artifacts: [], nextCursor: undefined }),
   createSession: async (request: CreateSessionRequest) => {
     lastCreateSessionRequest = structuredClone(request);
@@ -687,6 +900,18 @@ const client = {
     if (!value) throw new Error("session not found");
     return { session: structuredClone(value) };
   },
+  acknowledgeBackgroundMissingResult: async (id: string, continuationId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    const delivery = value.backgroundDeliveries?.find((candidate) =>
+      candidate.continuationId === continuationId);
+    if (!delivery?.missingResultAt) throw new Error("background delivery is not terminally missing");
+    delivery.missingResultAcknowledgedAt = Date.now();
+    delete delivery.watchdogState;
+    value.updatedAt += 1;
+    pushSession(value);
+    return structuredClone(value);
+  },
   retitleSession: async (id: string) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
@@ -711,6 +936,36 @@ const client = {
     saveModel();
     socket?.push({ type: "session_upsert", session: structuredClone(value) });
     return structuredClone(value);
+  },
+  handoff: async (id: string, turn: number, agentId: string, config: SessionConfig) => {
+    handoffRequests.push({ id, turn, agentId, config: structuredClone(config) });
+    const source = model.sessions.find((candidate) => candidate.id === id)!;
+    const agent = runner.agents.find((candidate) => candidate.id === agentId)!;
+    const handoffDraft = buildConversationHandoff(sessionEvents.get(id) ?? [], 3, agent, config);
+    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config, status: "idle" as const };
+    model.sessions.push(child);
+    sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 4, payload: { kind: "conversation_forked", sourceSessionId: id, turn,
+      handoff: { sourceAgent: source.agentId!, destinationAgent: agentId, disclosure: handoffDraft.disclosure } } }]);
+    pushSession(child);
+    return { ...structuredClone(child), handoffDraft };
+  },
+  recoverQuarantinedConversation: async (
+    id: string,
+    turn: number,
+    handoff?: { agentId: string; config: SessionConfig },
+  ) => {
+    recoveryRequests.push({ id, turn, handoff });
+    const source = model.sessions.find((candidate) => candidate.id === id)!;
+    const child = { ...source, id: "recovered-child", title: "Recovered Session", status: "idle" as const };
+    delete (child as { historyQuarantine?: unknown }).historyQuarantine;
+    model.sessions.push(child);
+    sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 7,
+      payload: { kind: "conversation_forked", sourceSessionId: id, turn } }]);
+    pushSession(child);
+    if (!handoff) return { ...structuredClone(child), retainedPrompt: { text: "Now scan every changed file.", images: [] } };
+    const agent = runner.agents.find((candidate) => candidate.id === handoff.agentId)!;
+    const handoffDraft = buildConversationHandoff(sessionEvents.get(id) ?? [], 3, agent, handoff.config);
+    return { ...structuredClone(child), handoffDraft };
   },
   cancelTurn: async (id: string) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
@@ -739,6 +994,15 @@ const client = {
       pendingApproval: null,
       updatedAt: value.updatedAt + 1,
     });
+    saveModel();
+    socket?.push({ type: "session_upsert", session: structuredClone(value) });
+    return structuredClone(value);
+  },
+  restart: async (id: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    restartRequests.push(id);
+    Object.assign(value, { status: "starting" as const, updatedAt: value.updatedAt + 1 });
     saveModel();
     socket?.push({ type: "session_upsert", session: structuredClone(value) });
     return structuredClone(value);
@@ -870,6 +1134,14 @@ const client = {
         pendingSteeringResolutionSettlements.set(submissionId, resolve);
       });
       pendingSteeringResolutionSettlements.delete(submissionId);
+    }
+    if (action === "dismiss" && attempt.resolution?.action === "queue_again" &&
+        attempt.resolution.state === "applied") {
+      value.steeringAttempts = value.steeringAttempts?.filter(
+        (candidate) => candidate.submissionId !== submissionId,
+      );
+      pushSession(value);
+      return structuredClone(attempt);
     }
     const queuedPromptId = action === "queue_again"
       ? attempt.queuedPromptId ?? `queued-again-${submissionId}`
@@ -1068,7 +1340,12 @@ const client = {
     window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(value) }), 0);
     return { project: structuredClone(value) };
   },
-  updateProject: async (id: string, patch: { name?: string; hidden?: boolean }) => {
+  updateProject: async (id: string, patch: import("@wollipog/protocol").UpdateProjectRequest) => {
+    if (nextProjectUpdateError) {
+      const message = nextProjectUpdateError;
+      nextProjectUpdateError = null;
+      throw new Error(message);
+    }
     const value = model.projects.find((candidate) => candidate.id === id);
     if (!value) throw new Error("project not found");
     Object.assign(value, patch, { updatedAt: value.updatedAt + 1 });
@@ -1177,34 +1454,19 @@ const client = {
   revealWorkspace: async () => ({ ok: true as const }),
 } as ApiClient;
 
-const rightPanel: RightPanelState = {
-  open: false,
-  mode: "launcher",
-  width: 320,
-  dragging: false,
-  subagentTarget: null,
-  toggle() {},
-  openMode() {},
-  show() {},
-  setMode() {},
-  setWidth() {},
-  setDragging() {},
-  close() {},
-  selectSubagent() {},
-  showSubagent() {},
-  consumeSubagentFocusRequest() {},
-};
+let nextProjectUpdateError: string | null = null;
 
 declare global {
   interface Window {
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
-      updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden">>): void;
+      failNextProjectUpdate(message?: string): void;
+      updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults">>): void;
       updateSession(
         id: string,
         patch: Partial<Pick<SessionView,
           "projectId" | "projectName" | "projectLocationId" | "audience" | "status" | "queued" | "queueHeld" |
           "pendingApproval" | "activeTurnId" | "adopted" | "importLocationReady" | "agentCapabilities" |
-          "steeringAttempts" | "preview" | "lastEventAt" | "title" | "titleSource">>,
+          "steeringAttempts" | "preview" | "lastEventAt" | "title" | "titleSource" | "maxChildSessions">>,
       ): void;
       emitUserMessage(id: string, text: string, turnId: string): void;
       emitAgentMessage(id: string, text: string): void;
@@ -1217,6 +1479,9 @@ declare global {
       deferNextSteeringResult(): void;
       settleDeferredSteeringResult(result: SteeringFixtureResult): void;
       promptRequests(): PromptFixtureRequest[];
+      recoveryRequests(): Array<{ id: string; turn: number; handoff?: { agentId: string; config: SessionConfig } }>;
+      handoffRequests(): Array<{ id: string; turn: number; agentId: string; config: SessionConfig }>;
+      restartRequests(): string[];
       sessionCommandRequests(): SessionCommandFixtureRequest[];
       retitleRequests(): string[];
       deferNextRetitle(): void;
@@ -1244,6 +1509,8 @@ declare global {
       settleDeferredGit(id: string, action: GitFixtureAction): void;
       failNextGit(id: string, action: GitFixtureAction, message?: string): void;
       setGitUnavailable(id: string, unavailable: boolean): void;
+      setGitSummary(id: string, patch: Partial<GitSummaryInfo>): void;
+      setGitStatus(id: string, patch: Partial<GitStatusInfo>): void;
       gitRequestCounts(id: string): { status: number; summary: number };
       setSlashCommands(
         commands: AgentSlashCommand[],
@@ -1264,11 +1531,13 @@ declare global {
       terminalOpenCount(): number;
       cancelTurnCount(): number;
       failNextCancelTurn(): void;
+      seedQueuedEditRecovery(sessionId: string, recovery: QueuedPromptEditRecovery): void;
     };
   }
 }
 
 window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
+  failNextProjectUpdate(message = "Could not save Project settings. Please retry.") { nextProjectUpdateError = message; },
   updateProject(id, patch) {
     const value = model.projects.find((candidate) => candidate.id === id);
     if (!value) throw new Error(`unknown Project: ${id}`);
@@ -1386,6 +1655,9 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     pendingSteeringSettlement(structuredClone(result));
   },
   promptRequests: () => structuredClone(promptRequests),
+  recoveryRequests: () => structuredClone(recoveryRequests),
+  handoffRequests: () => structuredClone(handoffRequests),
+  restartRequests: () => structuredClone(restartRequests),
   sessionCommandRequests: () => structuredClone(sessionCommandRequests),
   composerDraft: (id) => loadComposerDraft(id, "project-inbox-e2e"),
   failNextSessionCommandResponse() {
@@ -1457,6 +1729,16 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     if (unavailable) unavailableGitSessions.add(id);
     else unavailableGitSessions.delete(id);
   },
+  setGitSummary(id, patch) {
+    const fixture = gitFixtures.get(id);
+    if (!fixture) throw new Error(`unknown Git fixture: ${id}`);
+    Object.assign(fixture.summary, structuredClone(patch));
+  },
+  setGitStatus(id, patch) {
+    const fixture = gitFixtures.get(id);
+    if (!fixture) throw new Error(`unknown Git fixture: ${id}`);
+    Object.assign(fixture.status, structuredClone(patch));
+  },
   gitRequestCounts(id) {
     return structuredClone(gitRequestCounts.get(id) ?? { status: 0, summary: 0 });
   },
@@ -1506,9 +1788,10 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error(`unknown session: ${id}`);
     const seq = value.messageCount + 1;
+    const resumed = value.queued?.[0];
     value.messageCount = seq;
     value.status = "idle";
-    value.queueHeld = true;
+    value.queueHeld = false;
     value.activeTurnId = undefined;
     value.updatedAt += 1;
     value.lastEventAt = value.updatedAt;
@@ -1518,6 +1801,17 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
       event: { id: seq, sessionId: id, seq, ts: value.updatedAt, payload: { kind: "turn_interrupted" } },
     });
     socket?.push({ type: "session_upsert", session: structuredClone(value) });
+    if (resumed) {
+      setTimeout(() => {
+        value.queued?.shift();
+        value.status = "running";
+        value.activeTurnId = resumed.id;
+        value.updatedAt += 1;
+        value.lastEventAt = value.updatedAt;
+        saveModel();
+        socket?.push({ type: "session_upsert", session: structuredClone(value) });
+      }, 0);
+    }
   },
   upsertProject(project) {
     const index = model.projects.findIndex((candidate) => candidate.id === project.id);
@@ -1538,9 +1832,18 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   failNextCancelTurn: () => {
     failNextCancelTurn = true;
   },
+  seedQueuedEditRecovery(sessionId, recovery) {
+    const saved = saveDurableQueuedEditRecovery({
+      instanceScope: "project-inbox-e2e",
+      accountKey: queuedEditRecoveryAccountKey("fixture-organization", "fixture-user"),
+      sessionId,
+    }, recovery);
+    if (!saved) throw new Error("queued edit recovery was not saved");
+  },
 };
 
 function FixtureSurface() {
+  const rightPanel = useRightPanelState();
   const view = useStoreSelector((state) => state.view);
   const sessions = useStoreSelector((state) => state.sessions);
   const isMobile = useIsMobile();
@@ -1593,7 +1896,8 @@ function FixtureSurface() {
     );
   }
   if (view.name === "session" && SCENARIO !== "conversation-steering" &&
-      SCENARIO !== "preview-follow" && SCENARIO !== "preview-opening-fill") {
+      SCENARIO !== "preview-follow" && SCENARIO !== "preview-opening-fill" &&
+      SCENARIO !== "permission-mode-layout") {
     return (
       <>
         {mobileSessionShell}
@@ -1655,7 +1959,15 @@ createRoot(root).render(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            <FixtureSurface />
+            {FIXTURE_QUERY.get("fullShell") === "1" ? <ThemeProvider><Shell /></ThemeProvider> : SCENARIO === "permission-mode-layout" ? (
+              <div className="app">
+                <main className="main">
+                  <div className="main-body inbox-main-body">
+                    <FixtureSurface />
+                  </div>
+                </main>
+              </div>
+            ) : <FixtureSurface />}
           </StoreProvider>
         </FeedbackProvider>
       </ApiProvider>

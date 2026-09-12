@@ -85,7 +85,7 @@ export function conversationSteeringAvailability(
   if (input.queueHeld) {
     return {
       available: false,
-      reason: "Send a normal prompt to resume the held queue before steering.",
+      reason: "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
     };
   }
   if (input.sessionStatus !== "running" || typeof input.activeTurnId !== "string" || !input.activeTurnId.trim()) {

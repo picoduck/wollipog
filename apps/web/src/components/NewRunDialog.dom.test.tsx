@@ -20,8 +20,10 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { NewRunDialog } from "./NewRunDialog.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -253,7 +255,7 @@ test("run Project copy stays neutral before selection and fails closed when audi
   }
 });
 
-test("workflow copy discloses the organization-visible conductor outside a narrower Project", async () => {
+test("workflow creation ignores a retired conductor even with stale opt-in and advertisement", async () => {
   // The conductor orchestrator exists only behind the device-local experiment, which defaults
   // off; this test is about the disclosure copy, so it opts in first.
   setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
@@ -276,9 +278,8 @@ test("workflow copy discloses the organization-visible conductor outside a narro
       });
       const copy = [...fixture.container.querySelectorAll("label")]
         .find((label) => label.querySelector(":scope > span")?.textContent === "Project")?.textContent ?? "";
-      assert.match(copy, /Worker session transcripts use the Project's visibility./);
-      assert.match(copy, /The conductor session runs outside the Project with organization visibility./);
-      assert.doesNotMatch(copy, /New run session transcripts use the Project's visibility./);
+      assert.match(copy, /New run session transcripts use the Project's visibility./);
+      assert.doesNotMatch(copy, /conductor session/);
     } finally {
       await unmountFixture(fixture);
     }

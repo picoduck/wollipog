@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "./test-support/bounded-child-process.js";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,8 +23,82 @@ import {
   type SessionMeta,
 } from "./session-store.js";
 
+test("restart recovers exact unresolved child questions as dismiss-only and drops stale callbacks", () => {
+  const a = { requestId: "a", ownerToolUseId: "tool-a", kind: "question" as const,
+    title: "Choose A", options: [], questions: [{ id: "a", question: "Choose A" }] };
+  const b = { ...a, requestId: "b", ownerToolUseId: "tool-b" };
+  const h = harness({ status: "input_required", pendingApproval: { ...a, additionalRequests: [b] } });
+  try {
+    h.store.appendEvent("resume-session", { kind: "question_request",
+      requestId: "a", ownerToolUseId: "tool-a", questions: a.questions });
+    h.store.appendEvent("resume-session", { kind: "question_request",
+      requestId: "b", ownerToolUseId: "tool-b", questions: b.questions });
+    h.store.appendEvent("resume-session", { kind: "question_resolved", requestId: "a", answered: true });
+    h.manager.reconcileStore();
+    const pending = h.store.readMeta("resume-session")!.pendingApproval!;
+    assert.equal(pending.requestId, "b");
+    assert.equal(pending.ownerToolUseId, "tool-b");
+    assert.equal(pending.recoveryReason, "provider_restart");
+    assert.equal(pending.recoveryAction, undefined, "a parent resume cannot answer a child callback");
+    assert.equal(pending.additionalRequests, undefined);
+    h.manager.answerQuestion("resume-session", "b", {}, "dismiss");
+    assert.equal(h.store.readMeta("resume-session")!.pendingApproval, null);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const readable of [true, false]) test(`mixed parent/child recovery is explicit when history is ${readable ? "readable" : "unreadable"}`, () => {
+  const question = { requestId: "parent", kind: "question" as const, title: "Choose",
+    options: [], recoveryId: "prior", questions: [{ id: "q", question: "Choose" }] };
+  const child = { ...question, requestId: "child", ownerToolUseId: "spawn" };
+  const h = harness({ status: "input_required", pendingApproval: { ...question, additionalRequests: [child] } });
+  try {
+    h.store.appendEvent("resume-session", { kind: "question_request", requestId: "parent", questions: question.questions });
+    h.store.appendEvent("resume-session", { kind: "question_request", requestId: "child", ownerToolUseId: "spawn", questions: child.questions });
+    if (!readable) (h.store as any).readEventPage = () => ({ ok: false });
+    h.manager.reconcileStore();
+    const pending = h.store.readMeta("resume-session")!.pendingApproval!;
+    assert.equal(pending.requestId, "parent");
+    assert.equal(pending.recoveryReason, "provider_restart");
+    assert.equal(pending.recoveryAction, readable ? "resume_answer" : undefined);
+    assert.equal(pending.additionalRequests?.[0]?.requestId, "child");
+    assert.equal(pending.additionalRequests?.[0]?.recoveryAction, undefined);
+    assert.equal(h.store.readMeta("resume-session")!.status, "input_required");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("foreground idle preserves child attention and final child resolution publishes settlement", async () => {
+  const h = harness();
+  try {
+    h.manager.prompt("resume-session", "Start");
+    for (let index = 0; index < 8 && !h.callbacks(); index++) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.ok(h.callbacks());
+    h.callbacks().onEvent({ kind: "permission_request", requestId: "child", ownerToolUseId: "spawn",
+      title: "Read", options: [{ optionId: "yes", name: "Allow" }] });
+    (h.manager as any).emitStatus("resume-session", "idle");
+    assert.equal(h.store.readMeta("resume-session")!.pendingApproval?.requestId, "child");
+    assert.equal(h.store.readMeta("resume-session")!.status, "input_required");
+    h.callbacks().onEvent({ kind: "permission_resolved", requestId: "child", optionId: null, resolutionReason: "provider_resolved" });
+    assert.equal(h.store.readMeta("resume-session")!.pendingApproval, null);
+    const status = h.sent.filter((message) => message.type === "session_status").at(-1);
+    assert.ok(status && (status.status === "idle" || status.status === "running"));
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const shortDelay = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
+const identityEvidence = (fields: Partial<Record<"email" | "orgId" | "authMethod" | "apiProvider", string>>) => ({
+  version: 1 as const,
+  fields,
+});
 const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -113,6 +187,7 @@ function harness(
   const store = new SessionStore(root);
   store.create(stored(root, metaOverrides));
   const sent: RunnerToControlPlane[] = [];
+  const logs: string[] = [];
   const launches: Array<{ kind: AgentDriverKind; options: DriverOptions }> = [];
   const prompts: string[] = [];
   const disposals: Array<Parameters<Driver["dispose"]>[0]> = [];
@@ -170,7 +245,7 @@ function harness(
   };
   const manager = new SessionManager(
     (message) => sent.push(message),
-    () => {},
+    (message) => logs.push(message),
     store,
     "runner",
     undefined,
@@ -199,6 +274,7 @@ function harness(
     root,
     store,
     sent,
+    logs,
     launches,
     prompts,
     disposals,
@@ -210,6 +286,13 @@ function harness(
     callbacks: () => latestCallbacks!,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
+}
+
+function exitActive(manager: SessionManager, sessionId: string, code: number | null): void {
+  const internals = manager as any;
+  const client = internals.active.get(sessionId)?.client;
+  assert.ok(client, `expected an active provider for ${sessionId}`);
+  internals.onExit(sessionId, code, client);
 }
 
 test("provider auth failure stops the turn, parks exact recovery context, and holds FIFO until explicit retry", async () => {
@@ -273,12 +356,329 @@ test("provider auth failure stops the turn, parks exact recovery context, and ho
   }
 });
 
+test("runtime authentication recovery stays silent until the shared probe settles", async () => {
+  const probe = deferred<{ status: "authenticated"; identityId: string }>();
+  let h!: ReturnType<typeof harness>;
+  let probes = 0;
+  let turns = 0;
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ++probes === 1
+      ? { status: "authenticated", identityId: "account-a" }
+      : probe.promise,
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  h = harness({ driver: "claude-code", command: "claude" }, Promise.resolve(), Promise.resolve(),
+    () => {}, undefined, undefined, 4, async () => {
+      if (++turns === 1) h.callbacks().onAuthenticationFailure?.();
+    }, controller);
+  try {
+    h.manager.prompt("resume-session", "possibly delivered");
+    for (let i = 0; i < 5; i += 1) await tick();
+    assert.equal(probes, 2);
+    assert.ok(h.store.readMeta("resume-session")?.providerAuthBlock);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    assert.equal(h.sent.some((message) => message.type === "session_status" && message.status === "input_required"), false);
+    h.manager.prompt("resume-session", "must not cross the probe");
+    await tick();
+    assert.deepEqual(h.prompts, ["possibly delivered"]);
+    probe.resolve({ status: "authenticated", identityId: "account-a" });
+    for (let i = 0; i < 10; i += 1) await shortDelay();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.deepEqual(h.prompts, ["possibly delivered"], "uncertain delivery is not replayed");
+    assert.equal(h.store.readEvents("resume-session").some((event) =>
+      event.payload.kind === "permission_request" || event.payload.kind === "permission_resolved"), false);
+    assert.equal(h.sent.some((message) => message.type === "session_status" && message.status === "input_required"), false);
+    assert.equal(h.manager.prompt("resume-session", "retry after recovery"), true);
+    for (let i = 0; i < 5; i += 1) await tick();
+    assert.deepEqual(h.prompts, ["possibly delivered", "retry after recovery"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const state of ["automatic", "manual", "local-card", "shared-card"] as const) {
+  test(`blocked prompt guidance is actionable during ${state} recovery`, async () => {
+    const probe = deferred<{ status: "unauthenticated" }>();
+    const scope = { id: "scope-a", provider: "claude" as const, canStartLogin: false, configuredCredential: false };
+    const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, {
+      describe: () => scope,
+      revalidate: async () => probe.promise,
+      startLogin: async () => "failed",
+      cancel: () => false,
+    });
+    const failures: Array<[string, string | undefined]> = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: `blocked-${state}`,
+      queued: () => assert.fail("blocked work must not be queued"),
+      started: () => assert.fail("blocked work must not be started"),
+      completed: () => assert.fail("blocked work must not be completed"),
+      uncertain: () => assert.fail("blocked work has known non-delivery"),
+      failed: (message, code) => failures.push([message, code]),
+    };
+    try {
+      const manager = h.manager as any;
+      if (state === "shared-card") {
+        h.store.create(stored(h.root, { sessionId: "private-peer", title: "Private peer title" }));
+        manager.parkProviderAuthentication(h.store.readMeta("private-peer"), scope, "turn", "uncertain");
+      }
+      manager.parkProviderAuthentication(h.store.readMeta("resume-session"), scope, "turn", "uncertain", false,
+        state === "automatic" || state === "manual");
+      if (state === "automatic") manager.revalidateProviderAuthenticationSilently(scope.id);
+      if (state === "manual") manager.providerAuthOperations.add(scope.id);
+      const approvalsBefore = h.store.listSessions().filter((meta) => meta.pendingApproval).length;
+      const attentionBefore = h.sent.filter((message) => message.type === "session_status" && message.status === "input_required").length;
+      assert.equal(h.manager.prompt("resume-session", "new blocked prompt", [], undefined, undefined, lifecycle), false);
+      assert.deepEqual(h.prompts, []);
+      assert.equal(failures.length, 1);
+      assert.equal(failures[0]![1], "PROVIDER_AUTHENTICATION_REQUIRED");
+      const stderr = h.store.readEvents("resume-session").map((event) => event.payload)
+        .filter((payload) => payload.kind === "stderr").at(-1);
+      assert.ok(stderr?.kind === "stderr");
+      assert.equal(failures[0]![0], stderr.text, "durable receipt carries the same actionable guidance");
+      assert.match(stderr.text, /This prompt was not submitted/);
+      assert.match(stderr.text, /retry this prompt/i);
+      if (state === "automatic") {
+        assert.match(stderr.text, /checked automatically/);
+        assert.doesNotMatch(stderr.text, /Recheck Authentication|Inbox/);
+      } else if (state === "manual") {
+        assert.match(stderr.text, /recovery is in progress/);
+        assert.doesNotMatch(stderr.text, /Recheck Authentication|Inbox/);
+      } else if (state === "local-card") {
+        assert.match(stderr.text, /this session's Authentication Required card/);
+        assert.match(stderr.text, /Recheck Authentication/);
+      } else {
+        assert.match(stderr.text, /In Inbox/);
+        assert.match(stderr.text, /ask the runner owner/);
+        assert.doesNotMatch(stderr.text, /private-peer|Private peer title|scope-a/);
+      }
+      assert.equal(h.store.listSessions().filter((meta) => meta.pendingApproval).length, approvalsBefore);
+      if (state !== "local-card") {
+        assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+        assert.equal(h.sent.filter((message) => message.type === "session_status" && message.status === "input_required").length,
+          attentionBefore, "rejection cannot introduce another attention notification");
+      }
+    } finally {
+      probe.resolve({ status: "unauthenticated" });
+      h.manager.shutdownAll();
+      await tick();
+      h.cleanup();
+    }
+  });
+}
+
+test("silent authentication recovery waits for initialization to retain the unsubmitted prompt", async () => {
+  const initialization = deferred<void>();
+  const h = harness({ driver: "claude-code", command: "claude" },
+    (index) => index === 0 ? initialization.promise.then(() => { throw new Error("authentication initialization failed"); }) : Promise.resolve(),
+    Promise.resolve(), () => {}, undefined, undefined, 4, undefined, {
+      describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+      revalidate: async () => ({ status: "authenticated", identityId: "account-a" }),
+      startLogin: async () => "failed",
+      cancel: () => false,
+    });
+  try {
+    h.manager.prompt("resume-session", "retain this initial prompt");
+    for (let i = 0; i < 20 && h.launches.length === 0; i += 1) await shortDelay();
+    h.callbacks().onAuthenticationFailure?.();
+    for (let i = 0; i < 5; i += 1) await shortDelay();
+    assert.ok(h.store.readMeta("resume-session")?.providerAuthBlock,
+      "a successful probe cannot clear the block before launch bookkeeping settles");
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    initialization.resolve();
+    for (let i = 0; i < 40 && h.prompts.length === 0; i += 1) await shortDelay();
+    assert.deepEqual(h.prompts, ["retain this initial prompt"]);
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.ok(h.store.readMeta("resume-session")?.providerAuthRetryAttemptedRecoveryId);
+    assert.equal(h.store.readEvents("resume-session").some((event) => event.payload.kind === "permission_request"), false);
+  } finally {
+    initialization.resolve();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("silent authentication recovery stops after a repeated initialization failure", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({ driver: "claude-code", command: "claude" },
+    () => Promise.resolve().then(() => {
+      h.callbacks().onAuthenticationFailure?.();
+      throw new Error("provider initialization remains unauthenticated");
+    }), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, {
+      describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+      revalidate: async () => ({ status: "authenticated", identityId: "account-a" }),
+      startLogin: async () => "failed",
+      cancel: () => false,
+    });
+  try {
+    h.manager.prompt("resume-session", "bounded automatic retry");
+    for (let i = 0; i < 40 && !h.store.readMeta("resume-session")?.pendingApproval; i += 1) await shortDelay();
+    assert.equal(h.launches.length, 2, "only one automatic relaunch is allowed before provider acceptance");
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.kind, "authentication");
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock?.retry?.text, "bounded automatic retry");
+    for (let i = 0; i < 5; i += 1) await shortDelay();
+    assert.equal(h.launches.length, 2);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("silent authentication preparation timeout surfaces recovery and fences the late probe", async (context) => {
+  const preparation = deferred<void>();
+  let probes = 0;
+  const scope = { id: "scope-a", provider: "claude" as const, canStartLogin: false, configuredCredential: false };
+  const h = harness({ providerCredentialIdentityId: "account-a" }, Promise.resolve(), Promise.resolve(),
+    () => {}, () => preparation.promise, undefined, 4, undefined, {
+      describe: () => scope,
+      revalidate: async () => { probes += 1; return { status: "authenticated", identityId: "account-a" }; },
+      startLogin: async () => "failed",
+      cancel: () => false,
+    });
+  try {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const manager = h.manager as any;
+    manager.parkProviderAuthentication(h.store.readMeta("resume-session"), scope, "turn", "uncertain", false, true);
+    manager.revalidateProviderAuthenticationSilently(scope.id);
+    await tick();
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    context.mock.timers.tick(20_000);
+    await tick();
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.kind, "authentication");
+    preparation.resolve();
+    await tick();
+    assert.equal(probes, 0, "timed-out preparation cannot start a late probe or clear the surfaced block");
+    assert.ok(h.store.readMeta("resume-session")?.providerAuthBlock);
+  } finally {
+    preparation.resolve();
+    context.mock.timers.reset();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a healthy turn re-arms silent authentication recovery without an acceptance callback", async () => {
+  let probes = 0;
+  const h = harness({ providerCredentialScopeId: "scope-a" }, Promise.resolve(), Promise.resolve(),
+    () => {}, undefined, undefined, 4, undefined, {
+      describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: false, configuredCredential: false }),
+      revalidate: async () => { probes += 1; return { status: "authenticated", identityId: "account-a" }; },
+      startLogin: async () => "failed",
+      cancel: () => false,
+    }, false);
+  try {
+    (h.manager as any).providerAuthAutomaticAttempted.add("scope-a");
+    h.manager.prompt("resume-session", "healthy turn without acceptance callback");
+    for (let i = 0; i < 10; i += 1) await shortDelay();
+    h.callbacks().onAuthenticationFailure?.();
+    for (let i = 0; i < 5; i += 1) await shortDelay();
+    assert.equal(probes, 2, "successful turn completion permits a later silent probe");
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const removal of ["delete", "history-failure"] as const) {
+  test(`authentication card ownership transfers after ${removal}`, async () => {
+    const scope = { id: "scope-a", provider: "claude" as const, canStartLogin: false, configuredCredential: false };
+    const h = harness();
+    try {
+      h.store.create(stored(h.root, { sessionId: "shared" }));
+      const manager = h.manager as any;
+      for (const id of ["resume-session", "shared"]) {
+        manager.parkProviderAuthentication(h.store.readMeta(id), scope, "turn", "uncertain");
+      }
+      const owner = h.store.listSessions().find((meta) => meta.pendingApproval?.kind === "authentication")!;
+      if (removal === "delete") await h.manager.delete(owner.sessionId);
+      else manager.failHistoryIntegrity(owner.sessionId, new Error("history unavailable"));
+      const remaining = h.store.listSessions().filter((meta) => meta.pendingApproval?.kind === "authentication");
+      assert.equal(remaining.length, 1);
+      assert.notEqual(remaining[0]!.sessionId, owner.sessionId);
+    } finally {
+      h.manager.shutdownAll();
+      h.cleanup();
+    }
+  });
+}
+
+for (const outcome of ["authenticated", "unauthenticated", "unknown", "wrong-account"] as const) {
+  test(`shared authentication burst coalesces sessions when probe is ${outcome}`, async () => {
+    const probe = deferred<{ status: "authenticated" | "unauthenticated" | "unknown"; identityId?: string }>();
+    let probes = 0;
+    let recovered = false;
+    const scope = { id: "scope-a", provider: "claude" as const, canStartLogin: false, configuredCredential: false };
+    const h = harness({ providerCredentialIdentityId: "account-a" }, Promise.resolve(), Promise.resolve(),
+      () => {}, undefined, undefined, 4, undefined, {
+        describe: () => scope,
+        revalidate: async () => {
+          probes += 1;
+          return recovered ? { status: "authenticated", identityId: "account-a" } : probe.promise;
+        },
+        startLogin: async () => "failed",
+        cancel: () => false,
+      });
+    try {
+      h.store.create(stored(h.root, { sessionId: "shared", providerCredentialIdentityId: "account-a" }));
+      const manager = h.manager as any;
+      for (const id of ["resume-session", "shared"]) {
+        manager.parkProviderAuthentication(h.store.readMeta(id), scope, "turn", "uncertain", false, true);
+        manager.revalidateProviderAuthenticationSilently(scope.id);
+      }
+      await tick();
+      assert.equal(probes, 1);
+      assert.equal(h.store.listSessions().filter((meta) => meta.pendingApproval).length, 0);
+      probe.resolve(outcome === "wrong-account"
+        ? { status: "authenticated", identityId: "account-b" }
+        : { status: outcome, identityId: "account-a" });
+      await tick();
+      await tick();
+      const cards = h.store.listSessions().filter((meta) => meta.pendingApproval?.kind === "authentication");
+      assert.equal(cards.length, outcome === "authenticated" ? 0 : 1);
+      assert.equal(h.store.listSessions().filter((meta) => meta.providerAuthBlock).length,
+        outcome === "authenticated" ? 0 : 2);
+      assert.equal(h.sent.filter((message) => message.type === "session_status" && message.status === "input_required").length,
+        outcome === "authenticated" ? 0 : 1, "only the owner can trigger an authentication push");
+      if (outcome === "unauthenticated") {
+        const peer = h.store.listSessions().find((meta) => meta.sessionId !== cards[0]!.sessionId)!;
+        assert.equal(h.manager.prompt(peer.sessionId, "blocked after failed probe"), false);
+        const guidance = h.store.readEvents(peer.sessionId).map((event) => event.payload)
+          .filter((payload) => payload.kind === "stderr").at(-1);
+        assert.ok(guidance?.kind === "stderr");
+        assert.match(guidance.text, /In Inbox/);
+        assert.doesNotMatch(guidance.text, /checked automatically/);
+        recovered = true;
+        h.manager.resolvePermission(cards[0]!.sessionId, cards[0]!.pendingApproval!.requestId, "auth:revalidate");
+        for (let i = 0; i < 5; i += 1) await tick();
+        assert.equal(h.store.listSessions().filter((meta) => meta.providerAuthBlock || meta.pendingApproval).length, 0);
+        assert.equal(["resume-session", "shared"].flatMap((id) => h.store.readEvents(id)).filter((event) =>
+          event.payload.kind === "permission_resolved").length, 1, "only the surfaced card gets a resolution");
+      }
+      if (outcome === "unknown") {
+        // Stopping the card owner must expose recovery for the surviving blocked session.
+        h.manager.stop(cards[0]!.sessionId);
+        assert.equal(h.store.listSessions().filter((meta) => meta.pendingApproval?.kind === "authentication").length, 1);
+      }
+    } finally {
+      h.manager.shutdownAll();
+      h.cleanup();
+    }
+  });
+}
+
 test("app-server authentication recheck resumes the held FIFO without another prompt", async () => {
   let h!: ReturnType<typeof harness>;
   let attempts = 0;
+  let rechecks = 0;
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: false, configuredCredential: false }),
-    revalidate: async () => ({ status: "authenticated", identityId: "account-a" }),
+    revalidate: async () => ++rechecks === 2
+      ? { status: "unauthenticated" }
+      : { status: "authenticated", identityId: "account-a" },
     startLogin: async () => "failed",
     cancel: () => false,
   };
@@ -652,6 +1052,8 @@ test("startup reconciliation restores a durable authentication card and suppress
     const restored = h.store.readMeta("resume-session")!;
     assert.equal(restored.status, "input_required");
     assert.equal(restored.providerAuthBlock?.loginOperationId, undefined);
+    assert.equal(restored.questionRecoveryReconciled, undefined,
+      "a higher-priority authentication block must not consume the question recovery scan");
     assert.equal(restored.pendingApproval?.requestId, "provider-auth:recovery-a");
     assert.equal(restored.pendingApproval?.title, "Authentication Required — Claude Code");
     assert.deepEqual(
@@ -835,6 +1237,31 @@ test("concurrent runner rechecks consume one durable retry under the session loc
   }
 });
 
+test("provider-resolved service tiers persist and publish exact runtime snapshots", async () => {
+  const h = harness();
+  try {
+    assert.equal(await h.manager.start(launchSpec(h.root)), true);
+    const updatesBefore = h.sent.filter((message) => message.type === "session_runtime_updated").length;
+
+    h.callbacks().onServiceTierResolved?.("fast");
+    assert.equal(h.store.readMeta("resume-session")?.config.serviceTier, "fast");
+    const selected = h.sent.filter((message) => message.type === "session_runtime_updated").at(-1);
+    assert.equal(selected?.type === "session_runtime_updated" && selected.snapshot.config.serviceTier, "fast");
+
+    h.callbacks().onServiceTierResolved?.("fast");
+    assert.equal(h.sent.filter((message) => message.type === "session_runtime_updated").length, updatesBefore + 1,
+      "an unchanged provider tier does not publish a duplicate snapshot");
+
+    h.callbacks().onServiceTierResolved?.(null);
+    assert.equal(h.store.readMeta("resume-session")?.config.serviceTier, undefined);
+    const cleared = h.sent.filter((message) => message.type === "session_runtime_updated").at(-1);
+    assert.equal(cleared?.type === "session_runtime_updated" && cleared.snapshot.config.serviceTier, undefined);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("fresh-start authentication failure preserves its worktree and ordinary initial prompt", async () => {
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "fresh-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
@@ -914,6 +1341,213 @@ test("wrong-account revalidation fails closed and uncertain delivery is never re
     assert.equal(h.store.readMeta("resume-session")?.providerCredentialIdentityId, "account-b");
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
     assert.deepEqual(h.prompts, ["possibly delivered"], "uncertain provider delivery is never replayed");
+    assert.equal(
+      h.store.readEvents("resume-session").findLast((event) => event.payload.kind === "permission_resolved")?.payload.optionId,
+      "auth:accept-current",
+      "the durable audit records the operator's submitted decision",
+    );
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("matching account evidence survives a partial observation across relaunch contexts", async () => {
+  const expectedEvidence = identityEvidence({
+    email: "same-email",
+    orgId: "same-org",
+    authMethod: "same-method",
+    apiProvider: "same-provider",
+  });
+  const observedEvidence = identityEvidence({
+    email: "same-email",
+    authMethod: "same-method",
+    apiProvider: "same-provider",
+  });
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ({
+      status: "authenticated",
+      identityId: "partial-aggregate",
+      identityEvidence: observedEvidence,
+    }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialScopeId: "shared-scope",
+    providerCredentialIdentityId: "full-aggregate",
+    providerCredentialIdentityEvidence: expectedEvidence,
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "continue after restart");
+    for (let index = 0; index < 8; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.deepEqual(h.store.readMeta("resume-session")?.providerCredentialIdentityEvidence, expectedEvidence,
+      "a partial observation must not erase a previously proven account field");
+    assert.deepEqual(h.prompts, ["continue after restart"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("recheck without a recorded account asks for explicit acceptance without claiming a mismatch", async () => {
+  const authenticated = {
+    status: "authenticated" as const,
+    identityId: "current-aggregate",
+    identityEvidence: identityEvidence({ email: "current-email", orgId: "current-org" }),
+  };
+  const observations = [{ status: "unauthenticated" as const }, authenticated, authenticated];
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => observations.shift() ?? authenticated,
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native" },
+    Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained before first sign-in");
+    for (let index = 0; index < 8; index += 1) await tick();
+    const requestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+    h.manager.resolvePermission("resume-session", requestId, "auth:revalidate");
+    for (let index = 0; index < 8; index += 1) await tick();
+
+    const confirmation = h.store.readMeta("resume-session")!;
+    assert.equal(confirmation.providerAuthBlock?.identityMismatch, true);
+    assert.equal(confirmation.pendingApproval?.options[0]?.name, "Use Current Account");
+    assert.match(confirmation.pendingApproval?.context?.input ?? "", /no recorded account identity/i);
+    assert.doesNotMatch(confirmation.pendingApproval?.context?.input ?? "", /account identity mismatch/i);
+    assert.ok(h.logs.every((line) => !/account identity mismatch/i.test(line)));
+
+    h.manager.resolvePermission("resume-session", requestId, "auth:accept-current");
+    for (let index = 0; index < 12; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.deepEqual(h.prompts, ["retained before first sign-in"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("accepting an authenticated observation without an account anchor clears the stale baseline", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: true }),
+    revalidate: async () => ({ status: "authenticated" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialScopeId: "shared-scope",
+    providerCredentialIdentityId: "stale-aggregate",
+    providerCredentialIdentityEvidence: identityEvidence({ email: "stale-email", orgId: "stale-org" }),
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained across explicit acceptance");
+    for (let index = 0; index < 8; index += 1) await tick();
+    const blocked = h.store.readMeta("resume-session")!;
+    assert.equal(blocked.providerAuthBlock?.identityMismatch, true);
+    assert.equal(blocked.pendingApproval?.options[0]?.name, "Use Current Account");
+
+    h.manager.resolvePermission(
+      "resume-session",
+      blocked.pendingApproval!.requestId,
+      "auth:accept-current",
+    );
+    for (let index = 0; index < 20 && h.prompts.length === 0; index += 1) await shortDelay();
+    const accepted = h.store.readMeta("resume-session")!;
+    assert.equal(accepted.providerCredentialIdentityId, undefined);
+    assert.equal(accepted.providerCredentialIdentityEvidence, undefined);
+    assert.equal(accepted.providerAuthBlock, undefined);
+    assert.deepEqual(h.prompts, ["retained across explicit acceptance"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("genuine account changes park with redacted field evidence in block and log", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ({
+      status: "authenticated",
+      identityId: "changed-aggregate",
+      identityEvidence: identityEvidence({
+        email: "changed-email",
+        authMethod: "same-method",
+        apiProvider: "same-provider",
+      }),
+    }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialScopeId: "shared-scope",
+    providerCredentialIdentityId: "expected-aggregate",
+    providerCredentialIdentityEvidence: identityEvidence({
+      email: "expected-email",
+      orgId: "expected-org",
+      authMethod: "same-method",
+      apiProvider: "same-provider",
+    }),
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "must stay retained");
+    for (let index = 0; index < 8; index += 1) await tick();
+    const blocked = h.store.readMeta("resume-session")!;
+    assert.equal(blocked.providerAuthBlock?.identityMismatch, true);
+    assert.match(blocked.providerAuthBlock?.reason ?? "", /email differed/i);
+    assert.match(blocked.providerAuthBlock?.reason ?? "", /orgId.*missing from the current observation/i);
+    assert.doesNotMatch(blocked.providerAuthBlock?.reason ?? "", /expected-email|changed-email/);
+    assert.ok(h.logs.some((line) => /email differed/i.test(line)));
+    assert.ok(h.logs.every((line) => !/expected-email|changed-email/.test(line)));
+    assert.match(blocked.pendingApproval?.context?.input ?? "", /email differed/i);
+    assert.deepEqual(h.prompts, []);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a sibling held behind the surfaced authentication card exposes the wait", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ({ status: "unauthenticated" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native" },
+    Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  h.store.create(stored(h.root, {
+    sessionId: "held-sibling",
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+  }));
+  try {
+    h.manager.prompt("resume-session", "first retained prompt");
+    for (let index = 0; index < 5; index += 1) await tick();
+    h.manager.prompt("held-sibling", "second retained prompt");
+    for (let index = 0; index < 8; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.status, "input_required");
+    assert.equal(h.store.readMeta("held-sibling")?.pendingApproval, null);
+    assert.equal(h.store.readMeta("held-sibling")?.status, "idle");
+    const heldEvents = h.store.readEvents("held-sibling");
+    assert.ok(heldEvents.some((event) =>
+      event.payload.kind === "stderr" && /owned by another session.*if one appears/i.test(event.payload.text)));
+    assert.ok(h.sent.some((message) =>
+      message.type === "session_status" && message.sessionId === "held-sibling" &&
+      message.status === "idle" && /owned by another session.*if one appears/i.test(message.detail ?? "")));
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -922,9 +1556,12 @@ test("wrong-account revalidation fails closed and uncertain delivery is never re
 
 test("authentication recovery fans out only to matching credential scopes", async () => {
   let h!: ReturnType<typeof harness>;
+  let rechecks = 0;
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: true, configuredCredential: false }),
-    revalidate: async () => ({ status: "authenticated", identityId: "account-a" }),
+    revalidate: async () => ++rechecks === 2
+      ? { status: "unauthenticated" }
+      : { status: "authenticated", identityId: "account-a" },
     startLogin: async () => "completed",
     cancel: () => false,
   };
@@ -1069,6 +1706,46 @@ test("Stop clears durable authentication recovery and restart reconciliation pre
     assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
     assert.deepEqual(h.prompts, []);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("Stop during provider authentication preflight cannot revive the terminal session", async () => {
+  const preflight = deferred<{
+    status: "unauthenticated";
+  }>();
+  let revalidationStarted = false;
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => {
+      revalidationStarted = true;
+      return preflight.promise;
+    },
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained before Stop");
+    for (let index = 0; index < 8 && !revalidationStarted; index += 1) await tick();
+    assert.equal(revalidationStarted, true);
+
+    h.manager.stop("resume-session");
+    preflight.resolve({ status: "unauthenticated" });
+    for (let index = 0; index < 4; index += 1) await tick();
+
+    assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    assert.equal(h.prompts.length, 0);
+    assert.equal((h.manager as any).admitted.has("resume-session"), false);
+    assert.equal(h.manager.capacityState().usedUnits, 0);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -1861,6 +2538,31 @@ test("value-identical session command discovery does not publish a redundant run
   }
 });
 
+test("a restarted over-budget orphan waits for re-arm without launching a provider", async () => {
+  const h = harness({
+    driver: "claude-code", agentId: "claude-code", command: "claude",
+    agentSessionId: "claude-session", config: { costBudgetUsd: 8 }, costUsd: 8.33,
+    backgroundWorkState: "orphaned", pendingBackgroundTaskIds: ["task-held"],
+    orphanedWork: { pendingTaskIds: ["task-held"], markedAt: 10, reason: "process_exit" },
+  });
+  try {
+    await (h.manager as any).runOrphanRecovery("resume-session");
+    assert.equal(h.launches.length, 0);
+    assert.equal(h.prompts.length, 0);
+    assert.equal(h.store.readMeta("resume-session")?.status, "idle");
+    assert.ok(h.sent.some((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.status === "idle" && message.snapshot.costUsd === 8.33));
+    h.manager.rearmGovernance("resume-session", { costBudgetUsd: 16.33 });
+    await (h.manager as any).runOrphanRecovery("resume-session");
+    await shortDelay();
+    assert.equal(h.launches.length, 1);
+    assert.equal(h.prompts.length, 1);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("startup automatically resumes durable Claude orphan work without a user message", async () => {
   const h = harness({
     driver: "claude-code",
@@ -1887,7 +2589,7 @@ test("startup automatically resumes durable Claude orphan work without a user me
     assert.ok(h.store.readEvents("resume-session").some((event) =>
       event.payload.kind === "stderr" && /resumed orphaned background work automatically/i.test(event.payload.text)));
     assert.equal(h.store.readMeta("resume-session")?.orphanedWork, undefined);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
     assert.deepEqual(h.store.readMeta("resume-session")?.recoveredBackgroundTaskIds, ["task-1"]);
     const promptCount = h.prompts.length;
     h.manager.recoverAllOrphanedWork();
@@ -2048,7 +2750,7 @@ test("a live Claude orphan callback persists first and triggers recovery without
     await tick();
     assert.equal(h.prompts.length, 2);
     assert.match(h.prompts[1] ?? "", /reconcile every orphaned task/i);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
     assert.equal(h.store.readMeta("resume-session")?.orphanedWork, undefined);
   } finally {
     h.manager.shutdownAll();
@@ -2126,7 +2828,7 @@ test("two idle managed-job completions cross one durable barrier and resume the 
     assert.ok(delivered.every((job) => job.continuationSubmittedAt));
     assert.ok(delivered.every((job) => job.continuationAcceptedAt));
     assert.ok(delivered.every((job) => job.assistantResultPersistedAt));
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
     assert.equal(
       h.store.readEvents("resume-session").filter((event) => event.payload.kind === "user_message").length,
       1,
@@ -2195,6 +2897,76 @@ test("an in-turn managed completion is persisted without a synthetic continuatio
   }
 });
 
+for (const ceiling of ["cost", "tools"] as const) test(`restarted background continuation respects the ${ceiling} ceiling until re-arm`, async () => {
+  const h = harness({
+    driver: "claude-code", agentId: "claude-code", command: "claude",
+    agentSessionId: "claude-session", costUsd: 8.33,
+    config: ceiling === "cost" ? { costBudgetUsd: 8 } : { maxToolCalls: 1 },
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "held-job", parentTurnId: "turn-1", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-held",
+    }],
+  });
+  try {
+    if (ceiling === "tools") h.store.appendEvent("resume-session", {
+      kind: "tool_call", toolCallId: "tool-1", title: "Read", status: "completed",
+    });
+    h.manager.reconcileStore();
+    await shortDelay();
+    await tick();
+    assert.equal(h.launches.length, 0, "a held continuation must not initialize a provider");
+    assert.deepEqual(h.prompts, []);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.continuationSubmittedAt, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "continuation_pending");
+    h.manager.rearmGovernance("resume-session", ceiling === "cost" ? { costBudgetUsd: 16.33 } : { maxToolCalls: 2 });
+    await (h.manager as any).runBackgroundContinuation("resume-session");
+    await tick();
+    assert.equal(h.launches.length, 1);
+    assert.equal(h.prompts.length, 1);
+    await (h.manager as any).runBackgroundContinuation("resume-session");
+    assert.equal(h.prompts.length, 1, "repeated recovery must not duplicate accepted delivery");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const hold of ["governance", "control_plane"] as const) test(`live background continuation preserves a ${hold} hold`, async () => {
+  const h = harness({ driver: "claude-code", agentId: "claude-code", command: "claude" });
+  try {
+    h.manager.prompt("resume-session", "warm up");
+    await tick();
+    await tick();
+    const entry = (h.manager as any).active.get("resume-session");
+    assert.ok(entry && !entry.running);
+    if (hold === "governance") entry.governanceTripped = "cost_budget";
+    else h.manager.rearmGovernance("resume-session", {}, "control_plane");
+    h.store.patchMeta("resume-session", {
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [{
+        id: "held-job", parentTurnId: "turn-1", runnerId: "runner", workspaceId: "workspace",
+        context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+        terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+        continuationQueuedAt: 3, continuationId: "bgcont-held",
+      }],
+    });
+    await (h.manager as any).runBackgroundContinuation("resume-session");
+    assert.deepEqual(h.prompts, ["warm up"]);
+    assert.equal(entry.queue.length, 0);
+    assert.ok((h.manager as any).backgroundContinuationTimers.has("resume-session"));
+    h.manager.rearmGovernance("resume-session", { costBudgetUsd: 10 });
+    await (h.manager as any).runBackgroundContinuation("resume-session");
+    await shortDelay();
+    assert.equal(h.prompts.length, 2);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("restart retries queued continuation but never replays a submitted continuation", async () => {
   const queuedJob = {
     id: "queued-job",
@@ -2228,7 +3000,7 @@ test("restart retries queued continuation but never replays a submitted continua
     await shortDelay();
     await tick();
     assert.equal(queued.prompts.length, 1);
-    assert.equal(queued.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(queued.store.readMeta("resume-session")?.backgroundWorkState, undefined);
   } finally {
     queued.manager.shutdownAll();
     queued.cleanup();
@@ -2252,9 +3024,58 @@ test("restart retries queued continuation but never replays a submitted continua
     submitted.manager.shutdownAll();
     submitted.cleanup();
   }
+
+  const accepted = harness({
+    driver: "claude-code",
+    agentId: "claude-code",
+    command: "claude",
+    agentSessionId: "claude-session",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{ ...queuedJob, continuationSubmittedAt: 4, continuationAcceptedAt: 5 }],
+  });
+  try {
+    accepted.manager.reconcileStore();
+    await shortDelay();
+    assert.deepEqual(accepted.prompts, [], "an accepted continuation is never replayed after restart");
+    assert.ok(accepted.store.readMeta("resume-session")?.backgroundJobs?.[0]?.continuationMissingResultAt);
+    assert.equal(accepted.store.readMeta("resume-session")?.backgroundWorkState, undefined);
+  } finally {
+    accepted.manager.shutdownAll();
+    accepted.cleanup();
+  }
 });
 
-test("a partial assistant stream does not complete an accepted continuation", async () => {
+test("an accepted continuation ending without an assistant message becomes terminal", async () => {
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-code",
+    command: "claude",
+    agentSessionId: "claude-session",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "empty-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-empty",
+    }],
+  });
+  try {
+    h.manager.reconcileStore();
+    await shortDelay();
+    await tick();
+    const job = h.store.readMeta("resume-session")?.backgroundJobs?.[0];
+    assert.ok(job?.continuationAcceptedAt);
+    assert.ok(job?.continuationMissingResultAt);
+    assert.equal(job?.assistantResultPersistedAt, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
+    assert.equal(h.prompts.length, 1, "the continuation is submitted at most once");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a partial assistant stream terminally marks an accepted continuation without replay", async () => {
   let h!: ReturnType<typeof harness>;
   h = harness({
     driver: "claude-code",
@@ -2280,7 +3101,8 @@ test("a partial assistant stream does not complete an accepted continuation", as
     assert.ok(job?.continuationSubmittedAt);
     assert.ok(job?.continuationAcceptedAt);
     assert.equal(job?.assistantResultPersistedAt, undefined);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "continuation_pending");
+    assert.ok(job?.continuationMissingResultAt);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
     assert.equal(
       h.store.readEvents("resume-session").some((event) =>
         (event.payload.kind === "stderr" &&
@@ -2589,7 +3411,7 @@ test("startup reconciles structured delivery evidence written before the metadat
       structuredEvent.ts,
       "reconciliation preserves the original structured publication timestamp",
     );
-    assert.equal(reconciled?.backgroundWorkState, "resumed");
+    assert.equal(reconciled?.backgroundWorkState, undefined);
     assert.deepEqual(h.prompts, [], "reconciliation never submits a second provider turn");
     h.manager.recoverAllOrphanedWork();
     assert.equal(
@@ -2631,6 +3453,36 @@ test("pre-v82 delivery emits authenticated legacy evidence", () => {
       }],
     );
     assert.ok(h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.assistantResultPersistedAt);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("settling one continuation preserves live state while another managed job is running", () => {
+  const h = harness({
+    driver: "claude-code",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "settled-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-settled",
+      continuationSubmittedAt: 4, continuationAcceptedAt: 5,
+    }, {
+      id: "live-job", parentTurnId: "turn-b", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "shell", registeredAt: 6,
+    }],
+  });
+  try {
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 81 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.manager as any).finishBackgroundContinuation("resume-session", ["settled-job"]);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "running");
+    assert.equal(
+      h.store.readMeta("resume-session")?.backgroundJobs?.find((job) => job.id === "live-job")?.terminalStatus,
+      undefined,
+    );
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -2859,7 +3711,7 @@ test("startup converts a crashed running Claude task set into a durable orphan b
     await shortDelay();
     await tick();
     assert.equal(h.prompts.length, 1);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -2885,7 +3737,7 @@ test("artifact-only task updates preserve the at-most-once recovery tombstone", 
     h.manager.reconcileStore();
     await shortDelay();
     assert.equal(h.prompts.length, 0);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -2914,7 +3766,7 @@ test("startup discovers an incomplete Claude task directory even without a persi
     await shortDelay();
     await tick();
     assert.equal(h.prompts.length, 1);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -3035,7 +3887,7 @@ test("adoption surfaces provider task artifacts but waits for explicit user owne
     assert.equal(h.launches.at(-1)?.options.resumeId, "adopted-claude");
     assert.equal(h.prompts.at(-1), "continue this adopted session");
     assert.equal(h.store.readMeta("adopted-session")?.adoptedBackgroundRecoveryAuthorized, true);
-    assert.equal(h.store.readMeta("adopted-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("adopted-session")?.backgroundWorkState, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -3100,7 +3952,7 @@ test("real Claude driver shutdown persists live work and a restarted manager res
       secondChild.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
       await shortDelay();
       assert.equal(store.readMeta("resume-session")?.orphanedWork, undefined);
-      assert.equal(store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+      assert.equal(store.readMeta("resume-session")?.backgroundWorkState, undefined);
       assert.equal(
         store.readEvents("resume-session").some((event) => event.payload.kind === "user_message"),
         true,
@@ -3589,7 +4441,11 @@ test("ACP delete fences prompt and restart through close and removes the row", a
     h.manager.prompt("resume-session", "must not relaunch during delete");
     await h.manager.start(spec);
     assert.equal(h.launches.length, 1);
-    assert.equal(h.store.has("resume-session"), false, "the row is tombstoned before slow close settles");
+    assert.equal(
+      h.store.has("resume-session"),
+      true,
+      "the durable row remains available as retirement provenance until slow close settles",
+    );
     release();
     await deletion;
     assert.equal(h.store.has("resume-session"), false);
@@ -3656,11 +4512,16 @@ test("delete during driver initialization cannot resurrect a process or leak its
     const launch = h.manager.start(launchSpec(h.root));
     await tick();
     const deletion = h.manager.delete("resume-session");
-    assert.equal(h.store.has("resume-session"), false, "delete removes the durable row synchronously");
+    assert.equal(
+      h.store.has("resume-session"),
+      true,
+      "delete preserves the durable row until the initializing provider is retired",
+    );
     assert.equal(h.manager.sessionCanOpen("resume-session"), false);
     releaseInitialize();
     assert.equal(await launch, false);
     await deletion;
+    assert.equal(h.store.has("resume-session"), false);
     // The in-memory tombstone intentionally outlives async cleanup; its expiry releases the
     // generation, while the durable exact-id fence continues rejecting delayed/replayed starts.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3864,6 +4725,90 @@ test("a code-zero app-server exit still counts as unexpected persistent-process 
   }
 });
 
+test("an idle Claude exit with pending work records the task ids and resumes recovery", async () => {
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-native",
+    command: "claude",
+    agentSessionId: "claude-session",
+    agentVersion: "2.1.268",
+  });
+  try {
+    await h.manager.start({
+      ...launchSpec(h.root),
+      driver: "claude-code",
+      agentId: "claude-native",
+      command: "claude",
+    });
+    h.store.patchMeta("resume-session", { agentSessionId: "claude-session" });
+    const firstCallbacks = h.callbacks();
+    firstCallbacks.onBackgroundWork?.({
+      state: "orphaned",
+      pendingTaskIds: ["task-z", "task-a"],
+      observedTaskIds: ["task-z", "task-a"],
+      oldestPendingAt: 1,
+      reason: "process_exit",
+      jobs: [
+        { id: "task-z", launchType: "agent", startedAt: 1 },
+        { id: "task-a", launchType: "shell", startedAt: 2 },
+      ],
+    });
+    firstCallbacks.onExit(0);
+    for (let attempt = 0; attempt < 20 && h.prompts.length === 0; attempt++) await shortDelay();
+
+    assert.equal(h.launches.length, 2, "orphan recovery relaunches without another human prompt");
+    assert.match(h.prompts[0] ?? "", /Continue after runner restart/);
+    const error = h.sent.find((message) => message.type === "session_event" &&
+      message.payload.kind === "error" && /task-a, task-z/.test(message.payload.message));
+    assert.ok(error, "the durable error names every orphaned task id");
+    const crashes = h.sent.filter((message) =>
+      message.type === "driver_telemetry" && message.metric === "crash");
+    assert.equal(crashes.length, 1);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("an idle Claude exit without a resumable conversation reports that recovery is unavailable", async () => {
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-native",
+    command: "claude",
+    agentSessionId: null,
+    agentVersion: "2.1.268",
+  });
+  try {
+    await h.manager.start({
+      ...launchSpec(h.root),
+      driver: "claude-code",
+      agentId: "claude-native",
+      command: "claude",
+    });
+    h.store.patchMeta("resume-session", { agentSessionId: null });
+    const firstCallbacks = h.callbacks();
+    firstCallbacks.onBackgroundWork?.({
+      state: "orphaned",
+      pendingTaskIds: ["task-unresumable"],
+      observedTaskIds: ["task-unresumable"],
+      oldestPendingAt: 1,
+      reason: "process_exit",
+    });
+    firstCallbacks.onExit(0);
+    await tick();
+
+    const error = h.sent.find((message) => message.type === "session_event" &&
+      message.payload.kind === "error" && /task-unresumable/.test(message.payload.message));
+    assert.ok(error?.type === "session_event" && error.payload.kind === "error");
+    assert.match(error.payload.message, /automatic recovery is unavailable/);
+    assert.equal(h.launches.length, 1, "the runner cannot relaunch an unknown provider conversation");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("exec launches record fallback usage while failed initialization records launch failure", async () => {
   const h = harness(
     { driver: "codex", agentVersion: "0.63.0", agentSessionId: null },
@@ -3926,7 +4871,7 @@ test("app-server crash resumes queued-but-unsubmitted prompts and never replays 
       running: true,
       queue: [{ id: "safe-queued", text: "not submitted", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     await tick();
     await tick();
@@ -4027,7 +4972,7 @@ test("explicit restart keeps legacy exec Codex fresh while its process-loss resu
   }
 });
 
-test("a prompt arriving during crash recovery stays behind the older recovered queue", async () => {
+test("a runner exit during interruption recovery resumes the preserved FIFO before newer work", async () => {
   let releaseInitialize!: () => void;
   const gate = new Promise<void>((resolve) => { releaseInitialize = resolve; });
   const h = harness({ status: "running" }, gate);
@@ -4041,8 +4986,10 @@ test("a prompt arriving during crash recovery stays behind the older recovered q
       status: "running",
       running: true,
       queue: [{ id: "older", text: "older recovered", images: [] }],
+      interruptRequested: true,
+      holdQueuedPromptsAfterInterrupt: true,
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick(); // recovery launch has installed an active entry and is awaiting initialize
     h.manager.prompt("resume-session", "new during recovery");
     const recovering = (h.manager as any).recoveryQueues.get("resume-session");
@@ -4152,7 +5099,7 @@ test("a retryable recovery conflict retains unsubmitted prompts for a later retr
       running: true,
       queue: [{ id: "held", text: "keep me", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     await tick();
     const held = (h.manager as any).recoveryQueues.get("resume-session");
@@ -4177,7 +5124,7 @@ test("Stop before scheduled recovery prevents relaunch and clears held prompts",
       running: true,
       queue: [{ id: "held", text: "must not run", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     h.manager.stop("resume-session");
     await tick();
     await tick();
@@ -4206,7 +5153,7 @@ test("Stop during recovery initialization cancels that launch without leaving a 
       running: true,
       queue: [{ id: "held", text: "must not run", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     h.manager.stop("resume-session");
     releaseInitialize();
@@ -4246,7 +5193,7 @@ test("explicit Restart clears a retained recovery queue after a retryable confli
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "discarded by restart", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     await tick();
     assert.equal((h.manager as any).recoveryQueues.has("resume-session"), true);
@@ -4276,7 +5223,7 @@ test("Restart superseding recovery initialization keeps the Restart lease", asyn
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "old held", images: [] }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     assert.equal(h.launches.length, 1, "recovery launch is waiting in initialize");
 
@@ -4326,7 +5273,7 @@ test("Restart superseding deferred queued recovery keeps the replacement admissi
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "discarded by restart", images: [], durable }],
     });
-    (h.manager as any).onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await entered[0]!.promise;
 
     const restart = h.manager.start(launchSpec(h.root));
@@ -4406,7 +5353,7 @@ test("Restart superseding capacity-queued recovery keeps the replacement admissi
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "discarded by restart", images: [], durable }],
     });
-    internals.onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     assert.deepEqual(
       internals.admissionQueue.map((entry: { request: { sessionId: string } }) => entry.request.sessionId),
@@ -4469,7 +5416,7 @@ test("cancelling capacity-queued recovery releases its lock while retaining the 
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "retry later", images: [] }],
     });
-    internals.onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     assert.deepEqual(
       internals.admissionQueue.map((entry: { request: { sessionId: string } }) => entry.request.sessionId),
@@ -4507,7 +5454,7 @@ test("cancelling recovery after immediate admission releases its pre-provider lo
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "retry later", images: [] }],
     });
-    internals.onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await tick();
     await tick();
 
@@ -4537,7 +5484,7 @@ test("cancelling recovery during deferred launch preparation releases its lock",
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
       queue: [{ id: "held", text: "retry later", images: [] }],
     });
-    internals.onExit("resume-session", 1);
+    exitActive(h.manager, "resume-session", 1);
     await entered.promise;
     h.manager.cancel("resume-session");
     gate.resolve();

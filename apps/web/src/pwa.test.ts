@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import { shouldRegisterServiceWorker } from "./pwa.js";
+import { encodeResourceId } from "./navigation.js";
 
 test("registers on a secure remote origin (the phone case)", () => {
   assert.equal(
@@ -53,6 +54,7 @@ test("the service worker uses only the Wollipog generic notification tag", () =>
 
 type WorkerHandler = (event: {
   notification: { close(): void; data: { sessionId?: string | null; view?: string | null;
+    eventEpoch?: number | null; requestId?: string | null;
     receipt?: { deliveryId: string; token: string } | null } };
   waitUntil(promise: Promise<unknown>): void;
 }) => void;
@@ -80,6 +82,7 @@ function notificationClickHarness(openClients: Array<{ focus(): Promise<void>; p
   const click = handlers.get("notificationclick");
   assert.ok(click, "notificationclick handler registered");
   const dispatch = async (data: { sessionId?: string | null; view?: string | null;
+    eventEpoch?: number | null; requestId?: string | null;
     receipt?: { deliveryId: string; token: string } | null }) => {
     let settled: Promise<unknown> | null = null;
     click({ notification: { close() {}, data }, waitUntil: (promise) => { settled = promise; } });
@@ -91,10 +94,12 @@ function notificationClickHarness(openClients: Array<{ focus(): Promise<void>; p
 test("closed-PWA notification clicks open canonical encoded destinations", async () => {
   const harness = notificationClickHarness();
   await harness.dispatch({ sessionId: "space / unicode ✅" });
+  await harness.dispatch({ sessionId: "space / unicode ✅", eventEpoch: 4, requestId: "ask / ✅" });
   await harness.dispatch({ view: "automations" });
   await harness.dispatch({});
   assert.deepEqual(harness.opened, [
     "/sessions/~cwBwAGEAYwBlACAALwAgAHUAbgBpAGMAbwBkAGUAIAAFJw",
+    `/sessions/~cwBwAGEAYwBlACAALwAgAHUAbgBpAGMAbwBkAGUAIAAFJw/attention/~${encodeResourceId("ask / ✅")}?epoch=4`,
     "/automations",
     "/",
   ]);
@@ -108,10 +113,12 @@ test("live-PWA notification clicks focus and message the existing client", async
     postMessage(message) { messages.push(message); },
   }]);
   await harness.dispatch({ sessionId: "s_1" });
+  await harness.dispatch({ sessionId: "s_1", eventEpoch: 2, requestId: "ask" });
   await harness.dispatch({ view: "automations" });
-  assert.equal(focused, 2);
+  assert.equal(focused, 3);
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
     { type: "wollipog:open-session", sessionId: "s_1" },
+    { type: "wollipog:open-session", sessionId: "s_1", eventEpoch: 2, requestId: "ask" },
     { type: "wollipog:open-automations" },
   ]);
   assert.equal(JSON.stringify(messages).includes("mam:open-"), false,

@@ -39,6 +39,10 @@ import {
 } from "./instances-context.js";
 import { viewFromPath, type View } from "./navigation.js";
 import { browserRandomUUID } from "./browser-crypto.js";
+import {
+  clearAllDurableQueuedEditRecoveries,
+  clearRuntimeQueuedEditRecoveriesForInstance,
+} from "./queued-edit-recovery.js";
 
 const LOCAL_PROFILE: InstanceProfile = {
   id: "local",
@@ -469,6 +473,8 @@ export function InstanceProvider({
       }
       throw error;
     }
+    clearAllDurableQueuedEditRecoveries(profileId);
+    clearRuntimeQueuedEditRecoveriesForInstance(profileId);
     if (!mountedRef.current) return;
     if (generationRef.current !== operationGeneration) {
       setState((current) => ({ ...current, registry }));

@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerToControlPlane } from "@wollipog/protocol";
-import { SessionManager } from "./session-manager.js";
+import { SessionManager, type DurableCommandLifecycle } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
@@ -85,6 +85,190 @@ test("delivered approval emits exactly one permission_resolved and flips box met
     assert.equal(resolved.length, 1);
     assert.equal((resolved[0] as { payload: { resolutionReason?: string } }).payload.resolutionReason, "submitted");
     assert.equal(store.readMeta("s_perm")!.status, "running");
+  } finally {
+    cleanup();
+  }
+});
+
+test("provider-initiated turn settlement restores idle after an answered approval", () => {
+  const { sm, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:1");
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "provider-ask",
+      title: "Bash: pwd",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Reject", kind: "reject_once" },
+      ],
+    });
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+    sm.resolvePermission("s_perm", "provider-ask", "allow");
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:1");
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("provider-initiated turns enforce governance without claiming the runner queue drain", () => {
+  const { sm, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    let cancellations = 0;
+    entry.client.cancel = () => { cancellations += 1; };
+    store.patchMeta("s_perm", { config: { maxToolCalls: 1 } });
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:1");
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "tool_call",
+      toolCallId: "provider-tool",
+      title: "Bash",
+      toolKind: "execute",
+      status: "in_progress",
+    });
+
+    assert.equal(entry.running, false);
+    assert.equal(entry.providerInitiatedTurnActive, true);
+    assert.equal(cancellations, 1);
+    assert.equal(entry.governanceTripped, "max_tool_calls");
+  } finally {
+    cleanup();
+  }
+});
+
+test("provider-initiated settlement preserves a pending request owned by another lifecycle", () => {
+  const { sm, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = true;
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:2");
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "provider-ask",
+      title: "Bash: pwd",
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+    });
+    // A recovery/authentication lifecycle can replace the provider-owned card before the turn's
+    // result arrives. Settlement must not confuse that current card with its own request.
+    store.patchMeta("s_perm", {
+      status: "input_required",
+      pendingApproval: {
+        requestId: "recovered-question",
+        title: "Choose a recovery path",
+        options: [],
+        kind: "question",
+        questions: [{ id: "path", question: "Which path?", options: [], required: true }],
+      },
+    });
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:2");
+
+    const pending = store.readMeta("s_perm")?.pendingApproval;
+    assert.equal(pending?.requestId, "recovered-question");
+    assert.equal(pending?.additionalRequests, undefined);
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+  } finally {
+    cleanup();
+  }
+});
+
+test("provider-initiated settlement restores running while a queued runner turn drains", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  const entry = (sm as any).active.get("s_perm");
+  let finishPrompt: ((value: "end_turn") => void) | undefined;
+  try {
+    entry.running = false;
+    entry.client.prompt = () => new Promise<"end_turn">((resolve) => {
+      finishPrompt = resolve;
+    });
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:queued");
+    sm.prompt("s_perm", "queued behind provider turn");
+    for (let attempt = 0; attempt < 200 && !finishPrompt; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.ok(finishPrompt, "the queued runner turn owns the active drain");
+
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "provider-ask",
+      title: "Bash: pwd",
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+    });
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:queued");
+
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+    assert.equal(sent.filter((message) => message.type === "session_status").at(-1)?.status, "running");
+  } finally {
+    finishPrompt?.("end_turn");
+    for (let attempt = 0; attempt < 200 && entry.running; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    cleanup();
+  }
+});
+
+test("provider-initiated turns reject stale interrupts and resume the queued FIFO after settlement", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    let cancellations = 0;
+    const prompts: string[] = [];
+    entry.client.cancel = () => { cancellations += 1; };
+    entry.client.prompt = async (text: string) => { prompts.push(text); return "end_turn" as const; };
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:3");
+    const activeQueue = sent.filter((message) => message.type === "session_queue").at(-1);
+    assert.equal(activeQueue?.activeTurnId, "provider:3");
+    assert.equal(sm.interruptTurn("s_perm", "provider:stale"), "stale_turn");
+    assert.equal(sm.interruptTurn("s_perm", "provider:3"), "applied");
+    assert.equal(cancellations, 1);
+    sm.prompt("s_perm", "queued after provider turn");
+    assert.equal(entry.queue.length, 1);
+    assert.deepEqual(prompts, []);
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "settled", "provider:3");
+    for (let attempt = 0; attempt < 200 && prompts.length === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(sent.filter((message) => message.type === "session_queue").at(-1)?.activeTurnId, undefined);
+    assert.equal(eventsOf(sent, "turn_interrupted").length, 1);
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.equal(entry.interruptRequested, false);
+    assert.deepEqual(prompts, ["queued after provider turn"]);
+    assert.deepEqual(entry.queue, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("legacy cancellation of an idle provider turn does not discard the next runner prompt", () => {
+  const { sm, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    let cancellations = 0;
+    entry.client.cancel = () => { cancellations += 1; };
+
+    (sm as any).onProviderInitiatedTurn("s_perm", entry.client, "started", "provider:4");
+    sm.cancel("s_perm");
+
+    assert.equal(cancellations, 1);
+    assert.equal(entry.cancelRequested, false);
   } finally {
     cleanup();
   }
@@ -265,6 +449,462 @@ test("explicit question dismissal records cancelled telemetry and a dismissed li
       answered: false,
       resolutionReason: "dismissed",
     });
+  } finally {
+    cleanup();
+  }
+});
+
+test("startup preserves a stranded question as a dismissible recovery and resolves it exactly once", () => {
+  const { sm, sent, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "question-before-restart",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+    // Reproduce the metadata left by the affected older startup path: history still contains the
+    // unresolved request, but the actionable card and waiting status were erased.
+    store.patchMeta("s_perm", { status: "idle", pendingApproval: null });
+    // Recovery must use bounded pages instead of the legacy whole-history materializer.
+    (store as SessionStore & { readEvents: () => never }).readEvents = () => {
+      throw new Error("legacy whole-history reads are forbidden during startup reconciliation");
+    };
+
+    sm.reconcileStore();
+
+    const recovered = store.readMeta("s_perm")!;
+    assert.equal(recovered.status, "input_required");
+    assert.equal(recovered.questionRecoveryReconciled, true);
+    assert.deepEqual(recovered.pendingApproval, {
+      requestId: "question-before-restart",
+      title: "Which target?",
+      options: [],
+      kind: "question",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+      recoveryId: "question:0:1",
+      recoveryReason: "provider_restart",
+    });
+
+    sm.answerQuestion("s_perm", "question-before-restart", {}, "dismiss");
+    sm.answerQuestion("s_perm", "question-before-restart", {}, "dismiss");
+
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+    assert.deepEqual((eventsOf(sent, "question_resolved")[0] as { payload: unknown }).payload, {
+      kind: "question_resolved",
+      requestId: "question-before-restart",
+      answered: false,
+      resolutionReason: "dismissed",
+    });
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("startup preserves a still-pending question through the primary metadata path", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "pending-before-restart",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "pending-before-restart");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryReason, "provider_restart");
+  } finally {
+    cleanup();
+  }
+});
+
+test("startup marks only non-secret resumable questions for durable answer continuation", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    store.patchMeta("s_perm", { agentSessionId: "claude-session-1" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "resumable-before-restart",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryAction, "resume_answer");
+    assert.match(store.readMeta("s_perm")?.pendingApproval?.recoveryId ?? "", /^question:\d+:\d+$/u);
+
+    store.patchMeta("s_perm", {
+      pendingApproval: {
+        requestId: "secret-before-restart",
+        title: "Token",
+        options: [],
+        kind: "question",
+        questions: [{ id: "token", question: "Token", options: [], allowOther: true, secret: true }],
+        recoveryId: "question:1:secret",
+      },
+      status: "input_required",
+    });
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryAction, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a durable recovered answer records one resolution before one provider continuation", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(false);
+  try {
+    const prompts: string[] = [];
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "claude-session-1";
+    entry.client.prompt = async (text: string) => {
+      prompts.push(text);
+      return "end_turn" as const;
+    };
+    store.patchMeta("s_perm", {
+      agentSessionId: "claude-session-1",
+      title: "Untitled session",
+      titleSource: "generated",
+      status: "input_required",
+      pendingApproval: {
+        requestId: "recovered-answer",
+        title: "Which target?",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+        recoveryReason: "provider_restart",
+        recoveryAction: "resume_answer",
+        recoveryId: "question:1:8",
+      },
+    });
+    let resolutionFlushed = false;
+    const originalFlush = store.flush.bind(store);
+    store.flush = ((sessionId: string) => {
+      if (store.readEvents(sessionId).some((event) =>
+        event.payload.kind === "question_resolved" && event.payload.commandId === "answer_command_1")) {
+        resolutionFlushed = true;
+      }
+      return originalFlush(sessionId);
+    }) as typeof store.flush;
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "answer_command_1",
+      queued: () => { transitions.push("queued"); },
+      started: () => {
+        assert.equal(resolutionFlushed, true, "the correlated resolution is flushed before started");
+        transitions.push("started");
+      },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+
+    sm.answerRecoveredQuestion(
+      "s_perm",
+      "recovered-answer",
+      "question:1:8",
+      { target: "Production" },
+      lifecycle,
+    );
+    for (let attempt = 0; attempt < 20 && !transitions.includes("completed"); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    assert.deepEqual(transitions, ["queued", "started", "completed"]);
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0]!, /Do not repeat tool calls or other side effects/u);
+    assert.match(prompts[0]!, /"answer":"Production"/u);
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+    assert.deepEqual((eventsOf(sent, "question_resolved")[0] as { payload: unknown }).payload, {
+      kind: "question_resolved",
+      requestId: "recovered-answer",
+      answered: true,
+      resolutionReason: "submitted",
+      commandId: "answer_command_1",
+    });
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.title, "Untitled session");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a recovered answer passes the approval barrier ahead of already-queued ordinary prompts", async () => {
+  const { sm, store, cleanup } = makeHarness(false);
+  try {
+    const prompts: string[] = [];
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "claude-session-1";
+    entry.client.prompt = async (text: string) => {
+      prompts.push(text);
+      return "end_turn" as const;
+    };
+    store.patchMeta("s_perm", {
+      agentSessionId: "claude-session-1",
+      status: "input_required",
+      pendingApproval: {
+        requestId: "recovered-behind-queue",
+        recoveryId: "question:1:21",
+        title: "Which target?",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+        recoveryReason: "provider_restart",
+        recoveryAction: "resume_answer",
+      },
+    });
+    assert.equal(sm.prompt("s_perm", "ordinary prompt queued first"), true);
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "answer_command_barrier",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+
+    sm.answerRecoveredQuestion(
+      "s_perm",
+      "recovered-behind-queue",
+      "question:1:21",
+      { target: "Production" },
+      lifecycle,
+    );
+    for (let attempt = 0; attempt < 30 && prompts.length < 2; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    assert.deepEqual(transitions, ["queued", "started", "completed"]);
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[0]!, /"answer":"Production"/u);
+    assert.equal(prompts[1], "ordinary prompt queued first");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a correlated recovered resolution is a durable no-replay fence", () => {
+  const { sm, store, cleanup } = makeHarness(false);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    entry.client.agentSessionId = () => "claude-session-1";
+    store.patchMeta("s_perm", {
+      agentSessionId: "claude-session-1",
+      status: "input_required",
+      pendingApproval: {
+        requestId: "already-resolved",
+        recoveryId: "question:1:34",
+        title: "Which target?",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+        recoveryReason: "provider_restart",
+        recoveryAction: "resume_answer",
+      },
+    });
+    store.appendEvent("s_perm", {
+      kind: "question_resolved",
+      requestId: "already-resolved",
+      answered: true,
+      commandId: "answer_command_replayed",
+    });
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "answer_command_replayed",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+
+    sm.answerRecoveredQuestion(
+      "s_perm",
+      "already-resolved",
+      "question:1:34",
+      { target: "Production" },
+      lifecycle,
+    );
+
+    assert.deepEqual(transitions, [
+      "uncertain:the durable user event already exists but provider submission state is unknown",
+    ]);
+    assert.equal(entry.queue.length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a durable recovered answer rejects a mismatched question occurrence", () => {
+  const { sm, store, cleanup } = makeHarness(false);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = false;
+    entry.client.agentSessionId = () => "claude-session-1";
+    store.patchMeta("s_perm", {
+      agentSessionId: "claude-session-1",
+      status: "input_required",
+      pendingApproval: {
+        requestId: "provider-counter-5",
+        recoveryId: "question:2:40",
+        title: "Which target?",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+        recoveryReason: "provider_restart",
+        recoveryAction: "resume_answer",
+      },
+    });
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "answer_wrong_occurrence",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+
+    sm.answerRecoveredQuestion(
+      "s_perm",
+      "provider-counter-5",
+      "question:1:40",
+      { target: "Production" },
+      lifecycle,
+    );
+
+    assert.deepEqual(transitions, ["failed:the recovered question is no longer pending"]);
+    assert.equal(entry.queue.length, 0);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryId, "question:2:40");
+  } finally {
+    cleanup();
+  }
+});
+
+test("startup retries historical question recovery after a transient history read failure", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "question-after-read-retry",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+    store.patchMeta("s_perm", { status: "idle", pendingApproval: null });
+    const logTailSeqResult = store.logTailSeqResult.bind(store);
+    store.logTailSeqResult = () => ({ ok: false });
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.questionRecoveryReconciled, undefined);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+
+    store.logTailSeqResult = logTailSeqResult;
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.questionRecoveryReconciled, true);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "question-after-read-retry");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryReason, "provider_restart");
+  } finally {
+    cleanup();
+  }
+});
+
+test("recovered dismissal preserves a newer running turn status", () => {
+  const { sm, sent, store, cleanup } = makeHarness(false);
+  try {
+    store.patchMeta("s_perm", {
+      status: "running",
+      pendingApproval: {
+        requestId: "recovery-during-new-turn",
+        title: "Which target?",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+        recoveryReason: "provider_restart",
+      },
+    });
+
+    sm.answerQuestion("s_perm", "recovery-during-new-turn", {}, "dismiss");
+
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(sent.filter((message) => message.type === "session_status").at(-1)?.status, "running");
+  } finally {
+    cleanup();
+  }
+});
+
+test("startup never resurrects a question that already has a durable resolution", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "older-replaced-question",
+      questions: [{ id: "target", question: "Old target?", options: [{ label: "Staging" }] }],
+    });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "resolved-before-restart",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_resolved",
+      requestId: "resolved-before-restart",
+      answered: true,
+      resolutionReason: "submitted",
+    });
+    (sm as any).emitStatus("s_perm", "idle");
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("startup clears stale question metadata when its durable resolution won the crash race", () => {
+  const { sm, sent, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "resolved-before-meta-clear",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+    store.appendEvent("s_perm", {
+      kind: "question_resolved",
+      requestId: "resolved-before-meta-clear",
+      answered: true,
+      resolutionReason: "submitted",
+    });
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(eventsOf(sent, "question_resolved").length, 0,
+      "startup must not append a second resolution for an already-resolved question");
   } finally {
     cleanup();
   }

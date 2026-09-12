@@ -6,12 +6,13 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentDriverKind, EditQueuedPromptMessage, RunnerToControlPlane, SessionQueueMessage } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { createWorkspaceReference } from "./session-files.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -423,6 +424,28 @@ test("a governance-tripped entry rejects turn interruption without holding or ca
   }
 });
 
+test("a markerless interrupt cannot install a hold between serialized turns", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    // drain() retains running=true while a steering fence settles between turns, but the absence
+    // of activeTurnId proves there is no provider turn whose completion could clear a new hold.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (sm as any).active.get("s_q");
+    let cancels = 0;
+    entry.client.cancel = () => { cancels += 1; };
+    entry.steerFences = new Set(["between-turns"]);
+
+    const before = queues().length;
+    assert.equal(sm.interruptTurn("s_q"), "turn_not_running");
+    assert.equal(entry.interruptRequested, undefined);
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, undefined);
+    assert.equal(cancels, 0);
+    assert.equal(queues().length, before);
+  } finally {
+    cleanup();
+  }
+});
+
 test("a synchronous provider cancel failure rolls back the interruption hold", () => {
   const { sm, queues, cleanup } = harness();
   try {
@@ -440,7 +463,7 @@ test("a synchronous provider cancel failure rolls back the interruption hold", (
   }
 });
 
-test("turn-only interruption is idempotent and preserves FIFO for every driver contract", async () => {
+test("turn-only interruption auto-resumes the exact FIFO after safe settlement for every driver contract", async () => {
   for (const driver of ["codex-app-server", "codex", "claude-code", "acp"] as AgentDriverKind[]) {
     const root = mkdtempSync(join(tmpdir(), `wollipog-sm-interrupt-${driver}-`));
     const sent: RunnerToControlPlane[] = [];
@@ -448,17 +471,18 @@ test("turn-only interruption is idempotent and preserves FIFO for every driver c
     store.create(meta({ driver, status: "idle" }));
     let settleFirst!: (value: "cancelled") => void;
     const firstTurn = new Promise<"cancelled">((resolve) => { settleFirst = resolve; });
-    const ran: string[] = [];
+    const ran: Array<{ text: string; images: unknown[] }> = [];
+    const configs: Array<{ model?: string }> = [];
     let cancelCalls = 0;
     const client = {
       resolvePermission: () => false,
       cancel: () => { cancelCalls += 1; },
       dispose: () => {},
-      prompt: (text: string) => {
-        ran.push(text);
+      prompt: (text: string, images: unknown[]) => {
+        ran.push({ text, images });
         return text === "A" ? firstTurn : Promise.resolve("end_turn" as const);
       },
-      setConfig: () => {},
+      setConfig: (config: { model?: string }) => { configs.push(config); },
       agentSessionId: () => "agent-1",
     };
     const manager = new SessionManager((message) => sent.push(message), () => {}, store, "test-runner");
@@ -473,22 +497,27 @@ test("turn-only interruption is idempotent and preserves FIFO for every driver c
       const activeQueue = sent.filter((message): message is SessionQueueMessage =>
         message.type === "session_queue").at(-1)!;
       assert.ok(activeQueue.activeTurnId, `${driver} publishes the dequeued turn coordinate`);
-      manager.prompt("s_q", "B");
+      manager.prompt("s_q", "B", [{ mimeType: "image/png", data: "AAAA" }], undefined, { model: "model-b" });
+      manager.prompt("s_q", "C", [], undefined, { model: "model-c" });
+      const acceptedQueue = sent.filter((message): message is SessionQueueMessage =>
+        message.type === "session_queue").at(-1)!.queue;
+      const acceptedIds = acceptedQueue.map((prompt) => prompt.id);
 
       assert.equal(manager.interruptTurn("s_q"), "applied");
       assert.equal(manager.interruptTurn("s_q"), "already_requested");
       const heldQueue = sent.filter((message): message is SessionQueueMessage =>
         message.type === "session_queue").at(-1)!;
       assert.equal(heldQueue.held, true, `${driver} publishes the FIFO hold`);
-      assert.deepEqual(heldQueue.queue.map((prompt) => prompt.text), ["B"], driver);
-      manager.prompt("s_q", "C");
-      const releasedQueue = sent.filter((message): message is SessionQueueMessage =>
-        message.type === "session_queue").at(-1)!;
-      assert.equal(releasedQueue.held, undefined, `${driver} publishes explicit resume`);
-      assert.deepEqual(releasedQueue.queue.map((prompt) => prompt.text), ["B", "C"], driver);
+      assert.deepEqual(heldQueue.queue.map((prompt) => prompt.id), acceptedIds, `${driver} preserves queue identity`);
+      assert.deepEqual(heldQueue.queue.map((prompt) => prompt.text), ["B", "C"], driver);
+      manager.reportQueues();
+      assert.equal(sent.filter((message): message is SessionQueueMessage =>
+        message.type === "session_queue").at(-1)!.held, true, `${driver} preserves the fence across reconnect`);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(ran.length, 1, `${driver} cannot dispatch before cancellation settles`);
       assert.equal(cancelCalls, 1, `${driver} receives one provider cancellation`);
       settleFirst("cancelled");
-      await waitFor(() => ran.length === 3, `${driver} redirect prompt releases the held FIFO after settlement`);
+      await waitFor(() => ran.length === 3, `${driver} resumes the accepted FIFO after settlement`);
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const interrupted = (manager as any).active.get("s_q");
@@ -497,7 +526,9 @@ test("turn-only interruption is idempotent and preserves FIFO for every driver c
       assert.equal(store.readMeta("s_q")?.status, "idle", driver);
       assert.equal(store.readEvents("s_q").filter((event) => event.payload.kind === "turn_interrupted").length, 1, driver);
       assert.equal(store.readEvents("s_q").some((event) => event.payload.kind === "error"), false, driver);
-      assert.deepEqual(ran, ["A", "B", "C"], driver);
+      assert.deepEqual(ran.map((turn) => turn.text), ["A", "B", "C"], driver);
+      assert.deepEqual(ran[1]!.images, [{ mimeType: "image/png", data: "AAAA" }], `${driver} preserves attachments`);
+      assert.deepEqual(configs, [{ model: "model-b" }, { model: "model-c" }], `${driver} preserves per-message config`);
       assert.equal(sent.filter((message): message is SessionQueueMessage =>
         message.type === "session_queue").at(-1)!.activeTurnId, undefined, `${driver} clears the turn coordinate`);
     } finally {
@@ -506,7 +537,93 @@ test("turn-only interruption is idempotent and preserves FIFO for every driver c
   }
 });
 
-test("synthetic orphan recovery cannot resume a user-interrupted Claude queue", async () => {
+test("a terminal provider rejection after an accepted Stop Turn releases the FIFO", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-reject-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle" }));
+  let rejectFirst!: (reason: Error) => void;
+  const firstTurn = new Promise<"end_turn">((_resolve, reject) => { rejectFirst = reject; });
+  const ran: string[] = [];
+  const client = {
+    resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+    agentSessionId: () => "agent-1",
+    prompt: (text: string) => {
+      ran.push(text);
+      return text === "A" ? firstTurn : Promise.resolve("end_turn" as const);
+    },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (manager as any).active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  try {
+    manager.prompt("s_q", "A");
+    await waitFor(() => ran.length === 1);
+    manager.prompt("s_q", "B");
+    assert.equal(manager.interruptTurn("s_q"), "applied");
+    rejectFirst(new Error("provider rejected after cancellation"));
+    await waitFor(() => ran.length === 2, "the preserved prompt should run after rejection settles the turn");
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (manager as any).active.get("s_q");
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.deepEqual(entry.queue, []);
+    assert.deepEqual(ran, ["A", "B"]);
+    assert.equal(store.readEvents("s_q").filter((event) => event.payload.kind === "turn_interrupted").length, 1);
+    assert.equal(store.readEvents("s_q").some((event) => event.payload.kind === "error"), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("provider authentication remains the only hold after an interrupted turn settles", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-auth-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle" }));
+  let settleFirst!: (value: "cancelled") => void;
+  const firstTurn = new Promise<"cancelled">((resolve) => { settleFirst = resolve; });
+  const ran: string[] = [];
+  const client = {
+    resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+    agentSessionId: () => "agent-1",
+    prompt: (text: string) => {
+      ran.push(text);
+      return text === "A" ? firstTurn : Promise.resolve("end_turn" as const);
+    },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (manager as any).active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  try {
+    manager.prompt("s_q", "A");
+    await waitFor(() => ran.length === 1);
+    manager.prompt("s_q", "B");
+    assert.equal(manager.interruptTurn("s_q"), "applied");
+    // Authentication can be discovered while the provider is settling the cancelled turn.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (manager as any).active.get("s_q");
+    entry.authenticationBlocked = true;
+    settleFirst("cancelled");
+    await waitFor(() => entry.running === false);
+
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false, "the Stop Turn fence is settled");
+    assert.equal(entry.authenticationBlocked, true, "the independent authentication gate remains");
+    assert.deepEqual(ran, ["A"], "queued work still waits for authentication recovery");
+
+    manager.prompt("s_q", "C");
+    await waitFor(() => ran.length === 3, "a post-auth prompt releases the auth gate and drains the FIFO");
+    assert.deepEqual(ran, ["A", "B", "C"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("synthetic orphan recovery cannot overtake an interruption that has not settled", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-orphan-"));
   const store = new SessionStore(root);
   store.create(meta({
@@ -528,7 +645,7 @@ test("synthetic orphan recovery cannot resume a user-interrupted Claude queue", 
     sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
     context: { kind: "native" }, status: "idle", running: false, queue: [{
       id: "held", text: "B", images: [], syntheticRecovery: false,
-    }], holdQueuedPromptsAfterInterrupt: true,
+    }], interruptRequested: true, holdQueuedPromptsAfterInterrupt: true,
   });
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -546,7 +663,7 @@ test("synthetic orphan recovery cannot resume a user-interrupted Claude queue", 
   }
 });
 
-test("a configuration rejection cannot skip an interruption hold", async () => {
+test("a pre-provider configuration settlement releases the interruption fence and resumes the FIFO", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-config-reject-"));
   const store = new SessionStore(root);
   store.create(meta({ status: "idle" }));
@@ -571,20 +688,21 @@ test("a configuration rejection cannot skip an interruption hold", async () => {
     await waitFor(() => configStarted);
     manager.prompt("s_q", "C");
     manager.interruptTurn("s_q");
+    manager.rearmGovernance("s_q", {}, "control_plane");
     rejectConfig(new Error("model unavailable"));
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await waitFor(() => !(manager as any).active.get("s_q").running);
-    assert.deepEqual(ran, []);
+    await waitFor(() => (manager as any).active.get("s_q").running === false);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const entry = (manager as any).active.get("s_q");
-    assert.equal(entry.holdQueuedPromptsAfterInterrupt, true);
-    assert.deepEqual(entry.queue.map((prompt: { text: string }) => prompt.text), ["C"]);
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.equal(entry.controlPlaneHold, true, "the independent hold survives config settlement");
+    assert.deepEqual(ran, [], "the config branch must not continue past the control-plane fence");
+    assert.deepEqual(entry.queue.map((queued: { text: string }) => queued.text), ["C"]);
     assert.equal(store.readEvents("s_q").filter((event) => event.payload.kind === "turn_interrupted").length, 1);
     assert.equal(store.readEvents("s_q").some((event) => event.payload.kind === "error"), false);
-
-    manager.prompt("s_q", "D");
-    await waitFor(() => ran.length === 2);
-    assert.deepEqual(ran, ["C", "D"]);
+    manager.rearmGovernance("s_q", {});
+    await waitFor(() => ran.length === 1);
+    assert.deepEqual(ran, ["C"]);
+    assert.deepEqual(entry.queue, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -708,7 +826,7 @@ test("provider completion winning the interrupt race does not fabricate Interrup
   }
 });
 
-test("pre-provider interruption survives awaited configuration and never submits the interrupted turn", async () => {
+test("pre-provider interruption skips the interrupted turn and automatically resumes the preserved FIFO", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-pre-provider-"));
   const store = new SessionStore(root);
   store.create(meta({ status: "idle" }));
@@ -737,17 +855,59 @@ test("pre-provider interruption survives awaited configuration and never submits
     manager.prompt("s_q", "B");
     manager.interruptTurn("s_q");
     releaseConfig();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await waitFor(() => !(manager as any).active.get("s_q").running);
+    await waitFor(() => ran.length === 1);
     assert.equal(cancels, 1);
-    assert.deepEqual(ran, [], "provider prompt is never called for the interrupted prepared turn");
+    assert.deepEqual(ran, ["B"], "the interrupted prepared turn is skipped and the preserved FIFO resumes");
     assert.equal(store.readEvents("s_q").filter((event) => event.payload.kind === "turn_interrupted").length, 1);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    assert.deepEqual((manager as any).active.get("s_q").queue.map((prompt: { text: string }) => prompt.text), ["B"]);
+    assert.deepEqual((manager as any).active.get("s_q").queue, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
-    manager.prompt("s_q", "C");
-    await waitFor(() => ran.length === 2);
-    assert.deepEqual(ran, ["B", "C"]);
+test("attachment failure after Stop Turn settles the fence and resumes the FIFO", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-interrupt-attachment-failure-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle" }));
+  let rejectImages!: (reason: Error) => void;
+  const firstImages = new Promise<never>((_resolve, reject) => { rejectImages = reject; });
+  const ran: string[] = [];
+  const client = {
+    resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+    agentSessionId: () => "agent-1",
+    prompt: async (text: string) => { ran.push(text); return "end_turn" as const; },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const internals = manager as any;
+  internals.active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  let resolutionCalls = 0;
+  internals.resolvePromptImages = () => {
+    resolutionCalls += 1;
+    return resolutionCalls === 1 ? firstImages : Promise.resolve([]);
+  };
+  try {
+    manager.prompt("s_q", "A", [{
+      artifactId: "art_interrupted",
+      mimeType: "image/png",
+      sizeBytes: 3,
+      sha256: "a".repeat(64),
+    }]);
+    await waitFor(() => resolutionCalls === 1);
+    manager.prompt("s_q", "B");
+    assert.equal(manager.interruptTurn("s_q"), "applied");
+    rejectImages(new Error("referenced attachment changed"));
+    await waitFor(() => ran.length === 1, "the preserved FIFO should drain after resolver failure");
+
+    const entry = internals.active.get("s_q");
+    assert.deepEqual(ran, ["B"]);
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.equal(entry.interruptRequested, false);
+    assert.deepEqual(entry.queue, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -856,6 +1016,73 @@ test("referenced images stay metadata-only in durable events and materialize onl
   }
 });
 
+test("workspace references resolve bounded real content only at the provider boundary", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-workspace-ref-"));
+  writeFileSync(join(root, "source.ts"), "first line\nprovider-only secret\nthird line\n");
+  writeFileSync(join(root, "large-a.txt"), "a".repeat(512 * 1024 - 1_000));
+  writeFileSync(join(root, "large-b.txt"), "b".repeat(5_000));
+  mkdirSync(join(root, "docs"));
+  writeFileSync(join(root, "docs", "guide.md"), "guide");
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle", repoPath: root }));
+  const fileReference = await createWorkspaceReference({ kind: "native" }, root, { path: "source.ts", kind: "file" });
+  const lineReference = await createWorkspaceReference({ kind: "native" }, root, {
+    path: "source.ts", kind: "lines", startLine: 2, endLine: 2,
+  });
+  const directoryReference = await createWorkspaceReference({ kind: "native" }, root, { path: "docs", kind: "directory" });
+  const largeReferences = await Promise.all([
+    createWorkspaceReference({ kind: "native" }, root, { path: "large-a.txt", kind: "file" }),
+    createWorkspaceReference({ kind: "native" }, root, { path: "large-b.txt", kind: "file" }),
+  ]);
+  const providerTexts: string[] = [];
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  const client = {
+    resolvePermission: () => false,
+    cancel: () => {}, dispose: () => {}, setConfig: () => {}, agentSessionId: () => "agent-1",
+    prompt: async (text: string) => { providerTexts.push(text); return "end_turn" as const; },
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (manager as any).active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (manager as any).runPrompt("s_q", {
+      id: "workspace-prompt",
+      text: "inspect",
+      images: [fileReference, lineReference, directoryReference],
+    });
+    assert.equal(providerTexts.length, 1);
+    assert.match(providerTexts[0]!, /provider-only secret/);
+    assert.match(providerTexts[0]!, /"startLine": 2/);
+    assert.match(providerTexts[0]!, /2: provider-only secret/);
+    assert.match(providerTexts[0]!, /docs\/guide\.md \(5 bytes\)/);
+    const durable = JSON.stringify(store.readEvents("s_q"));
+    assert.equal(durable.includes("provider-only secret"), false, "workspace content must remain provider-only");
+    assert.equal(durable.includes(fileReference.artifactId), true, "durable history retains only reference metadata");
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (manager as any).runPrompt("s_q", {
+      id: "bounded-workspace-prompt", text: "bounded", images: largeReferences,
+    });
+    assert.equal(providerTexts.length, 2);
+    const boundedSuffix = providerTexts[1]!.slice("bounded".length);
+    assert.ok(Buffer.byteLength(boundedSuffix, "utf8") <= 512 * 1024, "the full provider suffix stays within the aggregate cap");
+    assert.match(boundedSuffix, /"truncated": true/, "the final reference is truncated instead of overflowing the aggregate cap");
+
+    writeFileSync(join(root, "source.ts"), "changed after attachment\n");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (manager as any).runPrompt("s_q", {
+      id: "stale-workspace-prompt", text: "inspect stale", images: [fileReference],
+    });
+    assert.equal(providerTexts.length, 2, "a changed target must fail before provider delivery");
+    assert.match(JSON.stringify(store.readEvents("s_q")), /missing, changed, or belongs to a different workspace/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("reportQueues re-emits every non-empty, held, or active queue (reconnect re-sync)", () => {
   const { sm, queues, cleanup } = harness();
   try {
@@ -871,6 +1098,8 @@ test("reportQueues re-emits every non-empty, held, or active queue (reconnect re
     // A hold is independently authoritative even when no prompt currently waits behind it.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const entry = (sm as any).active.get("s_q");
+    entry.client.steer = async () => ({ outcome: "accepted" });
+    entry.steeringAvailable = true;
     entry.queue = [];
     entry.holdQueuedPromptsAfterInterrupt = true;
     const heldBefore = queues().length;
@@ -878,6 +1107,12 @@ test("reportQueues re-emits every non-empty, held, or active queue (reconnect re
     assert.equal(queues().length, heldBefore + 1);
     assert.equal(queues().at(-1)!.held, true);
     assert.deepEqual(queues().at(-1)!.queue, []);
+
+    sm.prompt("s_q", "held steering reason");
+    assert.equal(
+      queues().at(-1)!.queue[0]?.steerDisabledReason,
+      "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
+    );
 
     entry.holdQueuedPromptsAfterInterrupt = false;
     entry.activeTurnId = "turn-live";
@@ -961,7 +1196,7 @@ test("process exit clears the queue overlay (queued prompts died with the entry)
     sm.prompt("s_q", "doomed");
     assert.equal(queues().at(-1)!.queue.length, 1);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (sm as any).onExit("s_q", 1);
+    (sm as any).onExit("s_q", 1, (sm as any).active.get("s_q").client);
     assert.equal(queues().at(-1)!.queue.length, 0, "exit must report an empty queue");
   } finally {
     cleanup();
@@ -1046,6 +1281,42 @@ test("each queued prompt runs under the config it was SENT with, in order", asyn
   }
 });
 
+test("a tier-only queued change reaches the driver without changing model or effort", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-queue-tier-"));
+  const store = new SessionStore(root);
+  store.create(meta({
+    driver: "codex-app-server",
+    config: { model: "gpt", effort: "high", serviceTier: "default" },
+  }));
+  const sm = new SessionManager(() => {}, () => {}, store, "test-runner");
+  const applied: Array<{ model?: string; effort?: string; serviceTier?: string }> = [];
+  const stub = {
+    resolvePermission: () => false,
+    cancel: () => {},
+    dispose: () => {},
+    prompt: () => Promise.resolve("end_turn" as const),
+    setConfig: (config: { model?: string; effort?: string; serviceTier?: string }) => applied.push(config),
+    agentSessionId: () => "thread-1",
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (sm as any).active.set("s_q", {
+    sessionId: "s_q", client: stub, repoPath: "/home/me/repo", cwd: "/home/me/repo",
+    worktree: null, status: "running", running: true, queue: [],
+  });
+  try {
+    sm.prompt("s_q", "B", [], undefined, { model: "gpt", effort: "high", serviceTier: "fast" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (sm as any).active.get("s_q").running = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (sm as any).drain("s_q");
+    assert.equal(applied.length, 1);
+    assert.deepEqual(applied[0], { model: "gpt", effort: "high", serviceTier: "fast" });
+    assert.deepEqual(store.readMeta("s_q")?.config, { model: "gpt", effort: "high", serviceTier: "fast" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a superseded drain cannot release a same-owner replacement drain's lock", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-sm-drain-lock-generation-"));
   const store = new SessionStore(root);
@@ -1117,5 +1388,77 @@ test("the queue byte budget rejects an oversized prompt with an error event", ()
     assert.equal(queues().length, 0, "rejected prompt must not enter the queue");
   } finally {
     cleanup();
+  }
+});
+
+test("a control-plane queue hold parks queued prompts without tripping governance", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-cp-hold-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle", config: { costBudgetUsd: 10 } }));
+  let settleFirst!: (value: "end_turn") => void;
+  const firstTurn = new Promise<"end_turn">((resolve) => { settleFirst = resolve; });
+  const ran: string[] = [];
+  const client = {
+    resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+    agentSessionId: () => "agent-1",
+    prompt: (text: string) => {
+      ran.push(text);
+      return text === "A" ? firstTurn : Promise.resolve("end_turn" as const);
+    },
+  };
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (manager as any).active.set("s_q", {
+    sessionId: "s_q", client, repoPath: root, cwd: root, worktree: null,
+    context: { kind: "native" }, status: "idle", running: false, queue: [],
+  });
+  try {
+    manager.prompt("s_q", "A");
+    await waitFor(() => ran.length === 1);
+    manager.prompt("s_q", "B", undefined, undefined, { costBudgetUsd: 5 });
+    manager.prompt("s_q", "C", undefined, undefined, { costBudgetUsd: 10 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (manager as any).active.get("s_q");
+    manager.interruptTurn("s_q");
+    manager.rearmGovernance("s_q", {}, "control_plane");
+    assert.equal(entry.controlPlaneHold, true, "the queue is held by the card, on its own flag");
+    assert.equal(entry.governanceTripped, undefined, "but nothing tripped: a provider failure would still surface");
+    assert.deepEqual(entry.queue.map((queued: { config?: { costBudgetUsd?: number } }) => queued.config?.costBudgetUsd), [5, 10],
+      "a threshold-free hold leaves each queued prompt's own budget alone");
+    settleFirst("end_turn");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false, "the provider finished first, so the interrupt hold cleared");
+    assert.deepEqual(ran, ["A"], "but B still waits on the control-plane card");
+    manager.rearmGovernance("s_q", {});
+    await waitFor(() => ran.length === 3);
+    assert.deepEqual(ran, ["A", "B", "C"], "a threshold-free release drains the queue");
+    assert.deepEqual(entry.queue, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a control-plane hold survives a provider exit: recovery keeps the queue until the release", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-cp-hold-recovery-"));
+  const store = new SessionStore(root);
+  store.create(meta({ status: "idle", driver: "codex-app-server", agentSessionId: "thread-1" }));
+  const manager = new SessionManager(() => {}, () => {}, store, "test-runner");
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.recoveryQueues.set("s_q", [{ id: "q1", text: "B", images: [], queuedAt: 1, config: { costBudgetUsd: 5 } }]);
+    manager.rearmGovernance("s_q", {}, "control_plane");
+    await internals.recoverQueuedAppServer("s_q");
+    assert.equal(internals.recoveryQueues.has("s_q"), true, "held: recovery leaves the queue parked");
+    assert.equal(internals.recoveryHolds.has("s_q"), true);
+    manager.rearmGovernance("s_q", { costBudgetUsd: 3 });
+    assert.equal(internals.recoveryHolds.has("s_q"), false, "a threshold-bearing release lifts the hold and re-enters recovery too");
+    assert.equal(internals.recoveryQueues.get("s_q")?.[0]?.config?.costBudgetUsd, 3, "and rewrites the recovered prompt's threshold");
+    manager.rearmGovernance("s_q", {}, "control_plane");
+    assert.equal(internals.recoveryHolds.has("s_q"), true);
+    internals.discardRecovery("s_q");
+    assert.equal(internals.recoveryHolds.has("s_q"), false, "discarding recovery forgets the hold with the queue");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

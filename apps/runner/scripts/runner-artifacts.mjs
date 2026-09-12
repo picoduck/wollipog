@@ -31,6 +31,22 @@ export function runnerArtifactNames(triple) {
   };
 }
 
+/** Headless release assets: one control-plane executable per target plus one platform-neutral
+ * web bundle. Names are derived from the target like the runner names, so installers, the
+ * release gate, and `wollipog service upgrade` agree byte for byte. */
+export const WEB_BUNDLE_ASSET_NAME = "wollipog-web.tar.gz";
+
+export function controlPlaneArtifactName(triple) {
+  runnerArtifactNames(triple);
+  const executable = triple.endsWith("-pc-windows-msvc") ? ".exe" : "";
+  return `wollipog-control-plane-${triple}${executable}`;
+}
+
+/** Every checksum-manifest asset besides the runner pairs, sorted. */
+export function headlessArtifactNames() {
+  return [...RUNNER_TARGET_TRIPLES.map((triple) => controlPlaneArtifactName(triple)), WEB_BUNDLE_ASSET_NAME].sort();
+}
+
 export function runnerPlatformOfTarget(triple) {
   runnerArtifactNames(triple);
   return RUNNER_TARGET_HOSTS[triple].platform;

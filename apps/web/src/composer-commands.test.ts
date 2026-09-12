@@ -53,6 +53,12 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
   });
   assert.equal(command(enabled, "app:stop").available, true);
   assert.equal(command(enabled, "app:stop").attachmentPolicy, "preserve");
+  assert.equal(command(enabled, "app:respond").available, false);
+  assert.equal(command(enabled, "app:respond").disabledReason, "There is no pending question.");
+
+  const withQuestion = registry([], { planSupported: true, canStopTurn: true, canRespond: true });
+  assert.equal(command(withQuestion, "app:respond").available, true);
+  assert.equal(command(withQuestion, "app:respond").label, "/respond");
 
   const disabled = registry([], { planSupported: false, canStopTurn: false });
   assert.deepEqual(
@@ -60,6 +66,7 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
     [
       { id: "app:rename-session", available: true, disabledReason: undefined },
       { id: "app:plan", available: false, disabledReason: "Plan mode is unavailable for this provider." },
+      { id: "app:respond", available: false, disabledReason: "There is no pending question." },
       { id: "app:stop", available: false, disabledReason: "There is no active turn to stop." },
     ],
   );
@@ -530,7 +537,7 @@ test("grouping and active-id retention preserve stable ranked selection", () => 
       commands: grouped.map((candidate) => candidate.id),
     })),
     [
-      { id: "app", label: "App Commands", order: 0, commands: ["app:rename-session", "app:plan", "app:stop"] },
+      { id: "app", label: "App Commands", order: 0, commands: ["app:rename-session", "app:plan", "app:respond", "app:stop"] },
       {
         id: "provider",
         label: "Harness Commands",

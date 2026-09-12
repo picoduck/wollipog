@@ -26,6 +26,8 @@ export function parseGitAction(body: GitActionRequest): { action: GitAction } | 
       return { action: { kind: "summary" } };
     case "github_review_sync":
       return { action: { kind: "github_review_sync" } };
+    case "forge_review_sync":
+      return { action: { kind: "forge_review_sync" } };
     case "diff": {
       if (!isDiffScope(body.scope)) {
         return { error: `invalid diff scope: ${String(body.scope)} (expected uncommitted | all_branch | last_turn)` };
@@ -133,7 +135,8 @@ const GIT_BUSY: ReadonlySet<SessionStatus> = new Set<SessionStatus>([
  * don't stage or commit a partial snapshot mid-turn or race the post-turn diff capture.
  */
 export function gitActionAllowed(action: GitAction, status: SessionStatus): { ok: true } | { ok: false; error: string } {
-  if (action.kind === "status" || action.kind === "summary" || action.kind === "diff" || action.kind === "github_review_sync") return { ok: true };
+  if (action.kind === "status" || action.kind === "summary" || action.kind === "diff" ||
+      action.kind === "github_review_sync" || action.kind === "forge_review_sync") return { ok: true };
   if (GIT_BUSY.has(status)) {
     return {
       ok: false,
@@ -157,5 +160,6 @@ export function gitActionCapability(action: GitAction): readonly [RunnerProtocol
     return ["fineGrainedDiff", "Line staging and tracked-file discard"];
   }
   if (action.kind === "github_review_sync") return ["githubReviewReconciliation", "GitHub review reconciliation"];
+  if (action.kind === "forge_review_sync") return ["forgeIntegration", "Forge review reconciliation"];
   return null;
 }

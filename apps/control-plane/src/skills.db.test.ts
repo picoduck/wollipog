@@ -28,6 +28,57 @@ const runnerMeta = (runnerId: string): RunnerMetadata => ({
   runnerId, hostname: `${runnerId}-host`, os: "linux", version: "1.0.0", agents: [], workspaces: [],
 });
 
+for (const deletion of ["box", "runner"] as const) {
+  test(`${deletion} deletion clears only its machine skill records, atomically`, () => {
+    const db = ControlPlaneDb.open(":memory:");
+    try {
+      db.createBox({ boxId: "box", runnerId: "removed", sshTarget: "user@host", sshPort: 22,
+        workspaces: [], autoReconnect: false, runnerDataDir: null, now: 10 });
+      db.registerRunner(runnerMeta("removed"), 10, 90);
+      db.registerRunner(runnerMeta("other"), 10, 90);
+      const skill = createSkill(db, "shared");
+      const version = db.getSkillVersion(skill.latestVersion!.id);
+      const instance = db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "all" } });
+      const removed = db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "removed", agentSelector: { kind: "all" } });
+      const other = db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "other", agentSelector: { kind: "all" } });
+      for (const runnerId of ["removed", "other"]) {
+        db.setRunnerSkillState(runnerId, { deployed: [], unmanaged: [] }, 20);
+        db.raw().prepare("INSERT INTO skill_machine_versions VALUES (?, ?, ?, ?)").run(skill.id, runnerId, version!.id, runnerId);
+      }
+      const otherState = db.getRunnerSkillState("other");
+      const remove = () => deletion === "box" ? db.deleteBox("box") : db.deleteRunner("removed");
+
+      // Fail after skill cleanup to prove the enclosing transaction restores it.
+      db.raw().exec("CREATE TRIGGER reject_runner_delete BEFORE DELETE ON runners BEGIN SELECT RAISE(ABORT, 'injected deletion failure'); END");
+      assert.throws(remove, /injected deletion failure/);
+      assert.ok(db.getBox("box"));
+      assert.ok(db.getSkillAssignment(removed.id));
+      assert.ok(db.getRunnerSkillState("removed"));
+      assert.ok(db.getMachineSkillVersion(skill.id, "removed"));
+      db.raw().exec("DROP TRIGGER reject_runner_delete");
+
+      assert.ok(remove());
+      assert.equal(db.getBox("box"), null);
+      assert.equal(db.getSkillAssignment(removed.id), null);
+      assert.equal(db.getRunnerSkillState("removed"), null);
+      assert.equal(db.getMachineSkillVersion(skill.id, "removed"), null);
+      assert.deepEqual(db.getSkillAssignment(instance.id), instance);
+      assert.deepEqual(db.getSkillAssignment(other.id), other);
+      assert.deepEqual(db.getRunnerSkillState("other"), otherState);
+      assert.ok(db.getMachineSkillVersion(skill.id, "other"));
+      assert.deepEqual(db.getSkillVersion(version!.id), version);
+      assert.equal(db.getSkill(skill.id)!.assignmentCount, 2);
+
+      db.registerRunner(runnerMeta("removed"), 30, 90);
+      assert.equal(db.getSkillAssignment(removed.id), null);
+      assert.equal(db.getRunnerSkillState("removed"), null);
+      assert.equal(db.getMachineSkillVersion(skill.id, "removed"), null);
+    } finally {
+      db.close();
+    }
+  });
+}
+
 test("skills CRUD: create with first version and default ownership, unique names, list/get", () => {
   const db = ControlPlaneDb.open(":memory:");
   const skill = createSkill(db, "alpha");
@@ -169,13 +220,17 @@ test("runner skill inventory replaces fully while latest non-empty removal histo
   db.setRunnerSkillState("runner-1", {
     deployed: [{ name: "alpha", digest: "d1", links: [{ agentId: "claude", status: "linked" }] }],
     unmanaged: [{ agentId: "claude", name: "hand-rolled", description: "Local skill" }],
-    removals: [{ path: "~/.codex/skills/retired", reason: "No longer in the desired skill list." }],
+    removals: [
+      { path: "~/.codex/skills/retired", reason: "No longer in the desired skill list." },
+      { path: "~/.codex/skills/retired-wsl (WSL Ubuntu)", reason: "No longer in the desired skill list." },
+    ],
   }, 500);
   const first = db.getRunnerSkillState("runner-1")!;
   assert.equal(first.updatedAt, 500);
   assert.equal(first.deployed[0]!.links[0]!.status, "linked");
   assert.deepEqual(first.removals, [
     { path: "~/.codex/skills/retired", reason: "No longer in the desired skill list." },
+    { path: "~/.codex/skills/retired-wsl (WSL Ubuntu)", reason: "No longer in the desired skill list." },
   ]);
   assert.equal(first.removalsUpdatedAt, 500);
   assert.equal(first.error, undefined);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { computeContextFill } from "./context-meter.js";
+import { compactionNote, computeContextFill } from "./context-meter.js";
 
 test("computeContextFill: small fill keeps one decimal", () => {
   const r = computeContextFill({ tokensIn: 1000, tokensOut: 500, contextWindow: 200_000 });
@@ -48,4 +48,11 @@ test("computeContextFill: overflow clamps to 100% and flags full", () => {
   assert.equal(r.formatPct, "100%");
   assert.equal(r.fillPct, 100);
   assert.equal(r.isFull, true);
+});
+
+test("compactionNote names automatic compaction for native harnesses and defers for ACP", () => {
+  assert.match(compactionNote("claude-code"), /compacts automatically/);
+  assert.match(compactionNote("codex-app-server"), /compacts automatically/);
+  assert.match(compactionNote("acp"), /up to the agent/);
+  assert.match(compactionNote(undefined), /up to the agent/);
 });

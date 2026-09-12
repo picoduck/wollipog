@@ -3,10 +3,12 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionView } from "@wollipog/protocol";
+import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { InboxRow } from "./InboxRow.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -16,6 +18,103 @@ for (const [name, value] of Object.entries({
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+
+test("a multi-request row shows one attention pill per kind with its count and no disclosure", async () => {
+  const session = { id: "session", eventEpoch: 7, runnerId: "runner", title: "Session",
+    status: "input_required", driver: "codex-app-server", pendingApproval: {
+      requestId: "a", options: [], title: "First", additionalRequests: [
+        { requestId: "b / %", options: [], title: "Second", ownerToolUseId: "child" },
+        { requestId: "q", options: [], title: "Which one?", kind: "question" },
+      ],
+    }, attentionOwners: [{ requestId: "b / %", toolCallId: "child", resolved: true, name: "Audit Child", role: "reviewer" }],
+  } as unknown as SessionView;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      threeRow={false} onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.equal(container.querySelector(".attention-requests"), null, "the request disclosure is gone (#896)");
+    assert.equal(container.querySelector("button button"), null);
+    const pills = [...container.querySelectorAll<HTMLElement>(".inbox-status-pill.blocked")];
+    assert.deepEqual(pills.map((pill) => pill.getAttribute("aria-label")),
+      ["Attention: Answer Required", "Attention: Approval Required, 2 Requests"],
+      "priority order: the question outranks the permissions, and the count rides the pill");
+    assert.equal(pills[1]!.querySelector(".inbox-status-pill-count")?.textContent, "2");
+    assert.equal(pills[1]!.getAttribute("title"), "Main Agent: First\nAudit Child · Reviewer: Second");
+    assert.doesNotMatch(container.textContent ?? "", /Actions Required|View All Requests|Request 1/);
+
+    // The phone shape has one line for the sender and the signals, so it shows the top kind and +N.
+    await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      threeRow onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    const compact = [...container.querySelectorAll<HTMLElement>(".inbox-status-pill.blocked")];
+    assert.equal(compact.length, 1);
+    assert.equal(compact[0]!.getAttribute("aria-label"), "Attention: Answer Required, 3 Requests");
+    assert.equal(compact[0]!.querySelector(".inbox-status-pill-count")?.textContent, "+2");
+    assert.equal(compact[0]!.getAttribute("title"), "Main Agent: Which one?\nMain Agent: First\nAudit Child · Reviewer: Second");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a parent row carries the chevron and family chip, and a child row its thread position", async () => {
+  const parent = { id: "parent", runnerId: "runner", title: "Orchestrator", status: "running",
+    driver: "claude-code", pendingApproval: null } as unknown as SessionView;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const toggled: string[] = [];
+  let selected = 0;
+  const children = JSON.stringify({ count: 2, waiting: 1, children: [
+    { id: "c1", title: "Child One", state: "blocked" }, { id: "c2", title: "Child Two", state: "done" },
+  ] });
+  try {
+    await act(async () => root.render(<InboxRow optionId="row" session={parent} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      threeRow={false} threadChildren={children} threadCollapsed={false}
+      onSelect={() => { selected++; }} onExpand={() => { selected++; }} onSessionMenu={() => {}}
+      onToggleThread={(id) => toggled.push(id)} />));
+    const shell = container.querySelector<HTMLElement>(".inbox-row-shell")!;
+    assert.match(shell.className, /thread-parent/);
+    const chevron = container.querySelector<HTMLButtonElement>(".inbox-thread-toggle")!;
+    assert.equal(chevron.getAttribute("aria-label"), "Collapse Thread");
+    assert.equal(chevron.getAttribute("aria-expanded"), "true");
+    assert.equal(chevron.getAttribute("tabindex"), "-1", "the grid owns the keyboard; T toggles");
+    assert.equal(container.querySelector("button button"), null, "the chevron is not nested in the row button");
+    const chip = container.querySelector<HTMLElement>(".inbox-thread-family")!;
+    assert.match(chip.className, /waiting/);
+    assert.equal(chip.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input");
+    assert.deepEqual([...chip.querySelectorAll(".inbox-thread-dot")].map((dot) => dot.className),
+      ["inbox-thread-dot blocked", "inbox-thread-dot done"]);
+    await act(async () => chevron.click());
+    await act(async () => chip.click());
+    assert.deepEqual(toggled, ["parent", "parent"]);
+    assert.equal(selected, 0, "toggling never selects or expands the row");
+
+    await act(async () => root.render(<InboxRow optionId="row" session={parent} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      threeRow={false} threadChildren={children} threadCollapsed
+      onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-label"), "Expand Thread");
+    assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input",
+      "the rollup reads the same while collapsed");
+
+    const child = { ...parent, id: "c1", title: "Child One", parentSessionId: "parent" } as SessionView;
+    await act(async () => root.render(<InboxRow optionId="row" session={child} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={2} stalled={false} activityNow={0}
+      threeRow={false} threadDepth={1} threadLast
+      onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-last/);
+    assert.equal(container.querySelector(".inbox-thread-toggle"), null);
+    assert.equal(container.querySelector(".inbox-thread-family"), null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
 
 test("Inbox rows expose plain Stop Failed instead of Diff Ready", async () => {
   const session = {
@@ -32,14 +131,14 @@ test("Inbox rows expose plain Stop Failed instead of Diff Ready", async () => {
     },
     pendingApproval: null, lastEventAt: null, preview: null,
     agentId: "codex", agentName: "Codex", driver: "codex-app-server",
-  } as SessionView;
+  } as unknown as SessionView;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => root.render(<InboxRow
     optionId="session-option" session={session} projectName="Project One"
     selected={false} unread={false} pinned={false} rowIndex={1}
-    stalled={false} activityNow={2}
+    stalled={false} activityNow={2} threeRow
     onSelect={() => undefined} onExpand={() => undefined}
       onSessionMenu={() => undefined}
   />));
@@ -47,4 +146,281 @@ test("Inbox rows expose plain Stop Failed instead of Diff Ready", async () => {
   assert.doesNotMatch(container.textContent ?? "", /Diff Ready/);
   await act(async () => root.unmount());
   container.remove();
+});
+
+test("returned-from-snooze rows expose the ended instant without overdue copy", async () => {
+  const session = {
+    id: "session-returned", runnerId: "runner-1", title: "Returned Session",
+    status: "idle", column: "inbox", archived: false, pendingApproval: null,
+    lastEventAt: null, preview: null, agentId: "codex", agentName: "Codex",
+    driver: "codex-app-server",
+  } as unknown as SessionView;
+  const scheduledFor = Date.now() - 60_000;
+  const reminder: SessionReminderView = {
+    reminderId: "reminder-returned", sessionId: session.id, scheduledFor, timeZone: "UTC",
+    originalExpression: "one minute ago", wakePolicy: "regardless", state: "fired",
+    revision: 2, createdAt: scheduledFor - 1_000, updatedAt: scheduledFor,
+    firedAt: scheduledFor, wakeReason: "scheduled",
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<InboxRow
+    optionId="session-option" session={session} projectName="Project One"
+    selected={false} unread={false} pinned={false} rowIndex={1}
+    stalled={false} activityNow={Date.now()} reminder={reminder} threeRow
+    onSelect={() => undefined} onExpand={() => undefined} onSessionMenu={() => undefined}
+  />));
+  const pill = container.querySelector<HTMLElement>(".inbox-status-pill.reminder")!;
+  assert.equal(pill.textContent, "Returned from Snooze");
+  assert.match(pill.getAttribute("aria-label") ?? "", /Snooze ended/);
+  assert.doesNotMatch(pill.textContent, /Overdue/);
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+/** Defaults to the phone's three-row card; #877's desktop shape is asked for explicitly. */
+async function withRow(
+  session: SessionView,
+  assertions: (container: HTMLDivElement) => void,
+  { threeRow = true }: { threeRow?: boolean } = {},
+): Promise<void> {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<InboxRow
+    optionId="session-option" session={session} projectName="Project One"
+    selected={false} unread={false} pinned={false} rowIndex={1}
+    stalled={false} activityNow={2} threeRow={threeRow}
+    onSelect={() => undefined} onExpand={() => undefined} onSessionMenu={() => undefined}
+  />));
+  try {
+    assertions(container);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+}
+
+const worktreeSession = (worktree: Record<string, unknown> | null): SessionView => ({
+  id: "session-worktree", runnerId: "runner-1", title: "Worktree Session",
+  status: "running", column: "review", archived: false, pendingApproval: null,
+  lastEventAt: null, preview: "The first line of the last message.",
+  agentId: "codex", agentName: "Codex", driver: "codex-app-server",
+  worktreePath: worktree ? "/repos/alpha/wt" : null,
+  worktrees: worktree ? [worktree] : undefined,
+} as unknown as SessionView);
+
+test("idle Inbox rows retain authoritative background work alongside attention", async () => {
+  for (const [state, visible, accessible] of [
+    ["running", "Waiting on External Job", "Waiting on External Job"],
+    ["continuation_pending", "Continuation Pending", "Continuation Pending"],
+    ["orphaned", "Background Work Orphaned", "Orphaned"],
+    ["resumed", null, null],
+    [undefined, null, null],
+  ] as const) {
+    await withRow({
+      ...worktreeSession(null), status: "idle", backgroundWorkState: state,
+      pendingApproval: { kind: "permission", requestId: "background-approval", title: "Review external work", options: [] },
+    }, (container) => {
+      assert.ok(container.querySelector('[aria-label="Activity: Awaiting Prompt"]'));
+      assert.ok(container.querySelector('[aria-label="Attention: Approval Required"]'));
+      const badge = container.querySelector(".inbox-row-background-work .background-work-badge");
+      if (visible) {
+        assert.equal(badge?.getAttribute("aria-label"), `Background Work: ${accessible}`);
+        assert.equal(badge?.querySelector('span[aria-hidden="true"]:last-child')?.textContent, visible);
+        assert.equal(badge?.getAttribute("role"), null, "rows must not create hundreds of live regions");
+      } else {
+        assert.equal(badge, null);
+        assert.equal(container.querySelector(".inbox-row-background-work"), null);
+      }
+    });
+  }
+});
+
+test("a session with a worktree gets a third line, and a default base ref is left off it", async () => {
+  await withRow(
+    worktreeSession({
+      id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-664", baseRef: "origin/main",
+      source: "created", pullRequest: { url: "https://example.test/pull/1", state: "open" },
+    }),
+    (container) => {
+      const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
+      assert.equal(line.querySelector(".inbox-row-branch")?.textContent, "fix/issue-664");
+      assert.equal(line.querySelector(".inbox-row-base"), null, "origin/main is what every reader assumes");
+      assert.equal(line.querySelector(".inbox-row-pr-pill")?.textContent, "Open PR");
+      assert.equal(line.querySelector(".inbox-row-pr-pill")?.getAttribute("aria-label"), "Pull Request: Open");
+    },
+  );
+});
+
+test("a base ref that is not the default is spelled out on the worktree line", async () => {
+  await withRow(
+    worktreeSession({
+      id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-664-follow-up",
+      baseRef: "fix/issue-664", source: "created",
+      pullRequest: { url: "https://example.test/pull/2", state: "merged" },
+    }),
+    (container) => {
+      const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
+      // The arrow is hidden from assistive technology; the word it stands for is not.
+      assert.equal(line.querySelector(".inbox-row-base")?.textContent, "Base: ← fix/issue-664");
+      assert.equal(line.querySelector(".inbox-row-pr-pill")?.textContent, "Merged PR");
+    },
+  );
+});
+
+test("Inbox rows no longer render the message preview, and every row keeps its Git line", async () => {
+  await withRow(worktreeSession(null), (container) => {
+    assert.doesNotMatch(container.textContent ?? "", /first line of the last message/);
+    assert.equal(container.querySelector(".inbox-row-snippet"), null);
+    // #782: line three is unconditional, so a session with no worktree says so instead of vanishing.
+    assert.notEqual(container.querySelector(".inbox-row-meta"), null);
+    assert.equal(container.querySelector(".inbox-row-branch-state")?.textContent, "No Branch");
+    // The strip is still there for a busy session; it is the line's only fixed-width item.
+    assert.notEqual(container.querySelector(".inbox-row-activity"), null);
+  });
+});
+
+// #782: three states, and the distinction between the last two is the whole point. A session that
+// holds a worktree the client cannot name must not be described as having no branch at all.
+test("a session's Git line names its branch, admits to none, or admits to not knowing", async () => {
+  const cases: Array<[Partial<SessionView>, string, string | null]> = [
+    [{ useWorktree: false, worktreePath: null }, "No Branch", "none"],
+    [{ useWorktree: true, worktreePath: null }, "Branch Unavailable", "unknown"],
+    [{ useWorktree: true, worktreePath: "/repos/alpha/wt", worktrees: undefined }, "Branch Unavailable", "unknown"],
+    [{
+      useWorktree: true,
+      worktreePath: "/repos/alpha/wt",
+      // An inventory that names a DIFFERENT worktree still leaves the active one unnamed.
+      worktrees: [{ id: "other", path: "/repos/alpha/other", branch: "fix/other", source: "created" }],
+    } as Partial<SessionView>, "Branch Unavailable", "unknown"],
+    [{
+      useWorktree: true,
+      worktreePath: "/repos/alpha/wt",
+      worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-782", source: "created" }],
+    } as Partial<SessionView>, "fix/issue-782", null],
+  ];
+  for (const [extra, label, stateClass] of cases) {
+    await withRow({ ...worktreeSession(null), ...extra } as SessionView, (container) => {
+      const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
+      assert.notEqual(line, null, `${label}: line three is always present`);
+      const state = line.querySelector<HTMLElement>(".inbox-row-branch-state");
+      if (stateClass) {
+        assert.equal(state?.textContent, label);
+        assert.ok(state!.classList.contains(stateClass), `${label} carries its own state class`);
+        assert.equal(line.querySelector(".inbox-row-branch"), null);
+      } else {
+        assert.equal(state, null);
+        assert.equal(line.querySelector(".inbox-row-branch")?.textContent, label);
+      }
+      // The accessible name says which of the three it is, not just what the text happens to read.
+      assert.match(container.querySelector<HTMLElement>(".inbox-row")!.textContent ?? "", new RegExp(`Branch: ${label}`));
+    });
+  }
+});
+
+// #782: the badge shares line three with the Git state instead of taking a fourth line.
+test("background work sits on the Git line of a phone card, whatever the session's branch state", async () => {
+  for (const extra of [
+    { useWorktree: false, worktreePath: null },
+    {
+      useWorktree: true,
+      worktreePath: "/repos/alpha/wt",
+      worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-782", source: "created" }],
+    },
+  ] as Partial<SessionView>[]) {
+    await withRow({ ...worktreeSession(null), ...extra, backgroundWorkState: "running" } as SessionView, (container) => {
+      const meta = container.querySelector<HTMLElement>(".inbox-row-meta")!;
+      assert.notEqual(meta.querySelector(".inbox-row-git"), null);
+      const badge = meta.querySelector(".inbox-row-background-work .background-work-badge");
+      assert.equal(badge?.getAttribute("aria-label"), "Background Work: Waiting on External Job");
+      // Nothing outside line three carries it, which is what a fourth row would look like.
+      assert.equal(container.querySelectorAll(".inbox-row-background-work").length, 1);
+    });
+  }
+});
+
+/**
+ * What the title line holds, left to right. The strip's own class list carries its variant classes
+ * too, so match on the row's marker class rather than comparing whole `className` strings.
+ */
+const titleLineOrder = (copy: Element): string[] => [...copy.children].map((child) => {
+  const marker = [...child.classList].find((name) => name.startsWith("inbox-row-"));
+  return marker?.slice("inbox-row-".length) ?? child.className;
+});
+
+// #877: the desktop card has no third line to put the badge on, so it moves to the title line —
+// immediately left of the strip, which is the only other thing on that line that does not shrink.
+test("a desktop card carries background work on the title line, left of the activity strip", async () => {
+  for (const extra of [
+    { useWorktree: false, worktreePath: null },
+    {
+      useWorktree: true,
+      worktreePath: "/repos/alpha/wt",
+      worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-877", source: "created" }],
+    },
+  ] as Partial<SessionView>[]) {
+    await withRow(
+      { ...worktreeSession(null), ...extra, backgroundWorkState: "running" } as SessionView,
+      (container) => {
+        const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
+        const badge = copy.querySelector<HTMLElement>(".inbox-row-background-work")!;
+        assert.notEqual(badge, null, "the badge rides the title line on a desktop card");
+        assert.equal(
+          badge.querySelector(".background-work-badge")?.getAttribute("aria-label"),
+          "Background Work: Waiting on External Job",
+        );
+        // Document ORDER is the layout here: title, badge, strip. `flex-direction` never reverses,
+        // so the badge sitting between them in the DOM is the badge sitting between them on screen.
+        assert.deepEqual(titleLineOrder(copy), ["title", "background-work", "activity"]);
+        // Still exactly one badge: it MOVED between lines, it was not duplicated and hidden.
+        assert.equal(container.querySelectorAll(".inbox-row-background-work").length, 1);
+        assert.equal(container.querySelector(".inbox-row-meta .inbox-row-background-work"), null);
+        // The Git state itself does not move out of its own element; only its line does, in CSS.
+        assert.notEqual(container.querySelector(".inbox-row-meta .inbox-row-git"), null);
+      },
+      { threeRow: false },
+    );
+  }
+});
+
+// A badge with no strip beside it must not be treated as a special case: it is the same one item at
+// the trailing edge of the same line, and the card is the same height either way.
+test("a desktop card with background work but no activity strip keeps the badge on the title line", async () => {
+  await withRow(
+    { ...worktreeSession(null), status: "idle", backgroundWorkState: "continuation_pending" } as SessionView,
+    (container) => {
+      const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
+      assert.equal(copy.querySelector(".inbox-row-activity"), null, "an idle session draws no strip");
+      assert.deepEqual(titleLineOrder(copy), ["title", "background-work"]);
+      assert.equal(
+        copy.querySelector(".background-work-badge")?.getAttribute("aria-label"),
+        "Background Work: Continuation Pending",
+      );
+    },
+    { threeRow: false },
+  );
+});
+
+test("the relative time renders once, on line three when stacked and in the signals column otherwise (#934)", async () => {
+  const session = {
+    id: "session-time", runnerId: "runner-1", title: "Timed Session", status: "running",
+    column: "review", archived: false, pendingApproval: null, lastEventAt: Date.now() - 15 * 60_000,
+    preview: null, agentId: "codex", agentName: "Codex", driver: "codex-app-server",
+  } as unknown as SessionView;
+  for (const threeRow of [true, false]) {
+    await withRow(session, (container) => {
+      const times = container.querySelectorAll("time");
+      assert.equal(times.length, 1, "one element, so the instant is never said twice");
+      const time = times[0]!;
+      assert.equal(time.textContent, "15m ago", "the suffix survives on both shapes (#934)");
+      assert.equal(time.getAttribute("title"), null, "no tooltip: the visible text is already whole");
+      assert.equal(
+        time.parentElement?.className,
+        threeRow ? "inbox-row-meta" : "inbox-row-signals",
+        threeRow ? "stacked: line three, beside the Git state" : "two-row: the signals column",
+      );
+    }, { threeRow });
+  }
 });

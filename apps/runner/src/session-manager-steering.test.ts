@@ -12,7 +12,7 @@ import type {
   SteerSessionMessage,
   SteerSessionResultMessage,
 } from "@wollipog/protocol";
-import type { Driver, DriverSteerResult } from "./drivers/driver.js";
+import type { Driver, DriverCallbacks, DriverSteerResult } from "./drivers/driver.js";
 import {
   SessionManager,
   type DurableCommandLifecycle,
@@ -122,6 +122,136 @@ function durable(commandId: string): DurableCommandLifecycle {
   };
 }
 
+/** Launch through the manager so these tests exercise its real callback registration. */
+async function callbackHarness() {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-steering-callback-"));
+  const sent: RunnerToControlPlane[] = [];
+  const store = new SessionStore(root);
+  const promptGate = deferred<"end_turn">();
+  let callbacks!: DriverCallbacks;
+  let coordinate: string | null = null;
+  let promptStarted = false;
+  let steerCalls = 0;
+  const driver: Driver = {
+    pid: undefined,
+    initialize: async () => { callbacks.onSteeringAvailability?.(true); },
+    newSession: async () => "thread-1",
+    agentSessionId: () => "thread-1",
+    agentTurnId: () => coordinate,
+    activeSteeringTurnId: () => coordinate,
+    prompt: async () => { promptStarted = true; return promptGate.promise; },
+    steer: async () => { steerCalls++; return { outcome: "accepted", providerTurnId: coordinate! }; },
+    setConfig: () => {},
+    cancel: () => { promptGate.resolve("end_turn"); },
+    resolvePermission: () => false,
+    dispose: () => { promptGate.resolve("end_turn"); },
+  };
+  const manager = new SessionManager((message) => sent.push(message), () => {}, store, "runner-1", undefined,
+    (_kind, _options, registered) => { callbacks = registered; return driver; });
+  const cleanup = () => {
+    manager.shutdownAll();
+    promptGate.resolve("end_turn");
+    rmSync(root, { recursive: true, force: true });
+  };
+  try {
+    assert.equal(await manager.start({
+      sessionId: "s_steer", agentId: "codex-app-server", workspaceId: "repo", workspacePath: root,
+      driver: "codex-app-server", command: "codex", args: [], env: {}, context: { kind: "native" },
+      useWorktree: false,
+    }, "running prompt"), true);
+    await waitFor(() => promptStarted, "the real launch starts a provider turn");
+    store.patchMeta("s_steer", {
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, supportsSteering: true,
+      },
+    });
+    const queues = () => sent.filter((message): message is SessionQueueMessage => message.type === "session_queue");
+    return {
+      manager, store, driver, callbacks, sent, queues, cleanup,
+      steerCalls: () => steerCalls,
+      coordinate: (id: string | null) => { coordinate = id; callbacks.onSteeringTurnChanged?.(); },
+    };
+  } catch (error) { cleanup(); throw error; }
+}
+
+test("registered steering callbacks publish coordinate gain and loss without a manual queue refresh", async () => {
+  const h = await callbackHarness();
+  try {
+    h.manager.prompt("s_steer", "keep queued");
+    const original = h.queues().at(-1)!.queue[0]!;
+    assert.equal(original.steerable, false);
+    assert.match(original.steerDisabledReason!, /has not confirmed an active provider turn/);
+    const beforeGain = h.queues().length;
+    h.coordinate("provider-live");
+    assert.equal(h.queues().length, beforeGain + 1);
+    assert.equal(h.queues().at(-1)!.queue[0]!.id, original.id);
+    assert.equal(h.queues().at(-1)!.queue[0]!.steerable, true);
+    h.coordinate(null);
+    assert.equal(h.queues().length, beforeGain + 2);
+    assert.equal(h.queues().at(-1)!.queue[0]!.steerable, false);
+    assert.match(h.queues().at(-1)!.queue[0]!.steerDisabledReason!, /has not confirmed an active provider turn/);
+    assert.equal(h.steerCalls(), 0);
+  } finally { h.cleanup(); }
+});
+
+test("registered runtime capability revocation blocks admission despite catalog support", async () => {
+  const h = await callbackHarness();
+  try {
+    h.manager.prompt("s_steer", "preserve queued source");
+    h.coordinate("provider-live");
+    const queued = h.queues().at(-1)!.queue[0]!;
+    assert.equal(queued.steerable, true);
+    const beforeRevoke = h.queues().length;
+    h.callbacks.onSteeringAvailability?.(false);
+    assert.equal(h.queues().length, beforeRevoke + 1);
+    assert.equal(h.queues().at(-1)!.queue[0]!.steerable, false);
+    assert.equal(h.store.readMeta("s_steer")!.capabilities!.supportsSteering, true);
+    assert.equal(h.manager.sessionSnapshots()[0]!.agentCapabilities!.supportsSteering, false);
+    const turnId = h.queues().at(-1)!.activeTurnId!;
+    assert.ok(turnId);
+    for (const content of [{ text: "direct input" }, { promotePromptId: queued.id }]) {
+      const result = await h.manager.steerSession({
+        sessionId: "s_steer", submissionId: `revoked-${"text" in content ? "direct" : "promotion"}`, turnId, ...content,
+      });
+      assert.equal(result.disposition, "rejected");
+      assert.equal(result.reason, "unsupported_driver");
+    }
+    assert.equal(h.steerCalls(), 0);
+    assert.deepEqual(h.queues().at(-1)!.queue.map((prompt) => prompt.id), [queued.id]);
+    h.callbacks.onSteeringAvailability?.(true);
+    assert.equal(h.queues().at(-1)!.queue[0]!.steerable, true);
+    const accepted = await h.manager.steerSession({
+      sessionId: "s_steer", submissionId: "restored-direct", turnId, text: "verified live steering",
+    });
+    assert.equal(accepted.disposition, "accepted");
+    assert.equal(h.steerCalls(), 1);
+  } finally { h.cleanup(); }
+});
+
+test("registered steering callbacks ignore stale clients and stale launch generations independently", async () => {
+  const h = await callbackHarness();
+  try {
+    h.manager.prompt("s_steer", "current queued source");
+    h.coordinate("provider-live");
+    // Isolate each ownership fence: a reused client identity must still obey the launch fence.
+    const active = (h.manager as any).active.get("s_steer");
+    const originalGeneration = active.launchGeneration;
+    for (const fence of ["client", "generation"] as const) {
+      if (fence === "client") active.client = { ...h.driver };
+      else active.launchGeneration = originalGeneration + 1;
+      const emittedBefore = h.sent.length;
+      h.callbacks.onSteeringTurnChanged?.();
+      h.callbacks.onSteeringAvailability?.(false);
+      assert.equal(h.sent.length, emittedBefore, `${fence} fence suppresses queue and runtime updates`);
+      assert.equal(h.manager.sessionSnapshots()[0]!.agentCapabilities!.supportsSteering, true);
+      assert.equal(h.queues().at(-1)!.queue[0]!.steerable, true);
+      active.client = h.driver;
+      active.launchGeneration = originalGeneration;
+    }
+  } finally { h.cleanup(); }
+});
+
 test("launch-time steering revocation survives catalog refresh until a verified process replaces it", () => {
   const h = harness();
   try {
@@ -192,6 +322,34 @@ test("accepted steering is serialized, deduplicated, and authored once by the ru
   } finally {
     h.cleanup();
   }
+});
+
+test("queue steering requires a live provider coordinate and preserves unavailable message attachments", async () => {
+  let coordinate: string | null = null;
+  let calls = 0;
+  const h = harness({
+    activeSteeringTurnId: () => coordinate,
+    steer: async () => { calls++; return { outcome: "accepted", providerTurnId: coordinate! }; },
+  });
+  try {
+    const images = [{ mimeType: "image/png", data: "aGVsbG8=" }];
+    h.manager.prompt("s_steer", "keep queued", images);
+    const queued = h.queues().at(-1)!.queue[0]!;
+    assert.equal(queued.steerable, false);
+    assert.match(queued.steerDisabledReason!, /has not confirmed an active provider turn/);
+    const result = await h.manager.steerSession({
+      submissionId: "missing-coordinate", sessionId: "s_steer", turnId: "turn-a", promotePromptId: queued.id,
+    });
+    assert.equal(result.reason, "no_active_provider_turn");
+    assert.equal(calls, 0);
+    assert.deepEqual((h.manager as any).active.get("s_steer").queue[0].images, images);
+    coordinate = "confirmed";
+    (h.manager as any).emitQueue("s_steer");
+    assert.equal(h.queues().at(-1)!.queue[0]!.steerable, true);
+    coordinate = null;
+    (h.manager as any).emitQueue("s_steer");
+    assert.equal(h.queues().at(-1)!.queue[0]!.steerable, false);
+  } finally { h.cleanup(); }
 });
 
 test("pending agent input blocks direct steering and queued promotion authoritatively", async () => {

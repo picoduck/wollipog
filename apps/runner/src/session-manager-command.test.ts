@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "./test-support/bounded-child-process.js";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import type {
   PreparedDriverCommand,
 } from "./drivers/driver.js";
 import {
+  providerStopError,
   SessionManager,
   type SessionCommandInvocationLifecycle,
 } from "./session-manager.js";
@@ -804,6 +805,53 @@ test("provider failure after submission remains delivery-uncertain", async () =>
   }
 });
 
+test("provider command rejection after Stop Turn releases the preserved command FIFO", async () => {
+  const provider = deferred<"end_turn">();
+  const h = harness({ invokeGate: provider.promise });
+  try {
+    assert.equal(await h.start(), true);
+    const command = liveCommand(h.manager);
+    const interruptedReceipts: Receipt[] = [];
+    const interrupted = message(command.invocation, {
+      invocationId: "invocation-interrupted-rejection",
+      submissionId: "submission-interrupted-rejection",
+      argumentText: "running",
+    });
+    assert.equal(h.manager.invokeSessionCommand(
+      interrupted,
+      receiptLifecycle(interrupted.invocationId, interruptedReceipts),
+    ), true);
+    await waitFor(() => h.invoked.length === 1);
+
+    const queuedReceipts: Receipt[] = [];
+    const queued = message(command.invocation, {
+      invocationId: "invocation-after-interrupted-rejection",
+      submissionId: "submission-after-interrupted-rejection",
+      argumentText: "preserved",
+    });
+    assert.equal(h.manager.invokeSessionCommand(
+      queued,
+      receiptLifecycle(queued.invocationId, queuedReceipts),
+    ), true);
+    assert.equal(h.manager.interruptTurn("command-session"), "applied");
+
+    provider.reject(new Error("provider rejected after cancellation"));
+    await waitFor(() => h.invoked.length === 2, "the next command should leave the preserved FIFO");
+    await waitFor(() => queuedReceipts.at(-1)?.state === "uncertain");
+    assert.equal(interruptedReceipts.at(-1)?.state, "rejected");
+    assert.equal(interruptedReceipts.at(-1)?.code, "COMMAND_CANCELLED");
+    assert.deepEqual(queuedReceipts.map((receipt) => receipt.state), ["queued", "started", "uncertain"]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry = (h.manager as any).active.get("command-session");
+    assert.equal(entry.holdQueuedPromptsAfterInterrupt, false);
+    assert.deepEqual(entry.queue, []);
+    assert.equal(h.store.readEvents("command-session").filter((event) =>
+      event.payload.kind === "turn_interrupted").length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("a governance-cancelled provider command rejection settles idle and completed without an error", async () => {
   const provider = deferred<"end_turn">();
   const h = harness({ invokeGate: provider.promise });
@@ -899,4 +947,17 @@ test("cancelling or stopping queued commands settles them as rejected without pr
   } finally {
     h.cleanup();
   }
+});
+
+test("a durable failure receipt carries the provider's reason, not just its stop reason", () => {
+  const oauth = "Failed to refresh OAuth token: another Claude Code process is refreshing it. " +
+    "This is usually transient; retry in a minute";
+  // Without this the scheduler records `provider refusal` and cannot tell a passing credential
+  // condition from a real one; the driver held the only copy of the reason.
+  assert.equal(providerStopError("refusal", { lastTurnError: () => oauth }), `provider refusal: ${oauth}`);
+  assert.equal(providerStopError("refusal", { lastTurnError: () => "  " }), "provider refusal");
+  assert.equal(providerStopError("refusal", { lastTurnError: () => null }), "provider refusal");
+  // Drivers without the channel, and stop reasons the provider did not explain, are unchanged.
+  assert.equal(providerStopError("refusal", {}), "provider refusal");
+  assert.equal(providerStopError("cancelled", { lastTurnError: () => oauth }), "provider cancelled");
 });

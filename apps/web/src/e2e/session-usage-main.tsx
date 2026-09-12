@@ -1,0 +1,472 @@
+import React from "react";
+import { createRoot } from "react-dom/client";
+import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView } from "@wollipog/protocol";
+import { api, type ApiClient } from "../api.js";
+import { ApiProvider } from "../api-context.js";
+import type { ViewNavigation } from "../navigation.js";
+import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
+import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
+import { SessionDetail } from "../components/SessionDetail.js";
+import { setQuestionResponseStyle } from "../question-response-style.js";
+import "../styles.css";
+
+declare global {
+  interface Window {
+    resolveSessionUsageQuestion(): void;
+  }
+}
+
+/** Real-browser SessionDetail harness for recovery geometry and earlier-history pagination:
+ * `?mode=preview|expanded`, `?height=<px>`, and `?pinned=1` configure the recovery fixture.
+ * By default recovery stays active for the page life; `?settled=1` completes it, while
+ * `?pagination=1` resolves a bounded opening window and then holds the automatic earlier-page
+ * request in flight for inspection. `?pagination=resolve` serves multiple variable-height pages;
+ * `?event-heavy=1` makes 200 raw opening events collapse into one partial rendered response, and
+ * `?live=1` adds a live tail event during the first prepend. */
+const params = new URLSearchParams(window.location.search);
+const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
+const frameHeight = Number(params.get("height") ?? "600");
+const frameWidth = Number(params.get("width") ?? "900");
+const pinnedOpen = params.get("pinned") === "1";
+const pagination = params.get("pagination") === "1";
+const resolvedPagination = params.get("pagination") === "resolve";
+const eventHeavyOpening = params.get("event-heavy") === "1";
+const liveDuringPagination = params.get("live") === "1";
+const paginationDelay = Number(params.get("pagination-delay") ?? "80");
+const settled = params.get("settled") === "1";
+/** `?context=choice` swaps in a Claude catalog whose Opus base lists 200K and 1M windows, with the
+ * session on `opus[1m]`; `?served=<tokens>` is the window the provider reported after launch. */
+const contextChoice = params.get("context") === "choice";
+const serviceTierFixture = params.has("tiers");
+const serviceTierChoice = params.get("tiers") === "1";
+const servedWindow = Number(params.get("served") ?? "0");
+// `?window=none` drops the context window (an agent that advertises no capacity); `?cost=none`
+// marks the session unpriced, while `?cost=free` carries provider-reported zero provenance,
+// `?usage-detail=pending|failed` holds or rejects the model breakdown, and `?cost=<amount>`
+// sets the total so layout specs can stress the strip with a figure much wider than the default
+// (#893). Every variant keeps the token counts.
+const unknownContextWindow = params.get("window") === "none";
+const costParam = params.get("cost");
+const unpricedCost = costParam === "none";
+const freeCost = costParam === "free";
+const usageDetail = params.get("usage-detail");
+const parsedCost = Number(costParam);
+const sessionCostUsd = unpricedCost || freeCost || costParam === null || !Number.isFinite(parsedCost)
+  ? 1.37
+  : parsedCost;
+/** The default fixture's 1.21 / 0.16 split, held as a ratio so a `?cost=` override still sums to the
+ * headline figure and a sub-cent total never produces a negative per-model row. */
+const miniModelCostUsd = sessionCostUsd * (0.16 / 1.37);
+const mainModelCostUsd = sessionCostUsd - miniModelCostUsd;
+
+const SESSION_ID = "session-usage-e2e";
+
+const runner = {
+  runnerId: "runner-1",
+  hostname: "runner-host",
+  os: "linux",
+  version: "1",
+  status: "online",
+  agents: [{
+    id: "codex",
+    name: "Codex",
+    command: "codex",
+    args: [],
+    env: {},
+    driver: "codex-app-server",
+    available: true,
+  }],
+  workspaces: [],
+  connectedAt: 1,
+  lastSeen: 1,
+  protocolVersion: 67,
+} as RunnerView;
+
+const session: SessionView = {
+  id: SESSION_ID,
+  runnerId: runner.runnerId,
+  workspaceId: null,
+  workspaceName: null,
+  projectId: null,
+  agentId: "codex",
+  agentName: "Codex",
+  title: "Session Usage Fixture",
+  status: "idle",
+  column: "review",
+  runId: null,
+  useWorktree: true,
+  worktreePath: "/tmp/recovery-e2e-worktree",
+  archived: false,
+  createdAt: 1,
+  updatedAt: 1,
+  lastEventAt: null,
+  messageCount: 0,
+  eventEpoch: 0,
+  preview: null,
+  pendingApproval: null,
+  driver: "codex-app-server",
+  model: "codex-large",
+  effort: null,
+  permissionMode: null,
+  tokensIn: 184_000,
+  tokensOut: 21_000,
+  costUsd: unpricedCost || freeCost ? 0 : sessionCostUsd,
+  ...(freeCost ? { costSource: "providerReported" as const }
+    : unpricedCost ? { costSource: "unpriced" as const } : {}),
+  contextTokensUsed: unknownContextWindow ? undefined : Number(params.get("used") ?? "72000"),
+  adopted: false,
+  // A known context window makes the ContextWindowMeter render in the strip's leading cell,
+  // so the specs can prove the active recovery echo wins that cell in compact mode.
+  contextWindow: unknownContextWindow ? undefined : 200_000,
+};
+const driverName = params.get("driver") === "claude-code" || contextChoice ? "claude-code" : "codex-app-server";
+session.driver = driverName as SessionView["driver"];
+if (contextChoice) {
+  runner.agents = [{
+    id: "claude",
+    name: "Claude Code",
+    command: "claude",
+    args: [],
+    env: {},
+    driver: "claude-code",
+    available: true,
+    capabilities: {
+      modelSource: "live",
+      models: [
+        { id: "default", displayName: "Default (Opus 5)", default: true, contextWindow: 1_000_000, description: "Opus 5 with 1M context · Best for everyday, complex tasks", efforts: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "opus", displayName: "Opus 5", contextWindow: 200_000, description: "Opus 5 with 200K context", efforts: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "opus[1m]", displayName: "Opus 5 (1M Context)", baseModelId: "opus", contextWindow: 1_000_000, description: "Opus 5 with 1M context", efforts: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "sonnet", displayName: "Sonnet 5", description: "Sonnet 5 · Efficient for routine tasks", efforts: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "haiku", displayName: "Haiku 4.5", contextWindow: 200_000, description: "Haiku 4.5 · Fastest for quick answers" },
+      ],
+      effortLevels: ["low", "medium", "high", "xhigh", "max"],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      permissionModes: ["default", "acceptEdits", "plan", "bypassPermissions"],
+    },
+  }] as RunnerView["agents"];
+  session.agentId = "claude";
+  session.agentName = "Claude Code";
+  session.model = params.get("model") ?? "opus[1m]";
+  session.effort = "high";
+  session.contextWindow = servedWindow > 0 ? servedWindow : undefined;
+}
+if (serviceTierFixture) {
+  runner.protocolVersion = serviceTierChoice ? 126 : 125;
+  runner.agents = [{
+    id: "codex",
+    name: "Codex",
+    command: "codex",
+    args: [],
+    env: {},
+    driver: "codex-app-server",
+    available: true,
+    capabilities: {
+      modelSource: "live",
+      models: [{
+        id: "gpt-tiered",
+        displayName: "GPT Tiered",
+        default: true,
+        efforts: ["low", "high"],
+        serviceTiers: [{
+          id: "fast",
+          name: "Fast",
+          description: "Faster responses that use more ChatGPT credits.",
+        }],
+        defaultServiceTier: "default",
+      }],
+      effortLevels: ["low", "high"],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: true,
+      permissionModes: ["auto-review"],
+    },
+  }] as RunnerView["agents"];
+  session.model = "gpt-tiered";
+  session.effort = "high";
+  session.serviceTier = serviceTierChoice ? "fast" : null;
+}
+if (params.get("approval") === "checkpoint") {
+  session.status = "input_required";
+  session.costCheckpointsUsd = [1, 2.5];
+  session.costCheckpointApprovedUsd = 1;
+  session.pendingApproval = {
+    requestId: "cost-checkpoint:session-usage-e2e:1",
+    kind: "cost_checkpoint",
+    title: "Cost checkpoint — $2.61 of $2.50. Continue?",
+    options: [
+      { optionId: "continue", name: "Continue", kind: "allow_once" },
+      { optionId: "cancel", name: "Stop", kind: "reject_once" },
+    ],
+  };
+} else if (params.get("approval") === "question") {
+  setQuestionResponseStyle("composer");
+  session.status = "input_required";
+  session.pendingApproval = {
+    requestId: "question:session-usage-e2e:1",
+    kind: "question",
+    title: "Choose a release target",
+    options: [],
+    questions: [{
+      id: "target",
+      question: "Which environment should receive the release?",
+      options: [{ label: "Staging" }, { label: "Production" }],
+    }],
+  };
+}
+
+const snapshotMessage: ControlPlaneToUi = {
+  type: "snapshot",
+  capabilities: {
+    sessionSubscriptions: false,
+    boundedDelivery: false,
+    paginatedSessionHistory: false,
+    projects: true,
+  },
+  runners: [runner],
+  boxes: [],
+  projects: [],
+  sessions: [session],
+  runs: [],
+  pods: [],
+};
+
+function usageAmount(input: number, output: number, costUsd: number, processed: number, costSource: "providerReported" | "modelPriced" | "unpriced" = "providerReported") {
+  return {
+    inputTokens: input, outputTokens: output, costUsd, uncachedInputTokens: input, cachedInputTokens: Math.round(input * 4.2),
+    cacheCreationTokens: Math.round(input / 8), reasoningTokens: 0, cacheSavingsUsd: costUsd * 0.6, costSource, unpricedRecords: costSource === "unpriced" ? 3 : 0,
+    processedTokens: processed,
+  };
+}
+
+let fixtureSocket: FixtureSocket | null = null;
+class FixtureSocket implements UiSocket {
+  readonly readyState = UI_SOCKET_OPEN;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor() {
+    fixtureSocket = this;
+    setTimeout(() => {
+      this.onopen?.();
+      this.onmessage?.({ data: JSON.stringify(snapshotMessage) });
+    }, 0);
+  }
+  send() {}
+  close() {}
+}
+
+window.resolveSessionUsageQuestion = () => {
+  session.status = "idle";
+  session.pendingApproval = null;
+  fixtureSocket?.onmessage?.({ data: JSON.stringify({
+    type: "session_upsert",
+    session: { ...session },
+  } satisfies ControlPlaneToUi) });
+};
+
+const connection: UiConnectionRuntime = {
+  instanceId: "recovery-e2e",
+  runtimeKey: "recovery-e2e:1",
+  createSocket: () => new FixtureSocket(),
+  close() {},
+};
+
+const navigation: ViewNavigation = {
+  current: () => ({ name: "session", id: SESSION_ID }),
+  push() {},
+  listen: () => () => {},
+};
+
+/** The default endpoints never answer, keeping recovery active for geometry tests. Pagination mode
+ * resolves only the opening window; its next request stays pending so loading state is observable. */
+let tailRequestCount = 0;
+// Usage screenshots want the settled transcript on screen; the harness defaults to settled.
+const settledUsage = params.get("settled") !== "0";
+const client = {
+  ...api,
+  sessionUsage: async () => {
+    if (usageDetail === "pending") return new Promise<never>(() => {});
+    if (usageDetail === "failed") throw new Error("Usage detail unavailable");
+    return {
+      sessionId: SESSION_ID,
+      totals: unpricedCost
+        ? usageAmount(184_000, 21_000, 0, 205_000, "unpriced")
+        : freeCost ? usageAmount(184_000, 21_000, 0, 205_000)
+        : usageAmount(184_000, 21_000, sessionCostUsd, 205_000, "modelPriced"),
+      byModel: [
+        {
+          model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex",
+          ...usageAmount(160_000, 18_000, freeCost ? 0 : mainModelCostUsd, 178_000),
+        },
+        {
+          model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini",
+          ...usageAmount(
+            24_000,
+            3_000,
+            unpricedCost || freeCost ? 0 : miniModelCostUsd,
+            27_000,
+            unpricedCost ? "unpriced" : freeCost ? "providerReported" : "modelPriced",
+          ),
+        },
+      ],
+      pricing: {
+        status: "fresh" as const,
+        source: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+        fetchedAt: 1,
+        knownModels: 1200,
+      },
+    };
+  },
+  session: () => new Promise<never>(() => {}),
+  getSessionEventPage: () => new Promise<never>(() => {}),
+  getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
+    tailRequestCount += 1;
+    document.body.dataset.tailRequestCount = String(tailRequestCount);
+    if ((settled || settledUsage) && before === undefined) {
+      return Promise.resolve({
+        events: activeFixtureEvents, eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+      });
+    }
+    if (resolvedPagination && before !== undefined) {
+      const pageSize = eventHeavyOpening ? 200 : 8;
+      const pageStart = Math.max(0, before - 1 - pageSize);
+      const events = activeFixtureEvents.slice(pageStart, before - 1);
+      if (liveDuringPagination && tailRequestCount === 2) {
+        window.setTimeout(() => fixtureSocket?.onmessage?.({ data: JSON.stringify({
+          type: "session_event",
+          event: {
+            id: 81,
+            sessionId: SESSION_ID,
+            seq: 81,
+            ts: 81,
+            payload: {
+              kind: "agent_message",
+              text: `live answer ${"arriving while older activity loads ".repeat(5)}`,
+              final: true,
+            },
+          },
+        } satisfies ControlPlaneToUi) }), 30);
+      }
+      return new Promise((resolve) => window.setTimeout(() => resolve({
+        events,
+        eventEpoch,
+        nextBefore: events[0]?.seq ?? 0,
+        hasMoreOlder: pageStart > 0,
+        cacheComplete: true,
+      }), paginationDelay));
+    }
+    if ((!pagination && !resolvedPagination) || before !== undefined) return new Promise<never>(() => {});
+    const openingWindow = activeFixtureEvents.slice(-24);
+    const boundedOpeningWindow = eventHeavyOpening ? activeFixtureEvents.slice(-200) : openingWindow;
+    return Promise.resolve({
+      events: boundedOpeningWindow, eventEpoch, nextBefore: boundedOpeningWindow[0]?.seq ?? 0,
+      hasMoreOlder: true, turnAligned: eventHeavyOpening ? false : true, cacheComplete: true,
+    });
+  },
+} as unknown as ApiClient;
+
+const payloads: SessionEvent["payload"][] = [];
+for (let turn = 0; turn < 4; turn += 1) {
+  payloads.push({ kind: "user_message", text: `Question ${turn + 1}: summarise the usage overhaul and its remaining risks.`, images: [] });
+  payloads.push({ kind: "agent_message", text: `Answer ${turn + 1}: the ledger prices at ingestion and the view reads the buckets. ${"Detail. ".repeat(turn + 2)}`, final: true });
+  payloads.push({
+    kind: "token_usage",
+    inputTokens: 2_400 + turn * 900,
+    cachedInputTokens: 38_000 + turn * 4_000,
+    cacheCreationInputTokens: 1_200,
+    outputTokens: 640 + turn * 120,
+    ...(turn === 2 ? {} : { costUsd: 0.18 + turn * 0.07 }),
+    durationMs: 12_300 + turn * 4_000,
+    model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex",
+  });
+}
+const fixtureEvents: SessionEvent[] = payloads.map((payload, index) => ({
+  id: index + 1,
+  sessionId: SESSION_ID,
+  seq: index + 1,
+  ts: index + 1,
+  payload,
+}));
+
+const eventHeavyPayloads: SessionEvent["payload"][] = [];
+for (let turn = 0; turn < 110; turn += 1) {
+  eventHeavyPayloads.push(
+    { kind: "user_message", text: `earlier question ${turn + 1}`, images: [] },
+    { kind: "agent_message", text: `earlier complete answer ${turn + 1}`, final: true },
+  );
+}
+eventHeavyPayloads.push({
+  kind: "user_message",
+  text: "Explain the bounded opening-window behavior.",
+  images: [],
+});
+for (let chunk = 0; chunk < 240; chunk += 1) {
+  eventHeavyPayloads.push({
+    kind: "agent_message",
+    text: "x ",
+    final: chunk === 239,
+  });
+}
+const eventHeavyFixtureEvents: SessionEvent[] = eventHeavyPayloads.map((payload, index) => ({
+  id: index + 1,
+  sessionId: SESSION_ID,
+  seq: index + 1,
+  ts: index + 1,
+  payload,
+}));
+const activeFixtureEvents = eventHeavyOpening ? eventHeavyFixtureEvents : fixtureEvents;
+
+function EventSeeder() {
+  const ready = useStoreSelector((state) => state.sessions.has(SESSION_ID));
+  const { dispatch } = useStoreActions();
+  React.useEffect(() => {
+    if (!ready) return;
+    for (const event of activeFixtureEvents) {
+      dispatch({ type: "msg", msg: { type: "session_event", event } });
+    }
+  }, [dispatch, ready]);
+  return null;
+}
+
+const rightPanel = {
+  open: false,
+  mode: "launcher" as const,
+  width: 360,
+  dragging: false,
+  subagentTarget: null,
+  toggle() {},
+  openMode() {},
+  show() {},
+  setMode() {},
+  setWidth() {},
+  setDragging() {},
+  close() {},
+  selectSubagent() {},
+  showSubagent() {},
+  consumeSubagentFocusRequest() {},
+};
+
+createRoot(document.getElementById("root")!).render(
+  <ApiProvider client={client}>
+    <StoreProvider connection={connection} navigation={navigation}>
+      <EventSeeder />
+      {/* The frame stands in for the pane an inbox splitter produces: fixed height, clipped. */}
+      <div
+        id="frame"
+        style={{ height: frameHeight, width: frameWidth, display: "flex", flexDirection: "column", overflow: "hidden" }}
+      >
+        <SessionDetail
+          sessionId={SESSION_ID}
+          mode={mode}
+          rightPanel={rightPanel}
+          onOpenTerminal={() => {}}
+          pinnedOpen={pinnedOpen}
+          composerDraftLoader={async () => null}
+        />
+      </div>
+    </StoreProvider>
+  </ApiProvider>,
+);

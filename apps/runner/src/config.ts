@@ -353,7 +353,7 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
       throw new Error(`runner config: workspace '${workspace.id}' exceeds 64 additional-directory grants`);
     }
   }
-  const agents = overrides.agents ?? file.agents ?? [];
+  const agents = (overrides.agents ?? file.agents ?? []).filter((agent) => agent.id !== "conductor");
   const containerTargets = validateContainerTargets(overrides.containerTargets ?? file.containerTargets ?? []);
   const cloudTargets = validateCloudTargets(overrides.cloudTargets ?? file.cloudTargets ?? []);
   const remoteEnabled = overrides.features?.acpRemoteTransports ?? file.features?.acpRemoteTransports ?? false;
@@ -583,18 +583,50 @@ export function resolveAgentEnvironment(
   hostEnv: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
   const resolved: Record<string, string> = {};
-  for (const [name, source] of Object.entries(agent.env ?? {})) {
-    if (typeof source === "string") {
-      resolved[name] = source;
-      continue;
-    }
-    const value = hostEnv[source.fromEnv];
-    if (value === undefined) {
-      throw new Error(`agent '${agent.id}' requires a runner-local environment variable for '${name}'`);
-    }
-    resolved[name] = value;
+  for (const name of Object.keys(agent.env ?? {})) {
+    const value = resolveAgentEnvironmentValue(agent, name, hostEnv);
+    if (value !== undefined) resolved[name] = value;
   }
   return resolved;
+}
+
+/** Resolve one configured value without eagerly validating unrelated launch-only references. */
+export function resolveAgentEnvironmentValue(
+  agent: Pick<RunnerConfigAgent, "id" | "env">,
+  name: string,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const source = agent.env?.[name];
+  if (source === undefined || typeof source === "string") return source;
+  const value = hostEnv[source.fromEnv];
+  if (value === undefined) {
+    throw new Error(`agent '${agent.id}' requires a runner-local environment variable for '${name}'`);
+  }
+  return value;
+}
+
+/** Project only the non-secret native Claude prerequisite used by discovery/readiness. */
+export function projectAgentDiscoveryEnvironment(
+  agent: Pick<RunnerConfigAgent, "id" | "env">,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const name = "CLAUDE_CODE_GIT_BASH_PATH";
+  if (!Object.prototype.hasOwnProperty.call(agent.env ?? {}, name)) return {};
+  try {
+    return { [name]: resolveAgentEnvironmentValue(agent, name, hostEnv) ?? "" };
+  } catch {
+    // Retain an explicit invalid marker so readiness fails closed without aborting other agents.
+    return { [name]: "" };
+  }
+}
+
+/** Merge non-secret discovery prerequisites into the configured launch environment. */
+export function resolveRunnerLocalAgentEnvironment(
+  agent: Pick<RunnerConfigAgent, "id" | "env">,
+  discoveredEnv: Record<string, string> | undefined,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  return { ...(discoveredEnv ?? {}), ...resolveAgentEnvironment(agent, hostEnv) };
 }
 
 function validateAdmissionMap(name: string, value: Record<string, number> | undefined, maximum: number): Record<string, number> {

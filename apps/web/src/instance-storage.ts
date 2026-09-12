@@ -19,6 +19,8 @@ const CURRENT_LOGICAL_PREFIX = "wollipog.";
 const LEGACY_LOGICAL_PREFIX = "mam.";
 
 export interface KeyValueStorage {
+  readonly length?: number;
+  key?(index: number): string | null;
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
   removeItem(key: string): void;

@@ -45,7 +45,7 @@ test("parseStoredRightPanelWidth: numeric strings parse and clamp", () => {
 });
 
 test("parseStoredRightPanelMode: valid modes pass through", () => {
-  for (const m of ["launcher", "review", "files", "terminal", "browser", "sidechat", "subagents"] as const) {
+  for (const m of ["launcher", "review", "files", "terminal", "browser", "sidechat", "subagents", "background"] as const) {
     assert.equal(parseStoredRightPanelMode(m), m);
   }
 });

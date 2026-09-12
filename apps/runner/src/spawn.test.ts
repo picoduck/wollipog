@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "./test-support/bounded-child-process.js";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { after, test } from "node:test";
-import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
 import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
@@ -27,6 +27,26 @@ const windowsJobIsolation = {
   ],
   network: "inherit" as const,
 };
+
+/**
+ * A killed process stays visible to `kill(pid, 0)` as a zombie until its parent reaps it. When the
+ * parent has already exited the reaper is init (or a subreaper), whose reaping is asynchronous and
+ * slow under load, so an immediate ESRCH assertion right after the kill promise settles is racy.
+ * Poll briefly instead; a live process still fails the deadline.
+ */
+async function waitForProcessGone(pid: number, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+      throw error;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
 
 test("Windows Job launcher is materialized, caches its bridge, and clears both specs", () => {
   assert.equal(materializeWindowsJobLauncher(windowsJobTestCacheRoot), windowsJobLauncherPath);
@@ -357,10 +377,19 @@ test("winQuoteArg quotes cmd metacharacters", () => {
   assert.equal(winQuoteArg("a&b"), '"a&b"');
   assert.equal(winQuoteArg("a|b"), '"a|b"');
   assert.equal(winQuoteArg("a>b"), '"a>b"');
+  assert.equal(winQuoteArg("a,b"), '"a,b"');
+  assert.equal(winQuoteArg("a;b"), '"a;b"');
+  assert.equal(winQuoteArg("a=b"), '"a=b"');
 });
 
 test("winQuoteArg doubles embedded quotes", () => {
   assert.equal(winQuoteArg('say "hi"'), '"say ""hi"""');
+  assert.equal(winQuoteArg('before\\"after'), `"before${"\\".repeat(2)}""after"`);
+});
+
+test("winQuoteArg doubles trailing backslashes before a closing quote", () => {
+  assert.equal(winQuoteArg("C:\\space path\\"), '"C:\\space path\\\\"');
+  assert.equal(winQuoteArg("equals=tail\\"), '"equals=tail\\\\"');
 });
 
 test("winQuoteArg encodes the empty string as a literal empty arg", () => {
@@ -370,6 +399,10 @@ test("winQuoteArg encodes the empty string as a literal empty arg", () => {
 test("winQuoteArg throws on CR/LF (must go via stdin, not argv)", () => {
   assert.throws(() => winQuoteArg("line1\nline2"), /CR\/LF/);
   assert.throws(() => winQuoteArg("a\rb"), /CR\/LF/);
+});
+
+test("winQuoteArg rejects active cmd percent expansion", () => {
+  assert.throws(() => winQuoteArg("%USERPROFILE%"), /would expand/);
 });
 
 test("buildBwrapArgs makes the host read-only, worktree/tmp writable, and network optionally absent", () => {
@@ -651,7 +684,12 @@ test("Windows Job launcher preserves cmd-shim argument boundaries", { skip: proc
   try {
     const child = spawnAgent({
       command: shim,
-      args: ["two words", "simple"],
+      args: [
+        "two words", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
+        "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+        "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+        'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
+      ],
       cwd: dir,
       isolation: windowsJobIsolation,
     });
@@ -667,7 +705,12 @@ test("Windows Job launcher preserves cmd-shim argument boundaries", { skip: proc
       child.on("close", resolve);
     });
     assert.equal(code, 0, err);
-    assert.deepEqual(JSON.parse(out), ["two words", "simple"]);
+    assert.deepEqual(JSON.parse(out), [
+      "two words", "amp&value", 'say "yes"', "paren(value)", "pipe|value",
+      "less<value", "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+      "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+      'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
+    ]);
   } finally {
     if (priorComSpec === undefined) delete process.env.ComSpec;
     else process.env.ComSpec = priorComSpec;
@@ -785,7 +828,7 @@ test("normal provider exit preserves owned background work until session disposa
   );
   finishGracefulStop();
   assert.equal(await waitForPendingKills(8_000), true);
-  assert.throws(() => process.kill(escapedPid!, 0), /ESRCH/, "session disposal reaps retained work");
+  assert.equal(await waitForProcessGone(escapedPid!), true, "session disposal reaps retained work");
 });
 
 test("session disposal reaps a grandchild that creates a new POSIX session and its descendant", {
@@ -823,21 +866,27 @@ test("session disposal reaps a grandchild that creates a new POSIX session and i
   killTree(child);
   assert.equal(await waitForPendingKills(8_000), true);
   for (const pid of [pids.escaped, pids.leaf]) {
-    assert.throws(() => process.kill(pid, 0), /ESRCH/, `owned pid ${pid} was reaped`);
+    assert.equal(await waitForProcessGone(pid), true, `owned pid ${pid} was reaped`);
   }
 });
 
 test("termination rescans the exact marker for a helper forked by a SIGTERM handler", {
   skip: process.platform === "win32",
-  timeout: 15_000,
+  timeout: 25_000,
 }, async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-term-handler-escape-"));
   const ready = path.join(dir, "ready.json");
   const providerReady = path.join(dir, "provider-ready");
+  const helperReady = path.join(dir, "helper-ready");
   const helperScript = path.join(dir, "helper.cjs");
   const providerScript = path.join(dir, "provider.cjs");
   let helperPid: number | undefined;
+  let child: AgentProcess | undefined;
   t.after(async () => {
+    if (child) {
+      killTree(child);
+      await waitForPendingKills(8_000);
+    }
     if (helperPid) {
       try { process.kill(helperPid, "SIGKILL"); } catch { /* already reaped */ }
     }
@@ -845,7 +894,10 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
   });
   await fs.writeFile(helperScript, [
     'const fs = require("node:fs");',
-    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));`,
+    // Pin the formerly flaky ordering: cleanup may win before the helper runs its readiness code.
+    // A blocked JS thread still receives the default OS SIGTERM action.
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);',
+    `fs.writeFileSync(${JSON.stringify(helperReady)}, "ready");`,
     "setInterval(() => {}, 1000);",
   ].join("\n"), "utf8");
   await fs.writeFile(providerScript, [
@@ -855,34 +907,46 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
     'process.on("SIGTERM", () => {',
     "  if (stopping) return;",
     "  stopping = true;",
-    `  spawn(process.execPath, [${JSON.stringify(helperScript)}], { detached: true, stdio: "ignore" }).unref();`,
-    "  process.exit(0);",
+    `  const helper = spawn(process.execPath, [${JSON.stringify(helperScript)}], { detached: true, stdio: "ignore" });`,
+    '  helper.on("error", (error) => { console.error(error); process.exit(1); });',
+    '  helper.on("spawn", () => {',
+    `    fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: helper.pid }));`,
+    "    helper.unref();",
+    "    process.exit(0);",
+    "  });",
     "});",
     `fs.writeFileSync(${JSON.stringify(providerReady)}, "ready");`,
     "setInterval(() => {}, 1000);",
   ].join("\n"), "utf8");
 
-  const child = spawnAgent({
+  child = spawnAgent({
     command: process.execPath,
     args: [providerScript],
     cwd: dir,
     windowsShell: false,
     descendantOwner: {},
   });
+  let providerOutput = "";
+  child.stderr.on("data", (chunk: unknown) => { providerOutput = (providerOutput + String(chunk)).slice(-4_096); });
   child.stdin.end();
-  for (let attempt = 0; attempt < 100; attempt++) {
+  const providerDeadline = Date.now() + 5_000;
+  while (Date.now() < providerDeadline) {
     try { await fs.access(providerReady); break; }
     catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
   }
-  await fs.access(providerReady);
+  assert.equal(await fs.access(providerReady).then(() => true, () => false), true,
+    `provider never installed its SIGTERM handler; pid=${child.pid}; stderr=${providerOutput}`);
   killTree(child);
-  for (let attempt = 0; attempt < 100 && !helperPid; attempt++) {
+  const helperDeadline = Date.now() + 5_000;
+  while (Date.now() < helperDeadline && !helperPid) {
     try { helperPid = (JSON.parse(await fs.readFile(ready, "utf8")) as { pid: number }).pid; }
     catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
   }
-  assert.ok(helperPid, "SIGTERM handler forked its detached helper");
+  assert.ok(Number.isSafeInteger(helperPid) && helperPid! > 0,
+    `SIGTERM handler did not report a successful detached spawn; provider=${child.pid}; stderr=${providerOutput}`);
   assert.equal(await waitForPendingKills(8_000), true);
-  assert.throws(() => process.kill(helperPid!, 0), /ESRCH/, "final marker rescan reaps the helper");
+  assert.equal(await waitForProcessGone(helperPid!), true, "final marker rescan reaps the helper");
+  await assert.rejects(fs.access(helperReady), /ENOENT/, "helper reaped without executing readiness code");
 });
 
 test("buildWslArgs scrubs names in-distro and never places agent env values in argv", () => {
@@ -988,15 +1052,43 @@ test("POSIX kill completion settles when close was already observed", {
   assert.deepEqual(signals, [], "an already-closed PID is not safe to signal after possible reuse");
 });
 
-test("bubblewrap remains the in-distro executable for an isolated WSL launch", () => {
-  const isolated = buildBwrapArgs(
-    { command: "/usr/bin/agent", args: ["--prompt", "two words"], cwd: "/home/me/repo" },
-    { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny" },
-  );
-  const args = buildWslArgs("Ubuntu", "/home/me/repo", "/tmp/x.pgid", {
-    command: "/usr/bin/bwrap", args: isolated, cwd: "/home/me/repo", context: { kind: "wsl", distro: "Ubuntu" },
-  });
-  assert.ok(args.includes("/usr/bin/bwrap"));
-  assert.ok(args.includes("--unshare-net"));
-  assert.deepEqual(args.slice(-3), ["/usr/bin/agent", "--prompt", "two words"]); // original argv boundaries survive
+test("spawnAgent rejects a synthetic WSL bwrap boundary before process construction", () => {
+  assert.throws(() => spawnAgent({
+    command: "/usr/bin/agent",
+    args: ["--prompt", "two words"],
+    cwd: "/home/me/alias",
+    context: { kind: "wsl", distro: "Ubuntu" },
+    isolation: { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny" },
+  }), /cannot hold target-local no-follow path handles/);
+});
+
+test("Direct WSL bridge binds broker-provisioned private files and launches only the target-local helper sibling", () => {
+  const bridge = {
+    protocolVersion: 1 as const, distro: "Ubuntu", nodeRuntime: "/usr/bin/node",
+    helperPath: "/usr/local/lib/wollipog/wsl-agent-control-v1.mjs" as const,
+    sessionId: "session-a", token: "never-in-argv", tokenFile: "C:\\state\\session-a.token",
+    readyFile: "C:\\state\\session-a.ready", cpUrl: "http://127.0.0.1:4317",
+    socketPath: "/tmp/wlp-test/control.sock",
+    safeLauncherProtocolVersion: 1 as const, bwrapRuntime: "/usr/bin/bwrap",
+    socketDirectory: { path: "/var/lib/wollipog-wsl-launcher/session/relay", identity: "1:2:3" },
+  };
+  const relayArgs = buildWslAgentControlRelayArgs(bridge);
+  assert.deepEqual(relayArgs.slice(0, 7), ["-d", "Ubuntu", "--cd", "/", "--exec",
+    "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1", "relay"]);
+  assert.ok(relayArgs.includes("/var/lib/wollipog-wsl-launcher/session/relay"));
+  assert.ok(relayArgs.includes("1:2:3"));
+  assert.ok(relayArgs.includes("/usr/bin/node"));
+  assert.ok(relayArgs.includes("/usr/local/lib/wollipog/wsl-agent-control-v1.mjs"));
+  assert.ok(relayArgs.includes("control.sock"));
+  assert.equal(relayArgs.join(" ").includes(bridge.token), false, "relay argv never receives the credential");
+});
+
+test("Direct WSL provider invocations use collision-free bounded pidfiles", () => {
+  const directory = "/var/lib/wollipog-wsl-launcher/session/relay";
+  const first = wslProviderPidfile(directory);
+  const second = wslProviderPidfile(directory);
+  assert.notEqual(first, second);
+  for (const value of [first, second]) {
+    assert.match(value, /^\/var\/lib\/wollipog-wsl-launcher\/session\/relay\/provider-[a-f0-9]{32}\.pgid$/u);
+  }
 });

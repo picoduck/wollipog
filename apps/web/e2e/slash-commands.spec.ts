@@ -420,7 +420,11 @@ test("rename-session moves into a retryable status receipt without disturbing th
   await composer.fill("Draft I care about");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
-  await receipt.getByRole("button", { name: "Retry Rename" }).click();
+  const retry = receipt.getByRole("button", { name: "Retry Rename" });
+  await composer.evaluate((element) => (element as HTMLTextAreaElement).setSelectionRange(5, 5));
+  await page.keyboard.press("Shift+Tab");
+  await expect(retry).toBeFocused();
+  await retry.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.retitleRequests())).toEqual([
     "session-alpha",
     "session-alpha",
@@ -433,6 +437,11 @@ test("rename-session moves into a retryable status receipt without disturbing th
     title: "Retitled Session",
   }));
   await expect(receipt).toHaveCount(0);
+  await expect(composer).toBeFocused();
+  await expect.poll(() => composer.evaluate((element) => ({
+    start: (element as HTMLTextAreaElement).selectionStart,
+    end: (element as HTMLTextAreaElement).selectionEnd,
+  }))).toEqual({ start: 5, end: 5 });
   await expect(page.getByText("Session renamed.", { exact: true })).toBeVisible();
   await expect(composer).toHaveValue("Draft I care about");
   await expect.poll(() => page.evaluate(async () =>
@@ -464,6 +473,127 @@ test("rename-session moves into a retryable status receipt without disturbing th
   await expect(composer).toHaveValue("");
   await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
   await expect(page.getByText("Retitled Again", { exact: true })).toBeVisible();
+});
+
+test("rename-session retry preserves deliberate focus movement and keeps failure retryable", async ({ page }) => {
+  const composer = page.locator(".composer-input");
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await composer.fill("/rename-session");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.retitleRequests().length))
+    .toBe(1);
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
+    error: "Session naming failed during thread start. Verify the selected Agent Harness and try again.",
+  }));
+
+  const receipt = page.getByRole("region", { name: "Rename Session Status" });
+  const retry = receipt.getByRole("button", { name: "Retry Rename" });
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await retry.click();
+  await expect(receipt).toBeFocused();
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
+    error: "Session naming timed out. Try again.",
+  }));
+  await expect(receipt).toBeFocused();
+  await expect(retry).toBeVisible();
+  await page.keyboard.press("Tab");
+  await expect(retry).toBeFocused();
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await retry.press("Enter");
+  const moreActions = page.locator(".session-detail > .detail-head")
+    .getByRole("button", { name: "More Actions" });
+  await moreActions.focus();
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
+    title: "Retitled Without Stolen Focus",
+  }));
+  await expect(receipt).toHaveCount(0);
+  await expect(moreActions).toBeFocused();
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await composer.fill("/rename-session");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.retitleRequests().length))
+    .toBe(4);
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
+    error: "Session naming timed out. Try again.",
+  }));
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await retry.dispatchEvent("pointerdown", { pointerId: 1, pointerType: "touch" });
+  await retry.dispatchEvent("click", { detail: 0 });
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.retitleRequests().length))
+    .toBe(5);
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
+    title: "Retitled From Pointer Retry",
+  }));
+  await expect(receipt).toHaveCount(0);
+  await expect(composer).not.toBeFocused();
+  await expect.poll(() => page.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
+});
+
+test("wrapped composer errors stay in flow beside status receipts at responsive widths", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const composer = page.locator(".composer-input");
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await composer.fill("/rename-session");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.retitleRequests().length))
+    .toBe(1);
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
+    error: "Session naming failed during thread start. Verify the selected Agent Harness and try again.",
+  }));
+
+  const receipt = page.getByRole("region", { name: "Rename Session Status" });
+  await expect(receipt.getByRole("button", { name: "Retry Rename" })).toBeVisible();
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands(
+    [], [], { supportsImages: true },
+  ));
+  await composer.evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "fixture.png", { type: "image/png" }));
+    element.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    }));
+  });
+  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands(
+    [], [], { supportsImages: false },
+  ));
+  await composer.fill("Draft with an unsupported image");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const composerError = page.locator(".composer").getByRole("alert");
+  await expect(composerError).toHaveText(
+    "The selected model does not support image input. Remove the attachment or choose an image-capable model.",
+  );
+  await expect.poll(() => composerError.evaluate((element) => getComputedStyle(element).position)).toBe("static");
+  const expectSeparated = async () => {
+    const [errorBox, receiptBox] = await Promise.all([composerError.boundingBox(), receipt.boundingBox()]);
+    expect(errorBox).not.toBeNull();
+    expect(receiptBox).not.toBeNull();
+    expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(receiptBox!.y);
+  };
+  await expectSeparated();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expectSeparated();
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await composer.fill("/rename-session");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(composerError).toHaveCount(0);
+  const [composerBox, receiptBox, composerInset] = await Promise.all([
+    page.locator(".composer").boundingBox(),
+    receipt.boundingBox(),
+    page.locator(".composer").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.paddingTop);
+    }),
+  ]);
+  expect(composerBox).not.toBeNull();
+  expect(receiptBox).not.toBeNull();
+  expect(receiptBox!.y - composerBox!.y).toBeCloseTo(composerInset, 1);
 });
 
 test("a stale semantic rename reports its fence without replacing a newer title", async ({ page }) => {

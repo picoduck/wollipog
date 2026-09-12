@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type {
@@ -13,14 +13,17 @@ import type {
   PendingApproval,
   RunnerMetadata,
   ReviewFinding,
+  ForgeReviewSyncInfo,
   GitHubReviewSyncInfo,
   SessionConfig,
   SessionSnapshot,
   WorkflowArtifact,
   WorkflowArtifactView,
+  type UsageAmount,
 } from "@wollipog/protocol";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 import { archiveSessionPage } from "./archive-session-page.js";
+import { parseRateTable } from "./usage-pricing.js";
 import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
@@ -88,6 +91,14 @@ function claudeAgent(): AgentDefinition {
       replayUserMessages: true,
       auth: { status: "authenticated", method: "claude.ai", provider: "firstParty", billingSource: "subscription", subscriptionType: "max" },
     },
+    nativeTuiAccounting: {
+      status: "unavailable",
+      provider: "claude-code",
+      installedVersion: "2.1.205",
+      verification: "live-cli-contract",
+      nearestStructuredSurface: "print-mode-only",
+      missingRequirements: ["authoritative_usage_events", "stable_event_identity", "replay_watermark", "gap_detection"],
+    },
     // no capabilities -> should round-trip as undefined
   };
 }
@@ -154,6 +165,23 @@ function createScreenshotArtifact(
 
 function createSteeringPromptImage(db: ControlPlaneDb, sessionId: string, artifactId: string): WorkflowArtifactView {
   return createScreenshotArtifact(db, { sessionId }, artifactId);
+}
+
+/** Expected-shape helper: the v103 ledger fields with the defaults an unbroken-down event yields. */
+function usageAmount<T extends { inputTokens: number; outputTokens: number; costUsd: number }>(
+  amount: T & Partial<UsageAmount>,
+): T & UsageAmount {
+  return {
+    uncachedInputTokens: amount.inputTokens,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    reasoningTokens: 0,
+    cacheSavingsUsd: 0,
+    costSource: amount.inputTokens + amount.outputTokens + amount.costUsd > 0 ? "providerReported" : "unpriced",
+    unpricedRecords: 0,
+    processedTokens: amount.inputTokens + amount.outputTokens,
+    ...amount,
+  };
 }
 
 test("steering attempts preserve idempotency, reconcile late receipts, compact, and cascade", () => {
@@ -445,6 +473,146 @@ test("steering resolution results validate and correlate before resolving recove
   }, 6);
   assert.deepEqual(resolved?.resolution, { action: "dismiss", state: "applied" });
   assert.equal(db.steeringRecoveryAdmissionCount("sess-1"), 0);
+});
+
+test("Queue Again receipts retire only from exact canonical queue identity and dismiss locally", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.createSteeringAttempt({
+    requestId: "steer-queue-again-db", sessionId: "sess-1", submissionId: "submission-queue-again-db",
+    turnId: "turn-1", source: "direct", requestSha256: "6".repeat(64), text: "recover", now: 1,
+  });
+  db.markSteeringAttemptUncertain("steer-queue-again-db", 2);
+  assert.equal(db.stageSteeringResolution(
+    "sess-1", "submission-queue-again-db", "queue_again", "resolve-queue-again-db", 3,
+  ).kind, "staged");
+  assert.deepEqual(db.recordSteeringResolutionResult("runner-1", {
+    type: "resolve_steering_attempt_result", requestId: "resolve-queue-again-db", sessionId: "sess-1",
+    submissionId: "submission-queue-again-db", action: "queue_again", applied: true,
+    queuedPromptId: "queue-exact",
+  }, 4)?.resolution, { action: "queue_again", state: "applied", queuedPromptId: "queue-exact" });
+
+  const lateOriginalResult = db.recordSteeringResult("runner-1", {
+    type: "steer_session_result", requestId: "steer-queue-again-db", sessionId: "sess-1",
+    submissionId: "submission-queue-again-db", turnId: "turn-1",
+    disposition: "converted_to_queue", reason: "stale_turn", queuedPromptId: "queue-original-late",
+  }, 4);
+  assert.equal(lateOriginalResult?.queuedPromptId, "queue-original-late");
+  assert.deepEqual(lateOriginalResult?.resolution, {
+    action: "queue_again", state: "applied", queuedPromptId: "queue-exact",
+  }, "a late original receipt cannot overwrite the Queue Again delivery identity");
+
+  assert.equal(db.recordSteeringQueueSnapshot("sess-1", [], 5), true);
+  assert.equal(db.listSteeringAttempts("sess-1").length, 1,
+    "queue disappearance can mean cancellation and cannot retire the receipt");
+  assert.equal(db.retireQueuedAgainSteeringReceiptFromUserMessage("sess-1", "queue-other", 6), false);
+  assert.equal(db.listSteeringAttempts("sess-1").length, 1);
+  assert.equal(db.retireQueuedAgainSteeringReceiptFromUserMessage("sess-1", "queue-exact", 7), true);
+  assert.deepEqual(db.listSteeringAttempts("sess-1"), []);
+  assert.equal(db.retireQueuedAgainSteeringReceiptFromUserMessage("sess-1", "queue-exact", 8), false,
+    "retirement is idempotent");
+
+  const durable = db.findSteeringAttemptBySubmission("sess-1", "submission-queue-again-db")?.attempt;
+  assert.deepEqual(durable?.resolution, {
+    action: "queue_again", state: "applied",
+  }, "retirement hides the receipt and discards its no-longer-needed queue identity");
+});
+
+test("manual Queue Again receipt dismissal is durable without staging a runner command", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-queue-again-dismiss-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    db.createSteeringAttempt({
+      requestId: "steer-dismiss-queue-again", sessionId: "sess-1",
+      submissionId: "submission-dismiss-queue-again", turnId: "turn-1", source: "direct",
+      requestSha256: "5".repeat(64), text: "recover", now: 2,
+    });
+    db.markSteeringAttemptUncertain("steer-dismiss-queue-again", 3);
+    db.stageSteeringResolution(
+      "sess-1", "submission-dismiss-queue-again", "queue_again", "resolve-dismiss-queue-again", 4,
+    );
+    db.recordSteeringResolutionResult("runner-1", {
+      type: "resolve_steering_attempt_result", requestId: "resolve-dismiss-queue-again",
+      sessionId: "sess-1", submissionId: "submission-dismiss-queue-again", action: "queue_again",
+      applied: true, queuedPromptId: "queue-still-live",
+    }, 5);
+
+    const dismissed = db.stageSteeringResolution(
+      "sess-1", "submission-dismiss-queue-again", "dismiss", "acknowledge-only", 6,
+    );
+    assert.equal(dismissed.kind, "staged");
+    assert.deepEqual(dismissed.attempt?.resolution, { action: "queue_again", state: "applied" });
+    assert.deepEqual(db.pendingSteeringResolutionMessages("runner-1"), []);
+    assert.deepEqual(db.listSteeringAttempts("sess-1"), []);
+    db.close();
+
+    db = ControlPlaneDb.open(path);
+    assert.deepEqual(db.listSteeringAttempts("sess-1"), [], "dismissal survives a database restart");
+    assert.deepEqual(db.findSteeringAttemptBySubmission(
+      "sess-1", "submission-dismiss-queue-again",
+    )?.attempt.resolution, { action: "queue_again", state: "applied" });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy Queue Again receipt identities migrate safely, including malformed receipt JSON", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-queue-again-migration-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    for (const [suffix, now] of [["valid", 2], ["malformed", 10]] as const) {
+      db.createSteeringAttempt({
+        requestId: `steer-migration-${suffix}`, sessionId: "sess-1",
+        submissionId: `submission-migration-${suffix}`, turnId: `turn-${suffix}`,
+        source: "direct", requestSha256: (suffix === "valid" ? "1" : "0").repeat(64),
+        text: "recover", now,
+      });
+      db.markSteeringAttemptUncertain(`steer-migration-${suffix}`, now + 1);
+      db.stageSteeringResolution(
+        "sess-1", `submission-migration-${suffix}`, "queue_again", `resolve-migration-${suffix}`, now + 2,
+      );
+    }
+    db.recordSteeringResolutionResult("runner-1", {
+      type: "resolve_steering_attempt_result", requestId: "resolve-migration-valid",
+      sessionId: "sess-1", submissionId: "submission-migration-valid",
+      action: "queue_again", applied: true, queuedPromptId: "queue-migrated",
+    }, 5);
+    db.raw().prepare(
+      `UPDATE session_steering_attempts
+       SET resolution_receipt_json='not json',resolved_at=13
+       WHERE request_id='steer-migration-malformed'`,
+    ).run();
+    db.close();
+    db = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE session_steering_attempts DROP COLUMN resolution_queued_prompt_id");
+    legacy.close();
+
+    assert.doesNotThrow(() => { db = ControlPlaneDb.open(path); },
+      "malformed legacy JSON must not make database startup fail");
+    assert.equal(db!.findSteeringAttemptBySubmission(
+      "sess-1", "submission-migration-valid",
+    )?.attempt.resolution?.queuedPromptId, "queue-migrated");
+    assert.equal(db!.retireQueuedAgainSteeringReceiptFromUserMessage(
+      "sess-1", "queue-migrated", 20,
+    ), true, "the backfilled identity remains eligible for exact retirement");
+    assert.deepEqual(db!.findSteeringAttemptBySubmission(
+      "sess-1", "submission-migration-malformed",
+    )?.attempt.resolution, { action: "queue_again", state: "applied" });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("rejected steering receipts can be durably acknowledged without a runner round trip", () => {
@@ -1066,7 +1234,8 @@ test("startup settlement waits for explicit ownership and still settles a genuin
 /* ----------------------------- Runners --------------------------------- */
 
 test("registerRunner + getRunner round-trips driver/context/capabilities via JSON columns", () => {
-  const db = withRunner();
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(meta(), 500, 121);
   const view = db.getRunner("runner-1");
   assert.ok(view, "runner exists");
   assert.equal(view!.runnerId, "runner-1");
@@ -1112,6 +1281,17 @@ test("registerRunner + getRunner round-trips driver/context/capabilities via JSO
   assert.deepEqual(claude.env, {});
   assert.equal(claude.claudeCode?.status, "ready");
   assert.equal(claude.claudeCode?.auth.billingSource, "subscription");
+  assert.equal(claude.nativeTuiAccounting?.status, "unavailable");
+  assert.deepEqual(claude.nativeTuiAccounting?.missingRequirements, [
+    "authoritative_usage_events", "stable_event_identity", "replay_watermark", "gap_detection",
+  ]);
+
+  db.registerRunner(meta(), 600, 120);
+  assert.equal(
+    db.getRunner("runner-1")?.agents.find((candidate) => candidate.id === "claude-agent")?.nativeTuiAccounting,
+    undefined,
+    "pre-v121 runners cannot publish the diagnostic",
+  );
 });
 
 test("runner runtime storage/admission diagnostics round-trip only for v32+", () => {
@@ -1130,6 +1310,93 @@ test("runner runtime storage/admission diagnostics round-trip only for v32+", ()
   assert.deepEqual(db.getRunner("runner-1")?.runtime, runtime);
   db.registerRunner(meta({ runtime }), 200, 31);
   assert.equal(db.getRunner("runner-1")?.runtime, undefined, "an older runner cannot advertise v32 diagnostics");
+});
+
+test("Machine Runner Capacity is durable, conflict-safe, and re-established after reconnect", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-runner-capacity-"));
+  const location = join(temp, "control-plane.sqlite");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(meta({ runtime: {
+      dataDir: "C:/wollipog",
+      worktreeRoot: "C:/wollipog/worktrees",
+      maxConcurrentSessions: 16,
+    } }), 100, PROTOCOL_VERSION);
+    db.setMachineDisplayName("runner-1", "Build Machine");
+    const first = db.setMachineRunnerCapacity("runner-1", 24, 0, 110);
+    assert.deepEqual(first, { ok: true, configuration: { configuredUnits: 24, revision: 1 } });
+    assert.deepEqual(db.setMachineRunnerCapacity("runner-1", 32, 0, 111), {
+      ok: false,
+      configuration: { configuredUnits: 24, revision: 1 },
+    }, "a concurrent stale writer receives the current authoritative revision");
+    assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+      configuredUnits: 24,
+      revision: 1,
+      authority: "control_plane",
+      usedUnits: 20,
+      availableUnits: 4,
+      queuedSessions: 2,
+      blockers: [{
+        kind: "agent_quota",
+        description: "claude is using 4 of 4 provider slots",
+        usedUnits: 4,
+        limitUnits: 4,
+        requiredUnits: 1,
+        waitingSessions: 2,
+        agentId: "claude",
+      }],
+    }, 120), true);
+    assert.equal(db.getRunner("runner-1")?.capacity?.usedUnits, 20);
+    assert.equal(db.getRunner("runner-1")?.capacity?.blockers[0]?.kind, "agent_quota");
+    assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+      configuredUnits: 24,
+      revision: 1,
+      authority: "control_plane",
+      usedUnits: 20,
+      availableUnits: 4,
+      queuedSessions: 1,
+      blockers: [{
+        kind: "not-a-real-limit" as never,
+        description: "untrusted",
+        usedUnits: 1,
+        limitUnits: 1,
+        requiredUnits: 1,
+        waitingSessions: 1,
+      }],
+    }, 121), false, "runner-authored diagnostics accept only the closed blocker vocabulary");
+
+    db.setMachineDisplayName("runner-1", "");
+    assert.deepEqual(db.machineRunnerCapacityConfiguration("runner-1"), { configuredUnits: 24, revision: 1 },
+      "clearing an unrelated Machine name cannot erase its capacity setting");
+    db.close();
+    db = undefined;
+
+    db = ControlPlaneDb.open(location);
+    assert.deepEqual(db.machineRunnerCapacityConfiguration("runner-1"), { configuredUnits: 24, revision: 1 });
+    db.registerRunner(meta({ runtime: {
+      dataDir: "C:/wollipog",
+      worktreeRoot: "C:/wollipog/worktrees",
+      maxConcurrentSessions: 16,
+    } }), 200, PROTOCOL_VERSION);
+    assert.deepEqual(db.getRunner("runner-1")?.capacity, {
+      configuredUnits: 24,
+      revision: 1,
+      authority: "control_plane",
+    }, "re-registration keeps CP authority while waiting for a fresh live lease report");
+    assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+      configuredUnits: 16,
+      revision: 0,
+      authority: "runner_local",
+      usedUnits: 0,
+      availableUnits: 16,
+      queuedSessions: 0,
+      blockers: [],
+    }, 201), false, "a stale runner-local report cannot override the durable control-plane setting");
+  } finally {
+    db?.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test("Codex app-server compatibility diagnostics round-trip and old rows may omit them", () => {
@@ -1367,6 +1634,28 @@ test("getAgentLaunch returns command/args/env/driver/context/version", () => {
   assert.equal(db.getAgentLaunch("nope", "acp-agent"), null);
 });
 
+test("Direct WSL safe-launcher attestation round-trips only from a v124+ runner", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const safe = {
+    ...claudeAgent(),
+    wslAgentControl: {
+      protocolVersion: 1 as const,
+      nodeRuntime: "/usr/bin/node",
+      safeLauncherProtocolVersion: 1 as const,
+      bwrapRuntime: "/usr/bin/bwrap",
+    },
+  };
+  db.registerRunner(meta({ agents: [safe] }), 500, RUNNER_CAPABILITY_MIN_PROTOCOL.wslSafeLauncher);
+  assert.deepEqual(db.getAgentLaunch("runner-1", safe.id)?.wslAgentControl, safe.wslAgentControl);
+  assert.deepEqual(db.getRunner("runner-1")?.agents[0]?.wslAgentControl, safe.wslAgentControl);
+
+  db.registerRunner(meta({ agents: [safe] }), 600, RUNNER_CAPABILITY_MIN_PROTOCOL.wslSafeLauncher - 1);
+  assert.equal(db.getAgentLaunch("runner-1", safe.id)?.wslAgentControl, undefined);
+  assert.equal(db.getRunner("runner-1")?.agents[0]?.wslAgentControl, undefined,
+    "an older runner cannot persist the newer authority-bearing attestation shape");
+  db.close();
+});
+
 test("protocol-v54 runner agent environment is never persisted by the control plane", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(meta(), 500, 54);
@@ -1531,8 +1820,8 @@ test("usage accounting is exact, parentless-only, and transactionally follows ac
   const usage = db.queryUsageAggregation(localOwner(), {
     since: 0, through: 10_000_000, granularity: "hour",
   });
-  assert.deepEqual(usage.totals, { inputTokens: 15, outputTokens: 3, costUsd: 0.3 });
-  assert.deepEqual(usage.series, [{ bucketTs: 3_600_000, inputTokens: 15, outputTokens: 3, costUsd: 0.3 }]);
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 15, outputTokens: 3, costUsd: 0.3 }));
+  assert.deepEqual(usage.series, [usageAmount({ bucketTs: 3_600_000, inputTokens: 15, outputTokens: 3, costUsd: 0.3 })]);
   assert.equal(db.getSession("sess-1")!.costUsd, 0.3, "the session total moves in the same transaction");
   assert.equal(db.raw().prepare("SELECT cost_microusd FROM usage_hourly").get()!.cost_microusd, 300_000);
 });
@@ -1606,7 +1895,7 @@ test("snapshot residuals and indexed source coverage prevent cold-history and re
   );
   assert.equal(cold.applied, true);
   let usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 10, outputTokens: 4, costUsd: 1 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 10, outputTokens: 4, costUsd: 1 }));
 
   db.reconcileRunnerHistory("usage-history", 7, 3);
   db.appendHydratedPage(
@@ -1625,7 +1914,7 @@ test("snapshot residuals and indexed source coverage prevent cold-history and re
   }), 5_000);
 
   usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 20, outputTokens: 6, costUsd: 2 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 20, outputTokens: 6, costUsd: 2 }));
   assert.equal(db.getSession("usage-history")!.costUsd, 2, "a stale lower snapshot cannot roll the session back");
 
   db.updateSessionFromSnapshot("usage-history", snapshot({
@@ -1637,7 +1926,7 @@ test("snapshot residuals and indexed source coverage prevent cold-history and re
     [{ seq: 1, ts: 50, payload: { kind: "token_usage", inputTokens: 20, outputTokens: 6, costUsd: 2 } }],
   );
   usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 20, outputTokens: 6, costUsd: 2 }, "reissued history in a new epoch is covered by the snapshot");
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 20, outputTokens: 6, costUsd: 2 }), "reissued history in a new epoch is covered by the snapshot");
 });
 
 test("the first known history epoch preserves legacy coverage and accrues its first uncovered event", () => {
@@ -1653,7 +1942,7 @@ test("the first known history epoch preserves legacy coverage and accrues its fi
   );
   assert.equal(applied.applied, true);
   const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 15, outputTokens: 0, costUsd: 1.5 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 15, outputTokens: 0, costUsd: 1.5 }));
 });
 
 test("legacy unknown-epoch hydration cannot claim a known generation was replaced", () => {
@@ -1668,7 +1957,7 @@ test("legacy unknown-epoch hydration cannot claim a known generation was replace
     { accrueUsage: true, runnerSeq: 2, historyEpoch: null },
   );
   const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 15, outputTokens: 0, costUsd: 1.5 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 15, outputTokens: 0, costUsd: 1.5 }));
 });
 
 test("a page-first replacement epoch covers the whole replay page before usage accounting", () => {
@@ -1687,7 +1976,7 @@ test("a page-first replacement epoch covers the whole replay page before usage a
   );
   assert.equal(applied.applied, true);
   const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 10, outputTokens: 0, costUsd: 1 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 10, outputTokens: 0, costUsd: 1 }));
   assert.equal(db.getSession("usage-page-first-reset")!.costUsd, 1);
 });
 
@@ -1705,17 +1994,17 @@ test("retention rolls hourly usage into UTC days before deletion and late rows r
 
   db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 2, costUsd: 0.000001 }, 10 * day + 7_200_000, { accrueUsage: true });
   let usage = db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "day" });
-  assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 4, costUsd: 0.375002 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }));
   db.maintainUsageAggregation(now, "org_personal");
   usage = db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "day" });
-  assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }, "rerolling a late hour adds it once");
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }), "rerolling a late hour adds it once");
   assert.equal(db.listEvents("sess-1").length, 3, "aggregate retention never touches transcripts");
   assert.equal(db.getSession("sess-1")!.costUsd, 0.375002, "aggregate retention never changes session budget totals");
 
   db.setUsageRetentionPolicy("org_personal", { hourlyDays: 30, dailyDays: 30 }, now);
   usage = db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "hour" });
   assert.equal(usage.granularity, "day", "rolled rows force a complete daily response after hourly retention expands");
-  assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 4, costUsd: 0.375002 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }));
 });
 
 test("runner timestamps cannot trigger retention maintenance for another organization", () => {
@@ -1776,17 +2065,17 @@ test("usage migration seeds an unbucketed lifetime baseline exactly once", () =>
 
     const upgraded = ControlPlaneDb.open(file);
     let usage = upgraded.queryUsageAggregation(localOwner(), { since: 0, through: Date.now() + 1, granularity: "hour" });
-    assert.deepEqual(usage.totals, { inputTokens: 0, outputTokens: 0, costUsd: 0 }, "lifetime totals are not fabricated into a historical bucket");
+    assert.deepEqual(usage.totals, usageAmount({ inputTokens: 0, outputTokens: 0, costUsd: 0 }), "lifetime totals are not fabricated into a historical bucket");
     upgraded.updateSessionFromSnapshot("sess-1", snapshot({
       id: "sess-1", tokensIn: 100, tokensOut: 20, costUsd: 3.25, seq: 4,
     }), Date.now());
     usage = upgraded.queryUsageAggregation(localOwner(), { since: 0, through: Date.now() + 1, granularity: "hour" });
-    assert.deepEqual(usage.totals, { inputTokens: 0, outputTokens: 0, costUsd: 0 }, "the first matching reconnect cannot charge the baseline again");
+    assert.deepEqual(usage.totals, usageAmount({ inputTokens: 0, outputTokens: 0, costUsd: 0 }), "the first matching reconnect cannot charge the baseline again");
     upgraded.updateSessionFromSnapshot("sess-1", snapshot({
       id: "sess-1", tokensIn: 105, tokensOut: 22, costUsd: 3.5, seq: 5,
     }), Date.now());
     usage = upgraded.queryUsageAggregation(localOwner(), { since: 0, through: Date.now() + 1, granularity: "hour" });
-    assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 2, costUsd: 0.25 });
+    assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 2, costUsd: 0.25 }));
     upgraded.close();
 
     const reopened = ControlPlaneDb.open(file);
@@ -1794,7 +2083,7 @@ test("usage migration seeds an unbucketed lifetime baseline exactly once", () =>
       id: "sess-1", tokensIn: 105, tokensOut: 22, costUsd: 3.5, seq: 5,
     }), Date.now());
     usage = reopened.queryUsageAggregation(localOwner(), { since: 0, through: Date.now() + 1, granularity: "hour" });
-    assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 2, costUsd: 0.25 }, "reopen does not silently re-baseline or duplicate usage");
+    assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 2, costUsd: 0.25 }), "reopen does not silently re-baseline or duplicate usage");
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -2103,6 +2392,32 @@ test("updateSessionStatus updates status and derived column", () => {
   assert.equal(v.column, "done");
 });
 
+test("queued capacity reasons persist for discovery and clear on the next lifecycle state", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.updateSessionStatus("sess-1", "queued", 2_000);
+  db.setSessionCapacityWait("sess-1", {
+    kind: "runner_capacity",
+    description: "Runner Capacity is 16 of 16 units used; this session needs 2",
+    usedUnits: 16,
+    limitUnits: 16,
+    requiredUnits: 2,
+    agentId: "acp-agent",
+  });
+  assert.equal(db.getSession("sess-1")?.capacityWait?.requiredUnits, 2);
+  assert.equal(db.setSessionCapacityWait("sess-1", {
+    kind: "not-a-real-limit" as never,
+    description: "untrusted",
+    usedUnits: 1,
+    limitUnits: 1,
+    requiredUnits: 1,
+  }), false);
+  assert.equal(db.getSession("sess-1")?.capacityWait?.requiredUnits, 2,
+    "an invalid runner frame cannot overwrite the last valid queue reason");
+  db.updateSessionStatus("sess-1", "starting", 2_001);
+  assert.equal(db.getSession("sess-1")?.capacityWait, undefined);
+});
+
 test("updateSessionStatus clears pending approval when leaving input_required", () => {
   const db = withRunner();
   db.createSession(newSession());
@@ -2128,37 +2443,41 @@ test("updateSessionStatus clears pending approval when leaving input_required", 
 test("updateSessionConfig persists changes and sessionView shows them", () => {
   const db = withRunner();
   db.createSession(
-    newSession({ config: { model: "opus", effort: "low", permissionMode: "plan" } }),
+    newSession({ config: { model: "opus", effort: "low", serviceTier: "fast", permissionMode: "plan" } }),
   );
-  db.raw().prepare("UPDATE sessions SET resolved_model=? WHERE id=?")
-    .run("claude-opus-5[1m]", "sess-1");
+  db.raw().prepare("UPDATE sessions SET resolved_model=?, context_window=? WHERE id=?")
+    .run("claude-opus-5[1m]", 1_000_000, "sess-1");
 
   db.updateSessionConfig(
     "sess-1",
-    { model: "sonnet", effort: "high", permissionMode: "default" },
+    { model: "sonnet", effort: "high", serviceTier: "flex", permissionMode: "default" },
     5000,
   );
   const v = db.getSession("sess-1")!;
   assert.equal(v.model, "sonnet");
   assert.equal(v.resolvedModel, null);
+  assert.equal(v.contextWindow, undefined, "the served window belonged to the previous model");
   assert.equal(v.effort, "high");
+  assert.equal(v.serviceTier, "flex");
   assert.equal(v.permissionMode, "default");
   assert.equal(v.updatedAt, 5000);
 
-  db.raw().prepare("UPDATE sessions SET resolved_model=? WHERE id=?")
-    .run("claude-sonnet-5", "sess-1");
+  db.raw().prepare("UPDATE sessions SET resolved_model=?, context_window=? WHERE id=?")
+    .run("claude-sonnet-5", 1_000_000, "sess-1");
   db.updateSessionConfig(
     "sess-1",
-    { model: "sonnet", effort: "low", permissionMode: "default" },
+    { model: "sonnet", effort: "low", serviceTier: "default", permissionMode: "default" },
     5200,
   );
   assert.equal(db.getSession("sess-1")?.resolvedModel, "claude-sonnet-5");
+  assert.equal(db.getSession("sess-1")?.contextWindow, 1_000_000, "an effort-only change keeps the served window");
 
   // partial config nulls out the omitted fields (update writes ?? null)
   db.updateSessionConfig("sess-1", { model: "haiku" }, 5500);
   const v2 = db.getSession("sess-1")!;
   assert.equal(v2.model, "haiku");
   assert.equal(v2.effort, null);
+  assert.equal(v2.serviceTier, null);
   assert.equal(v2.permissionMode, null);
 });
 
@@ -2240,6 +2559,85 @@ test("appendEvent + listEvents return events in seq order with stable ids", () =
   // afterSeq filter
   const after = db.listEvents("sess-1", 1);
   assert.deepEqual(after.map((e) => e.seq), [2, 3]);
+});
+
+test("child registry history scans SQL-filter ordinary tools and page child evidence", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  for (let index = 0; index < 205; index += 1) {
+    db.appendEvent("sess-1", { kind: "tool_call", toolCallId: `root-${index}`, toolKind: "read",
+      title: `/private/${index}`, status: "completed", text: `secret-${index}` }, index + 1);
+  }
+  db.appendEvent("sess-1", { kind: "tool_call", toolCallId: "early", parentToolUseId: "child",
+    toolKind: "read", title: "/private/early", status: "completed" }, 299);
+  db.appendEvent("sess-1", { kind: "tool_call", toolCallId: "child", toolKind: "agent",
+    title: "Task: secret prompt", status: "in_progress" }, 300);
+  db.appendEvent("sess-1", { kind: "tool_call", toolCallId: "nested", parentToolUseId: "child",
+    toolKind: "bash", title: "curl Authorization:secret", status: "running" }, 301);
+
+  const throughSeq = db.sessionEventTailSeq("sess-1");
+  assert.equal(throughSeq, 208);
+  assert.deepEqual(db.listAgentToolCallIds("sess-1", 0, throughSeq), ["child"]);
+  const pages = [];
+  let after = 0;
+  while (true) {
+    const page = db.listChildSessionProjectionPage("sess-1", ["child"], after, throughSeq, 1);
+    assert.ok(page.length <= 1);
+    pages.push(...page);
+    if (page.length < 1) break;
+    after = page.at(-1)!.seq;
+  }
+  assert.deepEqual(pages.map((entry) => entry.payload.kind), ["tool_call", "tool_call", "tool_call"]);
+  assert.deepEqual(pages.map((entry) => entry.seq), [206, 207, 208]);
+  assert.equal(JSON.stringify(pages).includes("root-"), false);
+  assert.deepEqual(db.listChildSessionProjectionPage("sess-1", [], 0, throughSeq, 10), []);
+  assert.throws(() => db.listChildSessionProjectionPage("sess-1", ["child"], 0, throughSeq, 2_001), /invalid event scan page/);
+
+  const agentPlan = db.raw().prepare(
+    `EXPLAIN QUERY PLAN SELECT DISTINCT json_extract(payload,'$.toolCallId') AS tool_call_id
+       FROM session_events WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call'
+        AND json_extract(payload,'$.toolKind')='agent'
+        AND json_type(payload,'$.toolCallId')='text' ORDER BY tool_call_id`,
+  ).all("sess-1", 0, throughSeq) as unknown as Array<{ detail: string }>;
+  assert.ok(agentPlan.some((row) => /idx_session_events_agent_spawn_id/.test(row.detail)), agentPlan.map((row) => row.detail).join("\n"));
+
+  const lanes = [
+    ["kind='tool_call' AND json_extract(payload,'$.toolCallId')=?", "idx_session_events_tool_call_id"],
+    ["kind='tool_call_update' AND json_extract(payload,'$.toolCallId')=?", "idx_session_events_tool_update_id"],
+    ["json_type(payload,'$.parentToolUseId')='text' AND json_extract(payload,'$.parentToolUseId')=?",
+      "idx_session_events_parent_tool_use_id"],
+  ] as const;
+  for (const [predicate, expectedIndex] of lanes) {
+    const plan = db.raw().prepare(
+      `EXPLAIN QUERY PLAN SELECT id FROM session_events WHERE session_id=? AND seq>? AND seq<=? AND ${predicate} ORDER BY seq`,
+    ).all("sess-1", 0, throughSeq, "child") as unknown as Array<{ detail: string }>;
+    assert.ok(plan.some((row) => row.detail.includes(expectedIndex)), plan.map((row) => row.detail).join("\n"));
+  }
+  const productionPlan = db.raw().prepare(
+    `EXPLAIN QUERY PLAN WITH candidate_ids(id) AS (SELECT value FROM json_each(?))
+     SELECT id, session_id, seq, ts, payload FROM (
+       SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_tool_call_id
+        WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call'
+          AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids)
+       UNION
+       SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_tool_update_id
+        WHERE session_id=? AND seq>? AND seq<=? AND kind='tool_call_update'
+          AND json_extract(payload,'$.toolCallId') IN (SELECT id FROM candidate_ids)
+       UNION
+       SELECT id, session_id, seq, ts, payload FROM session_events INDEXED BY idx_session_events_parent_tool_use_id
+        WHERE session_id=? AND seq>? AND seq<=?
+          AND json_type(payload,'$.parentToolUseId')='text'
+          AND json_extract(payload,'$.parentToolUseId') IN (SELECT id FROM candidate_ids)
+     ) ORDER BY seq LIMIT ?`,
+  ).all(JSON.stringify(["child"]),
+    "sess-1", 0, throughSeq,
+    "sess-1", 0, throughSeq,
+    "sess-1", 0, throughSeq,
+    10) as unknown as Array<{ detail: string }>;
+  for (const [, expectedIndex] of lanes) {
+    assert.ok(productionPlan.some((row) => row.detail.includes(expectedIndex)),
+      productionPlan.map((row) => row.detail).join("\n"));
+  }
 });
 
 test("event export snapshots retain an immutable sequence boundary", () => {
@@ -2398,7 +2796,7 @@ test("the adopted marker round-trips through create/update snapshot into Session
   assert.equal(db.getSession("no")?.adopted, true);
 });
 
-test("background work state round-trips through runner snapshot create and update", () => {
+test("background work state round-trips while legacy settled sentinels clear current status", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(
     snapshot({ id: "background-work", driver: "claude_code", backgroundWorkState: "running", backgroundWorkTracking: "managed" }),
@@ -2429,7 +2827,7 @@ test("background work state round-trips through runner snapshot create and updat
     snapshot({ id: "background-work", driver: "claude_code", backgroundWorkState: "resumed" }),
     4_000,
   );
-  assert.equal(db.getSession("background-work")?.backgroundWorkState, "resumed");
+  assert.equal(db.getSession("background-work")?.backgroundWorkState, undefined);
 });
 
 test("managed background delivery stages survive reconnect, hydration, acknowledgement, and restart", () => {
@@ -2470,6 +2868,17 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
       terminalCount: 1,
       watchdogState: "terminal_without_continuation",
     }]);
+    assert.deepEqual(db.getSession("background-delivery")?.backgroundJobs, [{
+      id: "job-1",
+      parentTurnId: "turn-1",
+      launchType: "agent",
+      registeredAt: 1_000,
+      lastObservedAt: 2_000,
+      sourcePresent: true,
+      terminalStatus: "completed",
+      terminalObservedAt: 1_100,
+      continuationRequired: true,
+    }]);
 
     db.updateSessionFromSnapshot("background-delivery", snapshot({
       id: "background-delivery",
@@ -2485,8 +2894,29 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
     }), 2_100);
     assert.equal(
       db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState,
+      undefined,
+      "provider acceptance alone remains plausibly in flight",
+    );
+
+    db.updateSessionFromSnapshot("background-delivery", snapshot({
+      id: "background-delivery",
+      driver: "claude_code",
+      backgroundJobs: [{
+        ...baseJob,
+        continuationId: "bgcont-1",
+        continuationQueuedAt: 1_200,
+        continuationSubmittedAt: 1_300,
+        continuationAcceptedAt: 1_400,
+        continuationMissingResultAt: 1_450,
+      }],
+    }), 2_150);
+    assert.equal(
+      db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState,
       "accepted_without_result",
     );
+    assert.equal(db.acknowledgeBackgroundMissingResult("background-delivery", "bgcont-1", 1_475), true);
+    assert.equal(db.acknowledgeBackgroundMissingResult("background-delivery", "bgcont-1", 1_476), false);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState, undefined);
 
     db.updateSessionFromSnapshot("background-delivery", snapshot({
       id: "background-delivery",
@@ -2512,6 +2942,8 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
       parentTurnId: "turn-1",
     }, 1_500);
     const projected = db.getSession("background-delivery")?.backgroundDeliveries?.[0];
+    assert.equal(projected?.missingResultAt, 1_450, "late proof preserves the missing-result audit boundary");
+    assert.equal(projected?.missingResultAcknowledgedAt, 1_475);
     assert.equal(projected?.transcriptProjectedAt, 1_500);
     assert.equal(projected?.notificationQueuedAt, 1_500);
     assert.equal(projected?.watchdogState, "dashboard_observation_pending");
@@ -2519,7 +2951,7 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
     assert.equal(db.acknowledgeBackgroundDelivery("background-delivery", "bgcont-1", 1_700), false);
     assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState, undefined);
 
-    // A pre-v78 reconnect omits the inventory; it must not erase already-acknowledged evidence.
+    // A pre-v82 reconnect omits the inventory; it must not erase already-acknowledged evidence.
     db.updateSessionFromSnapshot("background-delivery", snapshot({
       id: "background-delivery",
       driver: "claude_code",
@@ -2579,6 +3011,7 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
         continuationRequired: true,
         continuationId: "bgcont-promote",
         continuationAcceptedAt: 30,
+        continuationMissingResultAt: 31,
       }],
     }), 2_360);
     assert.equal(
@@ -2608,6 +3041,7 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
         id: "job-stopped",
         continuationId: "bgcont-stopped",
         continuationAcceptedAt: 40,
+        continuationMissingResultAt: 41,
       }],
     }), "runner-1", 2_380);
     assert.equal(
@@ -2641,6 +3075,10 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
 
     db = ControlPlaneDb.open(dbPath);
     assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.dashboardObservedAt, 1_600);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.missingResultAcknowledgedAt, 1_475,
+      "missing-result acknowledgement survives a control-plane restart");
+    assert.equal(db.getSession("background-delivery")?.backgroundJobs?.[0]?.assistantResultPersistedAt, 1_500,
+      "job inventory survives a control-plane restart with its delivery timestamp");
 
     db.createSessionFromSnapshot(snapshot({
       id: "background-indexed",
@@ -2678,6 +3116,103 @@ test("managed background delivery stages survive reconnect, hydration, acknowled
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("managed background job views are bounded, prioritize active work, and omit runner-local fields", () => {
+  const db = withRunner();
+  const jobs = Array.from({ length: 140 }, (_, index) => ({
+    id: `job-${String(index).padStart(3, "0")}`,
+    parentTurnId: `turn-${index}`,
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: index === 0 ? "monitor" as const : "shell" as const,
+    registeredAt: index + 1,
+    ...(index === 0 ? {} : {
+      terminalStatus: "completed" as const,
+      terminalObservedAt: index + 101,
+      continuationRequired: false,
+      assistantResultPersistedAt: index + 201,
+    }),
+  }));
+  db.createSessionFromSnapshot(snapshot({
+    id: "background-bounded",
+    driver: "claude_code",
+    backgroundWorkState: "running",
+    backgroundJobs: jobs,
+  }), "runner-1", 1_000);
+
+  const session = db.getSession("background-bounded");
+  const view = session?.backgroundJobs ?? [];
+  assert.equal(view.length, 128);
+  assert.equal(session?.backgroundJobsTruncated, true);
+  assert.equal(session?.backgroundJobsAvailable, true);
+  const listed = db.listSessions({ includeArchived: true })
+    .find((candidate) => candidate.id === "background-bounded");
+  assert.equal(listed?.backgroundJobs, undefined,
+    "bulk session projections do not query or broadcast the per-job inspection payload");
+  assert.equal(listed?.backgroundJobsTruncated, undefined);
+  assert.equal(listed?.backgroundJobsAvailable, true,
+    "bulk projections retain the compact signal needed to load the inspection payload on demand");
+  db.createSession(newSession({ id: "background-empty" }));
+  assert.equal(db.getSession("background-empty")?.backgroundJobsAvailable, false,
+    "current control planes explicitly distinguish an empty inventory from an unsupported projection");
+  assert.ok(view.some((job) => job.id === "job-000"), "unresolved active work survives history truncation");
+  const safeKeys = new Set([
+    "id", "parentTurnId", "launchType", "registeredAt", "lastObservedAt", "sourcePresent",
+    "terminalStatus", "terminalObservedAt", "continuationRequired", "continuationId",
+    "continuationQueuedAt", "continuationSubmittedAt", "continuationAcceptedAt",
+    "continuationMissingResultAt", "assistantResultPersistedAt",
+  ]);
+  assert.ok(view.every((job) => Object.keys(job).every((key) => safeKeys.has(key))),
+    "the dashboard projection contains only its explicit privacy-safe allowlist");
+});
+
+test("multiple terminal missing continuations remain individually resolvable", () => {
+  const db = withRunner();
+  const job = (id: string, continuationId: string, missingAt: number) => ({
+    id,
+    parentTurnId: "shared-parent",
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: "agent" as const,
+    registeredAt: missingAt - 30,
+    terminalStatus: "completed" as const,
+    terminalObservedAt: missingAt - 20,
+    continuationRequired: true,
+    continuationId,
+    continuationQueuedAt: missingAt - 10,
+    continuationSubmittedAt: missingAt - 5,
+    continuationAcceptedAt: missingAt - 2,
+    continuationMissingResultAt: missingAt,
+  });
+  db.createSessionFromSnapshot(snapshot({
+    id: "background-multiple-missing",
+    driver: "claude_code",
+    backgroundJobs: [job("job-a", "bgcont-a", 100), job("job-b", "bgcont-b", 200)],
+  }), "runner-1", 300);
+
+  assert.deepEqual(
+    db.getSession("background-multiple-missing")?.backgroundDeliveries?.map((delivery) =>
+      [delivery.continuationId, delivery.watchdogState]).sort(),
+    [["bgcont-a", "accepted_without_result"], ["bgcont-b", "accepted_without_result"]],
+  );
+  assert.equal(db.acknowledgeBackgroundMissingResult("background-multiple-missing", "bgcont-a", 400), true);
+  assert.deepEqual(
+    db.getSession("background-multiple-missing")?.backgroundDeliveries?.map((delivery) =>
+      [delivery.continuationId, delivery.watchdogState, delivery.missingResultAcknowledgedAt]).sort(),
+    [["bgcont-a", undefined, 400], ["bgcont-b", "accepted_without_result", undefined]],
+  );
+  db.appendEvent("background-multiple-missing", {
+    kind: "background_continuation_delivered",
+    continuationId: "bgcont-b",
+    parentTurnId: "shared-parent",
+  }, 500);
+  assert.equal(
+    db.getSession("background-multiple-missing")?.backgroundDeliveries?.find((delivery) =>
+      delivery.continuationId === "bgcont-b")?.watchdogState,
+    "dashboard_observation_pending",
+    "a late valid proof independently clears the missing-result watchdog",
+  );
 });
 
 test("background push receipts are per-endpoint, retryable, capability-authenticated, and restart durable", () => {
@@ -3014,6 +3549,35 @@ test("session title context queries keep the original objective and a bounded se
       : entry.payload.kind === "agent_message" ? entry.payload.text : "excluded"),
     ["Original", "Answer 3", "Answer 4"],
   );
+});
+
+test("title context reassembles bounded identified deltas before redaction and deduplicates final output", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "title-stream" }));
+  db.appendEvent("title-stream", { kind: "user_message", text: "Pick priority work", final: true }, 1);
+  db.appendEvent("title-stream", { kind: "agent_message", text: "Earlier relevant answer", final: true }, 1);
+  for (const text of ["Selected issues ", "#123", " and ", "#124", ". token", "=", "secret-value"]) {
+    db.appendEvent("title-stream", { kind: "agent_message", messageId: "active", text }, 2);
+  }
+  db.appendEvent("title-stream", { kind: "agent_message", text: "legacy partial" }, 3);
+  const active = db.listSessionTitleContextEvents("title-stream", 2);
+  assert.equal(active.length, 3, "one streamed message must not displace all other recent messages");
+  assert.equal((active[2]!.payload as { text: string }).text, "Selected issues #123 and #124. token=secret-value");
+  db.appendEvent("title-stream", { kind: "agent_message", messageId: "active", text: "Fixed #123 and #124", final: true }, 4);
+  assert.equal(db.hasCompletedAgentMessage("title-stream"), true);
+  const completed = db.listSessionTitleContextEvents("title-stream");
+  assert.deepEqual(completed.map((entry) => (entry.payload as { text: string }).text), ["Pick priority work", "Earlier relevant answer", "Fixed #123 and #124"]);
+});
+
+test("oversized title streams fail closed without preventing later bounded streams", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "title-bounds" }));
+  db.appendEvent("title-bounds", { kind: "user_message", text: "Original", final: true }, 1);
+  db.appendEvent("title-bounds", { kind: "agent_message", messageId: "oversized", text: "x".repeat(65_537) }, 2);
+  assert.equal(db.listSessionTitleContextEvents("title-bounds").length, 1);
+  db.appendEvent("title-bounds", { kind: "agent_message", messageId: "bounded", text: "Selected #123" }, 3);
+  const context = db.listSessionTitleContextEvents("title-bounds");
+  assert.deepEqual(context.map((event) => (event.payload as { text: string }).text), ["Original", "Selected #123"]);
 });
 
 test("createSessionFromSnapshot auto-files an adopted session by its workspacePath", () => {
@@ -3851,12 +4415,162 @@ test("GitHub review reconciliation is idempotent, remote-owned, and dismisses on
   assert.equal(findings[0]?.status, "resolved");
   assert.equal(findings[0]?.body, "Updated remotely.");
   assert.equal(findings[0]?.remote?.outdated, true);
-  assert.notEqual(findings[0]?.diffHash, sync.diffHash, "outdated or mismatched heads cannot attach to the current diff");
+  assert.equal(
+    findings[0]?.diffHash,
+    createHash("sha256").update(`github:${sync.repository}:${sync.pullRequestNumber}:${thread.threadId}:${thread.commitId}`).digest("hex"),
+    "outdated GitHub findings retain their pre-v106 snapshot identity",
+  );
 
   assert.deepEqual(db.reconcileGitHubReviewFindings("sess-1", { ...resolved, threads: [], synchronizedAt: 1_600 }), {
     imported: 0, updated: 0, resolved: 0, reopened: 0, dismissedMissing: 1,
   });
   assert.equal(db.listReviewFindings("sess-1")[0]?.status, "dismissed");
+});
+
+test("GitLab review reconciliation isolates projects, preserves provenance, and reopens remotely", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  const sync = {
+    provider: "gitlab",
+    host: "gitlab.example.test",
+    project: "team/sub/repo",
+    changeRequestNumber: 19,
+    changeRequestUrl: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19",
+    changeRequestHeadOid: "a".repeat(40),
+    changeRequestBaseOid: "b".repeat(40),
+    localHeadOid: "a".repeat(40),
+    diffHash: "d".repeat(64),
+    synchronizedAt: 2_000,
+    threads: [{
+      threadId: "discussion-1", commentId: 101,
+      url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19#note_101",
+      path: "src/a.ts", side: "right", line: 4, body: "Remote issue", author: "reviewer",
+      createdAt: 1_000, updatedAt: 1_100, commitId: "a".repeat(40), subjectType: "line", resolved: false, outdated: false,
+    }],
+  } satisfies ForgeReviewSyncInfo;
+  assert.deepEqual(db.reconcileForgeReviewFindings("sess-1", sync), {
+    imported: 1, updated: 0, resolved: 0, reopened: 0, dismissedMissing: 0,
+  });
+  let finding = db.listReviewFindings("sess-1")[0]!;
+  assert.equal(finding.source, "gitlab");
+  assert.equal(finding.diffHash, sync.diffHash);
+  assert.deepEqual(finding.remote, {
+    provider: "gitlab", repository: sync.project, pullRequestNumber: 19, threadId: "discussion-1",
+    commentId: 101, url: sync.threads[0].url, commitId: "a".repeat(40), outdated: false,
+    subjectType: "line", synchronizedAt: 2_000,
+  });
+  assert.deepEqual(db.reconcileForgeReviewFindings("sess-1", {
+    ...sync, synchronizedAt: 2_200, threads: [{ ...sync.threads[0], resolved: true, updatedAt: 2_100 }],
+  }), { imported: 0, updated: 1, resolved: 1, reopened: 0, dismissedMissing: 0 });
+  assert.deepEqual(db.reconcileForgeReviewFindings("sess-1", {
+    ...sync, synchronizedAt: 2_400, threads: [{ ...sync.threads[0], resolved: false, outdated: true, updatedAt: 2_300 }],
+  }), { imported: 0, updated: 1, resolved: 0, reopened: 1, dismissedMissing: 0 });
+  finding = db.listReviewFindings("sess-1")[0]!;
+  assert.equal(finding.status, "open");
+  assert.notEqual(finding.diffHash, sync.diffHash, "outdated positions remain remote-only");
+});
+
+test("GitLab review findings survive a control-plane reconnect", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-gitlab-review-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession());
+    initial.reconcileForgeReviewFindings("sess-1", {
+      provider: "gitlab", host: "gitlab.com", project: "team/repo", changeRequestNumber: 7,
+      changeRequestUrl: "https://gitlab.com/team/repo/-/merge_requests/7",
+      changeRequestHeadOid: "a".repeat(40), changeRequestBaseOid: "b".repeat(40),
+      localHeadOid: "a".repeat(40), diffHash: "d".repeat(64), synchronizedAt: 2_000,
+      threads: [{
+        threadId: "discussion-7", commentId: 107,
+        url: "https://gitlab.com/team/repo/-/merge_requests/7#note_107",
+        path: "__remote__/gitlab-discussion-107", side: "left", line: 1,
+        body: "General review", author: "reviewer", createdAt: 1_000, updatedAt: 1_100,
+        commitId: "a".repeat(40), subjectType: "remote", resolved: false, outdated: true,
+      }],
+    });
+    initial.close();
+
+    const reconnected = ControlPlaneDb.open(path);
+    const [finding] = reconnected.listReviewFindings("sess-1");
+    assert.equal(finding?.source, "gitlab");
+    assert.equal(finding?.remote?.provider, "gitlab");
+    assert.equal(finding?.remote?.subjectType, "remote");
+    assert.equal(reconnected.reviewFindingSummary("sess-1").completion, "blocked");
+    reconnected.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("review finding v106 migration preserves legacy GitHub provenance and indexes", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-v106-migration-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession());
+    const sync = {
+      repository: "acme/repo", pullRequestNumber: 7,
+      pullRequestUrl: "https://github.com/acme/repo/pull/7",
+      pullRequestHeadOid: "a".repeat(40), pullRequestBaseOid: "b".repeat(40),
+      localHeadOid: "c".repeat(40), diffHash: "d".repeat(64), synchronizedAt: 2_000,
+      threads: [{
+        threadId: "PRRT_legacy", commentId: 101,
+        url: "https://github.com/acme/repo/pull/7#discussion_r101",
+        path: "src/legacy.ts", side: "left", line: 9, body: "Legacy review", author: "octocat",
+        createdAt: 1_000, updatedAt: 1_100, commitId: "e".repeat(40),
+        subjectType: "line", resolved: false, outdated: true,
+      }],
+    } satisfies GitHubReviewSyncInfo;
+    initial.reconcileGitHubReviewFindings("sess-1", sync);
+    const before = initial.listReviewFindings("sess-1")[0]!;
+    initial.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE review_findings_v105 (
+        finding_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, scope TEXT NOT NULL,
+        diff_hash TEXT NOT NULL, file_path TEXT NOT NULL, side TEXT NOT NULL, line INTEGER NOT NULL,
+        body TEXT NOT NULL, severity TEXT NOT NULL, required INTEGER NOT NULL, status TEXT NOT NULL,
+        source TEXT NOT NULL, author_kind TEXT NOT NULL, author_id TEXT, created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL, sent_at INTEGER, resolved_at INTEGER, resolved_by_kind TEXT,
+        resolved_by_id TEXT, remote_provider TEXT, remote_repository TEXT, remote_pr_number INTEGER,
+        remote_thread_id TEXT, remote_comment_id INTEGER, remote_url TEXT, remote_commit_id TEXT,
+        remote_outdated INTEGER, remote_subject_type TEXT, remote_synchronized_at INTEGER,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        CHECK (scope IN ('uncommitted','all_branch','last_turn')),
+        CHECK (side IN ('left','right')), CHECK (line > 0),
+        CHECK (severity IN ('blocker','major','minor','nit')), CHECK (required IN (0,1)),
+        CHECK (status IN ('open','sent','resolved','dismissed')),
+        CHECK (source IN ('local','github'))
+      );
+      INSERT INTO review_findings_v105 SELECT * FROM review_findings;
+      DROP TABLE review_findings;
+      ALTER TABLE review_findings_v105 RENAME TO review_findings;
+      CREATE INDEX idx_review_findings_session ON review_findings(session_id, status, created_at, finding_id);
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+    legacy.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    assert.deepEqual(upgraded.listReviewFindings("sess-1")[0], before);
+    upgraded.close();
+    const verified = new DatabaseSync(path);
+    const tableSql = verified.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='review_findings'",
+    ).get() as { sql: string };
+    assert.match(tableSql.sql, /'gitlab'/);
+    const indexes = verified.prepare("PRAGMA index_list(review_findings)").all() as Array<{ name: string }>;
+    assert.equal(indexes.some((index) => index.name === "idx_review_findings_session"), true);
+    verified.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("createRun + run members reflected in runView via getRun/listRuns", () => {
@@ -4408,6 +5122,39 @@ test("governance audit is query-bounded, retention-bounded, and survives session
   assert.deepEqual(db.listGovernanceAudit("sess-1", 2), []);
 });
 
+test("governance audit cursor pages tied timestamps without crossing sessions", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.createSession(newSession({ id: "sess-2" }));
+  const append = (sessionId: string, requestId: string, timestamp: number) => db.appendGovernanceAudit({
+    requestId,
+    approvalKind: "policy_hook",
+    stage: "resolution",
+    outcome: "denied",
+    actor: { kind: "human", id: "device-1" },
+    scope: { sessionId, runnerId: "runner-1", workspaceId: "ws-1" },
+    timestamp,
+  });
+  const first = append("sess-1", "first", 1_000);
+  const second = append("sess-1", "second", 1_000);
+  const third = append("sess-1", "third", 1_000);
+  const foreign = append("sess-2", "foreign", 1_000);
+
+  assert.deepEqual(db.governanceAuditPage("sess-1", 2), {
+    entries: [second, third],
+    nextBefore: second.auditId,
+    hasMore: true,
+  });
+  assert.deepEqual(db.governanceAuditPage("sess-1", 2, second.auditId), {
+    entries: [first],
+    hasMore: false,
+  });
+  assert.equal(db.governanceAuditPage("sess-1", 2, foreign.auditId), null);
+  assert.deepEqual(db.listGovernanceAudit("sess-1", 2), [second, third], "legacy newest-N callers are unchanged");
+  assert.equal(db.policyHookDecisionAudit("sess-1", "second")?.auditId, second.auditId);
+  assert.equal(db.policyHookDecisionAudit("sess-1", "foreign"), null, "decision lookup is session-scoped");
+});
+
 test("governance policies persist ordered selectors/conditions and support update/delete", () => {
   const db = withRunner();
   const first = db.upsertGovernancePolicy({
@@ -4790,4 +5537,320 @@ test("archive page SQL preserves Stop Failed recovery state", () => {
   assert.ok(!("error" in candidates));
   if ("error" in candidates) throw new Error(candidates.error);
   assert.equal(candidates.sessions[0]?.archiveStatus, "stop_failed");
+});
+
+/* ------------------------ Usage pricing (v103 ledger) ------------------------ */
+
+const rateDocument = {
+  "gpt-5.5-codex": { input_cost_per_token: 0.000002, output_cost_per_token: 0.00001 },
+  "claude-fable-5-1": {
+    input_cost_per_token: 0.000005, output_cost_per_token: 0.000025,
+    cache_read_input_token_cost: 0.0000005, cache_creation_input_token_cost: 0.00000625,
+  },
+};
+
+test("codex usage is priced per bucket from the rate table with cached input split out of the inclusive count", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  db.appendEvent("sess-1", {
+    kind: "token_usage", inputTokens: 1000, cachedInputTokens: 600, outputTokens: 100, reasoningOutputTokens: 40,
+  }, 3_600_100, { accrueUsage: true });
+  db.appendEvent("sess-1", {
+    kind: "token_usage", inputTokens: 100, outputTokens: 10, reasoningOutputTokens: 500,
+  }, 3_600_200, { accrueUsage: true });
+
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  // Cache reads fall back to a tenth of the input rate when the table omits them.
+  const expectedCost = 400 * 0.000002 + 600 * 0.0000002 + 100 * 0.00001 + 100 * 0.000002 + 10 * 0.00001;
+  assert.deepEqual(usage.totals, {
+    inputTokens: 1100, outputTokens: 110, costUsd: Math.round(expectedCost * 1_000_000) / 1_000_000,
+    uncachedInputTokens: 500, cachedInputTokens: 600, cacheCreationTokens: 0,
+    reasoningTokens: 50, cacheSavingsUsd: Math.round(600 * (0.000002 - 0.0000002) * 1_000_000) / 1_000_000,
+    costSource: "modelPriced", unpricedRecords: 0, processedTokens: 1210,
+  }, "reasoning is clamped to output, input stays the provider-reported inclusive count, and processed tokens do not double-count Codex cache");
+  assert.ok(db.getSession("sess-1")!.costUsd > 0, "the priced figure reaches the session total the budget gate reads");
+  assert.deepEqual(usage.byModel.map((row) => [row.key, row.costSource]), [["gpt-5.5-codex", "modelPriced"]]);
+  assert.equal(usage.byDriver[0]!.key, "codex-app-server");
+});
+
+test("a provider-reported cost is recorded unchanged while cache buckets still derive savings", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.appendEvent("sess-1", {
+    kind: "token_usage", inputTokens: 100, cachedInputTokens: 10_000, cacheCreationInputTokens: 2_000,
+    outputTokens: 50, costUsd: 0.5,
+  }, 3_600_100, { accrueUsage: true });
+
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.equal(usage.totals.costUsd, 0.5);
+  assert.equal(usage.totals.costSource, "providerReported");
+  assert.equal(usage.totals.uncachedInputTokens, 100, "Anthropic input is already the uncached portion");
+  assert.equal(usage.totals.cachedInputTokens, 10_000);
+  assert.equal(usage.totals.cacheCreationTokens, 2_000);
+  assert.equal(usage.totals.cacheSavingsUsd, 0.045);
+  assert.equal(db.getSession("sess-1")!.costUsd, 0.5);
+});
+
+test("session views carry only caught-up usage cost provenance", () => {
+  const db = withRunner();
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.appendEvent("sess-1", {
+    kind: "token_usage", inputTokens: 100, outputTokens: 10, costUsd: 0,
+  }, 3_600_100, { accrueUsage: true });
+
+  assert.equal(db.getSession("sess-1")!.costSource, "providerReported",
+    "an explicit free provider record reaches the first session projection");
+
+  db.raw().prepare("UPDATE sessions SET input_tokens=1000 WHERE id='sess-1'").run();
+  assert.equal(db.getSession("sess-1")!.costSource, undefined,
+    "provenance is withheld while newer runner counters are not in the ledger");
+
+  db.createSession(newSession({ id: "unpriced", driver: "claude-code", config: { model: "unknown-model" } }));
+  db.appendEvent("unpriced", {
+    kind: "token_usage", inputTokens: 25, outputTokens: 5,
+  }, 3_600_200, { accrueUsage: true });
+  assert.equal(db.getSession("unpriced")!.costSource, "unpriced");
+});
+
+test("an unpriceable model counts its tokens, reports unpriced, and mixed provenance resolves to the weakest", () => {
+  const db = withRunner();
+  db.createSession(newSession({ driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5 }, 3_600_100, { accrueUsage: true });
+  let usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(usage.totals, {
+    inputTokens: 50, outputTokens: 5, costUsd: 0, uncachedInputTokens: 50, cachedInputTokens: 0, cacheCreationTokens: 0,
+    reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 1, processedTokens: 55,
+  }, "without a rate table the tokens are counted and the cost is honestly zero");
+  assert.equal(db.getSession("sess-1")!.costUsd, 0);
+
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5 }, 3_600_200, { accrueUsage: true });
+  usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.equal(usage.totals.inputTokens, 100);
+  assert.equal(usage.totals.costUsd, 0.00015);
+  assert.equal(usage.totals.costSource, "unpriced", "one unpriced record marks the figure a lower bound");
+  assert.equal(usage.totals.unpricedRecords, 1);
+
+  db.createSession(newSession({ id: "sess-2", driver: "claude-code", config: { model: "opus" } }));
+  db.appendEvent("sess-2", { kind: "token_usage", inputTokens: 10, outputTokens: 1 }, 3_600_300, { accrueUsage: true });
+  usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(
+    usage.byModel.map((row) => [row.key, row.costSource, row.unpricedRecords]),
+    [["gpt-5.5-codex", "unpriced", 1], ["opus", "unpriced", 1]],
+    "a bare family alias is never priced by guesswork",
+  );
+});
+
+test("a snapshot token residual without a cost residual is priced from the session model", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSessionFromSnapshot(snapshot({
+    id: "codex-snapshot", driver: "codex-app-server", config: { model: "gpt-5.5-codex" }, tokensIn: 1000, tokensOut: 100, costUsd: 0,
+  }), "runner-1", 2_000);
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.equal(usage.totals.costUsd, 0.003);
+  assert.equal(usage.totals.costSource, "modelPriced");
+  assert.equal(usage.totals.uncachedInputTokens, 1000, "a flat snapshot carries no cache breakdown");
+  assert.equal(db.getSession("codex-snapshot")!.costUsd, 0.003);
+
+  // A later runner snapshot that still reports zero cost must not reset the priced total.
+  db.updateSessionFromSnapshot("codex-snapshot", snapshot({
+    id: "codex-snapshot", driver: "codex-app-server", config: { model: "gpt-5.5-codex" }, tokensIn: 1000, tokensOut: 100, costUsd: 0, seq: 1,
+  }), 3_000);
+  assert.equal(db.getSession("codex-snapshot")!.costUsd, 0.003);
+  assert.equal(db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" }).totals.costUsd, 0.003);
+});
+
+test("the provider-resolved model id keys buckets and pricing ahead of the configured alias", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "claude-code", config: { model: "fable" } }));
+  db.raw().prepare("UPDATE sessions SET resolved_model='claude-fable-5-1' WHERE id='sess-1'").run();
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1000, outputTokens: 0 }, 3_600_100, { accrueUsage: true });
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(usage.byModel.map((row) => [row.key, row.costUsd, row.costSource]), [["claude-fable-5-1", 0.005, "modelPriced"]]);
+});
+
+test("ledger rows written before the v103 columns keep aggregating with zero for the new measures", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-usage-legacy-"));
+  const location = join(temp, "control-plane.db");
+  // Maintenance runs against the wall clock on reopen, so the rows must sit inside live retention:
+  // one recent hour that stays hourly and one 40-day-old hour that rolls into a daily bucket.
+  const now = Date.now();
+  const recentHour = Math.floor((now - 2 * 3_600_000) / 3_600_000) * 3_600_000;
+  const oldHour = recentHour - 40 * 86_400_000;
+  const window = { since: oldHour - 86_400_000, through: now + 3_600_000, granularity: "day" as const };
+  try {
+    let db = ControlPlaneDb.open(location);
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+    db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, outputTokens: 2, costUsd: 0.1 }, oldHour + 100, { accrueUsage: true });
+    db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, outputTokens: 2, costUsd: 0.1 }, recentHour + 100, { accrueUsage: true });
+    db.maintainUsageAggregation(now);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_daily").get()!.n, 1, "the old hour rolled into a day");
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_hourly").get()!.n, 1);
+    db.close();
+
+    const raw = new DatabaseSync(location);
+    for (const table of ["usage_session_state", "usage_hourly", "usage_daily"]) {
+      for (const column of [
+        "uncached_input_tokens", "cached_input_tokens", "cache_creation_tokens", "reasoning_tokens",
+        "cache_savings_microusd", "provider_reported_records", "model_priced_records", "unpriced_records",
+      ]) {
+        raw.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      }
+    }
+    raw.close();
+
+    db = ControlPlaneDb.open(location);
+    db.setUsageRateTable(parseRateTable(rateDocument));
+    let usage = db.queryUsageAggregation(localOwner(), window);
+    assert.deepEqual(usage.totals, {
+      inputTokens: 20, outputTokens: 4, costUsd: 0.2, uncachedInputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0,
+      reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 0, processedTokens: 24,
+    }, "pre-v103 buckets carry no provenance, so they neither claim nor count as unpriced records");
+
+    db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, outputTokens: 2, costUsd: 0.1 }, now, { accrueUsage: true });
+    usage = db.queryUsageAggregation(localOwner(), window);
+    assert.equal(usage.totals.inputTokens, 30);
+    assert.equal(usage.totals.costUsd, 0.3);
+    assert.equal(usage.totals.uncachedInputTokens, 10);
+    assert.equal(usage.totals.costSource, "providerReported", "legacy rows carry no provenance, so the new record decides it");
+    assert.equal(db.getSession("sess-1")!.costUsd, 0.3);
+    db.close();
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("snapshot residual pricing carries sub-micro cost and defers to a fractional provider increase", () => {
+  const db = withRunner();
+  // 0.15 micro-USD per input token: a single-token residual rounds to nothing without a carry.
+  db.setUsageRateTable(parseRateTable({ "cheap-model": { input_cost_per_token: 0.00000015, output_cost_per_token: 0 } }));
+  const base = snapshot({ id: "cheap", driver: "codex-app-server", config: { model: "cheap-model" }, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+  db.createSessionFromSnapshot(base, "runner-1", 1_000);
+  for (let tokens = 1; tokens <= 7; tokens += 1) {
+    db.updateSessionFromSnapshot("cheap", { ...base, tokensIn: tokens, seq: tokens }, 1_000 + tokens);
+  }
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
+  assert.equal(usage.totals.costUsd, 0.000001, "buckets hold whole micro-USD: seven 0.15 residuals crossed one boundary");
+  assert.equal(usage.totals.costSource, "modelPriced");
+  assert.ok(Math.abs(db.getSession("cheap")!.costUsd - 0.00000105) < 1e-12, "the session total keeps the sub-micro remainder");
+
+  // A provider that reports a sub-micro cost increase is authoritative; its tokens are not re-estimated.
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  const claude = snapshot({ id: "fraction", driver: "claude-code", config: { model: "claude-fable-5-1" }, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+  db.createSessionFromSnapshot(claude, "runner-1", 2_000);
+  db.updateSessionFromSnapshot("fraction", { ...claude, tokensIn: 1000, costUsd: 0.0000002, seq: 1 }, 2_001);
+  const fraction = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
+  assert.equal(fraction.byModel.find((row) => row.key === "claude-fable-5-1")!.costSource, "providerReported");
+  assert.ok(Math.abs(db.getSession("fraction")!.costUsd - 0.0000002) < 1e-15, "the estimate ($0.005) must not replace the reported fraction");
+});
+
+test("usage aggregation splits each time bucket per driver for stacked series", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "claude", driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.createSession(newSession({ id: "codex", driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  db.appendEvent("claude", { kind: "token_usage", inputTokens: 10, outputTokens: 1, costUsd: 0.1 }, 3_600_100, { accrueUsage: true });
+  db.appendEvent("codex", { kind: "token_usage", inputTokens: 20, outputTokens: 2 }, 3_600_200, { accrueUsage: true });
+  db.appendEvent("codex", { kind: "token_usage", inputTokens: 5, outputTokens: 1 }, 7_200_100, { accrueUsage: true });
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(
+    usage.seriesByDriver.map((row) => [row.bucketTs, row.driver, row.inputTokens]),
+    [[7_200_000, "codex-app-server", 5], [3_600_000, "claude-code", 10], [3_600_000, "codex-app-server", 20]],
+    "newest bucket first, drivers alphabetical within a bucket",
+  );
+  assert.equal(usage.seriesByDriver[1]!.costUsd, 0.1);
+  assert.equal(usage.seriesByDriver[2]!.costSource, "unpriced");
+  assert.deepEqual(usage.series.map((row) => [row.bucketTs, row.inputTokens]), [[7_200_000, 5], [3_600_000, 30]]);
+  // Processed tokens are derived per row with the driver's semantics, so they add up exactly across
+  // every grouping level instead of being re-derived from mixed aggregates.
+  assert.deepEqual(usage.seriesByDriver.map((row) => row.processedTokens), [6, 11, 22]);
+  assert.deepEqual(usage.series.map((row) => row.processedTokens), [6, 33]);
+  assert.equal(usage.totals.processedTokens, 39);
+  assert.equal(usage.byDriver.reduce((sum, row) => sum + row.processedTokens, 0), 39);
+});
+
+test("the per-session per-model ledger attributes each record to the model that produced it", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 100, cachedInputTokens: 1000, outputTokens: 10, costUsd: 0.5, model: "claude-fable-5-1" }, 3_600_100, { accrueUsage: true });
+  // A v104 runner names the model on the record; a mid-session switch lands on the new one even
+  // though the session row still says claude-fable-5-1.
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5, model: "gpt-5.5-codex" }, 3_600_200, { accrueUsage: true });
+  // A pre-v104 record names no model and falls back to the session's resolved model.
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 20, outputTokens: 2, costUsd: 0.1 }, 3_600_300, { accrueUsage: true });
+
+  const usage = db.sessionUsageByModel("sess-1");
+  assert.deepEqual(usage.byModel.map((row) => [row.model, row.inputTokens, row.costUsd, row.costSource, row.processedTokens]), [
+    ["claude-fable-5-1", 120, 0.6, "providerReported", 1132],
+    ["gpt-5.5-codex", 50, 0.00015, "modelPriced", 55],
+  ]);
+  assert.equal(usage.totals.inputTokens, 170);
+  assert.equal(usage.totals.costUsd, 0.60015);
+  assert.equal(usage.totals.processedTokens, 1187);
+  assert.equal(db.getSession("sess-1")!.costUsd, 0.60015, "the session total and the per-model ledger move together");
+
+  const aggregate = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(aggregate.byModel.map((row) => [row.key, row.inputTokens]), [["claude-fable-5-1", 120], ["gpt-5.5-codex", 50]], "the fleet buckets key on the same attribution");
+  assert.deepEqual(db.sessionUsageByModel("missing"), { totals: { ...usage.totals, inputTokens: 0, outputTokens: 0, costUsd: 0, uncachedInputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 0, processedTokens: 0 }, byModel: [] });
+});
+
+test("per-user cost windows and the daily budget read the owner-scoped buckets in UTC days", () => {
+  const db = withRunner();
+  const now = Date.UTC(2026, 8, 3, 15);
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id='sess-1'").run();
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1, costUsd: 1.5 }, now - 3_600_000, { accrueUsage: true });
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1, costUsd: 4 }, now - 3 * 86_400_000, { accrueUsage: true });
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1, costUsd: 8 }, now - 20 * 86_400_000, { accrueUsage: true });
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1, costUsd: 16 }, now - 40 * 86_400_000, { accrueUsage: true });
+
+  assert.deepEqual(db.getUsageDailyBudget("org_personal"), { perUserUsd: null, updatedAt: null });
+  const windows = db.userCostWindows("org_personal", "usr_local_owner", now);
+  assert.equal(windows.todayUsd, 1.5);
+  assert.equal(windows.last7DaysUsd, 5.5);
+  assert.equal(windows.last30DaysUsd, 13.5, "the 40-day-old cost is outside every window");
+  assert.equal(windows.dailyBudgetUsd, null);
+
+  db.setUsageDailyBudget("org_personal", 20, now);
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).dailyBudgetUsd, 20);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.userId, row.todayUsd]), [["usr_local_owner", 1.5]]);
+  assert.deepEqual(db.sessionOwnerUser("sess-1"), { organizationId: "org_personal", userId: "usr_local_owner" });
+
+  // Shorten hourly retention so the 3-day and 20-day samples roll into daily buckets, then the
+  // windows must read them from usage_daily rather than lose them.
+  db.setUsageRetentionPolicy("org_personal", { hourlyDays: 1, dailyDays: 30 }, now);
+  db.maintainUsageAggregation(now);
+  assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_daily").get()!.n, 2, "two samples rolled into days");
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).last7DaysUsd, 5.5, "a rolled-up day inside the window still counts");
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).last30DaysUsd, 13.5);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.todayUsd, row.last7DaysUsd, row.last30DaysUsd]), [[1.5, 5.5, 13.5]]);
+  db.setUsageDailyBudget("org_personal", null, now + 1);
+  assert.equal(db.getUsageDailyBudget("org_personal").perUserUsd, null);
+});
+
+test("a budgeted session whose usage cannot be priced reads as unpriced until a record is priced", () => {
+  const db = withRunner();
+  db.createSession(newSession({ driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  assert.equal(db.sessionUsageUnpriced("sess-1"), false, "no usage yet is not unpriced");
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5 }, 3_600_100, { accrueUsage: true });
+  assert.equal(db.sessionUsageUnpriced("sess-1"), true);
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5 }, 3_600_200, { accrueUsage: true });
+  assert.equal(db.sessionUsageUnpriced("sess-1"), false, "one priced record makes the cost a real lower bound");
+
+  db.updateSessionCostCheckpoints("sess-1", [1, 2.5], 3_600_300);
+  assert.deepEqual(db.getSession("sess-1")!.costCheckpointsUsd, [1, 2.5]);
+  db.approveSessionCostCheckpoint("sess-1", 1, 3_600_400);
+  db.approveSessionCostCheckpoint("sess-1", 0.5, 3_600_500);
+  assert.equal(db.getSession("sess-1")!.costCheckpointApprovedUsd, 1, "approval never moves backwards");
+  db.updateSessionCostCheckpoints("sess-1", null, 3_600_600);
+  assert.equal(db.getSession("sess-1")!.costCheckpointsUsd, null);
+  assert.equal(db.getSession("sess-1")!.costCheckpointApprovedUsd, null, "clearing the checkpoints forgets the approval");
+  db.acknowledgeSessionCostUnpriced("sess-1", 3_600_700);
+  assert.equal(db.getSession("sess-1")!.costUnpricedAcknowledged, true);
 });

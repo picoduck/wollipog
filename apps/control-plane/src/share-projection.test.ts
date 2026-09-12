@@ -52,6 +52,16 @@ const EVERY_PAYLOAD = {
   turn_interrupted: { kind: "turn_interrupted" },
   error: { kind: "error", message: "ERROR_LEAK" },
   policy_transport: { kind: "policy_transport", state: "open", openedAt: 123 },
+  policy_hook_decision: {
+    kind: "policy_hook_decision",
+    auditId: "HOOK_AUDIT_LEAK",
+    requestId: "HOOK_REQUEST_LEAK",
+    stage: "resolution",
+    outcome: "allowed",
+    actor: { kind: "human", id: "HOOK_ACTOR_LEAK" },
+    governancePolicyId: "HOOK_POLICY_LEAK",
+    toolCallId: "HOOK_TOOL_LEAK",
+  },
   review_decision: {
     kind: "review_decision",
     reviewId: "REVIEW_ID_LEAK",
@@ -73,6 +83,7 @@ const EVERY_PAYLOAD = {
     questions: [{ id: "ANSWER_KEY_LEAK", question: "QUESTION_TEXT_LEAK", options: [] }],
   },
   question_resolved: { kind: "question_resolved", requestId: "QUESTION_RESOLUTION_LEAK", answered: true },
+  question_policy_answered: { kind: "question_policy_answered", requestId: "POLICY_REQUEST_LEAK", policies: [{ policyId: "POLICY_LEAK", name: "POLICY_NAME_LEAK" }] },
   checkpoint: { kind: "checkpoint", turn: 1, tree: "CHECKPOINT_TREE_LEAK" },
   checkpoint_restored: { kind: "checkpoint_restored", turn: 2 },
   conversation_checkpoint: { kind: "conversation_checkpoint", turn: 3 },
@@ -118,7 +129,7 @@ test("strict projection exhaustively allowlists user, top-level assistant, and i
     "IMAGE_LEAK", "COMMAND_ID_LEAK", "AGENT_THOUGHT_LEAK", "TOOL_", "PLAN_LEAK",
     "COMMAND_OUTPUT_LEAK", "FILE_PATH_LEAK", "DIFF_LEAK", "STDERR_LEAK", "ERROR_LEAK",
     "REVIEW_", "PERMISSION_", "OPTION_", "QUESTION_", "ANSWER_KEY_LEAK", "CHECKPOINT_",
-    "SOURCE_SESSION_LEAK", "USAGE_PARENT_LEAK", "INTERNAL_SESSION_ID", "1700000000000",
+    "SOURCE_SESSION_LEAK", "USAGE_PARENT_LEAK", "HOOK_", "INTERNAL_SESSION_ID", "1700000000000",
   ]) {
     assert.ok(!serialized.includes(forbidden), `${forbidden} must not cross the operational projection`);
   }

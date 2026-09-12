@@ -38,6 +38,22 @@ const routes: Array<[View, string]> = [
   [{ name: "pod", id: "pod_abc" }, `/pods/~${encodeResourceId("pod_abc")}`],
 ];
 
+test("attention routes retain exact opaque request identity and epoch through reload", () => {
+  for (const requestId of [undefined, "child / ..? # % ✅", "\u0000request"]) {
+    const view: View = { name: "session", id: "session / ✅",
+      attention: { eventEpoch: 4, ...(requestId === undefined ? {} : { requestId }) } };
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+    assert.equal(sameView(view, { ...view, attention: { eventEpoch: 5, requestId } }), false);
+  }
+  const path = `/sessions/~${encodeResourceId("s")}/attention/~${encodeResourceId("request")}`;
+  for (const query of ["", "?epoch=-1", "?epoch=01", "?epoch=1.5", "?epoch=Infinity",
+    "?epoch=9007199254740992", "?epoch=0&epoch=1", "?epoch=0&request=other"]) {
+    assert.equal(viewFromPath(path, query), null);
+  }
+  assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/attention/~!`, "?epoch=0"), null);
+});
+
 test("every dashboard view has a canonical round-tripping path", () => {
   for (const [view, path] of routes) {
     assert.equal(viewPath(view), path);
@@ -172,6 +188,18 @@ test("notification messages navigate both dashboard and isolated-share windows c
   assert.deepEqual(viewFromNotificationMessage({ type: "wollipog:open-session", sessionId: "new/session" }), {
     name: "session", id: "new/session",
   });
+  assert.deepEqual(viewFromNotificationMessage({ type: "wollipog:open-session", sessionId: "new/session",
+    eventEpoch: 3, requestId: "ask / ✅" }), {
+    name: "session", id: "new/session", attention: { eventEpoch: 3, requestId: "ask / ✅" },
+  });
+  assert.deepEqual(viewFromNotificationMessage({ type: "wollipog:open-session", sessionId: "new/session",
+    eventEpoch: 3 }), {
+    name: "session", id: "new/session", attention: { eventEpoch: 3 },
+  });
+  for (const invalid of [-1, 1.5, "3", Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(viewFromNotificationMessage({ type: "wollipog:open-session", sessionId: "new/session",
+      eventEpoch: invalid, requestId: "ask" }), null);
+  }
   assert.deepEqual(viewFromNotificationMessage({ type: "mam:open-automations" }), { name: "automations" });
   assert.deepEqual(viewFromNotificationMessage({ type: "wollipog:open-automations" }), { name: "automations" });
   assert.equal(viewFromNotificationMessage({ type: "mam:open-session", sessionId: "" }), null);

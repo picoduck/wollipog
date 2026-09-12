@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { RunnerMetadata } from "@wollipog/protocol";
+import { WORKSPACE_REFERENCE_MIME_TYPE, type RunnerMetadata, type WorkspaceReference } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 
@@ -197,6 +197,36 @@ test("queued prompt edit routes correlate exact reads and atomic writes with a v
   }));
 
   const headers = { authorization: `Bearer ${OWNER_TOKEN}` };
+  const workspaceReference: WorkspaceReference = {
+    artifactId: "workspace:queued-edit-pre-v106",
+    mimeType: WORKSPACE_REFERENCE_MIME_TYPE,
+    sizeBytes: 0,
+    sha256: "a".repeat(64),
+    referenceVersion: 1,
+    kind: "file",
+    path: "src/app.ts",
+    rootFingerprint: "b".repeat(64),
+    targetFingerprint: "a".repeat(64),
+  };
+  const unsupportedWorkspaceReferenceResponse = await fetch(
+    `${httpBase}/api/sessions/${sessionId}/queued/prompt-1/edit`,
+    {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        submissionId: "workspace-reference-pre-v106",
+        expectedRevision: "qer_original",
+        text: "must reject unsupported workspace context",
+        images: [workspaceReference],
+      }),
+    },
+  );
+  assert.equal(unsupportedWorkspaceReferenceResponse.status, 409);
+  assert.match(
+    (await unsupportedWorkspaceReferenceResponse.json() as { error: string }).error,
+    /requires protocol v106/,
+  );
+
   const foreignImageResponse = await fetch(`${httpBase}/api/sessions/${sessionId}/queued/prompt-1/edit`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },

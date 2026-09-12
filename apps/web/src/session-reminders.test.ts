@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import {
+  reminderBadgeDescription,
   reminderBadgeLabel,
+  reminderMenuActionLabel,
   sessionVisibleForReminderMode,
   snoozedSessionAttentionReason,
   sortSessionsForReminders,
@@ -55,7 +57,7 @@ test("only explicit attention reasons retain a snoozed session in Active", () =>
         continuationId: "continuation",
         watchdogState: "terminal_without_continuation",
       } as never],
-    }), "Continuation Required"],
+    }), "Result Pending"],
   ];
 
   for (const [name, candidate, label] of cases) {
@@ -69,12 +71,58 @@ test("only explicit attention reasons retain a snoozed session in Active", () =>
     "a legacy omitted pendingApproval is absence, not an attention condition");
 });
 
+test("snoozed attention uses the shared delivery-watchdog presentation", () => {
+  const cases = [
+    ["terminal_without_continuation", "Result Pending", "pending", /returning the result automatically.*No action is needed/s],
+    ["accepted_without_result", "Result Missing", "missing", /will not repeat.*Acknowledge the missing result/s],
+    ["result_not_projected", "Transcript Delayed", "pending", /updating the transcript automatically.*No action is needed/s],
+    ["dashboard_observation_pending", "Notification Pending", "pending", /waiting for the dashboard confirmation.*No action is needed/s],
+  ] as const;
+  for (const [watchdogState, label, severity, description] of cases) {
+    const reason = snoozedSessionAttentionReason(session(watchdogState, "idle", {
+      backgroundDeliveries: [{
+        parentTurnId: "parent",
+        jobCount: 1,
+        terminalCount: 1,
+        watchdogState,
+      }],
+    }));
+    assert.equal(reason?.label, label);
+    assert.equal(reason?.severity, severity);
+    assert.match(reason?.accessibleName ?? "", new RegExp(`^Background Work: ${label}\\.`));
+    assert.match(reason?.description ?? "", description);
+  }
+});
+
 test("clearing the final attention condition removes a still-snoozed session from Active", () => {
   const pending = reminder("transition");
   const retained = session("transition", "idle", { backgroundWorkState: "orphaned" });
   assert.equal(sessionVisibleForReminderMode(retained, pending, "ordinary"), true);
   assert.equal(sessionVisibleForReminderMode({ ...retained, backgroundWorkState: "resumed" }, pending, "ordinary"), false);
   assert.equal(sessionVisibleForReminderMode({ ...retained, backgroundWorkState: undefined }, pending, "ordinary"), false);
+
+  const missing = session("transition", "idle", {
+    backgroundDeliveries: [{
+      continuationId: "bgcont-missing",
+      parentTurnId: "turn-1",
+      jobCount: 1,
+      terminalCount: 1,
+      acceptedAt: 10,
+      missingResultAt: 20,
+      watchdogState: "accepted_without_result",
+    }],
+  });
+  assert.equal(sessionVisibleForReminderMode(missing, pending, "ordinary"), true);
+  assert.equal(sessionVisibleForReminderMode(missing, pending, "snoozed"), true);
+  const acknowledged = {
+    ...missing,
+    backgroundDeliveries: missing.backgroundDeliveries?.map(({ watchdogState: _watchdog, ...delivery }) => ({
+      ...delivery,
+      missingResultAcknowledgedAt: 30,
+    })),
+  };
+  assert.equal(sessionVisibleForReminderMode(acknowledged, pending, "ordinary"), false);
+  assert.equal(sessionVisibleForReminderMode(acknowledged, pending, "snoozed"), true);
 });
 
 test("archived sessions do not appear in either reminder view", () => {
@@ -89,6 +137,10 @@ test("fired reminders return to the top with a text-backed reason until dismisse
   const fired = reminder("due", { state: "fired", wakeReason: "scheduled", firedAt: 2_000 });
   const reminders = new Map([["due", fired]]);
   assert.deepEqual(sortSessionsForReminders([normal, due], reminders, "ordinary").map(({ id }) => id), ["due", "normal"]);
-  assert.equal(reminderBadgeLabel(fired, 2_030), "Reminder Due");
+  assert.equal(reminderBadgeLabel(fired), "Returned from Snooze");
+  assert.match(reminderBadgeDescription(fired), /Returned from snooze\. Snooze ended/);
   assert.equal(reminderBadgeLabel({ ...fired, wakeReason: "agent_response" }), "Activity Reminder");
+  assert.equal(reminderMenuActionLabel(), "Snooze Session…");
+  assert.equal(reminderMenuActionLabel(reminder("pending")), "Edit Reminder…");
+  assert.equal(reminderMenuActionLabel(fired), "Snooze Again…");
 });

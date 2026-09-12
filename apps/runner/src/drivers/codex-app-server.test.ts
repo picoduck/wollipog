@@ -15,6 +15,7 @@ import {
   diagnosticValue,
   parseReviewDecision,
   reviewSummary,
+  waitForWslProviderAttemptTeardown,
 } from "./codex-app-server.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { StagedPromptImages } from "./prompt-images.js";
@@ -45,6 +46,18 @@ function childItemId(threadId: string, itemId: string): string {
   return `codex-child:${JSON.stringify([threadId, itemId])}`;
 }
 
+const serviceTierCapabilities = {
+  models: [{
+    id: "gpt-tiered",
+    default: true,
+    serviceTiers: [{ id: "fast", name: "Fast" }, { id: "flex", name: "Flex" }],
+  }],
+  effortLevels: [],
+  slashCommands: [],
+  supportsImages: true,
+  supportsApprovals: true,
+};
+
 /**
  * Unit tests for the app-server item -> SessionEventPayload mapping and the
  * approval decision wiring. No process spawn: we drive the private onItem mapper
@@ -58,12 +71,18 @@ function makeHarness(
   const stderr: string[] = [];
   let authenticationFailures = 0;
   const subscriptionUsage: unknown[] = [];
+  const serviceTiers: Array<string | null> = [];
+  const poisonedHistory: unknown[] = [];
+  const unclassifiedRejections: unknown[] = [];
   const cb: DriverCallbacks = {
     onEvent: (p) => events.push(p),
     onStderr: (line) => stderr.push(line),
     onExit: () => {},
     onAuthenticationFailure: () => { authenticationFailures += 1; },
+    onProviderHistoryUnrecoverable: (detail) => poisonedHistory.push(detail),
+    onUnclassifiedProviderRejection: (shape) => unclassifiedRejections.push(shape),
     onSubscriptionUsage: (update) => subscriptionUsage.push(update),
+    onServiceTierResolved: (serviceTier) => serviceTiers.push(serviceTier),
   };
   const opts: DriverOptions = {
     command: "codex",
@@ -79,7 +98,8 @@ function makeHarness(
     : new CodexAppServerDriver(opts, cb);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const onItem = (item: unknown, completed: boolean) => (driver as any).onItem(item, completed);
-  return { driver, events, stderr, subscriptionUsage, onItem, authenticationFailures: () => authenticationFailures };
+  return { driver, events, stderr, subscriptionUsage, serviceTiers, onItem, poisonedHistory,
+    unclassifiedRejections, authenticationFailures: () => authenticationFailures };
 }
 
 test("app-server launch enables Default-mode questions before the subcommand", () => {
@@ -92,6 +112,77 @@ test("app-server launch enables Default-mode questions before the subcommand", (
   ]);
   assert.deepEqual(codexAppServerArgs(base, false), [...base, "app-server"]);
   assert.deepEqual(base, ["/opt/codex.js", "-c", "model=default"], "configured arguments remain immutable");
+});
+
+test("an asynchronous app-server spawn error rejects initialization without waiting for close", async () => {
+  const child = fakeAgentProcess();
+  const stderr: string[] = [];
+  const exits: Array<number | null> = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: [],
+    cwd: "/missing/worktree",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: (line) => stderr.push(line),
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: () => child,
+    kill: () => {},
+  });
+
+  const initializing = driver.initialize();
+  setImmediate(() => child.emit("error", new Error("spawn codex ENOENT")));
+  await assert.rejects(initializing, (error: unknown) => {
+    assert.match(String((error as { message?: unknown }).message), /spawn codex ENOENT/);
+    return true;
+  });
+  assert.deepEqual(stderr, ["spawn error: spawn codex ENOENT"]);
+  assert.deepEqual(exits, [null]);
+  assert.equal(driver.pid, undefined);
+  driver.dispose();
+});
+
+test("a close after an app-server spawn error does not report a duplicate exit", async () => {
+  const child = fakeAgentProcess();
+  const stderr: string[] = [];
+  const exits: Array<number | null> = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: [],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: (line) => stderr.push(line),
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: () => {
+      child.stdin.on("data", (chunk) => {
+        const message = JSON.parse(String(chunk).trim()) as { id?: number; method?: string };
+        if (message.method === "initialize") {
+          child.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "codex-test" } }) + "\n");
+        }
+      });
+      return child;
+    },
+    kill: () => {},
+  });
+
+  await driver.initialize();
+  child.emit("error", new Error("spawn codex ENOENT"));
+  child.emit("close", null);
+  await nextTask();
+
+  assert.deepEqual(stderr, ["spawn error: spawn codex ENOENT"]);
+  assert.deepEqual(exits, [null]);
+  assert.equal(driver.pid, undefined);
+  driver.dispose();
 });
 
 test("unsupported Default-mode question feature retries the unchanged app-server launch", async () => {
@@ -200,12 +291,138 @@ test("a late rejected-probe close cannot fail or tear down the healthy fallback"
   }
 });
 
+test("Direct WSL fallback waits for both provider and signalled relay teardown", async () => {
+  const child = fakeAgentProcess();
+  const relay = Object.assign(fakeAgentProcess(), {
+    exitCode: null as number | null,
+    signalCode: null as NodeJS.Signals | null,
+  });
+  let disposed = 0;
+  let killed = 0;
+  let settled = false;
+  let finishReap!: (complete: boolean) => void;
+  child.wslAgentControl = {
+    input: relay.stdin,
+    output: relay.stdout,
+    relay: relay as unknown as NonNullable<AgentProcess["wslAgentControl"]>["relay"],
+    dispose: () => { disposed += 1; },
+  };
+  const waiting = waitForWslProviderAttemptTeardown(child, () => {
+    killed += 1;
+    child.wslReapCompletion = new Promise<boolean>((resolve) => { finishReap = resolve; });
+  }, 1_000)
+    .then(() => { settled = true; });
+  await nextTask();
+  assert.equal(disposed, 1);
+  assert.equal(killed, 1);
+  assert.equal(settled, false);
+  child.closeObserved = true;
+  child.emit("close", 1);
+  await nextTask();
+  assert.equal(settled, false, "provider close alone cannot release the shared relay directory");
+  relay.signalCode = "SIGTERM";
+  relay.emit("close", null, "SIGTERM");
+  await nextTask();
+  assert.equal(settled, false, "fallback also waits for its exact in-distro process-group reap");
+  finishReap(true);
+  await waiting;
+  assert.equal(settled, true, "signal-terminated relays count as closed after their close event");
+
+  const unproven = fakeAgentProcess();
+  unproven.closeObserved = true;
+  unproven.wslReapCompletion = Promise.resolve(false);
+  await assert.rejects(
+    waitForWslProviderAttemptTeardown(unproven, () => assert.fail("closed provider must not be killed")),
+    /process-group reap was not proven/,
+  );
+});
+
+test("Direct WSL teardown does not wait for close after an asynchronous spawn failure", async () => {
+  const child = fakeAgentProcess();
+  Object.defineProperty(child, "pid", { value: undefined });
+
+  await waitForWslProviderAttemptTeardown(
+    child,
+    () => assert.fail("a provider without a pid was never spawned and must not be killed"),
+    1,
+  );
+});
+
 test("app-server auth errors emit a secret-free auth signal", () => {
   const h = makeHarness();
   const raw = "unexpected status 401 Unauthorized: bearer token secret-value";
   (h.driver as any).emitDriverError(raw);
   assert.equal(h.authenticationFailures(), 1);
   assert.deepEqual(h.events, []);
+});
+
+test("an oversized historical tool call signals unrecoverable provider history", () => {
+  const h = makeHarness();
+  const raw = "Invalid 'input[675].arguments': string too long. Expected a string with maximum " +
+    "length 1048576, but got a string with length 1426210 instead.";
+  (h.driver as any).emitDriverError(raw);
+  // The transcript records a constructed description, never the provider's own text.
+  assert.equal(h.events.length, 1);
+  assert.equal((h.events[0] as any).kind, "error");
+  assert.match((h.events[0] as any).message, /rejected this conversation's stored history/);
+  assert.doesNotMatch((h.events[0] as any).message, /Invalid 'input/);
+  assert.deepEqual(h.poisonedHistory, [{
+    reason: "oversized_tool_call", itemIndex: 675, field: "arguments", limit: 1048576, length: 1426210,
+  }]);
+});
+
+test("a classified rejection never relays provider text that could carry content", () => {
+  const h = makeHarness();
+  // A future server version could append an excerpt or a thread id to the same rejection.
+  (h.driver as any).emitDriverError(
+    "Invalid 'input[1].arguments': {\"secret\":\"leaked-value\"}; string too long. " +
+      "Expected a string with maximum length 1048576, but got a string with length 2000000 instead. " +
+      "thread_id=thr_private",
+  );
+  assert.equal(h.poisonedHistory.length, 1);
+  const message = (h.events[0] as any).message as string;
+  assert.doesNotMatch(message, /leaked-value|secret|thr_private/);
+});
+
+test("an unrecognized indexed-item rejection is recorded without changing its handling", () => {
+  const h = makeHarness();
+  const raw = "Invalid 'input[3].content[0].image_url': unsupported value 'image/tiff'";
+  (h.driver as any).emitDriverError(raw);
+  // Handling is unchanged: the ordinary error still reaches the transcript verbatim, and nothing
+  // is quarantined. Only the observation is new.
+  assert.deepEqual(h.events, [{ kind: "error", message: raw }]);
+  assert.deepEqual(h.poisonedHistory, []);
+  assert.deepEqual(h.unclassifiedRejections, [
+    { path: "input[N].content[N].image_url", phrases: ["unsupported value"] },
+  ]);
+});
+
+test("a recognized poisoned-history rejection is quarantined and not also recorded as unclassified", () => {
+  const h = makeHarness();
+  (h.driver as any).emitDriverError(
+    "Invalid 'input[675].arguments': string too long. Expected a string with maximum length " +
+      "1048576, but got a string with length 1426210 instead.",
+  );
+  assert.equal(h.poisonedHistory.length, 1);
+  assert.deepEqual(h.unclassifiedRejections, [], "one rejection is one piece of evidence, not two");
+});
+
+test("ordinary provider errors never signal unrecoverable provider history", () => {
+  const h = makeHarness();
+  for (const raw of [
+    "400 Bad Request: unsupported model",
+    "Invalid 'input[0].content': string too long. Expected a string with maximum length 1048576.",
+    "context_length_exceeded",
+  ]) (h.driver as any).emitDriverError(raw);
+  assert.equal(h.events.length, 3);
+  assert.deepEqual(h.poisonedHistory, []);
+  // The oversized prompt does name an indexed request item, so its shape is recorded as evidence.
+  // That is deliberate: the journal collects what the provider rejects about items in the request,
+  // and a reader deciding whether to widen the classifier needs to see the recoverable shapes too —
+  // `input[N].content` being too long is fixed by shortening the message, not by quarantining.
+  assert.deepEqual(h.unclassifiedRejections, [
+    { path: "input[N].content", phrases: ["string too long", "maximum length", "expected a string"] },
+  ]);
 });
 
 test("Codex app-server accepts a final JSON-RPC response delivered after exit", async () => {
@@ -495,6 +712,27 @@ test("account/rateLimits/updated forwards sparse usage without creating transcri
   assert.deepEqual(h.events, []);
 });
 
+test("thread settings reconcile only this session's returned service tier", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "thread-current";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("thread/settings/updated")!({
+    threadId: "thread-other",
+    threadSettings: { serviceTier: "fast" },
+  });
+  notifications.get("thread/settings/updated")!({ threadSettings: { serviceTier: "fast" } });
+  notifications.get("thread/settings/updated")!({
+    threadId: "thread-current",
+    threadSettings: { serviceTier: "flex" },
+  });
+  notifications.get("thread/settings/updated")!({
+    threadId: "thread-current",
+    threadSettings: { serviceTier: null },
+  });
+  assert.deepEqual(h.serviceTiers, ["flex", null]);
+  assert.equal((h.driver as any).config.serviceTier, undefined);
+});
+
 test("prompt stages localImage inputs in text/image order and cleans them after settlement", async () => {
   let cleaned = 0;
   let turnParams: any = null;
@@ -650,21 +888,27 @@ test("image validation failure is readable and never calls turn/start", async ()
 });
 
 test("newSession starts a fresh thread and requires the server's actual id", async () => {
-  const h = makeHarness();
+  const h = makeHarness({ config: { model: "gpt-tiered", serviceTier: "fast" }, capabilities: serviceTierCapabilities });
   const calls: Array<{ method: string; params: unknown }> = [];
   (h.driver as any).peer = {
     request: async (method: string, params: unknown) => {
       calls.push({ method, params });
-      return { thread: { id: "fresh-1" } };
+      return { thread: { id: "fresh-1" }, serviceTier: "flex" };
     },
   };
   assert.equal(await h.driver.newSession("/fresh"), "fresh-1");
-  assert.deepEqual(calls, [{ method: "thread/start", params: { cwd: "/fresh" } }]);
+  assert.deepEqual(calls, [{ method: "thread/start", params: { cwd: "/fresh", serviceTier: "fast" } }]);
+  assert.deepEqual(h.serviceTiers, ["flex"]);
+  assert.equal((h.driver as any).config.serviceTier, "flex");
   assert.equal(h.driver.agentSessionId(), "fresh-1");
 });
 
 test("newSession validates then resumes the exact persisted thread without replaying history", async () => {
-  const h = makeHarness({ resumeId: "thread-7" });
+  const h = makeHarness({
+    resumeId: "thread-7",
+    config: { model: "gpt-tiered", serviceTier: "default" },
+    capabilities: serviceTierCapabilities,
+  });
   const calls: Array<{ method: string; params: unknown }> = [];
   (h.driver as any).peer = {
     request: async (method: string, params: unknown) => {
@@ -672,14 +916,16 @@ test("newSession validates then resumes the exact persisted thread without repla
       if (method === "thread/read") {
         return { thread: { id: "thread-7", status: { type: "idle" }, turns: [{ id: "old-turn" }] } };
       }
-      return { thread: { id: "thread-7", turns: [{ id: "old-turn" }] } };
+      return { thread: { id: "thread-7", turns: [{ id: "old-turn" }] }, serviceTier: null };
     },
   };
   assert.equal(await h.driver.newSession("/resume"), "thread-7");
   assert.deepEqual(calls, [
     { method: "thread/read", params: { threadId: "thread-7", includeTurns: false } },
-    { method: "thread/resume", params: { threadId: "thread-7" } },
+    { method: "thread/resume", params: { threadId: "thread-7", serviceTier: "default" } },
   ]);
+  assert.deepEqual(h.serviceTiers, [null]);
+  assert.equal((h.driver as any).config.serviceTier, undefined);
   assert.deepEqual(h.events, []); // provider history is never copied into the normalized log
 });
 
@@ -848,9 +1094,9 @@ test("turn settlement closes the active id but retains the provider turn used by
     onRequest: () => {},
     onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
   });
-  notifications.get("turn/started")!({ turn: { id: "turn-provider-7" } });
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
+  notifications.get("turn/started")!({ turn: { id: "turn-provider-7" } });
   notifications.get("turn/completed")!({ turn: { status: "completed" } });
   assert.equal((h.driver as any).turnId, null);
   assert.equal((h.driver as any).promptBusy, false);
@@ -860,9 +1106,9 @@ test("turn settlement closes the active id but retains the provider turn used by
 test("a second prompt missing turn/started cannot reuse the first completed turn id", async () => {
   const h = makeHarness();
   const notifications = notificationHandlers(h.driver);
-  notifications.get("turn/started")!({ turn: { id: "first-completed-turn" } });
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
+  notifications.get("turn/started")!({ turn: { id: "first-completed-turn" } });
   notifications.get("turn/completed")!({ turn: { status: "completed" } });
   assert.equal(h.driver.agentTurnId(), "first-completed-turn", "the completed checkpoint remains available between turns");
 
@@ -876,8 +1122,72 @@ test("a second prompt missing turn/started cannot reuse the first completed turn
   assert.equal(h.driver.agentTurnId(), null);
 });
 
-test("forkSession calls thread/fork with source thread and last turn", async () => {
+test("turn/start response recovers steering without a notification and publishes both availability edges", async () => {
   const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  const changes: (string | null)[] = [];
+  (h.driver as any).cb.onSteeringTurnChanged = () => changes.push(h.driver.activeSteeringTurnId());
+  let turn = 0;
+  (h.driver as any).peer = { request: async () => ({ turn: { id: `turn-${++turn}`, status: "inProgress" } }) };
+  for (const id of ["turn-1", "turn-2"]) {
+    const pending = h.driver.prompt("next");
+    assert.equal(h.driver.activeSteeringTurnId(), null);
+    await nextTask();
+    assert.equal(h.driver.activeSteeringTurnId(), id);
+    if (id === "turn-2") {
+      notifications.get("turn/started")!({ turn: { id: "turn-1" } });
+      notifications.get("turn/completed")!({ turn: { id: "turn-1", status: "completed" } });
+      assert.equal(h.driver.activeSteeringTurnId(), id);
+    }
+    notifications.get("turn/completed")!({ turn: { id, status: "completed" } });
+    assert.equal(await pending, "end_turn");
+    assert.equal(h.driver.activeSteeringTurnId(), null);
+    notifications.get("turn/started")!({ turn: { id } });
+    assert.equal(h.driver.activeSteeringTurnId(), null);
+  }
+  assert.deepEqual(changes, ["turn-1", null, "turn-2", null]);
+});
+
+test("late turn/start responses cannot resurrect a completed turn or overwrite a newer notification", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  let respond!: (value: unknown) => void;
+  (h.driver as any).peer = { request: () => new Promise((resolve) => { respond = resolve; }) };
+  const first = h.driver.prompt("first");
+  await nextTask();
+  const firstRespond = respond;
+  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  await first;
+  const second = h.driver.prompt("second");
+  await nextTask();
+  firstRespond({ turn: { id: "old", status: "inProgress" } });
+  await nextTask();
+  assert.equal(h.driver.activeSteeringTurnId(), null);
+  notifications.get("turn/started")!({ turn: { id: "newest" } });
+  respond({ turn: { id: "initial", status: "inProgress" } });
+  await nextTask();
+  assert.equal(h.driver.activeSteeringTurnId(), "newest");
+  notifications.get("turn/completed")!({ turn: { id: "newest", status: "completed" } });
+  await second;
+});
+
+test("missing coordinates explain the running server identity rather than assuming the installed CLI version", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  (h.driver as any).serverIdentity = "codex/0.149.1";
+  (h.driver as any).peer = { request: async () => ({}) };
+  const pending = h.driver.prompt("work");
+  await nextTask();
+  assert.equal(h.driver.activeSteeringTurnId(), null);
+  assert.match(h.stderr.at(-1)!, /running server: codex\/0.149.1; installed CLI version may differ/);
+  notifications.get("turn/started")!({ turn: { id: "recovered" } });
+  assert.equal(h.driver.activeSteeringTurnId(), "recovered");
+  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  await pending;
+});
+
+test("forkSession calls thread/fork with source thread and last turn", async () => {
+  const h = makeHarness({ config: { model: "gpt-tiered", serviceTier: "fast" }, capabilities: serviceTierCapabilities });
   (h.driver as any).threadId = "thread-source";
   let seen: unknown;
   (h.driver as any).peer = {
@@ -889,7 +1199,7 @@ test("forkSession calls thread/fork with source thread and last turn", async () 
   assert.equal(await h.driver.forkSession("turn-provider-7", "/tmp/fork"), "thread-forked");
   assert.deepEqual(seen, {
     method: "thread/fork",
-    params: { threadId: "thread-source", lastTurnId: "turn-provider-7", cwd: "/tmp/fork" },
+    params: { threadId: "thread-source", lastTurnId: "turn-provider-7", cwd: "/tmp/fork", serviceTier: "fast" },
   });
 });
 
@@ -1054,11 +1364,26 @@ test("structured Codex collaboration items expose recursive live subagent output
   });
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "grandchild-thread",
-    tokenUsage: { last: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 } },
+    tokenUsage: {
+      last: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2, cacheCreationInputTokens: 1, reasoningOutputTokens: 2 },
+      total: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2, cacheCreationInputTokens: 1, reasoningOutputTokens: 2 },
+    },
   });
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "grandchild-thread",
-    tokenUsage: { last: { inputTokens: 11, outputTokens: 5, cachedInputTokens: 3 } },
+    tokenUsage: {
+      last: { inputTokens: 11, outputTokens: 5, cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningOutputTokens: 3 },
+      total: { inputTokens: 20, outputTokens: 9, cachedInputTokens: 5, cacheCreationInputTokens: 3, reasoningOutputTokens: 5 },
+    },
+  });
+  // App Server can replay the same cumulative update around transport recovery. The cumulative
+  // counter makes this exact duplicate idempotent without mistaking two equal-sized responses.
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "grandchild-thread",
+    tokenUsage: {
+      last: { inputTokens: 11, outputTokens: 5, cachedInputTokens: 3, cacheCreationInputTokens: 2, reasoningOutputTokens: 3 },
+      total: { inputTokens: 20, outputTokens: 9, cachedInputTokens: 5, cacheCreationInputTokens: 3, reasoningOutputTokens: 5 },
+    },
   });
   notifications.get("turn/completed")!({
     threadId: "grandchild-thread",
@@ -1120,15 +1445,17 @@ test("structured Codex collaboration items expose recursive live subagent output
   });
   assert.deepEqual(h.events.find((event) => event.kind === "token_usage"), {
     kind: "token_usage",
-    inputTokens: 11,
-    outputTokens: 5,
-    cachedInputTokens: 3,
+    inputTokens: 20,
+    outputTokens: 9,
+    cachedInputTokens: 5,
+    cacheCreationInputTokens: 3,
+    reasoningOutputTokens: 5,
     parentToolUseId: innerSpawnId,
   });
   assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
     event.toolCallId === "spawn-outer" && event.subagentLifecycle === "completed"));
   assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 1,
-    "repeated cumulative child updates emit only the latest settled usage");
+    "repeated child updates emit one complete settled turn total");
   assert.equal(h.events.some((event) => event.kind === "agent_message" && event.text.includes("must not cross")), false);
 });
 
@@ -1666,6 +1993,71 @@ test("unsupported MCP modes cancel safely and provider resolution clears a parke
   });
 });
 
+test("negotiated child questions coexist and completion cancels only their exact owner", async () => {
+  const h = makeHarness();
+  (h.driver as any).cb.supportsWorkerAttention = () => true;
+  (h.driver as any).threadId = "root";
+  const requests = new Map<string, (params: any, id: string) => Promise<any>>();
+  const notifications = new Map<string, (params: any) => void>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: any) => requests.set(method, handler),
+    onNotification: (method: string, handler: any) => notifications.set(method, handler),
+  });
+  for (const child of ["a", "b"]) notifications.get("item/completed")!({
+    threadId: "root",
+    item: { type: "collabAgentToolCall", id: "spawn-" + child, tool: "spawnAgent",
+      status: "completed", senderThreadId: "root", receiverThreadIds: [child],
+      agentsStates: { [child]: { status: "running" } } },
+  });
+  const ask = (threadId: string, requestId = "ask-" + threadId) => requests.get("item/tool/requestUserInput")!({
+    threadId, questions: [{ id: "choice", header: "Choice", question: "Choose",
+      isOther: false, options: [{ label: "A", description: "A" }] }],
+  }, requestId);
+  const a = ask("a");
+  const b = ask("b");
+  assert.deepEqual(h.events.filter((event) => event.kind === "question_request")
+    .map((event) => event.ownerToolUseId), ["spawn-a", "spawn-b"]);
+  const replacementB = ask("b");
+  assert.deepEqual(await b, { answers: {} }, "a repeated child RPC id settles its old promise");
+  const root1 = ask("root", "root-1");
+  const root2 = ask("root", "root-2");
+  assert.deepEqual(await root1, { answers: {} }, "root replacement still applies with children pending");
+  // A root notification is authoritative only while a prompt is awaiting its turn.
+  (h.driver as any).promptBusy = true;
+  (h.driver as any).turnResolve = () => {};
+  notifications.get("turn/started")!({ threadId: "root", turn: { id: "root-turn" } });
+  assert.deepEqual(await root2, { answers: {} });
+  notifications.get("turn/completed")!({ threadId: "root", turn: { id: "root-turn", status: "completed" } });
+  notifications.get("item/completed")!({
+    threadId: "root", item: { type: "collabAgentToolCall", id: "spawn-a", tool: "spawnAgent",
+      status: "completed", senderThreadId: "root", receiverThreadIds: ["a"],
+      agentsStates: { a: { status: "completed" } } },
+  });
+  assert.deepEqual(await a, { answers: {} });
+  assert.equal(h.driver.answerQuestion("ask-a", { choice: "A" }), false);
+  assert.equal(h.driver.answerQuestion("ask-b", { choice: "A" }), true);
+  assert.deepEqual(await replacementB, { answers: { choice: { answers: ["A"] } } });
+});
+
+test("Codex child request capacity denies the new callback without dropping existing ones", async () => {
+  const h = makeHarness();
+  (h.driver as any).cb.supportsWorkerAttention = () => true;
+  (h.driver as any).subagentToolByThread.set("child", "spawn");
+  const requests = new Map<string, (params: any, id: string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: any) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const ask = (id: string) => requests.get("item/tool/requestUserInput")!({ threadId: "child",
+    questions: [{ id: "q", header: "Choice", question: "Choose",
+      isOther: false, options: [{ label: "A", description: "A" }] }] }, id);
+  const pending = Array.from({ length: 128 }, (_, index) => ask(String(index)));
+  assert.deepEqual(await ask("overflow"), { answers: {} });
+  assert.equal(h.events.filter((event) => event.kind === "question_request").length, 128);
+  h.driver.dispose();
+  assert.equal((await Promise.all(pending)).length, 128);
+});
+
 test("a newer structured request settles and resolves the displaced request exactly once", async () => {
   const h = makeHarness();
   const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
@@ -1735,6 +2127,15 @@ test("re-entrant cancellation while resolving a replacement cannot strand the ne
   assert.equal((h.driver as any).pendingApprovals.size, 0);
 });
 
+test("buildCodexTurnParams: orchestrator cannot request sandbox escalation", () => {
+  const params = buildCodexTurnParams(cfg("orchestrator"), "t1", "/w", []);
+  assert.equal(params.approvalPolicy, "never");
+  assert.deepEqual(params.sandboxPolicy, {
+    type: "workspaceWrite", writableRoots: ["/w"], networkAccess: true,
+    excludeTmpdirEnvVar: true, excludeSlashTmp: true,
+  });
+});
+
 test("buildCodexTurnParams: default and 'auto-review' use Guardian with an escapable workspace sandbox", () => {
   const p = buildCodexTurnParams(cfg("auto-review"), "t1", "/w", [{ type: "text", text: "hi" }]);
   assert.equal(p.approvalPolicy, "on-request");
@@ -1770,10 +2171,25 @@ test("buildCodexTurnParams: restricted modes can escalate; full access never ask
   assert.equal(buildCodexTurnParams(cfg("danger-full-access"), "t", "/w", []).approvalsReviewer, undefined);
 });
 
-test("buildCodexTurnParams: passes model/effort through, skips the 'default' model sentinel", () => {
-  const p = buildCodexTurnParams(cfg("workspace-write", { model: "gpt-5-codex", effort: "high" }), "t", "/w", []);
-  assert.equal(p.model, "gpt-5-codex");
+test("buildCodexTurnParams: passes model, effort, and service tier through, skips the 'default' model sentinel", () => {
+  const p = buildCodexTurnParams(
+    cfg("workspace-write", { model: "gpt-tiered", effort: "high", serviceTier: "fast" }),
+    "t",
+    "/w",
+    [],
+    serviceTierCapabilities,
+  );
+  assert.equal(p.model, "gpt-tiered");
   assert.equal(p.effort, "high");
+  assert.equal(p.serviceTier, "fast");
+  const unsupported = buildCodexTurnParams(
+    cfg("workspace-write", { model: "gpt-unknown", serviceTier: "fast" }),
+    "t",
+    "/w",
+    [],
+    serviceTierCapabilities,
+  );
+  assert.equal(unsupported.serviceTier, undefined, "tiers from another model are never sent");
   const d = buildCodexTurnParams(cfg("workspace-write", { model: "default" }), "t", "/w", []);
   assert.equal(d.model, undefined);
 });
@@ -2013,4 +2429,182 @@ test("diagnosticValue bounds every provider-controlled shape", () => {
   assert.equal(diagnosticValue(7), "7");
   assert.equal(diagnosticValue(["a".repeat(50_000)]), "[object]");
   assert.equal(diagnosticValue("a".repeat(500)), `${"a".repeat(120)}…`);
+});
+
+test("multi-response usage uses the cumulative turn delta while context uses only the final request", () => {
+  const h = makeHarness({ config: { model: "gpt-5.5-codex" } as DriverOptions["config"] });
+  const gauges: Array<{ contextTokensUsed: number; contextWindow: number }> = [];
+  (h.driver as any).cb.onAcpUsage = (usage: { contextTokensUsed: number; contextWindow: number }) => gauges.push(usage);
+  const notifications = new Map<string, (params: any) => void>();
+  (h.driver as any).registerHandlers({
+    onRequest: () => {},
+    onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
+  });
+  (h.driver as any).eventContext = () => ({ accepted: true });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "t1",
+    tokenUsage: {
+      last: { inputTokens: 11_000, outputTokens: 600, cachedInputTokens: 9_000, cacheCreationInputTokens: 100, reasoningOutputTokens: 200 },
+      total: { inputTokens: 111_000, outputTokens: 10_600, cachedInputTokens: 89_000, cacheCreationInputTokens: 500, reasoningOutputTokens: 1_200 },
+      modelContextWindow: 258_400,
+    },
+  });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "t1",
+    tokenUsage: {
+      last: { inputTokens: 12_000, outputTokens: 700, cachedInputTokens: 8_000, cacheCreationInputTokens: 50, reasoningOutputTokens: 300 },
+      total: { inputTokens: 123_000, outputTokens: 11_300, cachedInputTokens: 97_000, cacheCreationInputTokens: 550, reasoningOutputTokens: 1_500 },
+      modelContextWindow: 258_400,
+    },
+  });
+  assert.deepEqual(gauges, [
+    { contextTokensUsed: 11_600, contextWindow: 258_400 },
+    { contextTokensUsed: 12_700, contextWindow: 258_400 },
+  ], "each gauge uses one request, never the cumulative billable total");
+  (h.driver as any).emitPendingTurnUsage();
+  assert.deepEqual(h.events, [{
+    kind: "token_usage",
+    inputTokens: 23_000,
+    outputTokens: 1_300,
+    cachedInputTokens: 17_000,
+    cacheCreationInputTokens: 150,
+    reasoningOutputTokens: 500,
+    model: "gpt-5.5-codex",
+  }]);
+
+  const unpinned = makeHarness({ config: { model: "default" } as DriverOptions["config"] });
+  (unpinned.driver as any).pendingTurnUsage = { input: 1, output: 1 };
+  (unpinned.driver as any).emitPendingTurnUsage();
+  assert.equal("model" in unpinned.events[0]!, false, "an unpinned model is not guessed");
+});
+
+test("resumed thread totals establish a baseline and replayed history is never billed again", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "resumed-thread";
+  const notifications = notificationHandlers(h.driver);
+  const historical = {
+    threadId: "resumed-thread",
+    turnId: "historical-turn",
+    tokenUsage: {
+      last: { inputTokens: 20, outputTokens: 4, cachedInputTokens: 10, reasoningOutputTokens: 2 },
+      total: { inputTokens: 100, outputTokens: 20, cachedInputTokens: 60, reasoningOutputTokens: 8 },
+    },
+  };
+  (h.driver as any).completedTurnId = "historical-turn";
+  (h.driver as any).beginRootTurnUsage();
+  notifications.get("thread/tokenUsage/updated")!(historical);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "resumed-thread",
+    turnId: "new-turn",
+    tokenUsage: {
+      last: { inputTokens: 10, outputTokens: 3, cachedInputTokens: 5, reasoningOutputTokens: 1 },
+      total: { inputTokens: 110, outputTokens: 23, cachedInputTokens: 65, reasoningOutputTokens: 9 },
+    },
+  });
+  notifications.get("turn/completed")!({
+    threadId: "resumed-thread",
+    turn: { id: "new-turn", status: "completed" },
+  });
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 10, outputTokens: 3, cachedInputTokens: 5, reasoningOutputTokens: 1,
+  }]);
+});
+
+test("failed and interrupted turns emit the complete cumulative usage exactly once", async () => {
+  for (const [status, expectedStop] of [["failed", "refusal"], ["interrupted", "cancelled"]] as const) {
+    const h = makeHarness();
+    (h.driver as any).threadId = `root-${status}`;
+    (h.driver as any).turnId = `turn-${status}`;
+    const notifications = notificationHandlers(h.driver);
+    const stopped = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+    notifications.get("thread/tokenUsage/updated")!({
+      threadId: `root-${status}`,
+      turnId: `turn-${status}`,
+      tokenUsage: {
+        last: { inputTokens: 4, outputTokens: 2, cachedInputTokens: 3, reasoningOutputTokens: 1 },
+        total: { inputTokens: 104, outputTokens: 12, cachedInputTokens: 83, reasoningOutputTokens: 5 },
+      },
+    });
+    notifications.get("thread/tokenUsage/updated")!({
+      threadId: `root-${status}`,
+      turnId: `turn-${status}`,
+      tokenUsage: {
+        last: { inputTokens: 6, outputTokens: 3, cachedInputTokens: 4, reasoningOutputTokens: 2 },
+        total: { inputTokens: 110, outputTokens: 15, cachedInputTokens: 87, reasoningOutputTokens: 7 },
+      },
+    });
+    notifications.get("turn/completed")!({
+      threadId: `root-${status}`,
+      turn: { id: `turn-${status}`, status, ...(status === "failed" ? { error: "provider failed" } : {}) },
+    });
+    assert.equal(await stopped, expectedStop);
+    assert.deepEqual(h.events.filter((event) => event.kind === "token_usage"), [{
+      kind: "token_usage", inputTokens: 10, outputTokens: 5, cachedInputTokens: 7, reasoningOutputTokens: 3,
+    }]);
+  }
+});
+
+test("legacy last-only usage accumulates distinct responses and ignores exact notification replay", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "legacy-thread";
+  const notifications = notificationHandlers(h.driver);
+  const first = {
+    threadId: "legacy-thread",
+    tokenUsage: { last: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2, reasoningOutputTokens: 2 } },
+  };
+  notifications.get("thread/tokenUsage/updated")!(first);
+  notifications.get("thread/tokenUsage/updated")!(first);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "legacy-thread",
+    tokenUsage: { last: { inputTokens: 5, outputTokens: 2, cachedInputTokens: 1, reasoningOutputTokens: 9 } },
+  });
+  (h.driver as any).emitPendingTurnUsage();
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: 3, reasoningOutputTokens: 4,
+  }], "reasoning is clamped per response and remains a subset of aggregate output");
+});
+
+test("legacy lastTurn snapshots replace rather than add their running turn total", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "legacy-turn-thread";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "legacy-turn-thread",
+    tokenUsage: { lastTurn: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 } },
+  });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "legacy-turn-thread",
+    tokenUsage: { lastTurn: { inputTokens: 12, outputTokens: 5, cachedInputTokens: 4 } },
+  });
+  (h.driver as any).emitPendingTurnUsage();
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: 4,
+  }]);
+});
+
+test("fields omitted from cumulative totals accumulate from distinct per-response usage", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "partial-total-thread";
+  const notifications = notificationHandlers(h.driver);
+  const first = {
+    threadId: "partial-total-thread",
+    tokenUsage: {
+      last: { inputTokens: 7, outputTokens: 3, cacheCreationInputTokens: 2 },
+      total: { inputTokens: 107, outputTokens: 13 },
+    },
+  };
+  notifications.get("thread/tokenUsage/updated")!(first);
+  notifications.get("thread/tokenUsage/updated")!(first);
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "partial-total-thread",
+    tokenUsage: {
+      last: { inputTokens: 5, outputTokens: 2, cacheCreationInputTokens: 1 },
+      total: { inputTokens: 112, outputTokens: 15 },
+    },
+  });
+  (h.driver as any).emitPendingTurnUsage();
+  assert.deepEqual(h.events, [{
+    kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: undefined,
+    cacheCreationInputTokens: 3,
+  }]);
 });

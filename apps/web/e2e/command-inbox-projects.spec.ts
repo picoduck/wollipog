@@ -112,6 +112,160 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByRole("tab", { name: /Alpha/ })).toBeVisible();
 });
 
+const composerQuestion = {
+  requestId: "ask-from-sessions",
+  title: "Choose a target",
+  options: [],
+  kind: "question" as const,
+  questions: [{
+    id: "target",
+    question: "Choose a target",
+    options: [{ label: "Staging" }, { label: "Production" }],
+  }],
+};
+
+async function openComposerResponseFixture(page: Page) {
+  await page.evaluate(() => localStorage.setItem("wollipog.question-response-style", "composer"));
+  await page.goto("/command-inbox-projects-e2e.html?fullShell=1");
+  await expect(page.getByRole("tab", { name: /Alpha/ })).toBeVisible();
+}
+
+async function focusZoneWithKeyboard(page: Page, zone: "list" | "detail") {
+  const presses = zone === "list" ? 2 : 3;
+  for (let index = 0; index < presses; index += 1) await page.keyboard.press("F6");
+  await expect.poll(() => page.evaluate(() =>
+    document.activeElement?.closest<HTMLElement>("[data-focus-zone]")?.dataset.focusZone ?? null))
+    .toBe(zone);
+}
+
+test("one R from the Sessions list focuses an already-active Composer Response before the next digit", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openComposerResponseFixture(page);
+  await page.evaluate((pendingApproval) => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      status: "input_required",
+      pendingApproval,
+    });
+  }, composerQuestion);
+  await expect(page.locator(".question-bar").getByText("Choose a target", { exact: true })).toBeVisible();
+
+  await focusZoneWithKeyboard(page, "list");
+  await page.keyboard.press("r");
+  await page.keyboard.press("1");
+
+  const response = page.locator(".composer-answer-input");
+  await expect(page.getByRole("region", { name: "Session Activity" })).toBeVisible();
+  await expect(response).toBeFocused();
+  await expect(response).toHaveValue("1");
+});
+
+test("offline Composer Response owns the immediate digit after R from the Sessions list", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openComposerResponseFixture(page);
+  await page.evaluate((pendingApproval) => {
+    const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+    fixture.updateSession("session-alpha", {
+      status: "input_required",
+      pendingApproval,
+    });
+    fixture.setRunnerStatus("offline");
+  }, composerQuestion);
+  await expect(page.getByText("Responses are unavailable until the runner reconnects.", { exact: true })).toBeVisible();
+
+  await focusZoneWithKeyboard(page, "list");
+  await page.keyboard.press("r");
+  await page.keyboard.press("1");
+
+  const response = page.locator(".composer-answer-input");
+  await expect(page.getByRole("region", { name: "Session Activity" })).toBeVisible();
+  await expect(response).toBeFocused();
+  await expect(response).toHaveAttribute("aria-disabled", "true");
+  await expect(response).toHaveAttribute("readonly", "");
+  await expect(response).toHaveValue("");
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("online"));
+  await expect(response).not.toHaveAttribute("aria-disabled", "true");
+  await expect(response).not.toHaveAttribute("readonly", "");
+  await page.keyboard.press("1");
+  await expect(response).toHaveValue("1");
+});
+
+test("one R from the split preview enters Composer Response without losing the ordinary draft", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openComposerResponseFixture(page);
+
+  // Build the ordinary draft through the real keyboard path, then return to the split view.
+  await focusZoneWithKeyboard(page, "list");
+  await page.keyboard.press("r");
+  const composer = page.locator(".composer-input");
+  await expect(composer).toBeFocused();
+  await composer.pressSequentially("preserved draft");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "Session Preview Activity" })).toBeVisible();
+
+  await page.evaluate((pendingApproval) => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      status: "input_required",
+      pendingApproval,
+    });
+  }, composerQuestion);
+  await expect(page.locator(".question-bar").getByText("Choose a target", { exact: true })).toBeVisible();
+
+  await page.keyboard.press("F6");
+  await expect.poll(() => page.evaluate(() =>
+    document.activeElement?.closest<HTMLElement>("[data-focus-zone]")?.dataset.focusZone ?? null))
+    .toBe("detail");
+  await page.keyboard.press("r");
+  await page.keyboard.press("1");
+
+  const response = page.locator(".composer-answer-input");
+  await expect(response).toBeFocused();
+  await expect(response).toHaveValue("1");
+  await page.keyboard.press("Escape");
+  await expect(composer).toBeFocused();
+  await expect(composer).toHaveValue("preserved draft");
+});
+
+test("offline Composer Response owns the immediate digit after R from the split preview", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openComposerResponseFixture(page);
+
+  await focusZoneWithKeyboard(page, "list");
+  await page.keyboard.press("r");
+  const composer = page.locator(".composer-input");
+  await expect(composer).toBeFocused();
+  await composer.pressSequentially("offline preserved draft");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "Session Preview Activity" })).toBeVisible();
+
+  await page.evaluate((pendingApproval) => {
+    const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+    fixture.updateSession("session-alpha", {
+      status: "input_required",
+      pendingApproval,
+    });
+    fixture.setRunnerStatus("offline");
+  }, composerQuestion);
+  await expect(page.locator(".question-bar").getByText("Choose a target", { exact: true })).toBeVisible();
+
+  await page.keyboard.press("F6");
+  await expect.poll(() => page.evaluate(() =>
+    document.activeElement?.closest<HTMLElement>("[data-focus-zone]")?.dataset.focusZone ?? null))
+    .toBe("detail");
+  await page.keyboard.press("r");
+  await page.keyboard.press("1");
+
+  const response = page.locator(".composer-answer-input");
+  await expect(page.getByRole("region", { name: "Session Activity" })).toBeVisible();
+  await expect(response).toBeFocused();
+  await expect(response).toHaveValue("");
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("Answer Mode", { exact: true })).toHaveCount(0);
+  await expect(composer).toHaveValue("offline preserved draft");
+});
+
 for (const viewport of [
   { name: "mobile", width: 390, height: 720 },
   { name: "desktop", width: 1280, height: 760 },
@@ -142,8 +296,15 @@ for (const viewport of [
       });
     });
     await settlePreviewLayout(page);
-    expect((await inboxViewportAnchor(page)).scrollTop).toBe(0);
-    expect(await list.locator(".inbox-row-title").allTextContents()).toEqual(initialTitles);
+    const afterTop = await inboxViewportAnchor(page);
+    expect(afterTop.scrollTop).toBe(0);
+    expect(afterTop.key).toBe(atTop.key);
+    expect(Math.abs((afterTop.offset ?? 0) - (atTop.offset ?? 0))).toBeLessThan(2);
+    // Adding a request disclosure grows the row and legitimately shrinks the overscan set.
+    // Pin the anchor and ordering, not the number of mounted offscreen rows.
+    const afterTitles = await list.locator(".inbox-row-title").allTextContents();
+    expect(afterTitles.length).toBeGreaterThan(1);
+    expect(afterTitles).toEqual(initialTitles.slice(0, afterTitles.length));
 
     await list.evaluate((element) => {
       element.scrollTop = Math.round((element.scrollHeight - element.clientHeight) * 0.55);
@@ -568,23 +729,23 @@ test("Inbox titles keep one reading axis across row signals, widths, and densiti
       const geometry = await page.locator(".inbox-row").evaluateAll((rows) => rows.map((row) => {
         const title = row.querySelector<HTMLElement>(".inbox-row-title")!;
         const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!;
-        const senderText = sender.querySelector<HTMLElement>("span")!;
         const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!;
         return {
           titleX: title.getBoundingClientRect().left,
-          senderWidth: sender.getBoundingClientRect().width,
-          senderOverflows: senderText.scrollWidth > senderText.clientWidth,
+          senderRight: sender.getBoundingClientRect().right,
+          signalsLeft: signals.getBoundingClientRect().left,
           signalsWidth: signals.getBoundingClientRect().width,
         };
       }));
 
+      // The axis is now the row's own left edge: #664 moved the title onto its own line, so no
+      // amount of status badges or sender text can shift where a title starts.
       expect(Math.max(...geometry.map(({ titleX }) => titleX)) - Math.min(...geometry.map(({ titleX }) => titleX)))
-        .toBeLessThanOrEqual(1);
-      expect(Math.max(...geometry.map(({ senderWidth }) => senderWidth)) - Math.min(...geometry.map(({ senderWidth }) => senderWidth)))
         .toBeLessThanOrEqual(1);
       expect(Math.max(...geometry.map(({ signalsWidth }) => signalsWidth)) - Math.min(...geometry.map(({ signalsWidth }) => signalsWidth)))
         .toBeGreaterThan(8);
-      expect(geometry.some(({ senderOverflows }) => senderOverflows)).toBe(true);
+      // A long agent-and-Project label yields to the signals column instead of colliding with it.
+      for (const { senderRight, signalsLeft } of geometry) expect(senderRight).toBeLessThanOrEqual(signalsLeft + 1);
     }
   }
 });
@@ -643,7 +804,7 @@ test("Project launch actions submit stable Project and Location identity", async
     });
 });
 
-test("Native TUI launch sends the harness intent and opens Terminal only after creation", async ({ page }) => {
+test("Native TUI launch sends the harness intent and opens Terminal only after creation", async ({ page }, testInfo) => {
   await page.getByRole("tab", { name: /Alpha/ }).click();
   await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
@@ -661,8 +822,21 @@ test("Native TUI launch sends the harness intent and opens Terminal only after c
     .toBe(1);
   await expect(page.getByRole("tab", { name: "Agent TUI" })).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: "Manager policy hooks remain active" })).toHaveText(
-    "No structured events or approval cards. Manager policy hooks remain active.",
+    "Usage Accounting: Unavailable. No structured events or approval cards. Manager policy hooks remain active.",
   );
+
+  await page.evaluate(() => {
+    const created = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions.at(-1);
+    if (!created) throw new Error("created session missing");
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot(created.id, { costBudgetUsd: 5 });
+  });
+  await expect(page.getByRole("button", { name: "+ Agent TUI" })).toBeDisabled();
+  await expect(page.getByRole("status").filter({ hasText: "Agent TUI is unavailable" })).toContainText(
+    "Clear those guardrails or use Direct",
+  );
+  await page.locator(".shell-dock").screenshot({
+    path: testInfo.outputPath("native-tui-guardrail-blocked.png"),
+  });
 });
 
 test("unified Inbox creation opens both existing workflows with the active Project context", async ({ page }) => {

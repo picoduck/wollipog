@@ -29,6 +29,13 @@ same keyboard helper because one hook instance cannot safely own every repeated 
 
 ## Session-detail ownership
 
+The Inbox grid retains its active-descendant selection and project-switching Tab shortcut. A row
+carries no tabbable controls of its own: F2 opens the selected session with its highest-priority
+pending request focused, and a parent row's thread chevron is a pointer target whose keyboard
+equivalent is T on the grid (Shift+T for every thread, P to select a child's parent, and the Left
+and Right arrows as the conventional secondary path). Global palette, help, navigation, and
+focus-zone shortcuts remain available without invoking Inbox row actions.
+
 `SessionDetailLoaded` remains the coordinator for the single send/fork busy gate, composer-draft
 hydration and flush, view-generation fencing, fork leasing, timeline recovery, and the one shared
 git-status reader. Presentation leaves are split at stable boundaries:

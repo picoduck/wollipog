@@ -47,6 +47,10 @@ test("preview paging leaves follow state alone when the requested edge cannot mo
     clientHeight: 480,
     scrollHeight: 1_000,
     scrollTop: 520,
+    dispatchEvent: (event: Event) => {
+      calls.push(`intent:${(event as CustomEvent<{ direction?: string }>).detail?.direction ?? "none"}`);
+      return true;
+    },
     scrollTo: () => calls.push("scroll"),
   };
 
@@ -55,5 +59,6 @@ test("preview paging leaves follow state alone when the requested edge cannot mo
 
   scroll.scrollTop = 0;
   pageInboxPreview(scroll, "previous", () => calls.push("preview"));
-  assert.deepEqual(calls, [], "paging backward at the top must not claim preview ownership");
+  assert.deepEqual(calls, ["intent:up"],
+    "paging backward at the top asks the transcript for earlier activity without claiming preview ownership");
 });

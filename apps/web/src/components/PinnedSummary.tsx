@@ -13,6 +13,7 @@ import {
   legacyLocalGitFacts,
   remoteHttpUrl,
   sourceKind,
+  visibleForgeFacts,
   type GitPresentation,
 } from "../pinned-summary.js";
 import type { GitStatus, GitSummary } from "./useGitStatus.js";
@@ -42,6 +43,7 @@ export function PinnedSummary({
   richGitSupported,
   items,
   onOpenReview,
+  onOpenBackgroundWork,
   onOpenSourceLocation,
 }: {
   session: SessionView;
@@ -51,6 +53,7 @@ export function PinnedSummary({
   richGitSupported: boolean;
   items: TimelineItem[];
   onOpenReview: () => void;
+  onOpenBackgroundWork?: () => void;
   onOpenSourceLocation: (location: SourceLocation) => void;
 }) {
   const { navigate } = useStoreActions();
@@ -86,13 +89,15 @@ export function PinnedSummary({
   const commitAction = deriveCommitAction(reviewFacts);
   const subagents = deriveSubagents(session, runs, sessions);
   const forgeFactsVisible = !richGitSupported || gitPresentation.state !== "not_repository";
-  const remoteUrl = forgeFactsVisible ? summary?.remoteUrl ?? displayedFacts?.remoteUrl : null;
-  const source = sourceKind(remoteUrl);
+  const { forge, remoteUrl, pr, checks } = visibleForgeFacts(
+    summary,
+    displayedFacts?.remoteUrl,
+    forgeFactsVisible,
+  );
+  const source = forge?.provider ?? sourceKind(remoteUrl);
   const sourceUrl = remoteHttpUrl(remoteUrl);
   const pane = useMemo(() => deriveSidePaneContent(items), [items]);
   const branch = legacyFacts?.branch ?? (session.worktreePath ? `agent/${session.id}` : null);
-  const pr = forgeFactsVisible ? summary?.pr ?? null : null;
-  const checks = forgeFactsVisible ? summary?.checks ?? null : null;
   const prHref = safeExternalHref(pr?.url);
   const canPrompt = runnerOnline && !isTerminal(session.status) && !isPolicyApproval(session.pendingApproval);
   const refreshGit = async () => {
@@ -101,8 +106,7 @@ export function PinnedSummary({
 
   return (
     <aside className="pinned-summary" aria-label="Pinned Summary">
-      {/* Keep identity and freshness here. Live status belongs to the Session header so the same
-          facts are not duplicated in two nearby surfaces. */}
+      {/* Keep session identity and freshness together at the top of the pinned summary. */}
       <div className="ps-section">
         <div className="ps-section-head">
           <span>Session</span>
@@ -127,6 +131,7 @@ export function PinnedSummary({
           <div className="ps-row is-static">
             <BackgroundDeliveryBadge
               state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
+              onOpen={onOpenBackgroundWork}
             />
           </div>
         )}
@@ -199,11 +204,23 @@ export function PinnedSummary({
         {pr && prHref && (
           <a className="ps-row ps-source" href={prHref} target="_blank" rel="noreferrer" title={`#${pr.number} · ${pr.state}`}>
             <PullRequestIcon className="ps-icon" size={14} />
-            <span className="ps-sub-title">{pr.title || `PR #${pr.number}`}</span>
+            <span className="ps-sub-title">{pr.title || `${pr.kind === "merge_request" ? "MR" : "PR"} #${pr.number}`}</span>
           </a>
         )}
 
-        {checks && <ChecksRow checks={checks} session={session} canPrompt={canPrompt} />}
+        {checks && <ChecksRow checks={checks} session={session} canPrompt={canPrompt} kind={pr?.kind} />}
+        {forge?.authenticationError && (
+          <div className="ps-row is-static" title={forge.authenticationError}>
+            <span className="ps-check-dot is-fail" aria-hidden="true" />
+            <span>Forge Authentication Needed</span>
+          </div>
+        )}
+        {forge?.statusError && (
+          <div className="ps-row is-static" title={forge.statusError}>
+            <span className="ps-check-dot is-fail" aria-hidden="true" />
+            <span>Forge Status Unavailable</span>
+          </div>
+        )}
       </div>
 
       {richGitSupported && (
@@ -274,12 +291,12 @@ export function PinnedSummary({
           {sourceUrl ? (
             <a className="ps-row ps-source" href={sourceUrl} target="_blank" rel="noreferrer" title={sourceUrl}>
               <SourceIcon kind={source} />
-              <span>{source === "github" ? "GitHub" : "Git remote"}</span>
+              <span>{source === "github" ? "GitHub" : source === "gitlab" ? "GitLab" : "Git Remote"}</span>
             </a>
           ) : (
             <div className="ps-row is-static">
               <SourceIcon kind={source} />
-              <span>{source === "github" ? "GitHub" : "Git remote"}</span>
+              <span>{source === "github" ? "GitHub" : source === "gitlab" ? "GitLab" : "Git Remote"}</span>
             </div>
           )}
         </div>
@@ -298,10 +315,12 @@ function ChecksRow({
   checks,
   session,
   canPrompt,
+  kind,
 }: {
   checks: GitChecksSummary;
   session: SessionView;
   canPrompt: boolean;
+  kind?: "pull_request" | "merge_request";
 }) {
   const api = useApi();
   const [busy, setBusy] = useState(false);
@@ -309,7 +328,7 @@ function ChecksRow({
   const fix = async () => {
     setBusy(true);
     try {
-      await api.prompt(session.id, fixChecksPrompt(checks), []);
+      await api.prompt(session.id, fixChecksPrompt(checks, kind), []);
       setSent(true);
     } catch {
       /* the composer surfaces prompt failures; this button stays quiet */
@@ -350,7 +369,7 @@ function ChecksRow({
 }
 
 
-function SourceIcon({ kind }: { kind: "github" | "git" }) {
+function SourceIcon({ kind }: { kind: "github" | "gitlab" | "git" }) {
   if (kind === "github") {
     return (
       <GitHubIcon className="ps-icon" size={14} />

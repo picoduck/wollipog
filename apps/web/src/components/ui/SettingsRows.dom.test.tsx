@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse } from "postcss";
 import { NavRow, SegmentedRow, SelectRow, SwitchRow } from "./SettingsRows.js";
-import { resetSelectPreviewRegistry } from "./ChoiceControls.js";
+import { SELECT_LIST_CHROME_PX, resetSelectPreviewRegistry } from "./ChoiceControls.js";
 import { AppearancePanel } from "../SettingsView.js";
 import { ThemeProvider, useTheme } from "../ThemeProvider.js";
 import {
@@ -253,7 +253,12 @@ test("the scheme list requests readable content dimensions while preserving trig
     assert.equal(list.querySelectorAll('[role="option"]').length, 5);
     assert.equal(list.style.left, "600px", "the open list keeps the trigger's start edge");
     assert.equal(list.style.width, "400px", "described schemes get a content-aware width");
-    assert.equal(list.style.maxHeight, "298px", "five two-line options fit without a 280px cap");
+    // Five rows budgeted at 58px each, plus the list's own box. Derived rather than spelled "298px":
+    // that literal silently encoded a chrome budget of 8px, which counted `.ui-select-list`'s 4px
+    // padding on each edge but not its 1px border — and `box-sizing: border-box` is global, so
+    // `max-height` has to cover the border too. The list was being asked for 2px less than it drew.
+    assert.equal(list.style.maxHeight, `${5 * 58 + SELECT_LIST_CHROME_PX}px`,
+      "five two-line options fit without a 280px cap");
   } finally {
     await cleanup();
     Object.defineProperty(domWindow, "innerWidth", { configurable: true, value: priorWidth });

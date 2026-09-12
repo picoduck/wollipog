@@ -14,6 +14,7 @@
 
 import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
+  type AgentCapabilities,
   type AgentQuestion,
   type AuthoritativeSubagentLifecycle,
   type PlanEntry,
@@ -22,7 +23,12 @@ import {
   type SessionConfig,
 } from "@wollipog/protocol";
 import { JsonRpcPeer } from "../jsonrpc.js";
-import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
+import {
+  killTree,
+  spawnAgent,
+  terminateDescendantBoundaries,
+  type AgentProcess,
+} from "../spawn.js";
 import type {
   Driver,
   DriverCallbacks,
@@ -31,12 +37,22 @@ import type {
   DriverSteerResult,
   StopReason,
 } from "./driver.js";
+import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from "./poisoned-provider-history.js";
+import { providerRejectionShape } from "./provider-rejection-shape.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
+import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
 type ToolStatus = "in_progress" | "completed" | "failed";
+type FlatUsage = {
+  input?: number;
+  output?: number;
+  cached?: number;
+  cacheCreation?: number;
+  reasoning?: number;
+};
 
 const CODEX_SUBAGENT_LIFECYCLES: Record<string, AuthoritativeSubagentLifecycle> = {
   pendingInit: "starting",
@@ -82,6 +98,24 @@ const SANDBOX_TYPE: Record<string, string> = {
 };
 /** Interactive "ask" modes map straight to the AskForApproval string. */
 const ASK_MODES = new Set(["on-request", "untrusted", "on-failure"]);
+
+function configuredServiceTier(
+  config: SessionConfig,
+  capabilities?: AgentCapabilities,
+): { serviceTier?: string } {
+  if (!config.serviceTier) return {};
+  const exactModel = config.model && config.model !== "default"
+    ? capabilities?.models.find((candidate) => candidate.id === config.model)
+    : undefined;
+  const model = config.model && config.model !== "default"
+    ? exactModel
+    : capabilities?.models.find((candidate) => candidate.default && !candidate.hidden)
+      ?? capabilities?.models.find((candidate) => !candidate.hidden);
+  if (!model?.serviceTiers?.length) return {};
+  return config.serviceTier === "default" || model.serviceTiers.some((tier) => tier.id === config.serviceTier)
+    ? { serviceTier: config.serviceTier }
+    : {};
+}
 
 function normalizedCodexItemId(value: unknown): string | undefined {
   if (typeof value === "string" && value) return value;
@@ -173,8 +207,18 @@ export function buildCodexTurnParams(
   threadId: string | null,
   cwd: string,
   input: Json[],
+  capabilities?: AgentCapabilities,
 ): Json {
   const mode = cfg.permissionMode || AUTO_REVIEW_MODE;
+  if (mode === "orchestrator") {
+    return { threadId, input, approvalPolicy: "never", sandboxPolicy: {
+      type: "workspaceWrite", writableRoots: [cwd], networkAccess: true,
+      excludeTmpdirEnvVar: true, excludeSlashTmp: true,
+    }, cwd,
+      ...(cfg.model && cfg.model !== "default" ? { model: cfg.model } : {}),
+      ...(cfg.effort ? { effort: cfg.effort } : {}),
+      ...configuredServiceTier(cfg, capabilities) };
+  }
   const autoReview = mode === AUTO_REVIEW_MODE;
   const askMode = ASK_MODES.has(mode)
     ? mode
@@ -192,6 +236,7 @@ export function buildCodexTurnParams(
   if (autoReview) params.approvalsReviewer = "auto_review";
   if (cfg.model && cfg.model !== "default") params.model = cfg.model;
   if (cfg.effort) params.effort = cfg.effort;
+  Object.assign(params, configuredServiceTier(cfg, capabilities));
   return params;
 }
 
@@ -209,6 +254,54 @@ export class CodexAppServerResumeError extends Error {
     readonly rpcCode?: number,
   ) {
     super(message);
+  }
+}
+
+class WslProviderAttemptTeardownError extends Error {}
+
+/** A rejected Direct WSL app-server attempt shares one pinned relay directory and HOME lease with
+ * its fallback. Do not let that fallback start until both outer processes and the in-distro reap
+ * have completed; a timeout refuses the retry instead of racing target-local authority. */
+export async function waitForWslProviderAttemptTeardown(
+  child: AgentProcess,
+  kill: (child: AgentProcess) => void = killTree,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const relay = child.wslAgentControl?.relay;
+  // A ChildProcess has no pid when spawn failed asynchronously. No provider exists to reap in
+  // that case, and Node does not guarantee a later close event after the terminal error.
+  let providerClosed = child.closeObserved === true || child.pid === undefined;
+  let relayClosed = !relay || relay.exitCode !== null || relay.signalCode !== null;
+  child.wslAgentControl?.dispose();
+  const closed = new Promise<void>((resolve, reject) => {
+    if (providerClosed && relayClosed) {
+      resolve();
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      child.off("close", onProviderClose);
+      relay?.off("close", onRelayClose);
+    };
+    const finish = () => {
+      if (!providerClosed || !relayClosed) return;
+      cleanup();
+      resolve();
+    };
+    const onProviderClose = () => { providerClosed = true; finish(); };
+    const onRelayClose = () => { relayClosed = true; finish(); };
+    if (!providerClosed) child.once("close", onProviderClose);
+    if (!relayClosed) relay!.once("close", onRelayClose);
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new WslProviderAttemptTeardownError("Direct WSL provider teardown timed out"));
+    }, timeoutMs);
+  });
+  if (!providerClosed) kill(child);
+  await closed;
+  if (await child.wslReapCompletion === false) {
+    throw new WslProviderAttemptTeardownError("Direct WSL provider process-group reap was not proven");
   }
 }
 
@@ -233,9 +326,10 @@ export class CodexAppServerDriver implements Driver {
   private cancelled = false;
   private turnResolve: ((r: StopReason) => void) | null = null;
   private turnStop: StopReason = "end_turn";
-  /** Latest usage for the current turn. Emitted once when that turn settles so cumulative
-   * thread usage restored during resume is never appended to the runner totals again. */
-  private pendingTurnUsage: { input?: number; output?: number; cached?: number } | null = null;
+  /** Complete usage for the current turn. Cumulative thread totals make repeated notifications
+   * idempotent; `last` is accumulated only as a compatibility fallback for older App Servers. */
+  private pendingTurnUsage: FlatUsage | null = null;
+  private turnUsageBaseline: FlatUsage | null = null;
   /** Once a turn settles, ignore late usage/completion notifications from its interrupt race. */
   private turnUsageClosed = false;
   private readonly seenItems = new Set<string>();
@@ -259,12 +353,22 @@ export class CodexAppServerDriver implements Driver {
    * thread is admitted to this session only after a structured spawn item binds it to the exact
    * spawning collaboration tool. */
   private readonly subagentToolByThread = new Map<string, string>();
+  private readonly attentionOwners = new Map<string, string>();
   private readonly subagentParentByTool = new Map<string, string | undefined>();
   private readonly subagentLifecycleByThread = new Map<string, AuthoritativeSubagentLifecycle>();
-  /** Latest per-child turn usage. Like root usage, it is emitted once when that child turn settles,
-   * not once per cumulative update notification. */
-  private readonly pendingSubagentUsage = new Map<string, ReturnType<typeof flattenUsage>>();
+  /** Per-child turn usage, emitted once when that child turn settles. */
+  private readonly pendingSubagentUsage = new Map<string, FlatUsage>();
+  /** Last authoritative cumulative total observed for each admitted provider thread. Retaining it
+   * across turns and reconnect replay prevents an old notification from reopening billable usage. */
+  private readonly threadUsageTotals = new Map<string, FlatUsage>();
+  private readonly subagentUsageBaselines = new Map<string, FlatUsage>();
+  private readonly completedSubagentTurnIds = new Map<string, string>();
+  /** Old App Servers expose no cumulative total. Their fallback is necessarily best-effort, but
+   * exact replay duplicates must still not be added twice. */
+  private readonly lastOnlyUsageFingerprints = new Map<string, Set<string>>();
   private promptGeneration = 0;
+  private serverIdentity = "unknown";
+  private completedTurnId: string | null = null;
   private promptBusy = false;
   /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
    * retry does not surface a false session error. */
@@ -301,7 +405,12 @@ export class CodexAppServerDriver implements Driver {
 
   async forkSession(lastTurnId: string, cwd: string): Promise<string> {
     if (!this.peer || !this.threadId) throw new Error("Codex app-server thread is not ready to fork");
-    const res = await this.peer.request<Json>("thread/fork", { threadId: this.threadId, lastTurnId, cwd });
+    const res = await this.peer.request<Json>("thread/fork", {
+      threadId: this.threadId,
+      lastTurnId,
+      cwd,
+      ...configuredServiceTier(this.config, this.opts.capabilities),
+    });
     const id = res?.thread?.id;
     if (typeof id !== "string" || !id) throw new Error("Codex fork did not return a thread id");
     return id;
@@ -314,6 +423,11 @@ export class CodexAppServerDriver implements Driver {
 
   setConfig(config: SessionConfig): void {
     this.config = config;
+  }
+
+  private reconcileServiceTier(serviceTier: string | null): void {
+    this.config = { ...this.config, serviceTier: serviceTier ?? undefined };
+    this.cb.onServiceTierResolved?.(serviceTier);
   }
 
   private emitProviderStderr(text: string): void {
@@ -332,9 +446,12 @@ export class CodexAppServerDriver implements Driver {
     return exit;
   }
   private async startAppServer(enableDefaultModeQuestions: boolean): Promise<void> {
+    const isolationArgs = this.config.permissionMode === "orchestrator"
+      ? await codexOrchestratorMcpArgs(this.opts, this.cwd) : [];
+    if (this.disposed) throw new Error("session disposed before provider launch");
     const child = this.spawn({
       command: this.opts.command,
-      args: codexAppServerArgs(this.opts.args, enableDefaultModeQuestions),
+      args: codexAppServerArgs([...this.opts.args, ...isolationArgs], enableDefaultModeQuestions),
       cwd: this.cwd,
       env: this.opts.env,
       context: this.opts.context,
@@ -359,13 +476,12 @@ export class CodexAppServerDriver implements Driver {
         else this.emitProviderStderr(s);
       }
     });
-    // JSON-RPC stdout may still contain a response or final notification when
-    // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
-    child.on("close", (code) => {
-      peer.dispose("codex app-server exited");
-      // A rejected feature probe can be replaced before its delayed close event arrives.
+    const finishChild = (code: number | null, reason: string, spawnError?: Error) => {
+      peer.dispose(reason);
+      // A rejected feature probe can be replaced before its delayed error/close event arrives.
       // Only the current launch may tear down session state or report an exit.
       if (this.peer !== peer && this.child !== child) return;
+      if (spawnError) this.emitProviderStderr(`spawn error: ${spawnError.message}`);
       // The persistent server is gone: drop our handles so a later prompt() fails fast
       // instead of parking a turn/start request that never settles.
       if (this.peer === peer) this.peer = null;
@@ -379,10 +495,29 @@ export class CodexAppServerDriver implements Driver {
         if (this.initializing) this.initializationExit = { code };
         else this.cb.onExit(code);
       }
+    };
+    // POSIX spawn failures are asynchronous `error` events and may never emit `close`. Without an
+    // explicit listener, one missing executable or cwd becomes a process-fatal uncaughtException.
+    child.on("error", (error: Error) => {
+      finishChild(null, `codex app-server spawn error: ${error.message}`, error);
+    });
+    // JSON-RPC stdout may still contain a response or final notification when
+    // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
+    child.on("close", (code) => {
+      finishChild(code, "codex app-server exited");
     });
 
     this.registerHandlers(peer);
-    await peer.request("initialize", { clientInfo: { name: "wollipog", version: "0.4.0" } });
+    let initialized: Json;
+    try {
+      initialized = await peer.request<Json>("initialize", { clientInfo: { name: "wollipog", version: "0.4.0" } });
+    } catch (error) {
+      if (this.opts.isolation?.backend === "wsl-bwrap") {
+        await waitForWslProviderAttemptTeardown(child, this.kill);
+      }
+      throw error;
+    }
+    this.serverIdentity = diagnosticValue(initialized?.userAgent);
     peer.notify("initialized", {});
   }
 
@@ -395,7 +530,8 @@ export class CodexAppServerDriver implements Driver {
         await this.startAppServer(true);
       } catch (error) {
         const startupDiagnostics = this.initializationStderr.join("\n");
-        if (this.disposed || !defaultModeQuestionFeatureUnsupported(startupDiagnostics)) {
+        if (error instanceof WslProviderAttemptTeardownError || this.disposed ||
+            !defaultModeQuestionFeatureUnsupported(startupDiagnostics)) {
           this.flushInitializationStderr();
           throw error;
         }
@@ -450,9 +586,15 @@ export class CodexAppServerDriver implements Driver {
             true,
           );
         }
-        res = await this.peer!.request<Json>("thread/resume", { threadId: resumeId });
+        res = await this.peer!.request<Json>("thread/resume", {
+          threadId: resumeId,
+          ...configuredServiceTier(this.config, this.opts.capabilities),
+        });
       } else {
-        res = await this.peer!.request<Json>("thread/start", { cwd });
+        res = await this.peer!.request<Json>("thread/start", {
+          cwd,
+          ...configuredServiceTier(this.config, this.opts.capabilities),
+        });
       }
     } catch (err) {
       if (err instanceof CodexAppServerResumeError) throw err;
@@ -472,7 +614,19 @@ export class CodexAppServerDriver implements Driver {
       );
     }
     this.threadId = actualId;
+    if (typeof res?.serviceTier === "string" && res.serviceTier) this.reconcileServiceTier(res.serviceTier);
+    else if (res?.serviceTier === null) this.reconcileServiceTier(null);
     return actualId;
+  }
+
+  activeSteeringTurnId(): string | null {
+    return this.promptBusy && this.turnResolve ? this.turnId : null;
+  }
+
+  private setSteeringTurn(id: string | null): void {
+    if (this.turnId === id) return;
+    this.turnId = id;
+    this.cb.onSteeringTurnChanged?.();
   }
 
   async prompt(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
@@ -505,21 +659,33 @@ export class CodexAppServerDriver implements Driver {
       this.seenItems.clear();
       this.emittedErrors.clear();
       this.streamedAgentResponse = false;
-      this.declinePendingRequests();
-      this.pendingTurnUsage = null;
-      this.turnUsageClosed = false;
+      this.declinePendingRequests("provider_resolved", true);
+      this.beginRootTurnUsage();
       this.turnResolve = resolve;
       this.turnStop = "end_turn";
       // The manager must never mistake the previous provider turn for this one if turn/start
       // fails or a skewed server omits turn/started.
-      this.turnId = null;
+      this.setSteeringTurn(null);
 
       const base = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
       const input: Json[] = base || !staged.inputs.length ? [{ type: "text", text: base }] : [];
       input.push(...staged.inputs);
-      const params = buildCodexTurnParams(this.config, this.threadId, this.cwd, input);
+      const params = buildCodexTurnParams(this.config, this.threadId, this.cwd, input, this.opts.capabilities);
 
-      this.peer!.request("turn/start", params).catch((e: Json) => {
+      this.peer!.request("turn/start", params).then((response: Json) => {
+        // Notifications may precede the response, including completion or a later turn.
+        if (generation !== this.promptGeneration || !this.turnResolve || !this.promptBusy) return;
+        const id = response?.turn?.id;
+        if (!this.turnId && typeof id === "string" && id && id !== this.completedTurnId &&
+            (response?.turn?.status == null || response.turn.status === "inProgress")) {
+          this.lastTurnId = id;
+          this.setSteeringTurn(id);
+        }
+        if (!this.turnId) {
+          this.cb.onStderr(`Codex steering unavailable: turn/start did not confirm an active turn (running server: ${this.serverIdentity}; installed CLI version may differ).`);
+        }
+      }).catch((e: Json) => {
+        if (generation !== this.promptGeneration || !this.turnResolve) return;
         this.emitDriverError(`turn/start failed: ${e?.message ?? String(e)}`);
         this.settleTurn("refusal");
       });
@@ -616,6 +782,7 @@ export class CodexAppServerDriver implements Driver {
     const pending = this.pendingApprovals.get(requestId);
     if (!pending) return false;
     this.pendingApprovals.delete(requestId);
+    this.attentionOwners.delete(requestId);
     pending.resolve(pending.method === MCP_ELICITATION_METHOD
       ? mcpElicitationResponse(optionId === "accept" ? "accept" : optionId === "decline" ? "decline" : "cancel")
       : approvalResponse(pending.method, pending.params, optionId));
@@ -626,6 +793,7 @@ export class CodexAppServerDriver implements Driver {
     const pending = this.pendingQuestions.get(requestId);
     if (!pending) return false;
     this.pendingQuestions.delete(requestId);
+    this.attentionOwners.delete(requestId);
     pending.resolve(pending.response(answers, action ?? (Object.keys(answers).length > 0 ? "submit" : "dismiss")));
     return true;
   }
@@ -662,21 +830,26 @@ export class CodexAppServerDriver implements Driver {
     terminateDescendantBoundaries(this.descendantOwner);
   }
 
-  private declinePendingRequests(resolutionReason?: "replaced"): void {
+  private declinePendingRequests(resolutionReason?: "replaced" | "provider_resolved", preserveChildren = false): void {
     for (const [requestId, p] of this.pendingApprovals) {
+      if (preserveChildren && this.attentionOwners.has(requestId)) continue;
       p.resolve(p.method === MCP_ELICITATION_METHOD ? mcpElicitationResponse("cancel") : approvalResponse(p.method, p.params, null));
+      this.pendingApprovals.delete(requestId);
+      this.attentionOwners.delete(requestId);
       if (resolutionReason) {
         this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason });
       }
     }
-    this.pendingApprovals.clear();
     for (const [requestId, p] of this.pendingQuestions) {
+      if (preserveChildren && this.attentionOwners.has(requestId)) continue;
       p.resolve(p.response({}, "dismiss"));
+      this.pendingQuestions.delete(requestId);
+      this.attentionOwners.delete(requestId);
       if (resolutionReason) {
         this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason });
       }
     }
-    this.pendingQuestions.clear();
+    if (!preserveChildren) this.attentionOwners.clear();
   }
 
   private settleTurn(r: StopReason): void {
@@ -686,7 +859,8 @@ export class CodexAppServerDriver implements Driver {
     // Close active-turn admission synchronously. In particular, an image stager already awaited by
     // steer() must observe the generation/turn/busy fence before cleanup performs its first await.
     this.lastTurnId = this.turnId ?? this.lastTurnId;
-    this.turnId = null;
+    this.completedTurnId = this.turnId ?? this.completedTurnId;
+    this.setSteeringTurn(null);
     this.promptBusy = false;
     this.promptGeneration++;
     void this.cleanupStagedImages().finally(() => {
@@ -736,6 +910,21 @@ export class CodexAppServerDriver implements Driver {
   private updateSubagentLifecycle(threadId: string, lifecycle: AuthoritativeSubagentLifecycle): void {
     const toolCallId = this.subagentToolByThread.get(threadId);
     if (!toolCallId) return;
+    if (["completed", "failed", "interrupted"].includes(lifecycle)) {
+      for (const [requestId, owner] of this.attentionOwners) {
+        if (owner !== toolCallId) continue;
+        const permission = this.pendingApprovals.get(requestId);
+        const question = this.pendingQuestions.get(requestId);
+        if (permission) {
+          this.resolvePermission(requestId, null);
+          this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason: "provider_resolved" });
+        }
+        if (question) {
+          this.answerQuestion(requestId, {}, "dismiss");
+          this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason: "provider_resolved" });
+        }
+      }
+    }
     if (this.subagentLifecycleByThread.get(threadId) === lifecycle) return;
     this.subagentLifecycleByThread.set(threadId, lifecycle);
     this.cb.onEvent({
@@ -754,11 +943,16 @@ export class CodexAppServerDriver implements Driver {
     const parentToolUseId = this.subagentToolByThread.get(threadId);
     if (!usage || !parentToolUseId) return;
     this.pendingSubagentUsage.delete(threadId);
+    this.subagentUsageBaselines.delete(threadId);
+    this.lastOnlyUsageFingerprints.delete(threadId);
     this.cb.onEvent({
       kind: "token_usage",
       inputTokens: usage.input,
       outputTokens: usage.output,
       cachedInputTokens: usage.cached,
+      ...(typeof usage.cacheCreation === "number" ? { cacheCreationInputTokens: usage.cacheCreation } : {}),
+      ...(typeof usage.reasoning === "number" ? { reasoningOutputTokens: usage.reasoning } : {}),
+      ...(this.eventModel()),
       parentToolUseId,
     });
   }
@@ -818,21 +1012,52 @@ export class CodexAppServerDriver implements Driver {
     this.updateSubagentStates(item?.agentsStates);
   }
 
+  private prepareAttention(params: Json, requestId: string): { ownerToolUseId?: string } | null {
+    // Reused RPC identities replace only that callback, never orphan its parked promise.
+    if (this.pendingApprovals.has(requestId)) {
+      this.resolvePermission(requestId, null);
+      this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason: "replaced" });
+    }
+    if (this.pendingQuestions.has(requestId)) {
+      this.answerQuestion(requestId, {}, "dismiss");
+      this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason: "replaced" });
+    }
+    const candidate = this.cb.supportsWorkerAttention?.() && typeof params?.threadId === "string"
+      ? this.subagentToolByThread.get(params.threadId) : undefined;
+    const owner = candidate && [...this.subagentToolByThread.values()].filter((value) => value === candidate).length === 1
+      ? candidate : undefined;
+    // Preserve provider-declared concurrent children. Unknown ownership remains on the parent;
+    // older peers retain their existing replacement semantics.
+    if (!this.cb.supportsWorkerAttention?.()) this.declinePendingRequests("replaced");
+    else if (!owner) this.declinePendingRequests("replaced", true);
+    if (owner && ["completed", "failed", "interrupted"].includes(this.subagentLifecycleByThread.get(params.threadId) ?? "")) return null;
+    if (this.pendingApprovals.size + this.pendingQuestions.size >= 128) {
+      this.cb.onStderr("Too many concurrent provider requests; the new request was cancelled.");
+      return null;
+    }
+    if (owner) this.attentionOwners.set(requestId, owner);
+    return owner ? { ownerToolUseId: owner } : {};
+  }
+
   private registerHandlers(peer: JsonRpcPeer): void {
     // Server -> client approval requests: park a promise until the UI answers. The
     // method is captured so the response is built in the shape that method expects
     // (command/file -> {decision}; permissions -> {permissions, scope}).
     const makeApprover = (method: string) => (params: Json, rpcRequestId: number | string) =>
       new Promise<Json>((resolve) => {
-        if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, null));
+        if (this.disposed || this.cancelled || this.config.permissionMode === "orchestrator") {
+          return resolve(approvalResponse(method, params, null));
+        }
         const id = String(rpcRequestId ?? params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
-        this.declinePendingRequests("replaced");
+        const ownership = this.prepareAttention(params, id);
+        if (!ownership) return resolve(approvalResponse(method, params, null));
         if (this.disposed || this.cancelled) {
           return resolve(approvalResponse(method, params, null));
         }
         this.pendingApprovals.set(id, { method, params, resolve });
         this.cb.onEvent({
           kind: "permission_request",
+          ...ownership,
           requestId: id,
           title: approvalTitle(params),
           options: method === PERMISSIONS_METHOD
@@ -864,12 +1089,13 @@ export class CodexAppServerDriver implements Driver {
           return resolve({ answers: {} });
         }
         const id = String(rpcRequestId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
-        this.declinePendingRequests("replaced");
+        const ownership = this.prepareAttention(params, id);
+        if (!ownership) return resolve(normalized.response({}, "dismiss"));
         if (this.disposed || this.cancelled) {
           return resolve(normalized.response({}, "dismiss"));
         }
         this.pendingQuestions.set(id, { resolve, response: normalized.response });
-        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, ...ownership });
       }));
 
     peer.onRequest(MCP_ELICITATION_METHOD, (params: Json, rpcRequestId: number | string) =>
@@ -884,11 +1110,13 @@ export class CodexAppServerDriver implements Driver {
             this.cb.onStderr("Codex MCP URL elicitation was malformed — cancelling it");
             return resolve(mcpElicitationResponse("cancel"));
           }
-          this.declinePendingRequests("replaced");
+          const ownership = this.prepareAttention(params, id);
+          if (!ownership) return resolve(mcpElicitationResponse("cancel"));
           if (this.disposed || this.cancelled) return resolve(mcpElicitationResponse("cancel"));
           this.pendingApprovals.set(id, { method: MCP_ELICITATION_METHOD, params, resolve });
           this.cb.onEvent({
             kind: "permission_request",
+            ...ownership,
             requestId: id,
             title: `${serverName} requests a browser flow`,
             options: [
@@ -905,16 +1133,18 @@ export class CodexAppServerDriver implements Driver {
           this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${diagnosticValue(params?.mode)} — cancelling it`);
           return resolve(mcpElicitationResponse("cancel"));
         }
-        this.declinePendingRequests("replaced");
+        const ownership = this.prepareAttention(params, id);
+        if (!ownership) return resolve(normalized.response({}, "dismiss"));
         if (this.disposed || this.cancelled) {
           return resolve(normalized.response({}, "dismiss"));
         }
         this.pendingQuestions.set(id, { resolve, response: normalized.response });
-        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, ...ownership });
       }));
 
     peer.onNotification("serverRequest/resolved", (params: Json) => {
       const id = String(params?.requestId ?? "");
+      this.attentionOwners.delete(id);
       const question = this.pendingQuestions.get(id);
       if (question) {
         this.pendingQuestions.delete(id);
@@ -986,28 +1216,127 @@ export class CodexAppServerDriver implements Driver {
       if (decision) this.cb.onEvent({ kind: "review_decision", ...decision });
     });
     peer.onNotification("turn/started", (p: Json) => {
-      if (p?.threadId && p.threadId !== this.threadId) return;
-      this.declinePendingRequests();
+      if (p?.threadId && p.threadId !== this.threadId) {
+        if (this.subagentToolByThread.has(p.threadId)) {
+          this.pendingSubagentUsage.delete(p.threadId);
+          const known = this.threadUsageTotals.get(p.threadId);
+          if (known) this.subagentUsageBaselines.set(p.threadId, known);
+          else this.subagentUsageBaselines.delete(p.threadId);
+          this.lastOnlyUsageFingerprints.delete(p.threadId);
+          this.completedSubagentTurnIds.delete(p.threadId);
+        }
+        return;
+      }
+      if (!this.promptBusy || !this.turnResolve || p?.turn?.id === this.completedTurnId) return;
+      this.declinePendingRequests("provider_resolved", true);
       const id = p?.turn?.id;
       if (typeof id === "string" && id) {
-        this.turnId = id;
         this.lastTurnId = id;
+        this.setSteeringTurn(id);
       }
-      this.pendingTurnUsage = null;
-      this.turnUsageClosed = false;
+      // prompt() already opened this accounting interval before turn/start. Do not reset it here:
+      // App Server notifications are allowed to arrive before the turn/start response.
+    });
+    peer.onNotification("thread/settings/updated", (p: Json) => {
+      if (p?.threadId !== this.threadId) return;
+      const serviceTier = p?.threadSettings?.serviceTier;
+      if (typeof serviceTier === "string" && serviceTier) this.reconcileServiceTier(serviceTier);
+      else if (serviceTier === null) this.reconcileServiceTier(null);
     });
     peer.onNotification("thread/tokenUsage/updated", (p: Json) => {
-      // Prefer the per-turn field. The total is cumulative across a resumed thread and adding it
-      // to SessionMeta would double-count restored history. Keep only the latest update and emit
-      // once at settlement because app-server may publish several updates during one turn.
-      const u = flattenUsage(p?.tokenUsage?.last ?? p?.tokenUsage?.lastTurn ?? p?.tokenUsage?.last_turn);
-      if (!u) return;
+      const lastIsPerResponse = p?.tokenUsage?.last != null;
+      const last = flattenUsage(p?.tokenUsage?.last ?? p?.tokenUsage?.lastTurn ?? p?.tokenUsage?.last_turn);
+      const total = flattenUsage(p?.tokenUsage?.total ?? p?.tokenUsage?.threadTotal ?? p?.tokenUsage?.thread_total);
+      if (!last && !total) return;
       const context = this.eventContext(p?.threadId);
       if (!context.accepted) return;
+      const usageThreadId = typeof p?.threadId === "string" && p.threadId
+        ? p.threadId
+        : this.threadId ?? "root";
+      const notificationTurnId = typeof p?.turnId === "string" && p.turnId ? p.turnId : null;
+      const replayedSettledTurn = context.parentToolUseId
+        ? notificationTurnId != null && this.completedSubagentTurnIds.get(usageThreadId) === notificationTurnId
+        : notificationTurnId != null && (
+          notificationTurnId === this.completedTurnId || (this.turnId != null && notificationTurnId !== this.turnId)
+        );
+      const previousTotal = this.threadUsageTotals.get(usageThreadId) ?? null;
+      const candidateTotal = total ? fillUsage(total, previousTotal) : null;
+      const usableTotal = candidateTotal && (!previousTotal || usageAtLeast(candidateTotal, previousTotal))
+        ? candidateTotal
+        : null;
+      if (usableTotal) this.threadUsageTotals.set(usageThreadId, usableTotal);
+      if (replayedSettledTurn) return;
+
       if (context.parentToolUseId) {
-        this.pendingSubagentUsage.set(String(p.threadId), u);
+        if (usableTotal) {
+          const baseline = this.subagentUsageBaselines.get(usageThreadId)
+            ?? previousTotal
+            ?? (last ? subtractUsage(usableTotal, last) : usableTotal);
+          this.subagentUsageBaselines.set(usageThreadId, baseline);
+          if (usageAtLeast(usableTotal, baseline)) {
+            let delta = preserveNonCumulativeUsage(
+              subtractUsage(usableTotal, baseline),
+              this.pendingSubagentUsage.get(usageThreadId) ?? null,
+              usableTotal,
+            );
+            const partial = last ? usageMissingFromTotal(last, usableTotal) : null;
+            if (partial && hasUsage(partial)) {
+              if (lastIsPerResponse && this.admitLastOnlyUsage(usageThreadId, last!)) {
+                delta = addUsage(delta, partial);
+              } else if (!lastIsPerResponse) {
+                delta = replaceNonCumulativeUsage(delta, last!, usableTotal);
+              }
+            }
+            if (hasUsage(delta)) this.pendingSubagentUsage.set(usageThreadId, delta);
+          }
+        } else if (!total && last) {
+          if (!lastIsPerResponse) this.pendingSubagentUsage.set(usageThreadId, last);
+          else if (this.admitLastOnlyUsage(usageThreadId, last)) {
+            this.pendingSubagentUsage.set(
+              usageThreadId,
+              addUsage(this.pendingSubagentUsage.get(usageThreadId) ?? null, last),
+            );
+          }
+        }
       } else if (!this.turnUsageClosed) {
-        this.pendingTurnUsage = u;
+        if (usableTotal) {
+          const baseline = this.turnUsageBaseline
+            ?? previousTotal
+            ?? (last ? subtractUsage(usableTotal, last) : usableTotal);
+          this.turnUsageBaseline = baseline;
+          if (usageAtLeast(usableTotal, baseline)) {
+            let delta = preserveNonCumulativeUsage(
+              subtractUsage(usableTotal, baseline),
+              this.pendingTurnUsage,
+              usableTotal,
+            );
+            const partial = last ? usageMissingFromTotal(last, usableTotal) : null;
+            if (partial && hasUsage(partial)) {
+              if (lastIsPerResponse && this.admitLastOnlyUsage(usageThreadId, last!)) {
+                delta = addUsage(delta, partial);
+              } else if (!lastIsPerResponse) {
+                delta = replaceNonCumulativeUsage(delta, last!, usableTotal);
+              }
+            }
+            if (hasUsage(delta)) this.pendingTurnUsage = delta;
+          }
+        } else if (!total && last) {
+          if (!lastIsPerResponse) this.pendingTurnUsage = last;
+          else if (this.admitLastOnlyUsage(usageThreadId, last)) {
+            this.pendingTurnUsage = addUsage(this.pendingTurnUsage, last);
+          }
+        }
+        // App-server reports the model's context window beside the usage. The last request's
+        // input (cache included) plus its output is what sits in the window now, which is the
+        // same figure the Codex CLI's own "context left" reads from.
+        const window = p?.tokenUsage?.modelContextWindow ?? p?.tokenUsage?.model_context_window;
+        if (last && typeof window === "number" && Number.isFinite(window) && window > 0 &&
+            (last.input != null || last.output != null)) {
+          this.cb.onAcpUsage?.({
+            contextTokensUsed: Math.max(0, (last.input ?? 0) + (last.output ?? 0)),
+            contextWindow: Math.floor(window),
+          });
+        }
       }
     });
     peer.onNotification("account/rateLimits/updated", (payload: Json) => {
@@ -1016,13 +1345,19 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("turn/completed", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) {
         if (this.subagentToolByThread.has(p.threadId)) {
+          const turnId = typeof p?.turn?.id === "string" && p.turn.id ? p.turn.id : null;
+          if (turnId && this.completedSubagentTurnIds.get(p.threadId) === turnId) return;
+          if (turnId) this.completedSubagentTurnIds.set(p.threadId, turnId);
           this.flushSubagentUsage(p.threadId);
           if (p?.turn?.status === "failed") this.updateSubagentLifecycle(p.threadId, "failed");
           if (p?.turn?.status === "interrupted") this.updateSubagentLifecycle(p.threadId, "interrupted");
         }
         return;
       }
-      this.declinePendingRequests();
+      if (p?.turn?.id && (p.turn.id === this.completedTurnId ||
+          (this.turnId && p.turn.id !== this.turnId))) return;
+      if (typeof p?.turn?.id === "string" && p.turn.id) this.completedTurnId = p.turn.id;
+      this.declinePendingRequests("provider_resolved", true);
       this.closeTurnUsage();
       const status = p?.turn?.status;
       if (status === "failed") {
@@ -1043,12 +1378,15 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("turn/failed", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) {
         if (this.subagentToolByThread.has(p.threadId)) {
+          const turnId = typeof p?.turn?.id === "string" && p.turn.id ? p.turn.id : null;
+          if (turnId && this.completedSubagentTurnIds.get(p.threadId) === turnId) return;
+          if (turnId) this.completedSubagentTurnIds.set(p.threadId, turnId);
           this.flushSubagentUsage(p.threadId);
           this.updateSubagentLifecycle(p.threadId, "failed");
         }
         return;
       }
-      this.declinePendingRequests();
+      this.declinePendingRequests("provider_resolved", true);
       this.streamedAgentResponse = false;
       this.emitDriverError(p?.error);
       this.closeTurnUsage();
@@ -1073,8 +1411,25 @@ export class CodexAppServerDriver implements Driver {
     }
     if (!message || this.emittedErrors.has(message)) return;
     this.emittedErrors.add(message);
-    if (isProviderAuthenticationFailure(message)) this.signalAuthenticationFailure();
-    else this.cb.onEvent({ kind: "error", message });
+    if (isProviderAuthenticationFailure(message)) {
+      this.signalAuthenticationFailure();
+      return;
+    }
+    const poisoned = classifyPoisonedProviderHistory(message);
+    if (poisoned) {
+      // The rejection belongs in the transcript as the user-visible evidence for the quarantine,
+      // but as a constructed description, never the provider's raw text: the same error could
+      // carry an argument excerpt or a thread id, and this event is durable and shareable.
+      this.cb.onEvent({ kind: "error", message: poisonedProviderHistoryMessage(poisoned) });
+      this.cb.onProviderHistoryUnrecoverable?.(poisoned);
+      return;
+    }
+    this.cb.onEvent({ kind: "error", message });
+    // Not a recognized poisoned-history rejection. If it still names an indexed item in the
+    // request, record its shape so a second classifier case can one day be evidenced rather than
+    // guessed at (#876). This is observation only; the error's handling is unchanged.
+    const shape = providerRejectionShape(message);
+    if (shape) this.cb.onUnclassifiedProviderRejection?.(shape);
   }
 
   private signalAuthenticationFailure(): void {
@@ -1085,13 +1440,44 @@ export class CodexAppServerDriver implements Driver {
   private emitPendingTurnUsage(): void {
     const u = this.pendingTurnUsage;
     this.pendingTurnUsage = null;
-    if (u) this.cb.onEvent({ kind: "token_usage", inputTokens: u.input, outputTokens: u.output, cachedInputTokens: u.cached });
+    if (u) {
+      this.cb.onEvent({
+        kind: "token_usage",
+        inputTokens: u.input,
+        outputTokens: u.output,
+        cachedInputTokens: u.cached,
+        ...(typeof u.cacheCreation === "number" ? { cacheCreationInputTokens: u.cacheCreation } : {}),
+        ...(typeof u.reasoning === "number" ? { reasoningOutputTokens: u.reasoning } : {}),
+        ...(this.eventModel()),
+      });
+    }
+  }
+
+  /** The configured model, as the attribution for a usage record; app-server reports none itself. */
+  private eventModel(): { model?: string } {
+    return this.config.model && this.config.model !== "default" ? { model: this.config.model } : {};
   }
 
   private closeTurnUsage(): void {
     if (this.turnUsageClosed) return;
     this.turnUsageClosed = true;
     this.emitPendingTurnUsage();
+  }
+
+  private beginRootTurnUsage(): void {
+    this.pendingTurnUsage = null;
+    this.turnUsageBaseline = this.threadId ? this.threadUsageTotals.get(this.threadId) ?? null : null;
+    this.lastOnlyUsageFingerprints.delete(this.threadId ?? "root");
+    this.turnUsageClosed = false;
+  }
+
+  private admitLastOnlyUsage(threadId: string, usage: FlatUsage): boolean {
+    const seen = this.lastOnlyUsageFingerprints.get(threadId) ?? new Set<string>();
+    this.lastOnlyUsageFingerprints.set(threadId, seen);
+    const fingerprint = usageFingerprint(usage);
+    if (seen.has(fingerprint)) return false;
+    seen.add(fingerprint);
+    return true;
   }
 
   /** Map an item.started/completed payload to our normalized events. */
@@ -1302,15 +1688,85 @@ export function approvalContext(method: string, params: Json, escalated: boolean
   };
 }
 
+const USAGE_FIELDS = ["input", "output", "cached", "cacheCreation", "reasoning"] as const;
+
+function usageValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+}
+
 /** Dig token counts out of the app-server's nested token-usage object. */
-function flattenUsage(tu: Json): { input?: number; output?: number; cached?: number } | null {
+function flattenUsage(tu: Json): FlatUsage | null {
   if (!tu) return null;
   const u = tu.total ?? tu.lastTurn ?? tu.tokenUsage ?? tu;
-  const input = u.input_tokens ?? u.inputTokens ?? u.input;
-  const output = u.output_tokens ?? u.outputTokens ?? u.output;
-  const cached = u.cached_input_tokens ?? u.cachedInputTokens ?? u.cached;
+  const input = usageValue(u.input_tokens ?? u.inputTokens ?? u.input);
+  const output = usageValue(u.output_tokens ?? u.outputTokens ?? u.output);
+  const cached = usageValue(u.cached_input_tokens ?? u.cachedInputTokens ?? u.cached);
+  const cacheCreation = usageValue(
+    u.cache_creation_input_tokens ?? u.cacheCreationInputTokens ?? u.cache_creation ?? u.cacheCreation,
+  );
+  const rawReasoning = usageValue(u.reasoning_output_tokens ?? u.reasoningOutputTokens ?? u.reasoning);
+  const reasoning = rawReasoning == null ? undefined : output == null ? rawReasoning : Math.min(output, rawReasoning);
   if (input == null && output == null) return null;
-  return { input, output, cached };
+  return { input, output, cached, cacheCreation, reasoning };
+}
+
+function addUsage(left: FlatUsage | null, right: FlatUsage): FlatUsage {
+  const result: FlatUsage = {};
+  for (const field of USAGE_FIELDS) {
+    if (left?.[field] != null || right[field] != null) result[field] = (left?.[field] ?? 0) + (right[field] ?? 0);
+  }
+  if (result.output != null && result.reasoning != null) result.reasoning = Math.min(result.output, result.reasoning);
+  return result;
+}
+
+function subtractUsage(total: FlatUsage, baseline: FlatUsage): FlatUsage {
+  const result: FlatUsage = {};
+  for (const field of USAGE_FIELDS) {
+    if (total[field] != null) {
+      result[field] = Math.max(0, (total[field] ?? 0) - (baseline[field] ?? 0));
+    }
+  }
+  if (result.output != null && result.reasoning != null) result.reasoning = Math.min(result.output, result.reasoning);
+  return result;
+}
+
+function usageAtLeast(total: FlatUsage, baseline: FlatUsage): boolean {
+  return USAGE_FIELDS.every((field) => total[field] == null || baseline[field] == null || total[field]! >= baseline[field]!);
+}
+
+function fillUsage(usage: FlatUsage, fallback: FlatUsage | null): FlatUsage {
+  if (!fallback) return usage;
+  const result = { ...usage };
+  for (const field of USAGE_FIELDS) if (result[field] == null && fallback[field] != null) result[field] = fallback[field];
+  return result;
+}
+
+function hasUsage(usage: FlatUsage): boolean {
+  return USAGE_FIELDS.some((field) => (usage[field] ?? 0) > 0);
+}
+
+function usageMissingFromTotal(last: FlatUsage, total: FlatUsage): FlatUsage {
+  const result: FlatUsage = {};
+  for (const field of USAGE_FIELDS) if (total[field] == null && last[field] != null) result[field] = last[field];
+  return result;
+}
+
+function preserveNonCumulativeUsage(delta: FlatUsage, pending: FlatUsage | null, total: FlatUsage): FlatUsage {
+  if (!pending) return delta;
+  const result = { ...delta };
+  for (const field of USAGE_FIELDS) if (total[field] == null && pending[field] != null) result[field] = pending[field];
+  return result;
+}
+
+function replaceNonCumulativeUsage(delta: FlatUsage, latest: FlatUsage, total: FlatUsage): FlatUsage {
+  const result = { ...delta };
+  for (const field of USAGE_FIELDS) if (total[field] == null && latest[field] != null) result[field] = latest[field];
+  if (result.output != null && result.reasoning != null) result.reasoning = Math.min(result.output, result.reasoning);
+  return result;
+}
+
+function usageFingerprint(usage: FlatUsage): string {
+  return USAGE_FIELDS.map((field) => usage[field] ?? "").join(":");
 }
 
 function truncate(s: string, n: number): string {

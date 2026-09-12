@@ -15,6 +15,8 @@ import {
   parseCodexConfigModel,
   parseCodexModels,
   queryClaudeModels,
+  claudeBaseModelId,
+  claudeContextWindow,
 } from "./models.js";
 import type { AgentProcess } from "../spawn.js";
 import type { AgentDefinition } from "@wollipog/protocol";
@@ -87,6 +89,11 @@ const LIVE_PAGE = {
         { reasoningEffort: "low", description: "Fast" },
         { reasoningEffort: "high", description: "Deep" },
       ],
+      serviceTiers: [
+        { id: "fast", name: "Fast", description: "Faster responses that use more credits." },
+        { id: "flex", name: "Flex", description: "Lower-priority processing." },
+      ],
+      defaultServiceTier: "fast",
       inputModalities: ["text", "image"],
     },
     {
@@ -121,10 +128,27 @@ test("parseCodexAppServerModels: preserves defaults, hidden state, efforts, and 
     hidden: false,
     efforts: ["low", "high"],
     defaultEffort: "medium",
+    serviceTiers: [
+      { id: "fast", name: "Fast", description: "Faster responses that use more credits." },
+      { id: "flex", name: "Flex", description: "Lower-priority processing." },
+    ],
+    defaultServiceTier: "fast",
     inputModalities: ["text", "image"],
   });
   assert.equal(models[1]!.hidden, true);
   assert.deepEqual(models[1]!.inputModalities, ["text"]);
+});
+
+test("parseCodexAppServerModels: uses legacy additionalSpeedTiers only when structured tiers are absent", () => {
+  const [legacy, current] = parseCodexAppServerModels({ data: [
+    { ...LIVE_PAGE.data[0], id: "legacy", serviceTiers: [], additionalSpeedTiers: ["fast", "batch_mode", "fast"] },
+    { ...LIVE_PAGE.data[0], id: "current", additionalSpeedTiers: ["legacy-fast"] },
+  ] });
+  assert.deepEqual(legacy?.serviceTiers, [
+    { id: "fast", name: "Fast" },
+    { id: "batch_mode", name: "Batch Mode" },
+  ]);
+  assert.deepEqual(current?.serviceTiers, LIVE_PAGE.data[0]!.serviceTiers);
 });
 
 test("collectCodexAppServerModels follows pagination, dedupes ids, and rejects cursor loops", async () => {
@@ -281,9 +305,15 @@ test("parseClaudeModels: live metadata drives versioned labels, effort, context,
   assert.deepEqual(models[0]!.efforts, ["low", "high", "max"]);
   assert.equal(models[0]!.contextWindow, 1_000_000);
   assert.equal(models[1]!.displayName, "Opus 5 (1M Context)");
+  assert.equal(models[1]!.contextWindow, 1_000_000);
+  assert.equal(models[1]!.baseModelId, "opus", "a [1m] launch option is a variant of its base alias");
   assert.equal(models[2]!.displayName, "Haiku 4.5");
-  assert.equal(models[2]!.contextWindow, 200_000);
-  assert.equal(models[3]!.contextWindow, 200_000);
+  // A family name is not evidence of a window (Sonnet 5 serves 1M); unknown stays unknown until the
+  // live session reports what the provider served.
+  assert.equal(models[2]!.contextWindow, undefined);
+  assert.equal(models[3]!.contextWindow, undefined);
+  assert.equal(Object.hasOwn(models[0]!, "baseModelId"), false, "the default alias is its own base");
+  assert.equal(Object.hasOwn(models[3]!, "baseModelId"), false);
   assert.equal(models.find((model) => model.id === "opus")?.hidden, true);
   assert.equal(models.find((model) => model.id === "fable")?.hidden, true);
   assert.deepEqual(parseClaudeModels({ models: "invalid" }), []);
@@ -553,4 +583,24 @@ test("claude discovery negatively caches three cold probe failures until explici
   assert.equal(queries, 3);
   await discover(agent, { refresh: true });
   assert.equal(queries, 4);
+});
+
+test("parseClaudeModels: a [1m] picker alias whose resolved model lacks it proves no window", () => {
+  const [fable] = parseClaudeModels({
+    models: [{
+      value: "claude-fable-5-1[1m]",
+      resolvedModel: "claude-fable-5-1",
+      displayName: "Fable",
+      description: "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+    }],
+  });
+  assert.equal(fable!.id, "claude-fable-5-1[1m]");
+  assert.equal(fable!.contextWindow, undefined, "never synthesize 1M from the alias name alone");
+  assert.equal(fable!.baseModelId, "claude-fable-5-1");
+  assert.equal(claudeContextWindow({ description: "Sonnet 4 with 200K context", resolvedModel: "claude-sonnet-4" }), 200_000);
+  assert.equal(claudeContextWindow({ description: "Opus", resolvedModel: "claude-opus-5[1m]" }), 1_000_000);
+  assert.equal(claudeContextWindow({ description: undefined, resolvedModel: "claude-opus-5" }), undefined);
+  assert.equal(claudeBaseModelId("opus[1m]"), "opus");
+  assert.equal(claudeBaseModelId("opus"), undefined);
+  assert.equal(claudeBaseModelId("[1m]"), undefined);
 });

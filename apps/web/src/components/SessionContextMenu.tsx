@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, type CSSProperties } from "react";
+import type { SessionReminderView } from "@wollipog/protocol";
+import { reminderMenuActionLabel } from "../session-reminders.js";
 import { createPortal } from "react-dom";
 import { anchoredMenuPlacement, consumeLongPressClick, handleMenuKeyDown, pointAnchorRect } from "./interactions.js";
 
@@ -12,7 +14,7 @@ export interface SessionContextMenuState {
 }
 
 const MENU_WIDTH = 220;
-const MENU_HEIGHT = 160;
+const MENU_HEIGHT = 240;
 
 /**
  * The row/card context menu (#154): one portalled `role="menu"` shared by the Sessions list and
@@ -28,18 +30,26 @@ const MENU_HEIGHT = 160;
 export function SessionContextMenu({
   state,
   sessionTitle,
+  pinned,
   snoozeAvailable,
+  reminder,
   onClose,
   onRename,
+  onTogglePin,
   onSnooze,
+  onDismissReminder,
   onArchive,
 }: {
   state: SessionContextMenuState;
   sessionTitle: string;
+  pinned: boolean;
   snoozeAvailable: boolean;
+  reminder?: SessionReminderView;
   onClose: () => void;
   onRename: (sessionId: string) => void;
+  onTogglePin: (sessionId: string) => void;
   onSnooze: (sessionId: string) => void;
+  onDismissReminder?: (sessionId: string) => void;
   onArchive: (sessionId: string) => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -107,9 +117,17 @@ export function SessionContextMenu({
         <button type="button" className="menu-item" role="menuitem" onClick={act(onRename, false)}>
           Rename Session…
         </button>
+        <button type="button" className="menu-item" role="menuitem" onClick={act(onTogglePin, true)}>
+          {pinned ? "Unpin Session" : "Pin Session"}
+        </button>
         {snoozeAvailable && (
           <button type="button" className="menu-item" role="menuitem" onClick={act(onSnooze, false)}>
-            Snooze…
+            {reminderMenuActionLabel(reminder)}
+          </button>
+        )}
+        {reminder?.state === "fired" && onDismissReminder && (
+          <button type="button" className="menu-item" role="menuitem" onClick={act(onDismissReminder, true)}>
+            Dismiss Reminder
           </button>
         )}
         <button type="button" className="menu-item menu-danger" role="menuitem" onClick={act(onArchive, true)}>

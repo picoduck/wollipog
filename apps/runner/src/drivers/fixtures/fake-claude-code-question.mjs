@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 
 const args = process.argv.slice(2);
 
@@ -31,6 +32,10 @@ if (args[0] === "auth" && args[1] === "status") {
 
 const receiptPath = process.env.WOLLIPOG_FAKE_CLAUDE_RECEIPT;
 if (!receiptPath) throw new Error("WOLLIPOG_FAKE_CLAUDE_RECEIPT is required");
+const recoveryStatePath = process.env.WOLLIPOG_FAKE_QUESTION_STATE;
+const recovering = Boolean(recoveryStatePath && existsSync(recoveryStatePath));
+const sessionFlagIndex = Math.max(args.indexOf("--session-id"), args.indexOf("--resume"));
+const providerSessionId = sessionFlagIndex >= 0 ? args[sessionFlagIndex + 1] : "fixture-claude-question";
 
 const requestId = "live-question-1";
 const questions = [
@@ -60,9 +65,76 @@ let buffer = "";
 let asked = false;
 let answered = false;
 
+function userText(message) {
+  const content = message?.message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => typeof part === "string" ? part : part?.text ?? "").join("\n");
+}
+
+function recoveredPayload(message) {
+  const text = userText(message);
+  const line = text.trim().split("\n").at(-1);
+  return line ? JSON.parse(line) : null;
+}
+
 async function handleMessage(message) {
   if (message?.type === "user" && !asked) {
     asked = true;
+    send({ type: "system", subtype: "init", session_id: providerSessionId });
+    if (recovering) {
+      const payload = recoveredPayload(message);
+      const expected = {
+        requestId,
+        responses: [
+          {
+            id: "Which rollout strategy should we use?",
+            question: "Which rollout strategy should we use?",
+            answer: "Canary",
+          },
+          {
+            id: "Which checks should run before promotion?",
+            question: "Which checks should run before promotion?",
+            answer: ["Unit Tests", "Browser Tests"],
+          },
+        ],
+      };
+      if (JSON.stringify(payload) !== JSON.stringify(expected)) {
+        throw new Error(`unexpected recovered structured response: ${JSON.stringify(payload)}`);
+      }
+      const state = JSON.parse(await readFile(recoveryStatePath, "utf8"));
+      const recoveredState = {
+        initialQuestions: state.initialQuestions,
+        recoveryTurns: state.recoveryTurns + 1,
+      };
+      await writeFile(recoveryStatePath, `${JSON.stringify(recoveredState)}\n`, "utf8");
+      await writeFile(receiptPath, `${JSON.stringify({
+        requestId,
+        recovered: true,
+        answers: Object.fromEntries(payload.responses.map((response) => [response.id, response.answer])),
+        ...recoveredState,
+      })}\n`, "utf8");
+      send({ type: "stream_event", event: { type: "message_start", message: { id: "live-recovery-message" } } });
+      send({
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Recovered question answers received by Claude Code." },
+        },
+      });
+      send({ type: "stream_event", event: { type: "message_stop" } });
+      send({
+        type: "result",
+        subtype: "success",
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0 },
+        total_cost_usd: 0,
+      });
+      return;
+    }
+    if (recoveryStatePath) {
+      await writeFile(recoveryStatePath, `${JSON.stringify({ initialQuestions: 1, recoveryTurns: 0 })}\n`, "utf8");
+    }
     send({
       type: "control_request",
       request_id: requestId,

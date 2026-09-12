@@ -23,6 +23,7 @@ import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess 
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import type { Driver, DriverCallbacks, DriverOptions, StopReason } from "./driver.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
+import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -30,6 +31,7 @@ type Json = any;
 interface CodexDriverDeps {
   spawn: typeof spawnAgent;
   kill: typeof killTree;
+  orchestratorMcpArgs: typeof codexOrchestratorMcpArgs;
 }
 
 const SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
@@ -117,6 +119,7 @@ export class CodexDriver implements Driver {
     this.deps = {
       spawn: deps.spawn ?? spawnAgent,
       kill: deps.kill ?? killTree,
+      orchestratorMcpArgs: deps.orchestratorMcpArgs ?? codexOrchestratorMcpArgs,
     };
     // Phase 2 resume: a persisted threadId makes the first turn use `codex resume <id>`.
     if (opts.resumeId) this.threadId = opts.resumeId;
@@ -143,17 +146,29 @@ export class CodexDriver implements Driver {
     this.config = config;
   }
 
-  prompt(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
+  async prompt(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
+    // Reset the prior turn before the asynchronous probe; a new cancellation during
+    // the probe still wins at the post-await check and must not launch a process.
+    this.cancelled = false;
+    let isolationArgs: string[] = [];
+    if (this.config.permissionMode === "orchestrator") {
+      try { isolationArgs = await this.deps.orchestratorMcpArgs(this.opts, this.cwd); }
+      catch (err) {
+        this.cb.onEvent({ kind: "error", message: (err as Error).message });
+        return "refusal";
+      }
+      if (this.disposed || this.cancelled) return "cancelled";
+    }
     return new Promise<StopReason>((resolve) => {
-      this.cancelled = false;
       this.seenItems.clear(); // dedup is per-turn; each turn re-emits item.started ids
       const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
 
       const cfg = this.config;
-      const sandbox = cfg.permissionMode && SANDBOX_MODES.has(cfg.permissionMode) ? cfg.permissionMode : "workspace-write";
+      const sandbox = cfg.permissionMode === "orchestrator" ? "workspace-write"
+        : cfg.permissionMode && SANDBOX_MODES.has(cfg.permissionMode) ? cfg.permissionMode : "workspace-write";
 
       // model/effort apply to both first turn and resume.
       const modelEffort: string[] = [];
@@ -167,9 +182,12 @@ export class CodexDriver implements Driver {
 
       // The prompt is passed as "-" and written to stdin so a multi-line prompt (or
       // one containing %VAR%, quotes, etc.) can't be mangled by the Windows shell.
-      const args = [...this.opts.args, "exec"];
+      const args = [...this.opts.args, ...isolationArgs, "exec"];
       if (this.threadId) {
-        // `resume` inherits cwd + sandbox from the original session (no -C/-s).
+        // Current Codex rebuilds resume policy from the invocation config and process cwd. Pin
+        // Orchestrator explicitly as well so an upgraded thread can never recover its former
+        // project cwd if provider resume semantics drift back to inheriting persisted state.
+        if (cfg.permissionMode === "orchestrator") args.push("-C", this.cwd, "-s", sandbox);
         args.push("resume", "--json", "--skip-git-repo-check", ...modelEffort, ...imageArgs, this.threadId, "-");
       } else {
         args.push("--json", "--skip-git-repo-check", "-C", this.cwd, "-s", sandbox, ...modelEffort, ...imageArgs, "-");
@@ -313,6 +331,8 @@ export class CodexDriver implements Driver {
           inputTokens: u.input_tokens,
           outputTokens: u.output_tokens,
           cachedInputTokens: u.cached_input_tokens,
+          ...(typeof u.reasoning_output_tokens === "number" ? { reasoningOutputTokens: u.reasoning_output_tokens } : {}),
+          ...(this.config.model && this.config.model !== "default" ? { model: this.config.model } : {}),
         });
         return "end_turn";
       }

@@ -71,8 +71,10 @@ report `The address is not a Wollipog control plane.` and must be upgraded befor
 
 Desktop bundles remain unsigned, so operating systems may show an unidentified-developer warning
 on first launch. The release workflow builds all six supported native targets. Its final
-verification fails unless the draft holds exactly 27 assets:
-14 desktop bundles, 12 runner names, and
-`SHA256SUMS`, with canonical and compatibility runner names verified byte-identical and GitHub
+verification fails unless the draft holds exactly 34 assets:
+14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the
+`wollipog-web.tar.gz` dashboard bundle, and
+`SHA256SUMS`, with canonical and compatibility runner names verified byte-identical, each headless
+control plane verified byte-identical to its desktop sidecar, and GitHub
 publisher digests matching the manifest. Publishing the verified draft remains a
 manual operator step.

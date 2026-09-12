@@ -401,9 +401,9 @@ export function BehaviorPanel({
             description: "Choose options directly with keyboard-accessible form controls. Stored on this device.",
           },
           {
-            value: "text",
-            label: "Text Entry",
-            description: "Enter displayed numbers or option labels in one response field per question. Stored on this device.",
+            value: "composer",
+            label: "Composer Response",
+            description: "Answer pending questions through a distinct mode in the Session composer. Stored on this device.",
           },
         ]}
         value={questionResponseStyle}
@@ -1485,7 +1485,6 @@ export function SessionNamingPanel() {
 export function ExperimentalPanel({
   flags,
   onToggle,
-  conductorAvailable,
 }: {
   flags: ExperimentFlags;
   onToggle: (id: ExperimentId, enabled: boolean) => void;
@@ -1505,20 +1504,6 @@ export function ExperimentalPanel({
         description="Shared-context groups of sessions. Off hides Pods from navigation and search on this device."
         checked={flags.pods}
         onClick={() => onToggle("pods", !flags.pods)}
-      />
-      {/* The switch stays operable even with no runner able to supply a conductor: it is the
-          feature's only gate now, and the preference must be settable before the runner that
-          can host one connects. The pending reason says what is missing and that it self-heals. */}
-      <SwitchRow
-        title="Conductor-Led Work"
-        description={conductorAvailable
-          ? "The Conductor preset when creating a session. This switch is the feature's only gate on this device."
-          : <>The Conductor preset when creating a session.{" "}
-            <small className="settings-pending-reason">
-              No online runner can host a conductor yet; the preset appears once a runner with a native Claude Code installation connects.
-            </small></>}
-        checked={flags.conductor}
-        onClick={() => onToggle("conductor", !flags.conductor)}
       />
     </SettingsGroup>
   );

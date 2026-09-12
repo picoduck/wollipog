@@ -49,6 +49,7 @@ test("descriptor projection derives nested identity, activity, direct usage, and
   const items: TimelineItem[] = [
     { kind: "tool_call", id: 1, toolCallId: "outer", title: "Agent: Audit Storage", text: "", toolKind: "agent", status: "in_progress", startedAt: 100, lastActivityAt: 110, subagentRollup: { inputTokens: 10, outputTokens: 2 } },
     { kind: "agent_thought", id: 2, text: "looking", parentToolUseId: "outer", createdAt: 120, lastActivityAt: 130 },
+    { kind: "tool_call", id: 6, toolCallId: "read", title: "Read Schema", text: "", toolKind: "read", status: "completed", parentToolUseId: "outer", startedAt: 125, completedAt: 135 },
     { kind: "tool_call", id: 3, toolCallId: "inner", title: "Agent: Inspect Parser", text: "", toolKind: "agent", status: "completed", parentToolUseId: "outer", startedAt: 140, completedAt: 160, subagentRollup: { inputTokens: 4, outputTokens: 1 } },
     { kind: "agent_message", id: 4, text: "found it", parentToolUseId: "inner", createdAt: 150, completedAt: 170 },
     { kind: "agent_message", id: 5, text: "top level", createdAt: 180 },
@@ -62,6 +63,46 @@ test("descriptor projection derives nested identity, activity, direct usage, and
   assert.equal(subagentTokenTotal(descriptors[0]!.directUsage), 12);
   assert.equal(subagentTokenTotal(descriptors[0]!.inclusiveUsage), 17);
   assert.equal(descriptors[1]!.lastActivityAt, 170);
+  assert.equal(descriptors[0]!.toolCount, 2, "direct tools include the nested agent launch without flattening its own work");
+  assert.deepEqual(descriptors[0]!.latestTool, { title: "Agent: Inspect Parser", active: false });
+  assert.equal(descriptors[1]!.toolCount, undefined, "no tool count is fabricated without direct tool evidence");
+});
+
+test("direct tool summaries stay incremental and retain untimed source ordering", () => {
+  const projector = new IncrementalSubagentProjector();
+  const initial: TimelineItem[] = [
+    { kind: "tool_call", id: 1, toolCallId: "agent", title: "Agent", text: "", toolKind: "agent", status: "in_progress", startedAt: 100 },
+    { kind: "tool_call", id: 2, toolCallId: "older", title: "Timed Tool", text: "", toolKind: "read", status: "completed", parentToolUseId: "agent", completedAt: 200 },
+  ];
+  const first = projector.project(initial, context);
+  assert.deepEqual(first.descriptors[0]!.latestTool, { title: "Timed Tool", active: false });
+  const appended = [...initial,
+    { kind: "tool_call", id: 3, toolCallId: "newer", title: "Untimed Tool", text: "", toolKind: "write", status: "in_progress", parentToolUseId: "agent" } as TimelineItem,
+  ];
+  publishTimelineSnapshotDelta(appended, {
+    previous: initial,
+    dirtyFrom: 2,
+    dirtyIndexes: [2],
+    dirtyHasParentItems: true,
+  });
+  const second = projector.project(appended, context);
+  assert.equal(second.incremental, true);
+  assert.equal(second.processedItems, 1);
+  assert.equal(second.descriptors[0]!.toolCount, 2);
+  assert.deepEqual(second.descriptors[0]!.latestTool, { title: "Untimed Tool", active: true });
+
+  const removed = [...initial];
+  publishTimelineSnapshotDelta(removed, {
+    previous: appended,
+    dirtyFrom: 2,
+    dirtyIndexes: [2],
+    dirtyHasParentItems: true,
+  });
+  const third = projector.project(removed, context);
+  assert.equal(third.incremental, true);
+  assert.equal(third.processedItems, 1);
+  assert.equal(third.descriptors[0]!.toolCount, 1);
+  assert.deepEqual(third.descriptors[0]!.latestTool, { title: "Timed Tool", active: false });
 });
 
 test("replayed App Server events retain selectable durable subagent output", () => {

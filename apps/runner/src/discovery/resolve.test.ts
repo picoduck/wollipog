@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { launchForVersionManagerHit, run, sortVersionsDesc, wslInspectArgs, wslVersionManagerArgs } from "./resolve.js";
+import { launchForVersionManagerHit, pickWindowsExecutable, run, sortVersionsDesc, wslInspectArgs, wslVersionManagerArgs } from "./resolve.js";
 import { interpretCodexAppServerProbe } from "./codex-app-server.js";
 
 test("run preserves a string execFile error code for retryable spawn diagnostics", async () => {
@@ -25,6 +25,12 @@ test("sortVersionsDesc: numeric semver order, not lexicographic", () => {
   assert.deepEqual(sortVersionsDesc(["20.11.1", "20.9.0"]), ["20.11.1", "20.9.0"]); // no leading v
   assert.deepEqual(sortVersionsDesc(["v1.0.0", "junk", "v2.0.0"]), ["v2.0.0", "v1.0.0", "junk"]); // non-semver sinks
   assert.deepEqual(sortVersionsDesc([]), []);
+});
+
+test("Windows resolution prefers executable shims over adjacent POSIX scripts", () => {
+  assert.equal(pickWindowsExecutable("C:\\npm\\claude\r\nC:\\npm\\claude.cmd\r\n"), "C:\\npm\\claude.cmd");
+  assert.equal(pickWindowsExecutable("C:\\tools\\codex.exe\r\nC:\\tools\\codex.cmd"), "C:\\tools\\codex.exe");
+  assert.equal(pickWindowsExecutable(""), null);
 });
 
 test("launchForVersionManagerHit: node scripts wrap, real binaries run direct", () => {

@@ -1,7 +1,9 @@
+import type { AgentDriverKind, ReviewRiskLevel } from "@wollipog/protocol";
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
-import {
+import { isWorkspaceReference, normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
+import { type TurnUsage,
   groupTimeline,
+  isCollapsibleWorkItem,
   SubagentTreeProjector,
   timelineBoundaryKey,
   timelineItemIsStreaming,
@@ -19,12 +21,14 @@ import {
   type VirtualScrollAnchor,
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
-import { EditIcon, ThreadForkIcon } from "./Icons.js";
-import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
+import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
+import { EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
+import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { PromptImageView } from "./PromptImageView.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
+import { StructuredQuestionText, structuredQuestionSummary } from "./StructuredQuestionText.js";
 import type { ConversationForkAvailability } from "../session-actions.js";
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
@@ -46,7 +50,12 @@ export interface TimelineRevealTarget {
 
 export interface TimelineQuestionContext {
   sessionId: string;
-  pendingQuestion: { requestId: string; questions: AgentQuestion[] } | null;
+  pendingQuestion: {
+    requestId: string;
+    questions: AgentQuestion[];
+    recoveryReason?: "provider_restart";
+    recoveryAction?: "resume_answer";
+  } | null;
   /** True only after the matching pinned row is mounted and measurement-ready. */
   questionInTimeline: boolean;
   onPendingQuestionAvailabilityChange?: (requestId: string, available: boolean) => void;
@@ -78,8 +87,39 @@ export function assistantForkTurns(items: readonly TimelineItem[]): ReadonlyMap<
   }
   return turns;
 }
+
+/** Attach each file checkpoint to the canonical user message that starts its turn. Checkpoints are
+ * explicit semantic boundaries, so this never guesses from row position or lets a later prompt
+ * borrow an incomplete turn's checkpoint. */
+export function userRewindTurns(items: readonly TimelineItem[]): ReadonlyMap<number, number> {
+  const turns = new Map<number, number>();
+  let pendingUserMessageId: number | undefined;
+  for (const item of items) {
+    if (item.kind === "user_message" && item.deliveryIntent !== "steer") {
+      pendingUserMessageId = item.id;
+    } else if (item.kind === "checkpoint") {
+      if (pendingUserMessageId != null) turns.set(pendingUserMessageId, item.turn);
+      pendingUserMessageId = undefined;
+    } else if (item.kind !== "user_message") {
+      // The runner emits a normal checkpoint directly after its canonical prompt. Any intervening
+      // durable event means that snapshot was lost or this is an automatic recovery turn without
+      // a user message; neither may borrow the earlier prompt's action.
+      pendingUserMessageId = undefined;
+    }
+  }
+  return turns;
+}
 export type TimelineRenderRow =
-  | { kind: "work_summary"; key: string; tools: number; edits: number; thoughts: number; open: boolean }
+  | {
+      kind: "work_summary";
+      key: string;
+      tools: number;
+      edits: number;
+      thoughts: number;
+      autoApproved: number;
+      highestReviewRisk?: ReviewRiskLevel;
+      open: boolean;
+    }
   | { kind: "subagent_summary"; key: string; tool: ToolItem; depth: number; open: boolean }
   | { kind: "item"; key: string; item: TimelineItem; inWork: boolean; depth: number };
 
@@ -109,9 +149,12 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
  * keystrokes, status flips) skips the whole timeline subtree, not just the row bodies.
  * `onRewind` (when provided — session detail only) must be identity-stable (useCallback)
  * or it defeats the row memoization. */
+const HandoffContext = createContext<{ open: (turn: number) => void; reason?: string } | undefined>(undefined);
 export const EventTimeline = memo(function EventTimeline({
+  handoff,
   items,
   onRewind,
+  rewindUnavailableReason,
   onFork,
   onEditAndResend,
   onEditInFork,
@@ -126,14 +169,17 @@ export const EventTimeline = memo(function EventTimeline({
   onVisibleAnchorChange,
   onAnchorLost,
   sessionActive = false,
+  driver,
   ariaLabel = "Session Activity",
   onOpenSubagent,
   revealRequest,
   onRevealHandled,
   questionContext,
 }: {
+  handoff?: { open: (turn: number) => void; reason?: string };
   items: TimelineItem[];
   onRewind?: (turn: number) => void;
+  rewindUnavailableReason?: string;
   onFork?: (turn: number) => void;
   /** Composer preparation only; callers must never submit the prompt from this callback. */
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
@@ -152,6 +198,8 @@ export const EventTimeline = memo(function EventTimeline({
   onAnchorLost?: (anchor: VirtualScrollAnchor) => void;
   /** True only while this session has a nonterminal turn that can still produce activity. */
   sessionActive?: boolean;
+  /** The session's driver, for driver-aware token arithmetic on the turn rows. */
+  driver?: AgentDriverKind;
   /** Accessible name when the timeline is reused outside the parent transcript. */
   ariaLabel?: string;
   /** Open an agent task in the dedicated panel without changing its disclosure state. */
@@ -165,10 +213,12 @@ export const EventTimeline = memo(function EventTimeline({
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
+    <HandoffContext.Provider value={handoff}>
     <EventTimelineBody
       key={effectiveHistoryKey}
       items={items}
       onRewind={onRewind}
+      rewindUnavailableReason={rewindUnavailableReason}
       onFork={onFork}
       onEditAndResend={onEditAndResend}
       onEditInFork={onEditInFork}
@@ -182,18 +232,21 @@ export const EventTimeline = memo(function EventTimeline({
       onVisibleAnchorChange={onVisibleAnchorChange}
       onAnchorLost={onAnchorLost}
       sessionActive={sessionActive}
+      driver={driver}
       ariaLabel={ariaLabel}
       onOpenSubagent={onOpenSubagent}
       revealRequest={scopedRevealRequest}
       onRevealHandled={onRevealHandled}
       questionContext={questionContext}
     />
+    </HandoffContext.Provider>
   );
 });
 
 function EventTimelineBody({
   items,
   onRewind,
+  rewindUnavailableReason,
   onFork,
   onEditAndResend,
   onEditInFork,
@@ -207,6 +260,7 @@ function EventTimelineBody({
   onVisibleAnchorChange,
   onAnchorLost,
   sessionActive,
+  driver,
   ariaLabel,
   onOpenSubagent,
   revealRequest,
@@ -215,6 +269,7 @@ function EventTimelineBody({
 }: {
   items: TimelineItem[];
   onRewind?: (turn: number) => void;
+  rewindUnavailableReason?: string;
   onFork?: (turn: number) => void;
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
@@ -228,6 +283,7 @@ function EventTimelineBody({
   onVisibleAnchorChange?: (anchor: VirtualScrollAnchor) => void;
   onAnchorLost?: (anchor: VirtualScrollAnchor) => void;
   sessionActive: boolean;
+  driver?: AgentDriverKind;
   ariaLabel: string;
   onOpenSubagent?: (toolCallId: string) => void;
   revealRequest?: TimelineRevealRequest | null;
@@ -242,6 +298,7 @@ function EventTimelineBody({
   const projection = useMemo(() => projector.current!.project(items, disclosure), [items, disclosure]);
   const { rows } = projection;
   const forkTurns = useMemo(() => assistantForkTurns(items), [items]);
+  const rewindTurns = useMemo(() => userRewindTurns(items), [items]);
   const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
   let pinnedQuestionRow: TimelineRenderRow | undefined;
   if (pendingQuestionRequestId !== null) {
@@ -320,6 +377,8 @@ function EventTimelineBody({
           tools={row.tools}
           edits={row.edits}
           thoughts={row.thoughts}
+          autoApproved={row.autoApproved}
+          highestReviewRisk={row.highestReviewRisk}
           open={row.open}
           onToggle={() => toggle(row.key, row.open)}
         />
@@ -338,6 +397,7 @@ function EventTimelineBody({
     const detailsKey = `row-details:${row.key}`;
     const detailsOpen = disclosure.get(detailsKey) ?? false;
     const assistantForkTurn = item.kind === "agent_message" ? forkTurns.get(item.id) : undefined;
+    const userRewindTurn = item.kind === "user_message" ? rewindTurns.get(item.id) : undefined;
     return (
       <div
         className={row.depth > 0 ? "tl-nested-row" : row.inWork ? "tl-work-row" : undefined}
@@ -350,6 +410,8 @@ function EventTimelineBody({
           disclosureOpen={detailsOpen}
           onDisclosureToggle={() => toggle(detailsKey, detailsOpen)}
           onRewind={onRewind}
+          rewindTurn={userRewindTurn}
+          rewindUnavailableReason={rewindUnavailableReason}
           onEditAndResend={onEditAndResend}
           onEditInFork={onEditInFork}
           onOpenSourceLocation={onOpenSourceLocation}
@@ -397,7 +459,7 @@ function EventTimelineBody({
     </div>
   );
   return (
-    <TimelineClockProvider enabled={sessionActive} sessionActive={sessionActive}>
+    <TimelineClockProvider enabled={sessionActive} sessionActive={sessionActive} driver={driver}>
       {timeline}
     </TimelineClockProvider>
   );
@@ -411,15 +473,22 @@ export function timelineMediaSettled(item: TimelineItem, sessionActive: boolean)
   return !sessionActive || !timelineItemIsStreaming(item);
 }
 
-function TimelineClockProvider({ enabled, sessionActive, children }: {
+/** The session's driver, for driver-aware token arithmetic on the turn rows; provided once by the
+ * timeline so the memoised rows need no extra prop. */
+const TimelineDriverContext = createContext<AgentDriverKind | undefined>(undefined);
+
+function TimelineClockProvider({ enabled, sessionActive, driver, children }: {
   enabled: boolean;
   sessionActive: boolean;
+  driver?: AgentDriverKind;
   children: ReactNode;
 }) {
   const now = useTimelineClock(enabled);
   return (
     <TimelineActivityContext.Provider value={sessionActive}>
-      <TimelineClockContext.Provider value={now}>{children}</TimelineClockContext.Provider>
+      <TimelineDriverContext.Provider value={driver}>
+        <TimelineClockContext.Provider value={now}>{children}</TimelineClockContext.Provider>
+      </TimelineDriverContext.Provider>
     </TimelineActivityContext.Provider>
   );
 }
@@ -433,9 +502,15 @@ export interface TimelineRowsProjection {
   keyDirtyFrom: number;
 }
 
-const isWorkItem = (item: TimelineItem): boolean =>
-  item.kind === "agent_thought" || item.kind === "tool_call" || item.kind === "command_output" ||
-  item.kind === "stderr" || item.kind === "file_edit" || item.kind === "plan";
+const reviewRiskRank: Record<ReviewRiskLevel, number> = { low: 1, medium: 2, high: 3 };
+
+function higherReviewRisk(
+  current: ReviewRiskLevel | undefined,
+  candidate: ReviewRiskLevel | undefined,
+): ReviewRiskLevel | undefined {
+  if (!candidate || (current && reviewRiskRank[current] >= reviewRiskRank[candidate])) return current;
+  return candidate;
+}
 
 const rendersSubagentSummary = (item: TimelineItem): boolean =>
   item.kind === "tool_call" && (item.toolKind === "agent" || Boolean(item.children?.length));
@@ -554,7 +629,7 @@ export class IncrementalTimelineRows {
       const appended = tailDelta.dirtyFrom >= previousLength;
       const previousLastGroup = this.groups.at(-1)!;
       const firstNew = items[previousLength];
-      const joinsLastWork = appended && previousLastGroup.kind === "work" && firstNew != null && isWorkItem(firstNew);
+      const joinsLastWork = appended && previousLastGroup.kind === "work" && firstNew != null && isCollapsibleWorkItem(firstNew);
       const appendedItems = appended ? items.slice(previousLength) : [];
       const appendedToolIds = this.collectToolIds(appendedItems);
       const localToolIds = new Set<string>();
@@ -566,7 +641,7 @@ export class IncrementalTimelineRows {
       // A newly materialized root tool may claim an older orphan child. That changes earlier
       // topology, so only the full projector may handle it.
       const canAppendWithoutTopologyChange = !appendedToolIds.some((id) => this.unresolvedParentIds.has(id));
-      if (joinsLastWork && appendedItems.every(isWorkItem) && !hasToolCollision && canAppendWithoutTopologyChange) {
+      if (joinsLastWork && appendedItems.every(isCollapsibleWorkItem) && !hasToolCollision && canAppendWithoutTopologyChange) {
         const oldRowLength = this.rows.length;
         previousLastGroup.items.push(...appendedItems);
         const summaryIndex = this.rowIndexes.get(`work:${previousLastGroup.id}`);
@@ -575,16 +650,24 @@ export class IncrementalTimelineRows {
           let tools = 0;
           let edits = 0;
           let thoughts = 0;
+          let autoApproved = 0;
+          let highestReviewRisk = summary.highestReviewRisk;
           for (const item of appendedItems) {
             if (item.kind === "tool_call") tools += 1;
             else if (item.kind === "file_edit") edits += 1;
             else if (item.kind === "agent_thought") thoughts += 1;
+            else if (item.kind === "review_decision" && item.outcome === "allowed") {
+              autoApproved += 1;
+              highestReviewRisk = higherReviewRisk(highestReviewRisk, item.riskLevel);
+            }
           }
           this.rows[summaryIndex!] = {
             ...summary,
             tools: summary.tools + tools,
             edits: summary.edits + edits,
             thoughts: summary.thoughts + thoughts,
+            autoApproved: summary.autoApproved + autoApproved,
+            highestReviewRisk,
           };
           if (summary.open) {
             for (const id of appendedToolIds) this.toolIdCounts.set(id, 1);
@@ -1334,12 +1417,18 @@ export function flattenTimelineRows(
     let tools = 0;
     let edits = 0;
     let thoughts = 0;
+    let autoApproved = 0;
+    let highestReviewRisk: ReviewRiskLevel | undefined;
     for (const item of group.items) {
       if (item.kind === "tool_call") tools += 1;
       else if (item.kind === "file_edit") edits += 1;
       else if (item.kind === "agent_thought") thoughts += 1;
+      else if (item.kind === "review_decision" && item.outcome === "allowed") {
+        autoApproved += 1;
+        highestReviewRisk = higherReviewRisk(highestReviewRisk, item.riskLevel);
+      }
     }
-    rows.push({ kind: "work_summary", key, tools, edits, thoughts, open });
+    rows.push({ kind: "work_summary", key, tools, edits, thoughts, autoApproved, highestReviewRisk, open });
     if (open) rows.push(...flattenTimelineItemRows(group.items, disclosure, true, 0, toolIds));
   }
   return rows;
@@ -1377,19 +1466,27 @@ function WorkSummary({
   tools,
   edits,
   thoughts,
+  autoApproved,
+  highestReviewRisk,
   open,
   onToggle,
 }: {
   tools: number;
   edits: number;
   thoughts: number;
+  autoApproved: number;
+  highestReviewRisk?: ReviewRiskLevel;
   open: boolean;
   onToggle: () => void;
 }) {
   const parts: string[] = [];
-  if (tools) parts.push(`${tools} command${tools === 1 ? "" : "s"}`);
-  if (edits) parts.push(`${edits} edit${edits === 1 ? "" : "s"}`);
-  if (!tools && !edits && thoughts) parts.push(`${thoughts} reasoning step${thoughts === 1 ? "" : "s"}`);
+  if (tools) parts.push(`${tools} Command${tools === 1 ? "" : "s"}`);
+  if (edits) parts.push(`${edits} Edit${edits === 1 ? "" : "s"}`);
+  if (!tools && !edits && thoughts) parts.push(`${thoughts} Reasoning Step${thoughts === 1 ? "" : "s"}`);
+  if (autoApproved) {
+    const risk = highestReviewRisk ? ` · ${titleCaseLabel(highestReviewRisk)} Risk` : "";
+    parts.push(`${autoApproved} Tool Call${autoApproved === 1 ? "" : "s"} Auto-Approved${risk}`);
+  }
   const summary = parts.length ? `Worked · ${parts.join(", ")}` : "Worked";
   return (
     <div className={`tl-work${open ? " open" : ""}`}>
@@ -1481,6 +1578,8 @@ const TimelineRow = memo(function TimelineRow({
   item,
   inWork = false,
   onRewind,
+  rewindTurn,
+  rewindUnavailableReason,
   onFork,
   onEditAndResend,
   onEditInFork,
@@ -1496,6 +1595,8 @@ const TimelineRow = memo(function TimelineRow({
   item: TimelineItem;
   inWork?: boolean;
   onRewind?: (turn: number) => void;
+  rewindTurn?: number;
+  rewindUnavailableReason?: string;
   onFork?: (turn: number) => void;
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
@@ -1511,18 +1612,13 @@ const TimelineRow = memo(function TimelineRow({
   const timingDescriptionId = useId();
   const sessionActive = useContext(TimelineActivityContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
+  const handoff = useContext(HandoffContext);
   switch (item.kind) {
     case "checkpoint":
-      // Thin turn divider; the Rewind affordance shows on hover (session detail only).
       return (
         <div className="tl-checkpoint" title={`Files snapshot taken at the start of turn ${item.turn}`}>
           <span className="checkpoint-line" />
           <span className="checkpoint-label">Turn {item.turn}</span>
-          {onRewind && (
-            <button className="btn ghost sm checkpoint-rewind" onClick={() => onRewind(item.turn)}>
-              ⤺ Rewind Files to Here
-            </button>
-          )}
           <span className="checkpoint-line" />
         </div>
       );
@@ -1546,7 +1642,7 @@ const TimelineRow = memo(function TimelineRow({
       return (
         <div className="tl-checkpoint restored">
           <span className="checkpoint-line" />
-          <span className="checkpoint-label">forked from turn {item.turn}</span>
+          <span className="checkpoint-label">{item.handoff ? `Handoff from ${item.handoff.sourceAgent} to ${item.handoff.destinationAgent} after turn ${item.turn}: fresh provider conversation. ${item.handoff.disclosure}` : `forked from turn ${item.turn}`}</span>
           <span className="checkpoint-line" />
         </div>
       );
@@ -1560,8 +1656,11 @@ const TimelineRow = memo(function TimelineRow({
               )}
               {item.images && item.images.length > 0 && (
                 <div className="bubble-images">
-                  {item.images.map((img, i) => (
+                  {item.images.filter((attachment) => !isWorkspaceReference(attachment)).map((img, i) => (
                     <PromptImageView key={"artifactId" in img ? img.artifactId : i} image={img} alt={`attachment ${i + 1}`} />
+                  ))}
+                  {item.images.filter(isWorkspaceReference).map((reference) => (
+                    <span className="workspace-reference-chip is-readonly" key={reference.artifactId}>@{reference.path}</span>
                   ))}
                 </div>
               )}
@@ -1571,8 +1670,11 @@ const TimelineRow = memo(function TimelineRow({
               createdAt={item.createdAt}
               durationMs={item.durationMs}
               durationSource={item.durationSource}
+              turnUsage={item.turnUsage}
               copyText={item.text}
               copyLabel="Copy user message"
+              onRewind={onRewind && rewindTurn != null ? () => onRewind(rewindTurn) : undefined}
+              rewindUnavailableReason={rewindUnavailableReason}
               onEditAndResend={onEditAndResend ? () => onEditAndResend(item) : undefined}
               onEditInFork={onEditInFork && editInForkTurn != null ? () => onEditInFork(item, editInForkTurn) : undefined}
             />
@@ -1593,6 +1695,8 @@ const TimelineRow = memo(function TimelineRow({
             copyLabel="Copy assistant message"
             onFork={onFork && forkTurn != null ? () => onFork(forkTurn) : undefined}
             forkAvailability={forkAvailability}
+            onHandoff={handoff && forkTurn != null ? () => handoff.open(forkTurn) : undefined}
+            handoffUnavailableReason={handoff?.reason}
           />
         </div>
       );
@@ -1760,6 +1864,8 @@ const TimelineRow = memo(function TimelineRow({
             <span className="perm-resolved">
               {titleCaseLabel(item.outcome.replace("_", " "))}{item.riskLevel ? ` (${titleCaseLabel(item.riskLevel)} Risk)` : ""}
             </span>
+            <span>{titleCaseLabel(item.reviewer.kind)}{item.reviewer.id ? ` · ${item.reviewer.id}` : ""}</span>
+            <ActivityTimestampMeta startedAt={item.createdAt} pointWhenEqual />
           </div>
           {item.rationale && <div className="bubble-text">{item.rationale}</div>}
         </div>
@@ -1800,35 +1906,74 @@ const TimelineRow = memo(function TimelineRow({
           )}
         </div>
       );
+    case "governance_decision": {
+      const decision = item.decision;
+      return (
+        <div className={`tl-governance ${decision.tone}`} data-audit-id={decision.auditId}>
+          <details
+            className="governance-decision"
+            open={disclosureOpen}
+            onToggle={(event) => {
+              if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
+            }}
+          >
+            <summary className="tl-governance-head">
+              <span className="governance-icon" aria-hidden="true">⚖️</span>
+              <span className="sr-only">Governance Decision: </span>
+              <span className="governance-label">{decision.label}</span>
+              <ActivityTimestampMeta startedAt={decision.timestamp} pointWhenEqual />
+            </summary>
+            <GovernanceDecisionFacts decision={decision} />
+          </details>
+        </div>
+      );
+    }
     case "question": {
+      const firstQuestion = item.questions[0];
+      const summary = firstQuestion ? structuredQuestionSummary(firstQuestion.question) : "Question";
       const historicalQuestion = (
         <div className="tl-perm tl-question">
-          <div className="tl-perm-head">
-            <span className="perm-icon">❓</span>
-            <span>
-              {item.questions.length === 1
-                ? item.questions[0]!.question
-                : `The agent asked ${item.questions.length} questions`}
-            </span>
-            {item.answered !== undefined ? (
-              <span className="perm-resolved">
-                {item.resolutionReason === "replaced"
-                  ? "→ Replaced"
-                  : item.resolutionReason === "provider_resolved"
-                    ? "→ Resolved by Provider"
-                    : item.answered ? "→ Answered" : "→ Dismissed"}
+          <details
+            className="question-history"
+            open={disclosureOpen}
+            onToggle={(event) => {
+              if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
+            }}
+          >
+            <summary className="tl-perm-head">
+              <span className="perm-icon" aria-hidden="true">❓</span>
+              <span className="question-history-summary">
+                {summary}{item.questions.length > 1 ? ` (+${item.questions.length - 1} more)` : ""}
               </span>
-            ) : (
-              <span className="perm-pending">awaiting answer…</span>
-            )}
-          </div>
-          {item.questions.length > 1 && (
-            <ul className="question-recap">
-              {item.questions.map((q) => (
-                <li key={q.id}>{q.question}</li>
+              {item.answered !== undefined ? (
+                <span className="perm-resolved">
+                  {item.answeredByPolicies?.length ? `→ Answered by Policy: ${item.answeredByPolicies.join(", ")}` : item.resolutionReason === "replaced"
+                    ? "→ Replaced"
+                    : item.resolutionReason === "provider_resolved"
+                      ? "→ Resolved by Provider"
+                      : item.answered ? "→ Answered" : "→ Dismissed"}
+                </span>
+              ) : (
+                <span className="perm-pending">awaiting answer…</span>
+              )}
+            </summary>
+            <div className="question-history-body">
+              {item.questions.map((question, index) => (
+                <section className="question-history-item" key={question.id}>
+                  <div className="question-history-label">
+                    {item.questions.length > 1 && <strong>Question {index + 1}</strong>}
+                    {question.header && <span className="question-chip">{question.header}</span>}
+                  </div>
+                  <StructuredQuestionText>{question.question}</StructuredQuestionText>
+                  {question.context && (
+                    <div className="question-history-context">
+                      <StructuredQuestionText>{question.context}</StructuredQuestionText>
+                    </div>
+                  )}
+                </section>
               ))}
-            </ul>
-          )}
+            </div>
+          </details>
         </div>
       );
       return questionContext ? (
@@ -1943,34 +2088,68 @@ function ActivityTimestampMeta({
   );
 }
 
+/** "12.4K tok · $0.03": the turn's processed tokens and, when priced, its cost. Tokens are input
+ * across every cache bucket plus output; the tooltip lists the buckets so the compact figure never
+ * hides where they went. */
+function turnUsageLabel(usage: TurnUsage, driver: AgentDriverKind | undefined): { text: string; title: string } {
+  // Codex reports input inclusive of its cache reads; Anthropic reports the uncached part.
+  const inclusiveInput = driver === "codex" || driver === "codex-app-server";
+  const processed = usage.inputTokens + (inclusiveInput ? 0 : usage.cachedInputTokens) + usage.cacheCreationTokens + usage.outputTokens;
+  const cost = usage.costUsd != null ? formatCost(usage.costUsd) : "";
+  const parts = [`${formatTokens(processed)} tok`];
+  if (cost) parts.push(cost);
+  const detail = [
+    `${formatTokens(usage.inputTokens)} input`,
+    usage.cachedInputTokens ? `${formatTokens(usage.cachedInputTokens)} cached` : "",
+    usage.cacheCreationTokens ? `${formatTokens(usage.cacheCreationTokens)} cache write` : "",
+    `${formatTokens(usage.outputTokens)} output`,
+    usage.model ? `model ${usage.model}` : "",
+    cost ? `cost ${cost}` : "unpriced",
+  ].filter(Boolean).join(" · ");
+  return { text: parts.join(" · "), title: `Turn usage: ${detail}` };
+}
+
 function MessageMeta({
   createdAt,
   lastActivityAt,
   completedAt,
   durationMs,
   durationSource,
+  turnUsage,
   copyText,
   copyLabel,
   onEditAndResend,
   onEditInFork,
   onFork,
   forkAvailability,
+  onRewind,
+  rewindUnavailableReason,
+  onHandoff,
+  handoffUnavailableReason,
 }: {
   createdAt?: number;
   lastActivityAt?: number;
   completedAt?: number;
   durationMs?: number;
   durationSource?: "provider" | "observed";
+  turnUsage?: TurnUsage;
   copyText: string;
   copyLabel: string;
   onEditAndResend?: () => void;
   onEditInFork?: () => void;
   onFork?: () => void;
   forkAvailability?: ConversationForkAvailability;
+  onRewind?: () => void;
+  rewindUnavailableReason?: string;
+  onHandoff?: () => void;
+  handoffUnavailableReason?: string;
 }) {
   const duration = durationMs != null ? formatDuration(durationMs) : "";
+  const driver = useContext(TimelineDriverContext);
+  const usage = turnUsage ? turnUsageLabel(turnUsage, driver) : null;
   const timestamp = Number.isFinite(createdAt);
-  if (!timestamp && !duration && !copyText && !onEditAndResend && !onEditInFork && !forkAvailability) return null;
+  if (!timestamp && !duration && !usage && !copyText && !onEditAndResend && !onEditInFork &&
+      !forkAvailability && !onRewind && !onHandoff) return null;
   return (
     <div className="tl-message-meta">
       {timestamp && (
@@ -1990,42 +2169,108 @@ function MessageMeta({
           {durationSource === "observed" ? "~" : ""}{duration}
         </span>
       )}
-      {copyText && <CopyButton text={copyText} iconOnly ariaLabel={copyLabel} className="tl-message-icon" />}
-      {forkAvailability && (
-        <button
-          type="button"
-          className="tl-message-icon"
-          disabled={!forkAvailability.available}
-          onClick={forkAvailability.available ? onFork : undefined}
-          title={forkAvailability.available ? "Fork Conversation Here" : forkAvailability.reason}
-          aria-label="Fork Conversation Here"
-        >
-          <ThreadForkIcon size={14} />
-        </button>
+      {usage && (
+        <span className="tl-turn-usage" title={usage.title} aria-label={usage.title}>
+          {usage.text}
+        </span>
       )}
-      {onEditAndResend && (
-        <button
-          type="button"
-          className="tl-message-icon"
-          onClick={onEditAndResend}
-          title="Edit & Resend"
-          aria-label="Edit User Message as a New Turn"
-        >
-          <EditIcon size={14} />
-        </button>
-      )}
-      {onEditInFork && (
-        <button
-          type="button"
-          className="tl-message-icon"
-          onClick={onEditInFork}
-          title="Edit in Fork"
-          aria-label="Edit User Message in a New Conversation Fork"
-        >
-          <ThreadForkIcon size={14} />
-        </button>
+      {(copyText || forkAvailability || onRewind || onHandoff || onEditAndResend || onEditInFork) && (
+        <div className="tl-message-actions" role="group" aria-label="Message Actions">
+          {copyText && <CopyButton text={copyText} iconOnly ariaLabel={copyLabel} className="tl-message-icon" />}
+          {onRewind && (
+            <MessageAction
+              label="Rewind Files to Before This Turn"
+              description="Restore files from before this turn without changing conversation history."
+              reason={rewindUnavailableReason}
+              onClick={onRewind}
+            >
+              <FolderUpIcon size={14} />
+            </MessageAction>
+          )}
+          {forkAvailability && (
+            <MessageAction
+              label="Fork Conversation After This Turn"
+              description="Fork with the same provider and its native conversation history."
+              reason={forkAvailability.available ? undefined : forkAvailability.reason}
+              onClick={forkAvailability.available ? onFork : undefined}
+            >
+              <ThreadForkIcon size={14} />
+            </MessageAction>
+          )}
+          {onHandoff && (
+            <MessageAction
+              label="Hand Off After This Turn"
+              description="Hand off to a different provider in a fresh conversation with portable context."
+              reason={handoffUnavailableReason}
+              onClick={onHandoff}
+            >
+              <ShareIcon size={14} />
+            </MessageAction>
+          )}
+          {onEditAndResend && (
+            <button
+              type="button"
+              className="tl-message-icon"
+              onClick={onEditAndResend}
+              title="Edit & Resend"
+              aria-label="Edit User Message as a New Turn"
+            >
+              <EditIcon size={14} />
+            </button>
+          )}
+          {onEditInFork && (
+            <button
+              type="button"
+              className="tl-message-icon"
+              onClick={onEditInFork}
+              title="Edit in Fork"
+              aria-label="Edit User Message in a New Conversation Fork"
+            >
+              <ThreadForkIcon size={14} />
+            </button>
+          )}
+        </div>
       )}
     </div>
+  );
+}
+
+function MessageAction({ label, description, reason, onClick, children }: {
+  label: string;
+  description: string;
+  reason?: string;
+  onClick?: () => void;
+  children: ReactNode;
+}) {
+  const descriptionId = useId();
+  if (reason || !onClick) {
+    const unavailableReason = reason ?? "This action is unavailable.";
+    return (
+      <details className="tl-message-action-unavailable">
+        <summary
+          className="tl-message-icon"
+          aria-label={`${label} Unavailable`}
+          aria-describedby={descriptionId}
+          title={`${description} ${unavailableReason}`}
+        >
+          {children}
+        </summary>
+        <span id={descriptionId} role="status"><strong>{label}:</strong> {description} {unavailableReason}</span>
+      </details>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="tl-message-icon"
+      onClick={onClick}
+      title={description}
+      aria-label={label}
+      aria-describedby={descriptionId}
+    >
+      {children}
+      <span id={descriptionId} className="sr-only">{description}</span>
+    </button>
   );
 }
 

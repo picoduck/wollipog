@@ -27,6 +27,28 @@ test("running -> input_required notifies with the approval title", () => {
   assert.match(p!.title, /needs your input/);
   assert.match(p!.body, /Run: rm -rf build/);
   assert.equal(p!.sessionId, "s1");
+  assert.deepEqual(p!.attention, { eventEpoch: 0, requestId: "r" });
+});
+
+test("multiple input requests route notifications to the bounded aggregate", () => {
+  const next = session({ status: "input_required", eventEpoch: 4, pendingApproval: {
+    requestId: "a", title: "First", options: [], ownerToolUseId: "child-a",
+    additionalRequests: [{ requestId: "b", title: "Second", options: [], ownerToolUseId: "child-b" }],
+  } });
+  assert.deepEqual(notifyDecision(session({ status: "running" }), next)!.attention, { eventEpoch: 4 });
+});
+
+test("a promoted child request re-notifies with its new exact destination", () => {
+  const previous = session({ status: "input_required", eventEpoch: 5, pendingApproval: {
+    requestId: "root", title: "Root", options: [], additionalRequests: [
+      { requestId: "child", title: "Child", options: [], ownerToolUseId: "spawn" },
+    ],
+  } });
+  const promoted = session({ status: "input_required", eventEpoch: 5, pendingApproval: {
+    requestId: "child", title: "Child", options: [], ownerToolUseId: "spawn",
+  } });
+  assert.deepEqual(notifyDecision(previous, promoted)!.attention, { eventEpoch: 5, requestId: "child" });
+  assert.equal(notifyDecision(promoted, promoted), null, "the same request's trailing frame stays silent");
 });
 
 test("authentication input is distinct from tool approval", () => {
@@ -135,7 +157,9 @@ test("notification tags and click handlers remain bound to the originating insta
     const instance = new Notifier();
     instance.enabled = true;
     const payload = { title: "Done", body: "Finished", sessionId: "same-session" };
-    instance.show(payload, { instanceId: "remote-a", onClick: (id) => clicks.push(`a:${id}`) });
+    instance.show({ ...payload, attention: { eventEpoch: 3, requestId: "ask" } }, {
+      instanceId: "remote-a", onClick: (id, attention) => clicks.push(`a:${id}:${attention?.eventEpoch}:${attention?.requestId}`),
+    });
     instance.show(payload, { instanceId: "remote-b", onClick: (id) => clicks.push(`b:${id}`) });
     instance.show({ ...payload, notificationId: "bgcont-1" }, {
       instanceId: "remote-a", onClick: (id) => clicks.push(`a:${id}`),
@@ -150,7 +174,7 @@ test("notification tags and click handlers remain bound to the originating insta
       "remote-a:same-session:bgcont-2",
     ]);
     created[0]!.onclick?.();
-    assert.deepEqual(clicks, ["a:same-session"]);
+    assert.deepEqual(clicks, ["a:same-session:3:ask"]);
   } finally {
     Object.defineProperty(globalThis, "Notification", { configurable: true, value: previousNotification });
     Object.defineProperty(globalThis, "document", { configurable: true, value: previousDocument });
@@ -168,6 +192,17 @@ test("questions and approvals receive distinct notification labels", () => {
     status: "input_required",
     pendingApproval: { requestId: "approval", title: "Run deploy?", options: [], kind: "permission" },
   });
+  const recovery = session({
+    status: "input_required",
+    pendingApproval: {
+      requestId: "recovery",
+      title: "Which database?",
+      options: [],
+      kind: "question",
+      recoveryReason: "provider_restart",
+    },
+  });
   assert.match(notifyDecision(session({ status: "running" }), question)!.body, /^Answer required/);
   assert.match(notifyDecision(session({ status: "running" }), approval)!.body, /^Approval required/);
+  assert.match(notifyDecision(session({ status: "running" }), recovery)!.body, /^Recovery required/);
 });

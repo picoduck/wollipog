@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import viteConfig, { WOLLIPOG_WEBVIEW_TARGETS } from "../apps/web/vite.config.ts";
+import { webviewTargets } from "../apps/web/src/css-support.ts";
 
 const SUPPORTED_NATIVE_TARGETS = [
   "darwin-arm64",
@@ -13,10 +14,12 @@ const SUPPORTED_NATIVE_TARGETS = [
 ];
 
 test("Vite production output pins the supported desktop webview floor", () => {
-  assert.deepEqual(
-    WOLLIPOG_WEBVIEW_TARGETS,
-    ["chrome107", "edge107", "firefox104", "safari16"],
-  );
+  // The floor is COMPUTED from the CSS the app ships (#914), so this contract tracks that
+  // computation rather than restating a list. A second hardcoded copy is what let the previous
+  // floor go stale: it agreed with the config while both disagreed with the stylesheet. The
+  // expected VALUE is asserted once, in apps/web/src/css-support.test.ts, next to the support data
+  // it comes from.
+  assert.deepEqual(WOLLIPOG_WEBVIEW_TARGETS, webviewTargets());
   assert.equal(typeof viteConfig, "function");
   const config = viteConfig({ command: "build", mode: "production", isSsrBuild: false, isPreview: false });
   assert.deepEqual(config.build?.target, WOLLIPOG_WEBVIEW_TARGETS);

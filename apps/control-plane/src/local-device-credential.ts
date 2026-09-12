@@ -182,3 +182,52 @@ export function localPairingUrl(port: number, token: string): string {
   if (!validLocalDeviceToken(token)) throw new Error("invalid local device credential");
   return `http://127.0.0.1:${port}/#pair=${token}`;
 }
+
+export interface ProtectedCredentialAudit {
+  path: string;
+  safe: boolean;
+  /** Human-readable problems; empty when the file is a private regular file owned by this account. */
+  issues: string[];
+}
+
+/**
+ * Report, without reading or revealing contents, whether the protected credential file is safe to
+ * trust: it must exist as a regular non-symlink file owned by the current account with no group or
+ * other access, inside a directory that likewise grants no group or other access. Mode and owner
+ * checks are POSIX-only; Windows relies on ACLs. Used by `wollipog admin status` and `doctor`.
+ */
+export function auditProtectedCredentialFile(
+  path: string,
+  host: { platform?: NodeJS.Platform; uid?: number | null } = {},
+): ProtectedCredentialAudit {
+  const live = resolve(path);
+  const platform = host.platform ?? process.platform;
+  const uid = host.uid === undefined ? (typeof process.getuid === "function" ? process.getuid() : null) : host.uid;
+  const issues: string[] = [];
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(live);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    issues.push(code === "ENOENT"
+      ? "credential file does not exist; start the control plane once to create it"
+      : `credential file could not be inspected: ${(error as Error).message}`);
+    return { path: live, safe: false, issues };
+  }
+  if (stat.isSymbolicLink()) issues.push("credential path is a symbolic link");
+  else if (!stat.isFile()) issues.push("credential path is not a regular file");
+  if (platform !== "win32") {
+    const mode = stat.mode & 0o777;
+    if (mode & 0o077) issues.push(`credential file mode 0${mode.toString(8)} grants group or other access; expected 0600`);
+    if (uid !== null && stat.uid !== uid) issues.push(`credential file is owned by uid ${stat.uid}, not the current account (uid ${uid})`);
+    try {
+      const parent = lstatSync(dirname(live));
+      const parentMode = parent.mode & 0o777;
+      if (parentMode & 0o077) issues.push(`credential directory mode 0${parentMode.toString(8)} grants group or other access; expected 0700`);
+      if (uid !== null && parent.uid !== uid) issues.push(`credential directory is owned by uid ${parent.uid}, not the current account (uid ${uid})`);
+    } catch (error) {
+      issues.push(`credential directory could not be inspected: ${(error as Error).message}`);
+    }
+  }
+  return { path: live, safe: issues.length === 0, issues };
+}

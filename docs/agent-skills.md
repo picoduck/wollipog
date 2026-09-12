@@ -1,6 +1,235 @@
 # Agent Skills Management and Deployment
 
-Status: design proposal (not yet implemented)
+Status: managed Linux/macOS/Windows and mixed-context WSL deployment, Git import,
+Linux/macOS/Windows/WSL machine snapshots, guarded Linux adoption/recovery, version history with
+library rollback, machine-wide version pins, and assignable groups implemented. Project/workspace
+scope and opt-in automatic Git updates remain deferred.
+
+## Assignable Group API
+
+New groups created through `POST /api/skill-groups` carry the creator's default resource scope:
+organization scope for owners/admins, private scope for other members. Legacy groups remain shared
+organizational metadata and cannot deploy until explicitly converted with
+`POST /api/skill-groups/:id/convert` and `{ "accepted": true }`. Conversion requires every current
+member to have the proposed scope; it never transfers skill ownership. Mixed-scope legacy groups
+must be reorganized before conversion. An owned group's members must share its exact ownership scope.
+
+`GET`/`POST /api/skill-groups/:id/assignments` lists or creates group rules. Creation accepts
+`scopeKind` (`instance` or `runner`), `runnerId` for a machine rule, `agentSelector`, `invocation`
+(`agent` or `manual`), and optional `enabled`. `PATCH`/`DELETE` on
+`/api/skill-groups/:id/assignments/:assignmentId` changes policy or removes a rule. Reads and writes
+require group access and, for machine rules, machine access. All writes require a human identity.
+
+Membership is expanded at reconciliation time and ownership is rechecked, including after later
+membership or ownership changes. Existing scope/agent specificity precedence is preserved; a direct
+skill rule beats a group rule at equal specificity. Rules do not override machine-wide version pins.
+Member addition/removal, skill deletion, and group deletion push an authoritative update; deleting a
+group preserves its library skills and their direct assignments. Registration preserves group rules,
+while deleting a machine clears its machine-specific rules. Offline and older runners retain the
+existing reconciliation/capability behavior. Import previews count group rules in assignment impact.
+
+The Skills dashboard exposes group creation, conversion, membership, and inherited assignment rules.
+
+## Machine-Wide Version Pins
+
+**Machine Versions** selects one version policy for a skill on a machine: **Track Latest** or a
+specific immutable revision. Preview the current and proposed files and explicitly accept the
+machine-wide impact before saving. Pins affect every assigned agent on that machine without
+creating assignments or changing targeting. Offline machines apply the policy when they reconnect.
+Library imports, updates, and rollback do not advance pinned machines. Returning to **Track Latest**
+adopts the current library revision and future updates. Concurrent library or policy changes reject
+stale previews, including changes away from and back to the same policy.
+
+This follows the explicitly selected single-canonical-copy design: versions are machine-wide,
+not independently pinnable per agent. Conflicting per-agent version requests are not supported.
+Policies persist across runner registration, require access to both skill and machine, and enforce
+the same audience-containment and capability rules as deployment. Group assignments and guarded
+source adoption are described below.
+
+## Version History and Library Rollback
+
+Open a skill's **Version History** to browse immutable revisions, 50 at a time.
+**Preview Version** compares every historical file with the current library content, including
+removed files, scripts, and binary content. Preview does not run instructions or scripts.
+After accepting the diff and assignment impact, **Restore Version** copies the selected content
+into a new immutable revision and syncs assignments on unpinned machines. Earlier and newer revisions remain
+available, with original Git and machine-snapshot provenance preserved. The restore note identifies
+the source revision. A concurrent library update rejects the restore; preview again before retrying.
+
+This is library-wide rollback; pinned machines keep their selected revision. Offline machines
+reconcile when they reconnect; unsupported platforms retain their existing no-write behavior.
+Group assignments retain the selected machine-wide version policy when they expand dynamically.
+
+## Implemented machine snapshot import
+
+**Import from Machine** discovers real skill directories in `.agents/skills` and configured native
+Claude/Codex harness locations on an online Linux runner using protocol 111 or newer, a native
+Windows runner using protocol 119 or newer, a macOS runner using protocol 120 or newer, or a WSL
+distribution advertised by a Windows runner using protocol 125 or newer. An owner or administrator
+must have access to the source machine. The control plane requests opaque candidate
+IDs from an on-demand inventory, never arbitrary host paths, and never adds file contents to the
+periodic `skills_state` report. Discovery lists at most 64 candidates, examines at most 256 entries
+per harness directory, and retains at most 256 expiring candidate IDs on the runner. Shared harness
+locations are scanned once; divergent same-name directories remain separate candidates. A separate
+4,096-entry raw iteration ceiling keeps skipped private journals from removing the hard discovery
+bound while preserving the 256-entry useful-work budget.
+
+Linux opens every untrusted path component with `O_NOFOLLOW` through pinned `/proc/self/fd`
+descriptors. The fixed runner-owned macOS helper uses `openat` with the same descriptor-relative
+no-follow discipline. Native Windows and its `\\wsl.localhost` distribution paths use pinned native handles opened with
+`FILE_FLAG_OPEN_REPARSE_POINT` and without delete sharing. Symlinks, junctions,
+hard links, special files, excessive depth/entry counts, and trees
+exceeding the existing 64-file / 512 KiB-per-file / 2 MiB-total limits fail closed. Two bounded reads
+must agree before content is returned. The configured HOME itself may resolve through a symlink;
+its untrusted descendants may not. WSL candidates carry only their validated distro context and
+home-relative source location over the protocol; the private UNC path stays runner-local.
+Windows filesystems do not expose a POSIX executable mode, so native Windows and Windows-hosted WSL
+snapshots report no executable paths; previews still show the complete bounded file content.
+
+The preview shows the complete proposed files, digest, script-path indicators, and any existing
+version's files. An import commits exactly those previewed bytes with machine/directory/name,
+digest, and import-time provenance, even if the source subsequently changes or disconnects.
+Identical content reuses the latest version. Different same-name content requires explicit
+acceptance as a new version; a changed library version or replaced preview rejects stale acceptance.
+Rename-on-collision is deferred. Four expiring control-plane discoveries each retain at most one
+snapshot; one content/discovery request is active at a time. Internal runner errors are sanitized.
+
+Import is not adoption: new library skills stay unassigned, and no source directory is replaced.
+Explicitly accepted updates to existing skills retain their assignments and trigger the existing
+managed deployment reconciler, which refuses to overwrite unmanaged directories. Git upstream
+metadata remains intact when a machine snapshot updates a Git-backed skill. The separate adoption
+flow (durable snapshot + explicit assignment + source-digest check before replacing a directory)
+is documented below.
+
+### Read-only adoption preflight
+
+`POST /api/skill-machine/:discoveryId/adoption-preflight` accepts the current `previewId` from
+the machine snapshot preview. Import consumes that preview, so preview the source again after
+importing it and creating an explicit assignment. This owner/admin-only endpoint is read-only:
+it does not adopt a directory, create assignments, change pins, or send a deployment command.
+It uses the same online Linux/protocol-111 gate and bounded opaque-candidate read as import.
+
+The source is read again and must match the preview's full content digest and discovery identity.
+After that read, current ownership, effective direct/group assignments, disabled overrides, and
+machine-wide pins are resolved again. The selected immutable library version must have valid bytes
+matching the source. At least one effective target must read the source's native harness directory
+(or the canonical directory); unsupported manual invocation or conflicting policies in a shared
+Claude directory block the whole report. Manual Claude targets carry a content-transformation
+advisory because the deployed harness variant may inject `disable-model-invocation: true` into
+`SKILL.md`; the canonical copy remains untransformed. The report lists configured siblings without
+an effective target (including disabled assignments) that share the source directory instead of
+promising per-agent file isolation. Reader fields describe potential configured deployment exposure,
+not current filesystem links or observed reads, especially for an unmanaged canonical directory.
+It does not certify which running harnesses have loaded those files.
+
+`status: "prerequisites_met"` is an observation, not an adoption authorization. On a protocol-115
+Linux runner it also mints a one-use, preview-bound adoption token. Closing, importing, replacing,
+or expiring the preview invalidates it. The owner/admin must separately confirm the operation and
+any named shared-directory readers. Manual invocation variants remain blocked because their
+deployed frontmatter can differ from the approved source bytes.
+
+### Internal recoverable adoption transaction
+
+The runner's `adoptMachineSkill` module implements the Linux filesystem transaction. Protocol 115
+exposes it through a serialized runner command, owner/admin API, and the machine-import dialog.
+Its trusted caller must resolve the opaque candidate and expiry, verify the durable
+library version and current explicit assignment/invocation/shared-directory consent, and serialize
+the whole operation with reconciliation and store GC. A read-only preflight report is not that grant.
+The module requires synchronous lease acquisition and an authorization callback, repeats the latter
+before source movement and link publication, and rejects async guards.
+
+The source and already-materialized untransformed store version are read twice through pinned,
+no-follow descriptors with the existing snapshot bounds. Both must match the approved digest, and
+the source must retain its discovery generation and directory identity. Store/source overlap is
+rejected. The engine supports original agent-invocable content only; manual variants fail closed.
+
+Before moving the source, it creates a private mode-0700 sibling directory named
+`.wollipog-adoption-<uuid>` with a mode-0600 `intent.json` describing source/parent/target identities
+and digest. It flushes content, directory ancestry and the journal, then renames the original into
+that directory as `original` on the same filesystem. It checks the preserved identity/content again,
+records `preserved.json`, and exclusively creates the managed store-target symlink. A newly occupied
+source path makes publication fail; it is never overwritten. `linked.json` records completion.
+Normal serialized reconciliation can subsequently route a harness link through the canonical link.
+
+First adoption has a short gap between source preservation and link publication; it is not an
+atomic directory-to-symlink exchange. `recovery_required` means inspect the operation before any retry
+or further reconciliation: the source may be untouched, absent, newly occupied, or already linked.
+The engine never deletes a backup, auto-restores over a path, or rolls back by removing a concurrent
+occupant. Journals and backups survive runner process death and are not collected by ordinary skill
+disable/GC. Tests kill a child process at each journal boundary; hardware/power-loss recovery has
+not been tested, and durability depends on filesystem support for `fsync`.
+
+The returned backup directory is home-relative to the original parent and is displayed after
+completion or a recovery-required result. If that parent was moved,
+locate the operation UUID in the moved directory and compare its recorded identity; do not follow a
+replacement parent symlink or blindly move `original`. A last-instant source-name swap may preserve
+the substituted tree, which is detected as an identity mismatch rather than deleted. The command is serialized
+with reconciliation/GC, rechecks the latest desired digest and targets, and runs a solicited sync
+first so the target is materialized. Lost or uncorrelated results instruct the operator to inspect
+for a journal before retrying. Backups are intentionally retained without automatic cleanup.
+Adoption remains Linux-only. Windows-hosted WSL locations support snapshot import but not source
+replacement; standalone WSL runners report Linux and use the Linux adoption path.
+
+### Adoption recovery inspection and restore
+
+Protocol 116 adds a bounded recovery command. **Inspect Recovery** asks an online Linux runner to
+scan at most 4,096 raw entries in each known native harness directory and return at most 64 validated
+journals. The control plane accepts only fixed harness-relative journal paths and projected operation
+fields; arbitrary client paths and malformed runner results are rejected. Inspection and restore are
+owner/admin-only, correlated, re-authorized after the runner response, and serialized with adoption,
+reconciliation, and store GC.
+
+Operations report `intent_only`, `source_preserved`, `managed_linked`, `restored`, or `blocked`.
+Intent-only and already-restored states need no mutation. A restore requires an explicit per-operation
+confirmation. It reopens the journal and parent through pinned no-follow descriptors, verifies the
+preserved inode and full digest, and writes durable, retry-safe checkpoints. An active managed link is
+moved into the journal first. An exclusive recovery link then exposes the journal's verified `original`
+at the vacated source name. Link creation fails on any last-instant file, link, or directory occupant;
+nothing at the source name is unlinked, recursively deleted, or overwritten. A changed parent,
+malformed record, target mismatch, or race stops safely. Every checkpoint is retryable, including a
+process interruption after the managed-link move or recovery-link publication. The original retains
+its inode, bytes, and source metadata inside the private journal, and both it and the prior managed link
+remain available for manual inspection. Journals are intentionally retained; the recovery link is
+reported as unmanaged until the operator deliberately adopts or relocates that source again.
+The solicited reconciliation after restore can remove verified managed harness links that routed
+through the former canonical link, because the restored canonical source is now unmanaged. A
+managed link archived inside the journal can also outlive its referenced store version after
+ordinary retention GC. The journal preserves both artifacts for inspection; it does not promise
+that reconciliation will keep serving the former managed deployment.
+
+## Implemented Git import
+
+The Skills view's **Import from Git** action accepts HTTPS and SSH remotes (or GitHub
+`owner/repository` shorthand), a branch/tag/commit, and an optional repository subdirectory.
+Only the instance's local owner identity can use the control plane's ambient Git credentials,
+including from a paired device. Organization owners and administrators do not acquire that
+authority from their organization role. Credential-bearing
+URLs, local-file transports, symlinks, and submodules are refused. Git objects are read without a
+checkout, hooks, or script execution. Fetches have a 60-second command timeout, a 90-second overall
+deadline, and a monitored 128 MiB temporary repository budget; skill payload limits also apply.
+Discovery is capped at 32 candidates and 16 MiB of content; narrow the subdirectory if necessary.
+An invalid candidate fails the preview, so choose a valid skill's exact directory to import it.
+
+Preview shows every proposed and current file, highlights scripts, and records the resolved commit.
+The user selects one or more skills to import. New imports have no assignments. Existing different
+content requires explicit diff acceptance and updates existing track-latest assignments; identical
+content reuses the current version. A concurrent library change invalidates acceptance. Previews
+are scoped to the requesting human and organization, expire after ten minutes, and are discarded
+on restart. At most four previews and one discovery are active at once.
+The existing skill-file format and digest do not preserve executable bits. Protocol 115 machine
+snapshots therefore report executable paths separately, without changing version identity. Such a
+snapshot can still be imported as content, but adoption fails closed so replacing the original
+cannot silently discard its execution metadata. Imported scripts deploy as ordinary files and
+should be invoked through their interpreter. Supporting executable adoption requires a future,
+rolling-compatible metadata format.
+
+Git-imported versions retain URL, requested ref, repository path, and resolved commit separately
+from skill content. **Check for Updates** repeats the preview flow; there is no automatic polling
+or update. Import does not rename collisions: use a new source name or cancel. Non-Linux machine
+snapshot import includes native Windows, native macOS, and Windows-hosted WSL distributions.
+Native Windows deployment uses directory junctions. For WSL deployment, the Windows runner invokes
+a fixed in-distribution adapter; standalone WSL runners report Linux and use the Linux path. Later
+sections describe that broader target design.
 
 This document describes a planned feature that lets users manage a library of agent skills in
 Wollipog and deploy them to the Machines they have connected. A skill is a directory tree containing
@@ -136,10 +365,20 @@ Properties:
   overwrite. This is the inverse of `protectedWrite()`'s symlink refusal and needs the same rigor:
   segment-by-segment containment checks and never following links the runner did not create.
 - **Windows** uses directory junctions (no privilege or developer-mode requirement).
-- **WSL**: a Machine can host native and WSL agents (`runner_agents.context`); the reconciler
-  materializes into each context's home using the existing WSL path-mapping helpers. Note that
-  `hook-settings.ts` currently refuses WSL for settings injection; skills must support it because
-  mixed-context machines are a primary use case.
+- **WSL**: a Machine can host native and WSL agents (`runner_agents.context`). On Windows, the
+  native reconciler verifies and materializes the immutable version once under the runner data
+  directory. A fixed Python adapter runs inside each named distribution and creates its canonical
+  and harness links using descriptor-relative, no-follow operations; the canonical link targets
+  the same store through WSL's mounted native path. A durable owner marker partitions adapter state,
+  uses the native provider-home v2 lease journal, and publishes an explicit released successor
+  before exiting. A standalone in-distribution runner can therefore take an orderly cross-owner
+  handoff instead of treating the lock directory as corrupt; a live or uncleanly terminated foreign
+  owner still fails closed. After an unclean re-onboarding transition, an operator must first prove
+  that no runner or provider process uses the WSL home, quarantine
+  `.agent-manager/provider-home-leases-v1/mutable-home.lock`, and retry. Idle read-only passes do not
+  claim the lease. WSL failures are reported per target and never fall back to mutating the
+  distribution through host path APIs. Standalone WSL runners report Linux and use the ordinary
+  Linux reconciler.
 
 ### Per-harness materialization and invocation policy
 
@@ -272,14 +511,42 @@ Git backs the library as an **upstream source**, not as the distribution transpo
 - **Codex skill support is evolving.** The per-harness adapter table isolates directory paths,
   invocation forms, and sidecar formats from the core model.
 
+## Group Management Dashboard
+
+The Skills view's **Manage Groups** dialog creates ownership-scoped groups, explicitly converts
+legacy metadata groups, and manages membership and group deployment rules. It displays the
+server-computed creation/conversion ownership before acceptance. Conversion is permanent in this
+UI, may restrict visibility, and never changes member ownership. Membership changes, rule edits,
+and deletion require acknowledgment of their group-wide impact; adding a rule explicitly targets
+all current and future members. Library content, direct rules, and machine pins survive group
+removal. Unowned legacy groups cannot have deployable assignments.
+
+Skill details distinguish inherited group rules from direct assignments. Direct rules win at equal
+targeting specificity, while machine-wide pins still choose the version. These are assignment
+rules, not a claim that every target has successfully deployed; machine-reported state remains
+authoritative.
+
+The **Machine × Agents** section separates desired invocation from the last reported link for each
+agent and shows each machine's pin or Track Latest policy. Untargeted but still-reported links are
+explicitly labeled: a shared harness directory or a pending reconciliation can leave them visible.
+Unknown/failed reads never become an empty assignment or tracking default. Unsupported execution
+targets are marked unavailable, and offline reports carry their last inventory timestamp. Policy
+metadata is read through the same skill-and-machine authorization checks as version preview, but
+without loading files. The version picker starts from the selected machine's saved policy; saving
+still requires full preview and acceptance with the existing revision/latest-version fences.
+For older control planes lacking the lightweight route, the picker reads the existing authorized
+preview to recover the saved policy; it never infers Track Latest from a failed request. Failed
+desired-state reads stay unknown through manual sync until an authoritative refresh succeeds.
+
 ## Phasing
 
 1. **MVP** — protocol capability, tables, `skills_sync` / `skills_state`; library CRUD via
    import-from-machine and import-from-directory; per-machine × per-agent assignment with
    enable/disable; symlink deployment for native Claude Code and Codex; Skills view and
    per-machine section.
-2. **Phase 2** — git upstream sync, groups as assignable units, invocation-mode transforms, drift
-   detection and adopt, versions/pin/rollback, WSL and Windows-junction support.
+2. **Phase 2 (implemented)** — git upstream sync, groups as assignable units, invocation-mode
+   transforms, drift detection and guarded Linux adoption/recovery, versions/pin/rollback, and
+   Windows-junction plus mixed-context WSL support.
 3. **Phase 3** — project-scoped skills, usage analytics, sharing/export, edit-in-session,
    container mounts.
 

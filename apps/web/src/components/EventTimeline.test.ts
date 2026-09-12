@@ -15,6 +15,7 @@ import {
   stabilizeTimelineRowKeys,
   stabilizeWorkGroupKeys,
   timelineFileSourceLocation,
+  userRewindTurns,
 } from "./EventTimeline.js";
 import { reanchorAtLogicalIndex } from "./MeasuredVirtualList.js";
 
@@ -35,7 +36,15 @@ test("timeline row estimates include timestamp header lines", () => {
   assert.equal(estimateTimelineRow({ kind: "item", key: "tool", item: tool, inWork: false, depth: 0 }), 72);
   assert.equal(estimateTimelineRow({ kind: "item", key: "thought", item: thought, inWork: true, depth: 0 }), 72);
   assert.equal(estimateTimelineRow({ kind: "subagent_summary", key: "agent", tool, depth: 0, open: false }), 52);
-  assert.equal(estimateTimelineRow({ kind: "work_summary", key: "work", tools: 1, edits: 0, thoughts: 0, open: false }), 32);
+  assert.equal(estimateTimelineRow({
+    kind: "work_summary",
+    key: "work",
+    tools: 1,
+    edits: 0,
+    thoughts: 0,
+    autoApproved: 0,
+    open: false,
+  }), 32);
   const question = { kind: "question" as const, id: 3, requestId: "ask", questions: [{
     id: "choice", question: "Pick one", options: [{ label: "A" }, { label: "B" }],
   }] };
@@ -44,6 +53,63 @@ test("timeline row estimates include timestamp header lines", () => {
   assert.equal(estimateTimelineRow({
     kind: "item", key: "answered-question", item: { ...question, answered: true }, inWork: false, depth: 0,
   }), 52);
+});
+
+test("auto-approved reviews expose an exact count and highest risk while expanded order stays exact", () => {
+  const items: TimelineItem[] = [
+    { kind: "review_decision", id: 10, reviewId: "first", reviewer: { kind: "policy", id: "routine" }, outcome: "allowed", riskLevel: "low" },
+    { kind: "tool_call", id: 11, toolCallId: "search", title: "Search", status: "completed", text: "" },
+    { kind: "review_decision", id: 12, reviewId: "second", reviewer: { kind: "agent", id: "guardian" }, outcome: "allowed", riskLevel: "high" },
+  ];
+  const groups = groupTimeline(items);
+  const workKey = `work:${groups[0]!.kind === "work" ? groups[0]!.id : "missing"}`;
+  const collapsed = flattenTimelineRows(groups, new Map());
+  assert.deepEqual(collapsed[0], {
+    kind: "work_summary",
+    key: workKey,
+    tools: 1,
+    edits: 0,
+    thoughts: 0,
+    autoApproved: 2,
+    highestReviewRisk: "high",
+    open: false,
+  });
+
+  const expanded = flattenTimelineRows(groups, new Map([[workKey, true]]));
+  assert.deepEqual(
+    expanded.filter((row) => row.kind === "item").map((row) => row.kind === "item" ? row.item.id : -1),
+    [10, 11, 12],
+  );
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, { items }));
+  assert.match(html, /2 Tool Calls Auto-Approved · High Risk/);
+});
+
+test("live approvals update one stable collapsed summary without rebuilding historical rows", () => {
+  const builder = new TimelineBuilder();
+  const projector = new IncrementalTimelineRows();
+  const disclosure = new Map<string, boolean>();
+  builder.push({
+    id: 1, sessionId: "live-reviews", seq: 1, ts: 1,
+    payload: { kind: "review_decision", reviewId: "low", reviewer: { kind: "policy" }, outcome: "allowed", riskLevel: "low" },
+  });
+  const first = projector.project(builder.snapshot(), disclosure);
+  assert.equal(first.rows[0]?.kind === "work_summary" ? first.rows[0].autoApproved : null, 1);
+  const key = first.rows[0]!.key;
+
+  builder.push({
+    id: 2, sessionId: "live-reviews", seq: 2, ts: 2,
+    payload: { kind: "review_decision", reviewId: "high", reviewer: { kind: "agent" }, outcome: "allowed", riskLevel: "high" },
+  });
+  const second = projector.project(builder.snapshot(), disclosure);
+  assert.equal(second.incremental, true);
+  assert.equal(second.rows.length, 1);
+  assert.equal(second.rows[0]!.key, key);
+  assert.deepEqual(
+    second.rows[0]?.kind === "work_summary"
+      ? [second.rows[0].autoApproved, second.rows[0].highestReviewRisk]
+      : null,
+    [2, "high"],
+  );
 });
 
 test("semantic reveal resolution opens a collapsed work group without exposing virtual keys", () => {
@@ -204,39 +270,97 @@ test("a resolved question keeps one compact outcome card at the same timeline ro
   }));
 
   assert.doesNotMatch(html, /aria-label="Agent Questions"/);
-  assert.equal((html.match(/Which language\?/g) ?? []).length, 1);
+  assert.equal((html.match(/Which language\?/g) ?? []).length, 2,
+    "the concise summary and collapsed complete-question body retain the text");
   assert.match(html, /→ Replaced/);
   assert.doesNotMatch(html, /role="radiogroup"/);
 });
 
-test("completed assistant metadata owns enabled and disabled fork controls beside Copy", () => {
+test("resolved question cards keep a concise summary and disclose complete rich text", () => {
+  const signed = "https://evidence.example/private/capture.png?signature=secret#full";
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [{
+      kind: "question",
+      id: 5,
+      requestId: "ask-rich",
+      answered: true,
+      questions: [
+        {
+          id: "target",
+          header: "Target",
+          question: `Choose **one** target using ${signed}\n\n- staging\n- production`,
+          context: "Keep `build-42` available.",
+          options: [{ label: "Staging" }],
+        },
+        { id: "checks", question: "Select the checks.", options: [{ label: "Tests" }] },
+      ],
+    }],
+  }));
+
+  assert.match(html, /<details class="question-history">/);
+  assert.match(html, /Choose one target using evidence\.example\/capture\.png \(\+1 more\)/);
+  assert.match(html, /→ Answered/);
+  assert.match(html, /<strong>one<\/strong>/);
+  assert.match(html, /<li>staging<\/li>/);
+  assert.match(html, /<code>build-42<\/code>/);
+  assert.match(html, /href="https:\/\/evidence\.example\/private\/capture\.png\?signature=secret#full"/);
+  assert.equal((html.match(/signature=secret/g) ?? []).length, 1);
+});
+
+test("completed turn messages own compact rewind, fork, and handoff actions", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [
-      { kind: "checkpoint", id: 1, turn: 1 },
-      { kind: "agent_message", id: 2, text: "First answer" },
-      { kind: "conversation_checkpoint", id: 3, turn: 1 },
-      { kind: "checkpoint", id: 4, turn: 2 },
-      { kind: "agent_message", id: 5, text: "Second answer" },
-      { kind: "conversation_checkpoint", id: 6, turn: 2 },
+      { kind: "user_message", id: 1, text: "First question" },
+      { kind: "checkpoint", id: 2, turn: 1 },
+      { kind: "agent_message", id: 3, text: "First answer" },
+      { kind: "conversation_checkpoint", id: 4, turn: 1 },
+      { kind: "user_message", id: 5, text: "Second question" },
+      { kind: "checkpoint", id: 6, turn: 2 },
+      { kind: "agent_message", id: 7, text: "Second answer" },
+      { kind: "conversation_checkpoint", id: 8, turn: 2 },
     ],
     onRewind: () => {},
     onFork: () => {},
+    handoff: { open: () => {} },
     forkAvailabilityByTurn: new Map([
       [1, { available: false, reason: "Claude Code can fork only its latest completed conversation checkpoint." }],
       [2, { available: true, forkTurn: 2 }],
     ]),
   }));
 
-  assert.equal((html.match(/Rewind Files to Here/g) ?? []).length, 2);
-  assert.equal((html.match(/aria-label="Fork Conversation Here"/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-label="Rewind Files to Before This Turn"/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-label="Fork Conversation After This Turn/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-label="Hand Off After This Turn/g) ?? []).length, 2);
   assert.equal((html.match(/lucide-git-fork/g) ?? []).length, 2,
     "plain historical forks use the shared Lucide fork glyph");
-  assert.match(html, /aria-label="Copy assistant message"[\s\S]*?aria-label="Fork Conversation Here"/,
+  assert.equal((html.match(/lucide-share/g) ?? []).length, 2,
+    "Hand Off uses a distinct shared glyph");
+  assert.match(html, /aria-label="Copy assistant message"[\s\S]*?aria-label="Fork Conversation After This Turn/,
     "Fork follows Copy in assistant metadata");
-  assert.match(html, /<button[^>]*disabled=""[^>]*title="Claude Code can fork only its latest completed conversation checkpoint\."[^>]*aria-label="Fork Conversation Here"/);
-  assert.match(html, /<button[^>]*title="Fork Conversation Here"[^>]*aria-label="Fork Conversation Here"/);
-  assert.doesNotMatch(html, /class="btn ghost sm checkpoint-rewind"[^>]*>[^<]*Fork Conversation Here/,
-    "checkpoint dividers no longer own the heavy text action");
+  assert.match(html, /<details class="tl-message-action-unavailable">[\s\S]*?Claude Code can fork only its latest completed conversation checkpoint\./);
+  assert.match(html, /title="Fork with the same provider and its native conversation history\."/);
+  assert.match(html, /title="Hand off to a different provider in a fresh conversation with portable context\."/);
+  assert.doesNotMatch(html, /Rewind Files to Here|Hand Off to Another Agent/,
+    "checkpoint dividers no longer own heavy text actions");
+});
+
+test("checkpoint projection maps only the owning canonical user message", () => {
+  assert.deepEqual([...userRewindTurns([
+    { kind: "user_message", id: 1, text: "first" },
+    { kind: "checkpoint", id: 2, turn: 1 },
+    { kind: "conversation_checkpoint", id: 3, turn: 1 },
+    { kind: "user_message", id: 4, text: "second" },
+    { kind: "user_message", id: 5, text: "steer", deliveryIntent: "steer" },
+    { kind: "checkpoint", id: 6, turn: 2 },
+    { kind: "error", id: 7, message: "cancelled" },
+    { kind: "user_message", id: 8, text: "third after cancellation" },
+    { kind: "checkpoint", id: 9, turn: 3 },
+    { kind: "conversation_checkpoint", id: 10, turn: 3 },
+    { kind: "checkpoint", id: 11, turn: 4 },
+    { kind: "user_message", id: 12, text: "must not borrow an orphan checkpoint" },
+    { kind: "stderr", id: 13, text: "Runner resumed orphaned background work automatically." },
+    { kind: "checkpoint", id: 14, turn: 5 },
+  ])], [[1, 1], [4, 2], [8, 3]]);
 });
 
 test("assistant fork-point projection ignores nested answers and cancelled turns", () => {
@@ -326,6 +450,26 @@ test("history prefix merges preserve work and coalesced text render keys", () =>
   assert.equal(recovered[1]!.kind === "work" ? recovered[1]!.id : null, "head");
   const openRows = flattenTimelineRows(recovered, new Map([["work:head", true]]));
   assert.equal(openRows.some((row) => row.kind === "item" && row.item.id === 10), true);
+});
+
+test("history hydration extends an auto-approval summary without changing its disclosure anchor", () => {
+  const later = { kind: "review_decision" as const, id: 20, reviewId: "later", reviewer: { kind: "agent" as const }, outcome: "allowed" as const, riskLevel: "medium" as const };
+  const previous = groupTimeline([later]);
+  const recovered = stabilizeWorkGroupKeys(groupTimeline([
+    { kind: "review_decision", id: 19, reviewId: "earlier", reviewer: { kind: "policy" }, outcome: "allowed", riskLevel: "low" },
+    later,
+  ]), previous);
+  const previousKey = previous[0]!.kind === "work" ? `work:${previous[0].id}` : "missing";
+  const recoveredKey = recovered[0]!.kind === "work" ? `work:${recovered[0].id}` : "missing";
+
+  assert.equal(recoveredKey, previousKey);
+  const rows = flattenTimelineRows(recovered, new Map());
+  assert.deepEqual(
+    rows[0]?.kind === "work_summary"
+      ? [rows[0].autoApproved, rows[0].highestReviewRisk]
+      : null,
+    [2, "medium"],
+  );
 });
 
 test("a disjoint prepended head block cannot steal the retained boundary key", () => {

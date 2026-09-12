@@ -289,10 +289,148 @@
 //      linked worktree metadata. Additive + optional; pre-v101 runners reject worktree routes.
 // 102: explicit session-worktree discard plus conservative runner-side PR-state reconciliation.
 //      Older peers retain create/attach/select and never receive the destructive operation.
-export const PROTOCOL_VERSION = 102;
+// 103: token_usage carries the cache-creation and reasoning buckets, and the control plane prices
+//      every parentless record against a model rate table when the provider reports no cost.
+//      Usage aggregates gain the five token buckets, cost provenance, cache savings, a by-model
+//      breakdown, and rate-table status. Older runners keep sending the flat shape; the control
+//      plane prices it from input, cached input, and output alone.
+// 104: token_usage carries the model that produced the record, so a session that switches models
+//      attributes each turn to the model that ran it; the control plane keeps a per-session
+//      per-model ledger and serves it from GET /api/sessions/:id/usage. Codex app-server runners
+//      publish the provider context gauge (used tokens over the model window). Older runners
+//      omit the model and the control plane keys on the session's resolved model as before.
+// 105: cost governance. SessionConfig.costCheckpointsUsd parks a session once per checkpoint with
+//      a Continue/Stop card ahead of the hard budget; a budgeted session whose usage cannot be
+//      priced fails closed with a cost_unpriced card; an organization-wide per-user daily budget
+//      parks a user's sessions with a daily_budget card until the day rolls over or an owner or
+//      admin raises it. All control-plane owned; runners see the new config field as opaque.
+// 106: priced_session_cost acknowledges the control-plane-priced cumulative USD total after each
+//      parentless usage event. Current runners persist that total and apply the existing mid-turn
+//      cost guardrail to it; older runners keep provider-reported local cost enforcement.
+//      Settled managed work also clears its current-state badge, while the control plane projects a
+//      bounded, privacy-safe job inventory for the inspectable Background Work panel. The runner
+//      input remains compatible with v82 inventories; pre-v106 `resumed` is a legacy sentinel.
+//      Provider-neutral workspace references are runner-minted, root-scoped, revision-bound
+//      prompt attachments. Search and minting remain bounded inside the session execution root;
+//      pre-v106 runners reject the structured attachment instead of silently dropping it.
+//      Forge-neutral source-control metadata and review reconciliation add GitLab.com plus exact-
+//      host self-managed GitLab support. Legacy GitHub action/result fields remain accepted so a
+//      rolling control-plane/runner/web deployment falls back to the established GitHub workflow.
+// 107: answer_recovered_question extends the durable command receipt lane so a structured answer
+//      can resume an established provider conversation after runner/process loss without replay.
+//      A runner-owned recovery occurrence id prevents provider request-id reuse from aliasing two
+//      different interrupted questions.
+// 108: optional worker ownership and concurrent provider requests in the existing approval
+//      record. Ownership is a normalized spawning-tool id, never a raw provider thread id.
+// 109: session orchestration preset, trusted child attribution, and child creation guardrails.
+// 110: explicit cross-provider checkpoint handoffs carry a bounded portable draft and a fresh
+//      destination identity.
+// 111: on-demand, read-only machine skill discovery and bounded snapshot retrieval.
+// 112: isolated native orchestrator TUI launch and live-TUI agent-control authentication.
+// 113: progress-aware session worktree creation with bounded phase heartbeats.
+// 114: loopback host-administration status route and public dashboard origin for pairing links.
+// 115: explicitly confirmed, runner-revalidated machine skill adoption.
+// 116: bounded machine skill adoption recovery inspection and explicit restore.
+// 117: loopback host-administration doctor route (`wollipog admin doctor`).
+// 118: agent-spawn events may carry bounded, structured display identity. The control plane uses
+//      the complete runner history to expose a bounded child-session registry without making the
+//      dashboard's currently loaded transcript window an identity or liveness source.
+// 119: portable machine skill snapshots and native Windows skill deployment.
+// 120: native macOS no-follow machine skill snapshots.
+// 121: content-free Native TUI accounting readiness diagnostics. Discovery reports only
+//      provider contracts it can prove from the live CLI; absent or incomplete proof remains
+//      unavailable and never enables usage attribution or budget enforcement.
+// 122: AgentModel.baseModelId separates base model identity from context-window variants;
+//      `contextWindow` is provider evidence only, and native drivers publish the effective
+//      post-launch context window and occupancy through the session gauge.
+// 123: authenticated, target-local Agent Control bridge for structured Direct WSL harnesses.
+// 124: Direct WSL is launchable only through the attested no-follow target-local launcher.
+// 125: mixed-context WSL machine skill snapshots and deployment.
+// 126: Codex service-tier discovery and per-session selection. AgentModel carries the provider's
+//      open-string tier catalog/default and SessionConfig carries the selected tier through
+//      persistence, forks, resumes, and turn starts. Older peers omit the additive fields.
+// 127: Codex App Server usage derives each turn from replay-safe cumulative thread deltas while
+//      retaining the final response for context occupancy. Codex usage written by older runners
+//      may contain only the final upstream response and must be presented as incomplete history.
+// 128: provider-history quarantine. A conversation whose stored history the provider rejects
+//      before inference is durably marked unusable, stops accepting prompts and compaction, and
+//      exposes a bounded, content-free recovery coordinate instead.
+// 129: runners report an exact runner-owned governance trip so the control plane can always
+//      materialize the Continue / Stop decision that holds the runner queue.
+// 130: policy-hook terminal decisions become content-safe runner-owned session events. A
+//      correlated CP -> runner append fence orders the event before the hook response can release
+//      its exact tool call; pre-v130 peers retain audit-backed client synthesis.
+// 131: merged change-request linkage may carry the forge-verified head OID so runners can safely
+//      discard its worktree after the remote branch and local upstream disappear.
+// 132: control-plane-authoritative, revisioned per-Machine runner capacity can be applied live;
+//      runners report lease usage, queued demand, and exact admission bottlenecks.
+// 133: attach matches a worktree against the REPOSITORY that registers it rather than against the
+//      worktree's own directory, so a registered worktree outside every configured Project
+//      Location is attachable, and the result carries a content-free platform-isolation notice
+//      saying whether the live process can already write there. Older runners omit the notice and
+//      the control plane presents it as unknown.
+// 134: managed background continuations record a durable terminal missing-result boundary after
+//      provider acceptance. The control plane keeps that audit evidence separately from a user's
+//      idempotent acknowledgement, so accepted in-flight work is never mislabeled or replayed.
+export const PROTOCOL_VERSION = 134;
+export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
+
+/**
+ * A requested worktree can spend minutes preparing remote and local Git state before it is ready.
+ * Keep both budgets below Node fetch's transport deadline, and keep the runner wait below the
+ * caller's HTTP deadline so a real runner failure is not masked by a client-side abort.
+ */
+export const SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS = 4 * 60_000;
+export const SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS =
+  SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS + 30_000;
+
+/**
+ * Session naming deadline chain, innermost first. Preparation (neutral directory, provider
+ * authentication, process start) is budgeted separately from generation so its normal variance
+ * cannot silently consume the provider's allowance, and every enclosing layer is strictly larger
+ * than the layer it supervises so an outer transport can never expire first:
+ *
+ *   preparation (<= 3s) + generation (>= 12s) = runner budget 15s
+ *     -> runner teardown allowance (<= 1s), inside the margin below rather than competing with it
+ *       -> control-plane runner request 17s
+ *         -> control-plane supervision abort 18s
+ *           -> desktop remote read budget 35s (apps/desktop/src-tauri/src/remote_transport.rs)
+ *
+ * A custom endpoint may be configured up to 30s, so its supervision worst case is 33s — still
+ * under the desktop read budget.
+ *
+ * The total stays bounded: the runner clamps any requested budget to the runner budget below.
+ */
+export const SESSION_NAMING_PREPARATION_BUDGET_MS = 3_000;
+export const SESSION_NAMING_GENERATION_BUDGET_MS = 12_000;
+export const SESSION_NAMING_RUNNER_BUDGET_MS =
+  SESSION_NAMING_PREPARATION_BUDGET_MS + SESSION_NAMING_GENERATION_BUDGET_MS;
+/** After the title is known the runner still tears down its neutral directory and isolation
+ * boundary, and a `return` inside `try` does not settle until `finally` completes. A WSL `rm -rf`
+ * alone is allowed five seconds, so awaiting teardown unbounded would let housekeeping push a
+ * generated title past the control plane's round-trip deadline and report it as a timeout. The
+ * runner therefore waits only this long for teardown and lets an overrun finish detached. */
+export const SESSION_NAMING_CLEANUP_BUDGET_MS = 1_000;
+/** Extra time the control plane waits on the runner round trip beyond the runner's own budget.
+ * Must exceed the cleanup budget, or teardown can still outlast the deadline it sits inside. */
+export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_MS + 1_000;
+/** Extra time the control plane's own abort timer allows beyond that runner request deadline. */
+export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
+export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
+export type { ConversationHandoffDraft } from "./conversation-handoff.js";
+import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
+export {
+  attentionRequestRank,
+  pendingRequests,
+  prioritizedPendingRequests,
+  addPendingRequest,
+  removePendingRequest,
+} from "./worker-attention.js";
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
+/** Maximum number of managed background jobs projected into one SessionView. */
+export const MANAGED_BACKGROUND_JOB_VIEW_LIMIT = 128;
 
 /** Version of the UI-facing control-plane HTTP/WebSocket contract. This is intentionally
  * independent of PROTOCOL_VERSION, which negotiates runner capabilities. Remote-instance
@@ -371,6 +509,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   hunkStaging: 13,
   fineGrainedDiff: 50,
   githubReviewReconciliation: 51,
+  forgeIntegration: 106,
   podReconciliation: 52,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -386,11 +525,15 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   policyHookAsk: 66,
   sessionStartFencedShells: 67,
   sessionFiles: 16,
+  workspaceReferences: 106,
   sessionShells: 17,
   hostActions: 22,
   queuedPromptCancellation: 23,
   checkpointRewind: 25,
   conversationFork: 28,
+  conversationHandoff: 110,
+  /** Runner reports provider-history quarantine and accepts recovery forks/handoffs for it. */
+  providerHistoryQuarantine: 128,
   runtimeDiagnostics: 32,
   acpLogout: 34,
   acpSessionContext: 38,
@@ -406,15 +549,29 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   durablePromptQueueIdentity: 78,
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
-  /** The control plane serves an experiment-gated web bundle (versioned conductor storage,
-   * default off). Runners fence unconditional conductor advertisement on this floor. */
-  ungatedConductorAdvertisement: 91,
   managedBackgroundDelivery: 82,
+  managedBackgroundInventory: 82,
+  backgroundMissingResultRecovery: 134,
+  workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
   stopFailureRecovery: 85,
   stopAttemptCorrelation: 89,
   agentSkills: 90,
+  machineSkillSnapshots: 111,
+  nativeWindowsMachineSkillSnapshots: 119,
+  nativeWindowsSkillDeployment: 119,
+  nativeMacosMachineSkillSnapshots: 120,
+  /** v121 runners publish a content-free, live-discovered Native TUI accounting boundary. */
+  nativeTuiAccountingDiagnostics: 121,
+  /** Runner separates base model identity from context-window variants and publishes the
+   * effective post-launch window for native drivers. */
+  contextWindowVariants: 122,
+  wslMachineSkills: 125,
+  /** Per-model Codex service-tier catalogs and the selected session tier travel end to end. */
+  codexServiceTiers: 126,
+  machineSkillAdoption: 115,
+  machineSkillAdoptionRecovery: 116,
   chunkedAgentSkills: 96,
   /** v96 runners emit the additive `skills_state.removals` event projection. */
   skillLinkRemovalReporting: 96,
@@ -423,8 +580,35 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingTargets: 95,
   sessionNamingDriftCodes: 97,
   sessionAgentControl: 100,
+  sessionOrchestration: 109,
+  orchestratorNativeTui: 112,
+  /** Target-local Linux helper plus runner-side authenticated broker for Direct WSL only. */
+  wslAgentControlBridge: 123,
+  /** Fresh discovery attests the no-follow target-local launcher required for Direct WSL. */
+  wslSafeLauncher: 124,
+  /** Correlated runner-owned policy-hook decision events replace timestamp-based UI synthesis. */
+  nativePolicyHookEvents: 130,
+  /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
+  usageTokenBuckets: 103,
+  /** v104 runners stamp the producing model on token_usage. */
+  usageEventModel: 104,
+  /** v105 runners honour `rearm_governance.holdFor: "control_plane"` as a queue-only hold. */
+  controlPlaneQueueHold: 105,
+  /** v106 runners enforce the control-plane-priced cumulative cost during the active turn. */
+  pricedSessionCost: 106,
+  /** v129 runners report the exact threshold that cancelled a turn. */
+  governanceTripReporting: 129,
+  /** v107 runners durably resume non-secret structured-question answers after process loss. */
+  resumableQuestionAnswers: 107,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
+  progressAwareSessionWorktrees: 113,
+  /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
+  hostAdministration: 114,
+  /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
+  hostAdminDoctor: 117,
+  /** Revisioned per-Machine capacity configuration, live resize, and usage/queue reporting. */
+  machineRunnerCapacity: 132,
 } as const;
 
 /* ========================================================================== */
@@ -559,12 +743,51 @@ export function providerAuthenticationReceiptCode(
 /** Additive event kinds that have an explicit older-peer wire policy. Kinds absent from this
  * table are sent unchanged: an unreviewed event must fail closed at an older consumer rather than
  * being silently discarded. */
+/**
+ * Additive event kinds that older peers must not receive.
+ *
+ * Adding an entry changes the projected-history-epoch encoding (`localEpoch * VARIANTS + variant`).
+ * Protocol v130 therefore reserves an offset before the three-way encoding. For the same or any
+ * later local epoch, every new-format value sorts above both values the one-policy format could
+ * have published, forcing a resync before a cached sequence number can name a different event.
+ *
+ * Prefer carrying additive state on the session snapshot, which is version-gated per field and
+ * needs no sequence space at all.
+ */
 const SESSION_EVENT_WIRE_POLICIES = {
   agent_response_completed: { minProtocol: 87, legacy: "omit" },
+  policy_hook_decision: { minProtocol: 130, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
   minProtocol: number;
   legacy: "omit";
 }>>;
+
+/**
+ * Which projection this peer receives, as a dense index. 0 is the exact local history; each higher
+ * value omits one more event kind.
+ *
+ * Thresholds are an ordered chain — a peer below a lower threshold is below every higher one — so
+ * counting unmet policies yields a contiguous index rather than a sparse bitmask.
+ *
+ * This must identify WHICH projection a peer gets, not merely that it gets one. Two peers omitting
+ * different event sets number the same log differently, so they occupy different dense sequence
+ * spaces; collapsing them to a single "projected" flag lets a reconnect at a different version
+ * reuse cursors whose sequence numbers now name different events.
+ */
+export function sessionEventWireProjectionVariant(
+  protocolVersion: number | null | undefined,
+): number {
+  return Object.values(SESSION_EVENT_WIRE_POLICIES).filter(
+    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
+  ).length;
+}
+
+/** Total distinct projections, including the exact one. */
+export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
+  Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
+
+/** Numeric fence between the retired two-way encoding and the v130 three-way encoding. */
+export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 2;
 
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
@@ -572,9 +795,7 @@ const SESSION_EVENT_WIRE_POLICIES = {
 export function sessionEventWireProjectionRequiredForProtocol(
   protocolVersion: number | null | undefined,
 ): boolean {
-  return Object.values(SESSION_EVENT_WIRE_POLICIES).some(
-    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
-  );
+  return sessionEventWireProjectionVariant(protocolVersion) > 0;
 }
 
 /** Project one exact runner-local event payload for the currently connected control plane.
@@ -650,9 +871,25 @@ export interface AgentModel {
   efforts?: string[];
   /** The model's own default reasoning effort, if any. */
   defaultEffort?: string;
-  /** Total context window (tokens) for this model, if known — powers the context-fill meter.
-   * Curated per (driver, model); absent ⇒ the UI shows no fill %. */
+  /** Provider-advertised service tiers for this model. Identifiers are deliberately open strings. */
+  serviceTiers?: AgentModelServiceTier[];
+  /** The model catalog's default service-tier identifier, when advertised. */
+  defaultServiceTier?: string;
+  /** Total context window (tokens) for this model when the provider's own metadata states it —
+   * powers the context-fill meter and the Context Window selector. Never inferred from a model
+   * name or family; absent ⇒ unknown until the live session reports its effective window. */
   contextWindow?: number;
+  /** Protocol v120: the provider's base model identity when this entry is one context-window
+   * variant of it (Claude Code lists `opus` and `opus[1m]` as separate launchable ids). Entries
+   * sharing a base with distinct known `contextWindow` values form a real Context Window choice.
+   * Absent ⇒ the entry is its own base. */
+  baseModelId?: string;
+}
+
+export interface AgentModelServiceTier {
+  id: string;
+  name: string;
+  description?: string;
 }
 
 export interface AgentSlashCommand {
@@ -724,6 +961,85 @@ export interface UnmanagedSkillInfo {
   description?: string;
 }
 
+/** Ephemeral discovery identity, not a path accepted from a client. */
+export interface MachineSkillCandidate {
+  id: string;
+  name: string;
+  sourceDirectory: string;
+  generation: string;
+  /** Absent means the runner's native host. WSL candidates stay in their named distro. */
+  context?: AgentContext;
+}
+
+export interface SkillSnapshotMessage {
+  type: "skill_snapshot";
+  runnerId: string;
+  requestId: string;
+  operation: "list" | "read";
+  candidateId?: string;
+}
+
+export interface SkillSnapshotResultMessage {
+  type: "skill_snapshot_result";
+  runnerId: string;
+  requestId: string;
+  candidates?: MachineSkillCandidate[];
+  snapshot?: { candidate: MachineSkillCandidate; files: SkillFile[]; digest: string; executablePaths?: string[] };
+  error?: string;
+}
+
+/** One explicitly confirmed adoption of an opaque, unexpired runner discovery candidate.
+ * The runner independently matches this against its current desired skill snapshot. */
+export interface SkillAdoptionMessage {
+  type: "skill_adoption";
+  runnerId: string;
+  requestId: string;
+  candidate: MachineSkillCandidate;
+  digest: string;
+  confirmation: "explicit";
+  acceptSharedImpact: boolean;
+}
+
+export interface SkillAdoptionResultMessage {
+  type: "skill_adoption_result";
+  runnerId: string;
+  requestId: string;
+  status: "adopted" | "rejected" | "recovery_required";
+  operationId?: string;
+  backupDirectory?: string;
+  error?: string;
+}
+
+export interface SkillAdoptionRecoveryOperation {
+  operationId: string;
+  backupDirectory: string;
+  sourceDirectory: string;
+  name: string;
+  digest: string;
+  state: "intent_only" | "source_preserved" | "managed_linked" | "restored" | "blocked";
+  detail: string;
+}
+
+export interface SkillAdoptionRecoveryMessage {
+  type: "skill_adoption_recovery";
+  runnerId: string;
+  requestId: string;
+  operation: "list" | "restore";
+  operationId?: string;
+  confirmation?: "explicit";
+}
+
+export interface SkillAdoptionRecoveryResultMessage {
+  type: "skill_adoption_recovery_result";
+  runnerId: string;
+  requestId: string;
+  status: "listed" | "restored" | "not_needed" | "blocked" | "recovery_required";
+  operations?: SkillAdoptionRecoveryOperation[];
+  operation?: SkillAdoptionRecoveryOperation;
+  truncated?: boolean;
+  error?: string;
+}
+
 /** One managed skill link removed during a runner reconciliation pass. */
 export interface SkillLinkRemoval {
   /** Home-relative display path; never an absolute host path. */
@@ -793,13 +1109,27 @@ export interface SessionCapabilityOverlay {
 
 export type SessionCapabilities = AgentCapabilities | SessionCapabilityOverlay;
 
+/** A catalog-only marker that advertises runner-owned orchestration without inventing provider
+ * controls before an ACP session has negotiated them. Consumers must not treat its empty arrays
+ * as authoritative ACP model/effort/command catalogs. */
+export function isOrchestratorOnlyCapabilities(
+  capabilities: AgentCapabilities | undefined,
+): boolean {
+  const modes = capabilities?.permissionModes;
+  const transports = capabilities?.elicitation?.orchestrator;
+  return capabilities !== undefined && capabilities.models.length === 0 &&
+    capabilities.effortLevels.length === 0 && capabilities.slashCommands.length === 0 &&
+    modes?.length === 1 && modes[0] === "orchestrator" &&
+    transports?.length === 1 && transports[0] === "none";
+}
+
 /** Overlay session-scoped transport truth onto the current catalog. ACP snapshots carry a full
  * capability object and remain authoritative for their provider-native session controls. */
 export function mergeSessionCapabilities(
   catalog: AgentCapabilities | undefined,
   session: SessionCapabilities | undefined,
 ): AgentCapabilities | undefined {
-  if (!session) return catalog;
+  if (!session) return isOrchestratorOnlyCapabilities(catalog) ? undefined : catalog;
   if ("models" in session) return session;
   if (!catalog) return undefined;
   return {
@@ -896,10 +1226,38 @@ export interface ClaudeCodeCapabilities {
   failure?: ClaudeCodeFailure;
 }
 
-/** Resolved per-session knobs (model / reasoning effort / approval preset). */
+/** Proof obligations a provider-owned Native TUI must meet before Wollipog may attribute usage.
+ * These are deliberately fixed identifiers: discovery never forwards provider output, terminal
+ * text, local paths, prompts, or history into runner metadata. */
+export type NativeTuiAccountingRequirement =
+  | "authoritative_usage_events"
+  | "pre_first_turn_binding"
+  | "stable_event_identity"
+  | "replay_watermark"
+  | "gap_detection";
+
+/** Live-discovered boundary for provider-owned interactive terminals. This diagnostic is not an
+ * accounting capability: an incomplete provider contract always remains unavailable, and no
+ * caller may use it to relax Native TUI budget or usage guardrails. */
+export interface NativeTuiAccountingBoundary {
+  status: "unavailable";
+  provider: "claude-code" | "codex";
+  installedVersion?: string;
+  verification: "live-cli-contract" | "provider-not-installed";
+  /** Where the nearest structured usage signal exists; neither value is the launched Native TUI. */
+  nearestStructuredSurface: "print-mode-only" | "separate-app-server" | "none";
+  missingRequirements: NativeTuiAccountingRequirement[];
+}
+
+/** Resolved per-session knobs (model / reasoning effort / service tier / approval preset). */
 export interface SessionConfig {
+  /** Control-plane-owned concurrent live-child cap. Terminal or archived children do not occupy
+   * a slot, but their already-reserved usage remains part of parent ceiling accounting. */
+  maxChildSessions?: number;
   model?: string;
   effort?: string;
+  /** Codex service-tier id. `default` means standard speed; identifiers remain provider-defined. */
+  serviceTier?: string;
   permissionMode?: string;
   /** Absolute accumulated-cost threshold (USD). A v47 runner cancels at the first observable
    * crossing; the control plane parks and asks. Older runners retain between-turn enforcement. */
@@ -907,6 +1265,28 @@ export interface SessionConfig {
   /** Absolute distinct-tool-call threshold. A v47 runner cancels at the first observable crossing;
    * the control plane parks and asks. Absent ⇒ unlimited; ≤0 in setConfig clears the limit. */
   maxToolCalls?: number;
+  /** Ascending cost amounts (USD) below the hard budget at which the control plane parks the
+   * session once with a Continue/Stop card. Approving records the checkpoint; declining stops the
+   * turn without recording it, so the next turn over the same amount asks again. Empty ⇒ none.
+   * Control-plane owned; runners ignore it (v105+). */
+  costCheckpointsUsd?: number[];
+}
+
+/** Native provider TUIs do not expose their turns through Wollipog's structured event stream.
+ * A positive tracked guardrail therefore cannot coexist with a Native TUI without presenting a
+ * limit that the provider process can silently bypass. Keep this check shared by API and UI. */
+export function nativeTuiHasTrackedGuardrails(
+  config: {
+    costBudgetUsd?: number | null;
+    maxToolCalls?: number | null;
+    costCheckpointsUsd?: number[] | null;
+  },
+): boolean {
+  return (typeof config.costBudgetUsd === "number" && Number.isFinite(config.costBudgetUsd) && config.costBudgetUsd > 0) ||
+    (typeof config.maxToolCalls === "number" && Number.isFinite(config.maxToolCalls) && Math.floor(config.maxToolCalls) > 0) ||
+    (Array.isArray(config.costCheckpointsUsd) && config.costCheckpointsUsd.some(
+      (checkpoint) => Number.isFinite(checkpoint) && checkpoint > 0,
+    ));
 }
 
 /** A runner-local environment lookup. The referenced value is resolved only on the runner and is
@@ -992,11 +1372,23 @@ export interface AgentDefinition {
   codexAppServer?: CodexAppServerCapabilities;
   /** Claude-only launch-readiness result. Absent on pre-v30 runners and non-Claude agents. */
   claudeCode?: ClaudeCodeCapabilities;
+  /** Content-free Native TUI accounting boundary. Absent on pre-v121 runners and non-provider agents. */
+  nativeTuiAccounting?: NativeTuiAccountingBoundary;
   /** The logical binary name discovery resolved ("claude", "codex"). Launch-target identity for
    * config↔discovery merging: a version-manager install launches as `node <entry.js>` whose
    * entry file may be generically named (cli.js/index.js), so neither command nor args identify
    * the agent — this does. Absent on config entries and pre-v18 runners. */
   bin?: string;
+  /** Discovery-verified target-local runtime for the narrow Direct WSL Agent Control helper.
+   * Secret-free; absence means WSL orchestration must fail closed. */
+  wslAgentControl?: {
+    protocolVersion: 1;
+    nodeRuntime: string;
+    /** Present only after fresh target-local prerequisite attestation. A relay alone is not a
+     * filesystem isolation boundary and must never enable Direct WSL orchestration. */
+    safeLauncherProtocolVersion?: 1;
+    bwrapRuntime?: string;
+  };
 }
 
 /** Stable ACP capabilities observed from a live initialize handshake. Content-free and safe to
@@ -1058,12 +1450,20 @@ export interface ProjectLocationView {
   updatedAt: number;
 }
 
+/** Fallback allowances for agent-created child sessions. */
+export interface ChildSessionDefaults {
+  costBudgetUsd: number;
+  maxToolCalls: number;
+}
+
 /** Durable user-visible container for related sessions. A Project remains in this inventory when
  * it has no sessions or every Location is unavailable. */
 export interface ProjectView {
   id: string;
   name: string;
   hidden: boolean;
+  /** Finite fallback allowances for agent-created children of sessions in this Project. */
+  childSessionDefaults?: ChildSessionDefaults | null;
   /** Ownership audience for user-facing sharing copy. Older control planes may omit it. */
   audience?: ResourceOwner["kind"];
   /** Exact ownership for explicit access controls. Older control planes may omit it. */
@@ -1197,6 +1597,42 @@ export interface RunnerRuntimeInfo {
   };
 }
 
+export type RunnerCapacityBlockerKind =
+  | "runner_capacity"
+  | "agent_quota"
+  | "target_quota"
+  | "exclusive_group"
+  | "request_weight"
+  | "queue_order";
+
+/** Content-free explanation of the exact admission boundary holding one or more sessions. */
+export interface RunnerCapacityBlocker {
+  kind: RunnerCapacityBlockerKind;
+  description: string;
+  usedUnits: number;
+  limitUnits: number;
+  requiredUnits: number;
+  agentId?: string;
+  targetId?: string;
+  waitingSessions?: number;
+}
+
+/** Durable control-plane configuration coordinate sent to the runner. */
+export interface RunnerCapacityConfiguration {
+  configuredUnits: number;
+  revision: number;
+}
+
+/** Runner-authored live lease accounting projected into Machine settings. */
+export interface RunnerCapacityState extends RunnerCapacityConfiguration {
+  authority: "runner_local" | "control_plane";
+  usedUnits?: number;
+  availableUnits?: number;
+  queuedSessions?: number;
+  blockers?: RunnerCapacityBlocker[];
+  reportedAt?: number;
+}
+
 export type RunnerStatus = "online" | "offline";
 
 /** Denormalised runner record as the UI consumes it (REST + WS). */
@@ -1215,6 +1651,10 @@ export interface RunnerView {
   /** Editors found on the host (for "Open in …"); absent/empty hides the control. */
   editors?: EditorInfo[];
   runtime?: RunnerRuntimeInfo;
+  /** v132 authoritative configuration plus latest runner-authored usage. */
+  capacity?: RunnerCapacityState;
+  /** Principal-specific mutation permission; absent on older control planes. */
+  canManage?: boolean;
   /** Protocol v60 projection. Placement is separate from the agent definitions above. */
   executionTargets?: ExecutionTargetDefinition[];
   connectedAt: number | null;
@@ -1327,6 +1767,52 @@ export interface DeviceView {
   organizationId: string;
   organizationName: string;
   role: OrganizationRole;
+}
+
+/** Read-only operational facts for `wollipog admin status` (protocol v114+). Never carries secrets. */
+export interface HostAdminStatusView {
+  service: ControlPlaneService;
+  appVersion: string;
+  protocolVersion: number;
+  apiVersion: number;
+  health: { ok: boolean; startedAt: number; uptimeMs: number };
+  bind: {
+    host: string;
+    port: number;
+    mode: "loopback" | "wildcard" | "address";
+    tailnetOnly: boolean;
+    boundBeyondLoopback: boolean;
+  };
+  /** Configured `CONTROL_PLANE_PUBLIC_ORIGIN`, or null when pairing links fall back to bind hosts. */
+  publicOrigin: string | null;
+  dashboard: { webServed: boolean; pairingHosts: string[] };
+  database: { path: string; ready: boolean };
+  artifactStore: { path: string; ready: boolean };
+  /** Protected local bootstrap credential file audit; `issues` is empty when it is safe. */
+  localCredential: { path: string; safe: boolean; issues: string[] };
+  runners: { registered: number; online: number; items: Array<{ runnerId: string; status: string; version: string; protocolVersion: number | null }> };
+  devices: { paired: number };
+  warnings: string[];
+}
+
+export type HostAdminCheckStatus = "pass" | "warn" | "fail";
+
+/** One doctor check. `remedy` is an operator action, never a secret. */
+export interface HostAdminCheck {
+  id: string;
+  status: HostAdminCheckStatus;
+  summary: string;
+  detail?: string;
+  remedy?: string;
+}
+
+/** `GET /api/admin/doctor` (protocol v117+): server-side checks plus the status they were derived from. */
+export interface HostAdminDoctorView {
+  generatedAt: number;
+  /** True when no check failed; warnings do not clear this. */
+  ok: boolean;
+  checks: HostAdminCheck[];
+  status: HostAdminStatusView;
 }
 
 export type OrganizationRole = "owner" | "admin" | "operator" | "viewer";
@@ -1587,6 +2073,7 @@ export interface PolicyHookEvaluationResponse {
 export type SessionAttentionKind =
   | "approval_required"
   | "answer_required"
+  | "recovery_required"
   | "authentication_required"
   | "review_requested"
   | "input_required";
@@ -1597,11 +2084,131 @@ export interface SessionAttentionStatus {
   description: string;
 }
 
+/** One exact child identity projected from the runner-owned session history. `toolCallId` is the
+ * spawning agent tool; `parentToolUseId` is copied only from that structured spawn event. */
+export interface ChildSessionRegistryEntry {
+  toolCallId: string;
+  parentToolUseId?: string;
+  name: string;
+  role?: string;
+  status: string;
+  lifecycle?: AuthoritativeSubagentLifecycle;
+  sourceSeq: number;
+  startedAt: number;
+  lastActivityAt: number;
+  completedAt?: number;
+  toolCount: number;
+  latestTool?: { title: string; active: boolean };
+}
+
+/** Pending ownership is returned separately and on every page so pagination can never hide or
+ * silently retarget an unresolved request. A false `resolved` value remains session-actionable. */
+export interface ChildSessionAttentionOwner {
+  requestId: string;
+  toolCallId: string;
+  resolved: boolean;
+  name?: string;
+  role?: string;
+}
+
+export interface ChildSessionRegistryPage {
+  children: ChildSessionRegistryEntry[];
+  attentionOwners: ChildSessionAttentionOwner[];
+  /** Exact agent ids that could not safely become rows because the provider reused an id. */
+  unidentifiedChildren: number;
+  eventEpoch: number;
+  nextAfter: number | null;
+  truncated: boolean;
+}
+
 /** Canonical, compatibility-safe projection of the concrete action a person must take. */
 export function sessionAttentionStatus(
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
+): SessionAttentionStatus | null {
+  const result = singleSessionAttentionStatus(session);
+  if (!result || !session.pendingApproval?.ownerToolUseId || session.pendingApproval.additionalRequests?.length) return result;
+  const owner = session.attentionOwners?.find((value) =>
+    value.requestId === session.pendingApproval?.requestId && value.toolCallId === session.pendingApproval.ownerToolUseId);
+  if (owner?.resolved) {
+    const role = owner.role?.replace(/\b\p{L}/gu, (letter) => letter.toUpperCase());
+    const identity = `${owner.name ?? "Subagent"}${role ? ` · ${role}` : ""}`;
+    return { ...result, label: `${identity} · ${result.label}`,
+      description: `${identity} owns this request. ${result.description} Open Agents to inspect the exact worker and request.` };
+  }
+  return { ...result, label: `Child ${result.label}`,
+    description: `A child agent owns this request. ${result.description} Open Agents to inspect the owner and exact request.` };
+}
+
+/** One kind of attention a session needs, with every request of that kind behind it. */
+export interface SessionAttentionGroup extends SessionAttentionStatus {
+  /** How many requests carry this label. */
+  count: number;
+  /** In priority order, then arrival. */
+  requests: PendingApproval[];
+  /** Who owns each request, in the same order: the main agent, a resolved child, or an unresolvable child. */
+  owners: string[];
+}
+
+/**
+ * The per-kind breakdown a list card shows instead of the rolled-up "N Actions Required": one group
+ * per attention label, in priority order, each with its count. A session with one request yields
+ * one group of one, so a surface can use this for every card and never special-case the rollup.
+ */
+export function sessionAttentionBreakdown(
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">,
+): SessionAttentionGroup[] {
+  const requests = prioritizedPendingRequests(session.pendingApproval);
+  if (requests.length === 0) {
+    const fallback = singleSessionAttentionStatus(session);
+    return fallback ? [{ ...fallback, count: 0, requests: [], owners: [] }] : [];
+  }
+  const groups: SessionAttentionGroup[] = [];
+  for (const request of requests) {
+    const status = singleSessionAttentionStatus({ status: session.status, pendingApproval: request });
+    if (!status) continue;
+    const owner = session.attentionOwners?.find((value) =>
+      value.requestId === request.requestId && value.toolCallId === request.ownerToolUseId);
+    const role = owner?.role?.replace(/\b\p{L}/gu, (letter) => letter.toUpperCase());
+    const ownerLabel = !request.ownerToolUseId
+      ? "Main Agent"
+      : owner?.resolved ? `${owner.name ?? "Subagent"}${role ? ` · ${role}` : ""}` : "Child Owner Unavailable";
+    const group = groups.find((candidate) => candidate.label === status.label);
+    if (group) {
+      group.count += 1;
+      group.requests.push(request);
+      group.owners.push(ownerLabel);
+    } else {
+      groups.push({ ...status, count: 1, requests: [request], owners: [ownerLabel] });
+    }
+  }
+  return groups;
+}
+
+function singleSessionAttentionStatus(
   session: Pick<SessionView, "status" | "pendingApproval">,
 ): SessionAttentionStatus | null {
   const pending = session.pendingApproval;
+  const requests = pendingRequests(pending);
+  if (requests.length > 1) {
+    const children = requests.filter((request) => request.ownerToolUseId).length;
+    const questions = requests.filter((request) => request.kind === "question").length;
+    const authentication = requests.filter((request) => request.kind === "authentication").length;
+    const approvals = requests.length - questions - authentication;
+    return {
+      kind: "input_required",
+      label: `${requests.length} Actions Required`,
+      description: `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`,
+    };
+  }
+  if (pending?.kind === "question" && pending.recoveryReason === "provider_restart") {
+    return {
+      kind: "recovery_required",
+      label: "Recovery Required",
+      description: pending.recoveryAction === "resume_answer"
+        ? "The runner restarted while the agent was waiting. Submit the preserved answer to resume the conversation."
+        : "The runner restarted while the agent was waiting for an answer. Resolve the preserved question before continuing.",
+    };
+  }
   if (pending?.kind === "question") {
     return {
       kind: "answer_required",
@@ -1789,11 +2396,19 @@ export type ApprovalKind =
   | "permission"
   | "authentication"
   | "cost_budget"
+  | "cost_checkpoint"
+  | "cost_unpriced"
+  | "daily_budget"
   | "max_tool_calls"
   | "policy_hook"
   | "question";
 
 export interface PendingApproval {
+  /** v108: runner-verified spawning tool identity; never a raw provider thread id. */
+  ownerToolUseId?: string;
+  /** v108: other concurrent provider requests in this SAME approval store. The first request
+   * remains the legacy presentation. Entries never contain another additionalRequests array. */
+  additionalRequests?: PendingApproval[];
   requestId: string;
   title: string;
   options: PermissionOption[];
@@ -1805,12 +2420,30 @@ export interface PendingApproval {
   kind?: ApprovalKind;
   /** The structured questions when kind === "question". */
   questions?: AgentQuestion[];
+  /** The provider-owned response callback ended with its process. The question remains visible and
+   * dismissible, but must not accept an answer that can no longer reach the exact request. */
+  recoveryReason?: "provider_restart";
+  /** The runner proved that this recovered, non-secret question can continue the same provider
+   * conversation through the durable answer command lane. Absence retains dismiss-only recovery. */
+  recoveryAction?: "resume_answer";
+  /** Stable identity of this exact recovered question occurrence. Provider request ids can repeat
+   * after process restart, so durable delivery must bind to this runner-owned discriminator too. */
+  recoveryId?: string;
   /** What is being approved, when the driver can say (kind "permission"). */
   context?: ApprovalContext;
   /** Content-safe provenance for a CP-owned Claude hook ask. */
   governancePolicyId?: string;
   /** Absolute deadline for a policy hook ask. Absence means wait indefinitely. */
   expiresAt?: number;
+  /** v129: content-free runner evidence for a runner-owned threshold cancellation. It lets
+   * Continue synchronize a cleared or changed control-plane rule instead of assuming the stale
+   * runner threshold is still authoritative. */
+  runnerGuardrail?: {
+    tripId: string;
+    kind: RunnerGuardrailKind;
+    threshold: number;
+    observed: number;
+  };
 }
 
 export type GovernanceActorKind = "human" | "agent" | "policy" | "system";
@@ -1861,6 +2494,15 @@ export interface GovernancePolicyConditions {
 }
 
 export type GovernancePolicyEffect = "allow" | "deny" | "ask";
+/** Case-insensitive whole-field patterns; '*' is the only wildcard. Every populated field
+ * must match. Replies are validated against the provider's offered form before delivery. */
+export interface GovernanceQuestionRule {
+  /** Starter rules additionally exclude protected-action language across the complete form. */
+  starterCategory?: "review" | "push" | "evidence";
+  headerPattern?: string;
+  questionPattern?: string;
+  answer: { option: string } | { text: string };
+}
 export interface GovernancePolicy {
   policyId: string;
   name: string;
@@ -1868,6 +2510,9 @@ export interface GovernancePolicy {
   priority: number;
   enabled: boolean;
   scope: GovernancePolicyScope;
+  /** Question policies never participate in command approvals. */
+  ownerUserId?: string;
+  questionRule?: GovernanceQuestionRule;
   conditions?: GovernancePolicyConditions;
   /** Seconds a hook-backed `ask` may wait. Absence means wait indefinitely. */
   askTimeout?: number;
@@ -1968,7 +2613,7 @@ export interface ApprovalQueueRejectResult {
 export type ReviewFindingSeverity = "blocker" | "major" | "minor" | "nit";
 export type ReviewFindingStatus = "open" | "sent" | "resolved" | "dismissed";
 export type ReviewFindingSide = "left" | "right";
-export type ReviewFindingSource = "local" | "github";
+export type ReviewFindingSource = "local" | "github" | "gitlab";
 
 /** Durable line-anchored review feedback. `diffHash` makes a comment's source snapshot explicit;
  * comments whose hash no longer matches the visible diff remain in the findings list as stale
@@ -1999,7 +2644,7 @@ export interface ReviewFinding {
 }
 
 export interface ReviewFindingRemote {
-  provider: "github";
+  provider: ForgeProvider;
   repository: string;
   pullRequestNumber: number;
   threadId: string;
@@ -2007,7 +2652,7 @@ export interface ReviewFindingRemote {
   url: string;
   commitId: string;
   outdated: boolean;
-  subjectType: "line" | "file";
+  subjectType: "line" | "file" | "remote";
   synchronizedAt: number;
 }
 
@@ -2056,9 +2701,18 @@ export interface ReviewFindingsResponse {
  * policy engine can park the session. */
 export type PolicyRule =
   | { kind: "cost_budget"; budgetUsd: number }
-  | { kind: "max_tool_calls"; maxCalls: number };
+  | { kind: "max_tool_calls"; maxCalls: number }
+  /** A soft checkpoint below the budget: asks once, then is remembered on approval (v105). */
+  | { kind: "cost_checkpoint"; checkpointUsd: number }
+  /** A budgeted session whose recorded usage has no price fails closed rather than spending
+   * unbounded (v105). */
+  | { kind: "cost_unpriced" }
+  /** The organization's per-user daily allowance, measured across the owner's sessions (v105). */
+  | { kind: "daily_budget"; budgetUsd: number; spentUsd: number };
 
 export type PolicyRuleKind = PolicyRule["kind"];
+/** The rules a v47 runner enforces mid-turn; every other rule parks only on the control plane. */
+export type RunnerGuardrailKind = "cost_budget" | "max_tool_calls";
 
 /** The CP card decision remains "ok" or "ask"; active cancellation is runner-owned. */
 export interface PolicyDecision {
@@ -2068,7 +2722,7 @@ export interface PolicyDecision {
   title?: string;
 }
 
-export const GUARDRAIL_APPROVAL_KINDS = ["cost_budget", "max_tool_calls"] as const;
+export const GUARDRAIL_APPROVAL_KINDS = ["cost_budget", "max_tool_calls", "cost_checkpoint", "cost_unpriced", "daily_budget"] as const;
 export const POLICY_APPROVAL_KINDS = [...GUARDRAIL_APPROVAL_KINDS, "policy_hook"] as const;
 
 /** True for approvals the CONTROL PLANE owns. The card survives runner snapshots; v47 Continue
@@ -2095,6 +2749,90 @@ export interface PromptImageReference {
   mimeType: string;
   sizeBytes: number;
   sha256: string;
+}
+
+/** Metadata-only prompt attachment resolved by the owning runner against the exact session root.
+ * It deliberately extends the existing attachment-reference envelope so drafts, durable queues,
+ * and mixed control-plane versions preserve it atomically with image attachments. The MIME type
+ * distinguishes it before any artifact lookup: workspace contents never cross the control plane. */
+export const WORKSPACE_REFERENCE_MIME_TYPE = "application/vnd.wollipog.workspace-reference+json" as const;
+export const MAX_WORKSPACE_REFERENCES = 20;
+export const MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS = 50;
+
+export interface WorkspaceReference extends PromptImageReference {
+  artifactId: `workspace:${string}`;
+  mimeType: typeof WORKSPACE_REFERENCE_MIME_TYPE;
+  /** Workspace-reference schema, independent of the runner protocol version. */
+  referenceVersion: 1;
+  kind: "file" | "directory" | "lines" | "diff";
+  /** Session-root-relative POSIX path. */
+  path: string;
+  /** Hash of the canonical session root identity; prevents a queued reference retargeting. */
+  rootFingerprint: string;
+  /** File/directory identity at mint time. Also mirrored in `sha256` for envelope integrity. */
+  targetFingerprint: string;
+  startLine?: number;
+  endLine?: number;
+  /** Diff-only side and immutable change-set identity. */
+  side?: "left" | "right";
+  diffHash?: string;
+  diffScope?: GitDiffScope;
+}
+
+export interface WorkspaceReferenceCandidate {
+  path: string;
+  isDirectory: boolean;
+}
+
+export interface CreateWorkspaceReferenceRequest {
+  path: string;
+  kind: WorkspaceReference["kind"];
+  startLine?: number;
+  endLine?: number;
+  side?: WorkspaceReference["side"];
+  diffHash?: string;
+  diffScope?: WorkspaceReference["diffScope"];
+}
+
+export function isWorkspaceReference(value: unknown): value is WorkspaceReference {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) &&
+    (value as { mimeType?: unknown }).mimeType === WORKSPACE_REFERENCE_MIME_TYPE);
+}
+
+export function validateWorkspaceReference(value: unknown): { ok: true; value: WorkspaceReference } | { ok: false; error: string } {
+  if (!isWorkspaceReference(value)) return { ok: false, error: "workspace reference is malformed" };
+  const reference = value as unknown as Record<string, unknown>;
+  const allowed = new Set([
+    "artifactId", "mimeType", "sizeBytes", "sha256", "referenceVersion", "kind", "path",
+    "rootFingerprint", "targetFingerprint", "startLine", "endLine", "side", "diffHash", "diffScope",
+  ]);
+  if (Object.keys(reference).some((key) => !allowed.has(key))) {
+    return { ok: false, error: "workspace reference contains unsupported fields" };
+  }
+  const kind = reference.kind;
+  const path = reference.path;
+  const lineStart = reference.startLine;
+  const lineEnd = reference.endLine;
+  const lineKind = kind === "lines" || kind === "diff";
+  const diffKind = kind === "diff";
+  if (reference.referenceVersion !== 1 || typeof reference.artifactId !== "string" ||
+      !reference.artifactId.startsWith("workspace:") || reference.artifactId.length > 128 ||
+      reference.sizeBytes !== 0 || typeof path !== "string" || !path || path.length > 4096 ||
+      path.startsWith("/") || path.includes("\\") || path.split("/").some((part) => !part || part === "." || part === "..") ||
+      (kind !== "file" && kind !== "directory" && kind !== "lines" && kind !== "diff") ||
+      typeof reference.rootFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(reference.rootFingerprint) ||
+      typeof reference.targetFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(reference.targetFingerprint) ||
+      reference.sha256 !== reference.targetFingerprint ||
+      (lineKind && (!Number.isSafeInteger(lineStart) || !Number.isSafeInteger(lineEnd) ||
+        (lineStart as number) < 1 || (lineEnd as number) < (lineStart as number) || (lineEnd as number) > 1_000_000)) ||
+      (!lineKind && (lineStart !== undefined || lineEnd !== undefined)) ||
+      (diffKind && (reference.side !== "left" && reference.side !== "right")) ||
+      (diffKind && (typeof reference.diffHash !== "string" || !/^[a-f0-9]{64}$/.test(reference.diffHash))) ||
+      (diffKind && reference.diffScope !== "uncommitted" && reference.diffScope !== "all_branch" && reference.diffScope !== "last_turn") ||
+      (!diffKind && (reference.side !== undefined || reference.diffHash !== undefined || reference.diffScope !== undefined))) {
+    return { ok: false, error: "workspace reference has invalid identity or range metadata" };
+  }
+  return { ok: true, value };
 }
 
 /** Ordered UTF-8 artifact chunk for a large event field. Current control planes create these
@@ -2209,16 +2947,23 @@ export function validatePromptImageInputs(
   allowedMimeTypes: readonly string[] = PROMPT_IMAGE_MIME_TYPES,
 ): PromptImageValidation {
   if (!Array.isArray(images)) return { ok: false, error: "images must be an array" };
-  if (images.length > MAX_PROMPT_IMAGES) {
-    return { ok: false, error: `at most ${MAX_PROMPT_IMAGES} images may be attached` };
-  }
   const inline: PromptImage[] = [];
+  let imageCount = 0;
+  let referenceCount = 0;
+  let referencedBase64Bytes = 0;
   const allowedMimeSet = new Set<string>(allowedMimeTypes);
   for (let i = 0; i < images.length; i++) {
     const image = images[i]!;
     if (!image || typeof image !== "object" || Array.isArray(image)) {
       return { ok: false, error: `image ${i + 1} is malformed` };
     }
+    if (isWorkspaceReference(image)) {
+      referenceCount += 1;
+      const validation = validateWorkspaceReference(image);
+      if (!validation.ok) return { ok: false, error: `attachment ${i + 1}: ${validation.error}` };
+      continue;
+    }
+    imageCount += 1;
     if (!isPromptImageReference(image)) {
       if (Object.keys(image).some((key) => key !== "mimeType" && key !== "data") ||
           typeof image.mimeType !== "string" || typeof image.data !== "string") {
@@ -2242,8 +2987,25 @@ export function validatePromptImageInputs(
     if (!/^[a-f0-9]{64}$/.test(image.sha256)) {
       return { ok: false, error: `image ${i + 1} has an invalid SHA-256 digest` };
     }
+    referencedBase64Bytes += Math.ceil(image.sizeBytes / 3) * 4;
   }
-  return validatePromptImages(inline, allowedMimeTypes);
+  if (imageCount > MAX_PROMPT_IMAGES) {
+    return { ok: false, error: `at most ${MAX_PROMPT_IMAGES} images may be attached` };
+  }
+  if (referenceCount > MAX_WORKSPACE_REFERENCES) {
+    return { ok: false, error: `at most ${MAX_WORKSPACE_REFERENCES} workspace references may be attached` };
+  }
+  const inlineValidation = validatePromptImages(inline, allowedMimeTypes);
+  if (!inlineValidation.ok) return inlineValidation;
+  const totalBase64Bytes = referencedBase64Bytes +
+    inline.reduce((total, image) => total + image.data.length, 0);
+  if (totalBase64Bytes > MAX_PROMPT_IMAGE_TOTAL_BASE64_BYTES) {
+    return {
+      ok: false,
+      error: `combined image payload exceeds the ${MAX_PROMPT_IMAGE_TOTAL_BASE64_BYTES / 1024 / 1024} MiB base64 limit`,
+    };
+  }
+  return { ok: true };
 }
 
 /* ---------------------------- Session events ------------------------------ */
@@ -2311,6 +3073,10 @@ export type SessionEventPayload =
       parentToolUseId?: string;
       /** Provider-observed lifecycle for an agent-spawning tool (v92+). */
       subagentLifecycle?: AuthoritativeSubagentLifecycle;
+      /** Bounded provider-structured display identity for an agent spawn. Never parsed from
+       * transcript prose or provider-private thread/process identifiers. */
+      subagentName?: string;
+      subagentRole?: string;
     }
   | {
       kind: "tool_call_update";
@@ -2350,30 +3116,45 @@ export type SessionEventPayload =
       /** Recovery can restore session-scoped hook elicitation only when v66 provisioning proved it. */
       restoresElicitation?: boolean;
     }
+  | PolicyHookDecisionEvent
   | ({ kind: "review_decision" } & ReviewDecision)
-  | { kind: "permission_request"; requestId: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication" }
+  | { kind: "permission_request"; requestId: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication"; ownerToolUseId?: string }
   | {
       kind: "permission_resolved";
       requestId: string;
       optionId: string | null;
       resolutionReason?: StructuredRequestResolutionReason;
     }
-  | { kind: "question_request"; requestId: string; questions: AgentQuestion[] }
+  | { kind: "question_request"; requestId: string; questions: AgentQuestion[]; ownerToolUseId?: string }
+  | { kind: "question_policy_answered"; requestId: string; questionEventSeq?: number; policies: { policyId: string; name: string }[] }
   | {
       kind: "question_resolved";
       requestId: string;
       answered: boolean;
       resolutionReason?: StructuredRequestResolutionReason;
+      /** Durable recovery-command identity when provider continuation replaced a lost callback. */
+      commandId?: string;
     }
   | { kind: "checkpoint"; turn: number; tree: string }
   | { kind: "checkpoint_restored"; turn: number }
   | { kind: "conversation_checkpoint"; turn: number }
-  | { kind: "conversation_forked"; sourceSessionId: string; turn: number }
+  | { kind: "conversation_forked"; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
   | {
       kind: "token_usage";
+      /** Provider-reported input count. Anthropic reports the uncached portion only; Codex reports
+       * the total inclusive of `cachedInputTokens`. The control plane normalizes per driver. */
       inputTokens?: number;
       outputTokens?: number;
       cachedInputTokens?: number;
+      /** Prompt-cache write tokens (Anthropic `cache_creation_input_tokens`), v103+. */
+      cacheCreationInputTokens?: number;
+      /** Reasoning tokens already included in `outputTokens` (Codex), v103+. Never additive. */
+      reasoningOutputTokens?: number;
+      /** Provider model id that produced this record (v104+). Absent from older runners; the
+       * control plane then attributes the record to the session's resolved model. */
+      model?: string;
+      /** Provider-reported cost for this record. Absent when the provider bills opaquely; the
+       * control plane then prices the tokens from its rate table. */
       costUsd?: number;
       /** The spawning agent/task tool when this usage belongs to a subagent (v31+). */
       parentToolUseId?: string;
@@ -2391,14 +3172,90 @@ export interface SessionEvent {
   payload: SessionEventPayload;
 }
 
+/** Content-safe terminal policy-hook provenance. It deliberately excludes tool input, answers,
+ * policy predicates, and scope details; `toolCallId` is only the provider's opaque causal key. */
+export interface PolicyHookDecisionEvent {
+  kind: "policy_hook_decision";
+  auditId: string;
+  requestId: string;
+  stage: GovernanceAuditStage;
+  outcome: GovernanceAuditOutcome;
+  actor: GovernanceActor;
+  governancePolicyId?: string;
+  toolCallId: string;
+}
+
 /* ---------------------- Usage and cost aggregation ---------------------- */
 
 export type UsageAggregationGranularity = "hour" | "day";
 
+/** Why a figure's cost is what it is.
+ * - `providerReported`: every record carried an explicit provider cost.
+ * - `modelPriced`: at least one record was priced from the rate table and none were unpriced.
+ * - `unpriced`: at least one record's tokens are known but could not be priced. Tokens are counted;
+ *   the cost is a lower bound. `unpricedRecords` says how many. */
+export type UsageCostSource = "providerReported" | "modelPriced" | "unpriced";
+
 export interface UsageAmount {
+  /** Provider-reported input tokens, as accumulated on the runner (see `token_usage`). */
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
+  /** Input tokens billed at the full input rate; excludes both cache buckets (v103+). */
+  uncachedInputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationTokens: number;
+  /** Subset of `outputTokens`; never added on top of it. */
+  reasoningTokens: number;
+  /** Every token the provider processed: all input buckets plus output, derived per row with the
+   * driver's input semantics (Codex input already includes its cache reads) so it sums exactly
+   * across buckets, breakdowns, and drivers (v103+). Rows without a cache split count input only. */
+  processedTokens: number;
+  /** What cached input would have cost at the full input rate minus what it cost. */
+  cacheSavingsUsd: number;
+  costSource: UsageCostSource;
+  unpricedRecords: number;
+}
+
+/** One model's share of a session's usage, from the per-session per-model ledger (v104+). */
+export interface SessionModelUsage extends UsageAmount {
+  model: string;
+}
+
+/** `GET /api/sessions/:id/usage`: a session's usage split by the model that produced it, plus the
+ * session's own totals for the same buckets. Sorted by processed tokens, most first. */
+export interface SessionUsageResponse {
+  sessionId: string;
+  totals: UsageAmount;
+  byModel: SessionModelUsage[];
+  pricing?: UsagePricingStatus;
+}
+
+/** The organization's per-user daily cost allowance (v105). `perUserUsd: null` ⇒ no daily budget. */
+export interface UsageDailyBudgetPolicy {
+  perUserUsd: number | null;
+  updatedAt: number | null;
+}
+
+/** One user's spend over the standard windows, from the owner-scoped usage buckets (v105). */
+export interface UserCostWindows {
+  userId: string;
+  userName: string;
+  todayUsd: number;
+  last7DaysUsd: number;
+  last30DaysUsd: number;
+  /** The organization's per-user daily budget, repeated for convenience; null ⇒ none. */
+  dailyBudgetUsd: number | null;
+}
+
+/** Provenance for the rate table so the UI can be honest about how good the estimates are. */
+export interface UsagePricingStatus {
+  /** `fresh` inside the TTL, `cached` when serving a copy that could not be refreshed,
+   * `unavailable` when no table has loaded or pricing is disabled. */
+  status: "fresh" | "cached" | "unavailable";
+  source: string;
+  fetchedAt: number | null;
+  knownModels: number;
 }
 
 export interface UsageRetentionPolicy {
@@ -2410,6 +3267,11 @@ export interface UsageRetentionPolicy {
 
 export interface UsageTimeBucket extends UsageAmount {
   bucketTs: number;
+}
+
+/** One driver's share of one time bucket, for driver-stacked series (v103+). */
+export interface UsageDriverTimeBucket extends UsageTimeBucket {
+  driver: AgentDriverKind;
 }
 
 export interface UsageBreakdown extends UsageAmount {
@@ -2428,9 +3290,15 @@ export interface UsageAggregationResponse {
   totals: UsageAmount;
   /** Buckets in descending timestamp order, newest first. */
   series: UsageTimeBucket[];
+  /** The same buckets split per driver, newest first then driver; empty from pre-v103 planes. */
+  seriesByDriver: UsageDriverTimeBucket[];
   byDriver: UsageBreakdown[];
   byAgent: UsageBreakdown[];
   byRunner: UsageBreakdown[];
+  /** Keyed by the provider-resolved model id, or `unknown` when a session advertised none (v103+). */
+  byModel: UsageBreakdown[];
+  /** Rate-table provenance; absent only from control planes older than v103. */
+  pricing?: UsagePricingStatus;
 }
 
 /* -------------------------- Session naming ----------------------------- */
@@ -2601,6 +3469,19 @@ export interface AgentHarnessDefaultsView {
   defaults: AgentHarnessDefaultOption[];
 }
 
+/** Saved defaults apply as a complete combination, never partially under capability drift. */
+export function installationSupportsDefault(
+  installation: Pick<AgentHarnessDefaultInstallation, "models" | "effortLevels" | "permissionModes">,
+  config: AgentHarnessDefaultConfig,
+): boolean {
+  const model = config.model ? installation.models.find((candidate) => candidate.id === config.model) : undefined;
+  if (config.model && !model) return false;
+  const efforts = model?.efforts?.length ? model.efforts : installation.effortLevels;
+  if (config.effort && !efforts.includes(config.effort)) return false;
+  if (config.permissionMode && !installation.permissionModes.includes(config.permissionMode)) return false;
+  return Object.keys(config).length > 0;
+}
+
 export interface UpdateAgentHarnessDefaultRequest extends AgentHarnessIdentity {
   config: AgentHarnessDefaultConfig;
 }
@@ -2744,8 +3625,9 @@ export type ThreadType = "chat" | "project";
  * an explicit user title; optional on pre-v37 snapshots/rows. */
 export type SessionTitleSource = "generated" | "user" | "provider";
 
-/** Runner-observed durable Claude background-work lifecycle. Absent means the runner does not
- * expose background work for this session (including older runners and non-Claude drivers). */
+/** Runner-observed durable Claude background-work lifecycle. Absent means no managed work is
+ * currently active or awaiting delivery. `resumed` is accepted only for rolling compatibility
+ * with pre-v106 runners and must never be presented as a current state. */
 export type BackgroundWorkState = "running" | "continuation_pending" | "orphaned" | "resumed";
 
 /** Whether the runner can durably observe detached work for this provider. `untracked` is a
@@ -2768,6 +3650,30 @@ export interface ManagedBackgroundJobSnapshot {
   continuationQueuedAt?: number;
   continuationSubmittedAt?: number;
   continuationAcceptedAt?: number;
+  /** The accepted provider turn ended without a complete durable top-level assistant result. */
+  continuationMissingResultAt?: number;
+  assistantResultPersistedAt?: number;
+}
+
+/** Bounded, projection-safe control-plane view of one managed job. This intentionally omits raw
+ * commands, paths, provider context, output references, and credentials. */
+export interface ManagedBackgroundJobView {
+  id: string;
+  parentTurnId: string;
+  launchType: ManagedBackgroundJobSnapshot["launchType"];
+  registeredAt: number;
+  /** Most recent time the control plane received authoritative inventory evidence for this job. */
+  lastObservedAt: number;
+  /** Whether the job was present in the runner's latest inventory snapshot. */
+  sourcePresent: boolean;
+  terminalStatus?: NonNullable<ManagedBackgroundJobSnapshot["terminalStatus"]>;
+  terminalObservedAt?: number;
+  continuationRequired?: boolean;
+  continuationId?: string;
+  continuationQueuedAt?: number;
+  continuationSubmittedAt?: number;
+  continuationAcceptedAt?: number;
+  continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
 }
 
@@ -2818,6 +3724,10 @@ export interface BackgroundDeliveryView {
   queuedAt?: number;
   submittedAt?: number;
   acceptedAt?: number;
+  /** Runner proof that the accepted provider turn is terminal without a complete durable result. */
+  missingResultAt?: number;
+  /** Durable user resolution of a terminal missing result; audit evidence remains intact. */
+  missingResultAcknowledgedAt?: number;
   runnerResultPersistedAt?: number;
   transcriptProjectedAt?: number;
   notificationQueuedAt?: number;
@@ -2981,9 +3891,34 @@ export interface SessionCommandInvocationView {
   updatedAt: number;
 }
 
+/** How recovery rebuilds a usable conversation from the last safe checkpoint. "fork" asks the
+ * provider to branch the thread at that turn, which excludes every later item including the
+ * invalid one. "handoff" starts a fresh provider thread seeded with a bounded, sanitized draft of
+ * the visible dialogue, for providers or checkpoints where a safe fork is unavailable. */
+export type ProviderHistoryRecoveryMode = "fork" | "handoff";
+
+/** A provider-owned conversation that can no longer accept turns because its stored history
+ * contains an item the provider rejects before inference. Bounded and content-free: it names the
+ * structural cause and the recovery coordinate, never the offending value, the prompt text, or any
+ * provider thread/credential identifier. */
+export interface ProviderHistoryQuarantineView {
+  reason: "oversized_tool_call";
+  detectedAt: number;
+  /** Completed turn whose checkpoint precedes the invalid item. Absent means no safe conversation
+   * checkpoint was ever recorded, so this session cannot be recovered in place. */
+  recoveryTurn?: number;
+  /** Absent alongside `recoveryTurn` for the same reason: there is nothing to recover from. */
+  recovery?: ProviderHistoryRecoveryMode;
+  /** True once a prompt attempted after quarantine was retained as an unsent draft. */
+  retainedPrompt?: boolean;
+}
+
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
   id: string;
+  /** Control-plane-attributed creator session. Never accepted from a client or runner snapshot. */
+  parentSessionId?: string | null;
+  maxChildSessions?: number;
   runnerId: string;
   workspaceId: string | null;
   workspaceName: string | null;
@@ -3003,13 +3938,24 @@ export interface SessionView {
   titleSource?: SessionTitleSource;
   /** Canonical provider activity timestamp from stable ACP session_info_update; presentation-only. */
   providerUpdatedAt?: string;
+  /** Set when the provider conversation is quarantined; ordinary prompts and `/compact` cannot
+   * reach it and clients must offer recovery instead. Omitted by pre-v128 control planes. */
+  historyQuarantine?: ProviderHistoryQuarantineView;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */
   backgroundWorkTracking?: BackgroundWorkTracking;
   /** Durable control-plane delivery stages. Omitted by pre-v82 control planes. */
   backgroundDeliveries?: BackgroundDeliveryView[];
+  /** Bounded durable job inventory. Omitted by control planes that predate the panel contract. */
+  backgroundJobs?: ManagedBackgroundJobView[];
+  /** Whether job history exists. Compact session-list projections omit the inventory itself. */
+  backgroundJobsAvailable?: boolean;
+  /** True when older managed-job history exists beyond the projected bounded window. */
+  backgroundJobsTruncated?: boolean;
   status: SessionStatus;
+  /** Exact current admission boundary for a capacity-queued session. */
+  capacityWait?: RunnerCapacityBlocker;
   column: BoardColumn;
   runId: string | null;
   useWorktree: boolean;
@@ -3041,11 +3987,16 @@ export interface SessionView {
   /** Short snippet of the latest agent message, for the card preview. */
   preview: string | null;
   pendingApproval: PendingApproval | null;
+  /** Compact exact-owner joins for current pending requests. The full child registry remains
+   * paginated; unresolved ids stay present with `resolved: false`. */
+  attentionOwners?: ChildSessionAttentionOwner[];
   driver: AgentDriverKind;
   model: string | null;
   /** Provider-resolved model used by the live session; the selected alias remains in `model`. */
   resolvedModel?: string | null;
   effort: string | null;
+  /** Selected or provider-reconciled Codex service tier. Null lets the model default apply. */
+  serviceTier?: string | null;
   permissionMode: string | null;
   /** Live session-scoped controls (ACP modes/config/commands). Falls back to runner-agent
    * capabilities when absent on pre-v36 sessions. */
@@ -3057,6 +4008,9 @@ export interface SessionView {
   contextTokensUsed?: number;
   contextWindow?: number;
   costUsd: number;
+  /** Provenance for `costUsd` when the per-model ledger has caught up with the session totals.
+   * Omitted by older control planes and while the ledger trails the runner's live counters. */
+  costSource?: UsageCostSource;
   /** True for sessions adopted from an external CLI transcript — only these can be reprocessed. */
   adopted: boolean;
   /** Sidebar grouping. Absent ⇒ derive from `workspaceId` (null ⇒ "chat"). */
@@ -3071,11 +4025,17 @@ export interface SessionView {
   maxToolCallsStep?: number | null;
   /** Distinct tool calls recorded so far — populated only when `maxToolCalls` is set. */
   toolCallCount?: number;
+  /** Ascending cost checkpoints (USD) that park the session once each; null ⇒ none (v105+). */
+  costCheckpointsUsd?: number[] | null;
+  /** The highest checkpoint the user has approved; checkpoints at or below it never ask again. */
+  costCheckpointApprovedUsd?: number | null;
+  /** True once the user chose to continue a budgeted session whose usage cannot be priced. */
+  costUnpricedAcknowledged?: boolean;
   /** Prompts queued behind the running turn (ephemeral; absent/empty ⇒ nothing queued). */
   queued?: QueuedPromptView[];
   /** Durable user prompts rendered in the transcript while delivery remains incomplete/terminal. */
   pendingPrompts?: PendingPromptView[];
-  /** The runner interrupted the active turn and is holding the preserved FIFO for explicit resume. */
+  /** The runner is temporarily holding the preserved FIFO behind a runtime or control boundary. */
   queueHeld?: boolean;
   /** Ephemeral runner-owned coordinate for the currently dequeued turn. */
   activeTurnId?: string;
@@ -3135,6 +4095,14 @@ export interface SessionSnapshot {
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
+  /** Set when the provider conversation is quarantined. Runner-authoritative and durable, so a
+   * reconnecting control plane never re-offers submission into a poisoned thread.
+   *
+   * Three-valued on purpose. `undefined` means this snapshot carries no information — a pre-v128
+   * peer, or a registration snapshot built before version negotiation — and must never overwrite
+   * what the control plane already stored. Explicit `null` is a v126 runner stating there is no
+   * quarantine, which is what lets a restart onto a fresh provider conversation clear the guard. */
+  historyQuarantine?: ProviderHistoryQuarantineView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
@@ -3142,6 +4110,8 @@ export interface SessionSnapshot {
   /** Bounded projection-safe managed-job inventory. Omitted for pre-v82 control planes. */
   backgroundJobs?: ManagedBackgroundJobSnapshot[];
   status: SessionStatus;
+  /** Durable runner-owned wait explanation for reconnect hydration. */
+  capacityWait?: RunnerCapacityBlocker;
   driver: AgentDriverKind;
   useWorktree: boolean;
   worktreePath: string | null;
@@ -3185,11 +4155,28 @@ export interface SessionWorktreeView {
   branch: string;
   /** Caller-selected creation ref. Attached and legacy worktrees may omit it. */
   baseRef?: string;
+  /**
+   * The repository's default branch, as a plain branch name with no remote prefix.
+   *
+   * Carried so a reader of `baseRef` can tell "branched from the default, as usual" from "branched
+   * from somewhere deliberate" without guessing from the branch's NAME. Runners that predate this
+   * field, and repositories with no locally known remote HEAD, omit it; consumers must treat it as
+   * unknown rather than assuming a default.
+   */
+  defaultBranch?: string;
   /** Commit resolved from baseRef when this worktree was created. */
   baseCommit?: string;
   source: "legacy" | "created" | "attached";
-  /** Pull request linkage is additive and may be absent until GitHub state is available. */
-  pullRequest?: { url: string; state: "open" | "merged" | "closed" };
+  /** Forge change-request linkage. The historic field name is retained on the wire for rolling
+   * compatibility; `kind` and `provider` distinguish pull requests from merge requests. */
+  pullRequest?: {
+    url: string;
+    state: "open" | "merged" | "closed";
+    /** Forge-verified head OID. Only a merged record may use it as delivery proof. */
+    headOid?: string;
+    provider?: ForgeProvider;
+    kind?: ForgeChangeRequestKind;
+  };
 }
 
 /* ========================================================================== */
@@ -3797,6 +4784,9 @@ export interface AutomationCommandView {
   revision: number;
   attemptCount: number;
   lastError?: string;
+  /** Command id of the replacement issued after a retryable provider failure. A superseded command
+   * is terminal but no longer the execution's verdict; the replacement carries the outcome. */
+  supersededBy?: string;
   createdAt: number;
   updatedAt: number;
   lastSentAt?: number;
@@ -3900,6 +4890,8 @@ export interface SessionStatusMessage {
   sessionId: string;
   status: SessionStatus;
   detail?: string;
+  /** v132 exact admission boundary while status is queued; absent clears a prior wait reason. */
+  capacityWait?: RunnerCapacityBlocker;
   /** Set once when the runner creates an isolated worktree for the session. */
   worktreePath?: string | null;
   /** Opaque identity of the accepted start_session command that owns this lifecycle. */
@@ -3934,6 +4926,25 @@ export interface PolicyHookCredentialRegisteredMessage {
   error?: string;
 }
 
+/** Correlated causal append: the control plane waits for this runner-owned history write before
+ * returning a terminal PreToolUse response that can release the matching provider tool call. */
+export interface RecordPolicyHookDecisionMessage {
+  type: "record_policy_hook_decision";
+  requestId: string;
+  sessionId: string;
+  decision: Omit<PolicyHookDecisionEvent, "kind">;
+}
+
+export interface PolicyHookDecisionRecordedMessage {
+  type: "policy_hook_decision_recorded";
+  requestId: string;
+  sessionId: string;
+  auditId: string;
+  accepted: boolean;
+  eventSeq?: number;
+  error?: string;
+}
+
 /** Hash-only binding for one runner-minted, exact-session CLI/MCP credential. The plaintext stays
  * in a protected runner-local file and is never placed in argv or a durable command snapshot. */
 export interface AgentControlCredentialMessage {
@@ -3956,6 +4967,18 @@ export interface AgentControlCredentialRegisteredMessage {
 export interface SessionRuntimeUpdatedMessage {
   type: "session_runtime_updated";
   snapshot: SessionSnapshot;
+}
+
+/** A runner-owned threshold cancelled the active turn and is holding its queue. This notice is
+ * replay-safe and contains no provider content; the control plane owns the durable decision card. */
+export interface GovernanceTrippedMessage {
+  type: "governance_tripped";
+  sessionId: string;
+  /** Runner-process occurrence id. Reconnect replays retain it; a later crossing gets a new id. */
+  tripId: string;
+  kind: RunnerGuardrailKind;
+  threshold: number;
+  observed: number;
 }
 
 /** Runner streams a normalized session event. In Phase 2 the runner owns the per-session `seq`
@@ -4036,6 +5059,12 @@ export interface AgentsUpdatedMessage {
   agents: AgentDefinition[];
   /** Editors found by the same discovery pass (absent on pre-v22 runners). */
   editors?: EditorInfo[];
+}
+
+/** Authoritative live capacity/queue accounting after registration and every admission change. */
+export interface RunnerCapacityStatusMessage {
+  type: "runner_capacity_status";
+  status: RunnerCapacityState;
 }
 
 /** Event-driven or initial account-level provider usage update. The control plane validates the
@@ -4248,8 +5277,10 @@ export type RunnerToControlPlane =
   | SessionStatusMessage
   | StopSessionResultMessage
   | PolicyHookCredentialMessage
+  | PolicyHookDecisionRecordedMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
+  | GovernanceTrippedMessage
   | SessionEventMessage
   | SessionHistoryResultMessage
   | SessionHistoryPageResultMessage
@@ -4259,6 +5290,8 @@ export type RunnerToControlPlane =
   | ListDirectoryResultMessage
   | ListSessionFilesResultMessage
   | ReadSessionFileResultMessage
+  | SearchWorkspaceReferencesResultMessage
+  | CreateWorkspaceReferenceResultMessage
   | ShellOpenResultMessage
   | ShellOutputMessage
   | ShellExitMessage
@@ -4266,6 +5299,7 @@ export type RunnerToControlPlane =
   | ShellInventoryCompleteMessage
   | ProcessStatusMessage
   | AgentsUpdatedMessage
+  | RunnerCapacityStatusMessage
   | SubscriptionUsageUpdatedMessage
   | SubscriptionUsageInventoryMessage
   | SubscriptionUsageRefreshResultMessage
@@ -4283,10 +5317,14 @@ export type RunnerToControlPlane =
   | GitActionResultMessage
   | RewindResultMessage
   | ForkResultMessage
+  | SessionWorktreeProgressMessage
   | SessionWorktreeResultMessage
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
   | SkillsStateMessage
+  | SkillSnapshotResultMessage
+  | SkillAdoptionResultMessage
+  | SkillAdoptionRecoveryResultMessage
   | SkillsSyncNeedMessage
   | DurableSessionCommandResultMessage
   | DurableSessionCommandUpdateMessage
@@ -4301,6 +5339,8 @@ export interface RegisteredMessage {
   heartbeatIntervalMs: number;
   /** The control-plane protocol version. Absent means a pre-negotiation control plane. */
   protocolVersion?: number;
+  /** Present once an administrator has made the control plane authoritative for this Machine. */
+  runnerCapacity?: RunnerCapacityConfiguration;
 }
 
 export interface RegisterRejectedMessage {
@@ -4357,6 +5397,19 @@ export interface PromptSessionMessage {
   config?: SessionConfig;
   /** Slash command name (without leading "/") if this turn invokes one. */
   slashCommand?: string;
+}
+
+/** Continue an established provider conversation with the preserved answer to a structured
+ * question whose original process-owned callback was lost. This command is submit-only: dismiss
+ * remains an immediate resolution and secret answers are never staged in its durable payload. */
+export interface AnswerRecoveredQuestionCommand {
+  type: "answer_recovered_question";
+  sessionId: string;
+  requestId: string;
+  /** Runner-owned identity for this exact question occurrence, independent of provider request-id
+   * reuse across process generations. */
+  recoveryId: string;
+  answers: Record<string, string | string[]>;
 }
 
 /** Attempt to incorporate direct input or one existing queue item into the exact active turn.
@@ -4438,7 +5491,10 @@ export interface SessionCommandInvocationUpdateMessage {
 
 /* --- Durable automation command delivery (protocol v53) --- */
 
-export type DurableSessionCommand = StartSessionMessage | PromptSessionMessage;
+export type DurableSessionCommand =
+  | StartSessionMessage
+  | PromptSessionMessage
+  | AnswerRecoveredQuestionCommand;
 
 /** A distinct outer message is load-bearing: a pre-v53 runner cannot execute the inner command
  * while silently ignoring its receipt contract. `requestId` changes on every transport attempt;
@@ -4522,7 +5578,7 @@ export interface CancelSessionMessage {
 }
 
 /** Interrupt only the active turn. Unlike cancel_session, the session remains non-terminal and
- * queued prompts are preserved until a later explicit prompt resumes their FIFO. */
+ * queued prompts resume in FIFO order after the interrupted turn safely settles. */
 export interface InterruptTurnMessage {
   type: "interrupt_turn";
   sessionId: string;
@@ -4576,7 +5632,18 @@ export interface RearmGovernanceMessage {
   sessionId: string;
   config: { costBudgetUsd?: number | null; maxToolCalls?: number | null };
   /** Another serialized rule is already tripped. Update thresholds but keep queued work held. */
-  holdFor?: PolicyRuleKind;
+  /** A runner-enforced threshold names itself. `control_plane` (v105+) holds the queue for a
+   * control-plane-only card (checkpoint, unpriced, daily budget) WITHOUT tripping the runner's
+   * governance: no turn is cancelled, no error is swallowed, queued prompts simply wait. */
+  holdFor?: RunnerGuardrailKind | "control_plane";
+}
+
+/** Acknowledge the authoritative, control-plane-priced cumulative session cost after one
+ * parentless usage event. Content-free and additive; sent only to v106+ runners. */
+export interface PricedSessionCostMessage {
+  type: "priced_session_cost";
+  sessionId: string;
+  costUsd: number;
 }
 
 export interface ResolvePermissionMessage {
@@ -4631,6 +5698,10 @@ export interface ForkSessionMessage {
   /** Protocol v54+: omit the potentially unbounded inherited event array; the control plane pulls
    * the new session through session_history_page after materializing its snapshot. */
   deferHistory?: boolean;
+  handoff?: { agentId: string; config: SessionConfig };
+  /** v128: recover a quarantined provider conversation. The runner revalidates the source's
+   * durable quarantine and its recovery turn, and only then accepts a same-provider handoff. */
+  recovery?: true;
 }
 
 export interface ForkResultMessage {
@@ -4640,27 +5711,81 @@ export interface ForkResultMessage {
   error?: string;
   snapshot?: SessionSnapshot;
   events?: { seq: number; ts: number; payload: SessionEventPayload }[];
+  handoffDraft?: import("./conversation-handoff.js").ConversationHandoffDraft;
+  /** v128: a prompt the source retained unsent while quarantined, handed to the recovered session
+   * as a composer draft. It is never submitted by the runner or the control plane. */
+  retainedPrompt?: { text: string; images: PromptImageInput[] };
 }
 
 /** Create, attach, or select the worktree targeted by a session's Git/file actions. The runner
  * revalidates all repository and configured-location boundaries. */
 export type SessionWorktreeRequestMessage =
-  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "create"; baseRef?: string; branch: string }
+  | {
+      type: "session_worktree";
+      requestId: string;
+      sessionId: string;
+      operation: "create";
+      baseRef?: string;
+      branch: string;
+      /** Protocol v113+: ask the runner for bounded, content-free phase heartbeats. */
+      progress?: boolean;
+    }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "discard"; path: string };
+
+export type SessionWorktreeProgressPhase =
+  | "resolving_remote"
+  | "fetching_remote"
+  | "validating"
+  | "materializing"
+  | "activating";
+
+/** Content-free phase heartbeat for one exact runner request. */
+export interface SessionWorktreeProgressMessage {
+  type: "session_worktree_progress";
+  requestId: string;
+  sessionId: string;
+  phase: SessionWorktreeProgressPhase;
+}
+
+/**
+ * Protocol v133: what platform isolation makes of a freshly attached worktree path.
+ *
+ * A bwrap/Seatbelt boundary is bound at launch and cannot gain a mount afterwards, so attaching a
+ * worktree outside the boundary a live provider already holds leaves that path readable but not
+ * writable until the session relaunches. This states that instead of letting the agent discover it
+ * as a permission error mid-turn. Absent means unknown: either a pre-v133 runner, or an operation
+ * other than attach.
+ */
+export interface SessionWorktreeIsolationNotice {
+  /** True when the session's current provider process can already write to the attached path. */
+  writableNow: boolean;
+  /** True when the session's next launch binds the attached path into its writable boundary. */
+  writableAtNextLaunch: boolean;
+}
 
 export interface SessionWorktreeResultMessage {
   type: "session_worktree_result";
   requestId: string;
+  /** Protocol v113+: exact request coordinates echoed for cross-operation correlation. */
+  sessionId?: string;
+  operation?: "create" | "attach" | "select" | "discard";
   ok: boolean;
   error?: string;
   worktree?: SessionWorktreeView;
   snapshot?: SessionSnapshot;
+  /** Protocol v133+, attach only. */
+  isolation?: SessionWorktreeIsolationNotice;
 }
 
 /** Control plane asks the runner to re-probe installed agents and push the result. */
 export interface RediscoverMessage {
   type: "rediscover";
   runnerId: string;
+}
+
+/** Idempotent monotonic application of the control plane's durable Machine capacity setting. */
+export interface ConfigureRunnerCapacityMessage extends RunnerCapacityConfiguration {
+  type: "configure_runner_capacity";
 }
 
 /** Ask the runner to refresh provider-owned account usage without starting or interrupting a turn. */
@@ -4849,7 +5974,9 @@ export type GitAction =
    * metadata; callers never supply an arbitrary filesystem path. */
   | { kind: "pod_reconcile"; sourceSessionId: string; message: string }
   /** Read-only import/reconciliation of review threads for the PR associated with HEAD. */
-  | { kind: "github_review_sync" };
+  | { kind: "github_review_sync" }
+  /** Provider-selected read-only import for the change request associated with HEAD. */
+  | { kind: "forge_review_sync" };
 
 export interface GitActionRequestMessage {
   type: "git_action";
@@ -5067,6 +6194,40 @@ export interface ReadSessionFileRequestMessage {
   path: string;
 }
 
+/** Bounded filename search under the exact session root. The runner never follows directory
+ * symlinks and returns at most MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS candidates. */
+export interface SearchWorkspaceReferencesRequestMessage {
+  type: "search_workspace_references";
+  requestId: string;
+  sessionId: string;
+  query: string;
+}
+
+export interface SearchWorkspaceReferencesResultMessage {
+  type: "search_workspace_references_result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  results?: WorkspaceReferenceCandidate[];
+  truncated?: boolean;
+}
+
+/** Mint an immutable metadata-only attachment after runner-side path and diff validation. */
+export interface CreateWorkspaceReferenceRequestMessage {
+  type: "create_workspace_reference";
+  requestId: string;
+  sessionId: string;
+  target: CreateWorkspaceReferenceRequest;
+}
+
+export interface CreateWorkspaceReferenceResultMessage {
+  type: "create_workspace_reference_result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  reference?: WorkspaceReference;
+}
+
 /* --------------------------- per-session shells --------------------------- */
 
 export type ShellKind = "shell" | "agent_tui";
@@ -5282,6 +6443,22 @@ export interface GitCommitInfo {
 
 /* --- Git summary (pinned summary card: PR + checks at a glance) --- */
 
+export type ForgeProvider = "github" | "gitlab";
+export type ForgeChangeRequestKind = "pull_request" | "merge_request";
+
+/** Content-free forge capability/authentication state, resolved in the session's execution
+ * context. Credentials never cross the runner boundary. */
+export interface GitForgeInfo {
+  provider: ForgeProvider;
+  host: string;
+  project: string;
+  authenticated: boolean;
+  /** Bounded, sanitized remediation when the provider CLI is missing or not authenticated. */
+  authenticationError?: string;
+  /** Bounded provider read failure such as rate limiting, unsupported API behavior, or access. */
+  statusError?: string;
+}
+
 /** The open PR for the session branch, from `gh pr view`. */
 export interface GitPrSummary {
   number: number;
@@ -5289,6 +6466,9 @@ export interface GitPrSummary {
   url: string;
   /** gh's PR state vocabulary: OPEN | MERGED | CLOSED. */
   state: string;
+  /** Additive forge identity. Missing means a pre-v106 GitHub summary. */
+  provider?: ForgeProvider;
+  kind?: ForgeChangeRequestKind;
 }
 
 /** Check rollup for that PR (CheckRuns + commit StatusContexts combined). */
@@ -5317,6 +6497,8 @@ export interface GitSummaryInfo extends GitRepositoryFacts {
   remoteUrl: string | null;
   pr: GitPrSummary | null;
   checks: GitChecksSummary | null;
+  /** Additive forge readiness. Missing means the runner predates provider-neutral integration. */
+  forge?: GitForgeInfo | null;
 }
 
 /* --- Rich diff / review pane (PR-A, read-only) --- */
@@ -5396,12 +6578,53 @@ export interface GitDiffInfo {
 }
 
 export interface GitPrInfo {
-  /** PR URL (from gh) or a prefilled compare URL fallback. */
+  /** Authoritative change-request URL or a validated prefilled creation URL fallback. */
   url: string;
   branch: string;
   pushed: boolean;
   /** True when `gh` created a real PR; false when we returned a compare URL. */
   createdWithGh: boolean;
+  /** Additive provider-neutral creation result. Missing means a legacy GitHub runner. */
+  provider?: ForgeProvider;
+  kind?: ForgeChangeRequestKind;
+  created?: boolean;
+  /** Human-readable, sanitized explanation when only a prefilled creation URL was returned. */
+  notice?: string;
+}
+
+/** One top-level forge review discussion. Replies remain remote context and do not become
+ * duplicate local findings. Timestamps are epoch milliseconds. */
+export interface ForgeReviewThread {
+  threadId: string;
+  commentId: number;
+  url: string;
+  path: string;
+  side: ReviewFindingSide;
+  line: number;
+  body: string;
+  author: string;
+  createdAt: number;
+  updatedAt: number;
+  commitId: string;
+  /** `remote` means GitLab supplied a discussion without a trustworthy diff position. */
+  subjectType: "line" | "file" | "remote";
+  resolved: boolean;
+  outdated: boolean;
+}
+
+/** Complete authoritative review snapshot for one pull request or merge request. */
+export interface ForgeReviewSyncInfo {
+  provider: ForgeProvider;
+  host: string;
+  project: string;
+  changeRequestNumber: number;
+  changeRequestUrl: string;
+  changeRequestHeadOid: string;
+  changeRequestBaseOid: string;
+  localHeadOid: string;
+  diffHash: string;
+  threads: ForgeReviewThread[];
+  synchronizedAt: number;
 }
 
 /** One top-level GitHub PR review thread. Replies remain remote context and do not become
@@ -5445,6 +6668,8 @@ export interface GitHubReviewReconciliation {
   dismissedMissing: number;
 }
 
+export type ForgeReviewReconciliation = GitHubReviewReconciliation;
+
 /** Result of a git action, keyed by which action ran. */
 export interface GitActionData {
   status?: GitStatusInfo;
@@ -5453,6 +6678,7 @@ export interface GitActionData {
   commit?: GitCommitInfo;
   pr?: GitPrInfo;
   githubReview?: GitHubReviewSyncInfo;
+  forgeReview?: ForgeReviewSyncInfo;
   podReconciliation?: {
     status: "applied" | "already_applied" | "conflicted";
     sourceHead: string;
@@ -5482,6 +6708,7 @@ export type ControlPlaneToRunner =
   | RegisteredMessage
   | RegisterRejectedMessage
   | PolicyHookCredentialRegisteredMessage
+  | RecordPolicyHookDecisionMessage
   | AgentControlCredentialRegisteredMessage
   | StartSessionMessage
   | PromptSessionMessage
@@ -5496,12 +6723,14 @@ export type ControlPlaneToRunner =
   | EditQueuedPromptMessage
   | StopSessionMessage
   | RearmGovernanceMessage
+  | PricedSessionCostMessage
   | ResolvePermissionMessage
   | AnswerQuestionMessage
   | RewindSessionMessage
   | ForkSessionMessage
   | SessionWorktreeRequestMessage
   | RediscoverMessage
+  | ConfigureRunnerCapacityMessage
   | RefreshSubscriptionUsageMessage
   | GenerateSessionTitleMessage
   | ConfigureSessionNamingCustomModelMessage
@@ -5510,6 +6739,9 @@ export type ControlPlaneToRunner =
   | LogoutAgentMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
+  | SkillSnapshotMessage
+  | SkillAdoptionMessage
+  | SkillAdoptionRecoveryMessage
   | SkillsSyncManifestMessage
   | SkillsSyncContentMessage
   | SkillsSyncCompleteMessage
@@ -5523,6 +6755,8 @@ export type ControlPlaneToRunner =
   | ListDirectoryRequestMessage
   | ListSessionFilesRequestMessage
   | ReadSessionFileRequestMessage
+  | SearchWorkspaceReferencesRequestMessage
+  | CreateWorkspaceReferenceRequestMessage
   | ShellOpenMessage
   | ShellInputMessage
   | ShellResizeMessage
@@ -5870,6 +7104,8 @@ export interface CreateProjectRequest {
 
 /** Rename and/or show/hide a durable Project. Omitted fields remain unchanged. */
 export interface UpdateProjectRequest {
+  /** Human-managed defaults; null removes them so omitted child limits can remain unlimited. */
+  childSessionDefaults?: ChildSessionDefaults | null;
   name?: string;
   hidden?: boolean;
 }

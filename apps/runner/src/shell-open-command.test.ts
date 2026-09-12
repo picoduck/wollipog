@@ -35,7 +35,11 @@ function harness(overrides: Partial<ShellOpenCommandDependencies> = {}) {
     unregisterPending: () => {},
     consumeCancellation: () => false,
     sessionCanOpen: () => true,
+    launchEpoch: () => 0,
     resolveTarget: () => ({ root: "/repo", context: { kind: "native" }, meta }),
+    targetError: (target) => target === "pending"
+      ? "the session's worktree is still being prepared — try again in a moment"
+      : !target ? "unknown session" : "invalid" in target ? target.invalid : null,
     resolveAgentTuiLaunch: () => ({ command: "codex", args: [] }),
     open: () => {
       opens++;
@@ -149,6 +153,22 @@ test("missing and pending shell targets fail with distinct messages without spaw
   await handleShellOpenCommand(command("shell"), pending.dependencies);
   assert.equal(pending.opens, 0);
   assert.match(pending.replies[0]?.error ?? "", /worktree is still being prepared/);
+
+  // A selected worktree that no longer verifies is neither missing nor pending: the session exists
+  // and its root is materialized, but it is not the tree the session recorded.
+  const invalid = harness({
+    resolveTarget: () => ({ invalid: "the session's worktree could not be verified: it is gone" }),
+  });
+  await handleShellOpenCommand(command("shell"), invalid.dependencies);
+  assert.equal(invalid.opens, 0, "no shell is spawned in an unverified worktree");
+  assert.match(invalid.replies[0]?.error ?? "", /could not be verified/);
+
+  const invalidTui = harness({
+    resolveTarget: () => ({ invalid: "the session's worktree could not be verified: it is gone" }),
+  });
+  await handleShellOpenCommand(command("agent_tui"), invalidTui.dependencies);
+  assert.equal(invalidTui.opens, 0, "and neither is a Native TUI");
+  assert.match(invalidTui.replies[0]?.error ?? "", /could not be verified/);
 });
 
 test("a cancellation at the synchronous Agent TUI spawn boundary prevents open", async () => {
@@ -214,4 +234,36 @@ test("delete after the fence settles is rechecked before Agent TUI spawn", async
   await handleShellOpenCommand(command("agent_tui", true), state.dependencies);
   assert.equal(state.opens, 0);
   assert.match(state.replies[0]?.error ?? "", /being deleted/);
+});
+
+test("asynchronous TUI preparation never outlives cancellation, deletion, replacement, or workspace selection", async () => {
+  for (const change of ["cancel", "delete", "epoch", "workspace", "stop", "probe-failure", "none"]) {
+    let settle!: () => void;
+    const probe = new Promise<void>((resolve) => { settle = resolve; });
+    let changed = false;
+    const state = harness({
+      consumeCancellation: () => changed && change === "cancel",
+      sessionCanOpen: () => !(changed && change === "delete"),
+      launchEpoch: () => changed && change === "epoch" ? 1 : 0,
+      resolveTarget: () => ({
+        root: changed && change === "workspace" ? "/different" : "/repo",
+        context: meta.context,
+        meta: changed && change === "stop" ? { ...meta, status: "stopped" } : meta,
+      }),
+      resolveAgentTuiLaunch: async () => {
+        await probe;
+        if (change === "probe-failure") throw new Error("isolation unavailable");
+        return { command: "codex", args: [] };
+      },
+    });
+    const opening = handleShellOpenCommand(command("agent_tui"), state.dependencies);
+    await Promise.resolve();
+    assert.equal(state.opens, 0);
+    changed = true;
+    settle();
+    await opening;
+    assert.equal(state.opens, change === "none" ? 1 : 0, change);
+    assert.equal(state.replies.length, 1);
+    assert.equal(state.replies[0]?.ok, change === "none", change);
+  }
 });

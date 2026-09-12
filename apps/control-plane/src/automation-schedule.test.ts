@@ -27,6 +27,52 @@ test("nextCronFire uses exclusive minute precision and POSIX day-of-month/day-of
   );
 });
 
+test("nextCronFire does bounded timezone work for permissive schedules", () => {
+  const originalFormatToParts = Intl.DateTimeFormat.prototype.formatToParts;
+  let calls = 0;
+  Intl.DateTimeFormat.prototype.formatToParts = function (...args) {
+    calls += 1;
+    return originalFormatToParts.apply(this, args);
+  };
+  try {
+    const after = Date.UTC(2026, 6, 12, 12, 0);
+    nextCronFire("0 13 * * *", "UTC", after);
+    const fixedTimeCalls = calls;
+    calls = 0;
+    nextCronFire("* * * * *", "UTC", after);
+    assert.ok(
+      calls <= 8,
+      `per-minute schedule used ${calls} timezone conversions after a ${fixedTimeCalls}-call warmup`,
+    );
+  } finally {
+    Intl.DateTimeFormat.prototype.formatToParts = originalFormatToParts;
+  }
+});
+
+test("a one-day per-minute catch-up has bounded timezone conversions", () => {
+  const originalFormatToParts = Intl.DateTimeFormat.prototype.formatToParts;
+  let calls = 0;
+  Intl.DateTimeFormat.prototype.formatToParts = function (...args) {
+    calls += 1;
+    return originalFormatToParts.apply(this, args);
+  };
+  try {
+    const now = Date.UTC(2026, 8, 11, 12, 0);
+    let cursor = now - 1440 * 60_000;
+    let occurrences = 0;
+    while (occurrences < 10_000) {
+      const next = nextCronFire("* * * * *", "America/Chicago", cursor);
+      occurrences += 1;
+      if (next > now) break;
+      cursor = next;
+    }
+    assert.equal(occurrences, 1441);
+    assert.ok(calls < 2_500, `one-day catch-up used ${calls} timezone conversions`);
+  } finally {
+    Intl.DateTimeFormat.prototype.formatToParts = originalFormatToParts;
+  }
+});
+
 test("nextCronFire interprets IANA timezones and skips nonexistent spring-DST wall time", () => {
   assert.equal(
     nextCronFire("0 9 * * *", "America/Chicago", Date.UTC(2026, 6, 12, 13, 59)),
@@ -43,6 +89,16 @@ test("nextCronFire interprets IANA timezones and skips nonexistent spring-DST wa
     nextCronFire("30 1 * * *", "America/Chicago", repeatedWallTime),
     Date.UTC(2026, 10, 2, 7, 30),
     "a repeated fall-back wall time fires only once",
+  );
+  assert.equal(
+    nextCronFire("* * * * *", "America/Chicago", Date.UTC(2026, 10, 1, 6, 59)),
+    Date.UTC(2026, 10, 1, 8, 0),
+    "per-minute schedules skip the repeated fall-back hour after its wall times have fired",
+  );
+  assert.equal(
+    nextCronFire("30 1 * * *", "Australia/Lord_Howe", Date.UTC(2025, 3, 5, 0, 0)),
+    Date.UTC(2025, 3, 5, 15, 0),
+    "half-hour fall-back retains the existing zone-specific repeated-time resolution",
   );
   assert.equal(
     nextCronFire("0 0 29 2 *", "UTC", Date.UTC(2025, 0, 1)),

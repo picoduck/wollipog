@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SessionMeta } from "./session-store.js";
-import { agentTuiLaunch } from "./agent-tui.js";
+import { agentTuiLaunch, prepareAgentTuiLaunch } from "./agent-tui.js";
+import { provisionAgentControl } from "./agent-control.js";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { waitForPendingKills } from "./spawn.js";
 import { openWindowsConpty } from "./windows-conpty.js";
+import { orchestratorLaunchArgs } from "./orchestrator-preset.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -61,20 +65,28 @@ test("agent TUI launch is provider-gated and never attaches structured session i
 test("Windows agent TUI launch supports cmd shims inside ConPTY", () => {
   assert.deepEqual(agentTuiLaunch(meta(), { platform: "win32", comspec: "C:\\Windows\\cmd.exe" }), {
     command: "C:\\Windows\\cmd.exe",
-    args: ["/d", "/s", "/c", 'claude --profile "team profile"'],
+    args: ["/d", "/v:off", "/s", "/c", '"claude --profile "team profile""'],
     env: { PROVIDER_TOKEN: "runner-local" },
     scrubInheritedEnv: CLAUDE_RUNNER_ENV,
-    verbatimCommandLine: 'C:\\Windows\\cmd.exe /d /s /c "claude --profile "team profile""',
+    verbatimCommandLine: 'C:\\Windows\\cmd.exe /d /v:off /s /c "claude --profile "team profile""',
   });
 });
 
-test("Windows cmd shim receives spaced and metacharacter TUI args intact through ConPTY", { skip: process.platform !== "win32" }, async () => {
+test("Windows cmd shim receives spaced and metacharacter TUI args intact through ConPTY", { skip: process.platform !== "win32" }, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-argv (x86) & Tools "));
+  const capture = join(dir, "capture.cjs");
   const shim = join(dir, "echo args.cmd");
-  writeFileSync(shim, "@echo off\r\necho TUI_ARGV=[%~1][%~2][%~3][%~4][%~5]\r\n", "utf8");
+  writeFileSync(capture, 'process.stdout.write("TUI_ARGV=" + JSON.stringify(process.argv.slice(2)) + "\\n")\n', "utf8");
+  writeFileSync(shim, '@echo off\r\nnode "%~dp0capture.cjs" %*\r\n', "utf8");
+  const argv = [
+    "team profile", "amp&value", 'say "yes"', "paren(value)", "pipe|value", "less<value",
+    "more>value", "caret^value", "bang!kept", "comma,value", "semi;value", "equals=value",
+    "C:\\path with space\\", "after-space-tail", "equals=tail\\", "after-equals-tail",
+    'before\\"after', 'before\\\\"after', 'before\\"', '\\"after', 'before"\\', "after-quote-tail",
+  ];
   const launch = agentTuiLaunch(meta({
     command: shim,
-    args: ["team profile", "amp&value", 'say "yes"', "paren(value)", "pipe|value"],
+    args: argv,
   }), {
     platform: "win32",
     comspec: process.env.ComSpec,
@@ -92,21 +104,129 @@ test("Windows cmd shim receives spaced and metacharacter TUI args intact through
   });
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+  const closed = new Promise<void>((resolve) => { child.once("close", () => resolve()); });
   try {
     const started = Date.now();
     while (!output.includes("TUI_ARGV=") && Date.now() - started < 10_000) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    assert.match(output, /TUI_ARGV=\[team profile\]\[amp&value\]\[say "yes"\]\[paren\(value\)\]\[pipe\|value\]/);
+    const encoded = output.match(/TUI_ARGV=(\[[^\r\n]*\])/u)?.[1];
+    assert.ok(encoded, output);
+    assert.deepEqual(JSON.parse(encoded), argv);
   } finally {
+    // kill() only starts taskkill, so the shim can still hold this directory as its working
+    // directory once the call returns, and Windows then rejects the removal with EPERM - which
+    // force: true does not suppress. Wait for the pseudoconsole to close and the kill to land.
     child.kill();
-    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => {
+      const expiry = setTimeout(resolve, 10_000);
+      void closed.then(() => { clearTimeout(expiry); resolve(); });
+    });
+    await waitForPendingKills(10_000);
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    } catch (error) {
+      // The assertions above have already decided this test. A temp directory the OS still holds
+      // open is the runner image's to reap; failing here would look just like an argv regression.
+      t.diagnostic(`ConPTY temp directory cleanup failed: ${String(error)}`);
+    }
   }
 });
 
 test("Windows cmd shim launch rejects percent expansion", () => {
   assert.throws(
     () => agentTuiLaunch(meta({ args: ["%USERPROFILE%"] }), { platform: "win32", comspec: "cmd.exe" }),
-    /contains %/,
+    /contain %/,
   );
+});
+
+test("Windows Claude Orchestrator TUI argv carries a single-line system prompt", () => {
+  const args = orchestratorLaunchArgs("claude-code", {
+    command: "runner.exe", args: ["--agent-control-mcp"], env: {},
+  }, ["C:\\repo"]);
+  const launch = agentTuiLaunch(meta({ driver: "claude-code", args }), {
+    platform: "win32", comspec: "cmd.exe",
+  });
+  assert.ok(launch);
+  assert.equal(args.some((arg) => /[\r\n]/u.test(arg)), false);
+  assert.match(launch.args.at(-1) ?? "", /append-system-prompt/);
+});
+
+test("orchestrator TUIs rebuild credentials and restrictions without mutating durable metadata", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orchestrator-tui-"));
+  try {
+    for (const driver of ["claude-code", "codex", "codex-app-server"] as const) {
+      const source = meta({ driver, args: [], env: {}, config: { permissionMode: "orchestrator" } });
+      const original = JSON.stringify(source);
+      let probes = 0;
+      const launch = await prepareAgentTuiLaunch(source, {
+        controlPlaneProtocolVersion: PROTOCOL_VERSION,
+        executionIsolationMode: "bwrap",
+        platform: "linux",
+        prepareScratch: async () => "/scratch",
+        provision: (prepared) => provisionAgentControl(prepared, {
+          controlPlaneUrl: "ws://127.0.0.1:8787/runner",
+          controlPlaneProtocolVersion: PROTOCOL_VERSION,
+          executionIsolationMode: "bwrap",
+          registerCredential: () => {},
+        }, () => {}, {
+          configDir: dir, execPath: process.execPath, scriptPath: "/runner/cli.ts", execArgv: [], isSea: false,
+          platform: "linux",
+        }),
+        probe: async (prepared, cwd) => {
+          probes++;
+          assert.equal(cwd, "/scratch");
+          assert.ok(prepared.args.includes("--strict-config"));
+          assert.equal(prepared.env?.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
+          return ["-c", "mcp_servers.ambient.enabled=false"];
+        },
+      });
+      assert.ok(launch);
+      assert.equal(launch.cwd, "/scratch");
+      assert.equal(launch.env?.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
+      assert.equal(launch.env?.TMPDIR, "/scratch");
+      assert.ok(launch.env?.WOLLIPOG_SESSION_TOKEN_FILE);
+      assert.equal(JSON.stringify(source), original);
+      if (driver === "claude-code") {
+        assert.equal(probes, 0);
+        assert.ok(launch.args.includes("--strict-mcp-config"));
+        assert.match(launch.args[launch.args.indexOf("--tools") + 1] ?? "", /Read/);
+        assert.ok(launch.args.includes("--setting-sources"));
+      } else {
+        assert.equal(probes, 1);
+        const launchText = launch.args.join(" ");
+        assert.ok(launchText.includes("mcp_servers.ambient.enabled=false"));
+        assert.match(launchText, /sandbox_mode=.*workspace-write/);
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("orchestrator TUI preparation fails closed for old peers, unsupported targets, terminal sessions and probes", async () => {
+  const source = meta({ driver: "codex", config: { permissionMode: "orchestrator" } });
+  const dependencies = {
+    controlPlaneProtocolVersion: PROTOCOL_VERSION, platform: "linux" as const,
+    provision: () => {}, prepareScratch: async () => "/scratch",
+  };
+  await assert.rejects(prepareAgentTuiLaunch(source, { ...dependencies, controlPlaneProtocolVersion: 111 }), /current native/);
+  await assert.rejects(prepareAgentTuiLaunch({ ...source, context: { kind: "wsl", distro: "test" } }, dependencies), /current native/);
+  await assert.rejects(prepareAgentTuiLaunch({ ...source, driver: "acp" }, dependencies), /current native/);
+  await assert.rejects(prepareAgentTuiLaunch(source, { ...dependencies, platform: "win32" }),
+    /attested native filesystem boundary/);
+  await assert.rejects(prepareAgentTuiLaunch({ ...source, driver: "claude-code" }, {
+    ...dependencies, platform: "linux", executionIsolationMode: "provider",
+  }), /attested native filesystem boundary/);
+  for (const status of ["stopped", "failed", "completed"] as const) {
+    await assert.rejects(prepareAgentTuiLaunch({ ...source, status }, dependencies), /active session/);
+  }
+  await assert.rejects(prepareAgentTuiLaunch(source, {
+    ...dependencies, probe: async () => { throw new Error("isolation unavailable"); },
+  }), /isolation unavailable/);
+  await assert.rejects(prepareAgentTuiLaunch(source, {
+    ...dependencies, provision: async () => { throw new Error("credential provisioning failed"); },
+  }), /credential provisioning failed/);
+  assert.deepEqual(await prepareAgentTuiLaunch(meta(), {
+    controlPlaneProtocolVersion: 58, provision: () => assert.fail("ordinary TUI must not reprovision"),
+    prepareScratch: async () => assert.fail("ordinary TUI must not prepare scratch"),
+  }), agentTuiLaunch(meta()));
 });

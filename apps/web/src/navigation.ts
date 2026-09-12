@@ -4,6 +4,10 @@ import {
   type SourceLocation,
 } from "@wollipog/protocol";
 
+/** `activationId` is ephemeral and deliberately omitted from viewPath: repeated activation of the
+ * same stable deep link must re-focus its exact request without creating duplicate browser history. */
+export type AttentionTarget = { eventEpoch: number; requestId?: string; activationId?: number };
+
 export type View =
   | { name: "inbox" }
   | { name: "board" }
@@ -15,7 +19,7 @@ export type View =
   | { name: "usage" }
   | { name: "archived" }
   | { name: "projects"; id?: string }
-  | { name: "session"; id: string; location?: SourceLocation }
+  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
   | { name: "run"; id: string }
   | { name: "settings"; section?: SettingsSection }
   | { name: "pod"; id: string };
@@ -194,6 +198,8 @@ export function viewPath(view: View): string {
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : "/projects";
     case "session": return view.location
       ? `/sessions/~${encodeResourceId(view.id)}/files/~${encodeOpaque(view.location.path)}${sourceLocationSearch(view.location)}`
+      : view.attention
+      ? `/sessions/~${encodeResourceId(view.id)}/attention${view.attention.requestId === undefined ? "" : `/~${encodeOpaque(view.attention.requestId)}`}?epoch=${view.attention.eventEpoch}`
       : `/sessions/~${encodeResourceId(view.id)}`;
     case "run": return `/runs/~${encodeResourceId(view.id)}`;
     case "settings": return `/settings/${view.section ?? "appearance"}`;
@@ -262,6 +268,16 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     const id = decodeResourceId(projectMatch[1]!);
     return id === null ? null : { name: "projects", id };
   }
+  const attentionMatch = /^\/sessions\/~([^/]+)\/attention(?:\/~([^/]+))?$/.exec(path);
+  if (attentionMatch) {
+    const id = decodeResourceId(attentionMatch[1]!);
+    const requestId = attentionMatch[2] === undefined ? undefined : decodeOpaque(attentionMatch[2], 2048);
+    const params = new URLSearchParams(search);
+    const epoch = params.get("epoch");
+    if (id === null || requestId === null || [...params.keys()].length !== 1 ||
+        epoch === null || !/^(0|[1-9]\d*)$/.test(epoch) || !Number.isSafeInteger(Number(epoch))) return null;
+    return { name: "session", id, attention: { eventEpoch: Number(epoch), ...(requestId === undefined ? {} : { requestId }) } };
+  }
   const fileMatch = /^\/sessions\/~([^/]+)\/files\/~([^/]+)$/.exec(path);
   if (fileMatch) {
     const id = decodeResourceId(fileMatch[1]!);
@@ -294,11 +310,19 @@ export function absoluteViewUrl(origin: string, view: View): string {
 
 export function viewFromNotificationMessage(data: unknown): View | null {
   if (!data || typeof data !== "object") return null;
-  const message = data as { type?: unknown; sessionId?: unknown };
+  const message = data as { type?: unknown; sessionId?: unknown; eventEpoch?: unknown; requestId?: unknown };
   const opensSession = message.type === "mam:open-session" || message.type === "wollipog:open-session";
   if (opensSession && typeof message.sessionId === "string" &&
       message.sessionId.trim() && message.sessionId.length <= MAX_RESOURCE_ID_LENGTH) {
-    return { name: "session", id: message.sessionId };
+    const hasAttention = Object.hasOwn(message, "eventEpoch") || Object.hasOwn(message, "requestId");
+    if (!hasAttention) return { name: "session", id: message.sessionId };
+    if (!Number.isSafeInteger(message.eventEpoch) || (message.eventEpoch as number) < 0) return null;
+    if (message.requestId !== undefined &&
+        (typeof message.requestId !== "string" || !message.requestId || message.requestId.length > MAX_RESOURCE_ID_LENGTH)) return null;
+    return { name: "session", id: message.sessionId, attention: {
+      eventEpoch: message.eventEpoch as number,
+      ...(typeof message.requestId === "string" ? { requestId: message.requestId } : {}),
+    } };
   }
   return message.type === "mam:open-automations" || message.type === "wollipog:open-automations"
     ? { name: "automations" }

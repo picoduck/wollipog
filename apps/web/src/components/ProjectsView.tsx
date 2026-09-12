@@ -8,6 +8,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { archiveProjectWithFeedback } from "../project-actions.js";
+import { ProjectChildDefaults } from "./ProjectChildDefaults.js";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
   filterManagedProjects,
@@ -150,7 +151,7 @@ export function ProjectsView({
     setError(null);
     setDialog(next);
   };
-  const runProjectMutation = async (key: string, action: () => Promise<ProjectView>) => {
+  const runProjectMutation = async (key: string, action: () => Promise<ProjectView>, reportError = true) => {
     if (busy) return;
     setBusy(key);
     setError(null);
@@ -159,7 +160,7 @@ export function ProjectsView({
       applyProject(project);
       return project;
     } catch (cause) {
-      setError((cause as Error).message);
+      if (reportError) setError((cause as Error).message);
       throw cause;
     } finally {
       setBusy(null);
@@ -421,6 +422,17 @@ export function ProjectsView({
                   />
                 )}
               </section>
+              {selected.childSessionDefaults !== undefined && <ProjectChildDefaults
+                key={selected.id}
+                project={selected}
+                disabled={selected.canManage === false || busy !== null}
+                onSave={async (childSessionDefaults) => {
+                  const result = await runProjectMutation("child-defaults",
+                    // This form owns its error alert; do not announce the rejection twice.
+                    async () => (await api.updateProject(selected.id, { childSessionDefaults })).project, false);
+                  if (!result) throw new Error("Could not save child session defaults.");
+                }}
+              />}
               <section className="project-detail-section" aria-labelledby="project-locations-heading">
                 <div className="project-section-heading">
                   <div><h3 id="project-locations-heading">Locations</h3><p>Exact folders where this Project can run. The default is used first when available.</p></div>

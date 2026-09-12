@@ -1,8 +1,10 @@
+import type { GovernanceDecision } from "./governance.js";
 import type {
   AgentQuestion,
   ApprovalContext,
   AuthoritativeSubagentLifecycle,
   EventPayloadReference,
+  GovernanceActor,
   GovernanceReviewer,
   PermissionOption,
   PlanEntry,
@@ -14,6 +16,50 @@ import type {
   StructuredRequestResolutionReason,
 } from "@wollipog/protocol";
 
+
+/** One turn's usage as the provider reported it: tokens by bucket and, when priced, its cost. */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationTokens: number;
+  costUsd?: number;
+  model?: string;
+}
+
+function turnUsageFrom(p: {
+  inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cacheCreationInputTokens?: number;
+  costUsd?: number; model?: string;
+}): TurnUsage | null {
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0);
+  const usage: TurnUsage = {
+    inputTokens: count(p.inputTokens),
+    outputTokens: count(p.outputTokens),
+    cachedInputTokens: count(p.cachedInputTokens),
+    cacheCreationTokens: count(p.cacheCreationInputTokens),
+    ...(typeof p.costUsd === "number" && Number.isFinite(p.costUsd) && p.costUsd >= 0 ? { costUsd: p.costUsd } : {}),
+    ...(typeof p.model === "string" && p.model ? { model: p.model } : {}),
+  };
+  const anyTokens = usage.inputTokens + usage.outputTokens + usage.cachedInputTokens + usage.cacheCreationTokens > 0;
+  return anyTokens || usage.costUsd != null ? usage : null;
+}
+
+/** A turn can settle usage in more than one event (a persistent process reports per result);
+ * later reports add to the earlier ones. */
+function mergeTurnUsage(current: TurnUsage | undefined, addition: TurnUsage): TurnUsage {
+  if (!current) return addition;
+  const cost = current.costUsd != null || addition.costUsd != null
+    ? { costUsd: (current.costUsd ?? 0) + (addition.costUsd ?? 0) }
+    : {};
+  return {
+    inputTokens: current.inputTokens + addition.inputTokens,
+    outputTokens: current.outputTokens + addition.outputTokens,
+    cachedInputTokens: current.cachedInputTokens + addition.cachedInputTokens,
+    cacheCreationTokens: current.cacheCreationTokens + addition.cacheCreationTokens,
+    ...cost,
+    ...(addition.model ?? current.model ? { model: addition.model ?? current.model } : {}),
+  };
+}
 
 export type TimelineItem =
   | {
@@ -29,6 +75,8 @@ export type TimelineItem =
       submissionId?: string;
       /** A canonical user message incorporated into an already-active turn. */
       deliveryIntent?: "steer";
+      /** The turn's provider-reported usage, stamped when its parentless token_usage lands. */
+      turnUsage?: TurnUsage;
       commandInvocation?: {
         invocationId: string;
         submissionId: string;
@@ -109,6 +157,8 @@ export type TimelineItem =
       outcome: ReviewDecisionOutcome;
       riskLevel?: ReviewRiskLevel;
       rationale?: string;
+      /** Runner-recorded decision time. */
+      createdAt?: number;
     }
   | {
       kind: "permission";
@@ -127,12 +177,16 @@ export type TimelineItem =
       questions: AgentQuestion[];
       /** undefined = still pending; true = answered; false = dismissed. */
       answered?: boolean;
+      answeredByPolicies?: string[];
       resolutionReason?: StructuredRequestResolutionReason;
     }
+  /** A content-safe policy-hook outcome. Current histories use the runner event sequence as `id`;
+   * legacy histories synthesize a negative id from the audit and anchor it chronologically. */
+  | { kind: "governance_decision"; id: number; decision: GovernanceDecision }
   | { kind: "checkpoint"; id: number; turn: number }
   | { kind: "checkpoint_restored"; id: number; turn: number }
   | { kind: "conversation_checkpoint"; id: number; turn: number }
-  | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number };
+  | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } };
 
 type AgentTextItem = Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
 const streamingTimelineItems = new WeakSet<AgentTextItem>();
@@ -180,6 +234,55 @@ export interface SubagentRollup {
  * from turning stable message identities into transcript-lifetime state. */
 export const MAX_OPEN_PROVIDER_TEXT_ITEMS = 128;
 
+const GOVERNANCE_ACTOR_LABELS: Record<GovernanceActor["kind"], string> = {
+  human: "You",
+  policy: "Policy",
+  agent: "Agent",
+  system: "System",
+};
+
+function nativePolicyHookDecision(ev: SessionEvent): GovernanceDecision | null {
+  const payload = ev.payload;
+  if (payload.kind !== "policy_hook_decision") return null;
+  if ((payload.stage !== "policy_decision" && payload.stage !== "resolution") ||
+      (payload.outcome !== "allowed" && payload.outcome !== "denied" &&
+       payload.outcome !== "timed_out" && payload.outcome !== "aborted")) return null;
+  const tone = payload.outcome === "timed_out" ? "timed-out"
+    : payload.outcome === "aborted" ? "denied"
+    : payload.outcome === "allowed" ? "allowed"
+      : payload.actor.kind === "policy" ? "policy" : "denied";
+  const label = payload.outcome === "timed_out" ? "Approval Timed Out"
+    : payload.outcome === "aborted" ? "Approval Aborted"
+    : payload.actor.kind === "system" && payload.outcome === "denied" ? "Blocked Fail-Closed"
+    : payload.outcome === "allowed"
+      ? payload.actor.kind === "human" ? "Approved by You" : "Allowed by Policy"
+      : payload.actor.kind === "human" ? "Denied by You" : "Blocked by Policy";
+  const detail = payload.outcome === "timed_out"
+    ? "The policy deadline expired, so the tool was denied."
+    : payload.outcome === "aborted"
+      ? "The approval ended before the tool could run."
+    : payload.actor.kind === "system" && payload.outcome === "denied"
+      ? "The tool was denied because its approval could not be completed safely."
+    : payload.outcome === "allowed"
+      ? payload.actor.kind === "human"
+        ? "The suspended tool invocation resumed."
+        : "The matched policy allowed this tool."
+      : payload.actor.kind === "human"
+        ? "The suspended tool invocation was blocked."
+        : "The matched policy denied this tool.";
+  const actor = GOVERNANCE_ACTOR_LABELS[payload.actor.kind];
+  return {
+    auditId: payload.auditId,
+    requestId: payload.requestId,
+    label,
+    detail,
+    tone,
+    decidedBy: payload.actor.id ? `${actor} · ${payload.actor.id}` : actor,
+    ...(payload.governancePolicyId ? { policyId: payload.governancePolicyId } : {}),
+    timestamp: ev.ts,
+  };
+}
+
 /** A rendered row is either a standalone item or a collapsible block of "work" (reasoning + tools). */
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }
@@ -187,6 +290,14 @@ export type TimelineGroup =
 
 /** Item kinds that are intermediate "work" — folded into a collapsed "Worked" block, Codex-style. */
 const WORK_KINDS = new Set(["agent_thought", "tool_call", "command_output", "stderr", "file_edit", "plan"]);
+
+/** Routine automated approvals belong to the surrounding work block. Exceptional review outcomes
+ * remain standalone so denials, escalations, timeouts, and aborts cannot disappear in a summary. */
+export function isCollapsibleWorkItem(item: TimelineItem): boolean {
+  return WORK_KINDS.has(item.kind) ||
+    (item.kind === "review_decision" && item.outcome === "allowed") ||
+    (item.kind === "governance_decision" && item.decision.tone === "allowed");
+}
 
 export function timelineBoundaryKey(item: TimelineItem): string {
   if (item.kind === "agent_message" || item.kind === "agent_thought" ||
@@ -206,7 +317,7 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
   let work: TimelineItem[] | null = null;
   let boundary = "head";
   for (const it of items) {
-    if (WORK_KINDS.has(it.kind)) {
+    if (isCollapsibleWorkItem(it)) {
       if (!work) {
         work = [];
         // A block belongs to the preceding standalone row (or the transcript head), not its
@@ -648,8 +759,21 @@ export class TimelineBuilder {
           outcome: p.outcome,
           riskLevel: p.riskLevel,
           rationale: p.rationale,
+          ...(Number.isFinite(ev.ts) ? { createdAt: ev.ts } : {}),
         }) - 1);
         break;
+      case "policy_hook_decision": {
+        this.breakText();
+        const decision = nativePolicyHookDecision(ev);
+        if (decision) {
+          this.markDirty(this.items.push({
+            kind: "governance_decision",
+            id: ev.seq,
+            decision,
+          }) - 1);
+        }
+        break;
+      }
       case "command_output":
         this.pushText("command_output", ev.seq, p.text, undefined, p.parentToolUseId, undefined, p.textRefs);
         break;
@@ -782,17 +906,22 @@ export class TimelineBuilder {
                 Number.isFinite(ev.ts) && ev.ts >= item.createdAt
                 ? ev.ts - item.createdAt
                 : undefined;
-              const durationMs = providerDuration ?? observedDuration;
-              if (durationMs != null) {
+              const durationMs = item.durationMs == null ? (providerDuration ?? observedDuration) : undefined;
+              const turnUsage = turnUsageFrom(p);
+              if (durationMs != null || turnUsage) {
                 this.items[this.activeUserIndex] = {
                   ...item,
-                  durationMs,
-                  durationSource: providerDuration != null ? "provider" : "observed",
+                  ...(durationMs != null
+                    ? { durationMs, durationSource: providerDuration != null ? "provider" as const : "observed" as const }
+                    : {}),
+                  ...(turnUsage ? { turnUsage: mergeTurnUsage(item.turnUsage, turnUsage) } : {}),
                 };
                 this.markDirty(this.activeUserIndex);
               }
             }
-            this.activeUserIndex = null;
+            // The prompt stays the turn's owner until the next prompt arrives: a persistent
+            // process can settle one turn in more than one usage report, and each must land on
+            // the same row. The duration is stamped once, by the first report that carries one.
           }
           break;
         }
@@ -914,11 +1043,24 @@ export class TimelineBuilder {
         this.markDirty(i);
         break;
       }
+      case "question_policy_answered": {
+        const idx = p.questionEventSeq !== undefined
+          ? this.items.findIndex((item) => item.kind === "question" && item.id === p.questionEventSeq && item.requestId === p.requestId)
+          : this.permIndex.get(p.requestId);
+        if (idx != null && idx >= 0 && this.items[idx]?.kind === "question") {
+          const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
+          if (it.answered === false) break;
+          this.items[idx] = { ...it, answered: true, answeredByPolicies: p.policies.map((policy) => policy.name) };
+          this.markDirty(idx);
+        }
+        break;
+      }
       case "question_resolved": {
         const idx = this.permIndex.get(p.requestId);
         if (idx != null && this.items[idx]!.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
-          this.items[idx] = { ...it, answered: p.answered, resolutionReason: p.resolutionReason };
+          this.items[idx] = { ...it, answered: p.answered, resolutionReason: p.resolutionReason,
+            ...(!p.answered ? { answeredByPolicies: undefined } : {}) };
           this.markDirty(idx);
         }
         break;
@@ -945,7 +1087,7 @@ export class TimelineBuilder {
         break;
       case "conversation_forked":
         this.breakText();
-        this.markDirty(this.items.push({ kind: "conversation_forked", id: ev.seq, sourceSessionId: p.sourceSessionId, turn: p.turn }) - 1);
+        this.markDirty(this.items.push({ kind: "conversation_forked", id: ev.seq, sourceSessionId: p.sourceSessionId, turn: p.turn, ...(p.handoff ? { handoff: p.handoff } : {}) }) - 1);
         break;
       case "error":
         this.breakText();

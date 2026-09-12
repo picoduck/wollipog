@@ -22,6 +22,8 @@ export interface AgentPrincipal {
   actorId: string;
   /** Present only for the general runner-minted credential, which is confined to one session. */
   credentialSessionId?: string;
+  /** Derived from the credential's persisted session, never from request data. */
+  orchestrator?: boolean;
   userId?: undefined;
   organizationId: string;
   delegatedScope: ResourceScope;
@@ -91,7 +93,8 @@ export function mutationAuthorizationError(
 }
 
 export function agentDelegationAuthorizationError(routePath: string, principal: AgentPrincipal): string | null {
-  const resourceRoute = routePath === "/api/runners" || routePath === "/api/sessions" ||
+  if (principal.orchestrator && routePath === "/api/governance/policies") return null;
+  const resourceRoute = routePath === "/api/compatibility" || routePath === "/api/runners" || routePath === "/api/sessions" ||
     routePath.startsWith("/api/sessions/");
   if (resourceRoute || principal.delegatedScope.owner.kind === "organization") return null;
   return "the conductor session is not delegated organization-wide access to this global resource";
@@ -101,11 +104,25 @@ export function agentCredentialSessionTargetError(
   routePath: string,
   principal: AgentPrincipal,
   targetSessionId: string,
+  targetIsDescendant = false,
 ): string | null {
   const worktreeRoute = routePath === "/api/sessions/:id/worktrees" ||
     routePath === "/api/sessions/:id/worktrees/attach" ||
     routePath === "/api/sessions/:id/worktrees/select" ||
     routePath === "/api/sessions/:id/worktrees/discard";
+  // All agent credentials are confined here, not only the optional orchestrator preset.
+  // The caller computes ancestry from server-owned records; visibility is checked separately.
+  const descendantMutation = routePath === "/api/sessions/:id/prompt" ||
+    routePath === "/api/sessions/:id/stop" || routePath === "/api/sessions/:id/restart" ||
+    routePath === "/api/sessions/:id/config" || routePath === "/api/sessions/:id/archive";
+  // The config service permits a self-target only for maxChildSessions, so a live orchestrator can
+  // raise its own delegation concurrency without gaining authority over its spend/tool ceilings.
+  if (routePath === "/api/sessions/:id/config" &&
+      principal.credentialSessionId === targetSessionId) return null;
+  if (descendantMutation || (principal.orchestrator && worktreeRoute)) {
+    return principal.credentialSessionId && targetIsDescendant &&
+      targetSessionId !== principal.credentialSessionId ? null : "the session credential may manage only its descendants";
+  }
   if (!worktreeRoute) return null;
   return principal.credentialSessionId && principal.credentialSessionId !== targetSessionId
     ? "the session credential may manage only its own session"

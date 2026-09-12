@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RunnerView, SkillFile, SkillInvocationPolicy } from "@wollipog/protocol";
+import type { SkillFile, SkillInvocationPolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
-import { driverKindLabel } from "../agent-presentation.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { Empty, Modal, Skeleton } from "./common.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SkillsIcon } from "./Icons.js";
 import { Markdown } from "./Markdown.js";
+import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
+import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
+import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
+import { SkillMachineVersionDialog } from "./SkillMachineVersionDialog.js";
+import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
+import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
+import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
+import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -19,7 +26,6 @@ import {
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
   skillDeployBadge,
-  skillEligibleAgents,
   skillFilesFromUploads,
   skillFromPayload,
   skillGroupsFromPayload,
@@ -33,9 +39,6 @@ import {
   type SkillGroupView,
   type SkillSummary,
 } from "../skills.js";
-
-/** Drivers the MVP reconciler deploys to; offered even before a machine reports its agents. */
-const ASSIGNABLE_DRIVERS = ["claude-code", "codex", "codex-app-server"] as const;
 
 function formatTime(value: number | undefined): string {
   return value === undefined ? "—" : new Date(value).toLocaleString();
@@ -155,101 +158,6 @@ function NewSkillDialog({ onClose, onCreate, busy }: {
   );
 }
 
-function AddAssignmentDialog({ skill, runners, machineLabels, busy, onClose, onCreate }: {
-  skill: SkillSummary;
-  runners: RunnerView[];
-  machineLabels: Map<string, string>;
-  busy: boolean;
-  onClose: () => void;
-  onCreate: (input: {
-    scopeKind: "instance" | "runner";
-    runnerId?: string;
-    agentSelector: SkillAgentSelector;
-    invocation: SkillInvocationPolicy;
-  }) => Promise<void>;
-}) {
-  const [machineChoice, setMachineChoice] = useState("all");
-  const [agentChoice, setAgentChoice] = useState("all");
-  const [invocation, setInvocation] = useState<SkillInvocationPolicy>("agent");
-  const runnerId = machineChoice === "all" ? "" : machineChoice;
-  const selectedRunner = runners.find((runner) => runner.runnerId === runnerId);
-  const eligibleAgents = selectedRunner ? skillEligibleAgents(selectedRunner.agents) : [];
-
-  const submit = async () => {
-    const agentSelector: SkillAgentSelector = agentChoice === "all"
-      ? { kind: "all" }
-      : agentChoice.startsWith("driver:")
-        ? { kind: "driver", driver: agentChoice.slice("driver:".length) }
-        : { kind: "agent", agentId: agentChoice.slice("agent:".length) };
-    await onCreate({
-      scopeKind: runnerId ? "runner" : "instance",
-      ...(runnerId ? { runnerId } : {}),
-      agentSelector,
-      invocation,
-    });
-  };
-
-  return (
-    <Modal title="Add Assignment" onClose={onClose} footer={
-      <>
-        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn primary" disabled={busy} onClick={() => void submit()}>
-          {busy ? "Adding…" : "Add Assignment"}
-        </button>
-      </>
-    }>
-      <div className="form">
-        <p className="skills-hint">Deploy “{skill.name}” to the machines and agents selected below.</p>
-        <div className="field">
-          <span>Machine</span>
-          <Select
-            label="Machine"
-            value={machineChoice}
-            options={[
-              { value: "all", label: "All Machines" },
-              ...runners.map((runner) => ({
-                value: runner.runnerId,
-                label: machineLabels.get(runner.runnerId) ?? runner.runnerId,
-              })),
-            ]}
-            onChange={(value) => { setMachineChoice(value); setAgentChoice("all"); }}
-          />
-        </div>
-        <div className="field">
-          <span>Agents</span>
-          <Select
-            label="Agents"
-            value={agentChoice}
-            options={[
-              { value: "all", label: "All Agents" },
-              ...ASSIGNABLE_DRIVERS.map((driver) => ({
-                value: `driver:${driver}`,
-                label: driverKindLabel(driver),
-              })),
-              ...eligibleAgents.map((agent) => ({ value: `agent:${agent.id}`, label: agent.name })),
-            ]}
-            onChange={setAgentChoice}
-          />
-        </div>
-        <div className="field">
-          <span>Invocation</span>
-          <Select<SkillInvocationPolicy>
-            label="Invocation"
-            value={invocation}
-            options={[
-              { value: "agent", label: invocationLabel("agent") },
-              { value: "manual", label: invocationLabel("manual") },
-            ]}
-            onChange={setInvocation}
-          />
-        </div>
-        <p className="skills-hint">
-          Manual Only deploys the skill with model invocation disabled, so only a person can run it.
-        </p>
-      </div>
-    </Modal>
-  );
-}
 
 export function SkillsView() {
   const api = useApi();
@@ -270,8 +178,9 @@ export function SkillsView() {
   const [machineSkills, setMachineSkills] = useState<Record<string, RunnerSkillsResponse>>({});
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
+  const [versionRunnerId, setVersionRunnerId] = useState<string | undefined>();
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"new-skill" | "add-assignment" | null>(null);
+  const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | null>(null);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
   const listGeneration = useRef(0);
@@ -308,7 +217,7 @@ export function SkillsView() {
         // A machine that predates the skills routes reads as never reported rather than an error
         // banner over the whole view.
         return [runner.runnerId, {
-          desired: [], reported: null, removalReporting: "unknown",
+          desired: [], reported: null, removalReporting: "unknown", loadError: "Skills status could not be loaded. Try Sync Now or reopen this view.",
         } satisfies RunnerSkillsResponse] as const;
       }
     }));
@@ -406,6 +315,7 @@ export function SkillsView() {
           desired: current[runnerId]?.desired ?? [],
           reported,
           removalReporting: current[runnerId]?.removalReporting ?? "unknown",
+          ...(current[runnerId]?.loadError || !current[runnerId] ? { loadError: current[runnerId]?.loadError ?? "Desired skill assignments have not loaded." } : {}),
         },
       }));
       await refreshMachines();
@@ -417,6 +327,7 @@ export function SkillsView() {
   };
 
   const latest = detail?.latestVersion ?? null;
+  const gitSource = detail?.gitSource ?? latest?.gitSource;
   const skillMd = latest?.files?.find((file) => file.path === "SKILL.md" && file.encoding === "utf8");
 
   return (
@@ -424,9 +335,14 @@ export function SkillsView() {
       <div className="view-heading skills-heading">
         <div>
           <h2>Agent Skills</h2>
-          <p>Author a skill once, then assign it to machines and agents. Wollipog deploys the latest version and reports each machine's state.</p>
+          <p>Author a skill once, then assign it to machines and agents. Wollipog deploys each machine's selected version and reports its state.</p>
         </div>
-        <button className="btn primary" type="button" onClick={() => setDialog("new-skill")}>New Skill</button>
+        <div className="skills-section-heading">
+          <button className="btn" type="button" onClick={() => setDialog("groups")}>Manage Groups</button>
+          <button className="btn" type="button" onClick={() => setDialog("git-import")}>Import from Git</button>
+          <button className="btn" type="button" onClick={() => setDialog("machine-import")}>Import from Machine</button>
+          <button className="btn primary" type="button" onClick={() => setDialog("new-skill")}>New Skill</button>
+        </div>
       </div>
       {error && <div className="form-error" role="alert">{error}</div>}
 
@@ -495,6 +411,8 @@ export function SkillsView() {
                 </button>
               </div>
 
+              <button className="btn sm" type="button" onClick={() => setDialog("version-history")}>Version History</button>
+              <button className="btn sm" type="button" onClick={() => setDialog("machine-versions")}>Machine Versions</button>
               {skillMd && (
                 <section className="skills-section" aria-label="Skill Content">
                   <h4>Content</h4>
@@ -504,15 +422,29 @@ export function SkillsView() {
                 </section>
               )}
 
+              {gitSource && <section className="skills-section skills-git-source">
+                <h4>Git Source</h4>
+                <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
+                <p className="skills-hint">Commit {gitSource.commit}</p>
+                <button className="btn sm" type="button" onClick={() => setDialog("git-update")}>Check for Updates</button>
+              </section>}
+              {latest?.machineSource && <section className="skills-section skills-machine-import">
+                <h4>Machine Snapshot Source</h4>
+                <p className="skills-hint">{machineLabels.get(latest.machineSource.runnerId) ?? latest.machineSource.runnerId} · {latest.machineSource.context?.kind === "wsl" ? `WSL: ${latest.machineSource.context.distro} · ` : ""}{latest.machineSource.sourceDirectory}/{latest.machineSource.name}</p>
+                <p className="skills-hint">Digest: {latest.machineSource.digest}</p>
+                <p className="skills-hint">Imported {formatTime(latest.machineSource.importedAt)}. This records a snapshot, not an adopted source directory.</p>
+              </section>}
+
+              {detail.groupId && <SkillInheritedAssignments key={detail.id} groupId={detail.groupId} groups={groups} runners={runners} machineLabels={machineLabels} onManage={() => setDialog("groups")} />}
               <section className="skills-section" aria-label="Assignments">
                 <div className="skills-section-heading">
                   <h4>Assignments</h4>
-                  <button type="button" className="btn sm" disabled={busy} onClick={() => setDialog("add-assignment")}>
+                  <button type="button" className="btn sm" disabled={busy} onClick={() => { setError(null); setDialog("add-assignment"); }}>
                     Add Assignment
                   </button>
                 </div>
                 {assignments.length === 0 ? (
-                  <p className="skills-hint">Not assigned anywhere yet. Add an assignment to deploy this skill.</p>
+                  <p className="skills-hint">No direct assignments. Group assignments may still deploy this skill.</p>
                 ) : (
                   <table className="skills-table">
                     <thead>
@@ -592,6 +524,7 @@ export function SkillsView() {
                 )}
               </section>
 
+              <SkillAssignmentMatrix key={`matrix-${detail.id}`} skillId={detail.id} skillName={detail.name} runners={runners} machineLabels={machineLabels} machineSkills={machineSkills} onManageVersion={runnerId => { setVersionRunnerId(runnerId); setDialog("machine-versions"); }} />
               <section className="skills-section" aria-label="Deployment">
                 <h4>Deployment</h4>
                 {runners.length === 0 && <p className="skills-hint">Connect a machine to deploy this skill.</p>}
@@ -599,6 +532,8 @@ export function SkillsView() {
                   const machine = machineSkills[runner.runnerId];
                   const desired = machine?.desired.find((entry) => entry.name === detail.name);
                   const badge = skillDeployBadge({
+                    loadError: machine?.loadError,
+                    loading: !machine,
                     runnerOnline: runner.status === "online",
                     desired,
                     reported: machine?.reported,
@@ -638,7 +573,7 @@ export function SkillsView() {
                             ))}
                           </ul>
                           <p className="skills-hint">
-                            These skills live on the machine but are not managed here. Adopting them into the library arrives later.
+                            These skills live on the machine but are not managed here. Use Import from Machine to preview or import a snapshot. On a compatible Linux runner, an identical assigned version can then be adopted with an explicit recovery-aware confirmation.
                           </p>
                         </div>
                       )}
@@ -679,15 +614,39 @@ export function SkillsView() {
         </div>
       </div>
 
+      {dialog === "groups" && <SkillGroupsDialog runners={runners} machineLabels={machineLabels} onClose={() => setDialog(null)} onChanged={async () => {
+        await refreshList();
+        if (selectedId) await refreshDetail(selectedId);
+        await refreshMachines();
+      }} />}
       {dialog === "new-skill" && (
         <NewSkillDialog busy={busy} onClose={() => setDialog(null)} onCreate={createSkill} />
       )}
+      {dialog === "version-history" && detail && <SkillVersionHistoryDialog key={detail.id} skillId={detail.id} onClose={() => setDialog(null)} onRestored={async () => {
+        await refreshList();
+        await refreshDetail(detail.id);
+        await refreshMachines();
+      }} />}
+      {dialog === "machine-versions" && detail && <SkillMachineVersionDialog key={detail.id} skillId={detail.id} runners={runners} initialRunnerId={versionRunnerId} onClose={() => { setDialog(null); setVersionRunnerId(undefined); }} onSaved={refreshMachines} />}
+      {dialog === "machine-import" && <SkillMachineImportDialog runners={runners} onClose={() => setDialog(null)} onImported={async () => {
+        await refreshList();
+        if (selectedId) await refreshDetail(selectedId);
+        await refreshMachines();
+      }} />}
+      {(dialog === "git-import" || dialog === "git-update") && <SkillGitImportDialog
+        source={dialog === "git-update" && gitSource ? { ...gitSource, subdirectory: gitSource.path } : undefined}
+        onClose={() => setDialog(null)} onImported={async () => {
+          await refreshList();
+          if (selectedId) await refreshDetail(selectedId);
+          await refreshMachines();
+        }} />}
       {dialog === "add-assignment" && detail && (
         <AddAssignmentDialog
           skill={detail}
           runners={runners}
           machineLabels={machineLabels}
           busy={busy}
+          error={error}
           onClose={() => setDialog(null)}
           onCreate={createAssignment}
         />

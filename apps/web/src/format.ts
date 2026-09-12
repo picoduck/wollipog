@@ -203,6 +203,7 @@ export function formatCost(usd: number): string {
  * action) vs. the fixed-rule autos (accept-edits / workspace sandbox).
  */
 const PERMISSION_LABELS: Record<string, string> = {
+  orchestrator: "Orchestrator",
   // claude-code permission modes
   default: "Ask Every Time",
   auto: "Auto (AI-Reviewed)",
@@ -223,6 +224,7 @@ const PERMISSION_LABELS: Record<string, string> = {
 
 /** One-line explanation of each approval mode, used as the option's hover tooltip. */
 const PERMISSION_DESCRIPTIONS: Record<string, string> = {
+  orchestrator: "Manages child sessions without its own shell or file-write tools. Selected at session creation and fixed for that session.",
   default: "You approve every tool call (Allow / Reject).",
   untrusted: "You approve every tool call (Allow / Reject).",
   auto: "A classifier model reviews each action: safe ones run automatically; risky ones are blocked and the agent is steered to a safer path.",

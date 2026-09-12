@@ -1,6 +1,7 @@
 import type {
   BundleReviewFindingsRequest,
   CreateReviewFindingRequest,
+  ForgeReviewSyncInfo,
   GitHubReviewSyncInfo,
   ReviewFinding,
   UpdateReviewFindingRequest,
@@ -55,6 +56,56 @@ export function validateGitHubReviewSync(input: unknown): input is GitHubReviewS
         !Number.isSafeInteger(thread.updatedAt) || thread.updatedAt < thread.createdAt ||
         typeof thread.commitId !== "string" || !/^[a-f0-9]{40}$/.test(thread.commitId) ||
         (thread.subjectType !== "line" && thread.subjectType !== "file") ||
+        typeof thread.resolved !== "boolean" || typeof thread.outdated !== "boolean") return false;
+    ids.add(thread.threadId);
+  }
+  return true;
+}
+
+/** Validate a provider-neutral authoritative snapshot before any remote content becomes durable. */
+export function validateForgeReviewSync(input: unknown): input is ForgeReviewSyncInfo {
+  const value = input as Partial<ForgeReviewSyncInfo> | null;
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      (value.provider !== "github" && value.provider !== "gitlab") ||
+      typeof value.host !== "string" || !/^[a-z0-9.-]+(?::\d{1,5})?$/.test(value.host) ||
+      typeof value.project !== "string" || value.project.length > 512 ||
+      value.project.split("/").length < 2 || value.project.split("/").some((part) => !part || part === "." || part === "..") ||
+      !Number.isSafeInteger(value.changeRequestNumber) || value.changeRequestNumber! < 1 ||
+      typeof value.changeRequestUrl !== "string" ||
+      typeof value.changeRequestHeadOid !== "string" || !/^[a-f0-9]{40}$/.test(value.changeRequestHeadOid) ||
+      typeof value.changeRequestBaseOid !== "string" || !/^[a-f0-9]{40}$/.test(value.changeRequestBaseOid) ||
+      typeof value.localHeadOid !== "string" || !/^[a-f0-9]{40}$/.test(value.localHeadOid) ||
+      typeof value.diffHash !== "string" || !/^[a-f0-9]{64}$/.test(value.diffHash) ||
+      !Number.isSafeInteger(value.synchronizedAt) || value.synchronizedAt! < 1 ||
+      !Array.isArray(value.threads) || value.threads.length > 500) return false;
+  let requestUrl: URL;
+  try { requestUrl = new URL(value.changeRequestUrl); } catch { return false; }
+  const expectedPath = value.provider === "github"
+    ? `/${value.project}/pull/${value.changeRequestNumber}`
+    : `/${value.project}/-/merge_requests/${value.changeRequestNumber}`;
+  const pathMatches = value.provider === "github"
+    ? requestUrl.pathname.toLowerCase() === expectedPath.toLowerCase()
+    : requestUrl.pathname === expectedPath;
+  if (!new Set(["http:", "https:"]).has(requestUrl.protocol) || requestUrl.username || requestUrl.password ||
+      requestUrl.host.toLowerCase() !== value.host ||
+      !pathMatches || requestUrl.search || requestUrl.hash ||
+      (value.provider === "github" && (value.host !== "github.com" || requestUrl.protocol !== "https:"))) return false;
+  const ids = new Set<string>();
+  for (const thread of value.threads) {
+    if (!thread || typeof thread !== "object" || Array.isArray(thread) ||
+        typeof thread.threadId !== "string" || !thread.threadId || thread.threadId.length > 512 || ids.has(thread.threadId) ||
+        !Number.isSafeInteger(thread.commentId) || thread.commentId < 1 ||
+        typeof thread.url !== "string" || !thread.url.startsWith(`${value.changeRequestUrl}#${value.provider === "github" ? "discussion_" : "note_"}`) ||
+        typeof thread.path !== "string" || !validFilePath(thread.path) ||
+        (thread.side !== "left" && thread.side !== "right") ||
+        !Number.isSafeInteger(thread.line) || thread.line < 1 || thread.line > 10_000_000 ||
+        typeof thread.body !== "string" || !thread.body || thread.body.length > 4_000 ||
+        typeof thread.author !== "string" || !thread.author || thread.author.length > 160 || thread.author.includes("\0") ||
+        !Number.isSafeInteger(thread.createdAt) || thread.createdAt < 1 ||
+        !Number.isSafeInteger(thread.updatedAt) || thread.updatedAt < thread.createdAt ||
+        typeof thread.commitId !== "string" || !/^[a-f0-9]{40}$/.test(thread.commitId) ||
+        !new Set(["line", "file", "remote"]).has(thread.subjectType) ||
+        (thread.subjectType === "remote" && value.provider !== "gitlab") ||
         typeof thread.resolved !== "boolean" || typeof thread.outdated !== "boolean") return false;
     ids.add(thread.threadId);
   }
@@ -124,8 +175,11 @@ export function parseBundleReviewFindings(input: unknown): Parsed<BundleReviewFi
 export function formatReviewFindingsPrompt(findings: ReviewFinding[]): string {
   const entries = findings.map((finding, index) => {
     const requirement = finding.required ? "REQUIRED" : "OPTIONAL";
+    const location = finding.remote?.subjectType === "remote"
+      ? `Remote ${finding.remote.provider === "gitlab" ? "GitLab discussion" : "forge discussion"} (${finding.remote.url})`
+      : `${finding.filePath}:${finding.line} (${finding.side}, ${finding.scope})`;
     return [
-      `${index + 1}. [${requirement}] [${finding.severity.toUpperCase()}] ${finding.filePath}:${finding.line} (${finding.side}, ${finding.scope})`,
+      `${index + 1}. [${requirement}] [${finding.severity.toUpperCase()}] ${location}`,
       `   Finding: ${finding.body.replace(/\r?\n/g, "\n   ")}`,
       `   Review finding id: ${finding.findingId}`,
     ].join("\n");

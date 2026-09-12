@@ -275,7 +275,6 @@ test("nothing fades a subtree with opacity except an inactive control", () => {
     [".subagent-icon", "a decorative glyph beside a label that is not itself dimmed"],
     [".dir-icon", "a decorative glyph beside a label that is not itself dimmed"],
     [".working-dots span", "three animated dots, purely decorative"],
-    [".usage-cost-bar", "a bar chart's fill, not text"],
     [".ui-row-switch.is-busy .ui-switch",
       "the switch track and knob, non-text; #214 measured 0.85 to hold the track's 3:1 border"],
     [".loc-pick:disabled", "an inactive control, which WCAG 1.4.3 exempts"],

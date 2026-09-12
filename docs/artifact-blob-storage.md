@@ -38,6 +38,19 @@ only after confirming that no artifact row still references the digest, so dedup
 survives until its final reference is gone. Failed filesystem cleanup remains queued for a later
 pass and startup recovery.
 
+Raw prompt-image uploads are preparation leases, not permanent artifacts merely because their
+bytes were accepted. Identical uncommitted bytes for the same Session reuse one metadata row and
+renew its lease, so retries do not create unbounded duplicates. A successful queued edit commits
+its prepared images; prompt, steering, event, and workflow associations independently protect the
+images they reference. Maintenance expires an uncommitted, otherwise-unreferenced preparation
+after eight days—one day beyond browser queued-edit recovery—and then uses the same retryable blob
+garbage collection path. When a recovered queued edit is instead kept with **Use as New Message**,
+the browser first validates the complete retained collection against the ordinary image-count and
+aggregate payload limits, then authenticated-exports and verifies every prepared image before
+storing self-contained raw bytes in the ordinary local draft. Invalid collections start no exports,
+and the recovery remains available if validation or any export fails. A successful conversion no
+longer depends on the bounded preparation lease.
+
 ## Backup and operations
 
 Treat the database and artifact sidecar as one backup unit. For a consistent offline backup, stop

@@ -3,6 +3,7 @@ import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  compactMarkdownUrlLabel,
   Markdown,
   markdownCodeBlockContinues,
   markdownCodeLanguage,
@@ -44,6 +45,22 @@ test("safe Markdown renders immediately without synchronous highlighting or acti
   assert.doesNotMatch(html, /<script|<img/i);
   assert.match(html, /class="md-img-link"/);
   assert.match(html, /href="https:\/\/attacker\.example\/pixel\.png"/);
+});
+
+test("compact URL rendering hides signatures while retaining exact safe destinations", () => {
+  const signed = "https://evidence.example/private/mobile-capture.png?X-Amz-Signature=secret#review";
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    compactUrls: true,
+    children: `Plain ${signed}\n\n[Named evidence](${signed})`,
+  }));
+
+  assert.equal(compactMarkdownUrlLabel(signed), "evidence.example/mobile-capture.png");
+  assert.equal((html.match(/href="https:\/\/evidence\.example\/private\/mobile-capture\.png\?X-Amz-Signature=secret#review"/g) ?? []).length, 2);
+  assert.match(html, />evidence\.example\/mobile-capture\.png<\/a>/);
+  assert.match(html, />Named evidence<\/a>/);
+  assert.equal((html.match(/X-Amz-Signature=secret/g) ?? []).length, 2,
+    "the signature appears only in the two retained href attributes");
+  assert.doesNotMatch(html, /<img|<video/);
 });
 
 test("transcript media classification uses HTTPS path extensions and ignores signatures", () => {

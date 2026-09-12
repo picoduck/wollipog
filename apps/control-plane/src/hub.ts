@@ -28,15 +28,21 @@ import type {
   QueuedPromptView,
   ReadQueuedPromptResultMessage,
   ReadSessionFileResultMessage,
+  SearchWorkspaceReferencesResultMessage,
+  CreateWorkspaceReferenceResultMessage,
   ReprocessSessionResultMessage,
   ResolveSteeringAttemptResultMessage,
   RewindResultMessage,
   ShellOpenResultMessage,
   SkillsStateMessage,
+  SkillSnapshotResultMessage,
+  SkillAdoptionResultMessage,
+  SkillAdoptionRecoveryResultMessage,
   PodContextEntry,
   RunView,
   PodView,
   ProjectView,
+  PolicyHookDecisionRecordedMessage,
   SessionEvent,
   SessionEventPayload,
   SessionHistoryResultMessage,
@@ -166,6 +172,9 @@ export type UiSubscriptionApplyResult =
 /** Correlated runner replies the hub awaits (all carry `requestId`). A skills_state is only
  * correlatable when it echoes a solicited sync's requestId; unsolicited ones never enter here. */
 export type RunnerRequestResult =
+  | SkillSnapshotResultMessage
+  | SkillAdoptionResultMessage
+  | SkillAdoptionRecoveryResultMessage
   | (SkillsStateMessage & { requestId: string })
   | GitActionResultMessage
   | AdoptSessionResultMessage
@@ -179,6 +188,8 @@ export type RunnerRequestResult =
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
   | ReadSessionFileResultMessage
+  | SearchWorkspaceReferencesResultMessage
+  | CreateWorkspaceReferenceResultMessage
   | RewindResultMessage
   | ShellOpenResultMessage
   | HostActionResultMessage
@@ -190,7 +201,8 @@ export type RunnerRequestResult =
   | SteerSessionResultMessage
   | GenerateSessionTitleResultMessage
   | SessionNamingCustomModelResultMessage
-  | SessionWorktreeResultMessage;
+  | SessionWorktreeResultMessage
+  | PolicyHookDecisionRecordedMessage;
 
 interface PendingRequest {
   runnerId: string;
@@ -863,6 +875,12 @@ export class Hub {
     return this.queuedBySession.get(sessionId)?.activeTurnId;
   }
 
+  queuedPromptForSession(sessionId: string, promptId: string): QueuedPromptView | undefined {
+    const session = this.db.getSession(sessionId);
+    if (!session || !this.isRunnerOnline(session.runnerId)) return undefined;
+    return this.queuedBySession.get(sessionId)?.queue.find((prompt) => prompt.id === promptId);
+  }
+
   /** Forget queued state for a runner's sessions — its in-memory queues die with the connection, so
    * a fresh register (or a disconnect) must not leave a stale queue showing. Rebroadcasts each
    * affected session: dashboards hold the old queued list in their store, and a session that gets
@@ -931,8 +949,9 @@ export class Hub {
     }
   }
 
-  sessionEvent(event: SessionEvent): void {
+  sessionEvent(event: SessionEvent, options?: { suppressReminderWake?: boolean }): void {
     this.broadcast({ type: "session_event", event });
+    if (options?.suppressReminderWake) return;
     const reason = reminderWakeReasonForEvent(event.payload);
     if (!reason) return;
     for (const item of this.db.fireSessionRemindersForActivity(event.sessionId, event.seq, reason, event.ts)) {

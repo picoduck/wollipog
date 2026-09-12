@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
+import { validateSkillPayload } from "./skills.js";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "./local-device-credential.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -165,7 +166,7 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-skills-route-"));
   const databasePath = join(temp, "control-plane.db");
-  loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
 
   // Personal-organization fixtures: an ordinary (operator) member and a runner credential.
   const seed = ControlPlaneDb.open(databasePath);
@@ -282,6 +283,37 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   assert.equal(memberCreate.status, 201, "an ordinary member can create a skill");
   const memberSkill = (await memberCreate.json() as { skill: { id: string } }).skill;
 
+  // Exercise group ownership through the real HTTP auth boundary, not only injected handlers.
+  const memberGroups = await (await api(httpBase, MEMBER_TOKEN, "/api/skill-groups")).json() as { creationScope: { organizationId: string; owner: { kind: string; userId: string } } };
+  assert.equal(memberGroups.creationScope.organizationId, identity.organizationId);
+  assert.deepEqual(memberGroups.creationScope.owner, { kind: "user", userId: "usr_skills_member" });
+  const groupCreate = await api(httpBase, MEMBER_TOKEN, "/api/skill-groups", {
+    method: "POST", body: JSON.stringify({ name: "Member Tools" }),
+  });
+  assert.equal(groupCreate.status, 201);
+  const memberGroup = (await groupCreate.json() as { group: { id: string } }).group;
+  assert.equal((await api(httpBase, MEMBER_TOKEN, `/api/skills/${memberSkill.id}`, {
+    method: "PUT", body: JSON.stringify({ groupId: memberGroup.id }),
+  })).status, 200);
+  const groupRules = `/api/skill-groups/${memberGroup.id}/assignments`;
+  const groupRuleCreate = await api(httpBase, MEMBER_TOKEN, groupRules, {
+    method: "POST", body: JSON.stringify({ scopeKind: "instance", agentSelector: { kind: "all" }, enabled: false }),
+  });
+  assert.equal(groupRuleCreate.status, 201);
+  const groupRule = (await groupRuleCreate.json() as { assignment: { id: string } }).assignment;
+  for (const token of [SECOND_MEMBER_TOKEN, FOREIGN_ADMIN_TOKEN]) {
+    const groups = await (await api(httpBase, token, "/api/skill-groups")).json() as { groups: { id: string }[] };
+    assert.ok(!groups.groups.some(g => g.id === memberGroup.id));
+    assert.equal((await api(httpBase, token, groupRules)).status, 404);
+    assert.equal((await api(httpBase, token, `${groupRules}/${groupRule.id}`, {
+      method: "PATCH", body: JSON.stringify({ enabled: true }),
+    })).status, 404);
+    assert.equal((await api(httpBase, token, `${groupRules}/${groupRule.id}`, { method: "DELETE" })).status, 404);
+    assert.equal((await api(httpBase, token, `/api/skill-groups/${memberGroup.id}`, { method: "DELETE" })).status, 404);
+  }
+  assert.equal((await api(httpBase, MEMBER_TOKEN, `/api/skill-groups/${memberGroup.id}`, { method: "DELETE" })).status, 204);
+  assert.equal((await api(httpBase, MEMBER_TOKEN, groupRules)).status, 404);
+
   const memberAssignments = await api(httpBase, MEMBER_TOKEN, "/api/skill-assignments");
   assert.equal(memberAssignments.status, 200, "an ordinary member can list skill assignments");
 
@@ -395,6 +427,12 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
 
   // The parameterized per-machine routes are member-scoped too, and resource scoping still
   // applies: the personal-organization member reaches the runner, the foreign admin gets 404.
+  const policyPath = `/api/skills/${memberSkill.id}/machines/${RUNNER_ID}/version-policy`;
+  const memberPolicy = await api(httpBase, MEMBER_TOKEN, policyPath);
+  assert.equal(memberPolicy.status, 200);
+  assert.deepEqual(await memberPolicy.json(), { policy: null });
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, policyPath)).status, 404);
+  assert.equal((await api(httpBase, SECOND_MEMBER_TOKEN, policyPath)).status, 404);
   const memberRunnerView = await api(httpBase, MEMBER_TOKEN, `/api/runners/${RUNNER_ID}/skills`);
   assert.equal(memberRunnerView.status, 200, "an ordinary member can view a machine's skill state");
   assert.equal((await memberRunnerView.json() as { desired: Array<{ name: string }> }).desired[0]?.name,
@@ -439,5 +477,83 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   await runnerInbox.take((message) =>
     message.type === "skills_sync_complete" && message.syncId === refreshedSync.syncId);
 
+  // Machine snapshot routes are organization-scoped, but reading host files requires admin.
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, `/api/runners/${RUNNER_ID}/skill-snapshots`, { method: "POST" })).status, 404);
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, "/api/skill-machine/nonexistent", { method: "DELETE" })).status, 204,
+    "non-personal admins reach their own scoped discovery routes, not the global-resource gate");
+  assert.equal((await api(httpBase, MEMBER_TOKEN, `/api/runners/${RUNNER_ID}/skill-snapshots`, { method: "POST" })).status, 403);
+  const listingRequest = api(httpBase, ownerToken, `/api/runners/${RUNNER_ID}/skill-snapshots`, { method: "POST" });
+  const listingFrame = await runnerInbox.take((message) => message.type === "skill_snapshot");
+  assert.equal(listingFrame.operation, "list");
+  const candidate = { id: "opaque", name: "machine-skill", sourceDirectory: ".codex/skills", generation: "generation" };
+  runner.send(JSON.stringify({ type: "skill_snapshot_result", runnerId: RUNNER_ID, requestId: listingFrame.requestId, candidates: [candidate] }));
+  const listing = await listingRequest;
+  assert.equal(listing.status, 200);
+  const discoveryId = (await listing.json() as { discoveryId: string }).discoveryId;
+  const previewRequest = api(httpBase, ownerToken, `/api/skill-machine/${discoveryId}/preview`, { method: "POST", body: JSON.stringify({ candidateId: "opaque" }) });
+  const readFrame = await runnerInbox.take((message) => message.type === "skill_snapshot");
+  assert.equal(readFrame.operation, "read");
+  assert.equal(readFrame.candidateId, "opaque");
+  const payload = validateSkillPayload({ name: "machine-skill", files: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: machine-skill\n---\nSnapshot" }] });
+  assert.ok(payload.ok);
+  if (!payload.ok) throw new Error();
+  runner.send(JSON.stringify({ type: "skill_snapshot_result", runnerId: RUNNER_ID, requestId: readFrame.requestId, snapshot: { candidate, files: payload.files, digest: payload.digest } }));
+  const previewResponse = await previewRequest;
+  assert.equal(previewResponse.status, 200);
+  const previewId = (await previewResponse.json() as { previewId: string }).previewId;
+  const preflightPath = `/api/skill-machine/${discoveryId}/adoption-preflight`;
+  const preflightBody = { method: "POST", body: JSON.stringify({ previewId }) };
+  assert.equal((await api(httpBase, MEMBER_TOKEN, preflightPath, preflightBody)).status, 403);
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, preflightPath, preflightBody)).status, 404);
+  const preflightRequest = api(httpBase, ownerToken, preflightPath, preflightBody);
+  const preflightFrame = await runnerInbox.take((message) => message.type === "skill_snapshot");
+  assert.equal(preflightFrame.operation, "read");
+  assert.equal(preflightFrame.candidateId, "opaque");
+  runner.send(JSON.stringify({ type: "skill_snapshot_result", runnerId: RUNNER_ID, requestId: preflightFrame.requestId,
+    snapshot: { candidate, files: payload.files, digest: payload.digest } }));
+  const preflightResponse = await preflightRequest;
+  assert.equal(preflightResponse.status, 200);
+  const preflight = await preflightResponse.json() as { status: string; mutationSupported: boolean; blockers: string[] };
+  assert.equal(preflight.status, "blocked");
+  assert.equal(preflight.mutationSupported, false);
+  assert.ok(preflight.blockers.includes("library_skill_missing"));
+  const imported = await api(httpBase, ownerToken, `/api/skill-machine/${discoveryId}/import`, { method: "POST", body: JSON.stringify({ previewId }) });
+  assert.equal(imported.status, 200);
+  const importedSkill = (await imported.json() as { skill: { id: string; assignmentCount: number } }).skill;
+  assert.equal(importedSkill.assignmentCount, 0);
+  const detail = await (await api(httpBase, ownerToken, `/api/skills/${importedSkill.id}`)).json() as { latestVersion: { machineSource: { digest: string } } };
+  assert.equal(detail.latestVersion.machineSource.digest, payload.digest);
+
+  // Recovery commands cross the real authenticated HTTP/WebSocket correlation boundary.
+  const recoveryPath = `/api/runners/${RUNNER_ID}/skill-adoption-recovery`;
+  assert.equal((await api(httpBase, MEMBER_TOKEN, recoveryPath, { method: "POST" })).status, 403);
+  assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, recoveryPath, { method: "POST" })).status, 403);
+  const recoveryRequest = api(httpBase, ownerToken, recoveryPath, { method: "POST" });
+  const recoveryFrame = await runnerInbox.take((message) => message.type === "skill_adoption_recovery");
+  assert.equal(recoveryFrame.operation, "list");
+  const operation = {
+    operationId: "123e4567-e89b-42d3-a456-426614174000",
+    backupDirectory: ".codex/skills/.wollipog-adoption-123e4567-e89b-42d3-a456-426614174000",
+    sourceDirectory: ".codex/skills",
+    name: "machine-skill",
+    digest: payload.digest,
+    state: "managed_linked",
+    detail: "The managed link is active and the original is preserved.",
+  };
+  runner.send(JSON.stringify({ type: "skill_adoption_recovery_result", runnerId: RUNNER_ID,
+    requestId: recoveryFrame.requestId, status: "listed", operations: [operation], truncated: false }));
+  const recoveryResponse = await recoveryRequest;
+  assert.equal(recoveryResponse.status, 200);
+  assert.deepEqual((await recoveryResponse.json() as { operations: unknown[] }).operations, [operation]);
+  const restoreRequest = api(httpBase, ownerToken,
+    `${recoveryPath}/${operation.operationId}/restore`, {
+      method: "POST", body: JSON.stringify({ confirmation: "explicit" }),
+    });
+  const restoreFrame = await runnerInbox.take((message) => message.type === "skill_adoption_recovery");
+  assert.equal(restoreFrame.operation, "restore");
+  assert.equal(restoreFrame.operationId, operation.operationId);
+  runner.send(JSON.stringify({ type: "skill_adoption_recovery_result", runnerId: RUNNER_ID,
+    requestId: restoreFrame.requestId, status: "restored", operation: { ...operation, state: "restored" } }));
+  assert.equal((await restoreRequest).status, 200);
   assert.equal(child.exitCode, null, `control plane exited during the skills scenario\n${output}`);
 });

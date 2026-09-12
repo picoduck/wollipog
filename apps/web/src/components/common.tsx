@@ -9,8 +9,11 @@ import {
   type BackgroundWorkState,
   type SessionStatus,
   type SessionView,
+  type SessionAttentionGroup,
+  sessionAttentionBreakdown,
 } from "@wollipog/protocol";
-import { statusMeta } from "../format.js";
+import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
+import { statusMeta, type StatusMeta } from "../format.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CheckIcon, CloseIcon, CopyIcon, WarningIcon } from "./Icons.js";
 
@@ -147,14 +150,15 @@ export function CopyButton({
   );
 }
 
-export function StatusBadge({ status, archiveStatus, archiveOperation, stopOperation, ariaLabel }: {
+export function StatusBadge({ status, archiveStatus, archiveOperation, stopOperation, historyQuarantine, ariaLabel }: {
   status: SessionStatus;
   archiveStatus?: ArchiveStatus;
   archiveOperation?: ArchiveOperationView;
   stopOperation?: StopOperationView;
+  historyQuarantine?: SessionView["historyQuarantine"];
   ariaLabel?: string;
 }) {
-  const m = sessionStatusBadgeMeta(status, archiveStatus, archiveOperation, stopOperation);
+  const m = sessionStatusBadgeMeta(status, archiveStatus, archiveOperation, stopOperation, historyQuarantine);
   const operation = stopOperation ?? archiveOperation;
   return (
     <span className={"status-badge " + m.className} title={operation?.failure?.message} aria-label={ariaLabel}>
@@ -169,6 +173,7 @@ function sessionStatusBadgeMeta(
   archiveStatus?: ArchiveStatus,
   archiveOperation?: ArchiveOperationView,
   stopOperation?: StopOperationView,
+  historyQuarantine?: SessionView["historyQuarantine"],
 ) {
   const operation = stopOperation ?? archiveOperation;
   const operationStatus = operation?.status ?? archiveStatus;
@@ -176,15 +181,30 @@ function sessionStatusBadgeMeta(
     ? { label: "Stopping", className: "st-running", busy: true }
     : operationStatus === "stop_failed"
       ? { label: "Stop Failed", className: "st-failed", busy: false }
-      : statusMeta(status);
+      : quarantinedStatusMeta(status, historyQuarantine) ?? statusMeta(status);
 }
 
-export function AttentionBadge({ session, ariaLabel }: {
+/** A quarantined conversation is idle only in the sense that nothing is running. It can never
+ * accept another prompt, so "Awaiting Prompt" would invite exactly the retry that cannot work. */
+export function quarantinedStatusMeta(
+  status: SessionStatus,
+  historyQuarantine: SessionView["historyQuarantine"],
+): StatusMeta | null {
+  if (!historyQuarantine || status === "completed" || status === "failed" || status === "stopped") return null;
+  return { label: "Quarantined", className: "st-failed", busy: false };
+}
+
+export function AttentionBadge({ session, ariaLabel, onOpen }: {
   session: Pick<SessionView, "status" | "pendingApproval">;
   ariaLabel?: string;
+  onOpen?: () => void;
 }) {
   const attention = sessionAttentionStatus(session);
   if (!attention) return null;
+  if (onOpen) return <button type="button" className="status-badge st-input" title={attention.description}
+    aria-label={ariaLabel ?? attention.label} onClick={onOpen}>
+    <span className="status-dot2" aria-hidden="true" />{attention.label}
+  </button>;
   return (
     <span className="status-badge st-input" title={attention.description} aria-label={ariaLabel ?? attention.label}>
       <span className="status-dot2" aria-hidden="true" />
@@ -193,17 +213,85 @@ export function AttentionBadge({ session, ariaLabel }: {
   );
 }
 
-export function SessionStatusIndicators({ session, disconnected = false }: {
-  session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" | "stopOperation">;
+/** One child's dot on a parent's family chip (#896). Literal class names, so the stylesheet guard can
+ * see every state rendered; the state itself comes off the wire. */
+export function ThreadDot({ state, title }: { state: "blocked" | "stalled" | "running" | "done" | "idle"; title: string }) {
+  return <i
+    className={state === "blocked"
+      ? "inbox-thread-dot blocked"
+      : state === "stalled"
+        ? "inbox-thread-dot stalled"
+        : state === "running"
+          ? "inbox-thread-dot running"
+          : state === "done" ? "inbox-thread-dot done" : "inbox-thread-dot"}
+    title={title}
+  />;
+}
+
+/**
+ * Attention as one pill PER KIND, each carrying its count, in priority order: "Answer Required 2 ·
+ * Approval Required" where the rolled-up badge says "3 Actions Required" (#896). A single request
+ * keeps the rolled-up label so a child-owned request still names its owner; the tooltip lists each
+ * request's owner and title, bounded so a runaway provider cannot grow a card's title attribute.
+ */
+export function AttentionPills({ session, compact = false }: {
+  session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners">;
+  /** A phone card has one line for the sender AND the signals: show the top-priority kind with a
+   * "+N" for the rest instead of one pill per kind, so three kinds cannot push the sender off the card. */
+  compact?: boolean;
+}) {
+  const groups = sessionAttentionBreakdown(session);
+  if (groups.length === 0) return null;
+  if (groups.length === 1 && groups[0]!.count <= 1) {
+    const attention = sessionAttentionStatus(session);
+    return attention
+      ? <span className="inbox-status-pill blocked" title={attention.description} aria-label={"Attention: " + attention.label}>
+        {attention.label}
+      </span>
+      : null;
+  }
+  const describe = (group: SessionAttentionGroup) =>
+    group.requests.slice(0, 10).map((request, index) => `${group.owners[index]}: ${request.title}`);
+  if (compact) {
+    const top = groups[0]!;
+    const total = groups.reduce((sum, group) => sum + group.count, 0);
+    const listed = groups.flatMap(describe).slice(0, 10);
+    const more = total - listed.length;
+    return <span className="inbox-status-pill blocked"
+      title={[...listed, ...(more > 0 ? [`${more} more`] : [])].join("\n")}
+      aria-label={`Attention: ${top.label}, ${total} Requests`}>
+      {top.label}
+      <span className="inbox-status-pill-count" aria-hidden="true">+{total - 1}</span>
+    </span>;
+  }
+  return <>{groups.map((group) => {
+    const listed = describe(group);
+    const more = group.count - listed.length;
+    const title = [...listed, ...(more > 0 ? [`${more} more`] : [])].join("\n");
+    return <span key={group.label} className="inbox-status-pill blocked" title={title}
+      aria-label={`Attention: ${group.label}${group.count > 1 ? `, ${group.count} Requests` : ""}`}>
+      {group.label}
+      {group.count > 1 && <span className="inbox-status-pill-count" aria-hidden="true">{group.count}</span>}
+    </span>;
+  })}</>;
+}
+
+export function SessionStatusIndicators({ session, disconnected = false, onOpenAttention, attention = "badge" }: {
+  session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
+    "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait">;
   disconnected?: boolean;
+  onOpenAttention?: () => void;
+  /** Board cards show the per-kind pills; headers keep the single badge that opens the panel. */
+  attention?: "badge" | "pills";
 }) {
   const lifecycle = sessionStatusBadgeMeta(
     session.status,
     session.archiveStatus,
     session.archiveOperation,
     session.stopOperation,
+    session.historyQuarantine,
   );
-  const attention = sessionAttentionStatus(session);
+  const attentionStatus = sessionAttentionStatus(session);
   return (
     <span className="session-status-indicators" role="group" aria-label="Session Status">
       <StatusBadge
@@ -211,9 +299,32 @@ export function SessionStatusIndicators({ session, disconnected = false }: {
         archiveStatus={session.archiveStatus}
         archiveOperation={session.archiveOperation}
         stopOperation={session.stopOperation}
+        historyQuarantine={session.historyQuarantine}
         ariaLabel={`Activity: ${lifecycle.label}`}
       />
-      <AttentionBadge session={session} ariaLabel={attention ? `Attention: ${attention.label}` : undefined} />
+      {session.status === "queued" && session.capacityWait && (
+        <span
+          className="status-badge st-idle"
+          title={session.capacityWait.description}
+          aria-label={`Queue Reason: ${session.capacityWait.description}`}
+        >
+          <span className="status-dot2" aria-hidden="true" />
+          {session.capacityWait.kind === "runner_capacity"
+            ? "Runner Capacity"
+            : session.capacityWait.kind === "agent_quota"
+              ? "Agent Quota"
+              : session.capacityWait.kind === "target_quota"
+                ? "Target Quota"
+                : session.capacityWait.kind === "exclusive_group"
+                  ? "Provider Slot"
+                  : session.capacityWait.kind === "request_weight"
+                    ? "Agent Weight"
+                    : "Queue Order"}
+        </span>
+      )}
+      {attention === "pills"
+        ? <AttentionPills session={session} />
+        : <AttentionBadge session={session} ariaLabel={attentionStatus ? `Attention: ${attentionStatus.label}` : undefined} onOpen={onOpenAttention} />}
       {disconnected && (
         <span className="status-badge st-failed" title="The session runner is disconnected." aria-label="Health: Disconnected">
           <span className="status-dot2" aria-hidden="true" />
@@ -261,55 +372,110 @@ const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
   resumed: "Background Work Resumed",
 };
 
-export function BackgroundWorkBadge({ state, compact = false, announce = true }: {
+const NARROW_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
+  running: "Job",
+  continuation_pending: "Pending",
+  orphaned: "Orphaned",
+  resumed: "Resumed",
+};
+
+export function BackgroundWorkBadge({ state, compact = false, responsiveCompact = false, announce = true, onOpen }: {
   state: BackgroundWorkState;
   compact?: boolean;
+  /** Switch compact visible text again on narrow phones; the accessible name stays complete. */
+  responsiveCompact?: boolean;
   announce?: boolean;
+  onOpen?: () => void;
 }) {
+  // Rolling deployments may briefly receive the retired terminal sentinel from an older control
+  // plane. Completion remains available in the durable Background Work inventory, never here.
+  if (state === "resumed") return null;
   const label = `Background Work: ${BACKGROUND_WORK_LABELS[state]}`;
+  const className = state === "running" || state === "continuation_pending"
+    ? "background-work-badge background-work-running"
+    : "background-work-badge background-work-orphaned";
+  const content = <>
+    <span className="background-work-dot" aria-hidden="true" />
+    {compact ? (
+      <>
+        <span className="sr-only">{label}</span>
+        {responsiveCompact ? (
+          <>
+            <span className="background-work-label-wide" aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
+            <span className="background-work-label-narrow" aria-hidden="true">{NARROW_BACKGROUND_WORK_LABELS[state]}</span>
+          </>
+        ) : <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>}
+      </>
+    ) : label}
+  </>;
+  if (onOpen) {
+    return (
+      <>
+        <button
+          type="button"
+          className={className}
+          onClick={onOpen}
+          aria-label={label}
+          aria-controls="right-panel"
+          title={`Open ${label}`}
+        >
+          {content}
+        </button>
+        {announce && <span className="sr-only" role="status" aria-label={label}>{label}</span>}
+      </>
+    );
+  }
   return (
     <span
-      className={`background-work-badge ${state === "running" || state === "continuation_pending"
-        ? "background-work-running"
-        : state === "orphaned"
-          ? "background-work-orphaned"
-          : "background-work-resumed"}`}
+      className={className}
       role={announce ? "status" : undefined}
       aria-label={label}
       title={compact ? label : undefined}
     >
-      <span className="background-work-dot" aria-hidden="true" />
-      {compact ? (
-        <>
-          <span className="sr-only">{label}</span>
-          <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
-        </>
-      ) : label}
+      {content}
     </span>
   );
 }
 
-export function UntrackedBackgroundWorkBadge() {
+export function UntrackedBackgroundWorkBadge({ onOpen }: { onOpen?: () => void } = {}) {
+  const content = <>
+    <span className="background-work-dot" aria-hidden="true" />
+    Detached Work: Untracked
+  </>;
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        className="background-work-badge background-work-untracked"
+        onClick={onOpen}
+        aria-label="Detached Work: Untracked"
+        aria-controls="right-panel"
+        title="Open Background Work details"
+      >
+        {content}
+      </button>
+    );
+  }
   return (
     <span
       className="background-work-badge background-work-untracked"
       aria-label="Detached Work: Untracked"
       title="This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."
     >
-      <span className="background-work-dot" aria-hidden="true" />
-      Detached Work: Untracked
+      {content}
     </span>
   );
 }
 
-export function ActiveSubagentsBadge({ count, onOpen }: { count: number; onOpen: () => void }) {
+export function ActiveSubagentsBadge({ count, onOpen, workers = false }: { count: number; onOpen: () => void; workers?: boolean }) {
   if (count < 1) return null;
-  const label = count === 1 ? "1 Subagent Active" : `${count} Subagents Active`;
-  const visibleLabel = count === 1 ? "1 Subagent" : `${count} Subagents`;
+  const noun = workers ? "Worker" : "Subagent";
+  const visibleLabel = `${count} ${noun}${count === 1 ? "" : "s"}`;
+  const label = `${visibleLabel} Active`;
   return (
     <button
       type="button"
-      className="background-work-badge background-work-running"
+      className="background-work-badge background-work-running active-subagents-badge"
       onClick={onOpen}
       aria-label={label}
       title={label}
@@ -321,19 +487,25 @@ export function ActiveSubagentsBadge({ count, onOpen }: { count: number; onOpen:
   );
 }
 
-const BACKGROUND_DELIVERY_LABELS: Record<BackgroundDeliveryWatchdogState, string> = {
-  terminal_without_continuation: "Terminal Result Awaiting Continuation",
-  accepted_without_result: "Accepted Continuation Awaiting Result",
-  result_not_projected: "Result Awaiting Transcript Projection",
-  dashboard_observation_pending: "Notification Awaiting Dashboard",
-};
-
-export function BackgroundDeliveryBadge({ state }: { state: BackgroundDeliveryWatchdogState }) {
-  const label = `Background Delivery: ${BACKGROUND_DELIVERY_LABELS[state]}`;
-  return (
-    <span className="background-work-badge background-work-orphaned" aria-label={label}>
+export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDeliveryWatchdogState; onOpen?: () => void }) {
+  const status = BACKGROUND_DELIVERY_STATUS[state];
+  const accessibleName = backgroundDeliveryAccessibleName(state);
+  if (onOpen) return (
+    <button type="button" className={status.severity === "missing"
+      ? "background-work-badge background-work-orphaned"
+      : "background-work-badge background-delivery-pending"}
+      aria-label={accessibleName} aria-controls="right-panel" title={status.description} onClick={onOpen}>
       <span className="background-work-dot" aria-hidden="true" />
-      {label}
+      {status.label}
+    </button>
+  );
+  return (
+    <span className={status.severity === "missing"
+      ? "background-work-badge background-work-orphaned"
+      : "background-work-badge background-delivery-pending"}
+      aria-label={accessibleName} title={status.description}>
+      <span className="background-work-dot" aria-hidden="true" />
+      {status.label}
     </span>
   );
 }
@@ -348,12 +520,24 @@ const BACKGROUND_NOTIFICATION_LABELS: Record<BackgroundNotificationReceiptState,
   expired: "Push Expired",
 };
 
-export function BackgroundNotificationBadge({ state }: { state: BackgroundNotificationReceiptState }) {
+export function BackgroundNotificationBadge({ state, onOpen }: {
+  state: BackgroundNotificationReceiptState;
+  onOpen?: () => void;
+}) {
   const label = BACKGROUND_NOTIFICATION_LABELS[state];
   const attention = state === "pending" || state === "retry" || state === "permanent_failure" || state === "expired";
+  const className = attention ? "background-work-badge background-work-orphaned" : "background-work-badge";
+  if (onOpen) return (
+    <button type="button" className={className} data-attention={attention} aria-label={label} aria-controls="right-panel"
+      title={`Open Background Work: ${label}`} onClick={onOpen}>
+      <span className="background-work-dot" aria-hidden="true" />
+      {label}
+    </button>
+  );
   return (
     <span
-      className={`background-work-badge ${attention ? "background-work-orphaned" : "background-work-resumed"}`}
+      className={className}
+      data-attention={attention}
       aria-label={label}
     >
       <span className="background-work-dot" aria-hidden="true" />

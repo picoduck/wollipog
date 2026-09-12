@@ -1,4 +1,6 @@
 import React from "react";
+import { Shell } from "../App.js";
+import { ThemeProvider } from "../components/ThemeProvider.js";
 import { createRoot } from "react-dom/client";
 import {
   type BoardColumn,
@@ -30,6 +32,9 @@ import "../styles.css";
  * pushing a bare `/board` would make a reload fetch the production app instead of this fixture.
  */
 const SCOPE = "sessions-board-e2e";
+const fullShell = new URLSearchParams(location.search).has("full-shell");
+/** An orchestrator with four children and a session with three pending requests (#896). */
+const threads = new URLSearchParams(location.search).has("threads");
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -97,18 +102,81 @@ const sessions = [
   session("s-snoozed", "Snoozed Session", "review"),
 ];
 
-const reminders: SessionReminderView[] = [{
-  reminderId: "reminder-s-snoozed",
-  sessionId: "s-snoozed",
-  scheduledFor: Date.now() + 86_400_000,
-  timeZone: "UTC",
-  originalExpression: "tomorrow",
-  wakePolicy: "until_activity",
-  state: "pending",
-  revision: 1,
-  createdAt: 1,
-  updatedAt: 1,
-}];
+if (threads) {
+  // Recent instants, unlike the rest of the fixture: a family that reads as stalled would sort
+  // among the stalled rows and say nothing about how a live thread orders.
+  const now = Date.now();
+  const orchestrated = (id: string, title: string, column: BoardColumn, overrides: Partial<SessionView> = {}) =>
+    session(id, title, column, { parentSessionId: "s-orchestrator", agentName: "Claude Code", driver: "claude-code", ...overrides });
+  sessions.push(
+    session("s-orchestrator", "Ship the usage and cost overhaul", "running", {
+      status: "running", agentName: "Claude Code", driver: "claude-code", lastEventAt: now - 60_000, updatedAt: now - 60_000,
+    }),
+    orchestrated("s-child-600", "#600: Add the usage table", "running", { status: "running", lastEventAt: now - 120_000, updatedAt: now - 120_000 }),
+    orchestrated("s-child-601", "#601: Link the cost source", "review", {
+      status: "input_required", lastEventAt: now - 180_000, updatedAt: now - 180_000,
+      pendingApproval: { requestId: "ask-601", kind: "question", title: "Keep protocol 105 or bump to 106?", options: [], questions: [] } as never,
+    }),
+    orchestrated("s-child-602", "#602: Roll the daily budget over", "done", { status: "completed", lastEventAt: now - 240_000, updatedAt: now - 240_000 }),
+    // Old enough to read as stalled: with its lifecycle and attention pills that makes the
+    // three-pill signals cluster the phone shape has to fit on one line (#916).
+    orchestrated("s-child-603", "#603: Normalize the allowance window", "review", {
+      status: "input_required", lastEventAt: now - 900_000, updatedAt: now - 900_000,
+      pendingApproval: { requestId: "rm-603", kind: "permission", title: "Delete usage-view-model.old.ts",
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "deny" }] } as never,
+    }),
+  );
+  const approval = sessions.find((candidate) => candidate.id === "s-approval")!;
+  approval.pendingApproval = {
+    ...approval.pendingApproval!,
+    additionalRequests: [
+      { requestId: "ask-289", kind: "question", title: "Which measurement strategy?", options: [], questions: [] },
+      { requestId: "test-289", kind: "permission", title: "Run pnpm test", ownerToolUseId: "verifier",
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] },
+    ],
+  } as never;
+  approval.attentionOwners = [{ requestId: "test-289", toolCallId: "verifier", resolved: true, name: "Verifier", role: "tester" }];
+}
+
+if (fullShell) {
+  for (const [index, value] of sessions.filter(value => !value.archived).entries()) {
+    value.status = "input_required";
+    value.eventEpoch = 7;
+    value.pendingApproval = { requestId: `primary-${index}`, title: "Primary Request", options: [],
+      additionalRequests: [{ requestId: `child-${index}`, ownerToolUseId: "fixture-child",
+        title: `Exact Child Request ${index}`, options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] }] };
+    if (value.id === "s-running") delete value.pendingApproval.additionalRequests;
+  }
+}
+
+const reminders: SessionReminderView[] = [
+  {
+    reminderId: "reminder-s-snoozed",
+    sessionId: "s-snoozed",
+    scheduledFor: Date.now() + 86_400_000,
+    timeZone: "UTC",
+    originalExpression: "tomorrow",
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  },
+  {
+    reminderId: "reminder-s-review",
+    sessionId: "s-review",
+    scheduledFor: Date.now() - 60_000,
+    timeZone: "UTC",
+    originalExpression: "one minute ago",
+    wakePolicy: "regardless",
+    state: "fired",
+    revision: 2,
+    createdAt: 1,
+    updatedAt: Date.now() - 60_000,
+    firedAt: Date.now() - 60_000,
+    wakeReason: "scheduled",
+  },
+];
 
 function snapshot(): UiSnapshotMessage {
   return {
@@ -181,6 +249,16 @@ const client = {
     window.setTimeout(() => socket?.push({ type: "session_upsert", session: structuredClone(approved) }), 0);
     return structuredClone(approved);
   },
+  removeReminder: async (sessionId: string) => {
+    const index = reminders.findIndex((reminder) => reminder.sessionId === sessionId);
+    if (index >= 0) reminders.splice(index, 1);
+    window.setTimeout(() => socket?.push({
+      type: "session_reminder_removed",
+      userId: "usr_local_owner",
+      sessionId,
+    }), 0);
+    return { removed: true as const };
+  },
   session: async (id: string) => {
     const value = sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
@@ -199,7 +277,8 @@ const client = {
 const navigation: ViewNavigation = {
   current: () => {
     const path = new URLSearchParams(window.location.search).get("path") ?? "/";
-    return viewFromPath(path) ?? { name: "inbox" };
+    const url = new URL(path, window.location.origin);
+    return viewFromPath(url.pathname, url.search) ?? { name: "inbox" };
   },
   push: (view) => {
     const url = new URL(window.location.href);
@@ -274,7 +353,7 @@ createRoot(root).render(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            <HarnessShell />
+            <ThemeProvider>{fullShell ? <Shell /> : <HarnessShell />}</ThemeProvider>
           </StoreProvider>
         </FeedbackProvider>
       </ApiProvider>

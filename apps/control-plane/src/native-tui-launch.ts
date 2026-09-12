@@ -1,4 +1,5 @@
 import {
+  nativeTuiHasTrackedGuardrails,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type CreateSessionRequest,
@@ -7,6 +8,11 @@ import {
 import type { ControlPlaneDb } from "./db.js";
 
 const TUI_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
+
+export const NATIVE_TUI_TRACKED_GUARDRAILS_ERROR =
+  "Native TUI cannot run with a session cost budget, cost checkpoints, or tool-call limit because provider TUI activity is not reported to Wollipog. Use Direct for tracked usage and guardrails.";
+export const NATIVE_TUI_DAILY_BUDGET_ERROR =
+  "Native TUI cannot run for a user covered by a daily cost budget because provider TUI activity is not reported to Wollipog. Use Direct for tracked usage and daily budget enforcement.";
 
 export interface NativeTuiLaunchError {
   status: 400 | 404 | 409;
@@ -108,6 +114,9 @@ export function nativeTuiCreationError(
   if (request.launchSurface !== "native_tui") return null;
   const unavailable = runnerError(db, online, request.runnerId);
   if (unavailable) return unavailable;
+  if (nativeTuiHasTrackedGuardrails(request.config ?? {})) {
+    return { status: 409, error: NATIVE_TUI_TRACKED_GUARDRAILS_ERROR };
+  }
   const runner = db.getRunner(request.runnerId);
   if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionStartFencedShells")) {
     return {
@@ -147,6 +156,24 @@ export function nativeTuiSessionError(
 ): NativeTuiLaunchError | null {
   const unavailable = runnerError(db, online, session.runnerId);
   if (unavailable) return unavailable;
+  if (nativeTuiHasTrackedGuardrails(session)) {
+    return { status: 409, error: NATIVE_TUI_TRACKED_GUARDRAILS_ERROR };
+  }
+  const scope = db.sessionScope(session.id);
+  if (scope?.owner.kind === "user" && db.getUsageDailyBudget(scope.organizationId).perUserUsd !== null) {
+    return { status: 409, error: NATIVE_TUI_DAILY_BUDGET_ERROR };
+  }
+  if (session.permissionMode === "orchestrator") {
+    const protocolVersion = db.getRunner(session.runnerId)?.protocolVersion;
+    if (!runnerSupportsProtocol(protocolVersion, "orchestratorNativeTui")) {
+      return { status: 409, error: runnerCapabilityRequirement(
+        protocolVersion, "orchestratorNativeTui", "Orchestrator Native TUI",
+      ) };
+    }
+    if (!["idle", "starting", "running", "input_required"].includes(session.status)) {
+      return { status: 409, error: "Orchestrator Native TUI requires an active session; resume the session first." };
+    }
+  }
   if (requireStartFence) {
     const protocolVersion = db.getRunner(session.runnerId)?.protocolVersion;
     if (!runnerSupportsProtocol(protocolVersion, "sessionStartFencedShells")) {

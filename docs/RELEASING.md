@@ -31,11 +31,21 @@ finished bytes to the compatible `agent-manager-runner-<triple>[.exe]` alias. In
 signing happen only once, before the copy, so each pair is byte-identical. Both names run `--version`
 natively before upload.
 
-After all six native jobs finish, a verification job downloads the 12 published runner assets,
-requires all six pairs to have identical SHA-256 digests, and uploads a lexically sorted
-`SHA256SUMS` covering both names. It then compares that manifest with GitHub's recorded asset
-digests and requires exactly 27 release assets: 14 desktop bundles, 12 runner names, and the
-manifest. A missing, extra, empty, malformed, or mismatched runner asset fails the release workflow.
+Each matrix job also publishes the **headless control plane**: the exact injected and signed
+sidecar bytes are copied to `apps/control-plane/dist-bin/wollipog-control-plane-<triple>[.exe]`,
+run natively with `--version` against `APP_RELEASE_VERSION`, compared byte for byte with the
+desktop sidecar, uploaded, and digest-checked like the runner. This is the executable
+`wollipog service install` runs on a server (see [headless deployment](./headless-deployment.md)).
+
+After all six native jobs finish, a verification job builds the browser web bundle once
+(`pnpm --filter @wollipog/web build`, PWA assets included) and uploads it as `wollipog-web.tar.gz`,
+a tarball whose single top-level `web/` directory the control plane serves from beside its
+executable or through `WOLLIPOG_WEB_DIST`. The job then downloads the 12 published runner assets,
+the 6 control-plane executables, and the web bundle, requires all six runner pairs to have identical
+SHA-256 digests, and uploads a lexically sorted `SHA256SUMS` covering all 19 names. It then compares
+that manifest with GitHub's recorded asset digests and requires exactly 34 release assets: 14 desktop
+bundles, 12 runner names, 6 control-plane executables, the web bundle, and the manifest. A missing,
+extra, empty, malformed, or mismatched asset fails the release workflow.
 Because GitHub's release-by-tag endpoint does not expose drafts, this final gate resolves exactly one
 draft from the paginated release collection, fetches every page of its asset endpoint by immutable
 numeric release ID, and retries both transient API errors and not-yet-converged verification
@@ -67,7 +77,8 @@ Signing/notarization slots are stubbed in the workflow `env:` for later.
 
 End users install via the scripts in [`scripts/`](../scripts) (documented in the README's
 "Install (prebuilt)" section): `install.sh` / `install.ps1` for the desktop app and
-`install-runner.sh` / `install-runner.ps1` for the runner. They resolve assets from the GitHub
+`install-runner.sh` / `install-runner.ps1` for the runner (`install-runner.sh --control-plane` also
+installs the headless control plane and dashboard bundle for `wollipog service install`). They resolve assets from the GitHub
 API's **latest published** release, so they only work once a release is **published** (not while
 it is still a draft), and the runner one-liners need a release built **after** the runner-binary
 step landed (v0.4.0 shipped app bundles only).
@@ -118,8 +129,22 @@ git push origin vX.Y.Z
 
 The push triggers the workflow. When all six matrix jobs and the final runner-release verification are green, open the draft release on
 GitHub, replace the generic draft body with release notes, review upgrade behavior and known
-limitations, sanity-check the exact 27-asset inventory and `SHA256SUMS`, and **Publish**. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
+limitations, sanity-check the exact 34-asset inventory and `SHA256SUMS`, and **Publish**. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
 as a GitHub pre-release automatically.
+
+After publishing, reconcile the repository's security advisories with the release. For every
+published advisory whose `patched_versions` is empty, check whether the tagged commit contains the
+fix (`git merge-base --is-ancestor <fix-commit> vX.Y.Z`) and, if it does, set the patched version
+to `X.Y.Z` on the advisory (Security tab, or
+`gh api -X PATCH repos/picoduck/wollipog/security-advisories/<GHSA-id>` with the `vulnerabilities`
+array). An advisory published from a private fork does not learn about the release on its own:
+GHSA-7w29-232x-g886 shipped its fix in v0.23.0 and still advertised "no patched version" two days
+later, until a maintenance sweep noticed.
+
+```bash
+gh api repos/picoduck/wollipog/security-advisories \
+  --jq '.[] | select(.state == "published") | select(any(.vulnerabilities[]; .patched_versions == null)) | .ghsa_id'
+```
 
 ## Test build without tagging
 

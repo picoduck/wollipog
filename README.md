@@ -66,7 +66,7 @@ The installers require a published release and verify release asset digests befo
 
 ### Prerequisites
 
-- Node.js 22.13 or newer (24 recommended)
+- Node.js 22.13+ within 22.x, or 23.4+ (24 recommended; 23.0–23.3 are unsupported)
 - pnpm
 - Git
 - Rust and the platform C toolchain when building the desktop application

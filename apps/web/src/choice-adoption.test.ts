@@ -8,7 +8,7 @@ import { rovingChoiceStop } from "./components/interactions.js";
 /**
  * Phase 6, one screen at a time — and a ratchet so the count can only come down.
  *
- * §11.1 counted seventeen ways this app asks "pick one of N". §29 built three primitives to replace
+ * §11.1 counted seventeen ways this app asks "pick one of N". §29 built shared primitives to replace
  * fifteen of them (two are legitimately tablists and stay). Adoption is per screen, so for a while
  * both the primitive and the bespoke pattern exist side by side — which is the state in which a new
  * screen copies the wrong one, because the old pattern is still visibly in use.
@@ -65,8 +65,8 @@ const PATTERNS = {
   "agent-pick": /agent-pick/g,
   "cbar-opt": /cbar-opt/g,
   // A native select cannot show a description or an icon, and cannot explain a disabled option.
-  // `Select` replaces the ones that are a CHOICE; some of these are ordinary form fields and will
-  // stay, which is why the inventory is per file rather than a prohibition.
+  // `Select` or `SearchableCombobox` replaces the ones that are a CHOICE; some of these are ordinary
+  // form fields and will stay, which is why the inventory is per file rather than a prohibition.
   "native-select": /<select[\s>]/g,
   // Raw choice SEMANTICS, for the control that uses none of the names above. A hand-rolled
   // `role="radiogroup"` with `role="radio"` buttons and a fresh class name contributed nothing to
@@ -94,7 +94,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/AutomationsView.tsx", "native-select", 12],
   ["components/Board.tsx", "native-select", 2],
   ["components/BrowserPanel.tsx", "seg", 1],
-  ["components/ComposerControls.tsx", "cbar-opt", 4],
+  ["components/ComposerControls.tsx", "cbar-opt", 2],
   ["components/FilesPanel.tsx", "native-select", 1],
   ["components/FilesPanel.tsx", "seg", 1],
   ["components/GitDiffViewer.tsx", "native-select", 1],
@@ -103,9 +103,10 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/NewRunDialog.tsx", "workflow-preset", 3],
   ["components/NewSessionDialog.tsx", "agent-pick", 2],
-  ["components/NewSessionDialog.tsx", "loc-pick", 4],
-  ["components/NewSessionDialog.tsx", "native-select", 5],
-  ["components/NewSessionDialog.tsx", "workflow-preset", 6],
+  /* Down from 5 on 2026-09-11: Machine, Workspace and Execution Target adopted the shared Select.
+     The two left are Project and Agent, which #218 specifies as SEARCHABLE comboboxes — migrating
+     them to the plain listbox first would mean rewriting both controls twice. */
+  ["components/NewSessionDialog.tsx", "native-select", 2],
   ["components/OnboardRunnerDialog.tsx", "seg", 2],
   ["components/PeopleDevicesPanel.tsx", "access-choice", 2],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
@@ -126,7 +127,13 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/BrowserPanel.tsx", "raw-radiogroup", 2],
   ["components/FilesPanel.tsx", "raw-radiogroup", 3],
   ["components/NewRunDialog.tsx", "raw-radiogroup", 5],
-  ["components/NewSessionDialog.tsx", "raw-radiogroup", 13],
+  /* Down from 10 on 2026-09-11: the Harness picker adopted ChoiceCards, retiring its bespoke
+     `.workflow-preset` radiogroup and its two radios. The remaining seven are the two `.loc-pick`
+     Location groups, the Advanced Agents radio group, and the Additional Directories checkbox. */
+  /* Down from 7 on 2026-09-11: both `.loc-pick` Location groups adopted ChoiceCards. The three
+     that remain are the Advanced Agents radio group and the Additional Directories checkbox, which
+     wait on the Agent-selection rework in #218. */
+  ["components/NewSessionDialog.tsx", "raw-radiogroup", 3],
   ["components/OnboardRunnerDialog.tsx", "raw-radiogroup", 2],
   ["components/PeopleDevicesPanel.tsx", "raw-radiogroup", 3],
   ["components/ReviewPanel.tsx", "raw-radiogroup", 9],
@@ -136,7 +143,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // Like CommandPalette, this is transient command navigation rather than a persisted setting or
   // one-of-N form choice. Listbox/option is the correct combobox popup contract for its textarea.
   ["components/SlashCommandMenu.tsx", "raw-radiogroup", 2],
-  ["components/ComposerControls.tsx", "raw-radiogroup", 4],
+  ["components/ComposerControls.tsx", "raw-radiogroup", 2],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/GitDiffViewer.tsx", "raw-radiogroup", 3],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
@@ -274,7 +281,7 @@ test("a fully migrated screen renders a primitive", () => {
   // half — and it looks for a RENDERED element: matching the bare name passed against a screen
   // whose primitive had been renamed and therefore rendered nothing.
   for (const name of FULLY_MIGRATED) {
-    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceCards|Select)[\s/>]/,
+    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceCards|Select|SearchableCombobox)[\s/>]/,
       `${name} is listed as fully migrated but renders no choice primitive`);
   }
 });

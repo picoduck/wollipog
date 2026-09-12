@@ -1,0 +1,1336 @@
+/** Shared session-management tools for the session-scoped CLI and MCP server. */
+
+import type { Readable, Writable } from "node:stream";
+import {
+  SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+} from "@wollipog/protocol";
+import { VERSION } from "./version.js";
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type Json = any;
+
+const MCP_PROTOCOL_VERSION = "2025-06-18";
+/** Response caps: lists are field-mapped and bounded so a busy manager can't eat the
+ * conductor's context window (the MVP mitigation for hundreds of sessions). */
+const MAX_ITEMS = 100;
+const MAX_LINE = 400;
+
+/** Worker sessions the conductor creates may use any interactive/fixed mode EXCEPT
+ * bypassPermissions (and codex danger-full-access) — the human still sees the create card. */
+const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "orchestrator"] as const;
+
+/** The conductor's own agent id — a contract constant shared with the runner's agent
+ * synthesis + provisioning and the control plane's permissionMode clamp. */
+const CONDUCTOR_AGENT_ID = "conductor";
+
+/** Default cap on one CP round-trip. Without it, a half-open connection (the documented
+ * box-tunnel blip) would stall an ordinary call for undici's ~300s header/body timeouts. */
+const CP_TIMEOUT_MS = 30_000;
+const MAX_WAIT_SESSION_INTERVAL_MS = 10_000;
+
+export function nextWaitSessionIntervalMs(currentIntervalMs: number): number {
+  return Math.min(MAX_WAIT_SESSION_INTERVAL_MS, Math.ceil(currentIntervalMs * 1.5));
+}
+
+/** Minimal structural fetch types so tests can inject a stub without faking Response. */
+export interface McpFetchResponse {
+  ok: boolean;
+  status: number;
+  text(): Promise<string>;
+}
+export type McpFetch = (
+  url: string,
+  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
+) => Promise<McpFetchResponse>;
+
+export interface McpDeps {
+  fetch: McpFetch;
+  /** Control-plane HTTP base (no trailing slash), e.g. http://127.0.0.1:4317. */
+  cpUrl: string;
+  /** The conductor's OWN session id — self-targeting mutations are refused. */
+  selfSessionId: string;
+  /** Active runner credential; paired with selfSessionId so the control plane authenticates this
+   * exact live conductor without treating the credential as a general REST credential. */
+  token: string;
+  /** Conductor compatibility uses its historical header; general sessions use the exact-session
+   * credential header. Device-token CLI calls omit actorHeader entirely. */
+  actorHeader?: typeof WOLLIPOG_AGENT_ACTOR_SESSION_HEADER | null;
+  orchestrator?: boolean;
+  /** Deterministic scheduling hooks for wait-session tests. */
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+  /** Deterministic request budgets for timeout tests. */
+  requestTimeoutMs?: number;
+}
+
+export interface ToolResult {
+  content: { type: "text"; text: string }[];
+  isError?: boolean;
+}
+
+export interface McpTool {
+  name: string;
+  description: string;
+  inputSchema: Json;
+  handler: (args: Json, deps: McpDeps) => Promise<ToolResult>;
+}
+
+function textResult(data: unknown): ToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(data) }] };
+}
+
+function errorResult(text: string): ToolResult {
+  return { content: [{ type: "text", text }], isError: true };
+}
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+function capArray(v: unknown, limit = MAX_ITEMS): Json[] {
+  return Array.isArray(v) ? v.slice(0, limit) : [];
+}
+
+/** One REST round-trip. A non-2xx reply (or network failure) comes back as a message the
+ * handler wraps into an isError tool result — the CP's own error text is preserved verbatim
+ * so the model can explain WHY (offline / busy / guardrail-parked). */
+async function cpFetch(
+  deps: McpDeps,
+  method: string,
+  path: string,
+  body?: unknown,
+  timeoutMs = deps.requestTimeoutMs ?? CP_TIMEOUT_MS,
+): Promise<{ ok: true; data: Json } | { ok: false; message: string; status?: number }> {
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers["content-type"] = "application/json";
+  if (deps.token) headers["authorization"] = `Bearer ${deps.token}`;
+  const actorHeader = deps.actorHeader === undefined ? WOLLIPOG_AGENT_ACTOR_SESSION_HEADER : deps.actorHeader;
+  if (actorHeader && deps.selfSessionId) headers[actorHeader] = deps.selfSessionId;
+  let res: McpFetchResponse;
+  try {
+    res = await deps.fetch(`${deps.cpUrl}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      // Bound the round-trip; the catch below maps the TimeoutError into an isError tool
+      // result like any other network failure, so the model can relay "CP unreachable".
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    return { ok: false, message: `control plane request failed: ${(err as Error)?.message ?? String(err)}` };
+  }
+  let raw = "";
+  try {
+    raw = await res.text();
+  } catch {
+    /* body unreadable — fall through with what we have */
+  }
+  let data: Json = null;
+  try {
+    data = raw ? JSON.parse(raw) : null;
+  } catch {
+    /* non-JSON body (proxy error page etc.) — surface the raw text below */
+  }
+  if (!res.ok) {
+    const detail = typeof data?.error === "string" ? data.error : truncate(raw, MAX_LINE);
+    return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
+  }
+  return { ok: true, data };
+}
+
+/** Keep the exact invocation alive while its CP-owned child approval is pending, including
+ * run fan-out. Retrying maintains the durable approval's abandonment fence. */
+async function createWithSpawnApproval(deps: McpDeps, path: string, body: unknown) {
+  let result = await cpFetch(deps, "POST", path, body);
+  while (!result.ok && result.status === 428) {
+    await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(1000);
+    result = await cpFetch(deps, "POST", path, body);
+  }
+  return result;
+}
+
+/** Field-map a SessionView to the compact shape every session-returning tool shares. */
+function mapSession(s: Json): Json {
+  return {
+    id: s?.id,
+    title: s?.title,
+    status: s?.status,
+    runnerId: s?.runnerId,
+    workspaceId: s?.workspaceId ?? null,
+    agentId: s?.agentId ?? null,
+    runId: s?.runId ?? null,
+    parentSessionId: s?.parentSessionId ?? null,
+    maxChildSessions: s?.maxChildSessions ?? null,
+    costUsd: s?.costUsd,
+    costBudgetUsd: s?.costBudgetUsd ?? null,
+    costCheckpointsUsd: s?.costCheckpointsUsd ?? null,
+    costCheckpointApprovedUsd: s?.costCheckpointApprovedUsd ?? null,
+    maxToolCalls: s?.maxToolCalls ?? null,
+    toolCallCount: s?.toolCallCount,
+    // Title only — the options/requestId belong to the human's card, not the conductor.
+    pendingApproval: s?.pendingApproval?.title ?? null,
+    updatedAt: s?.updatedAt,
+    archived: s?.archived ?? false,
+    archiveStatus: s?.archiveStatus,
+  };
+}
+
+function worktreeTarget(args: Json, deps: McpDeps): string | ToolResult {
+  const sessionId = typeof args?.sessionId === "string" && args.sessionId ? args.sessionId : deps.selfSessionId;
+  if (!sessionId) return errorResult("sessionId is required");
+  if (deps.orchestrator && sessionId === deps.selfSessionId) {
+    return errorResult("the orchestrator preset cannot manage its own worktrees; select a child session");
+  }
+  if (!deps.orchestrator && deps.actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER && sessionId !== deps.selfSessionId) {
+    return errorResult("refusing: a session credential may manage only its own worktrees");
+  }
+  return sessionId;
+}
+
+function mapWorktreeResult(data: Json): Json {
+  const item = data?.worktree;
+  return {
+    worktree: item == null ? null : {
+      id: item.id,
+      path: item.path,
+      branch: item.branch,
+      baseRef: item.baseRef ?? null,
+      baseCommit: item.baseCommit ?? null,
+      source: item.source,
+      pullRequest: item.pullRequest ?? null,
+    },
+    session: data?.session == null ? null : mapSession(data.session),
+    // Attach under platform isolation: null when the runner does not report it. `writableNow:
+    // false` means the path is readable but not writable until this session relaunches, which a
+    // worktree switch schedules on its own — so the agent waits rather than treating a write
+    // denial as a broken attach.
+    isolation: data?.isolation == null ? null : {
+      writableNow: data.isolation.writableNow === true,
+      writableAtNextLaunch: data.isolation.writableAtNextLaunch === true,
+    },
+  };
+}
+
+/** Render one timeline event as a single capped line: "(seq) kind: text…". */
+function renderEventLine(ev: Json): string {
+  const p = ev?.payload ?? {};
+  const { kind, ...rest } = p;
+  const detail =
+    typeof p.text === "string" ? p.text
+    : typeof p.message === "string" ? p.message
+    : typeof p.title === "string" ? p.title
+    : JSON.stringify(rest);
+  const oneLine = String(detail).replace(/\s+/g, " ").trim();
+  return truncate(`(${ev?.seq}) ${kind ?? "event"}: ${oneLine}`, MAX_LINE);
+}
+
+function mapWorkflowNode(node: Json, includePrompt = false): Json {
+  const prompt = typeof node?.prompt === "string" ? node.prompt : undefined;
+  return {
+    nodeId: node?.nodeId,
+    kind: node?.kind,
+    role: node?.role,
+    ...(node?.agentId !== undefined ? { agentId: node.agentId } : {}),
+    ...(node?.policyId !== undefined ? { policyId: node.policyId } : {}),
+    ...(prompt !== undefined
+      ? includePrompt
+        ? { prompt }
+        : { promptPreview: truncate(prompt, MAX_LINE), promptTruncated: prompt.length > MAX_LINE }
+      : {}),
+    inputs: capArray(node?.inputs, 16),
+    outputs: capArray(node?.outputs, 16),
+    retry: node?.retry,
+    timeoutMs: node?.timeoutMs,
+    ...(node?.stopCondition !== undefined ? { stopCondition: node.stopCondition } : {}),
+  };
+}
+
+function mapWorkflowDefinition(definition: Json, includeGraph = false): Json {
+  return {
+    workflowId: definition?.workflowId,
+    version: definition?.version,
+    name: definition?.name,
+    description: definition?.description ?? null,
+    source: definition?.source,
+    maxTransitions: definition?.maxTransitions,
+    createdBy: definition?.createdBy,
+    createdAt: definition?.createdAt,
+    ...(includeGraph
+      ? { nodes: capArray(definition?.nodes, 64).map((node) => mapWorkflowNode(node)), edges: capArray(definition?.edges, 256) }
+      : { nodes: capArray(definition?.nodes).map((node) => ({ nodeId: node?.nodeId, kind: node?.kind, role: node?.role, agentId: node?.agentId, policyId: node?.policyId })) }),
+  };
+}
+
+function mapGovernancePolicy(policy: Json): Json {
+  return {
+    policyId: policy?.policyId,
+    name: policy?.name,
+    effect: policy?.effect,
+    priority: policy?.priority,
+    enabled: policy?.enabled,
+    scope: policy?.scope,
+    conditions: policy?.conditions ?? null,
+    askTimeout: policy?.askTimeout ?? null,
+    builtin: policy?.builtin ?? false,
+    createdAt: policy?.createdAt,
+    updatedAt: policy?.updatedAt,
+  };
+}
+
+function mapWorkflowInstance(instance: Json, includeDetail = false): Json {
+  return {
+    instanceId: instance?.instanceId,
+    workflowId: instance?.workflowId,
+    workflowVersion: instance?.workflowVersion,
+    runId: instance?.runId,
+    status: instance?.status,
+    transitionCount: instance?.transitionCount,
+    nodeStates: capArray(instance?.nodeStates),
+    createdBy: instance?.createdBy,
+    createdAt: instance?.createdAt,
+    updatedAt: instance?.updatedAt,
+    completedAt: instance?.completedAt ?? null,
+    ...(includeDetail
+      ? {
+          definition: mapWorkflowDefinition(instance?.definition, true),
+          attempts: capArray(instance?.attempts),
+          events: capArray(instance?.events),
+          attemptsTruncated: instance?.attemptsTruncated ?? false,
+          eventsTruncated: instance?.eventsTruncated ?? false,
+        }
+      : {}),
+  };
+}
+
+const WORKFLOW_SPEC_PROPERTIES: Json = {
+  name: { type: "string" },
+  description: { type: "string" },
+  maxTransitions: { type: "integer", minimum: 1, maximum: 1000 },
+  nodes: { type: "array", minItems: 1, maxItems: 64, items: { type: "object" } },
+  edges: { type: "array", maxItems: 256, items: { type: "object" } },
+};
+
+const GOVERNANCE_POLICY_PROPERTIES: Json = {
+  policyId: { type: "string" },
+  name: { type: "string" },
+  effect: { type: "string", enum: ["allow", "deny", "ask"] },
+  priority: { type: "integer", minimum: -100000, maximum: 100000 },
+  enabled: { type: "boolean" },
+  askTimeout: { type: "integer", minimum: 1, maximum: 2_000_000 },
+  scope: {
+    type: "object",
+    minProperties: 1,
+    properties: Object.fromEntries(
+      ["organizationId", "runnerId", "workspaceId", "agentId", "toolName", "path", "network", "branch"]
+        .map((key) => [key, { type: "string" }]),
+    ),
+    additionalProperties: false,
+  },
+  conditions: {
+    type: "object",
+    properties: {
+      statuses: {
+        type: "array",
+        minItems: 1,
+        items: { type: "string", enum: ["queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped"] },
+      },
+      minCostUsd: { type: "number", minimum: 0 },
+      maxCostUsd: { type: "number", minimum: 0 },
+      minToolCalls: { type: "integer", minimum: 0 },
+      maxToolCalls: { type: "integer", minimum: 0 },
+      escalated: { type: "boolean" },
+    },
+    additionalProperties: false,
+  },
+};
+
+/* -------------------------------------------------------------------------- */
+/* Tool table (tool ids as claude sees them: mcp__manager__<name>)             */
+/* -------------------------------------------------------------------------- */
+
+const ORCHESTRATOR_TOOLS = new Set(["list_runners", "list_sessions", "get_session", "get_session_events",
+  "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
+  "stop_session", "restart_session", "archive_session", "set_guardrails", "create_worktree", "attach_worktree",
+  "select_worktree", "discard_worktree"]);
+
+export const TOOLS: McpTool[] = [
+  /* ------------------------------- READS --------------------------------- */
+  {
+    name: "list_runners",
+    description: "List runner machines with their agents and workspaces (source of runnerId/agentId/workspaceId).",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (_args, deps) => {
+      const r = await cpFetch(deps, "GET", "/api/runners");
+      if (!r.ok) return errorResult(r.message);
+      const runners = capArray(r.data?.runners).map((run) => ({
+        runnerId: run?.runnerId,
+        hostname: run?.hostname,
+        os: run?.os,
+        status: run?.status,
+        agents: capArray(run?.agents).map((a) => ({
+          id: a?.id,
+          name: a?.name,
+          driver: a?.driver ?? "acp",
+          context: a?.context ?? { kind: "native" },
+          available: a?.available ?? null,
+          authStatus: a?.authStatus ?? null,
+        })),
+        workspaces: capArray(run?.workspaces).map((w) => ({ id: w?.id, name: w?.name, path: w?.path })),
+      }));
+      return textResult({ runners });
+    },
+  },
+  {
+    name: "list_sessions",
+    description: "List sessions with status, title, cost, budget, tool-call count, and any pending approval.",
+    inputSchema: {
+      type: "object",
+      properties: { archived: { type: "boolean", description: "Include archived sessions" } },
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      const r = await cpFetch(deps, "GET", `/api/sessions${args?.archived === true ? "?archived=true" : ""}`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ sessions: capArray(r.data?.sessions).map(mapSession) });
+    },
+  },
+  {
+    name: "get_session",
+    description: "Get one session's full metadata by id.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
+      if (!r.ok) return errorResult(r.message);
+      const s = r.data?.session;
+      // Funnel through mapSession like every other session-returning tool — the raw view
+      // carries pendingApproval.requestId + options (the credential a tool could one day
+      // replay against /approve) and an uncapped preview. "Full metadata" means the
+      // whitelisted extras below, not the wire-verbatim row.
+      return textResult({
+        session:
+          s == null
+            ? null
+            : {
+                ...mapSession(s),
+                workspaceName: s.workspaceName ?? null,
+                agentName: s.agentName ?? null,
+                driver: s.driver,
+                model: s.model ?? null,
+                effort: s.effort ?? null,
+                permissionMode: s.permissionMode ?? null,
+                useWorktree: s.useWorktree ?? false,
+                worktreePath: s.worktreePath ?? null,
+                createdAt: s.createdAt,
+                lastEventAt: s.lastEventAt ?? null,
+                messageCount: s.messageCount,
+                tokensIn: s.tokensIn,
+                tokensOut: s.tokensOut,
+                preview: typeof s.preview === "string" ? truncate(s.preview, MAX_LINE) : null,
+              },
+      });
+    },
+  },
+  {
+    name: "get_session_events",
+    description: "Read a session's recent timeline events (tail; use after/limit to page).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        after: { type: "number", description: "Only events with seq greater than this" },
+        limit: { type: "number", minimum: 1, maximum: 100, description: "Max events, default 30" },
+      },
+      required: ["sessionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      const after = typeof args.after === "number" && args.after > 0 ? Math.floor(args.after) : 0;
+      const limit = Math.min(100, Math.max(1, typeof args.limit === "number" ? Math.floor(args.limit) : 30));
+      const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}/events?after=${after}`);
+      if (!r.ok) return errorResult(r.message);
+      const events: Json[] = Array.isArray(r.data?.events) ? r.data.events : [];
+      // The tail is what matters ("what just happened?"); lastSeq feeds the next page's `after`.
+      const tail = events.slice(-limit);
+      const last = events[events.length - 1];
+      return textResult({
+        lines: tail.map(renderEventLine),
+        lastSeq: typeof last?.seq === "number" ? last.seq : after,
+      });
+    },
+  },
+  {
+    name: "wait_session",
+    description: "Wait until a session reaches one of the requested states, then return its metadata.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        states: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", enum: ["queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped"] },
+        },
+        timeoutMs: { type: "integer", minimum: 1, maximum: 3_600_000 },
+        intervalMs: {
+          type: "integer",
+          minimum: 50,
+          maximum: MAX_WAIT_SESSION_INTERVAL_MS,
+          description: "Initial polling interval; successful nonterminal reads back off to 10 seconds.",
+        },
+      },
+      required: ["sessionId", "states"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (!Array.isArray(args.states) || args.states.length === 0 ||
+          args.states.some((state: unknown) => typeof state !== "string")) {
+        return errorResult("states must be a non-empty array of session states");
+      }
+      const wanted = new Set<string>(args.states);
+      const timeoutMs = Math.min(3_600_000, Math.max(1, Number.isFinite(args.timeoutMs) ? Math.floor(args.timeoutMs) : 60_000));
+      let intervalMs = Math.min(MAX_WAIT_SESSION_INTERVAL_MS,
+        Math.max(50, Number.isFinite(args.intervalMs) ? Math.floor(args.intervalMs) : 500));
+      const now = deps.now ?? Date.now;
+      const sleep = deps.sleep ?? ((milliseconds: number) =>
+        new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+      const deadline = now() + timeoutMs;
+      do {
+        const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
+        if (!r.ok) return errorResult(r.message);
+        const session = r.data?.session;
+        if (typeof session?.status === "string" && wanted.has(session.status)) {
+          return textResult({ session: mapSession(session), reached: session.status });
+        }
+        const remaining = deadline - now();
+        if (remaining <= 0) break;
+        await sleep(Math.min(intervalMs, remaining));
+        intervalMs = nextWaitSessionIntervalMs(intervalMs);
+      } while (now() <= deadline);
+      return errorResult(`timed out waiting for session ${args.sessionId} to reach ${[...wanted].join(", ")}`);
+    },
+  },
+  {
+    name: "list_runs",
+    description: "List multi-agent runs and their member session ids.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (_args, deps) => {
+      const r = await cpFetch(deps, "GET", "/api/runs");
+      if (!r.ok) return errorResult(r.message);
+      const runs = capArray(r.data?.runs).map((run) => ({
+        id: run?.id,
+        title: run?.title,
+        prompt: truncate(String(run?.prompt ?? ""), MAX_LINE),
+        workspaceId: run?.workspaceId ?? null,
+        sessionIds: capArray(run?.sessionIds),
+        createdAt: run?.createdAt,
+        updatedAt: run?.updatedAt,
+      }));
+      return textResult({ runs });
+    },
+  },
+  {
+    name: "list_governance_policies",
+    description: "List stored and built-in governance policies with their exact scopes and conditions.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: async (_args, deps) => {
+      const r = await cpFetch(deps, "GET", "/api/governance/policies");
+      if (!r.ok) return errorResult(r.message);
+      const policies = Array.isArray(r.data?.policies) ? r.data.policies : [];
+      return textResult({
+        policies: capArray(policies).map(mapGovernancePolicy),
+        truncated: policies.length > MAX_ITEMS,
+      });
+    },
+  },
+  {
+    name: "get_governance_policy",
+    description: "Inspect one governance policy by its exact id.",
+    inputSchema: {
+      type: "object",
+      properties: { policyId: { type: "string" } },
+      required: ["policyId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.policyId !== "string" || !args.policyId) return errorResult("policyId is required");
+      const r = await cpFetch(deps, "GET", "/api/governance/policies");
+      if (!r.ok) return errorResult(r.message);
+      const policies = Array.isArray(r.data?.policies) ? r.data.policies : [];
+      const policy = policies.find((candidate: Json) => candidate?.policyId === args.policyId);
+      if (!policy) return errorResult(`governance policy '${args.policyId}' was not found`);
+      return textResult({ policy: mapGovernancePolicy(policy) });
+    },
+  },
+  {
+    name: "list_workflows",
+    description: "List the latest immutable workflow definitions and their graph roles.",
+    inputSchema: {
+      type: "object",
+      properties: { limit: { type: "integer", minimum: 1, maximum: 100 } },
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      const limit = Math.min(100, Math.max(1, typeof args?.limit === "number" ? Math.floor(args.limit) : 100));
+      const r = await cpFetch(deps, "GET", `/api/workflows?limit=${limit}`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ workflows: capArray(r.data).map((definition) => mapWorkflowDefinition(definition)) });
+    },
+  },
+  {
+    name: "get_workflow",
+    description: "Inspect one workflow definition with exact topology and contracts plus bounded prompt previews.",
+    inputSchema: {
+      type: "object",
+      properties: { workflowId: { type: "string" }, version: { type: "integer", minimum: 1 } },
+      required: ["workflowId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.workflowId !== "string" || !args.workflowId) return errorResult("workflowId is required");
+      const query = typeof args.version === "number" ? `?version=${Math.floor(args.version)}` : "";
+      const r = await cpFetch(deps, "GET", `/api/workflows/${encodeURIComponent(args.workflowId)}${query}`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ workflow: mapWorkflowDefinition(r.data, true) });
+    },
+  },
+  {
+    name: "get_workflow_node",
+    description: "Inspect one exact workflow node, including its complete validated prompt and artifact contracts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workflowId: { type: "string" },
+        version: { type: "integer", minimum: 1 },
+        nodeId: { type: "string" },
+      },
+      required: ["workflowId", "nodeId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.workflowId !== "string" || !args.workflowId || typeof args?.nodeId !== "string" || !args.nodeId) {
+        return errorResult("workflowId and nodeId are required");
+      }
+      const query = typeof args.version === "number" ? `?version=${Math.floor(args.version)}` : "";
+      const r = await cpFetch(deps, "GET", `/api/workflows/${encodeURIComponent(args.workflowId)}${query}`);
+      if (!r.ok) return errorResult(r.message);
+      const node = capArray(r.data?.nodes, 64).find((candidate) => candidate?.nodeId === args.nodeId);
+      if (!node) return errorResult(`workflow node '${args.nodeId}' was not found`);
+      return textResult({ node: mapWorkflowNode(node, true) });
+    },
+  },
+  {
+    name: "list_workflow_instances",
+    description: "List workflow instances, optionally restricted to one run, with node status summaries.",
+    inputSchema: {
+      type: "object",
+      properties: { runId: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 } },
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      const query = new URLSearchParams();
+      if (typeof args?.runId === "string" && args.runId) query.set("runId", args.runId);
+      query.set("limit", String(Math.min(100, Math.max(1, typeof args?.limit === "number" ? Math.floor(args.limit) : 100))));
+      const r = await cpFetch(deps, "GET", `/api/workflow-instances?${query.toString()}`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ instances: capArray(r.data).map((instance) => mapWorkflowInstance(instance)) });
+    },
+  },
+  {
+    name: "get_workflow_instance",
+    description: "Inspect one workflow instance with its graph, attempts, events, and exact ready or waiting nodes.",
+    inputSchema: {
+      type: "object",
+      properties: { instanceId: { type: "string" } },
+      required: ["instanceId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.instanceId !== "string" || !args.instanceId) return errorResult("instanceId is required");
+      const r = await cpFetch(deps, "GET", `/api/workflow-instances/${encodeURIComponent(args.instanceId)}`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ instance: mapWorkflowInstance(r.data, true) });
+    },
+  },
+
+  /* ---------------- MUTATIONS (each call parks on a human card) ----------- */
+  {
+    name: "upsert_governance_policy",
+    description: "Create or replace one validated non-built-in governance policy. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: GOVERNANCE_POLICY_PROPERTIES,
+      required: ["policyId", "name", "effect", "priority", "enabled", "scope"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.policyId !== "string" || !args.policyId) return errorResult("policyId is required");
+      const body: Json = {};
+      for (const key of ["policyId", "name", "effect", "priority", "enabled", "scope", "conditions", "askTimeout"]) {
+        if (args[key] !== undefined) body[key] = args[key];
+      }
+      const r = await cpFetch(deps, "PUT", `/api/governance/policies/${encodeURIComponent(args.policyId)}`, body);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ policy: mapGovernancePolicy(r.data) });
+    },
+  },
+  {
+    name: "delete_governance_policy",
+    description: "Delete one exact non-built-in governance policy. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: { policyId: { type: "string" } },
+      required: ["policyId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.policyId !== "string" || !args.policyId) return errorResult("policyId is required");
+      const r = await cpFetch(deps, "DELETE", `/api/governance/policies/${encodeURIComponent(args.policyId)}`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ deleted: true, policyId: args.policyId });
+    },
+  },
+  {
+    name: "create_workflow_definition",
+    description: "Create a validated custom workflow definition at immutable version 1. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: WORKFLOW_SPEC_PROPERTIES,
+      required: ["name", "maxTransitions", "nodes", "edges"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      const body = {
+        name: args?.name,
+        ...(args?.description !== undefined ? { description: args.description } : {}),
+        maxTransitions: args?.maxTransitions,
+        nodes: args?.nodes,
+        edges: args?.edges,
+      };
+      const r = await cpFetch(deps, "POST", "/api/workflows", body);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ workflow: mapWorkflowDefinition(r.data, true) });
+    },
+  },
+  {
+    name: "create_workflow_version",
+    description: "Create the next immutable version of an existing custom workflow definition. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: { workflowId: { type: "string" }, ...WORKFLOW_SPEC_PROPERTIES },
+      required: ["workflowId", "name", "maxTransitions", "nodes", "edges"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.workflowId !== "string" || !args.workflowId) return errorResult("workflowId is required");
+      const body = {
+        name: args.name,
+        ...(args.description !== undefined ? { description: args.description } : {}),
+        maxTransitions: args.maxTransitions,
+        nodes: args.nodes,
+        edges: args.edges,
+      };
+      const r = await cpFetch(deps, "POST", `/api/workflows/${encodeURIComponent(args.workflowId)}/versions`, body);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ workflow: mapWorkflowDefinition(r.data, true) });
+    },
+  },
+  {
+    name: "create_workflow_run",
+    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runnerId: { type: "string" },
+        workspaceId: { type: "string" },
+        workflowId: { type: "string" },
+        workflowVersion: { type: "integer", minimum: 1 },
+        task: { type: "string" },
+        title: { type: "string" },
+        useWorktree: { type: "boolean" },
+        agentBindings: { type: "object", additionalProperties: { type: "string" } },
+        costBudgetUsd: { type: "number", minimum: 0 },
+        maxToolCalls: { type: "number", minimum: 0 },
+      },
+      required: ["runnerId", "workspaceId", "workflowId", "task"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.runnerId !== "string" || typeof args?.workspaceId !== "string" ||
+          typeof args?.workflowId !== "string" || typeof args?.task !== "string" || !args.task.trim()) {
+        return errorResult("runnerId, workspaceId, workflowId, and a non-empty task are required");
+      }
+      if (args.agentBindings && Object.values(args.agentBindings).includes(CONDUCTOR_AGENT_ID)) {
+        return errorResult("refusing: workflow workers must not use the conductor agent");
+      }
+      const body: Json = {
+        runnerId: args.runnerId,
+        workspaceId: args.workspaceId,
+        workflowId: args.workflowId,
+        task: args.task,
+      };
+      for (const key of ["workflowVersion", "title", "useWorktree", "agentBindings", "costBudgetUsd", "maxToolCalls"]) {
+        if (args[key] !== undefined) body[key] = args[key];
+      }
+      const r = await createWithSpawnApproval(deps, "/api/workflow-runs", body);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({
+        run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },
+        sessions: capArray(r.data?.sessions).map(mapSession),
+        instance: mapWorkflowInstance(r.data?.instance, true),
+      });
+    },
+  },
+  {
+    name: "dispatch_workflow_node",
+    description: "Dispatch one ready workflow agent node with a caller-stable idempotency key. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: { instanceId: { type: "string" }, nodeId: { type: "string" }, dispatchKey: { type: "string" } },
+      required: ["instanceId", "nodeId", "dispatchKey"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (![args?.instanceId, args?.nodeId, args?.dispatchKey].every((value) => typeof value === "string" && value)) {
+        return errorResult("instanceId, nodeId, and dispatchKey are required");
+      }
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/workflow-instances/${encodeURIComponent(args.instanceId)}/nodes/${encodeURIComponent(args.nodeId)}/dispatch`,
+        { dispatchKey: args.dispatchKey },
+      );
+      if (!r.ok) return errorResult(r.message);
+      return textResult(r.data);
+    },
+  },
+  {
+    name: "create_workflow_artifact",
+    description: "Publish an immutable, attributed workflow artifact for a run or worker session. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: { type: "string" },
+        sessionId: { type: "string" },
+        kind: { type: "string", enum: ["html_preview", "patch", "review_report", "screenshot", "test_log", "verdict"] },
+        name: { type: "string" },
+        mimeType: { type: "string" },
+        encoding: { type: "string", enum: ["utf8", "base64", "json"] },
+        data: { type: "string" },
+        metadata: { type: "object" },
+      },
+      required: ["kind", "name", "mimeType", "encoding", "data"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!args?.runId && !args?.sessionId) return errorResult("runId or sessionId is required");
+      const body: Json = {};
+      for (const key of ["runId", "sessionId", "kind", "name", "mimeType", "encoding", "data", "metadata"]) {
+        if (args[key] !== undefined) body[key] = args[key];
+      }
+      const path = args.kind === "screenshot" ? "/api/artifacts/screenshots" : "/api/artifacts";
+      const r = await cpFetch(deps, "POST", path, body);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ artifact: { ...r.data, data: undefined } });
+    },
+  },
+  {
+    name: "complete_workflow_attempt",
+    description: "Complete an awaiting workflow attempt with exact artifact-contract bindings. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        attemptId: { type: "string" },
+        outcome: { type: "string", enum: ["success", "failure", "accepted", "changes_requested", "rejected"] },
+        outputs: { type: "object", additionalProperties: { type: "string" } },
+        error: { type: "string" },
+      },
+      required: ["attemptId", "outcome"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.attemptId !== "string" || !args.attemptId || typeof args?.outcome !== "string") {
+        return errorResult("attemptId and outcome are required");
+      }
+      const body: Json = { outcome: args.outcome };
+      if (args.outputs !== undefined) body.outputs = args.outputs;
+      if (args.error !== undefined) body.error = args.error;
+      const r = await cpFetch(deps, "POST", `/api/workflow-attempts/${encodeURIComponent(args.attemptId)}/complete`, body);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ instance: mapWorkflowInstance(r.data, true) });
+    },
+  },
+  {
+    name: "resolve_workflow_gate",
+    description: "Resolve a waiting human workflow gate; named policy decisions remain non-bypassable. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        instanceId: { type: "string" },
+        nodeId: { type: "string" },
+        outcome: { type: "string", enum: ["success", "failure"] },
+      },
+      required: ["instanceId", "nodeId", "outcome"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (![args?.instanceId, args?.nodeId, args?.outcome].every((value) => typeof value === "string" && value)) {
+        return errorResult("instanceId, nodeId, and outcome are required");
+      }
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/workflow-instances/${encodeURIComponent(args.instanceId)}/nodes/${encodeURIComponent(args.nodeId)}/resolve`,
+        { outcome: args.outcome },
+      );
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ instance: mapWorkflowInstance(r.data, true) });
+    },
+  },
+  {
+    name: "create_worktree",
+    description: "Create and select a session worktree at an exact branch and optional base ref. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Defaults to the calling session" },
+        branch: { type: "string" },
+        baseRef: { type: "string", description: "Defaults to the fetched remote default branch" },
+      },
+      required: ["branch"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.branch !== "string" || !args.branch) return errorResult("branch is required");
+      const sessionId = worktreeTarget(args, deps);
+      if (typeof sessionId !== "string") return sessionId;
+      // Additive opt-in: old control planes ignore this field and preserve their synchronous path;
+      // v113 control planes acknowledge and let this client poll without one absolute HTTP wait.
+      const body: Json = { branch: args.branch, progress: true };
+      if (typeof args.baseRef === "string") body.baseRef = args.baseRef;
+      const path = `/api/sessions/${encodeURIComponent(sessionId)}/worktrees`;
+      const sleep = deps.sleep ?? ((milliseconds: number) =>
+        new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+      let result = await cpFetch(deps, "POST", path, body, SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS);
+      while (result.ok && result.data?.operation?.status === "in_progress") {
+        await sleep(1_000);
+        // Repeating the exact coordinates joins the existing v113 operation. Against an older
+        // control plane the first response remains the complete legacy result and never loops.
+        result = await cpFetch(deps, "POST", path, body, SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS);
+      }
+      if (!result.ok) return errorResult(result.message);
+      if (result.data?.operation?.status === "failed") {
+        return errorResult(result.data.operation.error ?? "worktree operation failed");
+      }
+      return textResult(mapWorktreeResult(result.data));
+    },
+  },
+  {
+    name: "attach_worktree",
+    description: "Attach and select an existing worktree for a session. The path may live anywhere, including beside the checkout at ../<repo>-worktrees/<slug>, as long as the session repository registers it in `git worktree list`. Under platform isolation the result reports whether a live provider process can already write there, or whether that takes effect at the session's next launch. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Defaults to the calling session" },
+        path: { type: "string" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.path !== "string" || !args.path) return errorResult("path is required");
+      const sessionId = worktreeTarget(args, deps);
+      if (typeof sessionId !== "string") return sessionId;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees/attach`, { path: args.path });
+      if (!r.ok) return errorResult(r.message);
+      return textResult(mapWorktreeResult(r.data));
+    },
+  },
+  {
+    name: "select_worktree",
+    description: "Select one of a session's attached worktrees for future turns. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Defaults to the calling session" },
+        path: { type: "string" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.path !== "string" || !args.path) return errorResult("path is required");
+      const sessionId = worktreeTarget(args, deps);
+      if (typeof sessionId !== "string") return sessionId;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees/select`, { path: args.path });
+      if (!r.ok) return errorResult(r.message);
+      return textResult(mapWorktreeResult(r.data));
+    },
+  },
+  {
+    name: "discard_worktree",
+    description: "Permanently remove an inactive runner-owned worktree and branch only when they are clean and fully pushed. Always use this instead of `git worktree remove` for a session-linked path: it retains a worktree that is still selected by a launching or live provider and reports why, and it keeps the session's durable worktree record consistent with the filesystem. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Defaults to the calling session" },
+        path: { type: "string" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.path !== "string" || !args.path) return errorResult("path is required");
+      const sessionId = worktreeTarget(args, deps);
+      if (typeof sessionId !== "string") return sessionId;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees/discard`, { path: args.path });
+      if (!r.ok) return errorResult(r.message);
+      return textResult(mapWorktreeResult(r.data));
+    },
+  },
+  {
+    name: "create_session",
+    description:
+      "Start a child session. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports each effective guardrail as a value or null (none). Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runnerId: { type: "string" },
+        agentId: { type: "string" },
+        prompt: { type: "string", description: "Initial task for the agent" },
+        workspaceId: { type: "string" },
+        workspacePath: { type: "string", description: "Ad-hoc absolute directory instead of workspaceId" },
+        title: { type: "string" },
+        useWorktree: { type: "boolean", description: "Defaults to true; pass false to run the child in place in the workspace directory" },
+        model: { type: "string" },
+        permissionMode: { type: "string", enum: [...WORKER_PERMISSION_MODES] },
+        costBudgetUsd: { type: "number" },
+        maxToolCalls: { type: "number" },
+        maxChildSessions: { type: "integer", minimum: 0, maximum: 64 },
+      },
+      required: ["runnerId", "agentId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.runnerId !== "string" || typeof args?.agentId !== "string") {
+        return errorResult("runnerId and agentId are required");
+      }
+      if (args.agentId === CONDUCTOR_AGENT_ID) {
+        return errorResult("refusing to start another conductor (the Conductor agent is retired)");
+      }
+      if (!args.workspaceId && !args.workspacePath) {
+        return errorResult("workspaceId or workspacePath is required — pick one from list_runners");
+      }
+      if (args.permissionMode !== undefined && !WORKER_PERMISSION_MODES.includes(args.permissionMode)) {
+        return errorResult(
+          `permissionMode must be one of ${WORKER_PERMISSION_MODES.join(", ")} — bypassPermissions is never allowed`,
+        );
+      }
+      const config: Json = {};
+      if (typeof args.model === "string") config.model = args.model;
+      if (typeof args.permissionMode === "string") config.permissionMode = args.permissionMode;
+      if (typeof args.costBudgetUsd === "number") config.costBudgetUsd = args.costBudgetUsd;
+      if (typeof args.maxToolCalls === "number") config.maxToolCalls = args.maxToolCalls;
+      if (typeof args.maxChildSessions === "number") config.maxChildSessions = args.maxChildSessions;
+      const body: Json = { runnerId: args.runnerId, agentId: args.agentId };
+      if (typeof args.workspaceId === "string") body.workspaceId = args.workspaceId;
+      if (typeof args.workspacePath === "string") body.workspacePath = args.workspacePath;
+      if (typeof args.title === "string") body.title = args.title;
+      if (typeof args.prompt === "string") body.prompt = args.prompt;
+      // A child that starts in the primary checkout has no branch, so diff, checkpoint, review,
+      // and PR surfaces are blind to it. An agent asks for a worktree by default; only an explicit
+      // `useWorktree: false` keeps the in-place behavior. Human/UI-created sessions are unaffected
+      // — they post their own explicit value to the same route.
+      body.useWorktree = args.useWorktree !== false;
+      if (Object.keys(config).length) body.config = config;
+
+      const created = await createWithSpawnApproval(deps, "/api/sessions", body);
+      if (!created.ok) return errorResult(created.message);
+      const view = created.data;
+      return textResult({ session: mapSession(view) });
+    },
+  },
+  {
+    name: "prompt_session",
+    description: "Send a message/task to a descendant session. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" }, text: { type: "string" } },
+      required: ["sessionId", "text"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || typeof args?.text !== "string" || !args.text.trim()) {
+        return errorResult("sessionId and a non-empty text are required");
+      }
+      if (args.sessionId === deps.selfSessionId) {
+        return errorResult("refusing: that is my own session (an agent cannot prompt itself)");
+      }
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/prompt`, {
+        text: args.text,
+      });
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "stop_session",
+    description: "Stop a descendant session's agent process. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId) {
+        return errorResult("refusing: that is my own session (an agent cannot stop itself)");
+      }
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/stop`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "restart_session",
+    description: "Restart a stopped descendant session, subject to its parent's available live-child slots. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId) {
+        return errorResult("refusing: that is my own session (an agent cannot restart itself)");
+      }
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/restart`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "archive_session",
+    description: "Archive a descendant session without deleting its history. Existing stop-before-archive and visibility checks apply.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" } },
+      required: ["sessionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId) return errorResult("refusing: an agent cannot archive its own session");
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/archive`, { archived: true });
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "set_guardrails",
+    description: "Set or clear a descendant's cost budget (USD) and/or tool-call limit (0 clears), or set a descendant's or this session's concurrent live-child limit from 0 through 64. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        costBudgetUsd: { type: "number" },
+        maxToolCalls: { type: "number" },
+        maxChildSessions: { type: "integer", minimum: 0, maximum: 64 },
+      },
+      required: ["sessionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId &&
+          (typeof args.maxChildSessions !== "number" ||
+            typeof args.costBudgetUsd === "number" || typeof args.maxToolCalls === "number")) {
+        return errorResult("refusing: an agent may change only its own maxChildSessions");
+      }
+      // ONLY guardrail keys ever ride this call — never model/effort/permissionMode.
+      const body: Json = {};
+      if (typeof args.costBudgetUsd === "number") body.costBudgetUsd = args.costBudgetUsd;
+      if (typeof args.maxToolCalls === "number") body.maxToolCalls = args.maxToolCalls;
+      if (typeof args.maxChildSessions === "number") body.maxChildSessions = args.maxChildSessions;
+      if (!Object.keys(body).length) {
+        return errorResult("at least one of costBudgetUsd, maxToolCalls, or maxChildSessions is required (0 clears a cost/tool limit)");
+      }
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/config`, body);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "create_run",
+    description:
+      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runnerId: { type: "string" },
+        workspaceId: { type: "string" },
+        agentIds: { type: "array", items: { type: "string" }, minItems: 1 },
+        task: { type: "string" },
+        title: { type: "string" },
+        costBudgetUsd: { type: "number" },
+        maxToolCalls: { type: "number" },
+      },
+      required: ["runnerId", "workspaceId", "agentIds", "task"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (
+        typeof args?.runnerId !== "string" ||
+        typeof args?.workspaceId !== "string" ||
+        !Array.isArray(args?.agentIds) ||
+        args.agentIds.length === 0 ||
+        typeof args?.task !== "string" ||
+        !args.task.trim()
+      ) {
+        return errorResult("runnerId, workspaceId, agentIds (non-empty), and task are required");
+      }
+      if (args.agentIds.includes(CONDUCTOR_AGENT_ID)) {
+        return errorResult("refusing: a run must not include the conductor agent");
+      }
+      const body: Json = {
+        runnerId: args.runnerId,
+        workspaceId: args.workspaceId,
+        agentIds: args.agentIds,
+        task: args.task,
+      };
+      if (typeof args.title === "string") body.title = args.title;
+      if (typeof args.costBudgetUsd === "number") body.costBudgetUsd = args.costBudgetUsd;
+      if (typeof args.maxToolCalls === "number") body.maxToolCalls = args.maxToolCalls;
+      const r = await createWithSpawnApproval(deps, "/api/runs", body);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({
+        run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },
+        sessions: capArray(r.data?.sessions).map(mapSession),
+      });
+    },
+  },
+];
+
+/* -------------------------------------------------------------------------- */
+/* JSON-RPC dispatch + newline framing                                        */
+/* -------------------------------------------------------------------------- */
+
+interface RpcMessage {
+  jsonrpc?: string;
+  id?: number | string | null;
+  method?: string;
+  params?: Json;
+}
+
+/**
+ * Handle one parsed JSON-RPC message; returns the response object, or null for
+ * notifications (and noise). Pure over `deps` — the unit tests drive this directly.
+ */
+export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null> {
+  const m = msg as RpcMessage;
+  if (!m || typeof m !== "object" || typeof m.method !== "string") return null;
+  const id = m.id;
+  const isRequest = id !== undefined && id !== null;
+  const reply = (result: Json): Json => ({ jsonrpc: "2.0", id, result });
+  const rpcError = (code: number, message: string): Json => ({ jsonrpc: "2.0", id, error: { code, message } });
+
+  switch (m.method) {
+    case "initialize":
+      return isRequest
+        ? reply({
+            protocolVersion: MCP_PROTOCOL_VERSION,
+            capabilities: { tools: {} },
+            serverInfo: { name: "wollipog-manager", version: VERSION },
+          })
+        : null;
+    case "notifications/initialized":
+      return null; // notification — no reply
+    case "ping":
+      return isRequest ? reply({}) : null;
+    case "tools/list":
+      return isRequest
+        ? reply({ tools: TOOLS.filter((tool) => !deps.orchestrator || ORCHESTRATOR_TOOLS.has(tool.name)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
+        : null;
+    case "tools/call": {
+      if (!isRequest) return null;
+      const name = m.params?.name;
+      if (typeof name !== "string") return rpcError(-32602, "tools/call requires params.name");
+      const tool = TOOLS.find((t) => t.name === name);
+      if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return reply(errorResult("the orchestrator preset does not allow this tool"));
+      // Unknown tool → an isError TOOL result (not a protocol error) so the model can
+      // recover in-conversation instead of the client tearing the turn down.
+      if (!tool) return reply(errorResult(`unknown tool '${name}'`));
+      try {
+        return reply(await tool.handler(m.params?.arguments ?? {}, deps));
+      } catch (err) {
+        // A handler bug must never leave the request unanswered (claude would hang the turn).
+        return reply(errorResult(`tool '${name}' failed: ${(err as Error)?.message ?? String(err)}`));
+      }
+    }
+    default:
+      return isRequest ? rpcError(-32601, "method not found") : null;
+  }
+}
+
+/** Direct programmatic access for the CLI. It deliberately executes the exact MCP tool table so
+ * schemas, response projection, self-targeting checks, and REST routes cannot drift. */
+export async function executeManagerTool(name: string, args: Json, deps: McpDeps): Promise<ToolResult> {
+  if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return errorResult("the orchestrator preset does not allow this tool");
+  const tool = TOOLS.find((candidate) => candidate.name === name);
+  if (!tool) return errorResult(`unknown tool '${name}'`);
+  try {
+    return await tool.handler(args ?? {}, deps);
+  } catch (error) {
+    return errorResult(`tool '${name}' failed: ${(error as Error)?.message ?? String(error)}`);
+  }
+}
+
+/**
+ * Newline-delimited JSON-RPC over a stream pair. Non-JSON lines are skipped (same rule as
+ * jsonrpc.ts — stdout noise must not kill the server). Requests dispatch CONCURRENTLY:
+ * JSON-RPC correlates responses by id (out-of-order completion is legal) and each response
+ * is one atomic newline-terminated write(), so frames can't interleave. Serializing here
+ * would head-of-line block every tool — even ping and the pre-allowed reads — behind one
+ * stalled CP request, bricking the whole server for the duration of a tunnel blip.
+ */
+export function serveSessionManagementMcp(input: Readable, output: Writable, deps: McpDeps): void {
+  let buffer = "";
+  const handleLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let msg: unknown;
+    try {
+      msg = JSON.parse(trimmed);
+    } catch {
+      return; // skip non-JSON noise
+    }
+    void dispatch(msg, deps)
+      .then((res) => {
+        if (res) output.write(JSON.stringify(res) + "\n");
+      })
+      .catch((err) => {
+        // dispatch never rejects by design; belt so a bad frame can't become an unhandled rejection.
+        console.error(`[session-management-mcp] dispatch failed: ${(err as Error)?.message ?? String(err)}`);
+      });
+  };
+  input.setEncoding("utf8");
+  input.on("data", (chunk: string) => {
+    buffer += chunk;
+    let idx: number;
+    while ((idx = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 1);
+      handleLine(line);
+    }
+  });
+}

@@ -57,6 +57,7 @@ export interface ShellLaunch {
 export interface ShellProcessLaunch {
   command: string;
   args: string[];
+  cwd?: string;
   env?: Record<string, string>;
   scrubInheritedEnv?: string[];
   verbatimCommandLine?: string;
@@ -188,12 +189,13 @@ export class ShellManager {
       ? posixPtyCommandLaunch(cols, rows, meta.launch)
       : shellLaunchFor(context, cols, rows);
     const { command, args, pty, ttyFile } = selected;
+    const launchCwd = meta?.launch?.cwd ?? cwd;
     const child = process.platform === "win32" && context.kind === "native"
       ? openWindowsConpty({
           command: meta?.launch?.command ?? command,
           args: meta?.launch?.args ?? args,
           env: meta?.launch?.env,
-          cwd,
+          cwd: launchCwd,
           cols,
           rows,
           scrubInheritedEnv: meta?.launch?.scrubInheritedEnv,
@@ -202,7 +204,7 @@ export class ShellManager {
       : spawnAgent({
           command,
           args,
-          cwd,
+          cwd: launchCwd,
           context,
           env: meta?.launch?.env,
           scrubInheritedEnv: meta?.launch?.scrubInheritedEnv,
@@ -268,7 +270,7 @@ export class ShellManager {
     child.stdin.on("error", () => {
       /* surfaced via exit below */
     });
-    child.once("error", (err) => {
+    const onError = (err: Error) => {
       // spawn failure (ENOENT etc.) — surface as stderr then a null exit.
       if (live.exited) return;
       live.exited = true;
@@ -276,10 +278,10 @@ export class ShellManager {
       live.exitCode = null;
       this.cb.onExit(shellId, sessionId, null, live.outputSeq);
       if (live.forgetAfterExit) this.shells.delete(shellId);
-    });
+    };
     // "close", not "exit": close fires only after stdio has fully drained, so no output chunk
     // can arrive after the exit notification (exit can fire with data still buffered).
-    child.once("close", (code) => {
+    const onClose = (code: number | null) => {
       if (live.exited) return;
       live.exited = true;
       flushDecoders(); // a trailing partial character must land before the exit
@@ -287,7 +289,16 @@ export class ShellManager {
       live.exitCode = code;
       this.cb.onExit(shellId, sessionId, code, live.outputSeq);
       if (live.forgetAfterExit) this.shells.delete(shellId);
-    });
+    };
+    // Node 26 gives ChildProcess a typed event map. Narrow the process union before subscribing so
+    // its overloads are not intersected with the process-shaped ConPTY emitter's overloads.
+    if (child instanceof WindowsConptyProcess) {
+      child.once("error", onError);
+      child.once("close", onClose);
+    } else {
+      child.once("error", onError);
+      child.once("close", onClose);
+    }
     return { pty };
   }
 
@@ -342,10 +353,10 @@ export class ShellManager {
     this.kill(s); // exit handler emits onExit, then forgets the retained snapshot
   }
 
-  /** Kill every shell belonging to a session (session deleted). */
-  closeForSession(sessionId: string): void {
+  /** Delete closes every shell; orchestrator Stop closes only its provider TUI. */
+  closeForSession(sessionId: string, kind?: ShellKind): void {
     for (const [shellId, s] of this.shells) {
-      if (s.sessionId !== sessionId) continue;
+      if (s.sessionId !== sessionId || (kind && s.kind !== kind)) continue;
       s.forgetAfterExit = true;
       if (s.exited) {
         this.shells.delete(shellId);

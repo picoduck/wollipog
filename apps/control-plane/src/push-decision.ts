@@ -9,7 +9,7 @@
  * input_required status frame for the same request must stay silent.
  */
 
-import { sessionAttentionStatus, type SessionStatus, type SessionView } from "@wollipog/protocol";
+import { pendingRequests, sessionAttentionStatus, type SessionStatus, type SessionView } from "@wollipog/protocol";
 import type { PushMessage } from "./web-push.js";
 
 const BUSY: SessionStatus[] = ["queued", "starting", "running"];
@@ -21,6 +21,7 @@ function clamp(s: string, max: number): string {
 }
 const TITLE_MAX = 120;
 const BODY_MAX = 400;
+const ATTENTION_REQUEST_ID_MAX = 256;
 
 export type PushDecisionPrev = Pick<SessionView, "status" | "pendingApproval" | "backgroundDeliveries">;
 
@@ -41,12 +42,17 @@ export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMes
     const what = next.pendingApproval?.title ? `: ${next.pendingApproval.title}` : "";
     const attention = sessionAttentionStatus(next);
     const label = attention?.kind === "answer_required" ? "Answer required"
-      : attention?.kind === "authentication_required" ? "Authentication required"
+      : attention?.kind === "recovery_required" ? "Recovery required"
+        : attention?.kind === "authentication_required" ? "Authentication required"
         : attention?.kind === "approval_required" ? "Approval required" : "Input required";
+    const requests = pendingRequests(next.pendingApproval);
     return {
       title: `${name} needs your input`,
       body: clamp(`${label}${what}`, BODY_MAX),
       sessionId: next.id,
+      eventEpoch: next.eventEpoch ?? 0,
+      ...(requests.length === 1 && requests[0]!.requestId.length <= ATTENTION_REQUEST_ID_MAX
+        ? { requestId: requests[0]!.requestId } : {}),
       urgency: "high",
     };
   }

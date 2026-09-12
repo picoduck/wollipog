@@ -1,0 +1,604 @@
+import assert from "node:assert/strict";
+import { after, before, test } from "node:test";
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
+import { Window } from "happy-dom";
+import { PROTOCOL_VERSION, type ManagedBackgroundJobView, type SessionView } from "@wollipog/protocol";
+import type { ApiClient } from "../api.js";
+import { ApiProvider } from "../api-context.js";
+import {
+  BackgroundWorkPanel,
+  backgroundJobCurrentState,
+  backgroundJobDeliveryStage,
+} from "./BackgroundWorkPanel.js";
+
+const domWindow = new Window({ url: "http://localhost/" });
+const globals: Record<string, unknown> = {
+  window: domWindow,
+  document: domWindow.document,
+  navigator: domWindow.navigator,
+  HTMLElement: domWindow.HTMLElement,
+  React,
+  IS_REACT_ACT_ENVIRONMENT: true,
+};
+const prior = Object.fromEntries(
+  Object.keys(globals).map((name) => [name, (globalThis as Record<string, unknown>)[name]]),
+);
+
+before(() => {
+  for (const [name, value] of Object.entries(globals)) {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+});
+
+after(() => {
+  for (const [name, value] of Object.entries(prior)) {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+  domWindow.close();
+});
+
+const baseJob: ManagedBackgroundJobView = {
+  id: "opaque-job-id",
+  parentTurnId: "turn-1",
+  launchType: "agent",
+  registeredAt: 1_000,
+  lastObservedAt: 2_000,
+  sourcePresent: true,
+};
+
+test("job and delivery presentation keep current lifecycle separate from delivery", () => {
+  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true), "Running");
+  assert.equal(backgroundJobCurrentState(baseJob, "running", false, true), "Status Unverified");
+  assert.equal(backgroundJobCurrentState({ ...baseJob, sourcePresent: false }, "running", true, true), "Status Unverified");
+  assert.equal(backgroundJobCurrentState({ ...baseJob, terminalStatus: "failed" }, undefined, false, true), "Failed");
+  assert.equal(backgroundJobCurrentState(baseJob, "orphaned", true, true), "Orphaned");
+  assert.equal(backgroundJobCurrentState(baseJob, undefined, true, true), "Status Unverified",
+    "a source-present row cannot claim Running without a current aggregate lifecycle");
+  assert.equal(backgroundJobDeliveryStage(baseJob), "Not Started");
+  assert.equal(backgroundJobDeliveryStage({ ...baseJob, terminalObservedAt: 3_000, continuationRequired: true }), "Continuation Pending");
+  assert.equal(backgroundJobDeliveryStage({ ...baseJob, continuationAcceptedAt: 4_000 }), "Continuation In Flight");
+  assert.equal(backgroundJobDeliveryStage({
+    ...baseJob,
+    continuationAcceptedAt: 4_000,
+    continuationMissingResultAt: 4_500,
+  }), "Result Missing");
+  assert.equal(backgroundJobDeliveryStage({ ...baseJob, assistantResultPersistedAt: 5_000 }), "Result Delivered");
+});
+
+test("every watchdog highlights its delivery and explains completion, recovery, and user action", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const cases = [
+    ["terminal_without_continuation", "Result Pending", /returning the result automatically/, /No action is needed/],
+    ["accepted_without_result", "Result Missing", /will not repeat an accepted step/, /Acknowledge the missing result/],
+    ["result_not_projected", "Transcript Delayed", /updating the transcript automatically/, /No action is needed/],
+    ["dashboard_observation_pending", "Notification Pending", /waiting for the dashboard confirmation/, /No action is needed/],
+  ] as const;
+  try {
+    for (const [watchdogState, label, recovery, action] of cases) {
+      await act(async () => root.render(
+        <BackgroundWorkPanel
+          session={{
+            id: "session",
+            runnerId: "runner",
+            backgroundWorkTracking: "managed",
+            backgroundJobs: [],
+            backgroundDeliveries: [{
+              parentTurnId: "turn-1",
+              jobCount: 1,
+              terminalCount: 1,
+              watchdogState,
+            }],
+          } as unknown as SessionView}
+          runnerOnline
+          runnerProtocolVersion={PROTOCOL_VERSION}
+          parentTurnEventIds={new Map([["turn-1", 42]])}
+          onOpenParentTurn={() => undefined}
+        />,
+      ));
+      const highlighted = container.querySelector<HTMLElement>(".background-work-group-watchdog");
+      assert.equal(highlighted?.dataset["watchdogState"], watchdogState);
+      assert.equal(highlighted?.dataset["watchdogHighlighted"], "true");
+      const summary = highlighted?.querySelector<HTMLElement>(".background-delivery-summary");
+      assert.match(summary?.textContent ?? "", new RegExp(label));
+      assert.match(summary?.textContent ?? "", /Completed.*Still Pending.*Recovery.*Your Action/s);
+      assert.match(summary?.textContent ?? "", recovery);
+      assert.match(summary?.textContent ?? "", action);
+      const details = summary?.querySelector("details");
+      assert.equal(details?.open, false);
+      assert.equal(details?.querySelector("code")?.textContent, watchdogState);
+    }
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("terminal missing continuations show age and acknowledge independently without retry", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const acknowledged: Array<[string, string]> = [];
+  const client = {
+    acknowledgeBackgroundMissingResult: async (sessionId: string, continuationId: string) => {
+      acknowledged.push([sessionId, continuationId]);
+      return {} as SessionView;
+    },
+  } as unknown as ApiClient;
+  const delivery = (continuationId: string, missingResultAt: number) => ({
+    continuationId,
+    parentTurnId: "turn-1",
+    jobCount: 1,
+    terminalCount: 1,
+    acceptedAt: missingResultAt - 1_000,
+    missingResultAt,
+    watchdogState: "accepted_without_result" as const,
+  });
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client}>
+        <BackgroundWorkPanel
+          session={{
+            id: "session",
+            runnerId: "runner",
+            backgroundWorkTracking: "managed",
+            backgroundJobs: [],
+            backgroundDeliveries: [delivery("bgcont-a", 10_000), delivery("bgcont-b", 20_000)],
+          } as unknown as SessionView}
+          runnerOnline
+          runnerProtocolVersion={PROTOCOL_VERSION}
+          parentTurnEventIds={new Map()}
+          onOpenParentTurn={() => undefined}
+        />
+      </ApiProvider>,
+    ));
+    assert.equal(container.querySelectorAll(".background-delivery-summary").length, 2);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 2);
+    assert.match(container.textContent ?? "", /Missing Since.*Recovery State.*Acknowledgement Required/s);
+    await act(async () => {
+      container.querySelectorAll<HTMLButtonElement>("button")[0]!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(acknowledged, [["session", "bgcont-a"]]);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 1,
+      "acknowledging one continuation leaves the other independently actionable");
+    assert.equal(container.querySelectorAll('[data-recovery-state="missing-result-acknowledged"]').length, 1);
+    assert.match(container.textContent ?? "", /Missing Result Acknowledged/);
+    assert.equal([...container.querySelectorAll<HTMLButtonElement>("button")]
+      .some((button) => /retry/i.test(button.textContent ?? "")), false,
+    "acknowledgement never offers replay");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("terminal missing history remains actionable without a watchdog but yields to late proof", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const client = {
+    acknowledgeBackgroundMissingResult: async () => ({} as SessionView),
+  } as unknown as ApiClient;
+  const missingDelivery = {
+    continuationId: "bgcont-suppressed",
+    parentTurnId: "turn-suppressed",
+    jobCount: 1,
+    terminalCount: 1,
+    acceptedAt: 10_000,
+    missingResultAt: 20_000,
+  };
+  const render = (delivery: typeof missingDelivery & { runnerResultPersistedAt?: number }) => root.render(
+    <ApiProvider client={client}>
+      <BackgroundWorkPanel
+        session={{
+          id: "session-suppressed",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [],
+          backgroundDeliveries: [delivery],
+        } as unknown as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />
+    </ApiProvider>
+  );
+  try {
+    await act(async () => render(missingDelivery));
+    assert.match(container.textContent ?? "", /Acknowledgement Required/);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 1,
+      "terminal missing audit remains resolvable when attention is suppressed");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      container.querySelector(".background-work-barrier strong")?.textContent,
+      "Missing Result Acknowledged",
+      "the barrier follows the successful optimistic acknowledgement",
+    );
+    await act(async () => render({ ...missingDelivery, runnerResultPersistedAt: 30_000 }));
+    assert.doesNotMatch(container.textContent ?? "", /Acknowledgement Required/);
+    assert.doesNotMatch(container.textContent ?? "", /Result Missing/);
+    assert.match(container.textContent ?? "", /Result Delivered/);
+    assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 0,
+      "late delivery proof is authoritative and needs no acknowledgement");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the panel renders individual jobs, their parent barrier, durable times, and a transcript action", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const opened: number[] = [];
+  const session = {
+    id: "session",
+    runnerId: "runner",
+    backgroundWorkTracking: "managed",
+    backgroundJobs: [{
+      ...baseJob,
+      terminalStatus: "completed",
+      terminalObservedAt: 3_000,
+      continuationRequired: true,
+      continuationId: "continuation",
+      continuationQueuedAt: 3_100,
+      assistantResultPersistedAt: 4_000,
+    }, {
+      ...baseJob,
+      id: "second-private-id",
+      launchType: "shell",
+      registeredAt: 1_100,
+      terminalStatus: "failed",
+      terminalObservedAt: 3_200,
+      continuationRequired: true,
+      continuationId: "continuation",
+      continuationQueuedAt: 3_100,
+    }],
+    backgroundDeliveries: [{
+      continuationId: "continuation",
+      parentTurnId: "turn-1",
+      jobCount: 2,
+      terminalCount: 2,
+      notificationQueuedAt: 4_100,
+    }],
+  } as SessionView;
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={session}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map([["turn-1", 42]])}
+        onOpenParentTurn={(eventId) => opened.push(eventId)}
+      />,
+    ));
+    assert.equal(container.querySelectorAll(".background-work-job").length, 2);
+    assert.match(container.textContent ?? "", /2 of 2 jobs terminal · 1 delivered/);
+    assert.match(container.textContent ?? "", /Delivery Pending/);
+    assert.match(container.textContent ?? "", /Notification Queued/);
+    assert.match(container.textContent ?? "", /Agent Job 1/);
+    assert.match(container.textContent ?? "", /Shell Job 2/);
+    assert.doesNotMatch(container.textContent ?? "", /opaque-job-id|second-private-id|continuation|\/tmp/);
+    assert.ok(container.querySelectorAll("time[datetime]").length >= 6);
+    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    assert.deepEqual(opened, [42]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("bounded history uses authoritative barrier totals and discloses omitted jobs", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobsTruncated: true,
+          backgroundJobs: [{
+            ...baseJob,
+            terminalStatus: "completed",
+            terminalObservedAt: 3_000,
+            continuationRequired: true,
+            continuationId: "continuation",
+            assistantResultPersistedAt: 4_000,
+          }],
+          backgroundDeliveries: [{
+            continuationId: "continuation",
+            parentTurnId: "turn-1",
+            jobCount: 200,
+            terminalCount: 199,
+          }],
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Showing the 128 most relevant jobs/);
+    assert.match(container.textContent ?? "", /199 of 200 jobs terminal · 1 shown/);
+    assert.match(container.textContent ?? "", /Waiting for Jobs/);
+    assert.doesNotMatch(container.textContent ?? "", /BarrierDelivered/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("delivery-only history remains inspectable without inventing job lifecycle rows", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const opened: number[] = [];
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [],
+          backgroundJobsTruncated: true,
+          backgroundDeliveries: [{
+            continuationId: "private-continuation",
+            parentTurnId: "retained-parent",
+            jobCount: 3,
+            terminalCount: 3,
+            queuedAt: 3_000,
+            acceptedAt: 3_100,
+            runnerResultPersistedAt: 3_200,
+            notificationQueuedAt: 3_300,
+            notifications: [{
+              deliveryId: "private-delivery",
+              endpointKey: "private-endpoint",
+              state: "clicked",
+              attemptCount: 1,
+              clickedAt: 3_400,
+            }],
+          }],
+        } as unknown as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map([["retained-parent", 77]])}
+        onOpenParentTurn={(eventId) => opened.push(eventId)}
+      />,
+    ));
+    assert.equal(container.querySelectorAll(".background-work-group").length, 1);
+    assert.equal(container.querySelectorAll(".background-work-job").length, 0);
+    assert.equal(container.querySelectorAll(".background-work-delivery").length, 1);
+    assert.match(container.textContent ?? "", /Delivery receipt retained for 3 jobs/);
+    assert.match(container.textContent ?? "", /Per-job lifecycle history is outside the bounded inventory/);
+    assert.match(container.textContent ?? "", /Delivery ReceiptResult Delivered · Notification Opened/);
+    assert.match(container.textContent ?? "", /Delivery Receipt 1Result Delivered/);
+    assert.match(container.textContent ?? "", /Recorded Job Count3Recorded Terminal Count3/);
+    assert.doesNotMatch(container.textContent ?? "", /Running|Completed|Failed|Killed|Orphaned/);
+    assert.doesNotMatch(container.textContent ?? "", /private-continuation|private-delivery|private-endpoint|retained-parent/);
+    const receipt = container.querySelector('[role="group"][aria-label="Delivery Receipt Status"]');
+    assert.ok(receipt, "screen readers receive a delivery-specific status group");
+    const parentButton = container.querySelector<HTMLButtonElement>("button");
+    assert.equal(parentButton?.textContent, "View Parent Turn");
+    await act(async () => parentButton!.click());
+    assert.deepEqual(opened, [77]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("multiple delivery rounds under one parent use their combined authoritative totals", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [{
+            ...baseJob,
+            terminalStatus: "completed",
+            terminalObservedAt: 3_000,
+            continuationRequired: true,
+            continuationId: "continuation-1",
+            assistantResultPersistedAt: 4_000,
+          }, {
+            ...baseJob,
+            id: "job-2",
+            registeredAt: 5_000,
+            terminalStatus: "completed",
+            terminalObservedAt: 6_000,
+            continuationRequired: true,
+            continuationId: "continuation-2",
+            assistantResultPersistedAt: 7_000,
+          }],
+          backgroundDeliveries: [{
+            continuationId: "continuation-1",
+            parentTurnId: "turn-1",
+            jobCount: 1,
+            terminalCount: 1,
+            runnerResultPersistedAt: 4_000,
+          }, {
+            continuationId: "continuation-2",
+            parentTurnId: "turn-1",
+            jobCount: 1,
+            terminalCount: 1,
+            runnerResultPersistedAt: 7_000,
+          }],
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /2 of 2 jobs terminal · 2 delivered/);
+    assert.match(container.textContent ?? "", /BarrierDelivered/);
+    assert.doesNotMatch(container.textContent ?? "", /Waiting for Jobs/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("unknown parent sentinels stay separate and aggregate-only states explain missing evidence", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [
+            { ...baseJob, id: "unknown-1", parentTurnId: "unknown" },
+            { ...baseJob, id: "unknown-2", parentTurnId: "unknown", registeredAt: 3_000 },
+          ],
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.equal(container.querySelectorAll(".background-work-group").length, 2);
+    assert.equal(container.querySelectorAll(".background-work-group h3")[0]?.textContent, "Unknown Parent Turn");
+    assert.equal(container.querySelectorAll(".background-work-link-unavailable")[0]?.textContent,
+      "Parent Turn Unknown");
+    assert.equal(container.querySelectorAll(".background-work-barrier strong")[0]?.textContent,
+      "Status Unverified");
+
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundJobsAvailable: true,
+          backgroundWorkTracking: "managed",
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Loading Background Work/);
+    assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
+
+    let retries = 0;
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundJobsAvailable: true,
+          backgroundWorkTracking: "managed",
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+        inventoryError="offline"
+        onRetryInventory={() => { retries += 1; }}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Background Work Unavailable/);
+    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    assert.equal(retries, 1);
+
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Background Work Status Unverified/);
+    assert.match(container.textContent ?? "", /control plane does not expose/);
+    assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
+
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkState: "orphaned",
+          backgroundWorkTracking: "managed",
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Background Work Orphaned/);
+    assert.match(container.textContent ?? "", /per-job lifecycle evidence is unavailable/);
+    assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("offline current work and older untracked providers receive truthful capability copy", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkState: "running",
+          backgroundWorkTracking: "untracked",
+          backgroundJobs: [baseJob],
+        } as SessionView}
+        runnerOnline={false}
+        runnerProtocolVersion={81}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /predates inspectable background work/);
+    assert.match(container.textContent ?? "", /does not expose a durable detached-work lifecycle/);
+    assert.match(container.textContent ?? "", /Status Unverified/);
+    assert.match(container.textContent ?? "", /Parent Turn Not Loaded/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

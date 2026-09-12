@@ -5,7 +5,11 @@ import type { ShellProcessLaunch } from "./shell-manager.js";
 export type ShellOpenTarget =
   | { root: string; context: AgentContext; meta: SessionMeta }
   | "pending"
+  /** The session names a worktree that no longer verifies; `invalid` says why. */
+  | { invalid: string }
   | null;
+
+export type ShellOpenLaunchTarget = Exclude<ShellOpenTarget, "pending" | { invalid: string } | null>;
 
 export interface ShellOpenCommandDependencies {
   waitForSessionStart(sessionId: string): Promise<boolean | null>;
@@ -13,11 +17,14 @@ export interface ShellOpenCommandDependencies {
   unregisterPending(shellId: string): void;
   consumeCancellation(shellId: string): boolean;
   sessionCanOpen(sessionId: string): boolean;
-  resolveTarget(sessionId: string): ShellOpenTarget;
-  resolveAgentTuiLaunch(meta: SessionMeta): ShellProcessLaunch | null;
+  resolveTarget(sessionId: string): ShellOpenTarget | Promise<ShellOpenTarget>;
+  /** The reason a target is unusable, or null when it can be opened. */
+  targetError(target: ShellOpenTarget): string | null;
+  launchEpoch(sessionId: string): number;
+  resolveAgentTuiLaunch(meta: SessionMeta): ShellProcessLaunch | null | Promise<ShellProcessLaunch | null>;
   open(
     message: ShellOpenMessage,
-    target: Exclude<ShellOpenTarget, "pending" | null>,
+    target: ShellOpenLaunchTarget,
     launch: ShellProcessLaunch | undefined,
   ): { pty: boolean };
   send(result: ShellOpenResultMessage): void;
@@ -26,7 +33,7 @@ export interface ShellOpenCommandDependencies {
 
 /** Coordinate a shell open without letting an initial Agent TUI outrun its session start.
  * Ordinary interactive shells intentionally bypass the start fence so manual attachment keeps
- * the legacy v58 behavior. Cancellation is checked on both sides of the only await and again at
+ * the legacy v58 behavior. Cancellation is checked on both sides of asynchronous preparation and at
  * the synchronous spawn boundary. */
 export async function handleShellOpenCommand(
   message: ShellOpenMessage,
@@ -69,17 +76,25 @@ export async function handleShellOpenCommand(
       }
     }
 
-    const target = dependencies.resolveTarget(message.sessionId);
-    if (!target || target === "pending") {
-      fail(target === "pending"
-        ? "the session's worktree is still being prepared — try again in a moment"
-        : "unknown session");
+    const target = await dependencies.resolveTarget(message.sessionId);
+    const unusable = dependencies.targetError(target);
+    if (unusable || !target || target === "pending" || "invalid" in target) {
+      fail(unusable ?? "unknown session");
       return;
     }
 
     try {
+      // Only launch-relevant fields participate: transcript ticks must not continually
+      // invalidate a slow MCP probe, but a replacement launch or workspace change must.
+      const launchIdentity = (value: ShellOpenLaunchTarget) => JSON.stringify([
+        value.root, value.context, value.meta.agentId, value.meta.driver,
+        value.meta.command, value.meta.args, value.meta.config,
+        value.meta.executionTarget, value.meta.providerCredentialScopeId, value.meta.status,
+      ]);
+      const identity = launchIdentity(target);
+      const epoch = dependencies.launchEpoch(message.sessionId);
       const launch = message.kind === "agent_tui"
-        ? dependencies.resolveAgentTuiLaunch(target.meta) ?? undefined
+        ? (await dependencies.resolveAgentTuiLaunch(target.meta)) ?? undefined
         : undefined;
       if (message.kind === "agent_tui" && !launch) {
         throw new Error("this session's agent does not expose a standalone TUI");
@@ -89,6 +104,14 @@ export async function handleShellOpenCommand(
       }
       if (dependencies.consumeCancellation(message.shellId)) {
         throw new Error("shell open was cancelled");
+      }
+      if (message.kind === "agent_tui") {
+        const current = await dependencies.resolveTarget(message.sessionId);
+        if (!current || current === "pending" || "invalid" in current ||
+            launchIdentity(current) !== identity ||
+            dependencies.launchEpoch(message.sessionId) !== epoch) {
+          throw new Error("session launch or workspace changed while preparing Agent TUI; try again");
+        }
       }
       const { pty } = dependencies.open(message, target, launch);
       dependencies.send({ type: "shell_open_result", requestId: message.requestId, ok: true, pty });

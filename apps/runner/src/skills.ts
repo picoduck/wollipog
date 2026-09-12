@@ -35,7 +35,8 @@
  * - All materialization goes through a fresh temp dir and one atomic rename; files are created
  *   with "wx" so no pre-existing path (symlinks included) can ever be followed or overwritten.
  * - Names, paths, and digests are validated and the digest recomputed before any write.
- * - Windows performs no writes at all and reports every link as "unsupported" (MVP).
+ * - Windows publishes directory junctions. Existing managed junctions are retargeted in place
+ *   only after their current target is verified again by the runner-owned native helper.
  */
 
 import { randomUUID } from "node:crypto";
@@ -57,7 +58,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import {
   SKILL_MAX_FILES,
   SKILL_MAX_FILE_BYTES,
@@ -74,6 +75,8 @@ import {
   type UnmanagedSkillInfo,
 } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
+import { replaceWindowsSkillJunction } from "./windows-skill-junction.js";
+import { validWslDistroName } from "./wsl-context.js";
 
 /** Harness skill directories, home-relative. Only native claude-code/codex deployment is built. */
 export const SKILL_DIRS: Partial<Record<AgentDriverKind, string>> = {
@@ -91,7 +94,6 @@ export const SKILL_SCAN_LIMITS = {
 } as const;
 
 const DIGEST_HEX = /^[0-9a-f]{64}$/;
-const WINDOWS_UNSUPPORTED_DETAIL = "Windows deployment is not yet supported";
 
 export function skillsStoreRoot(dataDir: string): string {
   return join(dataDir, "skills", "store");
@@ -121,19 +123,31 @@ export interface ReconcileSkillsOptions {
   previousVersionGraceMs?: number;
   /** Deterministic GC clock for tests. */
   now?: number;
+  /** Test seam for the fixed native helper that atomically retargets a verified junction. */
+  replaceWindowsJunction?: (path: string, expectedTarget: string, target: string) => void;
 }
 
 /** Chunked v96 manifests omit content for a digest already verified in this runner's store. */
 export type ReconcileSkillEntry = Omit<SkillSyncEntry, "files"> & { files?: SkillFile[] };
+
+function validReconcileTargets(value: unknown): value is SkillSyncEntry["targets"] {
+  return Array.isArray(value) && value.length <= 4096 && value.every((target) =>
+    target !== null && typeof target === "object" &&
+    typeof (target as { agentId?: unknown }).agentId === "string" &&
+    (target as { agentId: string }).agentId.length > 0 &&
+    !/[\p{Cc}\p{Cf}]/u.test((target as { agentId: string }).agentId) &&
+    ((target as { invocation?: unknown }).invocation === "agent" ||
+      (target as { invocation?: unknown }).invocation === "manual"));
+}
 
 /** One policy for both manifest cache negotiation and final reconciliation. */
 export function skillNeedsManualVariant(
   agents: AgentDefinition[],
   entry: Pick<ReconcileSkillEntry, "targets">,
 ): boolean {
-  const bindings = new Map(harnessBindings(agents).map((binding) => [binding.agentId, binding]));
-  return entry.targets.some(
-    (target) => target.invocation === "manual" && bindings.get(target.agentId)?.driver === "claude-code",
+  const drivers = new Map(agents.map((agent) => [agent.id, agent.driver ?? "acp"]));
+  return validReconcileTargets(entry.targets) && entry.targets.some(
+    (target) => target.invocation === "manual" && drivers.get(target.agentId) === "claude-code",
   );
 }
 
@@ -318,7 +332,7 @@ function prepareSkillStoreRoot(dataDir: string): string {
   mkdirSync(storeRoot, { recursive: true, mode: 0o755 });
   assertNotSymlink(storeRoot, "the skills store root");
   const realStoreRoot = realpathSync(storeRoot);
-  if (realStoreRoot !== join(realDataDir, "skills", "store")) {
+  if (!samePath(realStoreRoot, join(realDataDir, "skills", "store"))) {
     throw new Error("the skills store root does not resolve inside the data directory");
   }
   return realStoreRoot;
@@ -468,7 +482,7 @@ function loadOwnedLinks(path: string, log?: (message: string) => void): Set<stri
       (parsed as { version?: unknown })?.version !== LINK_MANIFEST_VERSION ||
       !Array.isArray(links) ||
       links.length > LINK_MANIFEST_MAX_ENTRIES ||
-      !links.every((entry): entry is string => typeof entry === "string" && entry.startsWith(sep))
+      !links.every((entry): entry is string => typeof entry === "string" && isAbsolute(entry))
     ) {
       log?.("skill link manifest has an unknown shape; treating it as empty");
       return new Set();
@@ -526,9 +540,22 @@ type LinkProbe =
   | { kind: "foreign-symlink" }
   | { kind: "occupied" };
 
-function containedInStore(path: string, realStoreRoot: string): boolean {
-  const prefix = realStoreRoot.endsWith(sep) ? realStoreRoot : `${realStoreRoot}${sep}`;
-  return path === realStoreRoot || path.startsWith(prefix);
+function comparablePath(path: string, platform: NodeJS.Platform = process.platform): string {
+  const normalized = platform === "win32" ? win32.resolve(path) : resolve(path);
+  return platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
+}
+
+function samePath(left: string, right: string, platform: NodeJS.Platform = process.platform): boolean {
+  return comparablePath(left, platform) === comparablePath(right, platform);
+}
+
+function containedInStore(path: string, realStoreRoot: string,
+  platform: NodeJS.Platform = process.platform): boolean {
+  const candidate = comparablePath(path, platform);
+  const root = comparablePath(realStoreRoot, platform);
+  const separator = platform === "win32" ? win32.sep : sep;
+  const prefix = root.endsWith(separator) ? root : `${root}${separator}`;
+  return candidate === root || candidate.startsWith(prefix);
 }
 
 /** Classify what currently sits at a link path. Only "ours" may ever be replaced or removed: a
@@ -541,7 +568,8 @@ function containedInStore(path: string, realStoreRoot: string): boolean {
  * canonical-shaped link is exactly what a user hand-linking a harness to ~/.agents/skills also
  * produces, so `via: "canonical"` alone never authorizes removal — removal additionally requires
  * the link manifest to record that this runner created it. */
-function probeLink(linkPath: string, realStoreRoot: string, canonicalDir?: string): LinkProbe {
+function probeLink(linkPath: string, realStoreRoot: string, canonicalDir?: string,
+  platform: NodeJS.Platform = process.platform): LinkProbe {
   let entry;
   try {
     entry = lstatSync(linkPath);
@@ -555,11 +583,16 @@ function probeLink(linkPath: string, realStoreRoot: string, canonicalDir?: strin
   } catch {
     return { kind: "occupied" };
   }
-  const resolvedTarget = resolve(dirname(linkPath), target);
-  if (containedInStore(resolvedTarget, realStoreRoot)) {
+  const resolvedTarget = platform === "win32"
+    ? win32.resolve(win32.dirname(linkPath), target)
+    : resolve(dirname(linkPath), target);
+  if (containedInStore(resolvedTarget, realStoreRoot, platform)) {
     return { kind: "ours", resolvedTarget, via: "store" };
   }
-  if (canonicalDir !== undefined && resolvedTarget === join(canonicalDir, basename(linkPath))) {
+  const canonicalTarget = canonicalDir === undefined ? undefined : platform === "win32"
+    ? win32.join(canonicalDir, win32.basename(linkPath))
+    : join(canonicalDir, basename(linkPath));
+  if (canonicalTarget !== undefined && samePath(resolvedTarget, canonicalTarget, platform)) {
     return { kind: "ours", resolvedTarget, via: "canonical" };
   }
   return { kind: "foreign-symlink" };
@@ -575,20 +608,29 @@ function ensureManagedSymlink(
   realStoreRoot: string,
   shownPath: string,
   canonicalDir?: string,
+  platform: NodeJS.Platform = process.platform,
+  replaceJunction?: (path: string, expectedTarget: string, target: string) => void,
 ): LinkOutcome {
-  const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
+  const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
   if (probe.kind === "occupied") {
     return { ok: false, status: "conflict", detail: `an unmanaged file or directory already exists at ${shownPath}` };
   }
   if (probe.kind === "foreign-symlink") {
     return { ok: false, status: "conflict", detail: `an unmanaged symlink already exists at ${shownPath}` };
   }
-  if (probe.kind === "ours" && probe.resolvedTarget === targetDir) return { ok: true };
+  if (probe.kind === "ours" && samePath(probe.resolvedTarget, targetDir, platform)) return { ok: true };
   try {
     mkdirSync(dirname(linkPath), { recursive: true, mode: 0o755 });
+    if (platform === "win32" && probe.kind === "ours") {
+      if (!replaceJunction) throw new Error("Windows junction helper unavailable");
+      replaceJunction(linkPath, probe.resolvedTarget, targetDir);
+      const replaced = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
+      if (replaced.kind !== "ours" || !samePath(replaced.resolvedTarget, targetDir, platform)) throw new Error();
+      return { ok: true };
+    }
     const temp = join(dirname(linkPath), `.${basename(linkPath)}.tmp-${randomUUID()}`);
     try {
-      symlinkSync(targetDir, temp, "dir");
+      symlinkSync(targetDir, temp, platform === "win32" ? "junction" : "dir");
       renameSync(temp, linkPath);
     } finally {
       rmSync(temp, { force: true });
@@ -606,6 +648,19 @@ interface SweepContext {
   removedLinks: SkillLinkRemoval[];
   shownDir: string;
   log?: (message: string) => void;
+  platform?: NodeJS.Platform;
+}
+
+function ownedLink(owned: ReadonlySet<string>, path: string,
+  platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform !== "win32") return owned.has(path) ? path : undefined;
+  return [...owned].find((entry) => samePath(entry, path, platform));
+}
+
+function forgetOwnedLink(owned: Set<string>, path: string,
+  platform: NodeJS.Platform = process.platform): void {
+  const recorded = ownedLink(owned, path, platform);
+  if (recorded !== undefined) owned.delete(recorded);
 }
 
 /** Remove this runner's own symlinks whose name is no longer desired: store-target links (only
@@ -628,9 +683,9 @@ function sweepManagedLinks(
   for (const name of entries) {
     if (keep.has(name)) continue;
     const linkPath = join(dir, name);
-    const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
+    const probe = probeLink(linkPath, realStoreRoot, canonicalDir, sweep.platform);
     if (probe.kind !== "ours") continue;
-    if (probe.via === "canonical" && !sweep.owned.has(linkPath)) {
+    if (probe.via === "canonical" && !ownedLink(sweep.owned, linkPath, sweep.platform)) {
       // Shaped like ours, but this runner has no record of creating it — a hand-made link to the
       // canonical location. Leave it; the unmanaged scan reports it.
       continue;
@@ -638,7 +693,7 @@ function sweepManagedLinks(
     const shownPath = `${sweep.shownDir}/${name}`;
     try {
       unlinkSync(linkPath);
-      sweep.owned.delete(linkPath);
+      forgetOwnedLink(sweep.owned, linkPath, sweep.platform);
       const reason = "No longer in the desired skill list.";
       sweep.removedLinks.push({ path: shownPath, reason });
       sweep.log?.(`skill link removed: ${shownPath} (${reason})`);
@@ -991,6 +1046,7 @@ function scanHarnessSkillDir(
   const found: { name: string; description?: string }[] = [];
   let examined = 0;
   for (const entry of entries) {
+    if (entry.name.startsWith(".wollipog-adoption-")) continue;
     if (++examined > SKILL_SCAN_LIMITS.maxEntriesPerDirectory) break;
     if (entry.isSymbolicLink()) {
       if (!isForeignLink?.(join(dir, entry.name))) continue;
@@ -1059,6 +1115,7 @@ function scanUnmanagedSkills(
 function linkedStoreVersionKeys(
   home: string,
   realStoreRoot: string,
+  platform: NodeJS.Platform = process.platform,
 ): Set<string> {
   const protectedVersions = new Set<string>();
   const canonicalDir = canonicalSkillsDir(home);
@@ -1067,9 +1124,10 @@ function linkedStoreVersionKeys(
     ...Object.values(SKILL_DIRS).map((relDir) => join(home, relDir)),
   ]);
   const protectDirectStoreLink = (linkPath: string): void => {
-    const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
+    const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
     if (probe.kind !== "ours" || probe.via !== "store") return;
-    const relative = probe.resolvedTarget.slice(realStoreRoot.length + 1).split(sep);
+    const relative = probe.resolvedTarget.slice(realStoreRoot.length + 1)
+      .split(platform === "win32" ? win32.sep : sep);
     if (relative.length !== 2 || !validSkillName(relative[0]!) || !STORE_VERSION_NAME.test(relative[1]!)) return;
     protectedVersions.add(retentionKey(relative[0]!, relative[1]!));
   };
@@ -1097,6 +1155,7 @@ function linkedStoreVersionKeys(
     }
     let examined = 0;
     for (const entry of entries) {
+      if (entry.name.startsWith(".wollipog-adoption-")) continue;
       if (++examined > SKILL_SCAN_LIMITS.maxEntriesPerDirectory) break;
       if (!entry.isSymbolicLink()) continue;
       protectDirectStoreLink(join(dir, entry.name));
@@ -1115,22 +1174,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const { dataDir, home, agents, desired } = options;
   const allowRemovals = options.allowRemovals === true;
   const platform = options.platform ?? process.platform;
-
-  if (platform === "win32") {
-    return {
-      deployed: desired.map((entry) => ({
-        name: entry.name,
-        digest: entry.versionDigest,
-        links: entry.targets.map((target) => ({
-          agentId: target.agentId,
-          status: "unsupported" as const,
-          detail: WINDOWS_UNSUPPORTED_DETAIL,
-        })),
-      })),
-      unmanaged: [],
-      removedLinks: [],
-    };
-  }
+  const replaceJunction = options.replaceWindowsJunction ?? ((path: string, expectedTarget: string, target: string) =>
+    replaceWindowsSkillJunction(path, expectedTarget, target));
 
   let realStoreRoot: string;
   try {
@@ -1156,6 +1201,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   }
   const bindings = harnessBindings(agents);
   const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
+  const wslAgentIds = new Set(agents.flatMap((agent) =>
+    agent.context?.kind === "wsl" ? [agent.id] : []));
 
   // Materialization is runner-data-dir-local and must remain available even while another runner
   // owns the shared provider HOME. Finish that phase before attempting the provider-home lease;
@@ -1170,11 +1217,12 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         ? "invalid skill name"
         : !DIGEST_HEX.test(entry.versionDigest)
           ? "invalid version digest"
-          : !Array.isArray(entry.targets)
+          : !validReconcileTargets(entry.targets)
             ? "invalid skill targets"
             : null;
     } else {
       invalid = validateSkillSyncEntry(entry as SkillSyncEntry);
+      if (!invalid && !validReconcileTargets(entry.targets)) invalid = "invalid skill targets";
     }
     seenPreparedNames.add(entry.name);
     const manualNeeded = !invalid && skillNeedsManualVariant(agents, entry);
@@ -1214,7 +1262,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   }
 
   const leaseNeeded = allowRemovals ||
-    prepared.some(({ invalid, materializationError }) => !invalid && !materializationError);
+    prepared.some(({ entry, invalid, materializationError }) => !invalid && !materializationError &&
+      !(entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))));
   if (leaseNeeded && options.acquireProviderHomeLease) {
     try {
       options.acquireProviderHomeLease();
@@ -1233,14 +1282,14 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
             previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
             now: options.now ?? Date.now(),
-            protectedVersions: linkedStoreVersionKeys(home, realStoreRoot),
+            protectedVersions: linkedStoreVersionKeys(home, realStoreRoot, platform),
           },
           options.log,
         );
       }
       let foundForeignSymlink = false;
       const unmanaged = scanUnmanagedSkills(home, agents, (linkPath) => {
-        const probe = probeLink(linkPath, realStoreRoot, canonicalSkillsDir(home));
+        const probe = probeLink(linkPath, realStoreRoot, canonicalSkillsDir(home), platform);
         const foreign = probe.kind !== "ours" ||
           (probe.via === "canonical" && !contendedOwned.has(linkPath));
         foundForeignSymlink ||= foreign;
@@ -1313,6 +1362,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
    * reported) a link it did not create, but only for a name the control plane actively deploys
    * to this harness. */
   const ownLink = (linkPath: string): void => {
+    forgetOwnedLink(owned, linkPath, platform);
     owned.add(linkPath);
   };
   const deployed: DeployedSkillState[] = [];
@@ -1320,13 +1370,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const harnessKeep = new Map<string, Set<string>>();
   for (const relDir of new Set(Object.values(SKILL_DIRS))) harnessKeep.set(relDir, new Set());
   for (const { entry, invalid, manualNeeded, materializationError } of prepared) {
-    if (typeof entry.name === "string" && entry.name) {
+    if (typeof entry.name === "string" && entry.name && invalid) {
       canonicalKeep.add(entry.name);
-      if (invalid) {
         // A payload this runner cannot verify must not tear anything down: keep the name's
         // existing links and every stored version until a valid replacement arrives.
-        for (const set of harnessKeep.values()) set.add(entry.name);
-      }
+      for (const set of harnessKeep.values()) set.add(entry.name);
     }
     if (invalid) {
       deployed.push({ name: String(entry.name), digest: String(entry.versionDigest), links: [], error: invalid });
@@ -1339,6 +1387,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     // below), so only they force its materialization.
     const state: DeployedSkillState = { name: entry.name, digest: entry.versionDigest, links: [] };
     if (materializationError) {
+      canonicalKeep.add(entry.name);
       state.error = `could not materialize the skill version: ${materializationError}`;
       state.links = entry.targets.map((target) => ({
         agentId: target.agentId,
@@ -1351,6 +1400,31 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       continue;
     }
 
+    // WSL targets reconcile inside their distro after this native materialization phase. Their
+    // versions remain protected by storeKeep above, but they must not create unused native links.
+    if (entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))) {
+      state.links = entry.targets.map((target) => ({
+        agentId: target.agentId,
+        status: "unsupported" as const,
+        detail: (() => {
+          const agent = agents.find((candidate) => candidate.id === target.agentId);
+          if (!agent) return "this agent is not present on the runner";
+          if (agent.context?.kind !== "wsl") return "this agent is not a WSL target";
+          if (!validWslDistroName(agent.context.distro)) {
+            return "this agent's WSL distribution name is invalid or unsafe";
+          }
+          if (!SKILL_DIRS[agent.driver ?? "acp"]) {
+            return "this agent's driver does not support managed skills";
+          }
+          return "this target reconciles inside its WSL distribution";
+        })(),
+      }));
+      deployed.push(state);
+      continue;
+    }
+
+    canonicalKeep.add(entry.name);
+
     const agentVariantDir = join(realStoreRoot, entry.name, entry.versionDigest);
     const manualVariantDir = `${agentVariantDir}-manual`;
     const canonicalPath = join(canonicalDir, entry.name);
@@ -1361,6 +1435,9 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       agentVariantDir,
       realStoreRoot,
       `~/.agents/skills/${entry.name}`,
+      undefined,
+      platform,
+      replaceJunction,
     );
     if (canonical.ok) ownLink(canonicalPath);
     else state.error = `canonical link: ${canonical.detail}`;
@@ -1415,6 +1492,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           realStoreRoot,
           `~/${relDir}/${entry.name}`,
           canonicalDir,
+          platform,
+          replaceJunction,
         );
       } else if (!canonical.ok && canonical.status === "conflict") {
         // The canonical path has been replaced by foreign content. A managed harness link
@@ -1425,12 +1504,12 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         // canonical path itself is never touched either way.
         const linkPath = join(home, relDir, entry.name);
         const shownPath = `~/${relDir}/${entry.name}`;
-        const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
-        const removable = probe.kind === "ours" && (probe.via === "store" || owned.has(linkPath));
+        const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
+        const removable = probe.kind === "ours" && (probe.via === "store" || !!ownedLink(owned, linkPath, platform));
         if (removable) {
           try {
             unlinkSync(linkPath);
-            owned.delete(linkPath);
+            forgetOwnedLink(owned, linkPath, platform);
             const reason = "The canonical location it routes through is conflicted.";
             removedLinks.push({ path: shownPath, reason });
             options.log?.(`skill link removed: ${shownPath} (${reason})`);
@@ -1466,6 +1545,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           realStoreRoot,
           `~/${relDir}/${entry.name}`,
           canonicalDir,
+          platform,
+          replaceJunction,
         );
       }
       const linkedIds = useManual ? plan.manualTargets : [...plan.agentTargets, ...(mixed ? [] : plan.manualTargets)];
@@ -1533,7 +1614,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         join(home, relDir),
         keep,
         realStoreRoot,
-        { owned, removedLinks, shownDir: `~/${relDir}`, log: options.log },
+        { owned, removedLinks, shownDir: `~/${relDir}`, log: options.log, platform },
         canonicalDir,
       );
     }
@@ -1542,6 +1623,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       removedLinks,
       shownDir: "~/.agents/skills",
       log: options.log,
+      platform,
     });
     gcStoreWithRetention(
       dataDir,
@@ -1567,9 +1649,9 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     unmanaged: scanUnmanagedSkills(home, agents, (linkPath) => {
       // Foreign is anything the sweep would refuse to touch: a link with a foreign target, or a
       // canonical-shaped link this runner has no record of creating.
-      const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
+      const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
       if (probe.kind !== "ours") return true;
-      return probe.via === "canonical" && !owned.has(linkPath);
+      return probe.via === "canonical" && !ownedLink(owned, linkPath, platform);
     }),
     removedLinks,
   };

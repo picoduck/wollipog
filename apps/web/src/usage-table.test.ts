@@ -96,57 +96,6 @@ test("the sticky header is opaque", () => {
   for (const palette of everyPalette(css)) paint(palette, header, "#000000");
 });
 
-test("the cost bar is inset by the same token as the cell", () => {
-  // These were 14px and calc(100% - 28px), written when the cell padding was 14px. #224 made that
-  // padding a density token, so at Comfortable the bar started 2px inside the text it measures —
-  // a literal silently agreeing with another literal, which is what the token exists to prevent.
-  // The whole geometry, not the token's presence: `max-width: var(--usage-cell-pad-x)` mentions it
-  // and would leave the bar a few pixels wide. The right inset has to be the same token as the left,
-  // which makes the width the cell minus TWICE it.
-  assert.equal(valueOf("left", BAR), "var(--usage-cell-pad-x)",
-    "the bar's inset has to be the cell's padding, not a copy of what it used to be");
-  assert.match((valueOf("max-width", BAR) ?? "").replace(/\s+/g, ""),
-    /^calc\(100%-\(?var\(--usage-cell-pad-x\)\*2\)?\)$/,
-    "the bar has to end where the text does, which is the same padding again on the right");
-});
-
-test("the cost bar clears 3:1 on every ground it can land on", () => {
-  // It is a non-text graphic carrying a comparison, so WCAG's bar is 3:1 — and at 0.6 opacity it
-  // measured 3.03:1 on the plain surface before this PR added tints beneath it. The zebra and hover
-  // fills changed its ground and took Wollipog light to 2.88:1.
-  //
-  // The first version of this check hard-coded all of that: an opaque `--accent` bar on `--bg-elev`
-  // tinted 3% and 7%. Those numbers were right on the day, and none of them was READ — so restoring
-  // the `opacity: .6` that caused the original failure left the test green, which is the one thing a
-  // regression test exists to prevent. Every colour below now comes out of the rule that paints it.
-  const wrap = fillOf(WRAP);
-  // Everything below is measured against this, so it has to BE the ground rather than another tint
-  // over whatever the page happens to put behind the table.
-  assert.equal(wrap.alpha, 1, "the wrapper is the ground the rows and the bar are composited onto");
-  const barFill = fillOf(BAR);
-  const declaredOpacity = valueOf("opacity", BAR);
-  // A separate `opacity` multiplies the fill's own alpha — it is the exact form the old bug took.
-  const bar = { ...barFill, alpha: barFill.alpha * (declaredOpacity ? alphaOf(declaredOpacity, BAR) : 1) };
-  const rows = [{ name: "zebra", fill: fillOf(ZEBRA) }, { name: "hover", fill: fillOf(HOVER) }];
-
-  const palettes = everyPalette(css);
-  assert.equal(palettes.length, SCHEMES.length * THEMES.length,
-    "a palette that fails to resolve inherits Wollipog's colours and passes for the wrong reason");
-
-  const failures: string[] = [];
-  for (const palette of palettes) {
-    // The wrapper is what the rows are painted over; the rows are what the bar is painted over.
-    const surface = paint(palette, wrap, "#000000");
-    const grounds: Array<readonly [string, string]> = [["plain", surface]];
-    for (const row of rows) grounds.push([row.name, paint(palette, row.fill, surface)]);
-    for (const [name, ground] of grounds) {
-      const measured = contrast(paint(palette, bar, ground), ground);
-      if (measured < 3) failures.push(`${palette.label} ${name}: ${measured.toFixed(2)}:1`);
-    }
-  }
-  assert.deepEqual(failures, [], "the cost bar is a graphic that carries meaning; 3:1 is its floor");
-});
-
 test("the scroll region is reachable and shows focus", () => {
   const view = readFileSync(fileURLToPath(new URL("./components/UsageView.tsx", import.meta.url)), "utf8");
   // The max-height that makes the sticky header work also gives this its own scrollbar, and a plain

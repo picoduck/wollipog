@@ -4,6 +4,7 @@
  */
 
 import os from "node:os";
+import { handoffDestinationError, type SessionConfig } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -11,6 +12,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import { canMutateQuestionPolicy } from "./question-policy.js";
 import {
   archiveSessionPage,
   parseArchiveSessionPageQuery,
@@ -24,6 +26,8 @@ import {
   runnerAuthTimeoutMs,
 } from "./runner-channel.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
+import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
+import { KeyedSerialTaskQueue } from "./keyed-serial-task-queue.js";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
   registerAutomationTriggerContentTypeParser,
@@ -31,12 +35,15 @@ import {
 import {
   PROTOCOL_VERSION,
   POLICY_HOOK_POLL_CAPABILITY,
+  SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
   parseMessage,
   CONTROL_PLANE_SERVICE,
   providerSupportsConversationFork,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   scopeAudienceContained,
+  isPromptImageReference,
+  isWorkspaceReference,
   validatePromptImageInputs,
   type AddBoxRequest,
   type AccessScopeChangePreview,
@@ -58,6 +65,7 @@ import {
   type DispatchWorkflowNodeRequest,
   type CreateWorkflowArtifactRequest,
   type CreateSessionRequest,
+  type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
   type UpdateProjectRequest,
   type AddProjectLocationRequest,
@@ -102,10 +110,8 @@ import {
   extractBearer,
   hashToken,
   isAuthenticatedAgentControlClaim,
-  isAuthenticatedConductorClaim,
   isAuthenticatedPolicyHookClaim,
   isAgentControlApiRouteAllowed,
-  isConductorApiRouteAllowed,
   isPolicyHookApiRouteAllowed,
   isTrustedLoopback,
   newDeviceToken,
@@ -132,13 +138,18 @@ import {
   localDeviceTokenPath,
   localPairingUrl,
 } from "./local-device-credential.js";
+import { probePublicOriginWithFetch, registerHostAdminRoute } from "./host-admin-route.js";
+import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
+import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
+import { childSessionDefaultsError } from "./child-session-guardrails.js";
+import { ChildSessionRegistryProjector } from "./child-session-registry.js";
 import {
   decideScopedBoxLifecycle,
   parseBoxLifecycleForce,
 } from "./box-lifecycle.js";
 import { registerBoxLegacyAdoptionRoute } from "./box-legacy-adoption-route.js";
-import { RUNNER_RELEASE_TAG } from "./release-version.js";
+import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
@@ -163,7 +174,7 @@ import {
   parseGitAction,
 } from "./git-route.js";
 import { editorAdvertisesLocation, parseSessionHostAction } from "./host-actions.js";
-import { validateGitHubReviewSync } from "./review-findings.js";
+import { validateForgeReviewSync, validateGitHubReviewSync } from "./review-findings.js";
 import { Hub, isRunnerRequestTimeoutError } from "./hub.js";
 import {
   buildRunnerWsUrl,
@@ -194,6 +205,7 @@ import {
 } from "./web-dist.js";
 import { normalizeDriverTelemetry, telemetryWindowDays } from "./driver-telemetry.js";
 import { registerUsageRoutes } from "./usage-routes.js";
+import { UsageRateTableService, defaultUsagePricingCachePath, resolveUsagePricingUrl } from "./usage-rate-table.js";
 import {
   validateSubscriptionUsageInventory,
   validateSubscriptionUsageSnapshot,
@@ -260,6 +272,14 @@ const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE
 // runs, instead of keeping the runner "online" with lost prompts until the OS TCP timeout fires.
 const RUNNER_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
 const LOCAL_DEVICE_TOKEN_PATH = localDeviceTokenPath(DB_PATH);
+const STARTED_AT = Date.now();
+
+// Release verification runs the packaged executable with --version before uploading it; answer
+// before any database, credential, or network work happens.
+if (process.argv.includes("--version")) {
+  writeSync(1, `${APP_RELEASE_VERSION}\n`);
+  process.exit(0);
+}
 
 // Recovery is read-only: wrong coordinates must fail loudly instead of minting a plausible but
 // unusable owner credential. Synchronous fd writes make the one-line contract flush-safe on Windows.
@@ -279,6 +299,16 @@ if (process.argv.includes("--print-pair-url")) {
   }
 }
 
+// The dashboard origin remote clients actually reach (Tailscale, HTTPS reverse proxy). Pairing
+// links created by `wollipog admin device create` embed it; an invalid value fails startup
+// rather than silently producing links that point tokens at the wrong host. Validated after the
+// read-only recovery branch above, which must keep working under any unrelated misconfiguration.
+const PUBLIC_ORIGIN = resolvePublicOrigin(process.env[PUBLIC_ORIGIN_ENV]);
+if (PUBLIC_ORIGIN.error) {
+  writeSync(2, `[control-plane] ${PUBLIC_ORIGIN.error}\n`);
+  process.exit(1);
+}
+
 const LOCAL_DEVICE_TOKEN = (() => {
   try {
     return loadOrCreateLocalDeviceToken(LOCAL_DEVICE_TOKEN_PATH);
@@ -292,6 +322,14 @@ const LOCAL_DEVICE_TOKEN_HASH = hashToken(LOCAL_DEVICE_TOKEN);
 const LOCAL_PAIRING_URL = localPairingUrl(PORT, LOCAL_DEVICE_TOKEN);
 
 const db = ControlPlaneDb.open(DB_PATH, ARTIFACT_BLOB_DIR ? { artifactBlobDir: ARTIFACT_BLOB_DIR } : {});
+// Model rate table for pricing usage the provider bills opaquely (Codex). One outbound fetch per
+// day; `CONTROL_PLANE_USAGE_PRICING_URL=off` disables it and leaves such usage unpriced.
+const usagePricing = new UsageRateTableService({
+  sourceUrl: resolveUsagePricingUrl(process.env.CONTROL_PLANE_USAGE_PRICING_URL),
+  cachePath: defaultUsagePricingCachePath(DB_PATH, process.env.CONTROL_PLANE_USAGE_PRICING_CACHE),
+});
+db.setUsageRateTable(usagePricing.current());
+const usagePricingReady = usagePricing.ensure().then(() => db.setUsageRateTable(usagePricing.current()));
 const legacyCredentialMigration = db.backfillLegacyRunnerCredentials(hashToken(TOKEN), Date.now());
 if (legacyCredentialMigration.blocked > 0) {
   console.warn(
@@ -301,6 +339,7 @@ if (legacyCredentialMigration.blocked > 0) {
 }
 db.scrubLegacyAgentSecrets(Date.now());
 const hub = new Hub(db);
+const worktreeCreates = new WorktreeCreateCoordinator();
 const shellRegistry = new ShellRegistry(db);
 // Larger body limit so pasted screenshots (base64) fit comfortably.
 const app = Fastify({
@@ -315,6 +354,16 @@ const app = Fastify({
     },
   },
 });
+
+const CHILD_SESSION_REGISTRY_CACHE_LIMIT = 128;
+const CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE = 1_000;
+const childSessionRegistries = new Map<string, {
+  eventEpoch: number;
+  lastSeq: number;
+  candidateAgentIds: Set<string>;
+  projector: ChildSessionRegistryProjector;
+}>();
+const childSessionRegistryTasks = new KeyedSerialTaskQueue();
 const markStartupReady = installStartupReadinessGate(app);
 const warnedLegacyRunnerCredentialIds = new Set<string>();
 
@@ -401,24 +450,6 @@ function authedLocalBootstrap(
   return token && tokenMatchesHash(token, LOCAL_DEVICE_TOKEN_HASH) ? localApiPrincipal() : null;
 }
 
-/** Resolve the exact live conductor whose sidecar presented its runner's active credential. The
- * session claim and exact runner binding prevent that secret from becoming an unscoped REST token. */
-function authedConductor(req: { headers: { authorization?: string; [key: string]: unknown } }) {
-  const selected = selectCompatibleHeader(
-    req.headers,
-    WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
-    LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER,
-  );
-  const claimed = selected.ok ? selected.value : undefined;
-  const session = typeof claimed === "string" && claimed.length <= 256 ? db.getSession(claimed) : null;
-  const bearer = extractBearer(req.headers.authorization);
-  return isAuthenticatedConductorClaim({
-    credentialValid: Boolean(session && bearer && db.verifyActiveRunnerCredential(session.runnerId, hashToken(bearer))),
-    claimedSessionId: claimed,
-    session,
-  }) ? session : null;
-}
-
 /** Resolve one live session whose runner-minted control credential is bound to that exact row. */
 function authedAgentControl(req: { headers: { authorization?: string; [key: string]: unknown } }) {
   const claimed = req.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER];
@@ -429,6 +460,10 @@ function authedAgentControl(req: { headers: { authorization?: string; [key: stri
       db.agentControlCredentialValid(session.id, session.runnerId, hashToken(bearer))),
     claimedSessionId: claimed,
     session,
+    hasLiveOrchestratorTui: Boolean(session?.permissionMode === "orchestrator" &&
+      runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "orchestratorNativeTui") &&
+      hub.isRunnerOnline(session.runnerId) &&
+      shellRegistry.list(session.id).some((shell) => shell.kind === "agent_tui" && shell.status === "running")),
   }) ? session : null;
 }
 
@@ -465,7 +500,7 @@ function authedApiPrincipal(
   if (local) return local;
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
   const agentControl = authedAgentControl(req);
-  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath)) {
+  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, agentControl.permissionMode)) {
     const delegatedScope = db.sessionScope(agentControl.id);
     if (!delegatedScope) return null;
     return {
@@ -475,6 +510,7 @@ function authedApiPrincipal(
         kind: "agent",
         actorId: agentControl.id,
         credentialSessionId: agentControl.id,
+        ...(agentControl.permissionMode === "orchestrator" ? { orchestrator: true } : {}),
         organizationId: delegatedScope.organizationId,
         delegatedScope,
       },
@@ -490,21 +526,6 @@ function authedApiPrincipal(
       principal: {
         kind: "agent",
         actorId: policyHook.id,
-        organizationId: delegatedScope.organizationId,
-        delegatedScope,
-      },
-    };
-  }
-  const conductor = authedConductor(req);
-  if (conductor && isConductorApiRouteAllowed(req.method, routePath)) {
-    const delegatedScope = db.sessionScope(conductor.id);
-    if (!delegatedScope) return null;
-    return {
-      id: conductor.id,
-      name: conductor.agentName ?? "Conductor",
-      principal: {
-        kind: "agent",
-        actorId: conductor.id,
         organizationId: delegatedScope.organizationId,
         delegatedScope,
       },
@@ -566,11 +587,15 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (mutationError) return mutationError;
   if (!principal) return null;
 
-  const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/identity" || routePath === "/api/runners" ||
+  const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/compatibility" ||
+    routePath === "/api/identity" || routePath === "/api/runners" ||
     (routePath === "/api/session-naming" || routePath.startsWith("/api/session-naming/")) ||
     routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
     routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
     routePath === "/api/search" || routePath === "/api/usage" || routePath === "/api/usage/retention" ||
+    routePath === "/api/usage/daily-budget" || routePath === "/api/usage/users" ||
+    routePath === "/api/usage/pricing/refresh" || routePath === "/api/usage/subscriptions" ||
+    routePath === "/api/usage/subscriptions/refresh" ||
     routePath === "/api/push/vapid-public-key" || routePath === "/api/push/subscriptions" ||
     routePath === "/api/push/unsubscribe" ||
     routePath === "/api/artifacts/:artifactId/export" ||
@@ -580,7 +605,10 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/skill-groups" || routePath.startsWith("/api/skill-groups/") ||
     routePath === "/api/skill-assignments" || routePath.startsWith("/api/skill-assignments/") ||
     routePath === "/api/runners/:id/skills" ||
+    routePath === "/api/runners/:id/capacity" ||
     routePath === "/api/runners/:id/skills/sync" ||
+    routePath === "/api/runners/:id/skill-snapshots" ||
+    routePath.startsWith("/api/skill-machine/") ||
     routePath === "/api/runners/:runnerId/host-action" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
@@ -612,7 +640,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
   if (sessionId && principal.kind === "agent") {
-    const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId);
+    const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId,
+      Boolean(principal.credentialSessionId && db.isSessionDescendant(principal.credentialSessionId, sessionId)));
     if (credentialTargetError) return { statusCode: 404, error: "session not found" };
   }
   if (sessionId && !db.canAccessSession(principal, sessionId)) {
@@ -1048,6 +1077,9 @@ app.register(async (instance) => {
           serverTime: Date.now(),
           heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
           protocolVersion: PROTOCOL_VERSION,
+          ...(runnerSupportsProtocol(msg.protocolVersion, "machineRunnerCapacity")
+            ? { runnerCapacity: db.machineRunnerCapacityConfiguration(runnerId) ?? undefined }
+            : {}),
         });
         // Close/forget requests made while this runner was offline are durable. The registered
         // frame is ordered first, so the runner can safely process these immediately afterward.
@@ -1095,6 +1127,7 @@ app.register(async (instance) => {
           msg.worktreePath,
           runnerId ?? undefined,
           msg.controlPlaneLaunchId,
+          msg.capacityWait,
         );
         break;
       case "stop_session_result":
@@ -1115,6 +1148,11 @@ app.register(async (instance) => {
           }
         }
         break;
+      case "policy_hook_decision_recorded":
+        if (runnerId && !hub.resolveRunnerRequest(msg, runnerId)) {
+          app.log.warn(`runner ${runnerId} sent an unsolicited policy-hook decision receipt`);
+        }
+        break;
       case "agent_control_credential":
         {
           const accepted = db.setAgentControlCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
@@ -1132,6 +1170,13 @@ app.register(async (instance) => {
         break;
       case "session_runtime_updated":
         svc.applySessionRuntimeUpdate(runnerId!, msg.snapshot);
+        break;
+      case "governance_tripped":
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "governanceTripReporting")) {
+          app.log.warn(`runner ${runnerId} sent a governance trip without negotiated support`);
+          break;
+        }
+        svc.onGovernanceTripped(runnerId!, msg);
         break;
       case "session_event":
         svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined);
@@ -1160,6 +1205,17 @@ app.register(async (instance) => {
           pushSkillsSync(msg.runnerId);
           app.log.info(`runner ${msg.runnerId} agents: [${msg.agents.map((a) => a.id).join(", ")}]`);
         }
+        break;
+      case "runner_capacity_status":
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "machineRunnerCapacity")) {
+          app.log.warn(`runner ${runnerId} sent capacity status without negotiated support`);
+          break;
+        }
+        if (!db.updateRunnerCapacityStatus(runnerId!, msg.status, Date.now())) {
+          app.log.warn(`runner ${runnerId} sent invalid or stale capacity status`);
+          break;
+        }
+        hub.runnerChanged(runnerId!);
         break;
       case "subscription_usage_updated":
         if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "subscriptionUsage")) {
@@ -1271,6 +1327,24 @@ app.register(async (instance) => {
       case "session_command_invocation_update":
         svc.onSessionCommandInvocationReceipt(runnerId!, msg);
         break;
+      case "session_worktree_progress": {
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "progressAwareSessionWorktrees")) {
+          app.log.warn(`runner ${runnerId} sent worktree progress without negotiated support`);
+          break;
+        }
+        if (!worktreeCreates.recordProgress(runnerId!, msg)) {
+          app.log.warn(`runner ${runnerId} sent stale or mismatched worktree progress`);
+          break;
+        }
+        if (!hub.refreshRunnerRequestTimeout(
+          runnerId!,
+          msg.requestId,
+          SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
+        )) {
+          app.log.warn(`runner ${runnerId} sent worktree progress for a request that is no longer pending`);
+        }
+        break;
+      }
       case "git_result":
       case "session_history_result":
       case "session_history_page_result":
@@ -1280,6 +1354,8 @@ app.register(async (instance) => {
       case "list_directory_result":
       case "list_session_files_result":
       case "read_session_file_result":
+      case "search_workspace_references_result":
+      case "create_workspace_reference_result":
       case "shell_open_result":
       case "rewind_result":
       case "fork_result":
@@ -1307,6 +1383,21 @@ app.register(async (instance) => {
         if (msg.requestId) hub.resolveRunnerRequest({ ...msg, requestId: msg.requestId }, runnerId);
         break;
       }
+      case "skill_snapshot_result":
+        if (runnerId === msg.runnerId && runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "machineSkillSnapshots")) {
+          hub.resolveRunnerRequest(msg, runnerId);
+        }
+        break;
+      case "skill_adoption_result":
+        if (runnerId === msg.runnerId && runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "machineSkillAdoption")) {
+          hub.resolveRunnerRequest(msg, runnerId);
+        }
+        break;
+      case "skill_adoption_recovery_result":
+        if (runnerId === msg.runnerId && runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "machineSkillAdoptionRecovery")) {
+          hub.resolveRunnerRequest(msg, runnerId);
+        }
+        break;
       case "skills_sync_need": {
         if (runnerId !== msg.runnerId) {
           app.log.warn(`runner ${runnerId} sent a mismatched skills content request`);
@@ -1506,8 +1597,9 @@ app.get("/healthz", async () => ({
   ok: true,
   ts: Date.now(),
   service: CONTROL_PLANE_SERVICE,
-  protocolVersion: PROTOCOL_VERSION,
 }));
+
+app.get("/api/compatibility", async () => ({ protocolVersion: PROTOCOL_VERSION }));
 
 registerManagedDesktopRoutes(app, MANAGED_DESKTOP_IDENTITY, {
   trustedLoopback,
@@ -1683,15 +1775,23 @@ app.patch("/api/projects/:id", async (req, reply) => {
   if (!principal) return reply.code(403).send({ error: "human identity is required" });
   if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
   const body = (req.body ?? {}) as UpdateProjectRequest;
-  if (body.name === undefined && body.hidden === undefined) {
-    return reply.code(400).send({ error: "name or hidden is required" });
+  if (body.name === undefined && body.hidden === undefined && body.childSessionDefaults === undefined) {
+    return reply.code(400).send({ error: "name, hidden, or childSessionDefaults is required" });
   }
   const name = body.name === undefined ? undefined : projectName(body.name);
   if (body.name !== undefined && !name) return reply.code(400).send({ error: "name must be 1-120 characters" });
   if (body.hidden !== undefined && typeof body.hidden !== "boolean") {
     return reply.code(400).send({ error: "hidden must be a boolean" });
   }
-  db.updateProject(id, { ...(name ? { name } : {}), ...(body.hidden !== undefined ? { hidden: body.hidden } : {}) });
+  if (body.childSessionDefaults !== undefined) {
+    const error = childSessionDefaultsError(body.childSessionDefaults);
+    if (error) return reply.code(400).send({ error });
+  }
+  db.updateProject(id, {
+    ...(name ? { name } : {}),
+    ...(body.hidden !== undefined ? { hidden: body.hidden } : {}),
+    ...(body.childSessionDefaults !== undefined ? { childSessionDefaults: body.childSessionDefaults } : {}),
+  });
   const project = db.getProject(id)!;
   hub.projectChanged(project);
   return { project: db.getProjectForPrincipal(principal, id)! };
@@ -1909,6 +2009,32 @@ registerInstanceRoute(app, {
   instanceId: () => db.instanceId(),
   displayName: () => db.localIdentityContext().organizationName,
 });
+registerHostAdminRoute(app, {
+  localBootstrapPrincipal: (req) => authedLocalBootstrap(req),
+  startedAt: STARTED_AT,
+  bind: { host: HOST, port: PORT, tailnetOnly: TAILNET_ONLY },
+  publicOrigin: PUBLIC_ORIGIN.origin,
+  publicOriginWarning: PUBLIC_ORIGIN.warning,
+  webServed: () => webDist !== null,
+  pairingHosts: () => pairingHosts(HOST, TAILNET_ONLY ? tailnetIpv4(lanIpv4()) : lanIpv4()),
+  databasePath: DB_PATH,
+  artifactStorePath: ARTIFACT_BLOB_DIR ?? defaultArtifactBlobRoot(DB_PATH),
+  localCredentialPath: LOCAL_DEVICE_TOKEN_PATH,
+  runners: () => db.listRunners().map((runner) => ({
+    runnerId: runner.runnerId,
+    status: runner.status,
+    version: runner.version,
+    protocolVersion: runner.protocolVersion ?? null,
+  })),
+  pairedDeviceCount: () => db.listDevices().length,
+  doctor: {
+    probePublicOrigin: (origin) => probePublicOriginWithFetch(origin),
+    legacyRunnerCredentials: () => db.listRunnerCredentials(PERSONAL_ORGANIZATION_ID)
+      .filter((credential) => credential.legacy && credential.status !== "revoked").length,
+    defaultLegacyToken: TOKEN === "dev-local-token",
+    tailnetAddresses: () => tailnetIpv4(lanIpv4()),
+  },
+});
 registerRunnerAttestationRoute(app, db);
 
 // Connection coordinates are reusable; runner-specific credentials are issued separately and
@@ -1969,6 +2095,9 @@ app.post("/api/devices", async (req, reply) => {
       port: PORT,
       webServed: webDist !== null,
       boundBeyondLoopback: !isLoopbackBindHost(HOST),
+      // Protocol v114+: the operator-configured dashboard origin, so a host CLI can print a
+      // complete link even when the bind host is not what remote clients reach.
+      publicOrigin: PUBLIC_ORIGIN.origin,
     },
   });
 });
@@ -2275,6 +2404,45 @@ app.patch("/api/runners/:id", async (req, reply) => {
   return { ok: true };
 });
 
+app.put("/api/runners/:id/capacity", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const body = (req.body ?? {}) as { configuredUnits?: unknown; expectedRevision?: unknown };
+  if (!Number.isInteger(body.configuredUnits) || (body.configuredUnits as number) < 1 ||
+      (body.configuredUnits as number) > 256) {
+    return reply.code(400).send({ error: "configuredUnits must be an integer from 1 to 256" });
+  }
+  if (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 0) {
+    return reply.code(400).send({ error: "expectedRevision must be a non-negative integer" });
+  }
+  const runner = db.getRunner(id);
+  const boxId = db.boxIdForRunner(id);
+  if (!runner && !boxId) return reply.code(404).send({ error: "runner not found" });
+  if (runner?.status === "online" && !runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity")) {
+    return reply.code(409).send({
+      error: runnerCapabilityRequirement(runner.protocolVersion, "machineRunnerCapacity", "Runner Capacity changes"),
+    });
+  }
+  const changed = db.setMachineRunnerCapacity(
+    id,
+    body.configuredUnits as number,
+    body.expectedRevision as number,
+    Date.now(),
+  );
+  if (!changed.ok) {
+    return reply.code(409).send({ error: "Runner Capacity changed in another client", current: changed.configuration });
+  }
+  if (runner?.status === "online") {
+    hub.sendToRunner(id, { type: "configure_runner_capacity", ...changed.configuration });
+  }
+  hub.runnerChanged(id);
+  if (boxId) hub.boxChanged(boxId);
+  return { capacity: changed.configuration };
+});
+
 app.delete("/api/runners/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is online — stop it before removing" });
@@ -2329,6 +2497,14 @@ app.get("/api/sessions/:id/files", async (req, reply) => {
   return r.data;
 });
 
+// Per-session usage split by the model that produced it. Route access already resolved through
+// canAccessSession; the ledger stores only bounded model ids and counts.
+app.get("/api/sessions/:id/usage", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  if (!db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+  return { sessionId: id, ...db.sessionUsageByModel(id), pricing: usagePricing.status() };
+});
+
 app.get("/api/sessions/:id/file", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const q = req.query as { path?: unknown };
@@ -2338,6 +2514,29 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
   const r = await svc.readSessionFile(id, q.path);
   if (!r.ok) return reply.code(r.status).send({ error: r.error });
   return r.data;
+});
+
+app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const q = req.query as { q?: unknown };
+  if (typeof q.q !== "string" || !q.q.trim() || q.q.length > 256) {
+    return reply.code(400).send({ error: "q must contain 1-256 characters" });
+  }
+  const r = await svc.searchWorkspaceReferences(id, q.q);
+  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  return r.data;
+});
+
+app.post("/api/sessions/:id/workspace-references", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const body = (req.body ?? {}) as Partial<CreateWorkspaceReferenceRequest>;
+  if (typeof body.path !== "string" || !body.path ||
+      (body.kind !== "file" && body.kind !== "directory" && body.kind !== "lines" && body.kind !== "diff")) {
+    return reply.code(400).send({ error: "path and a valid reference kind are required" });
+  }
+  const r = await svc.createWorkspaceReference(id, body as CreateWorkspaceReferenceRequest);
+  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  return { reference: r.data };
 });
 
 // Drop one not-yet-started queued prompt (the running turn is unaffected). The runner echoes the
@@ -2412,6 +2611,16 @@ app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
   const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "Queued prompt editing");
   if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (typedImages.some(isWorkspaceReference)) {
+    const unsupportedWorkspaceReferences = runnerCapabilityError(
+      session.runnerId,
+      "workspaceReferences",
+      "Workspace references",
+    );
+    if (unsupportedWorkspaceReferences) {
+      return reply.code(409).send({ error: unsupportedWorkspaceReferences });
+    }
+  }
   const preparedImages = svc.prepareQueuedPromptEditImages(id, typedImages);
   if (!preparedImages.ok || !preparedImages.data) {
     return reply.code(preparedImages.status).send({ error: preparedImages.error ?? "queued message images are invalid" });
@@ -2434,6 +2643,15 @@ app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
     }
     if (!result.applied || !result.prompt) {
       return reply.code(409).send({ error: result.error ?? "queued message could not be saved", reason: result.reason });
+    }
+    try {
+      db.commitPreparedPromptImages(preparedImages.data.flatMap((image) =>
+        isWorkspaceReference(image) || !isPromptImageReference(image) ? [] : [image.artifactId]));
+    } catch (error) {
+      // Runner acceptance is authoritative. Lease cleanup is outcome-neutral; never turn an
+      // applied edit into an ambiguous client failure.
+      req.log.warn({ error: error instanceof Error ? error.message : String(error) },
+        "prepared queued-edit image lease cleanup deferred");
     }
     return { prompt: result.prompt };
   } catch (error) {
@@ -2848,6 +3066,81 @@ app.get("/api/sessions/:id", async (req, reply) => {
   return { session };
 });
 
+app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
+  const after = query.after === undefined ? 0 : Number(query.after);
+  const limit = query.limit === undefined ? 50 : Number(query.limit);
+  const requestedEpoch = query.eventEpoch === undefined ? undefined : Number(query.eventEpoch);
+  if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+      (requestedEpoch !== undefined && (!Number.isSafeInteger(requestedEpoch) || requestedEpoch < 0))) {
+    return reply.code(400).send({ error: "invalid child-session page" });
+  }
+  const session = db.getSession(id);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  const eventEpoch = session.eventEpoch ?? 0;
+  if (requestedEpoch !== undefined && requestedEpoch !== eventEpoch) {
+    return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+  }
+  // Hydration reads the runner's complete durable SessionStore. The browser receives only this
+  // allowlisted projection, never raw history or a client-selected ownership join.
+  await svc.hydrateHistory(id);
+  const current = db.getSession(id);
+  if (!current) return reply.code(404).send({ error: "session not found" });
+  if ((current.eventEpoch ?? 0) !== eventEpoch) {
+    return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+  }
+  return childSessionRegistryTasks.run(id, async () => {
+    const lockedSession = db.getSession(id);
+    if (!lockedSession) return reply.code(404).send({ error: "session not found" });
+    if ((lockedSession.eventEpoch ?? 0) !== eventEpoch) {
+      return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+    }
+    const throughSeq = db.sessionEventTailSeq(id);
+    let registry = childSessionRegistries.get(id);
+    if (!registry || registry.eventEpoch !== eventEpoch) {
+      registry = { eventEpoch, lastSeq: 0, candidateAgentIds: new Set(), projector: new ChildSessionRegistryProjector() };
+    }
+    const previousTail = registry.lastSeq;
+    const newAgentIds = db.listAgentToolCallIds(id, previousTail, throughSeq)
+      .filter((candidate) => !registry!.candidateAgentIds.has(candidate));
+    for (const candidate of newAgentIds) registry.candidateAgentIds.add(candidate);
+    const scan = async (candidateIds: readonly string[], scanAfter: number, scanThrough: number) => {
+      let cursor = scanAfter;
+      while (candidateIds.length && cursor < scanThrough) {
+        const appended = db.listChildSessionProjectionPage(
+          id, candidateIds, cursor, scanThrough, CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE,
+        );
+        registry!.projector.append(appended, registry!.candidateAgentIds);
+        if (appended.length) cursor = appended.at(-1)!.seq;
+        if (appended.length < CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE) break;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    };
+    // A newly observed spawn can own imported/pre-spawn evidence. Recover only that ID's indexed
+    // evidence before the old tail, then scan the append-only suffix once for every known child.
+    await scan(newAgentIds, 0, previousTail);
+    await scan([...registry.candidateAgentIds], previousTail, throughSeq);
+    const finalSession = db.getSession(id);
+    const finalTail = db.sessionEventTailSeq(id);
+    if (!finalSession || (finalSession.eventEpoch ?? 0) !== eventEpoch || finalTail !== throughSeq) {
+      childSessionRegistries.delete(id);
+      return reply.code(409).send({ error: "child-session inventory changed", code: "inventory_changed" });
+    }
+    registry.lastSeq = throughSeq;
+    // Refresh insertion order for a small LRU. Cached state contains only structured child facts,
+    // never raw prose/output; old sessions rebuild once if revisited after eviction.
+    childSessionRegistries.delete(id);
+    childSessionRegistries.set(id, registry);
+    while (childSessionRegistries.size > CHILD_SESSION_REGISTRY_CACHE_LIMIT) {
+      const oldest = childSessionRegistries.keys().next().value;
+      if (oldest === undefined) break;
+      childSessionRegistries.delete(oldest);
+    }
+    return registry.projector.page(finalSession.pendingApproval, eventEpoch, after, limit);
+  });
+});
+
 app.get("/api/sessions/:id/side-chat", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const result = svc.sideChat(id);
@@ -3036,6 +3329,8 @@ app.post("/api/sessions/:id/review-findings/bundle", async (req, reply) =>
 
 app.post("/api/sessions", async (req, reply) => {
   const principal = requestHuman(req);
+  const actor = requestPrincipal(req);
+  const parentSessionId = actor?.kind === "agent" ? actor.credentialSessionId : undefined;
   const body = req.body as CreateSessionRequest;
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return reply.code(400).send({ error: "session request is required" });
@@ -3043,7 +3338,12 @@ app.post("/api/sessions", async (req, reply) => {
   if (body.launchSurface !== undefined && body.launchSurface !== "direct" && body.launchSurface !== "native_tui") {
     return reply.code(400).send({ error: "launchSurface must be direct or native_tui" });
   }
-  const ownership = resolveSessionCreationOwnership(db, principal, body);
+  const ownership = resolveSessionCreationOwnership(
+    db,
+    principal,
+    body,
+    { preserveOmittedProject: Boolean(parentSessionId) },
+  );
   if (!ownership.ok) return reply.code(ownership.status).send({ error: ownership.error });
   const launchError = nativeTuiCreationError(db, hub, ownership.body);
   if (launchError) return reply.code(launchError.status).send({ error: launchError.error });
@@ -3051,11 +3351,11 @@ app.post("/api/sessions", async (req, reply) => {
   const created = svc.createSession(
     ownership.body,
     undefined,
-    ownership.scope,
+    parentSessionId ? db.sessionScope(parentSessionId) ?? undefined : ownership.scope,
     initialNativeTui,
     false,
     false,
-    { defaultOwnerUserId: principal?.userId },
+    { defaultOwnerUserId: principal?.userId, parentSessionId },
   );
   if (!created.ok || !created.data || ownership.body.launchSurface !== "native_tui") return respond(reply, created);
   const sessionId = created.data.id;
@@ -3097,7 +3397,10 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
   if (!text && images.length === 0 && !slashCommand) {
     return reply.code(400).send({ error: "text, an image, or a slash command is required" });
   }
-  return respond(reply, svc.prompt(id, text, images, slashCommand, body?.config));
+  const human = requestHuman(req);
+  return respond(reply, human
+    ? svc.promptFromUser(human.userId, id, text, images, slashCommand, body?.config)
+    : svc.prompt(id, text, images, slashCommand, body?.config));
 });
 
 app.post("/api/sessions/:id/command-invocations", async (req, reply) => {
@@ -3214,7 +3517,7 @@ app.post("/api/sessions/:id/policy-hook", { bodyLimit: 128 * 1024 }, async (req,
     return reply.code(403).send({ error: "policy hook session claim does not match the route" });
   }
   if (!pollHeader.ok) return reply.code(403).send({ error: "policy hook capability headers conflict" });
-  return respond(reply, svc.evaluatePolicyHook(
+  return respond(reply, await svc.evaluatePolicyHookCausally(
     id,
     req.body,
     pollHeader.value === POLICY_HOOK_POLL_CAPABILITY,
@@ -3232,26 +3535,51 @@ app.post("/api/sessions/:id/approve", async (req, reply) => {
 
 app.get("/api/sessions/:id/governance-audit", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const rawLimit = (req.query as { limit?: string }).limit;
+  const query = req.query as { limit?: string; before?: string };
+  const rawLimit = query.limit;
   const limit = rawLimit == null ? 200 : Number(rawLimit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
     return reply.code(400).send({ error: "limit must be an integer between 1 and 500" });
   }
-  return { entries: svc.governanceAudit(id, limit) };
+  const before = typeof query.before === "string" && query.before ? query.before : undefined;
+  return respond(reply, svc.governanceAuditPage(id, limit, before));
 });
 
-app.get("/api/governance/policies", async () => ({ policies: svc.governancePolicies() }));
+function questionPolicyAdministrator(req: FastifyRequest) {
+  const human = requestHuman(req);
+  if (!human || !canAdministerIdentity(human.role)) return undefined;
+  return { organizationId: human.organizationId,
+    activeMemberUserIds: db.identityAdministration(human).memberships.filter((member) => member.userStatus === "active").map((member) => member.userId) };
+}
+
+app.get("/api/governance/policies", async (req) => {
+  const admin = questionPolicyAdministrator(req);
+  const principal = requestPrincipal(req);
+  return { policies: svc.governancePolicies().filter((policy) =>
+    (!policy.questionRule || canMutateQuestionPolicy(policy, undefined, requestHuman(req)?.userId, admin)) &&
+    (!(principal?.kind === "agent" && principal.orchestrator) ||
+      !policy.scope.organizationId || policy.scope.organizationId === principal.organizationId)) };
+});
 
 app.put("/api/governance/policies/:policyId", async (req, reply) => {
   const policyId = (req.params as { policyId: string }).policyId;
   const body = req.body as Omit<GovernancePolicy, "createdAt" | "updatedAt">;
   if (body?.policyId !== policyId) return reply.code(400).send({ error: "path and body policyId must match" });
+  const existing = svc.governancePolicies().find((policy) => policy.policyId === policyId);
+  if (!canMutateQuestionPolicy(existing, body, requestHuman(req)?.userId, questionPolicyAdministrator(req))) {
+    return reply.code(403).send({ error: "Question policies require their owner or an admin acting within the owner's organization" });
+  }
   return respond(reply, svc.upsertGovernancePolicy(body));
 });
 
-app.delete("/api/governance/policies/:policyId", async (req, reply) =>
-  respond(reply, svc.deleteGovernancePolicy((req.params as { policyId: string }).policyId)),
-);
+app.delete("/api/governance/policies/:policyId", async (req, reply) => {
+  const id = (req.params as { policyId: string }).policyId;
+  const existing = svc.governancePolicies().find((policy) => policy.policyId === id);
+  if (!canMutateQuestionPolicy(existing, undefined, requestHuman(req)?.userId, questionPolicyAdministrator(req))) {
+    return reply.code(403).send({ error: "Question policies require their owner or an admin acting within the owner's organization" });
+  }
+  return respond(reply, svc.deleteGovernancePolicy(id));
+});
 
 app.get("/api/governance/approval-queue", async () => ({ items: svc.approvalQueue() }));
 
@@ -3306,12 +3634,19 @@ app.get("/api/telemetry/drivers", async (req, reply) => {
 
 // Content-free, observation-time usage accounting. Human members see only frozen ownership
 // scopes they may access; conductor credentials are deliberately excluded from this surface.
-registerUsageRoutes(app, db, requestPrincipal, hub);
+registerUsageRoutes(app, db, requestPrincipal, hub, {
+  status: () => usagePricing.status(),
+  ensure: async (force) => {
+    const status = await usagePricing.ensure(force);
+    db.setUsageRateTable(usagePricing.current());
+    return status;
+  },
+});
 
 async function runSessionWorktreeRequest(
   sessionId: string,
   request:
-    | { operation: "create"; baseRef?: string; branch: string }
+    | { operation: "create"; baseRef?: string; branch: string; progress?: boolean }
     | { operation: "attach" | "select" | "discard"; path: string },
   reply: FastifyReply,
 ) {
@@ -3326,18 +3661,58 @@ async function runSessionWorktreeRequest(
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  if (request.operation === "create" && request.progress === true && runnerSupportsProtocol(
+    db.getRunner(session.runnerId)?.protocolVersion,
+    "progressAwareSessionWorktrees",
+  )) {
+    const operation = worktreeCreates.startOrJoin({
+      runnerId: session.runnerId,
+      sessionId,
+      branch: request.branch,
+      ...(request.baseRef ? { baseRef: request.baseRef } : {}),
+    }, async (requestId) => {
+      const res = await hub.requestFromRunner(
+        session.runnerId,
+        requestId,
+        { ...request, type: "session_worktree", requestId, sessionId, progress: true },
+        SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
+      );
+      if (res.type !== "session_worktree_result") throw new Error("unexpected runner reply");
+      if (res.sessionId !== sessionId || res.operation !== "create") {
+        throw new Error("mismatched runner worktree reply");
+      }
+      if (!res.ok || !res.snapshot) throw new Error(res.error ?? "worktree operation failed");
+      db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
+      return { snapshot: res.snapshot, worktree: res.worktree };
+    });
+    if (operation.status === "in_progress") {
+      return reply.code(202).send({ operation });
+    }
+    worktreeCreates.releaseTerminal(operation.id);
+    if (operation.status === "failed") {
+      return reply.code(409).send({ operation, error: operation.error });
+    }
+    return {
+      operation: { id: operation.id, status: operation.status },
+      worktree: operation.worktree,
+      session: db.getSession(sessionId),
+    };
+  }
   const requestId = `worktree_${randomUUID().slice(0, 8)}`;
   try {
     const res = await hub.requestFromRunner(
       session.runnerId,
       requestId,
       { ...request, type: "session_worktree", requestId, sessionId },
-      150_000,
+      request.operation === "create" ? SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS : 150_000,
     );
     if (res.type !== "session_worktree_result") return reply.code(502).send({ error: "unexpected runner reply" });
     if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "worktree operation failed" });
     db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
-    return { worktree: res.worktree, session: db.getSession(sessionId) };
+    if (request.operation !== "create") worktreeCreates.invalidateSession(sessionId);
+    // v133+ runners say whether a live platform sandbox can already write to an attached path.
+    // A pre-v133 runner omits it, and the field stays absent rather than being guessed here.
+    return { worktree: res.worktree, session: db.getSession(sessionId), ...(res.isolation ? { isolation: res.isolation } : {}) };
   } catch (error) {
     return reply.code(502).send({ error: (error as Error).message });
   }
@@ -3345,17 +3720,21 @@ async function runSessionWorktreeRequest(
 
 app.post("/api/sessions/:id/worktrees", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const body = req.body as { baseRef?: unknown; branch?: unknown };
+  const body = req.body as { baseRef?: unknown; branch?: unknown; progress?: unknown };
   if (typeof body?.branch !== "string" || !body.branch || body.branch.length > 255) {
     return reply.code(400).send({ error: "branch must be a non-empty string of at most 255 characters" });
   }
   if (body.baseRef !== undefined && (typeof body.baseRef !== "string" || !body.baseRef || body.baseRef.length > 1024)) {
     return reply.code(400).send({ error: "baseRef must be a non-empty string of at most 1024 characters" });
   }
+  if (body.progress !== undefined && typeof body.progress !== "boolean") {
+    return reply.code(400).send({ error: "progress must be a boolean" });
+  }
   return runSessionWorktreeRequest(id, {
     operation: "create",
     branch: body.branch,
     ...(typeof body.baseRef === "string" ? { baseRef: body.baseRef } : {}),
+    ...(body.progress === true ? { progress: true } : {}),
   }, reply);
 });
 
@@ -3423,6 +3802,7 @@ app.post("/api/sessions/:id/rewind", async (req, reply) => {
 
 // Provider-native conversation fork: the runner owns both the provider transcript and git object
 // database, so it creates the target atomically enough to return a complete box snapshot.
+const conversationBranchesInFlight = new Set<string>();
 app.post("/api/sessions/:id/fork", async (req, reply) => {
   const sourceId = (req.params as { id: string }).id;
   const reconciliationBlock = svc.podReconciliationMutationError(sourceId);
@@ -3434,8 +3814,39 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   const sourceScope = db.sessionScope(sourceId);
   if (!sourceScope) return reply.code(409).send({ error: "source session ownership is unavailable" });
   const sourceAgent = db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === source.agentId);
+  const handoff = (req.body as { handoff?: { agentId: string; config: SessionConfig } })?.handoff;
+  const destination = handoff ? db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === handoff.agentId) : undefined;
+  // Recovering a quarantined conversation is the one fork whose destination may be the same
+  // provider: the invalid item is excluded by a new thread, not by a different vendor. Validate the
+  // request against the session's own durable quarantine so the allowance cannot be borrowed by an
+  // ordinary fork; the runner revalidates it again against its authoritative copy.
+  const recovery = (req.body as { recovery?: boolean })?.recovery === true;
+  const quarantine = source.historyQuarantine;
+  if (recovery) {
+    if (!quarantine) return reply.code(409).send({ error: "this session's provider conversation is not quarantined" });
+    if (quarantine.recoveryTurn === undefined) {
+      return reply.code(409).send({ error: "this quarantined conversation has no safe checkpoint to recover from" });
+    }
+    if (turn !== quarantine.recoveryTurn) {
+      return reply.code(409).send({ error: "recovery must start from the quarantined session's recorded safe checkpoint" });
+    }
+    if ((quarantine.recovery === "handoff") !== !!handoff) {
+      return reply.code(409).send({ error: `this quarantined conversation recovers by ${quarantine.recovery ?? "fork"}` });
+    }
+    const unsupported = runnerCapabilityError(source.runnerId, "providerHistoryQuarantine", "Quarantine recovery");
+    if (unsupported) return reply.code(409).send({ error: unsupported });
+  } else if (quarantine) {
+    return reply.code(409).send({ error: "this session's provider conversation is quarantined — use its recovery action" });
+  }
+  if (handoff) {
+    if (!handoff.config || typeof handoff.config !== "object" || Array.isArray(handoff.config)) return reply.code(400).send({ error: "handoff config is required" });
+    const error = handoffDestinationError(destination, source.driver, handoff.config, { allowSameProvider: recovery });
+    if (error) return reply.code(409).send({ error });
+    const unsupported = runnerCapabilityError(source.runnerId, "conversationHandoff", "Checkpoint handoffs");
+    if (unsupported) return reply.code(409).send({ error: unsupported });
+  }
   const supportsFork = providerSupportsConversationFork(source.driver, sourceAgent?.capabilities);
-  if (!supportsFork) return reply.code(409).send({ error: "this provider session does not support conversation fork" });
+  if (!supportsFork && !handoff) return reply.code(409).send({ error: "this provider session does not support conversation fork" });
   if (!source.worktreePath) return reply.code(409).send({ error: "conversation fork requires a worktree session" });
   if (sessionBlocksConversationFork(source.status)) {
     return reply.code(409).send({ error: "the source session is busy — wait before forking" });
@@ -3447,6 +3858,8 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   const sourceExecutionWorkspacePath = db.getAdHocWorkspacePath(sourceId);
   const targetSessionId = `s_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
   const requestId = `fork_${randomUUID().slice(0, 8)}`;
+  if (conversationBranchesInFlight.has(sourceId)) return reply.code(409).send({ error: "a conversation fork or handoff is already in progress" });
+  conversationBranchesInFlight.add(sourceId);
   let forkCreatedOnRunner = false;
   try {
     const res = await hub.requestFromRunner(
@@ -3458,7 +3871,9 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
         sourceSessionId: sourceId,
         targetSessionId,
         turn,
-        title: `${source.title} (fork)`.slice(0, 120),
+        title: `${source.title} (${recovery ? "recovered" : handoff ? "handoff" : "fork"})`.slice(0, 120),
+        ...(handoff ? { handoff } : {}),
+        ...(recovery ? { recovery: true as const } : {}),
         ...(deferHistory ? { deferHistory: true } : {}),
       },
       150_000,
@@ -3471,8 +3886,9 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       throw new Error(snapshotIdError);
     }
     forkCreatedOnRunner = true;
+    if (handoff && (!res.handoffDraft || typeof res.handoffDraft.text !== "string" || !Array.isArray(res.handoffDraft.images))) throw new Error("runner returned no valid handoff draft");
     const forkIdentityError = forkSnapshotIdentityError(
-      { ...source, executionWorkspacePath: sourceExecutionWorkspacePath },
+      { ...source, ...(destination ? { agentId: destination.id, driver: destination.driver! } : {}), executionWorkspacePath: sourceExecutionWorkspacePath },
       res.snapshot,
     );
     if (forkIdentityError) throw new Error(forkIdentityError);
@@ -3497,7 +3913,12 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
     db.setHydratedSeq(targetSessionId, highWater);
     hub.sessionChangedById(session.id);
     if (deferHistory) void svc.hydrateHistory(targetSessionId);
-    return reply.code(201).send(db.getSession(targetSessionId));
+    return reply.code(201).send({
+      ...db.getSession(targetSessionId),
+      ...(handoff ? { handoffDraft: res.handoffDraft } : {}),
+      // The source's unsent prompt travels to the client as a composer draft only.
+      ...(res.retainedPrompt ? { retainedPrompt: res.retainedPrompt } : {}),
+    });
   } catch (err) {
     const timedOut = isRunnerRequestTimeoutError(err);
     const cleanupTargetSessionId = providerForkCleanupTarget(targetSessionId, forkCreatedOnRunner, timedOut);
@@ -3519,6 +3940,8 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       });
     }
     return reply.code(502).send({ error: message });
+  } finally {
+    conversationBranchesInFlight.delete(sourceId);
   }
 });
 
@@ -3582,14 +4005,16 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
   // capture a partial snapshot and can race the post-turn diff capture.
   const gate = gitActionAllowed(action, session.status);
   if (!gate.ok) return reply.code(409).send({ error: gate.error });
-  if (!["status", "summary", "diff", "github_review_sync"].includes(action.kind)) {
+  if (!["status", "summary", "diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
     const reconciliationBlock = svc.podReconciliationMutationError(id);
     if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   }
 
   const requestId = randomUUID();
   // Pushing + calling gh takes longer than a quick status read.
-  const timeoutMs = action.kind === "open_pr" || action.kind === "github_review_sync" ? 60_000 : 30_000;
+  const timeoutMs = action.kind === "open_pr" || action.kind === "github_review_sync" || action.kind === "forge_review_sync"
+    ? 60_000
+    : 30_000;
   try {
     const result = await hub.requestFromRunner(
       session.runnerId,
@@ -3627,6 +4052,21 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
       const reconciled = svc.reconcileGitHubReviewFindings(id, result.data.githubReview);
       if (!reconciled.ok || !reconciled.data) {
         return reply.code(reconciled.status).send({ error: reconciled.error ?? "GitHub reviews could not be reconciled" });
+      }
+      const { reconciliation, findings, summary } = reconciled.data;
+      return {
+        ...result.data,
+        reviewFindings: { findings, summary },
+        reviewReconciliation: reconciliation,
+      };
+    }
+    if (action.kind === "forge_review_sync") {
+      if (!validateForgeReviewSync(result.data?.forgeReview)) {
+        return reply.code(502).send({ error: "the runner did not return forge review data — update the runner on this box" });
+      }
+      const reconciled = svc.reconcileForgeReviewFindings(id, result.data.forgeReview);
+      if (!reconciled.ok || !reconciled.data) {
+        return reply.code(reconciled.status).send({ error: reconciled.error ?? "Forge reviews could not be reconciled" });
       }
       const { reconciliation, findings, summary } = reconciled.data;
       return {
@@ -3896,13 +4336,31 @@ app.delete("/api/sessions/:id/reminder", async (req, reply) => {
 
 app.post("/api/sessions/:id/archive", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const body = req.body as SetArchivedRequest;
+  const body = (req.body ?? {}) as SetArchivedRequest;
+  if (typeof body.archived !== "boolean") return reply.code(400).send({ error: "archived must be a boolean" });
+  if (requestPrincipal(req)?.kind === "agent" && !body.archived) {
+    return reply.code(403).send({ error: "session credentials may archive descendants, but cannot unarchive them" });
+  }
   return respond(reply, svc.setArchived(id, body.archived));
 });
 
 app.post("/api/sessions/:id/retry-stop", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   return respond(reply, svc.retryStop(id));
+});
+
+app.post("/api/sessions/:id/background-deliveries/:continuationId/acknowledge-missing-result", async (req, reply) => {
+  const { id, continuationId } = req.params as { id: string; continuationId: string };
+  const changed = db.acknowledgeBackgroundMissingResult(id, continuationId, Date.now());
+  const session = db.getSession(id);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  const resolution = db.backgroundMissingResultResolution(id, continuationId);
+  if (!resolution) return reply.code(404).send({ error: "background delivery not found" });
+  if (!changed && resolution === "not_terminal") {
+    return reply.code(409).send({ error: "background delivery is not terminally missing" });
+  }
+  if (changed) hub.sessionChangedById(id);
+  return session;
 });
 
 app.post("/api/sessions/:id/config", async (req, reply) => {
@@ -3937,7 +4395,8 @@ app.post("/api/runs", async (req, reply) => {
   if (typeof body?.projectId === "string" && (!principal || !db.canAccessProject(principal, body.projectId))) {
     return reply.code(404).send({ error: "project not found" });
   }
-  return respond(reply, svc.createRun(body));
+  return respond(reply, svc.createRun(body,
+    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId } : undefined));
 });
 
 app.get("/api/pods", async () => ({ pods: db.listPods() }));
@@ -4041,7 +4500,8 @@ app.post("/api/workflow-runs", async (req, reply) => {
   if (typeof body?.projectId === "string" && (!principal || !db.canAccessProject(principal, body.projectId))) {
     return reply.code(404).send({ error: "project not found" });
   }
-  return respond(reply, svc.createWorkflowRun(body, workflowActor(req)));
+  return respond(reply, svc.createWorkflowRun(body, workflowActor(req), undefined,
+    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId } : undefined));
 });
 
 app.get("/api/automations", async () => automations.list());
@@ -4222,7 +4682,17 @@ app.post("/api/workflow-instances/:instanceId/nodes/:nodeId/resolve", async (req
 // tsx-watch reload in dev, which would otherwise orphan ssh processes + their remote runners.
 const workflowRecoveryTimer = setInterval(() => svc.recoverExpiredWorkflowAttempts(), 5_000);
 workflowRecoveryTimer.unref();
-const automationTimer = setInterval(() => automations.tick(Date.now()), 5_000);
+const automationTimer = setInterval(() => {
+  try {
+    automations.tick(Date.now());
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+      "automation tick deferred");
+  }
+}, 5_000);
+const usagePricingTimer = setInterval(() => {
+  void usagePricing.ensure().then(() => db.setUsageRateTable(usagePricing.current()));
+}, 60 * 60 * 1000);
 automationTimer.unref();
 const sweepSessionReminders = () => {
   try {
@@ -4277,6 +4747,7 @@ const artifactMaintenanceTimer = setInterval(() => {
     svc.maintainPrompts(now);
     db.pruneSessionCommandInvocations(now - SESSION_COMMAND_INVOCATION_RETENTION_MS, 1_000);
     db.compactSteeringAttempts(now, 1_000);
+    db.collectExpiredPreparedPromptImages(now, 1_000);
     db.collectOrphanedSteeringPromptImages(1_000);
     db.collectOrphanedEventPayloadArtifacts(1_000);
     db.collectWorkflowArtifactBlobs(1_000);
@@ -4332,6 +4803,7 @@ runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
+  clearInterval(usagePricingTimer);
   clearInterval(sessionReminderTimer);
   clearInterval(sessionCommandRetryTimer);
   clearInterval(sessionStopMaintenanceTimer);
@@ -4391,6 +4863,9 @@ process.on("unhandledRejection", (reason) => {
 // Wrapped in an async IIFE (not a top-level await) so the module bundles to CJS.
 void (async () => {
   try {
+    // Records are priced at ingestion and never re-priced, so on a first boot with no disk cache
+    // give the rate table a bounded head start before runners reconnect and replay usage.
+    await Promise.race([usagePricingReady, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     await app.listen({ port: PORT, host: HOST });
     // Shell reconciliation is connection-owned state like the reset above: a duplicate process
     // that loses the port race must not flip the survivor's running shells to reconnecting.
@@ -4398,6 +4873,8 @@ void (async () => {
     shellRegistry.reconcileStartup(Date.now());
     markStartupReady();
     app.log.info(`control plane listening on http://${HOST}:${PORT}`);
+    if (PUBLIC_ORIGIN.origin) app.log.info(`public dashboard origin for pairing links: ${PUBLIC_ORIGIN.origin}`);
+    if (PUBLIC_ORIGIN.warning) app.log.warn(PUBLIC_ORIGIN.warning);
     // Normal service stdout is commonly captured as a log. Reveal the credential automatically
     // only to an interactive terminal; `--print-pair-url` is the explicit non-interactive path.
     if (process.stdout.isTTY) process.stdout.write(`[control-plane] Pair This Device: ${LOCAL_PAIRING_URL}\n`);

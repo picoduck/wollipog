@@ -540,7 +540,8 @@ function validateMessage(
   if (!/^[a-f0-9]{64}$/.test(message.payloadDigest)) {
     return { code: "INVALID_COMMAND", error: "durable command payload digest is invalid" };
   }
-  if (message.command.type !== "start_session" && message.command.type !== "prompt_session") {
+  if (message.command.type !== "start_session" && message.command.type !== "prompt_session" &&
+      message.command.type !== "answer_recovered_question") {
     return { code: "INVALID_COMMAND", error: "durable command kind is unsupported" };
   }
   return null;
@@ -590,7 +591,8 @@ function isTerminal(state: DurableSessionCommandState): boolean {
 
 function validRecord(value: DurableCommandRecord): boolean {
   return value?.version === 1 && COMMAND_ID.test(value.commandId) && COMMAND_ID.test(value.executionId) &&
-    (value.kind === "start_session" || value.kind === "prompt_session") && typeof value.sessionId === "string" &&
+    (value.kind === "start_session" || value.kind === "prompt_session" ||
+      value.kind === "answer_recovered_question") && typeof value.sessionId === "string" &&
     /^[a-f0-9]{64}$/.test(value.payloadHmac) && Number.isInteger(value.revision) && value.revision > 0 &&
     typeof value.ownerId === "string" && Number.isFinite(value.createdAt) && Number.isFinite(value.updatedAt) &&
     Number.isFinite(value.expiresAt) && ["accepted", "queued", "started", "completed", "failed", "uncertain"].includes(value.state);
@@ -613,7 +615,8 @@ function safeCommandSessionId(command: unknown): string {
   if (command.type === "start_session" && isObject(command.spec) && typeof command.spec.sessionId === "string") {
     return command.spec.sessionId;
   }
-  return command.type === "prompt_session" && typeof command.sessionId === "string" ? command.sessionId : "";
+  return (command.type === "prompt_session" || command.type === "answer_recovered_question") &&
+    typeof command.sessionId === "string" ? command.sessionId : "";
 }
 
 export function isDurableSessionCommandMessage(value: unknown): value is DurableSessionCommandMessage {
@@ -630,6 +633,12 @@ export function isDurableSessionCommandMessage(value: unknown): value is Durable
       (command.slashCommand === undefined || typeof command.slashCommand === "string") &&
       (command.config === undefined || isObject(command.config));
   }
+  if (command.type === "answer_recovered_question") {
+    return typeof command.sessionId === "string" && Boolean(command.sessionId) &&
+      typeof command.requestId === "string" && Boolean(command.requestId) &&
+      typeof command.recoveryId === "string" && Boolean(command.recoveryId) &&
+      isQuestionAnswerMap(command.answers);
+  }
   if (command.type !== "start_session" || !isObject(command.spec)) return false;
   const spec = command.spec;
   return typeof spec.sessionId === "string" && Boolean(spec.sessionId) &&
@@ -645,6 +654,17 @@ export function isDurableSessionCommandMessage(value: unknown): value is Durable
     (spec.config === undefined || isObject(spec.config)) &&
     (spec.context === undefined || isObject(spec.context)) &&
     (spec.acpSessionContext === undefined || isObject(spec.acpSessionContext));
+}
+
+function isQuestionAnswerMap(value: unknown): value is Record<string, string | string[]> {
+  if (!isObject(value) || Object.keys(value).length > 100) return false;
+  return Object.entries(value).every(([key, answer]) =>
+    Boolean(key) && key.length <= 4_096 && (
+      typeof answer === "string"
+        ? answer.length <= 4_000
+        : Array.isArray(answer) && answer.length <= 100 &&
+          answer.every((item) => typeof item === "string" && item.length <= 4_000)
+    ));
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

@@ -52,6 +52,9 @@ function checkShape(node, expected, label, diffs) {
   const variants = node.oneOf || [];
   for (const name of expected.required || []) if (!required.has(name)) diffs.push(`- ${label}: required field removed: ${name}`);
   for (const name of expected.properties || []) if (!properties.has(name)) diffs.push(`- ${label}: property removed: ${name}`);
+  for (const [name, type] of Object.entries(expected.propertyTypes || {})) {
+    if (node.properties?.[name]?.type !== type) diffs.push(`- ${label}: property type changed: ${name} (expected ${type})`);
+  }
   for (const name of expected.requiredInEveryVariant || []) {
     if (!variants.length || variants.some((variant) => !(variant.required || []).includes(name))) {
       diffs.push(`- ${label}: variant-required field removed: ${name}`);

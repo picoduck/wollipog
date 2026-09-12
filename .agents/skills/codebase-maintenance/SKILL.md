@@ -24,7 +24,10 @@ Hard rules:
    push, or open a pull request.
 2. Do not run installs, migrations, formatters, code generators, or any command whose purpose is to
    change the tree. Analysis tooling that writes only to caches, `node_modules/.cache`, or the
-   scratch directory below is allowed. Put every scratch file under one run-scoped directory,
+   scratch directory below is allowed. One exception: the preflight install in the ground-truth
+   section below — `pnpm install --frozen-lockfile` cannot change anything git tracks (it refuses
+   to run rather than rewrite the lockfile, and `node_modules` is ignored), and it may run only
+   there, before the first test or analysis command. Put every scratch file under one run-scoped directory,
    `~/.cache/wollipog-maintenance/<job-id>-<YYYY-MM-DD>/` (create it with `mkdir -p`) — date-keyed
    rather than random, so a resumed run can re-derive its own path. Two hard-won properties of
    this location: it survives a reboot, unlike `/tmp`, which this machine wipes at boot — so the
@@ -38,11 +41,57 @@ Hard rules:
    name the files rather than quietly reverting.
 4. Do not publish a GitHub issue. Drafting and publication are separated by the gate in
    `.github/ISSUE_REPORTING.md`, and an unattended run cannot satisfy it.
+5. The agent memory directory outside the repository is shared by every session on this machine
+   and is not part of the workspace, so rule 1 does not cover it. You MAY correct a memory there,
+   but only one this run has verified stale against the tracker or the code, only by recording
+   the verified fact (never speculation or planning notes), and only with a one-line disclosure in
+   the report naming the memory and the correction. A stale memory left standing is how a
+   reconciled issue gets filed a third time; an undisclosed edit is how a shared memory drifts.
+
+6. Follow-up work in this session. A human may reply to the report with "publish", then "claim
+   and fix" — that is their call, and it converts this session into a fixing session for the
+   rest of its life. Two things must happen before any fix work starts:
+   - State the remaining budget first, on its own line: this session's `costBudgetUsd` caps the
+     WHOLE session, sweep and follow-up alike, and a sweep budget is not sized for a fix. "$6.33
+     of $8.00 remaining" at the top of the turn is what lets the human raise it before the
+     guardrail pauses a half-finished fix (which is how a session was stranded once).
+   - Attach a control-plane-tracked worktree with `wollipog worktree create` before touching any
+     file — never a raw `git worktree add`. The control plane must know the worktree: that is
+     what makes "Hand Off to Another Agent" available for the rest of the session, what the
+     hygiene job's `wollipog worktree discard` retirement assumes, and what the worktree-per-issue
+     rule requires. (One session used raw git for its fix; its hand-off control stayed disabled
+     and its worktree was invisible to the control plane.)
 
 Promotion to Phase 2 (opening pull requests) is a deliberate change, not a judgment call a job may
 make on its own. See "Promotion Criteria" below.
 
 ## Anchor Every Finding in Ground Truth
+
+Start with `git fetch origin main` (it touches only `.git` refs, never the working tree) and
+`git rev-list --left-right --count HEAD...origin/main`. If HEAD is behind, say so at the top of
+the report and evaluate every candidate against `origin/main` — `git show origin/main:<path>`,
+`git diff --stat HEAD origin/main` — so a file deleted or rewritten upstream is dropped, not
+reported. One sweep ran two commits behind and produced three findings in a file the tip of
+`main` no longer contained; the "differs from `origin/main`" exclusion also silently removed
+twelve files that had merely moved on. The primary checkout is not fast-forwarded on a schedule,
+and Phase 1 forbids this run from pulling it.
+
+Check install freshness the same way, before any job that executes code (tests, coverage, knip,
+type checks): compare the install stamp to the lockfile's last change —
+`stat -c %Y node_modules/.modules.yaml` against `git log -1 --format=%ct -- pnpm-lock.yaml`. If
+the install is older than the lockfile, run `pnpm install --frozen-lockfile --prefer-offline`
+right then, as part of preflight, and record it in the Tree State section with the packages it
+linked. This is the only install Phase 1 permits, and only at this point: never after a test or
+analysis run has started, and never in response to HEAD moving mid-sweep (that case is handled
+by re-running at the new baseline, not by reinstalling under a running suite). Two jobs share
+the primary checkout an hour apart; the first to find the install stale fixes it in seconds and
+the second finds it fresh, so a preflight install does not race a sibling's suite. If the
+install fails, or if `ERR_MODULE_NOT_FOUND` / "Cannot find package" failures still appear, treat
+them as environmental: they are not broken tests and not findings, and they go in Recommended
+Actions as one `environment` item naming the missing package and the install error. One
+flaky-test sweep ran the unit suite six times before establishing that its 29 identical failures
+were a workspace package added to the lockfile after the checkout's last install; the freshness
+check is one command and the install is one more.
 
 A finding that rests only on reading code is a guess. Each job file names the tool that proves its
 category — static analysis, coverage data, test runs, `git log`, `gh`. Run it, and cite what it
@@ -139,7 +188,7 @@ weeks of runs reviewed, and roughly 70% or more accepted as real. Below that, th
 source and should be retuned or disabled instead of promoted.
 
 Phase 2 adds, per job: an isolated worktree, one concern per pull request, a diff cap of about
-150-300 lines, the full test suite green, cross-model review through the `codex-review` skill for
+150-300 lines, the full test suite green, cross-model review through the `cross-model-review` skill for
 convergence jobs, and the Definition of Done from the `issue-workflow` skill. No job auto-merges.
 
 ## The Deletion and Generation Jobs Must Agree

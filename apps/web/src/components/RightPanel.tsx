@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ChevronLeftIcon, CommandLineIcon, FolderIcon, GlobeIcon, HelpIcon, TeamIcon, TerminalIcon } from "./Icons.js";
+import { ChevronLeftIcon, CommandLineIcon, FolderIcon, GlobeIcon, HelpIcon, LockIcon, TeamIcon, TerminalIcon } from "./Icons.js";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
+  type GitForgeInfo,
   type SessionView,
   type SourceLocation,
+  type CreateWorkspaceReferenceRequest,
 } from "@wollipog/protocol";
 import {
   RIGHT_PANEL_DEFAULT_WIDTH,
@@ -24,7 +26,11 @@ import { ReviewPanel } from "./ReviewPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import type { TimelineItem } from "../timeline.js";
-import { SubagentsPanel } from "./SubagentsPanel.js";
+import type { GovernanceDecision } from "../governance.js";
+import { GovernanceHistoryPanel } from "./GovernanceHistoryPanel.js";
+import { AgentsPanel } from "./AgentsPanel.js";
+import { focusSessionRequest } from "./SessionApproval.js";
+import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 
 /** Viewport-aware width ceiling: the panel may take at most ~40% of the window, so the
@@ -32,6 +38,9 @@ import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-st
 function viewportPanelMax(): number {
   return Math.floor(window.innerWidth * 0.4);
 }
+
+const EMPTY_PARENT_TURN_EVENTS: ReadonlyMap<string, number> = new Map();
+const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];
 
 /**
  * The right side panel's app-level state. Lives in App.tsx (NOT inside the per-session-keyed
@@ -151,7 +160,9 @@ const MODE_TITLES: Record<RightPanelMode, string> = {
   terminal: "Terminal",
   browser: "Browser",
   sidechat: "Side Chat",
-  subagents: "Subagents",
+  subagents: "Agents",
+  background: "Background Work",
+  governance: "Governance History",
 };
 
 /**
@@ -164,31 +175,57 @@ export function RightPanel({
   state,
   session,
   sourceLocation,
+  attentionTarget,
   onOpenSourceLocation,
   onClearSourceLocation,
   runnerOnline,
   runnerProtocolVersion,
   git,
+  forge,
   onOpenTerminal,
   onInsertSideChatDraft,
+  onAttachWorkspaceReference,
   items,
+  governanceDecisions = EMPTY_GOVERNANCE_DECISIONS,
+  governanceAvailable = governanceDecisions.length > 0,
+  governanceHasMore = false,
+  governanceLoadingOlder = false,
+  onLoadOlderGovernance,
   earlierActivityUnloaded = false,
+  parentTurnEventIds = EMPTY_PARENT_TURN_EVENTS,
+  onOpenParentTurn = () => undefined,
+  backgroundInventoryError = null,
+  onRetryBackgroundInventory,
 }: {
   state: RightPanelState;
   session: SessionView;
   sourceLocation?: SourceLocation;
+  attentionTarget?: import("../navigation.js").AttentionTarget;
   onOpenSourceLocation: (location: SourceLocation) => void;
   onClearSourceLocation: () => void;
   runnerOnline: boolean;
   runnerProtocolVersion: number | null | undefined;
   git: GitStatus;
+  forge?: GitForgeInfo | null;
   /** The Terminal launcher row opens the bottom dock — the app's single terminal surface. */
   onOpenTerminal: () => void;
   /** Explicitly prepares the primary composer; never sends it. */
   onInsertSideChatDraft: (text: string) => void;
+  onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   items: TimelineItem[];
+  /** Consolidated, content-safe governance outcomes for this session, oldest-first. */
+  governanceDecisions?: readonly GovernanceDecision[];
+  governanceAvailable?: boolean;
+  governanceHasMore?: boolean;
+  governanceLoadingOlder?: boolean;
+  onLoadOlderGovernance?: () => void;
   /** The transcript is showing a bounded window with older turns still unloaded. */
   earlierActivityUnloaded?: boolean;
+  /** Loaded parent turns that can be revealed directly in the virtual transcript. */
+  parentTurnEventIds?: ReadonlyMap<string, number>;
+  onOpenParentTurn?: (eventId: number) => void;
+  backgroundInventoryError?: string | null;
+  onRetryBackgroundInventory?: () => void;
 }) {
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const filesSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionFiles");
@@ -339,6 +376,10 @@ export function RightPanel({
             filesHint={filesHint}
             terminalSupported={terminalSupported}
             terminalHint={terminalHint}
+            backgroundAvailable={(session.backgroundJobs?.length ?? 0) > 0 ||
+              session.backgroundJobsAvailable === true ||
+              session.backgroundWorkTracking != null || session.backgroundWorkState != null}
+            governanceAvailable={governanceAvailable}
           />
         ) : (
           <div className="rp-body">
@@ -351,6 +392,7 @@ export function RightPanel({
                   location={sourceLocation}
                   onOpenLocation={onOpenSourceLocation}
                   onClearLocation={onClearSourceLocation}
+                  onAttachWorkspaceReference={onAttachWorkspaceReference}
                 />
               ) : (
                 <div className="hint warn">{filesHint}</div>
@@ -361,7 +403,17 @@ export function RightPanel({
                 runnerOnline={runnerOnline}
                 runnerProtocolVersion={runnerProtocolVersion}
                 git={git}
+                forge={forge}
                 onOpenSourceLocation={onOpenSourceLocation}
+                onAttachWorkspaceReference={onAttachWorkspaceReference}
+              />
+            )}
+            {state.mode === "governance" && (
+              <GovernanceHistoryPanel
+                decisions={governanceDecisions}
+                hasMore={governanceHasMore}
+                loadingOlder={governanceLoadingOlder}
+                onLoadOlder={onLoadOlderGovernance}
               />
             )}
             {state.mode === "browser" && <BrowserPanel session={session} />}
@@ -369,7 +421,18 @@ export function RightPanel({
               <SideChatPanel session={session} runnerOnline={runnerOnline} onInsertDraft={onInsertSideChatDraft} />
             )}
             {state.mode === "subagents" && (
-              <SubagentsPanel
+              <AgentsPanel
+                attentionTarget={attentionTarget}
+                key={`${session.id}:${sessionEventEpoch}`}
+                onOpenPrimaryRequest={(requestId) => {
+                  state.close();
+                  window.requestAnimationFrame(() => focusSessionRequest(session.id, requestId));
+                }}
+                runnerProtocolVersion={runnerProtocolVersion}
+                parentTurnEventIds={parentTurnEventIds}
+                onOpenParentTurn={onOpenParentTurn}
+                inventoryError={backgroundInventoryError}
+                onRetryInventory={onRetryBackgroundInventory}
                 session={session}
                 items={items}
                 runnerOnline={runnerOnline}
@@ -388,8 +451,20 @@ export function RightPanel({
                 onSelect={(subagentId) => state.selectSubagent(session.id, sessionEventEpoch, subagentId)}
               />
             )}
+            {state.mode === "background" && (
+              <BackgroundWorkPanel
+                session={session}
+                runnerOnline={runnerOnline}
+                runnerProtocolVersion={runnerProtocolVersion}
+                parentTurnEventIds={parentTurnEventIds}
+                onOpenParentTurn={onOpenParentTurn}
+                inventoryError={backgroundInventoryError}
+                onRetryInventory={onRetryBackgroundInventory}
+              />
+            )}
             {state.mode !== "files" && state.mode !== "review" && state.mode !== "browser" &&
-              state.mode !== "sidechat" && state.mode !== "subagents" && <div className="hint">Coming soon.</div>}
+              state.mode !== "sidechat" && state.mode !== "subagents" && state.mode !== "background" &&
+              <div className="hint">Coming soon.</div>}
           </div>
         )}
       </aside>
@@ -429,6 +504,8 @@ function Launcher({
   filesHint,
   terminalSupported,
   terminalHint,
+  backgroundAvailable,
+  governanceAvailable,
 }: {
   onPick: (mode: RightPanelMode) => void;
   onOpenTerminal: () => void;
@@ -436,6 +513,8 @@ function Launcher({
   filesHint: string;
   terminalSupported: boolean;
   terminalHint: string;
+  backgroundAvailable: boolean;
+  governanceAvailable: boolean;
 }) {
   return (
     <div className="rp-launcher">
@@ -445,6 +524,13 @@ function Launcher({
           {!terminalSupported && <div>{terminalHint}</div>}
         </div>
       )}
+      <LauncherRow
+        label="Background Work"
+        disabled={!backgroundAvailable}
+        hint="No background-work capability or history is available for this session."
+        onClick={() => onPick("background")}
+        icon={<CommandLineIcon size={14} />}
+      />
       <LauncherRow
         label="Review"
         kbd={shortcutDisplay("open-review")}
@@ -481,11 +567,18 @@ function Launcher({
         }
       />
       <LauncherRow
-        label="Subagents"
+        label="Agents"
         onClick={() => onPick("subagents")}
         icon={
           <TeamIcon size={14} />
         }
+      />
+      <LauncherRow
+        label="Governance History"
+        disabled={!governanceAvailable}
+        hint="No governance decisions have been recorded for this session."
+        onClick={() => onPick("governance")}
+        icon={<LockIcon size={14} />}
       />
       <LauncherRow
         label="Side Chat"

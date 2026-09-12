@@ -5,10 +5,8 @@ import {
   extractBearer,
   hashToken,
   isAuthenticatedAgentControlClaim,
-  isAuthenticatedConductorClaim,
   isAuthenticatedPolicyHookClaim,
   isAgentControlApiRouteAllowed,
-  isConductorApiRouteAllowed,
   isPolicyHookApiRouteAllowed,
   isTrustedLoopback,
   newDeviceToken,
@@ -17,6 +15,20 @@ import {
   shouldTouchDevice,
   tokenMatchesHash,
 } from "./auth.js";
+
+test("orchestrator credentials expose only session management and governance reads", () => {
+  for (const [method, route] of [
+    ["GET", "/api/sessions"], ["GET", "/api/governance/policies"],
+    ["POST", "/api/sessions"], ["POST", "/api/sessions/:id/stop"],
+    ["POST", "/api/sessions/:id/restart"], ["POST", "/api/sessions/:id/config"],
+    ["POST", "/api/sessions/:id/worktrees"], ["POST", "/api/sessions/:id/archive"],
+  ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), true, route);
+  for (const [method, route] of [
+    ["POST", "/api/runs"], ["POST", "/api/sessions/:id/approve"],
+    ["PUT", "/api/governance/policies/:policyId"], ["POST", "/api/artifacts/screenshots"],
+    ["POST", "/api/workflow-instances/:instanceId/nodes/:nodeId/dispatch"],
+  ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), false, route);
+});
 
 test("policy hook claims bind one active Claude session to one exact POST route", () => {
   const base = {
@@ -35,20 +47,6 @@ test("policy hook claims bind one active Claude session to one exact POST route"
   assert.equal(isPolicyHookApiRouteAllowed("POST", "/api/sessions/:id/approve"), false);
 });
 
-test("conductor REST claims require an active exact-runner credential and an exact live conductor session", () => {
-  const base = {
-    credentialValid: true,
-    claimedSessionId: "s_conductor",
-    session: { id: "s_conductor", agentId: "conductor", status: "running" },
-  };
-  assert.equal(isAuthenticatedConductorClaim(base), true);
-  assert.equal(isAuthenticatedConductorClaim({ ...base, credentialValid: false }), false);
-  assert.equal(isAuthenticatedConductorClaim({ ...base, claimedSessionId: "s_other" }), false);
-  assert.equal(isAuthenticatedConductorClaim({ ...base, session: { ...base.session, agentId: "claude" } }), false);
-  for (const status of ["idle", "completed", "failed", "stopped"]) {
-    assert.equal(isAuthenticatedConductorClaim({ ...base, session: { ...base.session, status } }), false, status);
-  }
-});
 
 test("general agent-control claims require an exact active session and purpose-bound credential", () => {
   const base = {
@@ -64,13 +62,29 @@ test("general agent-control claims require an exact active session and purpose-b
   }
 });
 
-test("conductor REST access is method- and route-scoped to its published MCP tools", () => {
+test("only a live orchestrator TUI extends an exact credential into idle, never terminal, sessions", () => {
+  const base = { credentialValid: true, claimedSessionId: "parent", hasLiveOrchestratorTui: true,
+    session: { id: "parent", status: "idle", permissionMode: "orchestrator" } };
+  assert.equal(isAuthenticatedAgentControlClaim(base), true);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, credentialValid: false }), false);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, claimedSessionId: "other" }), false);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, hasLiveOrchestratorTui: false }), false);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, session: { ...base.session, permissionMode: "default" } }), false);
+  for (const status of ["completed", "failed", "stopped"]) {
+    assert.equal(isAuthenticatedAgentControlClaim({ ...base, session: { ...base.session, status } }), false, status);
+  }
+});
+
+test("session-management REST access is method- and route-scoped to its published MCP tools", () => {
   for (const [method, route] of [
+    ["GET", "/api/compatibility"],
     ["GET", "/api/runners"],
     ["GET", "/api/sessions"],
     ["GET", "/api/sessions/:id/events"],
     ["POST", "/api/sessions"],
     ["POST", "/api/sessions/:id/prompt"],
+    ["POST", "/api/sessions/:id/restart"],
+    ["POST", "/api/sessions/:id/config"],
     ["POST", "/api/sessions/:id/worktrees"],
     ["POST", "/api/sessions/:id/worktrees/attach"],
     ["POST", "/api/sessions/:id/worktrees/select"],
@@ -82,7 +96,7 @@ test("conductor REST access is method- and route-scoped to its published MCP too
     ["POST", "/api/workflow-instances/:instanceId/nodes/:nodeId/dispatch"],
     ["POST", "/api/artifacts/screenshots"],
   ] as const) {
-    assert.equal(isConductorApiRouteAllowed(method, route), true, `${method} ${route}`);
+    assert.equal(isAgentControlApiRouteAllowed(method, route), true, `${method} ${route}`);
   }
 
   for (const [method, route] of [
@@ -98,13 +112,16 @@ test("conductor REST access is method- and route-scoped to its published MCP too
     ["GET", "/api/artifacts/:artifactId/export"],
     ["GET", "/api/new-future-surface"],
   ] as const) {
-    assert.equal(isConductorApiRouteAllowed(method, route), false, `${method} ${route}`);
+    assert.equal(isAgentControlApiRouteAllowed(method, route), false, `${method} ${route}`);
   }
 });
 
 test("general CLI/MCP access shares the closed manager route allowlist", () => {
+  assert.equal(isAgentControlApiRouteAllowed("GET", "/api/compatibility"), true);
   assert.equal(isAgentControlApiRouteAllowed("GET", "/api/sessions"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/prompt"), true);
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/restart"), true);
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/config"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/attach"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/select"), true);

@@ -27,14 +27,25 @@ function workflowContract(path) {
 
   assert.ok(pullRequestTypes, `${path}: missing pull_request types`);
   assert.ok(concurrencyGroup, `${path}: missing concurrency group`);
-  assert.equal(jobGuards.length, 1, `${path}: expected one job-level if guard`);
+  const jobIds = (text.split(/^jobs:\r?\n/m)[1] ?? "").match(/^  [A-Za-z_][A-Za-z0-9_-]*:$/gm) ?? [];
+  assert.ok(jobIds.length >= 1, `${path}: expected at least one job`);
+  assert.equal(jobGuards.length, jobIds.length, `${path}: every job needs a job-level if guard (${jobGuards.length} of ${jobIds.length} jobs have one)`);
   assert.match(text, /^  cancel-in-progress: true$/m, `${path}: concurrency must cancel in progress`);
+  // Every job carries the same draft guard. An aggregating job may wrap it in
+  // `always() && (...)` so it still reports when the jobs it needs fail or are cancelled.
+  const guards = [...new Set(jobGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
+  assert.equal(guards.length, 1, `${path}: every job must carry the same draft guard, got ${JSON.stringify(guards)}`);
 
   return {
     pullRequestTypes: pullRequestTypes[1].split(",").map((value) => value.trim()),
     groupTemplate: concurrencyGroup[1].trim(),
-    jobGuard: jobGuards[0][1].trim(),
+    jobGuard: guards[0],
   };
+}
+
+function unwrapAggregatorGuard(expression) {
+  const wrapped = expression.match(/^\$\{\{\s*always\(\)\s*&&\s*\((.+)\)\s*\}\}$/);
+  return wrapped ? wrapped[1].trim() : expression;
 }
 
 function groupExpressions(groupTemplate) {
@@ -186,6 +197,104 @@ test("PR workflows keep least-privilege permissions and an always-present requir
   );
 });
 
+test("the required CI check aggregates parallel jobs that each own a time budget", () => {
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+  const jobsText = ci.split(/^jobs:\r?\n/m)[1];
+  const starts = [...jobsText.matchAll(/^  ([A-Za-z_][A-Za-z0-9_-]*):$/gm)];
+  const byId = Object.fromEntries(starts.map((match, index) => [
+    match[1],
+    jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
+  ]));
+  assert.deepEqual(Object.keys(byId), ["checks", "browser", "check"], "CI jobs drifted");
+  for (const id of ["checks", "browser"]) {
+    assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
+    assert.doesNotMatch(byId[id], /^    needs:/m, `${id}: the work jobs run in parallel, not chained`);
+  }
+  assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
+
+  // The browser suite is sharded across matrix legs, and there are many ways to make that run less
+  // than the whole suite while every leg still reports green. Four rounds of review found five:
+  // a matrix list disagreeing with the `--shard` denominator; an `exclude:` removing a leg the list
+  // still declares; the same key spelled `"exclude":`; an `if:` on the run step; and a
+  // `continue-on-error` reporting a failed leg as a success. Two of those arrived only after the
+  // patch for the previous one, and one of them — a quoted key — defeated a fix I had just written
+  // for the unquoted spelling of a different key.
+  //
+  // The through-line is that a denylist cannot work here. YAML has more spellings than a pattern
+  // has branches (quoted keys, reordered mappings, blank lines), and every miss is silent: a shard
+  // that was never scheduled, or a step that was skipped, cannot fail.
+  //
+  // So the job's whole shape is asserted at once, against its exact expected text with comment-only
+  // and blank lines stripped. Not "these keys are forbidden" but "these lines are the job" — which
+  // forecloses spellings nobody has thought of yet, including inserting a key ANYWHERE rather than
+  // only where the last bypass happened to put it. Changing the job then means editing this
+  // expectation by hand, which is the reviewable act the guard exists to force.
+  const structural = byId.browser
+    .split("\n")
+    .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
+    .join("\n");
+
+  // The `if:` line is the shared draft guard, asserted for every job further up; matching it loosely
+  // here keeps this expectation about sharding. Everything else is fixed, in order, with nothing
+  // between the lines.
+  const header = structural.match(
+    /^  browser:\n    if: [^\n]*\n    name: Browser End-to-End Tests\n    runs-on: ubuntu-22\.04\n    timeout-minutes: \d+\n    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[([^\]]*)\]\n    steps:$/m,
+  );
+  assert.ok(header,
+    "browser: the job header must be exactly its guard, name, runner, timeout, `fail-fast: false`, " +
+    "a single `shard:` list, and then `steps:` — nothing else and nothing between. `fail-fast` is " +
+    "off because the aggregator reads a cancelled job as a budget hit, so one failing test would " +
+    "otherwise be announced as several timeouts. Any other key fails here whatever it is called or " +
+    "however it is quoted: `exclude` drops a leg the list still declares, `include` can add one the " +
+    "denominator does not cover, `max-parallel` serialises the legs back into one long job, and " +
+    "`continue-on-error` reports a failed leg to the aggregator as a success.");
+
+  // Anchored on the NEXT step, so the shard command's step is exactly its name and its run line.
+  // YAML mapping order is irrelevant, so pinning only the first two lines let `if:` be appended
+  // after `run:` and skip the suite on whichever legs it excluded — which those legs then reported
+  // as success.
+  const step = structural.match(
+    /^      - name: Remote-Instance Browser End-to-End Tests\n        run: pnpm test:e2e --shard=\$\{\{ matrix\.shard \}\}\/(\d+)\n      - name: /m,
+  );
+  assert.ok(step,
+    "browser: the shard command's step must be exactly its name and its run line, followed by the " +
+    "next step. A key on either side of `run:` — an `if:` most of all — skips the suite on the legs " +
+    "it excludes, and each of those legs still reports success.");
+
+  // The header pins everything BEFORE `steps:`; this pins everything after it. A job key placed at
+  // the very end of the job — immediately before the next job's heading — is still a job key, and
+  // `continue-on-error` there reports a failed leg to the aggregator as a success. Six bypasses over
+  // four rounds, and this was the last region left unread: asserting a REGION is what kept leaving
+  // one, so the two assertions together now cover the job from its first line to its last.
+  const afterSteps = structural.slice(structural.indexOf("\n    steps:") + "\n    steps:".length);
+  const strayJobKeys = afterSteps
+    .split("\n")
+    .filter((line) => /^    \S/.test(line));
+  assert.deepEqual(strayJobKeys, [],
+    "browser: every line after `steps:` must belong to a step. A key at this indentation is a JOB " +
+    "key wherever it sits, and `continue-on-error` among them reports a failed leg to the " +
+    "aggregator as a success.");
+
+  const shards = header[1].split(",").map((value) => Number(value.trim()));
+  assert.deepEqual(shards, shards.map((_, index) => index + 1),
+    "browser: shards must be numbered 1..N with no gaps, because --shard=i/N means the i-th of N");
+  assert.equal(Number(step[1]), shards.length,
+    `browser: --shard=i/${step[1]} against ${shards.length} matrix legs runs the wrong fraction of ` +
+    "the suite. The dangerous direction is silent: fewer legs than the denominator runs a fraction " +
+    "and reports every leg green, because a shard that was never scheduled cannot fail.");
+
+  assert.doesNotMatch(byId.checks, /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
+    "the browser suites must not share the unit-test job's budget");
+  assert.match(byId.checks, /^      - name: Unit Tests$/m);
+  assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
+  assert.match(byId.check, /^    needs: \[checks, browser\]$/m, "the aggregator must wait for every work job");
+  assert.match(byId.check, /^    if: \$\{\{ always\(\) && \(/m,
+    "the aggregator must run when a needed job failed or was cancelled, or the required context never reports");
+  assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
+  assert.match(byId.check, /needs\.browser\.result/, "the aggregator must inspect the browser job result");
+  assert.match(byId.check, /cancelled\) .*timeout-minutes budget/, "a cancelled job is reported as a budget hit, not a flaky test");
+});
+
 test("workflow actions use immutable commit pins", () => {
   for (const path of [...WORKFLOWS, RELEASE_WORKFLOW]) {
     const text = readFileSync(resolve(process.cwd(), path), "utf8");
@@ -204,6 +313,86 @@ test("workflow actions use immutable commit pins", () => {
   }
 });
 
+test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provider boundary", () => {
+  const platform = readFileSync(resolve(process.cwd(), WORKFLOWS[2]), "utf8");
+
+  assert.match(platform, /os: \[windows-latest, windows-2025, macos-latest\]/u);
+  assert.match(platform, /Verify WSL Boundaries Stay Fail-Closed/u);
+  assert.match(platform, /WOLLIPOG_WSL_FAIL_CLOSED_DISTRO = "Ubuntu-24\.04"/u);
+  assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-bwrap-fail-closed\.integration\.test\.ts/u,
+    "the real WSL job must exercise the product's Direct bwrap rejection against a target-local alias");
+  assert.match(platform, /\$wslBoundaryOutput -notmatch '\(\?m\)\^# pass 1\\r\?\$'/u);
+  assert.match(platform, /\$wslBoundaryOutput -notmatch '\(\?m\)\^# skipped 0\\r\?\$'/u,
+    "the WSL boundary job must fail if its opt-in real integration test silently skips");
+  assert.match(platform,
+    /\$savedBoundaryPreference = \$ErrorActionPreference[\s\S]*\$ErrorActionPreference = "Continue"[\s\S]*\$wslBoundaryExit = \$LASTEXITCODE[\s\S]*\$ErrorActionPreference = \$savedBoundaryPreference/u,
+    "native stderr capture must not terminate PowerShell before the explicit exit and TAP checks");
+  assert.match(platform, /apt-get install -y bubblewrap build-essential curl xz-utils/u,
+    "the real target must compile the checked-in native launcher source");
+  assert.match(platform, /tar --no-same-owner -xJf/u,
+    "the pinned Linux Node fixture must install as root instead of preserving archive owner ids");
+  assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-agent-control\.wsl\.test\.ts/u,
+    "the real WSL job must exercise the safe launcher and authenticated broker end to end");
+  assert.match(platform, /\$safeWslOutput -notmatch '\(\?m\)\^# pass 1\\r\?\$'/u);
+  assert.match(platform, /\$safeWslOutput -notmatch '\(\?m\)\^# skipped 0\\r\?\$'/u,
+    "the safe-launcher integration must fail if it silently skips");
+  assert.match(platform, /wsl\.exe -d Ubuntu-24\.04 -- cmd\.exe \/d \/c exit 0/u,
+    "the capability-sensitive outside probe must use WSL's ordinary binfmt command path");
+  assert.match(platform, /WSLInterop registration outside bwrap:/u);
+  assert.match(platform, /WSLInterop registration inside bwrap: absent/u);
+  assert.match(platform, /\$registrationExit = \$LASTEXITCODE/u);
+  assert.match(platform, /cmd\.exe executable outside bwrap: \$outsideInterop/u);
+  assert.match(platform, /Hosted WSL baseline lacks PE interop; verifying bwrap does not add it/u);
+  assert.match(platform, /-not \$outsideInterop -and \$outsideOutput -notmatch 'Exec format error'/u,
+    "unexpected host-side failures must not be accepted as a fail-closed baseline");
+  assert.doesNotMatch(platform, /WSL Windows interop baseline failed outside bwrap/u,
+    "host PE interop availability is diagnostic, not a prerequisite");
+  assert.match(platform, /--chdir \/ -- \/bin\/true/u,
+    "a production-shaped bwrap smoke test must prove the sandbox itself works");
+  assert.match(platform, /test ! -e \/proc\/sys\/fs\/binfmt_misc\/WSLInterop/u,
+    "the fresh provider proc must explicitly prove the automatic WSL binfmt registration is absent");
+  assert.match(platform, /--proc \/proc --tmpfs \/tmp --chdir \/ -- \$cmdPath/u);
+  assert.match(platform, /bwrap unexpectedly preserved automatic PE\/binfmt interop/u);
+  assert.doesNotMatch(platform, /\$blockedOutput -notmatch/u,
+    "libc execvp may fall back to a shell after ENOEXEC, so denial is behavioral rather than stderr-textual");
+  assert.doesNotMatch(platform, /--bind[^\n]*\/init|--ro-bind[^\n]*\/init/u,
+    "CI must never add a dedicated WSL /init bind inside bwrap");
+});
+
+test("desktop Rust verification enforces the lockfile and runs one pinned audit", () => {
+  const desktop = readFileSync(resolve(process.cwd(), WORKFLOWS[1]), "utf8");
+
+  assert.match(
+    desktop,
+    /^      - name: Install Cargo Audit\r?\n        if: startsWith\(matrix\.os, 'ubuntu'\)\r?\n        run: cargo install cargo-audit --version 0\.22\.2 --locked$/m,
+    "desktop CI must install an exact cargo-audit release on only the Linux matrix leg",
+  );
+  assert.match(
+    desktop,
+    /^      - name: Audit Locked Dependencies\r?\n        if: startsWith\(matrix\.os, 'ubuntu'\)\r?\n        run: cargo audit --file apps\/desktop\/src-tauri\/Cargo\.lock$/m,
+    "desktop CI must audit the committed lockfile on only the Linux matrix leg",
+  );
+  assert.equal(
+    desktop.match(/cargo audit --file apps\/desktop\/src-tauri\/Cargo\.lock/g)?.length,
+    1,
+    "desktop CI must not duplicate the audit across matrix legs",
+  );
+  assert.match(
+    desktop,
+    /run: cargo test --locked --manifest-path apps\/desktop\/src-tauri\/Cargo\.toml/,
+    "desktop tests must fail instead of resolving a changed lockfile",
+  );
+  assert.match(
+    desktop,
+    /run: cargo clippy --locked --manifest-path apps\/desktop\/src-tauri\/Cargo\.toml/,
+    "desktop lint must fail instead of resolving a changed lockfile",
+  );
+
+  const rootPackage = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8"));
+  assert.match(rootPackage.scripts["check:rust"], /cargo clippy --locked /);
+  assert.match(rootPackage.scripts["check:rust"], /cargo test --locked /);
+});
+
 test("CI validates production builds and caches the pinned Playwright browser", () => {
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
 
@@ -212,9 +401,13 @@ test("CI validates production builds and caches the pinned Playwright browser", 
     /^      - name: Validate Web Production Build\r?\n        run: pnpm --filter @wollipog\/web build$/m,
     "CI must exercise the web production build",
   );
+  // The production pass is guarded to one shard, so the `run:` no longer follows its `name:` line
+  // directly. The guard itself is asserted rather than merely tolerated: `if: false`, or a guard
+  // naming a shard the matrix does not contain, would skip this step on every leg and leave the
+  // assertion above still matching a step that never executes.
   assert.match(
     ci,
-    /^      - name: Rendered Production Browser Smoke\r?\n        run: pnpm test:e2e:production$/m,
+    /^      - name: Rendered Production Browser Smoke\r?\n        if: matrix\.shard == 1\r?\n        run: pnpm test:e2e:production$/m,
     "CI must render the built Timeline and Settings fixtures through the production preview server",
   );
   assert.match(

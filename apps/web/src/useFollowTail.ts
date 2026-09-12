@@ -338,7 +338,7 @@ export function useFollowTail({
   const follow = useCallback(() => {
     cancelProgrammaticScroll();
     transition("resume");
-    dispatchVirtualViewportIntent(scrollRef.current);
+    dispatchVirtualViewportIntent(scrollRef.current, "down");
     scrollToBottom();
     scheduleFollow();
   }, [cancelProgrammaticScroll, scheduleFollow, scrollRef, scrollToBottom, transition]);

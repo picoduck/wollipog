@@ -9,12 +9,14 @@ import {
 } from "@wollipog/protocol";
 import {
   executeManagerTool,
-  serveConductorMcp,
+  serveSessionManagementMcp,
   type McpDeps,
   type McpFetch,
   type ToolResult,
-} from "./conductor-mcp.js";
+} from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
+import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
+import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
 
 type Write = (text: string) => void;
 
@@ -58,6 +60,7 @@ function positional(args: string[]): string[] {
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
     "--title", "--model", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
+    "--max-child-sessions",
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -79,17 +82,23 @@ function usage(): string {
   return [
     "Usage: wollipog session <command> [options]",
     "       wollipog worktree <create|attach|select|discard> [options]",
-    "Session Commands: list, get, events, create, prompt, wait, stop",
+    "       wollipog admin <pairing-url|status|user|device|runner-credential> [options]",
+    "       wollipog service <install|status|restart|logs|uninstall> [options]",
+    "Session Commands: list, get, events, create, prompt, wait, stop, restart, archive, guardrails",
     "Worktree Options: --session <id>, --branch <name>, --base <ref>, --path <absolute-path>",
+    "Admin Commands: run on the control-plane host with its protected local credential; see `wollipog admin`.",
+    "Service Commands: Linux systemd deployment of the control plane and a colocated runner; see `wollipog service`.",
     "Use --json for stable machine-readable output.",
   ].join("\n");
 }
 
 function invocationArgs(argv: string[]): string[] {
-  const marker = argv.findIndex((arg) => arg === "--wollipog-cli");
-  if (marker >= 0) return argv.slice(marker + 1);
   const invokedAsAlias = /(?:^|[\\/])wollipog(?:\.exe)?$/iu.test(argv[0] ?? "");
-  return argv.slice(invokedAsAlias ? 1 : 2);
+  // The dispatcher recognizes an internal marker only in the first application-argument
+  // position. Mirror that boundary here: a marker later in user data must never cause this
+  // parser to discard the real command that preceded it. SEA starts at index 1; Node/tsx at 2.
+  const appIndex = invokedAsAlias || argv[1] === "--wollipog-cli" ? 1 : 2;
+  return argv.slice(argv[appIndex] === "--wollipog-cli" ? appIndex + 1 : appIndex);
 }
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
@@ -152,6 +161,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
           useWorktree: flag(args, "--worktree"),
           costBudgetUsd: numeric(option(args, "--cost-budget")),
           maxToolCalls: numeric(option(args, "--max-tool-calls")),
+          maxChildSessions: numeric(option(args, "--max-child-sessions")),
         },
       };
     }
@@ -173,6 +183,22 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         : { error: "session wait requires an id" };
     case "stop":
       return words[2] ? { tool: "stop_session", input: { sessionId: words[2] } } : { error: "session stop requires an id" };
+    case "restart":
+      return words[2] ? { tool: "restart_session", input: { sessionId: words[2] } } : { error: "session restart requires an id" };
+    case "archive":
+      return words[2] ? { tool: "archive_session", input: { sessionId: words[2] } } : { error: "session archive requires an id" };
+    case "guardrails":
+      return words[2]
+        ? {
+            tool: "set_guardrails",
+            input: {
+              sessionId: words[2],
+              costBudgetUsd: numeric(option(args, "--cost-budget")),
+              maxToolCalls: numeric(option(args, "--max-tool-calls")),
+              maxChildSessions: numeric(option(args, "--max-child-sessions")),
+            },
+          }
+        : { error: "session guardrails requires an id" };
     default:
       return { error: usage() };
   }
@@ -183,9 +209,29 @@ function payload(result: ToolResult): unknown {
   try { return JSON.parse(raw); } catch { return { error: raw }; }
 }
 
-async function compatible(fetchImpl: McpFetch, cpUrl: string, requiredProtocol: number): Promise<string | null> {
+async function compatible(
+  fetchImpl: McpFetch,
+  cpUrl: string,
+  requiredProtocol: number,
+  token: string,
+  sessionId: string,
+): Promise<string | null> {
   try {
-    const response = await fetchImpl(`${cpUrl}/healthz`, { method: "GET", signal: AbortSignal.timeout(10_000) });
+    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
+    if (sessionId) headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] = sessionId;
+    let response = await fetchImpl(`${cpUrl}/api/compatibility`, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+    // Protocol v100-v102 dogfood control planes predate the authenticated route but still expose
+    // the version on their public health response. Released pre-v100 peers never receive this CLI.
+    if (response.status === 404) {
+      response = await fetchImpl(`${cpUrl}/healthz`, {
+        method: "GET",
+        signal: AbortSignal.timeout(10_000),
+      });
+    }
     if (!response.ok) return `control plane compatibility check failed: HTTP ${response.status}`;
     const body = JSON.parse(await response.text()) as { protocolVersion?: unknown };
     if (typeof body.protocolVersion !== "number" || body.protocolVersion < requiredProtocol) {
@@ -205,14 +251,31 @@ export async function runWollipogCli(
     stderr: (text) => process.stderr.write(text),
   },
   fetchImpl: McpFetch = globalThis.fetch,
+  hostAdminIo: HostAdminIo = { ...defaultHostAdminIo(), stdout: io.stdout, stderr: io.stderr },
 ): Promise<number> {
   const args = invocationArgs(argv);
   if (flag(args, "--version")) {
     io.stdout(`${VERSION} (protocol v${PROTOCOL_VERSION})\n`);
     return 0;
   }
-  const parsed = command(args);
   const json = flag(args, "--json");
+  // Host administration authenticates with the control plane's own protected local credential,
+  // not a session or device token, so it branches before any session plumbing runs.
+  if (positional(args)[0] === "admin") {
+    if (positional(args).length === 1 || flag(args, "--help")) {
+      (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: hostAdminUsage() })}\n` : `${hostAdminUsage()}\n`);
+      return 2;
+    }
+    return runHostAdminCli(args, env, hostAdminIo, fetchImpl);
+  }
+  if (positional(args)[0] === "service") {
+    if (positional(args).length === 1 || flag(args, "--help")) {
+      (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: serviceUsage() })}\n` : `${serviceUsage()}\n`);
+      return 2;
+    }
+    return runServiceCli(args, defaultServiceHost(fetchImpl), { ...defaultServiceIo(), stdout: io.stdout, stderr: io.stderr });
+  }
+  const parsed = command(args);
   if ("error" in parsed) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: parsed.error })}\n` : `${parsed.error}\n`);
     return 2;
@@ -241,7 +304,7 @@ export async function runWollipogCli(
     : worktreeTools.has(parsed.tool)
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
       : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
-  const incompatibility = await compatible(fetchImpl, cpUrl, requiredProtocol);
+  const incompatibility = await compatible(fetchImpl, cpUrl, requiredProtocol, token, sessionId);
   if (incompatibility) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: incompatibility })}\n` : `${incompatibility}\n`);
     return 1;
@@ -252,6 +315,7 @@ export async function runWollipogCli(
     selfSessionId: sessionId,
     token,
     actorHeader: sessionId ? WOLLIPOG_AGENT_ACTOR_SESSION_HEADER : null,
+    orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
   });
   const data = payload(result);
   if (json) io.stdout(`${JSON.stringify(data)}\n`);
@@ -282,8 +346,9 @@ export async function runAgentControlMcp(env: NodeJS.ProcessEnv): Promise<void> 
     selfSessionId,
     token,
     actorHeader: WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+    orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
   };
-  serveConductorMcp(process.stdin, process.stdout, deps);
+  serveSessionManagementMcp(process.stdin, process.stdout, deps);
   process.stdin.on("end", () => process.exit(0));
   console.error(`[wollipog-mcp] serving session-scoped tools for ${selfSessionId}`);
 }

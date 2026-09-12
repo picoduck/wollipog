@@ -10,12 +10,14 @@ import {
   subscriptionUsageRefreshTimeoutMs,
 } from "./subscription-usage.js";
 import { parseUsageAggregationQuery, parseUsageRetentionInput } from "./usage-aggregation.js";
+import type { UsageRateTableService } from "./usage-rate-table.js";
 
 export function registerUsageRoutes(
   app: FastifyInstance,
   db: ControlPlaneDb,
   requestPrincipal: (request: FastifyRequest) => AuthPrincipal | null,
   hub?: Pick<Hub, "requestFromRunner">,
+  pricing?: Pick<UsageRateTableService, "ensure" | "status">,
 ): void {
   app.get("/api/usage", async (request, reply) => {
     const principal = requestPrincipal(request);
@@ -25,10 +27,22 @@ export function registerUsageRoutes(
     const retention = db.getUsageRetentionPolicy(principal.organizationId);
     try {
       const query = parseUsageAggregationQuery((request.query ?? {}) as Record<string, unknown>, retention);
-      return db.queryUsageAggregation(principal, query);
+      const aggregation = db.queryUsageAggregation(principal, query);
+      return pricing ? { ...aggregation, pricing: pricing.status() } : aggregation;
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid usage query" });
     }
+  });
+
+  // Refetches the rate table ahead of its TTL so a model released since the last daily fetch is
+  // priced from now on. Already-recorded buckets keep their provenance; nothing is re-priced.
+  app.post("/api/usage/pricing/refresh", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human") {
+      return reply.code(403).send({ error: "usage accounting is available to organization members only" });
+    }
+    if (!pricing) return reply.code(503).send({ error: "usage pricing is unavailable" });
+    return { pricing: await pricing.ensure(true) };
   });
 
   app.get("/api/usage/subscriptions", async (request, reply) => {
@@ -68,6 +82,48 @@ export function registerUsageRoutes(
       ...db.subscriptionUsageForPrincipal(principal, Date.now(), SUBSCRIPTION_USAGE_STALE_AFTER_MS),
       refresh: { attempted: runners.length, failed },
     };
+  });
+
+  // The organization's per-user daily allowance. Members can read it (it is what parks their
+  // sessions); only owners and admins set it. `null` clears it.
+  app.get("/api/usage/daily-budget", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human") {
+      return reply.code(403).send({ error: "usage accounting is available to organization members only" });
+    }
+    return { dailyBudget: db.getUsageDailyBudget(principal.organizationId) };
+  });
+
+  app.put("/api/usage/daily-budget", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    const body = (request.body ?? {}) as { perUserUsd?: unknown };
+    const value = body.perUserUsd;
+    const rounded = typeof value === "number" && Number.isFinite(value) ? Math.round(value * 100) / 100 : Number.NaN;
+    if (value !== null && (!Number.isFinite(rounded) || rounded < 0.01 || rounded > 1_000_000)) {
+      return reply.code(400).send({ error: "perUserUsd must be at least one cent, or null to clear" });
+    }
+    if (value !== null && db.hasUserOwnedActiveAgentTui(principal.organizationId)) {
+      return reply.code(409).send({
+        error: "Daily cost budgets cannot be enabled while a user-owned Agent TUI is running because provider TUI activity is not reported to Wollipog. Close every Agent TUI or leave the daily budget disabled.",
+      });
+    }
+    return { dailyBudget: db.setUsageDailyBudget(principal.organizationId, value === null ? null : rounded, Date.now()) };
+  });
+
+  // Per-user spend windows. Owners and admins see every user with usage; a member sees only
+  // their own row, which is also what the daily budget gates on.
+  app.get("/api/usage/users", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human") {
+      return reply.code(403).send({ error: "usage accounting is available to organization members only" });
+    }
+    const users = canAdministerIdentity(principal.role)
+      ? db.listUserCostWindows(principal.organizationId)
+      : [db.userCostWindows(principal.organizationId, principal.userId)];
+    return { users };
   });
 
   app.put("/api/usage/retention", async (request, reply) => {

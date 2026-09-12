@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { contextCommandSpec } from "./context-command.js";
+import { contextCommandSpec, runContextCommand } from "./context-command.js";
 
 test("WSL commands preserve argv boundaries while env values ride WSLENV, never argv", () => {
   const spec = contextCommandSpec(
@@ -25,4 +25,11 @@ test("native commands retain the host cwd and executable", () => {
   assert.equal(spec.file, "git");
   assert.deepEqual(spec.args, ["status"]);
   assert.equal(spec.cwd, "C:\\repo");
+});
+
+test("unsafe native shim arguments reject through the async command contract", { skip: process.platform !== "win32" }, async () => {
+  await assert.rejects(
+    runContextCommand({ kind: "native" }, "agent.cmd", ["%PATH%"], { cwd: "C:\\repo" }),
+    /would expand/,
+  );
 });

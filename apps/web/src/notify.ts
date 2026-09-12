@@ -1,4 +1,5 @@
-import { sessionAttentionStatus, type SessionView } from "@wollipog/protocol";
+import { pendingRequests, sessionAttentionStatus, type SessionView } from "@wollipog/protocol";
+import type { AttentionTarget } from "./navigation.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "./instance-storage.js";
 
 /** A notification to surface for a session transition. */
@@ -8,6 +9,8 @@ export interface NotifyPayload {
   sessionId: string;
   /** Distinguishes simultaneous durable events for one session in the Notification API tag. */
   notificationId?: string;
+  /** Exact stale-safe destination for attention notifications. */
+  attention?: AttentionTarget;
 }
 
 const BUSY = new Set<SessionView["status"]>(["queued", "starting", "running"]);
@@ -25,16 +28,27 @@ function newlySettledBackgroundDelivery(prev: SessionView, next: SessionView): b
  * snapshot doesn't fire a burst of notifications for already-finished sessions).
  */
 export function notifyDecision(prev: SessionView | undefined, next: SessionView): NotifyPayload | null {
-  if (!prev || prev.status === next.status) return null;
+  if (!prev) return null;
+  const replacedAttention = next.status === "input_required" && prev.status === "input_required" &&
+    prev.pendingApproval?.requestId !== next.pendingApproval?.requestId;
+  if (prev.status === next.status && !replacedAttention) return null;
   const name = next.title?.trim() || "Session";
   switch (next.status) {
     case "input_required": {
       const what = next.pendingApproval?.title ? `: ${next.pendingApproval.title}` : "";
       const attention = sessionAttentionStatus(next);
       const label = attention?.kind === "answer_required" ? "Answer required"
-        : attention?.kind === "authentication_required" ? "Authentication required"
+        : attention?.kind === "recovery_required" ? "Recovery required"
+          : attention?.kind === "authentication_required" ? "Authentication required"
           : attention?.kind === "approval_required" ? "Approval required" : "Input required";
-      return { title: `${name} needs your input`, body: `${label}${what}`, sessionId: next.id };
+      const requests = pendingRequests(next.pendingApproval);
+      return {
+        title: `${name} needs your input`, body: `${label}${what}`, sessionId: next.id,
+        attention: {
+          eventEpoch: next.eventEpoch ?? 0,
+          ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
+        },
+      };
     }
     case "completed":
       if (BUSY.has(prev.status)) return { title: `${name} completed`, body: "The agent finished its work.", sessionId: next.id };
@@ -87,7 +101,7 @@ export function backgroundDeliveryNotifyDecisions(
 
 export interface NotificationTarget {
   instanceId: string;
-  onClick: (sessionId: string) => void;
+  onClick: (sessionId: string, attention?: AttentionTarget) => void;
 }
 
 /**
@@ -137,7 +151,7 @@ export class Notifier {
     const n = new Notification(p.title, { body: p.body, tag });
     n.onclick = () => {
       window.focus();
-      target.onClick(p.sessionId);
+      target.onClick(p.sessionId, p.attention);
       n.close();
     };
   }

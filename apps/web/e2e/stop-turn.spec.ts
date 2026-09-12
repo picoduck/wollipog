@@ -39,15 +39,24 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   await page.keyboard.press("Shift+Escape");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(1);
 
-  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha"));
-  await expect(page.getByText("Interrupted", { exact: true })).toBeVisible();
-  await expect(page.getByText("Held", { exact: true })).toHaveAttribute(
-    "title",
-    "Held after stopping the active turn; send another prompt to resume",
-  );
   await composer.focus();
   await page.keyboard.press("ArrowUp");
   await expect(composer).toHaveValue("Preserve this queued prompt");
+  await composer.fill("");
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha"));
+  await expect(page.getByText("Interrupted", { exact: true })).toBeVisible();
+  await expect(page.getByText("Held", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("queued-prompt-queued-1")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => {
+    const session = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
+      .find((candidate) => candidate.id === "session-alpha");
+    return { status: session?.status, activeTurnId: session?.activeTurnId, queued: session?.queued ?? [] };
+  })).toEqual({ status: "running", activeTurnId: "queued-1", queued: [] });
+  await composer.focus();
+  await page.keyboard.press("ArrowUp");
+  await expect(composer).toHaveValue("Preserve this queued prompt");
+  await composer.fill("");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
     status: "running",
@@ -285,3 +294,38 @@ test("a policy pause does not expose Stop Turn or app-owned stop", async ({ page
   await expect(workingRow).toBeVisible();
   await expect(workingRow).toContainText("Waiting for Approval");
 });
+
+for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`composer explains policy, offline, and terminal states at ${viewport.width}px in ${theme}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.emulateMedia({ colorScheme: theme });
+      await openSession(page);
+      await page.evaluate(theme => {
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      }, theme);
+      const composer = page.locator(".composer-input");
+      await expect(composer).toBeEnabled();
+      await expect(composer).toHaveAttribute("placeholder", "Do anything");
+      await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+        status: "input_required",
+        pendingApproval: { kind: "cost_budget", requestId: "budget-copy", title: "Cost Budget Reached", options: [] },
+      }));
+      await expect(composer).toBeDisabled();
+      await expect(composer).toHaveAttribute("placeholder", "Session is paused by guardrails. Review the pending decision to continue.");
+      await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
+      await expect(composer).toBeDisabled();
+      await expect(composer).toHaveAttribute("placeholder", "Runner is offline.");
+      await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "stopped" }));
+      await expect(composer).toBeDisabled();
+      await expect(composer).toHaveAttribute("placeholder", "Session is stopped.");
+      await page.evaluate(() => {
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("online");
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "idle", pendingApproval: null });
+      });
+      await expect(composer).toBeEnabled();
+      await expect(composer).toHaveAttribute("placeholder", "Do anything");
+    });
+  }
+}

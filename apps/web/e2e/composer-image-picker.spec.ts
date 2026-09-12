@@ -310,6 +310,75 @@ test("the Add and Modes icon stays centered independently of font metrics", asyn
   await expectCentered("disabled");
 });
 
+test("guardrail guidance stays compact and aligns at desktop and phone widths", async ({ page }) => {
+  for (const viewport of [
+    { name: "desktop", width: 1280, height: 800 },
+    { name: "phone", width: 390, height: 800 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await openSession(page);
+    await openPlusMenu(page);
+
+    const recurring = page.getByRole("spinbutton", { name: "Recurring Cost Threshold" });
+    const checkpoints = page.getByRole("textbox", { name: "Cost Checkpoints" });
+    const toolCalls = page.getByRole("spinbutton", { name: "Tool-Call Threshold" });
+    for (const [label, hint] of [
+      [
+        "Recurring Cost Threshold",
+        "Pauses when spend reaches this amount. Continue advances the next threshold by another equal allowance.",
+      ],
+      [
+        "Cost Checkpoints",
+        "Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again. " +
+          "Checkpoints at or above the recurring cost threshold do not pause separately.",
+      ],
+      ["Tool-Call Threshold", "Pauses after this many tool calls."],
+      [
+        "Live Child Limit",
+        "A session can run four live children by default. Set 0 to pause new child admission. " +
+          "Terminal and archived children release their slots.",
+      ],
+    ] as const) {
+      const help = page.getByRole("button", { name: `About ${label}` });
+      await expect(help).toHaveAccessibleDescription(`About ${label}`);
+      await help.click();
+      await expect(help).toHaveAccessibleDescription(hint);
+      await expect(page.getByRole("note")).toHaveText(hint);
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("note")).toHaveCount(0);
+      await expect(help).toBeFocused();
+    }
+
+    const geometry = await Promise.all([recurring, checkpoints, toolCalls].map((control) => control.evaluate((input) => {
+      const element = input.closest(".plus-budget")!;
+      const row = element.getBoundingClientRect();
+      const prefix = element.querySelector(".plus-budget-prefix")!.getBoundingClientRect();
+      const inputBox = input.getBoundingClientRect();
+      const copyElement = element.querySelector(".plus-budget-copy") as HTMLElement;
+      const copy = copyElement.getBoundingClientRect();
+      return {
+        row: { left: row.left, right: row.right },
+        prefix: { right: prefix.right },
+        input: { left: inputBox.left, right: inputBox.right },
+        copy: { left: copy.left, right: copy.right, scrollWidth: copyElement.scrollWidth },
+      };
+    })));
+
+    expect(new Set(geometry.map(({ input }) => input.left)).size,
+      `${viewport.name}: all guardrail inputs start in the same column`).toBe(1);
+    for (const [index, item] of geometry.entries()) {
+      expect(item.prefix.right, `${viewport.name} row ${index}: prefix stays before input`).toBeLessThanOrEqual(item.input.left);
+      expect(item.input.right, `${viewport.name} row ${index}: input stays before copy`).toBeLessThanOrEqual(item.copy.left);
+      expect(item.copy.right, `${viewport.name} row ${index}: copy stays inside row`).toBeLessThanOrEqual(item.row.right);
+      expect(item.copy.scrollWidth, `${viewport.name} row ${index}: copy wraps instead of truncating`).toBeLessThanOrEqual(
+        Math.ceil(item.copy.right - item.copy.left),
+      );
+    }
+
+    await page.keyboard.press("Escape");
+  }
+});
+
 test.describe("on a phone", () => {
   test.use({
     viewport: phone.viewport,

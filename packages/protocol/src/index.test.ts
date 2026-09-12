@@ -10,11 +10,22 @@ import {
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
   PROTOCOL_VERSION,
+  SESSION_NAMING_CLEANUP_BUDGET_MS,
+  SESSION_NAMING_GENERATION_BUDGET_MS,
+  SESSION_NAMING_PREPARATION_BUDGET_MS,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+  SESSION_NAMING_SUPERVISION_MARGIN_MS,
+  SESSION_NAMING_TRANSPORT_MARGIN_MS,
+  SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
+  SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
   providerAuthenticationReceiptCode,
   projectRunnerMessageForProtocol,
   projectSessionEventPayloadForProtocol,
   sessionNamingAgentFailureCode,
   sessionEventWireProjectionRequiredForProtocol,
+  sessionEventWireProjectionVariant,
+  SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET,
+  SESSION_EVENT_WIRE_PROJECTION_VARIANTS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -35,7 +46,9 @@ import {
   validateQuestionFreeText,
   validatePromptImageInputs,
   providerSupportsConversationFork,
+  isOrchestratorOnlyCapabilities,
   mergeSessionCapabilities,
+  nativeTuiHasTrackedGuardrails,
   type SessionStatus,
   type AgentCapabilities,
   type AgentDefinition,
@@ -71,6 +84,14 @@ import {
   type ReadQueuedPromptMessage,
   type ReadQueuedPromptResultMessage,
 } from "./index.js";
+
+test("Native TUI guardrail detection follows persisted positive-limit semantics", () => {
+  assert.equal(nativeTuiHasTrackedGuardrails({}), false);
+  assert.equal(nativeTuiHasTrackedGuardrails({ costBudgetUsd: 0, maxToolCalls: 0.9, costCheckpointsUsd: [] }), false);
+  assert.equal(nativeTuiHasTrackedGuardrails({ costBudgetUsd: 1 }), true);
+  assert.equal(nativeTuiHasTrackedGuardrails({ maxToolCalls: 1 }), true);
+  assert.equal(nativeTuiHasTrackedGuardrails({ costCheckpointsUsd: [0.5] }), true);
+});
 
 const DURABLE_SESSION_COMMAND_ERROR_CODES = [
   "COMMAND_ID_CONFLICT",
@@ -133,14 +154,109 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 102", () => {
-  assert.equal(PROTOCOL_VERSION, 102);
+test("PROTOCOL_VERSION is 134", () => {
+  assert.equal(PROTOCOL_VERSION, 134);
+  assert.equal(runnerSupportsProtocol(131, "machineRunnerCapacity"), false);
+  assert.equal(runnerSupportsProtocol(132, "machineRunnerCapacity"), true);
+  assert.equal(runnerSupportsProtocol(127, "providerHistoryQuarantine"), false);
+  assert.equal(runnerSupportsProtocol(128, "providerHistoryQuarantine"), true);
+  assert.equal(runnerSupportsProtocol(121, "contextWindowVariants"), false);
+  assert.equal(runnerSupportsProtocol(122, "contextWindowVariants"), true);
+  assert.equal(runnerSupportsProtocol(122, "wslAgentControlBridge"), false);
+  assert.equal(runnerSupportsProtocol(123, "wslAgentControlBridge"), true);
+  assert.equal(runnerSupportsProtocol(123, "wslSafeLauncher"), false);
+  assert.equal(runnerSupportsProtocol(124, "wslSafeLauncher"), true);
+  assert.equal(runnerSupportsProtocol(128, "governanceTripReporting"), false);
+  assert.equal(runnerSupportsProtocol(129, "governanceTripReporting"), true);
+  assert.equal(runnerSupportsProtocol(129, "nativePolicyHookEvents"), false);
+  assert.equal(runnerSupportsProtocol(130, "nativePolicyHookEvents"), true);
+  assert.equal(runnerSupportsProtocol(112, "progressAwareSessionWorktrees"), false);
+  assert.equal(runnerSupportsProtocol(113, "progressAwareSessionWorktrees"), true);
+  assert.equal(runnerSupportsProtocol(113, "hostAdministration"), false);
+  assert.equal(runnerSupportsProtocol(114, "hostAdministration"), true);
+  assert.equal(runnerSupportsProtocol(111, "orchestratorNativeTui"), false);
+  assert.equal(runnerSupportsProtocol(112, "orchestratorNativeTui"), true);
+  assert.equal(runnerSupportsProtocol(110, "machineSkillSnapshots"), false);
+  assert.equal(runnerSupportsProtocol(111, "machineSkillSnapshots"), true);
+  assert.equal(runnerSupportsProtocol(118, "nativeWindowsMachineSkillSnapshots"), false);
+  assert.equal(runnerSupportsProtocol(119, "nativeWindowsMachineSkillSnapshots"), true);
+  assert.equal(runnerSupportsProtocol(118, "nativeWindowsSkillDeployment"), false);
+  assert.equal(runnerSupportsProtocol(119, "nativeWindowsSkillDeployment"), true);
+  assert.equal(runnerSupportsProtocol(119, "nativeMacosMachineSkillSnapshots"), false);
+  assert.equal(runnerSupportsProtocol(120, "nativeMacosMachineSkillSnapshots"), true);
+  assert.equal(runnerSupportsProtocol(120, "nativeTuiAccountingDiagnostics"), false);
+  assert.equal(runnerSupportsProtocol(121, "nativeTuiAccountingDiagnostics"), true);
+  assert.equal(runnerSupportsProtocol(124, "wslMachineSkills"), false);
+  assert.equal(runnerSupportsProtocol(125, "wslMachineSkills"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.codexServiceTiers, 126);
+  assert.equal(runnerSupportsProtocol(125, "codexServiceTiers"), false);
+  assert.equal(runnerSupportsProtocol(126, "codexServiceTiers"), true);
+  assert.equal(runnerSupportsProtocol(116, "hostAdminDoctor"), false);
+  assert.equal(runnerSupportsProtocol(117, "hostAdminDoctor"), true);
+  assert.equal(runnerSupportsProtocol(114, "machineSkillAdoption"), false);
+  assert.equal(runnerSupportsProtocol(115, "machineSkillAdoption"), true);
+  assert.equal(runnerSupportsProtocol(115, "machineSkillAdoptionRecovery"), false);
+  assert.equal(runnerSupportsProtocol(116, "machineSkillAdoptionRecovery"), true);
+  assert.equal(runnerSupportsProtocol(109, "conversationHandoff"), false);
+  assert.equal(runnerSupportsProtocol(110, "conversationHandoff"), true);
+  assert.equal(runnerSupportsProtocol(108, "sessionOrchestration"), false);
+  assert.equal(runnerSupportsProtocol(109, "sessionOrchestration"), true);
+  assert.equal(runnerSupportsProtocol(107, "workerAttention"), false);
+  assert.equal(runnerSupportsProtocol(108, "workerAttention"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.resumableQuestionAnswers, 107);
+  assert.equal(runnerSupportsProtocol(106, "resumableQuestionAnswers"), false);
+  assert.equal(runnerSupportsProtocol(107, "resumableQuestionAnswers"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.pricedSessionCost, 106);
+  assert.equal(runnerSupportsProtocol(105, "pricedSessionCost"), false);
+  assert.equal(runnerSupportsProtocol(106, "pricedSessionCost"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.workspaceReferences, 106);
+  assert.equal(runnerSupportsProtocol(105, "workspaceReferences"), false);
+  assert.equal(runnerSupportsProtocol(106, "workspaceReferences"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.usageEventModel, 104);
+  assert.equal(runnerSupportsProtocol(103, "usageEventModel"), false);
+  assert.equal(runnerSupportsProtocol(104, "usageEventModel"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.usageTokenBuckets, 103);
+  assert.equal(runnerSupportsProtocol(102, "usageTokenBuckets"), false);
+  assert.equal(runnerSupportsProtocol(103, "usageTokenBuckets"), true);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees, 101);
   assert.equal(runnerSupportsProtocol(100, "sessionWorktrees"), false);
   assert.equal(runnerSupportsProtocol(101, "sessionWorktrees"), true);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeDiscard, 102);
   assert.equal(runnerSupportsProtocol(101, "sessionWorktreeDiscard"), false);
   assert.equal(runnerSupportsProtocol(102, "sessionWorktreeDiscard"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundInventory, 82);
+  assert.equal(runnerSupportsProtocol(81, "managedBackgroundInventory"), false);
+  assert.equal(runnerSupportsProtocol(82, "managedBackgroundInventory"), true);
+  assert.equal(runnerSupportsProtocol(133, "backgroundMissingResultRecovery"), false);
+  assert.equal(runnerSupportsProtocol(134, "backgroundMissingResultRecovery"), true);
+});
+
+test("worktree create deadlines preserve transport and error-reporting order", () => {
+  assert.ok(SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS > 30_000,
+    "runner preparation outlives the ordinary client deadline");
+  assert.ok(SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS > SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
+    "the client receives a server-side timeout before its own abort fires");
+  assert.ok(SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS < 300_000,
+    "Node fetch's default transport deadline must not preempt the client signal");
+});
+
+test("session naming budgets account for preparation and stay ordered outermost-last", () => {
+  assert.ok(SESSION_NAMING_GENERATION_BUDGET_MS > 5_000,
+    "provider generation alone must outlast the old five-second total budget");
+  assert.equal(SESSION_NAMING_PREPARATION_BUDGET_MS + SESSION_NAMING_GENERATION_BUDGET_MS,
+    SESSION_NAMING_RUNNER_BUDGET_MS,
+    "preparation is charged explicitly rather than taken out of the generation allowance");
+  const runnerRequestMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_TRANSPORT_MARGIN_MS;
+  const supervisionMs = SESSION_NAMING_RUNNER_BUDGET_MS + SESSION_NAMING_SUPERVISION_MARGIN_MS;
+  assert.ok(runnerRequestMs > SESSION_NAMING_RUNNER_BUDGET_MS,
+    "the runner reports its own timeout before the control plane gives up on the round trip");
+  assert.ok(supervisionMs > runnerRequestMs,
+    "the control-plane abort must not preempt its own runner request deadline");
+  // The desktop transport grants 35s and the runner clamps naming to 15s: the chain stays bounded.
+  assert.ok(SESSION_NAMING_TRANSPORT_MARGIN_MS > SESSION_NAMING_CLEANUP_BUDGET_MS,
+    "teardown after a generated title must fit inside the round-trip margin it sits within");
+  assert.ok(SESSION_NAMING_RUNNER_BUDGET_MS <= 15_000, "the runner rejects budgets above 15s");
+  assert.ok(supervisionMs < 35_000, "the desktop naming read budget must outlast the whole chain");
 });
 
 test("v99 queued prompt editing messages preserve opaque revisions and attachments", () => {
@@ -478,6 +594,29 @@ test("a complete ACP session capability snapshot remains authoritative when its 
   assert.deepEqual(mergeSessionCapabilities(catalog, acpSession), acpSession);
 });
 
+test("an orchestration-only ACP catalog marker never replaces live provider capabilities", () => {
+  const catalog: AgentCapabilities = {
+    models: [],
+    effortLevels: [],
+    slashCommands: [],
+    supportsImages: true,
+    supportsApprovals: true,
+    permissionModes: ["orchestrator"],
+    elicitation: { orchestrator: ["none"] },
+  };
+  const live: AgentCapabilities = {
+    models: [{ id: "provider-model" }],
+    effortLevels: ["provider-effort"],
+    slashCommands: [{ name: "provider-command", source: "builtin" }],
+    supportsImages: false,
+    supportsApprovals: true,
+  };
+  assert.equal(isOrchestratorOnlyCapabilities(catalog), true);
+  assert.equal(mergeSessionCapabilities(catalog, undefined), undefined,
+    "unknown ACP controls stay permissive before the live handshake");
+  assert.deepEqual(mergeSessionCapabilities(catalog, live), live);
+});
+
 test("native session command overlays replace only session-scoped catalog fields", () => {
   const catalog: AgentCapabilities = {
     models: [{ id: "catalog-model", default: true }],
@@ -630,6 +769,8 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(50, "fineGrainedDiff"), true);
   assert.equal(runnerSupportsProtocol(50, "githubReviewReconciliation"), false);
   assert.equal(runnerSupportsProtocol(51, "githubReviewReconciliation"), true);
+  assert.equal(runnerSupportsProtocol(105, "forgeIntegration"), false);
+  assert.equal(runnerSupportsProtocol(106, "forgeIntegration"), true);
   assert.equal(runnerSupportsProtocol(51, "podReconciliation"), false);
   assert.equal(runnerSupportsProtocol(52, "podReconciliation"), true);
   assert.equal(runnerSupportsProtocol(52, "automationCommandReceipts"), false);
@@ -737,7 +878,34 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(completion, 87), completion);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), false);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), true);
+  assert.equal(sessionEventWireProjectionVariant(86), 2);
+  assert.equal(sessionEventWireProjectionVariant(87), 1);
+
+  const hookDecision = {
+    kind: "policy_hook_decision",
+    auditId: "audit-1",
+    requestId: "request-1",
+    stage: "resolution",
+    outcome: "allowed",
+    actor: { kind: "human" },
+    toolCallId: "tool-1",
+  } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 129), null);
+  assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 130), hookDecision);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(129), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(130), false);
+  assert.equal(sessionEventWireProjectionVariant(129), 1);
+  assert.equal(sessionEventWireProjectionVariant(130), 0);
+  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 3);
+
+  // The variant is the count of unmet policies, so it stays a dense index. The count is the
+  // projected-epoch radix, and the explicit offset fences the retired one-policy encoding.
+  assert.equal(sessionEventWireProjectionVariant(86), 2);
+  assert.equal(sessionEventWireProjectionVariant(undefined), 2);
+  assert.equal(sessionEventWireProjectionVariant(87), 1);
+  assert.equal(sessionEventWireProjectionVariant(130), 0);
+  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 2);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

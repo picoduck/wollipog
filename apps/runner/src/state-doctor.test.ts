@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "./test-support/bounded-child-process.js";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import { CheckpointRefOwnershipLedger } from "./checkpoint-ref-ownership.js";
 import { runStateDoctor, stateDoctorFileSyncFlags } from "./state-doctor.js";

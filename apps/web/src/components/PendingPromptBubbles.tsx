@@ -62,7 +62,11 @@ export function PendingPromptBubbles({
   onCancelLive: (commandId: string) => void;
   onDismiss: (commandId: string) => void;
 }) {
-  return prompts.filter((prompt) => !deliveredCommandIds.has(prompt.commandId)).map((prompt) => {
+  // userEventSeq comes from the runner only after the command-tagged user event is flushed. It is
+  // therefore stronger delivery evidence than the currently loaded (possibly partial) timeline.
+  return prompts.filter((prompt) =>
+    prompt.userEventSeq === undefined && !deliveredCommandIds.has(prompt.commandId)
+  ).map((prompt) => {
     const busy = pendingAction === prompt.commandId;
     const actionPending = pendingAction !== undefined;
     const cancelPending = prompt.canCancel === true;
@@ -79,11 +83,13 @@ export function PendingPromptBubbles({
           <div className="pending-prompt-meta">
             <span className="pending-prompt-state">{pendingPromptLabel(prompt)}</span>
             <span className="pending-prompt-attempts">
-              {prompt.attemptCount > 1 ? `${prompt.attemptCount} Attempts` : "Awaiting Delivery"}
+              {prompt.attemptCount > 1
+                ? `${prompt.attemptCount} Delivery Attempts`
+                : "Awaiting Delivery"}
             </span>
           </div>
           <div id={detailsId}>
-            {prompt.hasImages && <div className="pending-prompt-attachment">Image Attachment</div>}
+            {prompt.hasImages && <div className="pending-prompt-attachment">Attachment</div>}
             {prompt.text && <div className="bubble-text">{prompt.text}</div>}
             {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
           </div>

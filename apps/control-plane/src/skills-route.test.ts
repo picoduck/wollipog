@@ -15,6 +15,7 @@ import { Hub, RunnerRequestTimeoutError, type RunnerRequestResult, type Socket }
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import {
   resolveDesiredSkills,
+  validateSkillPayload,
   SKILLS_SYNC_MAX_TOTAL_BYTES,
   skillsSyncMessageBytes,
 } from "./skills.js";
@@ -100,6 +101,262 @@ async function fixture() {
     stubRequest(fn: (msg: SkillsSyncMessage) => Promise<RunnerRequestResult>) { nextRequestResult = fn; },
   };
 }
+
+test("owned group rules expand changing membership, respect direct overrides and pins, and notify removals", async (t) => {
+  const { app, db, online, pushed } = await fixture();
+  t.after(async () => { await app.close(); db.close(); });
+  for (const id of ["one", "two"]) { db.registerRunner(runnerMeta(id), 10, 90); online.add(id); }
+  const group = (await app.inject({ method: "POST", url: "/api/skill-groups", payload: { name: "Tools" } })).json().group;
+  assert.ok(group.scope);
+  const rules = `/api/skill-groups/${group.id}/assignments`;
+  const response = await app.inject({ method: "POST", url: rules, payload: {
+    scopeKind: "runner", runnerId: "one", agentSelector: { kind: "agent", agentId: "codex" }, invocation: "manual",
+  } });
+  assert.equal(response.statusCode, 201, response.body);
+  const rule = response.json().assignment;
+  assert.deepEqual(resolveDesiredSkills(db, "one"), [], "empty group is safe and dynamically assignable");
+  const skill = (await app.inject({ method: "POST", url: "/api/skills", payload: { ...skillPayload("grouped"), groupId: group.id } })).json().skill;
+  assert.equal(db.getSkill(skill.id)!.assignmentCount, 1);
+  assert.deepEqual(resolveDesiredSkills(db, "one")[0]!.targets, [{ agentId: "codex", invocation: "manual" }]);
+  assert.deepEqual(resolveDesiredSkills(db, "two"), []);
+  const version = db.getSkillVersion(skill.latestVersion.id)!;
+  db.setMachineSkillVersion(skill.id, "one", version.id, null, version.id);
+  db.addSkillVersion(skill.id, { files: version.files, manifest: version.manifest, digest: "new-digest" });
+  assert.equal(resolveDesiredSkills(db, "one")[0]!.versionDigest, version.digest);
+  const direct = db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one",
+    agentSelector: { kind: "agent", agentId: "codex" }, enabled: false, now: 1 });
+  assert.deepEqual(resolveDesiredSkills(db, "one"), [], "equal-specificity direct disable wins despite older timestamp");
+  db.deleteSkillAssignment(direct.id);
+  assert.equal((await app.inject({ method: "PATCH", url: `${rules}/${rule.id}`, payload: { enabled: false } })).statusCode, 200);
+  assert.deepEqual(resolveDesiredSkills(db, "one"), []);
+  await app.inject({ method: "PATCH", url: `${rules}/${rule.id}`, payload: { enabled: true } });
+  db.registerRunner(runnerMeta("one"), 20, 90);
+  assert.equal(resolveDesiredSkills(db, "one").length, 1, "registration preserves group rules");
+  pushed.length = 0;
+  assert.equal((await app.inject({ method: "PUT", url: `/api/skills/${skill.id}`, payload: { groupId: null } })).statusCode, 200);
+  assert.deepEqual(resolveDesiredSkills(db, "one"), []);
+  assert.ok(pushed.some(p => p.runnerId === "one"), "membership removal sends authoritative sync");
+  await app.inject({ method: "PUT", url: `/api/skills/${skill.id}`, payload: { groupId: group.id } });
+  pushed.length = 0;
+  assert.equal((await app.inject({ method: "DELETE", url: `/api/skills/${skill.id}` })).statusCode, 204);
+  assert.ok(pushed.some(p => p.runnerId === "one"), "deletion notifies group-only deployment");
+  assert.deepEqual(resolveDesiredSkills(db, "one"), []);
+  assert.equal((await app.inject({ method: "DELETE", url: `${rules}/${rule.id}` })).statusCode, 204);
+  assert.deepEqual((await app.inject(rules)).json().assignments, []);
+});
+
+test("legacy groups require explicit same-scope conversion; owned groups reject foreign skills and principals", async (t) => {
+  const { app, db } = await fixture();
+  t.after(async () => { await app.close(); db.close(); });
+  const legacy = db.createSkillGroup("Legacy");
+  assert.deepEqual((await app.inject("/api/skill-groups")).json().creationScope,
+    { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "organization", organizationId: PERSONAL_ORGANIZATION_ID } });
+  const rules = `/api/skill-groups/${legacy.id}/assignments`;
+  assert.equal((await app.inject({ method: "POST", url: rules, payload: { scopeKind: "instance", agentSelector: { kind: "all" } } })).statusCode, 404);
+  assert.equal((await app.inject({ method: "POST", url: `/api/skill-groups/${legacy.id}/convert` })).statusCode, 400);
+  const converted = await app.inject({ method: "POST", url: `/api/skill-groups/${legacy.id}/convert`, payload: { accepted: true } });
+  assert.equal(converted.statusCode, 200);
+  assert.equal((await app.inject({ method: "POST", url: `/api/skill-groups/${legacy.id}/convert`, payload: { accepted: true } })).statusCode, 409);
+  const foreignScope = { organizationId: "foreign", owner: { kind: "organization" as const, organizationId: "foreign" } };
+  const foreignGroup = db.createSkillGroup("Foreign", 10, foreignScope);
+  const data = validateSkillPayload(skillPayload("foreign-skill")); assert.ok(data.ok);
+  const foreignSkill = db.createSkill({ ...data, scope: foreignScope });
+  assert.throws(() => db.updateSkill(foreignSkill.id, { groupId: legacy.id }), /same ownership scope/);
+  assert.throws(() => db.createSkill({ ...data, name: "foreign-other", scope: foreignScope, groupId: legacy.id }), /same ownership scope/);
+  const mixed = db.createSkillGroup("Mixed");
+  db.updateSkill(foreignSkill.id, { groupId: mixed.id });
+  assert.equal((await app.inject({ method: "POST", url: `/api/skill-groups/${mixed.id}/convert`, payload: { accepted: true } })).statusCode, 409);
+  assert.equal(db.skillGroupScope(mixed.id), null, "failed conversion leaves legacy metadata intact");
+  assert.ok(!(await app.inject("/api/skill-groups")).json().groups.some((g: { id: string }) => g.id === foreignGroup.id));
+  for (const method of ["GET", "POST"] as const) assert.equal((await app.inject({ method, url: `/api/skill-groups/${foreignGroup.id}/assignments` })).statusCode, 404);
+  assert.equal((await app.inject({ method: "DELETE", url: `/api/skill-groups/${foreignGroup.id}` })).statusCode, 404);
+  assert.equal((await app.inject({ method: "POST", url: "/api/skills", payload: { ...skillPayload("probe"), groupId: foreignGroup.id } })).statusCode, 404);
+});
+
+test("group expansion fails closed after ownership changes; group and machine deletion preserve unrelated rules", async (t) => {
+  const { app, db, online } = await fixture();
+  t.after(async () => { await app.close(); db.close(); });
+  db.createBox({ boxId: "box", runnerId: "two", sshTarget: "user@host", sshPort: 22, workspaces: [], autoReconnect: false, runnerDataDir: null, now: 1 });
+  for (const id of ["one", "two"]) { db.registerRunner(runnerMeta(id), 10, 90); online.add(id); }
+  const group = (await app.inject({ method: "POST", url: "/api/skill-groups", payload: { name: "Shared" } })).json().group;
+  const skill = (await app.inject({ method: "POST", url: "/api/skills", payload: { ...skillPayload("scope-check"), groupId: group.id } })).json().skill;
+  const input = { groupId: group.id, scopeKind: "instance" as const, runnerId: null, agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const };
+  db.createSkillGroupAssignment(input);
+  for (const runnerId of ["one", "two"]) db.createSkillGroupAssignment({ ...input, scopeKind: "runner", runnerId });
+  const direct = db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "agent", agentId: "claude" } });
+  db.raw().prepare("UPDATE skill_ownership SET owner_kind='user', owner_id='different-user' WHERE skill_id=?").run(skill.id);
+  assert.deepEqual(db.listExpandedSkillGroupAssignments("one"), [], "scope mismatch prevents inherited deployment");
+  db.raw().prepare("UPDATE skill_ownership SET owner_kind='organization', owner_id=? WHERE skill_id=?").run(PERSONAL_ORGANIZATION_ID, skill.id);
+  assert.equal(db.listExpandedSkillGroupAssignments("one").length, 2);
+  db.deleteRunner("one");
+  assert.equal(db.listSkillGroupAssignments(group.id).length, 2);
+  db.deleteBox("box");
+  assert.equal(db.listSkillGroupAssignments(group.id).length, 1);
+  db.deleteSkillGroup(group.id);
+  assert.deepEqual(db.listSkillGroupAssignments(group.id), []);
+  assert.equal(db.skillGroupScope(group.id), null);
+  assert.equal(db.getSkill(skill.id)!.groupId, null);
+  assert.ok(db.getSkillAssignment(direct.id));
+  assert.ok(db.getSkillVersion(skill.latestVersion.id));
+});
+
+test("machine pins survive updates and registration, preserve targeting, and fence stale pin or unpin previews", async (t) => {
+  const { app, db, online, pushed } = await fixture();
+  t.after(() => { void app.close(); db.close(); });
+  for (const id of ["pinned", "tracking"]) { db.registerRunner(runnerMeta(id), 10, 90); online.add(id); }
+  const skill = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("pinned-skill") })).json().skill;
+  const original = db.getSkillVersion(skill.latestVersion.id)!;
+  const assignment = db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "agent", agentId: "codex" } });
+  const path = `/api/skills/${skill.id}/machines/pinned/version`;
+  const preview = (await app.inject(`${path}?versionId=${original.id}`)).json();
+  assert.equal(preview.policy, null);
+  assert.equal(preview.proposedVersion.id, original.id);
+  pushed.length = 0;
+  const payload = { versionId: original.id, expectedRevision: null, expectedLatestVersionId: original.id };
+  assert.equal((await app.inject({ method: "PUT", url: path, payload })).statusCode, 200);
+  assert.deepEqual(pushed.map((p) => p.runnerId), ["pinned"]);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload })).statusCode, 409);
+  const input = validateSkillPayload({ name: skill.name, files: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: pinned-skill\n---\nUpdated" }] });
+  assert.ok(input.ok);
+  const updated = db.addSkillVersion(skill.id, input)!;
+  db.registerRunner(runnerMeta("pinned"), 20, 90);
+  assert.equal(resolveDesiredSkills(db, "pinned")[0]!.versionDigest, original.digest);
+  assert.equal(resolveDesiredSkills(db, "tracking")[0]!.versionDigest, updated.digest);
+  assert.deepEqual(resolveDesiredSkills(db, "pinned")[0]!.targets.map((a) => a.agentId), ["codex"]);
+  assert.deepEqual(db.listSkillAssignments(skill.id), [assignment]);
+  const beforeClear = (await app.inject(path)).json();
+  assert.equal(beforeClear.currentVersion.id, original.id);
+  assert.equal(beforeClear.proposedVersion.id, updated.id);
+  const clear = { versionId: null, expectedRevision: beforeClear.policy.revision, expectedLatestVersionId: updated.id };
+  assert.equal((await app.inject({ method: "PUT", url: path, payload: clear })).statusCode, 200);
+  assert.equal(resolveDesiredSkills(db, "pinned")[0]!.versionDigest, updated.digest);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload: clear })).statusCode, 409, "track-latest transitions retain unique revisions");
+  const track = db.getMachineSkillVersion(skill.id, "pinned")!;
+  db.addSkillVersion(skill.id, input);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload: { ...payload, expectedRevision: track.revision, expectedLatestVersionId: updated.id } })).statusCode, 409);
+  db.deleteRunner("pinned");
+  assert.equal(db.getMachineSkillVersion(skill.id, "pinned"), null, "deleted machines leave no policy for a reused id");
+  db.setMachineSkillVersion(skill.id, "tracking", original.id, null, db.getSkill(skill.id)!.latestVersion!.id);
+  db.deleteSkill(skill.id);
+  assert.equal(db.getMachineSkillVersion(skill.id, "tracking"), null);
+});
+
+test("machine version policy rejects cross-skill versions, inaccessible machines, invalid bodies, and old runners", async (t) => {
+  const { app, db } = await fixture();
+  t.after(() => { void app.close(); db.close(); });
+  db.registerRunner(runnerMeta("capable-pin"), 10, 90);
+  db.registerRunner(runnerMeta("legacy-pin"), 10, 89);
+  db.registerRunner(runnerMeta("foreign-pin"), 10, 90, { organizationId: "foreign", owner: { kind: "user", userId: "foreign" } });
+  const one = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("pin-one") })).json().skill;
+  const two = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("pin-two") })).json().skill;
+  const path = `/api/skills/${one.id}/machines/capable-pin/version`;
+  const payload = { versionId: two.latestVersion.id, expectedRevision: null, expectedLatestVersionId: one.latestVersion.id };
+  assert.equal((await app.inject(`${path}?versionId=${two.latestVersion.id}`)).statusCode, 404);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload })).statusCode, 404);
+  assert.equal((await app.inject({ method: "PUT", url: path, payload: { versionId: null } })).statusCode, 400);
+  assert.equal((await app.inject({ method: "PUT", url: `/api/skills/${one.id}/machines/legacy-pin/version`, payload: { ...payload, versionId: null } })).statusCode, 409);
+  assert.equal((await app.inject(`/api/skills/${one.id}/machines/foreign-pin/version`)).statusCode, 404);
+  assert.equal((await app.inject({ method: "PUT", url: `/api/skills/${one.id}/machines/foreign-pin/version`, payload: { ...payload, versionId: null } })).statusCode, 404);
+  assert.equal(db.getMachineSkillVersion(one.id, "capable-pin"), null);
+  assert.deepEqual((await app.inject(`${path}-policy`)).json(), { policy: null });
+  assert.equal((await app.inject(`/api/skills/${one.id}/machines/foreign-pin/version-policy`)).statusCode, 404);
+  assert.equal((await app.inject(`/api/skills/missing/machines/capable-pin/version-policy`)).statusCode, 404);
+  db.setMachineSkillVersion(one.id, "capable-pin", one.latestVersion.id, null, one.latestVersion.id);
+  const listed = (await app.inject(`${path}-policy`)).json();
+  assert.equal(listed.policy.versionId, one.latestVersion.id);
+  assert.equal(typeof listed.policy.revision, "string");
+  assert.deepEqual(Object.keys(listed.policy).sort(), ["revision", "versionId"], "policy listing never includes skill files");
+});
+
+test("skill history is paginated without payloads and restore preserves history while fencing stale previews", async (t) => {
+  const { app, db, online, pushed } = await fixture();
+  t.after(() => { void app.close(); db.close(); });
+  db.registerRunner(runnerMeta("history-runner"), 10, 90);
+  online.add("history-runner");
+  const skill = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("history-skill") })).json().skill;
+  const original = db.getSkillVersion(skill.latestVersion.id)!;
+  const assignment = db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "all" } });
+  for (let i = 0; i < 52; i++) {
+    const input = validateSkillPayload({ ...skillPayload("history-skill"), files: [{ path: "SKILL.md", encoding: "utf8", content: `---\nname: history-skill\n---\nRevision ${i}` }] });
+    assert.ok(input.ok);
+    db.addSkillVersion(skill.id, input, original.createdAt + 1);
+  }
+  const first = (await app.inject(`/api/skills/${skill.id}/versions`)).json();
+  assert.equal(first.versions.length, 50);
+  assert.ok(first.nextCursor);
+  assert.deepEqual(Object.keys(first.versions[0]).sort(), ["createdAt", "digest", "id"]);
+  const second = (await app.inject(`/api/skills/${skill.id}/versions?before=${first.nextCursor}`)).json();
+  assert.equal(second.versions.length, 3);
+  assert.equal(second.nextCursor, null);
+  assert.equal(new Set([...first.versions, ...second.versions].map((v) => v.id)).size, 53);
+  assert.equal((await app.inject(`/api/skills/${skill.id}/versions?before=missing`)).statusCode, 400);
+  const preview = (await app.inject(`/api/skills/${skill.id}/versions/${original.id}`)).json();
+  assert.deepEqual(preview.version, original);
+  const current = preview.currentVersion;
+  pushed.length = 0;
+  const response = await app.inject({ method: "POST", url: `/api/skills/${skill.id}/restore`, payload: { versionId: original.id, expectedLatestVersionId: current.id } });
+  assert.equal(response.statusCode, 200);
+  const restored = response.json().version;
+  assert.notEqual(restored.id, original.id);
+  assert.notEqual(restored.id, current.id);
+  assert.deepEqual(restored.files, original.files);
+  assert.equal(restored.digest, original.digest);
+  assert.equal(restored.note, `Restored from ${original.id}`);
+  assert.deepEqual(db.getSkillVersion(original.id), original);
+  assert.deepEqual(db.getSkillVersion(current.id), current);
+  assert.deepEqual(db.listSkillAssignments(skill.id), [assignment]);
+  assert.equal(resolveDesiredSkills(db, "history-runner")[0]!.versionDigest, original.digest);
+  assert.equal(pushed.length, 1);
+  const stale = await app.inject({ method: "POST", url: `/api/skills/${skill.id}/restore`, payload: { versionId: original.id, expectedLatestVersionId: current.id } });
+  assert.equal(stale.statusCode, 409);
+  assert.equal(db.getSkill(skill.id)!.latestVersion!.id, restored.id);
+  assert.equal(pushed.length, 1, "conflicts never trigger sync");
+  const noop = await app.inject({ method: "POST", url: `/api/skills/${skill.id}/restore`, payload: { versionId: restored.id, expectedLatestVersionId: restored.id } });
+  assert.equal(noop.json().version.id, restored.id);
+});
+
+test("historical version access and restore reject foreign skills, audiences, and invalid input", async (t) => {
+  const { app, db } = await fixture();
+  t.after(() => { void app.close(); db.close(); });
+  const one = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("first-skill") })).json().skill;
+  const two = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("second-skill") })).json().skill;
+  assert.equal((await app.inject(`/api/skills/${one.id}/versions/${two.latestVersion.id}`)).statusCode, 404);
+  assert.equal((await app.inject(`/api/skills/${one.id}/versions?before=${two.latestVersion.id}`)).statusCode, 400);
+  assert.equal((await app.inject({ method: "POST", url: `/api/skills/${one.id}/restore`, payload: { versionId: two.latestVersion.id, expectedLatestVersionId: one.latestVersion.id } })).statusCode, 404);
+  for (const payload of [{}, { versionId: 123, expectedLatestVersionId: [] }, { versionId: one.latestVersion.id }]) {
+    assert.equal((await app.inject({ method: "POST", url: `/api/skills/${one.id}/restore`, payload })).statusCode, 400);
+  }
+  const privateInput = validateSkillPayload(skillPayload("private-history"));
+  assert.ok(privateInput.ok);
+  const foreign = db.createSkill({ ...privateInput, scope: { organizationId: "foreign-org", owner: { kind: "user", userId: "foreign-user" } } });
+  assert.equal((await app.inject(`/api/skills/${foreign.id}/versions`)).statusCode, 404);
+  assert.equal((await app.inject(`/api/skills/${foreign.id}/versions/${foreign.latestVersion!.id}`)).statusCode, 404);
+  assert.equal((await app.inject({ method: "POST", url: `/api/skills/${foreign.id}/restore`, payload: { versionId: foreign.latestVersion!.id, expectedLatestVersionId: foreign.latestVersion!.id } })).statusCode, 404);
+  assert.equal(db.getSkill(one.id)!.latestVersion!.id, one.latestVersion.id);
+  const agentApp = Fastify();
+  registerSkillRoutes(agentApp, { db, hub: {} as SkillsHub, requestPrincipal: () => null, requestHuman: () => null, pushSkillsSync: (() => {}) as ReturnType<typeof makeSkillsSyncPusher> });
+  t.after(() => agentApp.close());
+  assert.equal((await agentApp.inject(`/api/skills/${one.id}/versions`)).statusCode, 404);
+  assert.equal((await agentApp.inject(`/api/skills/${one.id}/versions/${one.latestVersion.id}`)).statusCode, 404);
+  assert.equal((await agentApp.inject({ method: "POST", url: `/api/skills/${one.id}/restore`, payload: { versionId: one.latestVersion.id, expectedLatestVersionId: one.latestVersion.id } })).statusCode, 403);
+});
+
+test("restore copies immutable Git and machine provenance without changing source versions", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const input = validateSkillPayload(skillPayload("provenance-skill"));
+    assert.ok(input.ok);
+    const scope = { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "user" as const, userId: LOCAL_OWNER_USER_ID } };
+    const skill = db.importGitSkill({ ...input, source: { url: "https://example.com/skills.git", ref: "main", subdirectory: "", path: "", commit: "a".repeat(40) }, scope, expectedVersionId: null });
+    db.importMachineSkill({ ...input, source: { runnerId: "runner-1", sourceDirectory: ".agents/skills", name: input.name, digest: input.digest, importedAt: 1 }, scope, expectedVersionId: skill.latestVersion!.id });
+    const original = db.getSkillVersion(skill.latestVersion!.id)!;
+    const latest = db.addSkillVersion(skill.id, { ...input, note: "A later revision" })!;
+    const restored = db.restoreSkillVersion(skill.id, original.id, latest.id)!;
+    assert.deepEqual(restored.gitSource, original.gitSource);
+    assert.deepEqual(restored.machineSource, original.machineSource);
+    assert.deepEqual(db.getSkillVersion(original.id), original);
+  } finally { db.close(); }
+});
 
 test("POST /api/skills validates, creates skill + first version, and rejects duplicates", async (t) => {
   const { app, db } = await fixture();

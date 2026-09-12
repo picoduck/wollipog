@@ -41,6 +41,17 @@ function percent(value: unknown): number | undefined {
   return parsed === undefined ? undefined : Math.max(0, Math.min(100, parsed));
 }
 
+/** Anthropic reports `utilization` as the fraction of a window consumed, not a percentage: 0.42
+ * means 42% used. Values above 1 are legitimate when usage runs past a window's cap, so the scale
+ * follows the field name and never the magnitude. Percent-named fields are already 0..100. */
+function utilizationPercent(value: unknown): number | undefined {
+  const parsed = finite(value);
+  if (parsed === undefined) return undefined;
+  // Round to hundredths of a percent: scaling by 100 in binary floating point leaves noise
+  // (0.07 becomes 7.000000000000001) that would churn the event-dedupe signature for free.
+  return Math.max(0, Math.min(100, Math.round(parsed * 10_000) / 100));
+}
+
 function epochMilliseconds(value: unknown): number | undefined {
   const parsed = finite(value);
   if (parsed === undefined || parsed <= 0) return undefined;
@@ -242,7 +253,8 @@ export function normalizeCodexRateLimits(
 function claudeWindow(id: string, input: unknown, observedAt: number): SubscriptionUsageBucket | null {
   const window = record(input);
   if (!window) return null;
-  const usedPercent = percent(window.used_percentage ?? window.usedPercent ?? window.utilization);
+  const usedPercent = percent(window.used_percentage ?? window.usedPercent) ??
+    utilizationPercent(window.utilization);
   const resetsAt = boundedResetAt(window.resets_at ?? window.resetsAt, observedAt);
   const duration = boundedDurationMinutes(window.window_duration_minutes ?? window.windowDurationMinutes);
   const rawStatus = stringValue(window.status, 40);
@@ -275,41 +287,125 @@ export function normalizeClaudeRateLimits(
   const root = record(payload);
   if (!root) return null;
   const buckets: SubscriptionUsageBucket[] = [];
-  const structured = record(root.rate_limits ?? root.rateLimits);
-  if (structured) {
-    for (const [id, value] of Object.entries(structured).slice(0, MAX_PROVIDER_BUCKETS)) {
-      const bucket = claudeWindow(id, value, fetchedAt);
+  const info = record(root.rate_limit_info ?? root.rateLimitInfo);
+  if (info) {
+    // `unifiedWindows` is where Claude Code actually reports per-window utilization: one entry per
+    // allowance window (five-hour, weekly, overage-included weekly), each carrying the fraction
+    // consumed and a reset time. It is tracked on every observation, unlike the top-level
+    // status/utilization pair, which only describes whichever window is currently limiting.
+    const limitingId = stringValue(info.rateLimitType ?? info.rate_limit_type, 96);
+    const unified = record(info.unifiedWindows ?? info.unified_windows);
+    const unifiedIds = new Set<string>();
+    for (const [rawId, value] of Object.entries(unified ?? {}).slice(0, MAX_PROVIDER_BUCKETS)) {
+      const window = record(value);
+      if (!window) continue;
+      // Compare sanitized ids. `limitingId` is already bounded, and `claudeWindow` bounds the raw
+      // key the same way, so comparing the raw key would silently miss any id past the bound —
+      // suppressing the top-level bucket while never folding its status into the window.
+      const id = stringValue(rawId, 96);
+      // Distinct raw keys can bound to the same id. The first one read owns it: letting a later
+      // key overwrite would fuse two windows, and both would match a bounded `limitingId`.
+      if (id !== undefined && unifiedIds.has(id)) continue;
+      // A unified window carries no status of its own; the limiting window's status is the
+      // top-level one, so fold it in rather than reporting that window as plainly available.
+      const isLimiting = id !== undefined && id === limitingId;
+      const bucket = claudeWindow(rawId, isLimiting ? { ...window, status: info.status } : window, fetchedAt);
+      if (!bucket) continue;
+      unifiedIds.add(bucket.id);
+      buckets.push(bucket);
+    }
+    // Fold the top-level pair into the window it names. Emitting it separately would stand a
+    // second, percentage-less card beside the real one whenever a sparse status/reset event
+    // arrives for a window `unifiedWindows` already describes.
+    if (!limitingId || !unifiedIds.has(limitingId)) {
+      const bucket = claudeWindow(limitingId ?? "subscription", info, fetchedAt);
       if (bucket) buckets.push(bucket);
     }
   }
-  const info = record(root.rate_limit_info ?? root.rateLimitInfo);
-  if (info) {
-    const id = stringValue(info.rateLimitType ?? info.rate_limit_type, 96) ?? "subscription";
-    const bucket = claudeWindow(id, info, fetchedAt);
-    if (bucket) buckets.push(bucket);
-  }
   if (buckets.length === 0) return null;
+  // The fallback bucket above can still land on an id a unified window already used — a payload
+  // naming no `rateLimitType` while carrying a `subscription` window does exactly that.
   const deduped = new Map<string, SubscriptionUsageBucket>();
-  for (const bucket of buckets) deduped.set(bucket.id, { ...deduped.get(bucket.id), ...bucket });
+  // Records inside one payload are equally current, so this is a plain field merge: ordering
+  // rules belong only to sparse notifications arriving across events.
+  for (const bucket of buckets) deduped.set(bucket.id, mergeBucket(deduped.get(bucket.id), bucket));
   return {
     ...base,
     provider: "claude",
     state: "available",
     fetchedAt,
-    buckets: [...deduped.values()],
+    // Unified windows are already bounded, but the fallback bucket can put the total one over.
+    // The control plane rejects a snapshot above this many buckets and drops the whole update.
+    buckets: [...deduped.values()].slice(0, MAX_PROVIDER_BUCKETS),
   };
+}
+
+/** True when a source has usable allowance numbers, as opposed to reset times alone. */
+export function hasSubscriptionUtilization(snapshot: SubscriptionUsageSnapshot): boolean {
+  return snapshot.buckets.some((bucket) =>
+    bucket.usedPercent !== undefined || bucket.remainingPercent !== undefined);
+}
+
+/** Field-level merge with no ordering judgement. Records inside one provider payload, and every
+ * field of an authoritative probe result, are current by construction. */
+function mergeBucket(
+  prior: SubscriptionUsageBucket | undefined,
+  update: SubscriptionUsageBucket,
+): SubscriptionUsageBucket {
+  return prior ? { ...prior, ...update } : update;
+}
+
+/** Merge for sparse provider notifications, which can arrive out of order: concurrent sessions on
+ * one source report independently, and `fetchedAt` is receipt time, not event time. Two signals
+ * order them — a window's reset time only ever moves forward, and within one window (an identical
+ * reset time) usage only accumulates. An update failing either test is older data, so keep the
+ * newer window intact rather than letting a late event walk utilization backwards. This never
+ * applies to an authoritative read, which is current whatever it says. */
+function mergeObservedBucket(
+  prior: SubscriptionUsageBucket | undefined,
+  update: SubscriptionUsageBucket,
+): SubscriptionUsageBucket {
+  if (!prior) return update;
+  if (prior.resetsAt !== undefined && update.resetsAt !== undefined) {
+    if (update.resetsAt < prior.resetsAt) return prior;
+    if (update.resetsAt === prior.resetsAt &&
+        prior.usedPercent !== undefined && update.usedPercent !== undefined &&
+        update.usedPercent < prior.usedPercent) {
+      return prior;
+    }
+  }
+  return { ...prior, ...update };
+}
+
+/** Hold the snapshot inside the control plane's bucket bound, which it enforces by rejecting the
+ * whole update. Buckets the update did not report are dropped first: retaining an old bucket at the
+ * cost of a currently reported window is how a source loses the windows the user actually needs.
+ * Claude only — Codex keeps the plain truncation it had before Claude gained sparse windows. */
+function boundBuckets(ordered: SubscriptionUsageBucket[], reported: Set<string>): SubscriptionUsageBucket[] {
+  if (ordered.length <= MAX_PROVIDER_BUCKETS) return ordered;
+  const excess = ordered.length - MAX_PROVIDER_BUCKETS;
+  const dropped = new Set<string>();
+  for (let index = ordered.length - 1; index >= 0 && dropped.size < excess; index -= 1) {
+    const candidate = ordered[index];
+    if (candidate && !reported.has(candidate.id)) dropped.add(candidate.id);
+  }
+  return ordered.filter((bucket) => !dropped.has(bucket.id)).slice(0, MAX_PROVIDER_BUCKETS);
 }
 
 function mergeSnapshot(
   prior: SubscriptionUsageSnapshot | undefined,
   update: SubscriptionUsageSnapshot,
+  /** Only Claude notifications are both unordered and carry the per-window semantics the ordering
+   * rules rely on. Codex probes and Codex push updates keep the plain pre-existing merge. */
+  mergeMode: "claude-notification" | "plain",
 ): SubscriptionUsageSnapshot {
   if (!prior || prior.provider !== update.provider) return update;
   // Sparse notifications can be delayed behind a manual read. Never let an older provider
   // observation replace fields from a newer authoritative snapshot.
   if (update.fetchedAt < prior.fetchedAt) return prior;
+  const merge = mergeMode === "claude-notification" ? mergeObservedBucket : mergeBucket;
   const buckets = new Map(prior.buckets.map((bucket) => [bucket.id, bucket]));
-  for (const bucket of update.buckets) buckets.set(bucket.id, { ...buckets.get(bucket.id), ...bucket });
+  for (const bucket of update.buckets) buckets.set(bucket.id, merge(buckets.get(bucket.id), bucket));
   const spendControls = new Map((prior.spendControls ?? []).map((item) => [item.id, item]));
   for (const item of update.spendControls ?? []) {
     spendControls.set(item.id, { ...spendControls.get(item.id), ...item });
@@ -318,7 +414,9 @@ function mergeSnapshot(
   return {
     ...priorWithoutDetail,
     ...update,
-    buckets: [...buckets.values()].slice(0, MAX_PROVIDER_BUCKETS),
+    buckets: mergeMode === "claude-notification"
+      ? boundBuckets([...buckets.values()], new Set(update.buckets.map((bucket) => bucket.id)))
+      : [...buckets.values()].slice(0, MAX_PROVIDER_BUCKETS),
     ...(update.credits || prior.credits ? { credits: { ...prior.credits, ...update.credits } } : {}),
     ...(spendControls.size > 0 ? { spendControls: [...spendControls.values()] } : {}),
   };
@@ -446,6 +544,9 @@ export class SubscriptionUsageManager {
   private readonly snapshots = new Map<string, SubscriptionUsageSnapshot>();
   private readonly lastProbeAt = new Map<string, number>();
   private readonly lastEvent = new Map<string, { signature: string; observedAt: number }>();
+  /** Sources whose provider has answered at least once. Separates a source that has simply never
+   * run from one whose provider reports no allowances, which read identically before. */
+  private readonly responded = new Set<string>();
   private readonly activeProbeChildren = new Set<AgentProcess>();
   private refreshPromise: Promise<SubscriptionUsageSnapshot[]> | null = null;
   private shuttingDown = false;
@@ -524,7 +625,10 @@ export class SubscriptionUsageManager {
       return {
         ...base,
         state: "unavailable",
-        detail: "Claude subscription usage is available after the first provider response in a session.",
+        detail: this.responded.has(sourceId)
+          ? "Claude Code answered without reporting subscription allowances. Only Claude.ai " +
+            "subscription sessions carry them; API-key, Bedrock, and Vertex sessions never do."
+          : "Claude subscription usage is available after the first provider response in a session.",
         ...(auth?.subscriptionType ? { plan: auth.subscriptionType } : {}),
       };
     }
@@ -571,6 +675,7 @@ export class SubscriptionUsageManager {
     const provider = driver === "codex-app-server" ? "codex" : driver === "claude-code" ? "claude" : null;
     if (!provider || provider !== update.provider) return null;
     const sourceId = subscriptionUsageSourceId(this.options.runnerId, agentId, provider, context);
+    if (update.kind === "response_observed") return this.observeProviderResponse(sourceId);
     const base = { sourceId, runnerId: this.options.runnerId, agentId };
     const normalized = provider === "codex"
       ? normalizeCodexRateLimits(update.payload, base, this.now())
@@ -585,11 +690,41 @@ export class SubscriptionUsageManager {
       return prior ?? null;
     }
     this.lastEvent.set(sourceId, { signature, observedAt: normalized.fetchedAt });
-    const merged = mergeSnapshot(prior, normalized);
-    if (merged === prior) return prior;
-    this.snapshots.set(sourceId, merged);
-    this.options.publish(merged);
-    return merged;
+    const explained = this.explainMissingUtilization(
+      mergeSnapshot(prior, normalized, provider === "claude" ? "claude-notification" : "plain"));
+    if (explained === prior) return prior;
+    this.snapshots.set(sourceId, explained);
+    this.options.publish(explained);
+    return explained;
+  }
+
+  /** A Claude source reporting allowance windows without percentages is not a source waiting on
+   * its first response. Describe only what the provider actually sent: a status-only event carries
+   * no reset time either, and the cause can be the installed version or the account's responses. */
+  private explainMissingUtilization(snapshot: SubscriptionUsageSnapshot): SubscriptionUsageSnapshot {
+    if (snapshot.provider !== "claude" || snapshot.state !== "available") return snapshot;
+    if (hasSubscriptionUtilization(snapshot)) return snapshot;
+    return {
+      ...snapshot,
+      detail: "Claude Code reported allowance windows for this source without utilization " +
+        "percentages. Older Claude Code versions report window status and reset times only; " +
+        "update Claude Code if this persists.",
+    };
+  }
+
+  /** The provider answered for this source. Only the pre-first-response wording is now wrong, so
+   * real provider data — including a source already reporting allowances — is never disturbed. */
+  private observeProviderResponse(sourceId: string): SubscriptionUsageSnapshot | null {
+    const prior = this.snapshots.get(sourceId);
+    if (!this.responded.has(sourceId)) this.responded.add(sourceId);
+    if (!prior || prior.state !== "unavailable" || prior.buckets.length > 0) return prior ?? null;
+    const source = this.sources().find((candidate) => candidate.sourceId === sourceId);
+    if (!source) return prior;
+    const updated = this.initialSnapshot(source);
+    if (updated.state !== "unavailable" || updated.detail === prior.detail) return prior;
+    this.snapshots.set(sourceId, updated);
+    this.options.publish(updated);
+    return updated;
   }
 
   refreshAll(): Promise<SubscriptionUsageSnapshot[]> {
@@ -675,7 +810,7 @@ export class SubscriptionUsageManager {
         const merged = mergeSnapshot(this.snapshots.get(source.sourceId), {
           ...normalized,
           ...(result.plan && !normalized.plan ? { plan: result.plan } : {}),
-        });
+        }, "plain");
         this.snapshots.set(source.sourceId, merged);
         this.options.publish(merged);
         return;

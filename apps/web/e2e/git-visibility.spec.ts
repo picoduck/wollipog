@@ -103,6 +103,56 @@ test("rich Git facts are truthful, accessible, and contained at desktop and narr
   }
 });
 
+test("retained forge rows hide outside a repository and restore current provider data", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 820 });
+  await resetFixture(page);
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setGitSummary("session-alpha", {
+      remoteUrl: "https://gitlab.example.test/team/project.git",
+      forge: {
+        provider: "gitlab",
+        host: "gitlab.example.test",
+        project: "team/project",
+        authenticated: false,
+        authenticationError: "Sign in to GitLab.",
+        statusError: "GitLab status unavailable.",
+      },
+    });
+  });
+  await openSession(page, "Alpha Session");
+  const summary = page.getByRole("complementary", { name: "Pinned Summary" });
+  await expect(summary.getByText("GitLab", { exact: true })).toBeVisible();
+  await expect(summary.getByText("Forge Authentication Needed", { exact: true })).toBeVisible();
+  await expect(summary.getByText("Forge Status Unavailable", { exact: true })).toBeVisible();
+
+  await page.evaluate(() => {
+    const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+    fixture.failNextGit("session-alpha", "status", "not a git repository");
+  });
+  await showGitDetails(page);
+  await gitRegion(page).getByRole("button", { name: "Refresh Git Status" }).click();
+  await expect(gitRegion(page)).toContainText("Not a Git Repository");
+  await expect(summary.getByText("GitLab", { exact: true })).toHaveCount(0);
+  await expect(summary.getByText("Forge Authentication Needed", { exact: true })).toHaveCount(0);
+  await expect(summary.getByText("Forge Status Unavailable", { exact: true })).toHaveCount(0);
+
+  await page.evaluate(() => {
+    const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+    fixture.setGitSummary("session-alpha", {
+      forge: {
+        provider: "gitlab",
+        host: "gitlab.example.test",
+        project: "team/project",
+        authenticated: true,
+      },
+    });
+  });
+  await gitRegion(page).getByRole("button", { name: "Refresh Git Status" }).click();
+  await expect(summary.getByText("GitLab", { exact: true })).toBeVisible();
+  await expect(summary.getByText("Forge Authentication Needed", { exact: true })).toHaveCount(0);
+  await expect(summary.getByText("Forge Status Unavailable", { exact: true })).toHaveCount(0);
+});
+
 test("background cadence preserves focused enabled controls and confirmed facts", async ({ page }) => {
   await page.clock.install({ time: new Date("2026-08-07T12:00:00Z") });
   await page.setViewportSize({ width: 1280, height: 820 });

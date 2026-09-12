@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { SubscriptionUsageResponse, UsageAggregationResponse } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { bucketLabel, UsageView } from "./UsageView.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -23,6 +24,11 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
+// `UsageView` starts a 30s `setInterval` that only its effect teardown clears, so an assertion that
+// throws before this file's trailing `root.unmount()` would leave the timer rescheduling and the
+// process unable to exit — a plain failure reading as a hung suite (#690, #899).
+installDomTestCleanup(domWindow);
+
 const response = (
   series: UsageAggregationResponse["series"],
   granularity: UsageAggregationResponse["granularity"] = "hour",
@@ -33,11 +39,23 @@ const response = (
   retention: { hourlyDays: 30, dailyDays: 365, coverageStartedAt: 0 },
   canManageRetention: false,
   privacy: "Content-free usage accounting.",
-  totals: { inputTokens: 6, outputTokens: 0, costUsd: 0.06 },
+  totals: {
+    inputTokens: 6, outputTokens: 0, costUsd: 0.06, uncachedInputTokens: 6, cachedInputTokens: 0,
+    cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "providerReported", unpricedRecords: 0,
+    processedTokens: 6,
+  },
   series,
+  seriesByDriver: series.map((bucket) => ({ ...bucket, driver: "claude-code" as const })),
   byDriver: [],
   byAgent: [],
   byRunner: [],
+  byModel: [],
+});
+
+const bucket = (bucketTs: number, inputTokens: number, costUsd: number): UsageAggregationResponse["series"][number] => ({
+  bucketTs, inputTokens, outputTokens: 0, costUsd, uncachedInputTokens: inputTokens, cachedInputTokens: 0,
+  cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "providerReported", unpricedRecords: 0,
+  processedTokens: inputTokens,
 });
 
 const settleLoad = () => new Promise((resolve) => setTimeout(resolve, 250));
@@ -50,19 +68,19 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
   const newerDay = Date.UTC(2025, 11, 31);
   const newestDay = Date.UTC(2026, 0, 1);
   const hourlySeries = [
-    { bucketTs: newest, inputTokens: 3, outputTokens: 0, costUsd: 0.03 },
-    { bucketTs: newer, inputTokens: 2, outputTokens: 0, costUsd: 0.02 },
-    { bucketTs: older, inputTokens: 1, outputTokens: 0, costUsd: 0.01 },
+    bucket(newest, 3, 0.03),
+    bucket(newer, 2, 0.02),
+    bucket(older, 1, 0.01),
   ];
   const dailySeries = [
-    { bucketTs: newestDay, inputTokens: 3, outputTokens: 0, costUsd: 0.03 },
-    { bucketTs: newerDay, inputTokens: 2, outputTokens: 0, costUsd: 0.02 },
-    { bucketTs: olderDay, inputTokens: 1, outputTokens: 0, costUsd: 0.01 },
+    bucket(newestDay, 3, 0.03),
+    bucket(newerDay, 2, 0.02),
+    bucket(olderDay, 1, 0.01),
   ];
   const responses: UsageAggregationResponse[] = [
     response([
-      { bucketTs: newer, inputTokens: 2, outputTokens: 0, costUsd: 0.02 },
-      { bucketTs: older, inputTokens: 1, outputTokens: 0, costUsd: 0.01 },
+      bucket(newer, 2, 0.02),
+      bucket(older, 1, 0.01),
     ]),
     response(hourlySeries),
     response(hourlySeries),
@@ -75,6 +93,8 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
     ...api,
     subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
     usage: async (query: { days: number }) => {
       requestedRanges.push(query.days);
       return responses[calls++]!;
@@ -160,6 +180,8 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   const client = {
     ...api,
     usage: async () => response([]),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
     subscriptionUsage: async () => subscription("warning", 15),
     refreshSubscriptionUsage: async () => {
       refreshes++;
@@ -197,6 +219,174 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   assert.match(pageText(), /0% Remaining/);
   assert.match(pageText(), /⛔ Exhausted/);
   assert.match(pageText(), /Subscription usage refreshed/);
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a window the provider never measured is marked absent, not shown as a value", async () => {
+  const now = Date.now();
+  const bucket = (id: string, measured: boolean) => ({
+    id,
+    label: id === "five_hour" ? "Five-Hour Window" : "Weekly — All Models",
+    ...(measured ? { usedPercent: 40, remainingPercent: 60 } : {}),
+    resetsAt: now + 90 * 60_000,
+    status: "available" as const,
+  });
+  const subscription: SubscriptionUsageResponse = {
+    staleAfterMs: 600_000,
+    generatedAt: now,
+    sources: [{
+      sourceId: "b".repeat(32),
+      runnerId: "runner-1",
+      agentId: "claude",
+      provider: "claude",
+      state: "available",
+      fetchedAt: now,
+      freshness: "fresh",
+      runnerStatus: "online",
+      runnerName: "Build Machine",
+      agentName: "Claude Code",
+      buckets: [bucket("five_hour", false), bucket("seven_day", true)],
+    }],
+  };
+  const client = {
+    ...api,
+    usage: async () => response([]),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    subscriptionUsage: async () => subscription,
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+  });
+  await act(async () => {
+    await settleLoad();
+    await Promise.resolve();
+  });
+
+  const buckets = [...container.querySelectorAll(".subscription-bucket")];
+  assert.equal(buckets.length, 2);
+  const [unmeasured, measured] = buckets as HTMLElement[];
+  assert.ok(unmeasured?.className.includes("unmeasured"), "the unmeasured window is distinguishable");
+  assert.ok(!measured?.className.includes("unmeasured"));
+
+  // The old bold "Allowance Reported" put a non-value where every sibling shows a percentage.
+  assert.doesNotMatch(container.textContent ?? "", /Allowance Reported/);
+  // The dash is decorative; the meaning reaches assistive technology as text, not as visual weight.
+  assert.equal(unmeasured?.querySelector("[aria-hidden=\"true\"]")?.textContent, "—");
+  assert.equal(unmeasured?.querySelector(".sr-only")?.textContent, "Utilization Not Reported");
+  // The reset time is what that window does have to say, so it takes the prominent slot.
+  assert.match(unmeasured?.querySelector("dd strong")?.textContent ?? "", /Resets in 2 hours/);
+  // A measured window is untouched: the percentage keeps the prominent slot.
+  assert.equal(measured?.querySelector("dd strong")?.textContent, "60% Remaining");
+  assert.equal(measured?.querySelector(".sr-only"), null);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an unsplit response from an older plane is shown honestly and the window comes from the response", async () => {
+  const day = Date.UTC(2026, 0, 2);
+  const unsplit: UsageAggregationResponse = {
+    ...response([bucket(day, 4, 0.04), bucket(day - 86_400_000, 2, 0.02)], "day"),
+    since: day - 6 * 86_400_000,
+    through: day + 86_400_000,
+    seriesByDriver: [],
+    byDriver: [
+      { key: "claude-code", ...bucket(0, 4, 0.04) },
+      { key: "codex-app-server", ...bucket(0, 2, 0.02) },
+    ].map(({ bucketTs: _ignored, ...row }) => row),
+  };
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: 20, updatedAt: 1 } }),
+    usageUsers: async () => ({ users: [{ userId: "u1", userName: "Ada", todayUsd: 21.5, last7DaysUsd: 40, last30DaysUsd: 90, dailyBudgetUsd: 20 }] }),
+    usage: async () => unsplit,
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+  });
+  await act(async () => {
+    await settleLoad();
+    await Promise.resolve();
+  });
+
+  // The headline names the response's 7-day window although the default range control says 30d.
+  assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 7 days/);
+  const codexCoverage = [...container.querySelectorAll(".usage-coverage")]
+    .find((node) => node.textContent?.includes("Codex App Server"));
+  assert.match(
+    codexCoverage?.textContent ?? "",
+    /before protocol v127 include only the final model response and are incomplete.*v127\+ records complete turn usage/s,
+  );
+  assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /not split by driver/);
+  assert.equal(container.querySelector(".usage-legend"), null, "no legend claims a split that does not exist");
+  const dayTable = container.querySelector(".usage-breakdown-section table")!;
+  const driverCells = [...dayTable.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td.usage-cell-dim")].slice(0, 2));
+  assert.ok(driverCells.length >= 4);
+  assert.ok(driverCells.every((cell) => cell.textContent === "—"), "unknown per-driver values read as dashes, not $0.00");
+
+  const hit = container.querySelector(".usage-chart-hit") as SVGRectElement;
+  await act(async () => {
+    hit.dispatchEvent(new domWindow.FocusEvent("focus", { bubbles: false }) as never);
+    hit.dispatchEvent(new domWindow.Event("focusin", { bubbles: true }) as never);
+    await Promise.resolve();
+  });
+  const readout = container.querySelector(".usage-chart-readout")?.textContent ?? "";
+  assert.match(readout, /Not split by this control plane/);
+  assert.match(readout, /Total/);
+
+  const usersText = container.querySelector(".usage-users-section")?.textContent ?? "";
+  assert.match(usersText, /Ada · paused by daily budget/);
+  assert.match(usersText, /\$21\.50 of \$20\.00/);
+  assert.match(usersText, /Each user may spend \$20\.00 per UTC day/);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a pre-v103 response without seriesByDriver still renders", async () => {
+  const day = Date.UTC(2026, 0, 2);
+  const legacy = {
+    ...response([bucket(day, 4, 0.04)], "day"),
+    since: day,
+    through: day + 86_400_000,
+  };
+  legacy.byDriver = [{
+    key: "claude-code",
+    ...bucket(0, 4, 0.04),
+  }].map(({ bucketTs: _ignored, ...row }) => row);
+  delete (legacy as Partial<UsageAggregationResponse>).seriesByDriver;
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async () => legacy,
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+  });
+  await act(async () => {
+    await settleLoad();
+    await Promise.resolve();
+  });
+
+  assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 1 day/);
+  assert.equal(container.querySelector('[role="alert"]'), null);
+  assert.doesNotMatch(container.textContent ?? "", /Codex App Server records/);
   await act(async () => root.unmount());
   container.remove();
 });

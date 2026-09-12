@@ -76,7 +76,8 @@ export interface Driver {
 
 Runner-owned isolation is resolved once per session before driver construction. Provider mode keeps
 the driver mappings below unchanged. Bubblewrap, macOS Seatbelt, and Windows Job Object modes pass the same resolved boundary to Claude,
-Codex exec/app-server, ACP, provider fork helpers, and ACP-created command terminals. Bubblewrap makes `/`
+Codex exec/app-server, ACP, provider fork helpers, and ACP-created command terminals. On native Linux,
+Bubblewrap makes `/`
 read-only, overlays only the session/terminal root writable, supplies an ephemeral `/tmp`, and may
 unshare networking. ACP filesystem calls remain independently constrained to the canonical session
 root and explicitly activated additional-directory grants. A strict resolution failure is terminal;
@@ -88,10 +89,10 @@ restart cannot overlap a fork helper. The Windows Job
 launcher provides kill-on-close descendant containment only; it never claims filesystem or network
 restriction, and `network: "deny"` is rejected for that mode.
 
-The bwrap profile maps Claude's `projects` and Codex's `sessions` stores to hashed per-manager-session
-roots under runner data. In WSL, those roots live below
-`~/.agent-manager/runner-instances/<attested-owner>/`, so runners with the same distro user cannot
-reconcile or remove each other's state. Provider forks copy the completed source store into the child partition before
+The native-Linux bwrap profile maps Claude's `projects` and Codex's `sessions` stores to hashed
+per-manager-session roots under runner data. Historical WSL partitions below
+`~/.agent-manager/runner-instances/<attested-owner>/` remain attributable for cleanup and explicit
+offline recovery, but are not used to launch new provider processes. Provider forks copy the completed source store into the child partition before
 publishing the child, after polling for a non-empty size-stable provider-specific fork artifact; a
 missing or continuously growing artifact fails the fork. Failed forks and session deletion remove only
 their exact partition. Functional
@@ -122,10 +123,19 @@ removes access to cloud model APIs. New checkpoint refs use
 `refs/{wollipog,mam}/owners/<full-attested-owner>/<session>/<kind>-<turn>`; persisted legacy rows and
 cleanup journals retain their exact unscoped layout until explicit offline adoption. Native provider
 mode remains the broadest compatibility default but takes an exclusive whole-HOME lease shared by
-Claude, Codex, ACP, Seatbelt, Windows Job, and Agent TUI launches. Direct WSL provider mode fails
-closed; choose bwrap or a dedicated distro/account.
-Standalone Agent TUI processes are not bwrapped, so Agent TUI attachment from a WSL session requires
-a dedicated distro/account even when the session's structured provider launch uses bwrap.
+Claude, Codex, ACP, Seatbelt, Windows Job, and Agent TUI launches. Protocol-v124 Direct WSL bwrap is
+available only for freshly discovered Codex/Claude structured drivers in the Orchestrator preset:
+the target-local launcher pins a session-private scratch cwd and writable sources through bwrap exec,
+and a root-owned per-session state anchor plus a target-local HOME lease bounds provider state,
+scratch, and relay lifetime. Direct WSL provider mode, generic ACP, conversation fork/state adoption, and WSL Native TUI
+remain fail-closed. Use a supported native, container, or cloud execution target for those modes.
+
+Native Windows harnesses do not advertise the Orchestrator preset because a Job Object alone cannot
+attest the scratch-only filesystem boundary. Claude Bash-prefix rules are also insufficient there:
+an otherwise read-only Git command can redirect its output into a Project Location.
+For the same reason, native Claude Code and Claude Agent ACP require runner isolation mode `bwrap`
+on Linux or `seatbelt` on macOS. Native Codex uses its provider sandbox on those platforms and is
+withheld on other native operating systems where that boundary is not attested.
 
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
 owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never
@@ -134,7 +144,7 @@ older runner. To retire those files, stop every pre-attestation runner for the O
 redacted `--state-doctor inventory`, then use the explicit quarantine action. Adoption conditionally
 copies legacy checkpoint or WSL provider state and preserves all source bytes; divergent targets fail
 closed. Provider-home bytes remain operator-owned even though native mutable launches are cross-process
-leased. Use bwrap or separate WSL distros/accounts for concurrent owners.
+leased. Use a supported native, container, or cloud execution target for concurrent owners.
 
 `makeDriver(spec, cb): Driver` (`drivers/factory.ts`) switches on `spec.driver`
 (`"acp" | "claude-code" | "codex"`). `AcpDriver` (`drivers/acp-driver.ts`) constructs the existing
@@ -657,7 +667,7 @@ their `supportedReasoningEfforts` come from the `model/list` request (also used 
 | child-thread item/delta notifications | the ordinary mapped payload plus `parentToolUseId` for the spawning collaboration call; nested `spawnAgent` calls recursively preserve that ownership |
 | `turn/plan/updated {plan:[{step,status}]}` | `{kind:"plan", entries: plan.map(p=>({content:p.step,status:p.status}))}` |
 | `turn/diff/updated {diff}` | `{kind:"file_edit", path:"worktree", diff}` |
-| `thread/tokenUsage/updated {…}` | retain latest schema-pinned `last`, then emit one `{kind:"token_usage",…}` at turn settlement; never add restored cumulative `total` usage |
+| `thread/tokenUsage/updated {…}` | derive complete per-turn usage from replay-safe cumulative `total` deltas, retain `last` only for context occupancy, then emit one `{kind:"token_usage",…}` at turn settlement; old servers without `total` use a best-effort compatibility fallback |
 | `turn/completed {turn.status}` | end turn → `StopReason` (`completed`→`end_turn`, `interrupted`→`cancelled`, `failed`→`refusal`); `{kind:"status", status:"idle"}` |
 | `error {error:{message,codexErrorInfo?}}` | `{kind:"error", message}` |
 

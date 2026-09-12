@@ -45,6 +45,12 @@ test("native macOS and Windows policies resolve only their audited platform adap
   assert.doesNotMatch(seatbelt?.backend === "seatbelt" ? seatbelt.profile : "", /allow network/);
   assert.doesNotMatch(seatbelt?.backend === "seatbelt" ? seatbelt.profile : "", /allow mach/);
   assert.match(seatbelt?.backend === "seatbelt" ? seatbelt.profile : "", /Volumes\/provider-state\/claude\/projects/);
+  assert.deepEqual(seatbelt?.backend === "seatbelt" ? seatbelt.writableRoots : [], [
+    "/Users/me/Work/repo",
+    "/Users/me/Library/Application Support/Wollipog",
+    "/private/var/folders/tmp",
+    "/Volumes/provider-state/claude/projects",
+  ]);
   assert.deepEqual(macCreated, [["/Users/me/.claude/projects"]]);
 
   const windows = await resolveExecutionIsolation(
@@ -67,7 +73,7 @@ test("native macOS and Windows policies resolve only their audited platform adap
   ), /requires native macOS/);
   await assert.rejects(() => resolveExecutionIsolation(
     { mode: "windows-job", network: "inherit" }, { kind: "wsl", distro: "Ubuntu" }, { platform: "win32" }, state,
-  ), /native-host only.*require bwrap/);
+  ), /native-host only.*WSL Direct execution is unavailable/);
 });
 
 test("Seatbelt profile escapes paths and limits its writable surface", () => {
@@ -86,6 +92,23 @@ test("Seatbelt profile escapes paths and limits its writable surface", () => {
   }, "/Users/me", "deny"), /control-free POSIX path/);
 });
 
+test("Orchestrator Seatbelt grants writes only to scratch and provider transcripts", () => {
+  const profile = buildSeatbeltProfile({
+    driver: "claude-code",
+    dataDir: "/Users/me/Library/Application Support/Wollipog",
+    env: { HOME: "/Users/me" },
+    sessionId: "s1",
+    cwd: "/Users/me/Wollipog/orchestrator-scratch",
+    additionalWritableRoots: ["/Users/me/Work/repo"],
+    orchestratorScratchOnly: true,
+  }, "/Users/me", "inherit", "/private/var/folders/tmp");
+  assert.match(profile, /orchestrator-scratch/);
+  assert.match(profile, /\/Users\/me\/\.claude\/projects/);
+  assert.doesNotMatch(profile, /Application Support\/Wollipog/);
+  assert.doesNotMatch(profile, /Users\/me\/Work\/repo/);
+  assert.doesNotMatch(profile, /private\/var\/folders\/tmp/);
+});
+
 test("provider isolation preserves the driver-owned boundary", async () => {
   assert.equal(await resolveExecutionIsolation(provider, { kind: "native" }, {
     platform: "win32",
@@ -95,7 +118,7 @@ test("provider isolation preserves the driver-owned boundary", async () => {
   }), undefined);
 });
 
-test("bwrap resolves in the exact native or WSL process namespace", async () => {
+test("bwrap resolves in the exact native process namespace", async () => {
   const native = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
     platform: "linux",
     uid: () => 1000,
@@ -109,15 +132,35 @@ test("bwrap resolves in the exact native or WSL process namespace", async () => 
   assert.deepEqual(native, {
     backend: "bwrap", command: "/usr/bin/bwrap", args: ["--launcher-prefix"], network: "deny",
   });
-  const wsl = await resolveExecutionIsolation(bwrap, { kind: "wsl", distro: "Ubuntu" }, {
-    platform: "win32",
-    uid: () => undefined,
-    resolveNative: async () => null,
-    resolveWsl: async (context) => context.distro === "Ubuntu"
-      ? { command: "/usr/bin/bwrap", uid: 1000, home: "/home/me" }
-      : null,
-  });
-  assert.deepEqual(wsl, { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny" });
+});
+
+test("WSL bwrap fails closed before inspecting writable path names for every Direct driver", async () => {
+  for (const driver of ["claude-code", "codex", "codex-app-server", "acp"] as const) {
+    const targetOperations: string[] = [];
+    await assert.rejects(() => resolveExecutionIsolation(
+      bwrap,
+      { kind: "wsl", distro: "Ubuntu" },
+      {
+        platform: "win32",
+        resolveWsl: async () => {
+          targetOperations.push("probe");
+          return { command: "/usr/bin/bwrap", uid: 1000, home: "/home/me" };
+        },
+        mkdirWsl: async () => { targetOperations.push("mkdir"); },
+      },
+      {
+        driver,
+        dataDir: "C:/runner",
+        env: { HOME: "/home/me" },
+        sessionId: `session-${driver}`,
+        // Both names could be aliases to a protected path. No pathname inspection can make a
+        // later path-based bwrap open race-free, so the feature is rejected before either is used.
+        cwd: "/work/alias",
+        additionalWritableRoots: ["/work/alias-child"],
+      },
+    ), /cannot hold target-local no-follow path handles/);
+    assert.deepEqual(targetOperations, [], `${driver} must not touch the WSL target`);
+  }
 });
 
 test("platform isolation makes only the session-requested worktree boundary additionally writable", async () => {
@@ -145,20 +188,16 @@ test("platform isolation makes only the session-requested worktree boundary addi
 test("strict bwrap policy fails closed when the target context cannot provide it", async () => {
   await assert.rejects(() => resolveExecutionIsolation(bwrap, { kind: "native" }, {
     platform: "win32", uid: () => undefined, resolveNative: async () => null, resolveWsl: async () => null,
-  }), /requires Linux or WSL.*fail closed/);
+  }), /requires native Linux.*fail closed/);
   await assert.rejects(() => resolveExecutionIsolation(bwrap, { kind: "wsl", distro: "Missing" }, {
     platform: "win32", uid: () => undefined, resolveNative: async () => null, resolveWsl: async () => null,
-  }), /required inside WSL distro Missing/);
+  }), /bubblewrap isolation is unavailable for WSL/);
   await assert.rejects(() => resolveExecutionIsolation(bwrap, { kind: "native" }, {
     platform: "linux", uid: () => 1000, resolveNative: async () => null, resolveWsl: async () => null,
   }), /bwrap was not found/);
   await assert.rejects(() => resolveExecutionIsolation(bwrap, { kind: "native" }, {
     platform: "linux", uid: () => 0, resolveNative: async () => null, resolveWsl: async () => null,
   }), /refuses a root runner/);
-  await assert.rejects(() => resolveExecutionIsolation(bwrap, { kind: "wsl", distro: "Rooted" }, {
-    platform: "win32", uid: () => undefined, resolveNative: async () => null,
-    resolveWsl: async () => ({ command: "/usr/bin/bwrap", uid: 0, home: "/root" }),
-  }), /refuses root execution inside WSL distro Rooted/);
 });
 
 test("strict sessions virtualize only Claude/Codex transcript roots under runner data", async () => {
@@ -177,20 +216,6 @@ test("strict sessions virtualize only Claude/Codex transcript roots under runner
   }]);
   assert.deepEqual(nativeCreated, [[
     `/var/lib/wollipog/provider-state/claude/${sessionKey}/projects`, "/home/me/.claude/projects",
-  ]]);
-
-  const wslCreated: string[][] = [];
-  const wsl = await resolveExecutionIsolation(bwrap, { kind: "wsl", distro: "Ubuntu" }, {
-    platform: "win32",
-    resolveWsl: async () => ({ command: "/usr/bin/bwrap", uid: 1000, home: "/home/me" }),
-    mkdirWsl: async (_context, paths) => { wslCreated.push(paths); },
-  }, { driver: "codex-app-server", dataDir: "C:/ignored-in-wsl", env: { HOME: "/srv/agent" }, sessionId: "session/../../../host", cwd: "/work" });
-  assert.deepEqual(wsl?.writableBinds, [{
-    source: `/home/me/.agent-manager/provider-state/codex/${sessionKey}/sessions`,
-    target: "/srv/agent/.codex/sessions",
-  }]);
-  assert.deepEqual(wslCreated, [[
-    `/home/me/.agent-manager/provider-state/codex/${sessionKey}/sessions`, "/srv/agent/.codex/sessions",
   ]]);
 
   const acp = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
@@ -212,6 +237,10 @@ test("strict sessions virtualize only Claude/Codex transcript roots under runner
     source: `/var/lib/wollipog/provider-state/codex/${providerStateKey("s-codex")}/sessions`,
     target: "/home/me/.codex/sessions",
   });
+});
+
+test("provider state requires a non-empty session identity", () => {
+  assert.throws(() => providerStateKey(""), /requires a non-empty session id/);
 });
 
 test("isolated provider state clone and cleanup stay inside hashed session partitions", async () => {
@@ -262,19 +291,17 @@ test("isolated provider state clone and cleanup stay inside hashed session parti
   }]);
 
   const wslRemovals: unknown[] = [];
+  const ownerHash = "a".repeat(64);
   await removeExecutionIsolationState(
     bwrap, { kind: "wsl", distro: "Ubuntu" }, "claude-code", "C:/ignored", "target", {
       resolveWsl: async () => { throw new Error("bwrap was uninstalled"); },
-      resolveWslHome: async () => "/home/me",
-      removeWsl: async (context, location) => { wslRemovals.push({ context, location }); },
-    },
+      cleanupWslSessionState: async (distro, owner, sessionKey) => { wslRemovals.push({ distro, owner, sessionKey }); },
+    }, ownerHash,
   );
   assert.deepEqual(wslRemovals, [{
-    context: { kind: "wsl", distro: "Ubuntu" },
-    location: {
-      root: `/home/me/.agent-manager/provider-state/claude/${providerStateKey("target")}`,
-      leaf: `/home/me/.agent-manager/provider-state/claude/${providerStateKey("target")}/projects`,
-    },
+    distro: "Ubuntu",
+    owner: ownerHash,
+    sessionKey: providerStateKey("target"),
   }]);
 });
 
@@ -388,26 +415,8 @@ test("WSL isolation probe parsing requires three absolute, well-formed lines", (
   assert.equal(parseWslIsolationProbe("/usr/bin/bwrap\nnot-a-uid\n/home/me\n"), null);
 });
 
-test("attested WSL owners get disjoint provider roots and ambiguous v2 state fails closed", async () => {
+test("ambiguous legacy WSL provider state remains fail closed for offline recovery", async () => {
   const firstOwner = "1".repeat(64);
-  const secondOwner = "2".repeat(64);
-  const resolve = (ownerHash: string) => resolveExecutionIsolation(
-    bwrap,
-    { kind: "wsl", distro: "Ubuntu" },
-    {
-      platform: "win32",
-      resolveWsl: async () => ({ command: "/usr/bin/bwrap", uid: 1000, home: "/home/me" }),
-      mkdirWsl: async () => {},
-    },
-    { driver: "claude-code", dataDir: "C:/ignored", env: {}, sessionId: "same-session", cwd: "/work", ownerHash },
-  );
-  const [first, second] = await Promise.all([resolve(firstOwner), resolve(secondOwner)]);
-  const firstSource = first?.writableBinds?.[0]?.source;
-  const secondSource = second?.writableBinds?.[0]?.source;
-  assert.match(firstSource ?? "", new RegExp(`/runner-instances/${firstOwner}/provider-state/claude/`));
-  assert.match(secondSource ?? "", new RegExp(`/runner-instances/${secondOwner}/provider-state/claude/`));
-  assert.notEqual(firstSource, secondSource);
-
   let copied = false;
   await assert.rejects(() => migrateExecutionIsolationState(
     bwrap,

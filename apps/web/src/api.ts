@@ -14,12 +14,14 @@ import type {
   AutomationTriggerView,
   BoardColumn,
   BoxView,
+  ChildSessionRegistryPage,
   CreatePodRequest,
   CreateProjectRequest,
   CreateAutomationRequest,
   CreateAutomationTriggerRequest,
   CreateRunRequest,
   CreateSessionRequest,
+  CreateWorkspaceReferenceRequest,
   AddProjectLocationRequest,
   CreateProjectLocationRequest,
   MoveProjectLocationRequest,
@@ -38,6 +40,7 @@ import type {
   GitDiffScope,
   GitSummaryInfo,
   GovernanceAuditEntry,
+  GovernancePolicy,
   IdentityAdministrationView,
   HostAction,
   MutationAuditView,
@@ -98,8 +101,14 @@ import type {
   UsageAggregationResponse,
   SubscriptionUsageResponse,
   UsageRetentionPolicy,
+  UsagePricingStatus,
+  SessionUsageResponse,
+  UsageDailyBudgetPolicy,
+  UserCostWindows,
   UserStatus,
   WorkspaceInfo,
+  WorkspaceReference,
+  WorkspaceReferenceCandidate,
   WorkflowArtifact,
   WorkflowArtifactPage,
   WorkflowDefinition,
@@ -121,6 +130,7 @@ import type {
   SkillDetailPayload,
   SkillGroupListPayload,
   SkillGroupView,
+  SkillGroupAssignmentView,
   SkillListPayload,
 } from "./skills.js";
 import { CONTROL_PLANE_HTTP } from "./config.js";
@@ -313,12 +323,20 @@ export function createApiClient(transport: ApiTransport) {
   testSessionNamingCustomModel: () =>
     req<SessionNamingConnectionTestResult>("/api/session-naming/custom-model/test", { method: "POST" }),
 
+  /** Refetches the model rate table ahead of its daily TTL so newly released models get priced. */
+  refreshUsagePricing: () => req<{ pricing: UsagePricingStatus }>("/api/usage/pricing/refresh", { method: "POST" }),
   subscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions"),
 
   refreshSubscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions/refresh", {
     method: "POST",
   }),
 
+  usageDailyBudget: () => req<{ dailyBudget: UsageDailyBudgetPolicy }>("/api/usage/daily-budget"),
+  updateUsageDailyBudget: (perUserUsd: number | null) =>
+    req<{ dailyBudget: UsageDailyBudgetPolicy }>("/api/usage/daily-budget", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ perUserUsd }),
+    }),
+  usageUsers: () => req<{ users: UserCostWindows[] }>("/api/usage/users"),
   updateUsageRetention: (body: Pick<UsageRetentionPolicy, "hourlyDays" | "dailyDays">) =>
     req<{ retention: UsageRetentionPolicy }>("/api/usage/retention", {
       method: "PUT",
@@ -451,11 +469,42 @@ export function createApiClient(transport: ApiTransport) {
    * `*FromPayload` helpers in skills.ts, because the routes are versioned separately from this
    * dashboard. */
   listSkills: () => req<SkillListPayload>("/api/skills"),
+  discoverMachineSkills: (runnerId: string) => req<import("./skills.js").MachineSkillDiscovery>(`/api/runners/${encodeURIComponent(runnerId)}/skill-snapshots`, { method: "POST" }),
+  previewMachineSkill: (id: string, candidateId: string) => req<import("./skills.js").MachineSkillPreview>(`/api/skill-machine/${encodeURIComponent(id)}/preview`, { method: "POST", body: JSON.stringify({ candidateId }) }),
+  preflightMachineSkillAdoption: (id: string, previewId: string) => req<import("./skills.js").MachineSkillAdoptionPreflight>(`/api/skill-machine/${encodeURIComponent(id)}/adoption-preflight`, { method: "POST", body: JSON.stringify({ previewId }) }),
+  adoptMachineSkill: (id: string, body: { previewId: string; adoptionToken: string; acceptSharedImpact: boolean }) =>
+    req<import("./skills.js").MachineSkillAdoptionResult>(`/api/skill-machine/${encodeURIComponent(id)}/adopt`, {
+      method: "POST", body: JSON.stringify({ ...body, confirmation: "explicit" }),
+    }),
+  inspectMachineSkillRecovery: (runnerId: string) =>
+    req<import("./skills.js").MachineSkillRecovery>(
+      `/api/runners/${encodeURIComponent(runnerId)}/skill-adoption-recovery`, { method: "POST" },
+    ),
+  restoreMachineSkillRecovery: (runnerId: string, operationId: string) =>
+    req<import("./skills.js").MachineSkillRecoveryResult>(
+      `/api/runners/${encodeURIComponent(runnerId)}/skill-adoption-recovery/${encodeURIComponent(operationId)}/restore`,
+      { method: "POST", body: JSON.stringify({ confirmation: "explicit" }) },
+    ),
+  importMachineSkill: (id: string, previewId: string, acceptUpdate: boolean) => req<SkillDetailPayload>(`/api/skill-machine/${encodeURIComponent(id)}/import`, { method: "POST", body: JSON.stringify({ previewId, acceptUpdate }) }),
+  discardMachineSkillDiscovery: (id: string) => req<void>(`/api/skill-machine/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  previewGitSkills: (source: import("./skills.js").SkillGitSource) =>
+    req<import("./skills.js").SkillGitPreview>("/api/skill-git/preview", { method: "POST", body: JSON.stringify(source) }),
+  discardGitSkillPreview: (id: string) => req<void>(`/api/skill-git/preview/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  importGitSkill: (body: { previewId: string; path: string; acceptUpdate: boolean }) =>
+    req<SkillDetailPayload>("/api/skill-git/import", { method: "POST", body: JSON.stringify(body) }),
 
   createSkill: (body: { name: string; description?: string; groupId?: string; files: SkillFile[]; note?: string }) =>
     req<SkillDetailPayload>("/api/skills", { method: "POST", body: JSON.stringify(body) }),
 
   getSkill: (id: string) => req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`),
+  previewMachineSkillVersion: (id: string, runnerId: string, versionId: string | null) => req<import("./skills.js").MachineSkillVersionPreview>(`/api/skills/${encodeURIComponent(id)}/machines/${encodeURIComponent(runnerId)}/version${versionId ? `?versionId=${encodeURIComponent(versionId)}` : ""}`),
+  getMachineSkillVersionPolicy: (id: string, runnerId: string) => req<import("./skills.js").MachineSkillVersionPolicy>(`/api/skills/${encodeURIComponent(id)}/machines/${encodeURIComponent(runnerId)}/version-policy`),
+  setMachineSkillVersion: (id: string, runnerId: string, body: { versionId: string | null; expectedRevision: string | null; expectedLatestVersionId: string }) => req<unknown>(`/api/skills/${encodeURIComponent(id)}/machines/${encodeURIComponent(runnerId)}/version`, { method: "PUT", body: JSON.stringify(body) }),
+
+  listSkillVersions: (id: string, before?: string) => req<{ versions: import("./skills.js").SkillVersionSummary[]; nextCursor: string | null }>(`/api/skills/${encodeURIComponent(id)}/versions${before ? `?before=${encodeURIComponent(before)}` : ""}`),
+  previewSkillVersion: (id: string, versionId: string) => req<import("./skills.js").SkillVersionPreview>(`/api/skills/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}`),
+  restoreSkillVersion: (id: string, versionId: string, expectedLatestVersionId: string) => req<unknown>(`/api/skills/${encodeURIComponent(id)}/restore`, { method: "POST", body: JSON.stringify({ versionId, expectedLatestVersionId }) }),
 
   updateSkill: (id: string, body: { description?: string; groupId?: string | null }) =>
     req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`, {
@@ -474,7 +523,16 @@ export function createApiClient(transport: ApiTransport) {
   listSkillGroups: () => req<SkillGroupListPayload>("/api/skill-groups"),
 
   createSkillGroup: (body: { name: string }) =>
-    req<SkillGroupView>("/api/skill-groups", { method: "POST", body: JSON.stringify(body) }),
+    req<{ group: SkillGroupView }>("/api/skill-groups", { method: "POST", body: JSON.stringify(body) }),
+
+  convertSkillGroup: (id: string) => req<{ group: SkillGroupView }>(`/api/skill-groups/${encodeURIComponent(id)}/convert`, { method: "POST", body: JSON.stringify({ accepted: true }) }),
+  listSkillGroupAssignments: (id: string) => req<{ assignments: SkillGroupAssignmentView[] }>(`/api/skill-groups/${encodeURIComponent(id)}/assignments`),
+  createSkillGroupAssignment: (id: string, body: { scopeKind: "instance" | "runner"; runnerId?: string; agentSelector: SkillAgentSelector; invocation: SkillInvocationPolicy }) =>
+    req<{ assignment: SkillGroupAssignmentView }>(`/api/skill-groups/${encodeURIComponent(id)}/assignments`, { method: "POST", body: JSON.stringify(body) }),
+  updateSkillGroupAssignment: (id: string, assignmentId: string, body: { enabled?: boolean; invocation?: SkillInvocationPolicy }) =>
+    req<{ assignment: SkillGroupAssignmentView }>(`/api/skill-groups/${encodeURIComponent(id)}/assignments/${encodeURIComponent(assignmentId)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteSkillGroupAssignment: (id: string, assignmentId: string) =>
+    req<void>(`/api/skill-groups/${encodeURIComponent(id)}/assignments/${encodeURIComponent(assignmentId)}`, { method: "DELETE" }),
 
   deleteSkillGroup: (id: string) =>
     req<void>(`/api/skill-groups/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -576,6 +634,8 @@ export function createApiClient(transport: ApiTransport) {
   // `config` is applied atomically before the turn on the control plane — pass the composer's
   // currently-selected model/effort/approval so a change made just before Send can't be lost to an
   // in-flight setConfig round trip.
+  preparePromptImages: (id: string, images: PromptImageInput[]) =>
+    Promise.all(images.map((image) => uploadPromptImage(transport, id, image))),
   prompt: async (id: string, text: string, images: PromptImageInput[] = [], config?: SessionConfig, slashCommand?: string) => {
     const references = await Promise.all(images.map((image) => uploadPromptImage(transport, id, image)));
     return req<SessionView>(`/api/sessions/${id}/prompt`, {
@@ -655,12 +715,18 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
-  governanceAudit: (id: string, limit = 50) =>
-    req<{ entries: GovernanceAuditEntry[] }>(
-      `/api/sessions/${encodeURIComponent(id)}/governance-audit?limit=${limit}`,
+  governanceAudit: (id: string, limit = 50, before?: string) =>
+    req<{ entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean }>(
+      `/api/sessions/${encodeURIComponent(id)}/governance-audit?limit=${limit}` +
+        (before ? `&before=${encodeURIComponent(before)}` : ""),
     ),
 
   approvalQueue: () => req<{ items: ApprovalQueueItem[] }>("/api/governance/approval-queue"),
+  governancePolicies: () => req<{ policies: GovernancePolicy[] }>("/api/governance/policies"),
+  putGovernancePolicy: (policy: Omit<GovernancePolicy, "createdAt" | "updatedAt">) =>
+    req<GovernancePolicy>(`/api/governance/policies/${encodeURIComponent(policy.policyId)}`, {
+      method: "PUT", body: JSON.stringify(policy),
+    }),
 
   reviewFindings: (sessionId: string) =>
     req<ReviewFindingsResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/review-findings`),
@@ -705,6 +771,27 @@ export function createApiClient(transport: ApiTransport) {
     req<SessionView>(`/api/sessions/${id}/fork`, {
       method: "POST",
       body: JSON.stringify({ turn }),
+    }),
+
+  handoff: (id: string, turn: number, agentId: string, config: SessionConfig) =>
+    req<SessionView & { handoffDraft: import("@wollipog/protocol").ConversationHandoffDraft }>(`/api/sessions/${id}/fork`, {
+      method: "POST", body: JSON.stringify({ turn, handoff: { agentId, config } }),
+    }),
+
+  /** Recover a quarantined provider conversation. `agent` is supplied only when the session's
+   * recorded recovery mode is a fresh-thread handoff; otherwise the provider forks natively.
+   * A retained prompt comes back as text for the composer — it is never submitted. */
+  recoverQuarantinedConversation: (
+    id: string,
+    turn: number,
+    handoff?: { agentId: string; config: SessionConfig },
+  ) =>
+    req<SessionView & {
+      handoffDraft?: import("@wollipog/protocol").ConversationHandoffDraft;
+      retainedPrompt?: { text: string; images: import("@wollipog/protocol").PromptImageInput[] };
+    }>(`/api/sessions/${id}/fork`, {
+      method: "POST",
+      body: JSON.stringify({ turn, recovery: true, ...(handoff ? { handoff } : {}) }),
     }),
 
   search: (q: string) =>
@@ -757,6 +844,12 @@ export function createApiClient(transport: ApiTransport) {
   /** Exact authorized lookup used by direct links, including archived sessions omitted from the
    * live dashboard snapshot. */
   session: (id: string) => req<{ session: SessionView }>(sessionLookupPath(id)),
+  childSessions: (id: string, eventEpoch: number, after = 0, limit = 50) => {
+    const query = new URLSearchParams({ eventEpoch: String(eventEpoch), after: String(after), limit: String(limit) });
+    return req<ChildSessionRegistryPage>(`/api/sessions/${encodeURIComponent(id)}/child-sessions?${query}`);
+  },
+  /** The session's usage split by producing model, from the control plane's per-session ledger. */
+  sessionUsage: (id: string) => req<SessionUsageResponse>(`/api/sessions/${encodeURIComponent(id)}/usage`),
 
   setArchived: (id: string, archived: boolean) =>
     req<SessionView>(`/api/sessions/${id}/archive`, {
@@ -766,6 +859,12 @@ export function createApiClient(transport: ApiTransport) {
 
   retryStop: (id: string) =>
     req<SessionView>(`/api/sessions/${id}/retry-stop`, { method: "POST" }),
+
+  acknowledgeBackgroundMissingResult: (id: string, continuationId: string) =>
+    req<SessionView>(
+      `/api/sessions/${encodeURIComponent(id)}/background-deliveries/${encodeURIComponent(continuationId)}/acknowledge-missing-result`,
+      { method: "POST" },
+    ),
 
   setReminder: (id: string, body: SetSessionReminderRequest) =>
     req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
@@ -963,6 +1062,11 @@ export function createApiClient(transport: ApiTransport) {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  updateMachineCapacity: (runnerId: string, body: { configuredUnits: number; expectedRevision: number }) =>
+    req<{ capacity: import("@wollipog/protocol").RunnerCapacityConfiguration }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/capacity`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
 
   // Phase 3: external (CLI-started) sessions on a box.
   listExternalSessions: (runnerId: string, agentId?: string) =>
@@ -990,6 +1094,17 @@ export function createApiClient(transport: ApiTransport) {
   readSessionFile: (sessionId: string, path: string) =>
     req<{ path: string; content?: string; size?: number; truncated?: boolean; binary?: boolean }>(
       `/api/sessions/${encodeURIComponent(sessionId)}/file?${new URLSearchParams({ path }).toString()}`,
+    ),
+
+  searchWorkspaceReferences: (sessionId: string, query: string) =>
+    req<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({ q: query }).toString()}`,
+    ),
+
+  createWorkspaceReference: (sessionId: string, target: CreateWorkspaceReferenceRequest) =>
+    req<{ reference: WorkspaceReference }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references`,
+      { method: "POST", body: JSON.stringify(target) },
     ),
 
   // Shells panel: durable metadata plus bounded sequence-addressed history.
@@ -1065,7 +1180,7 @@ export function createApiClient(transport: ApiTransport) {
     req<{
       device: DeviceView;
       token: string;
-      pairing: { hosts: string[]; port: number; webServed: boolean; boundBeyondLoopback: boolean };
+      pairing: { hosts: string[]; port: number; webServed: boolean; boundBeyondLoopback: boolean; publicOrigin?: string | null };
     }>("/api/devices", { method: "POST", body: JSON.stringify({ name, userId }) }),
   revokeDevice: (deviceId: string) => req<void>(`/api/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" }),
 

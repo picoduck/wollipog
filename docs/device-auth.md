@@ -47,7 +47,9 @@ pnpm --filter @wollipog/control-plane start -- --print-pair-url
 
 This command is read-only: start the control plane once so it can create the protected credential,
 then use the command to reprint the existing URL. It fails instead of minting an unrelated
-credential when the configured database or token-file coordinates are wrong.
+credential when the configured database or token-file coordinates are wrong. On a headless host
+with the standalone CLI installed, `wollipog admin pairing-url` is the supported equivalent and
+needs neither the repository nor Node; see [host administration](./host-administration.md).
 
 For Vite development, open `http://127.0.0.1:5173/#pair=<token>` using the fragment from that
 command. Opening a pairing URL stores the credential in `localStorage` (`wollipog.deviceToken`,
@@ -89,6 +91,14 @@ http://<host>:<port>/#pair=<token>
 The link is offered only when the control plane serves the built dashboard and is reachable beyond
 loopback. Otherwise the panel supplies the fragment and explains which prerequisite is missing.
 Opening it uses the same store-and-scrub flow as local startup pairing.
+
+From an SSH terminal on the host, `wollipog admin device create --name <name>` mints the same kind
+of credential with the protected startup credential and prints a complete link. Set
+`CONTROL_PLANE_PUBLIC_ORIGIN` (for example `https://wollipog.example.ts.net`) so links embed the
+origin remote clients reach rather than a bind address; the value is also returned as
+`pairing.publicOrigin` by `POST /api/devices`. `wollipog admin device list` and
+`wollipog admin device revoke <id>` complete the lifecycle; see
+[host administration](./host-administration.md).
 
 Revocation is loopback-only and requires an authenticated local request. It deletes the device row,
 removes associated push subscriptions, and immediately closes that device's live `/ui` sockets.

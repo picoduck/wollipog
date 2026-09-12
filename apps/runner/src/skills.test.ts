@@ -88,6 +88,7 @@ async function reconcile(
     removedSkillRetentionMs?: number;
     previousVersionGraceMs?: number;
     now?: number;
+    replaceWindowsJunction?: (path: string, expectedTarget: string, target: string) => void;
   } = {},
 ) {
   return reconcileSkills({
@@ -108,6 +109,9 @@ async function reconcile(
       ? { previousVersionGraceMs: overrides.previousVersionGraceMs }
       : {}),
     ...(overrides.now !== undefined ? { now: overrides.now } : {}),
+    ...(overrides.replaceWindowsJunction
+      ? { replaceWindowsJunction: overrides.replaceWindowsJunction }
+      : {}),
   });
 }
 
@@ -295,6 +299,113 @@ test("an unknown target agent is reported as unsupported", async () => {
     const link = result.deployed[0]!.links.find((l) => l.agentId === "ghost")!;
     assert.equal(link.status, "unsupported");
     assert.match(link.detail ?? "", /not present/);
+    assert.equal(lstatSync(join(roots.home, ".agents", "skills", "alpha")).isSymbolicLink(), true);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy array-shaped target collections reject malformed entries without throwing", async () => {
+  const roots = makeRoots();
+  try {
+    const malformed = entry("alpha", []) as unknown as ReturnType<typeof entry>;
+    (malformed as unknown as { targets: unknown[] }).targets = [null, { agentId: 42 },
+      { agentId: claudeAgent.id, invocation: "invalid" }];
+    const result = await reconcile(roots, [malformed]);
+    assert.equal(result.deployed[0]?.error, "invalid skill targets");
+    assert.deepEqual(result.deployed[0]?.links, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a desired skill with zero targets retains its canonical link while harness links are removed", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha]);
+    const result = await reconcile(roots, [{ ...alpha, targets: [] }]);
+    assert.equal(lstatSync(join(roots.home, ".agents", "skills", "alpha")).isSymbolicLink(), true);
+    assert.equal(existsSync(join(roots.home, ".claude", "skills", "alpha")), false);
+    assert.equal(result.removedLinks.some((removal) => removal.path === "~/.agents/skills/alpha"), false);
+    assert.equal(result.removedLinks.some((removal) => removal.path === "~/.claude/skills/alpha"), true);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("an exclusively WSL-targeted skill materializes without creating native links", async () => {
+  const roots = makeRoots();
+  try {
+    const wslAgent: AgentDefinition = {
+      ...codexAgent,
+      id: "codex-wsl-Ubuntu",
+      context: { kind: "wsl", distro: "Ubuntu" },
+    };
+    const result = await reconcile(roots, [
+      entry("alpha", [{ agentId: wslAgent.id, invocation: "agent" }]),
+    ], { agents: [wslAgent] });
+    assert.equal(existsSync(join(roots.home, ".agents", "skills", "alpha")), false);
+    assert.deepEqual(result.deployed[0]?.links, [{
+      agentId: wslAgent.id,
+      status: "unsupported",
+      detail: "this target reconciles inside its WSL distribution",
+    }]);
+    assert.equal(existsSync(join(skillsStoreRoot(roots.dataDir), "alpha", result.deployed[0]!.digest)), true);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("WSL placeholders distinguish unsafe distributions from unsupported drivers", async () => {
+  const roots = makeRoots();
+  try {
+    const unsafe: AgentDefinition = {
+      ...codexAgent, id: "unsafe-wsl", context: { kind: "wsl", distro: "../Ubuntu" },
+    };
+    const unsupported: AgentDefinition = {
+      ...codexAgent, id: "unsupported-wsl", driver: "acp", context: { kind: "wsl", distro: "Ubuntu" },
+    };
+    const result = await reconcile(roots, [entry("alpha", [
+      { agentId: unsafe.id, invocation: "agent" },
+      { agentId: unsupported.id, invocation: "agent" },
+    ])], { agents: [unsafe, unsupported] });
+    const links = new Map(result.deployed[0]!.links.map((link) => [link.agentId, link]));
+    assert.equal(links.get(unsafe.id)?.status, "unsupported");
+    assert.equal(links.get(unsafe.id)?.detail, "this agent's WSL distribution name is invalid or unsafe");
+    assert.equal(links.get(unsupported.id)?.status, "unsupported");
+    assert.equal(links.get(unsupported.id)?.detail, "this agent's driver does not support managed skills");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a malformed missing WSL distro is reported without collapsing native reconciliation", async () => {
+  const roots = makeRoots();
+  try {
+    const malformed = {
+      ...codexAgent, id: "malformed-wsl", context: { kind: "wsl" },
+    } as unknown as AgentDefinition;
+    const result = await reconcile(roots, [entry("alpha", [
+      { agentId: malformed.id, invocation: "agent" },
+    ])], { agents: [malformed] });
+    assert.equal(result.deployed[0]?.links[0]?.status, "unsupported");
+    assert.equal(result.deployed[0]?.links[0]?.detail,
+      "this agent's WSL distribution name is invalid or unsafe");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy target validation does not impose a new agent ID length limit", async () => {
+  const roots = makeRoots();
+  try {
+    const longId = "agent-".padEnd(300, "x");
+    const longAgent = { ...codexAgent, id: longId };
+    const result = await reconcile(roots, [entry("alpha", [
+      { agentId: longId, invocation: "agent" },
+    ])], { agents: [longAgent] });
+    assert.equal(result.deployed[0]?.links[0]?.status, "linked");
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -421,6 +532,24 @@ test("unmanaged scan is bounded per harness directory", async () => {
     const result = await reconcile(roots, []);
     const found = result.unmanaged.filter((s) => s.agentId === claudeAgent.id);
     assert.equal(found.length, SKILL_SCAN_LIMITS.maxEntriesPerDirectory);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("retained adoption journals do not crowd real skills out of bounded unmanaged scans", async () => {
+  const roots = makeRoots();
+  try {
+    const skills = join(roots.home, ".claude", "skills");
+    for (let index = 0; index < SKILL_SCAN_LIMITS.maxEntriesPerDirectory; index += 1) {
+      mkdirSync(join(skills, `.wollipog-adoption-${String(index).padStart(3, "0")}`), { recursive: true });
+      const local = join(skills, `local-skill-${String(index).padStart(3, "0")}`);
+      mkdirSync(local);
+      writeFileSync(join(local, "SKILL.md"), `---\nname: local-skill-${index}\n---\nBody`);
+    }
+    const result = await reconcile(roots, []);
+    assert.equal(result.unmanaged.filter((skill) => skill.agentId === claudeAgent.id).length,
+      SKILL_SCAN_LIMITS.maxEntriesPerDirectory);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -1423,6 +1552,7 @@ test("canonical link mutations require the provider-home lease even without a ha
     const canonicalPath = join(roots.home, ".agents", "skills", "alpha");
     const blocked = await reconcile(roots, [alpha], {
       agents: [],
+      allowRemovals: false,
       acquireProviderHomeLease: () => {
         assert.equal(existsSync(canonicalPath), false);
         throw new Error("foreign owner");
@@ -1681,25 +1811,38 @@ test("store gc logs what it removes", async () => {
   }
 });
 
-test("windows performs no writes and reports every link as unsupported", async () => {
+test("Windows uses junction-shaped managed links and atomically retargets only a verified link", async () => {
   const roots = makeRoots();
   try {
-    const result = await reconcile(
-      roots,
-      [
-        entry("alpha", [
-          { agentId: claudeAgent.id, invocation: "agent" },
-          { agentId: codexAgent.id, invocation: "manual" },
-        ]),
-      ],
-      { platform: "win32" },
-    );
-    for (const link of result.deployed[0]!.links) {
-      assert.equal(link.status, "unsupported");
-      assert.match(link.detail ?? "", /Windows/);
-    }
-    assert.equal(existsSync(join(roots.dataDir, "skills")), false);
-    assert.deepEqual(readdirSync(roots.home), []);
+    const targets = [
+      { agentId: claudeAgent.id, invocation: "agent" as const },
+      { agentId: codexAgent.id, invocation: "manual" as const },
+    ];
+    const first = entry("alpha", targets);
+    const created = await reconcile(roots, [first], { platform: "win32" });
+    assert.equal(created.deployed[0]?.links.find((link) => link.agentId === claudeAgent.id)?.status, "linked");
+    assert.equal(created.deployed[0]?.links.find((link) => link.agentId === codexAgent.id)?.status, "unsupported");
+    const canonical = join(roots.home, ".agents", "skills", "alpha");
+    const oldTarget = readlinkSync(canonical);
+    const replacements: string[][] = [];
+    const second = entry("alpha", targets, skillFiles("alpha", "Updated.\n"));
+    const updated = await reconcile(roots, [second], {
+      platform: "win32",
+      ...(process.platform === "win32" ? {} : { replaceWindowsJunction: (path: string, expectedTarget: string, target: string) => {
+        replacements.push([path, expectedTarget, target]);
+        assert.equal(readlinkSync(path), oldTarget);
+        unlinkSync(path);
+        symlinkSync(target, path, "dir");
+      } }),
+    });
+    assert.equal(updated.deployed[0]?.links.find((link) => link.agentId === claudeAgent.id)?.status, "linked");
+    assert.equal(replacements.length, process.platform === "win32" ? 0 : 1,
+      "only the seam-based run records the canonical version switch");
+    if (process.platform !== "win32") assert.equal(replacements[0]?.[0], canonical);
+    assert.equal(linkTarget(canonical), join(skillsStoreRoot(roots.dataDir), "alpha", second.versionDigest));
+    const removed = await reconcile(roots, [], { platform: "win32" });
+    assert.ok(removed.removedLinks.some((entry) => entry.path === "~/.agents/skills/alpha"));
+    assert.equal(existsSync(canonical), false);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }

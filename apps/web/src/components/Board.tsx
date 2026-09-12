@@ -5,12 +5,17 @@ import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { SessionStatusIndicators, Empty } from "./common.js";
+import { SessionStatusIndicators, Empty, ThreadDot } from "./common.js";
+import { inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
 import { useLongPress } from "./interactions.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
-import { reminderBadgeLabel, snoozedSessionAttentionReason } from "../session-reminders.js";
+import {
+  reminderBadgeDescription,
+  reminderBadgeLabel,
+  snoozedSessionAttentionReason,
+} from "../session-reminders.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
 const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 230 : session.preview ? 155 : 120;
@@ -20,9 +25,10 @@ const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 
  * split, search, and reminder filtering applied by the parent), grouped into status columns.
  * The Machine and Agent filters below are board-local refinements on top of that shared scope.
  */
-export function Board({ sessions: scoped, reminders = new Map(), searchActive, onShowAll, onNewSession, onSessionMenu }: {
+export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu }: {
   /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
   sessions: SessionView[];
+  stalledSessionIds?: ReadonlySet<string>;
   reminders?: ReadonlyMap<string, SessionReminderView>;
   /** True while the shared search or a non-All split narrows the scope (changes the empty state). */
   searchActive: boolean;
@@ -76,9 +82,28 @@ export function Board({ sessions: scoped, reminders = new Map(), searchActive, o
     const cols = new Map<string, SessionView[]>();
     for (const c of BOARD_COLUMNS) cols.set(c.id, []);
     for (const s of visible) cols.get(s.column)?.push(s);
-    for (const list of cols.values()) list.sort((a, b) => b.updatedAt - a.updatedAt);
+    // `scoped` already carries the canonical, pin- and family-aware Inbox order. Preserve it
+    // within each column so pinning from a card has the same immediate ordering effect as pinning
+    // from a row; sorting again by `updatedAt` would erase that structural choice.
     return cols;
   }, [visible]);
+
+  // The family chip on a parent's card (#896). The Board does not nest, and a parent's children
+  // are usually in other columns, so the rollup is read off the whole scope rather than a column.
+  const threadChildren = useMemo(() => {
+    const present = new Set(scoped.map((session) => session.id));
+    const map = new Map<string, InboxThreadChildren>();
+    for (const session of scoped) {
+      const parentId = session.parentSessionId;
+      if (!parentId || !present.has(parentId) || parentId === session.id) continue;
+      const entry = map.get(parentId) ?? { count: 0, waiting: 0, children: [] };
+      entry.count += 1;
+      if (isInboxBlocked(session)) entry.waiting += 1;
+      entry.children.push({ id: session.id, title: session.title, state: inboxThreadChildState(session, stalledSessionIds.has(session.id)) });
+      map.set(parentId, entry);
+    }
+    return map;
+  }, [scoped, stalledSessionIds]);
 
   // Drag a card onto a column to file the session there manually (server-side
   // setColumn override). Depth counter per column: dragleave fires when crossing
@@ -238,6 +263,7 @@ export function Board({ sessions: scoped, reminders = new Map(), searchActive, o
                   machineName={machineName}
                   runnerOnline={(runnerId) => runners.get(runnerId)?.status === "online"}
                   onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
+                  threadChildren={threadChildren}
                   onDragEnd={clearDragState}
                   onSessionMenu={onSessionMenu}
                 />
@@ -256,6 +282,7 @@ function BoardColumnBody({
   machineName,
   runnerOnline,
   onOpen,
+  threadChildren,
   onDragEnd,
   onSessionMenu,
 }: {
@@ -264,6 +291,7 @@ function BoardColumnBody({
   machineName: (runnerId: string) => string;
   runnerOnline: (runnerId: string) => boolean;
   onOpen: (sessionId: string) => void;
+  threadChildren: ReadonlyMap<string, InboxThreadChildren>;
   onDragEnd: () => void;
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
@@ -281,6 +309,7 @@ function BoardColumnBody({
             machineName={machineName(session.runnerId)}
             runnerOnline={runnerOnline(session.runnerId)}
             onOpen={() => onOpen(session.id)}
+            threadChildren={threadChildren.get(session.id) ?? null}
             onDragEnd={onDragEnd}
             onSessionMenu={onSessionMenu}
           />
@@ -303,6 +332,7 @@ function SessionCard({
   machineName,
   runnerOnline,
   onOpen,
+  threadChildren,
   onDragEnd,
   onSessionMenu,
 }: {
@@ -311,6 +341,7 @@ function SessionCard({
   machineName: string;
   runnerOnline: boolean;
   onOpen: () => void;
+  threadChildren: InboxThreadChildren | null;
   onDragEnd: () => void;
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
@@ -371,7 +402,7 @@ function SessionCard({
       onDragEnd={onDragEnd}
     >
       <div className="card-top">
-        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
+        <SessionStatusIndicators session={session} disconnected={!runnerOnline} attention="pills" />
         <span className="card-time">{relativeTime(session.lastEventAt ?? session.updatedAt)}</span>
       </div>
       <button
@@ -382,7 +413,6 @@ function SessionCard({
         {session.title}
       </button>
       {session.preview && <div className="card-preview">{session.preview}</div>}
-
       {session.pendingApproval && session.pendingApproval.kind === "question" ? (
         // Structured questions have no inline options (options[] is empty by design) — the
         // card offers Open, which lands on the detail view's interactive question card.
@@ -413,17 +443,34 @@ function SessionCard({
       ) : null}
 
       <div className="card-meta">
+        {threadChildren && (
+          <span className={`inbox-thread-family${threadChildren.waiting > 0 ? " waiting" : ""}`} title={inboxThreadChildrenLabel(threadChildren)}>
+            <span className="inbox-thread-dots" aria-hidden="true">
+              {threadChildren.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
+            </span>
+            <span className="inbox-thread-family-text">{inboxThreadChildrenLabel(threadChildren)}</span>
+          </span>
+        )}
         {extraSnoozedAttention && (
           <span
-            className="inbox-status-pill blocked"
+            className={`inbox-status-pill ${extraSnoozedAttention.kind === "background_delivery_watchdog" &&
+              extraSnoozedAttention.severity === "pending" ? "background-delivery-pending" : "blocked"}`}
             title={extraSnoozedAttention.description}
-            aria-label={`Attention: ${extraSnoozedAttention.label}`}
+            aria-label={extraSnoozedAttention.kind === "background_delivery_watchdog"
+              ? extraSnoozedAttention.accessibleName
+              : `Attention: ${extraSnoozedAttention.label}`}
           >
             {extraSnoozedAttention.label}
           </span>
         )}
         {reminder && (
-          <span className="inbox-status-pill reminder" aria-label={`Reminder: ${reminderBadgeLabel(reminder)}`}>
+          <span
+            className="inbox-status-pill reminder"
+            title={reminderBadgeDescription(reminder)}
+            aria-label={`Reminder: ${reminder.state === "fired"
+              ? reminderBadgeDescription(reminder)
+              : reminderBadgeLabel(reminder)}`}
+          >
             {reminderBadgeLabel(reminder)}
           </span>
         )}

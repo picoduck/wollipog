@@ -26,6 +26,19 @@ export interface PolicyInput {
   status: SessionStatus;
   costUsd: number;
   toolCallCount: number;
+  /** Tokens are recorded but none of them could be priced, so `costUsd` says nothing (v105). */
+  unpriced?: boolean;
+}
+
+/** The guardrail fields a session carries, as the rule builder reads them (v105 adds the soft
+ * checkpoints, the unpriced acknowledgement, and the owner's daily allowance). */
+export interface GuardrailFields {
+  costBudgetUsd?: number | null;
+  maxToolCalls?: number | null;
+  costCheckpointsUsd?: number[] | null;
+  costCheckpointApprovedUsd?: number | null;
+  costUnpricedAcknowledged?: boolean;
+  dailyBudget?: { budgetUsd: number; spentUsd: number } | null;
 }
 
 export interface ApprovalPolicyInput {
@@ -126,17 +139,17 @@ export function parsePolicyHookRequest(input: unknown): ParsedPolicyHookRequest 
   };
 }
 
-/** The conductor may orchestrate broad changes, but no stored rule may silently auto-approve its
- * requests. Keeping this invariant as ordinary policy data makes precedence inspectable/testable. */
-export function conductorSafetyPolicy(now = 0): GovernancePolicy {
+/** Shared audiences require a spawn approval by default; an individual owner may opt in with a
+ * higher-priority stored policy scoped to this same operation. */
+export function sessionSpawnSafetyPolicy(individualOwner = false, now = 0): GovernancePolicy {
   return {
-    policyId: "builtin:conductor-human-gate",
-    name: "Conductor actions require review",
-    effect: "ask",
-    priority: 1_000_000,
+    policyId: "builtin:session-spawn-human-gate",
+    name: "Review Agent-Created Sessions",
+    effect: individualOwner ? "allow" : "ask",
+    priority: -1_000_000,
     enabled: true,
     builtin: true,
-    scope: { agentId: "conductor" },
+    scope: { toolName: "wollipog.create_session" },
     createdAt: now,
     updatedAt: now,
   };
@@ -150,7 +163,7 @@ export function evaluateApprovalPolicies(
   policies: GovernancePolicy[],
 ): ApprovalPolicyDecision {
   const matched = policies
-    .filter((policy) => policy.enabled && policyMatches(policy, input))
+    .filter((policy) => !policy.questionRule && policy.enabled && policyMatches(policy, input))
     .sort((a, b) => b.priority - a.priority || EFFECT_ORDER[b.effect] - EFFECT_ORDER[a.effect] || a.policyId.localeCompare(b.policyId));
   return {
     effect: matched[0]?.effect ?? "ask",
@@ -272,12 +285,19 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
     "scope",
     "conditions",
     "askTimeout",
+    "ownerUserId",
+    "questionRule",
   ]);
   if (Object.keys(policy).some((key) => !topKeys.has(key))) return "policy contains unsupported fields";
   if (typeof policy.policyId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(policy.policyId) || policy.policyId.startsWith("builtin:")) {
     return "policyId must be a non-builtin identifier of at most 128 characters";
   }
   if (typeof policy.name !== "string" || !policy.name.trim() || policy.name.length > 160) return "name must be between 1 and 160 characters";
+  const starterId = /^questions:(review|push|evidence):/.exec(policy.policyId);
+  if (starterId && (policy.questionRule?.starterCategory !== starterId[1] ||
+      policy.policyId !== `questions:${starterId[1]}:${policy.ownerUserId}`)) {
+    return "starter policy identifiers are reserved for their category and owner";
+  }
   if (!(["allow", "deny", "ask"] as unknown[]).includes(policy.effect)) return "effect must be allow, deny, or ask";
   if (!Number.isInteger(policy.priority) || policy.priority < -100_000 || policy.priority > 100_000) {
     return "priority must be an integer between -100000 and 100000";
@@ -294,11 +314,11 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
   const scopeKeys = new Set(["organizationId", "runnerId", "workspaceId", "agentId", "toolName", "path", "network", "branch"]);
   if (Object.keys(policy.scope).some((key) => !scopeKeys.has(key))) return "scope contains unsupported fields";
   const scopeValues = Object.values(policy.scope);
-  if (!scopeValues.length || scopeValues.some((value) => typeof value !== "string" || !value || value.length > 1024)) {
+  if ((!scopeValues.length && !policy.questionRule) || scopeValues.some((value) => typeof value !== "string" || !value || value.length > 1024)) {
     return "scope must contain at least one non-empty bounded selector";
   }
   const narrowingScope = [policy.scope.runnerId, policy.scope.workspaceId, policy.scope.agentId, policy.scope.toolName, policy.scope.path, policy.scope.network, policy.scope.branch];
-  if (policy.effect === "allow" && narrowingScope.every((value) => value === undefined)) {
+  if (!policy.questionRule && policy.effect === "allow" && narrowingScope.every((value) => value === undefined)) {
     return "allow policies require a selector narrower than organization";
   }
   if (policy.scope.path) {
@@ -314,6 +334,23 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
       return "network selectors must be host patterns or credential-free URL patterns";
     }
   }
+  if (policy.questionRule !== undefined) {
+    const rule = policy.questionRule;
+    if (!rule || typeof rule !== "object" || Array.isArray(rule) ||
+        Object.keys(rule).some((key) => !["headerPattern", "questionPattern", "answer", "starterCategory"].includes(key))) return "invalid questionRule";
+    if (rule.starterCategory !== undefined && !["review", "push", "evidence"].includes(rule.starterCategory)) return "invalid starter category";
+    if (policy.effect !== "allow" || policy.askTimeout !== undefined || policy.conditions !== undefined) return "question rules require allow without conditions or askTimeout";
+    if (typeof policy.ownerUserId !== "string" || !policy.ownerUserId || policy.ownerUserId.length > 128) return "question rules require ownerUserId";
+    if (!rule.headerPattern && !rule.questionPattern) return "question rules require an explicit header or question pattern";
+    for (const pattern of [rule.headerPattern, rule.questionPattern]) {
+      if (pattern !== undefined && (typeof pattern !== "string" || !pattern.trim().replaceAll("*", "") || pattern.length > 512 || pattern.split("*").length > 9)) return "question patterns must contain literal text and at most eight wildcards";
+    }
+    if (Object.keys(policy.scope).some((key) => !["organizationId", "runnerId", "workspaceId", "agentId"].includes(key))) return "unsupported question scope";
+    const answer = rule.answer;
+    if (!answer || typeof answer !== "object" || Array.isArray(answer) || Object.keys(answer).length !== 1 ||
+        !Object.keys(answer).every((key) => ["option", "text"].includes(key)) ||
+        !Object.values(answer).every((value) => typeof value === "string" && value.length > 0 && value.length <= 4096)) return "question answer must configure one option or text";
+  } else if (policy.ownerUserId !== undefined) return "ownerUserId requires a question rule";
   const c = policy.conditions;
   if (!c) return null;
   if (typeof c !== "object" || Array.isArray(c)) return "conditions must be an object";
@@ -338,13 +375,41 @@ export function validateGovernancePolicy(policy: Omit<GovernancePolicy, "created
 
 /**
  * Build the rule list from a session's flattened guardrail fields. The fixed order here IS the
- * precedence order when several rules trip at once (cost first — it's the one spending money).
+ * precedence order when several rules trip at once: the organization's daily allowance first (it
+ * outranks anything the session set for itself), then the unpriced fail-closed check (a budget
+ * that cannot see spend is no budget), then the next soft checkpoint, then the hard budget, then
+ * the tool-call limit.
  */
-export function rulesFromSession(s: { costBudgetUsd?: number | null; maxToolCalls?: number | null }): PolicyRule[] {
+export function rulesFromSession(s: GuardrailFields): PolicyRule[] {
   const rules: PolicyRule[] = [];
-  if (s.costBudgetUsd != null && s.costBudgetUsd > 0) rules.push({ kind: "cost_budget", budgetUsd: s.costBudgetUsd });
+  if (s.dailyBudget && s.dailyBudget.budgetUsd > 0) {
+    rules.push({ kind: "daily_budget", budgetUsd: s.dailyBudget.budgetUsd, spentUsd: s.dailyBudget.spentUsd });
+  }
+  const hasBudget = s.costBudgetUsd != null && s.costBudgetUsd > 0;
+  const checkpoints = (s.costCheckpointsUsd ?? []).filter((usd) => Number.isFinite(usd) && usd > 0).sort((a, b) => a - b);
+  if ((hasBudget || checkpoints.length > 0) && !s.costUnpricedAcknowledged) rules.push({ kind: "cost_unpriced" });
+  const approved = s.costCheckpointApprovedUsd ?? 0;
+  // Only the next unapproved checkpoint is a rule: approving it advances `approved`, and the one
+  // after it becomes the rule on the next evaluation.
+  const next = checkpoints.find((usd) => usd > approved && (!hasBudget || usd < s.costBudgetUsd!));
+  if (next != null) rules.push({ kind: "cost_checkpoint", checkpointUsd: next });
+  if (hasBudget) rules.push({ kind: "cost_budget", budgetUsd: s.costBudgetUsd! });
   if (s.maxToolCalls != null && s.maxToolCalls > 0) rules.push({ kind: "max_tool_calls", maxCalls: s.maxToolCalls });
   return rules;
+}
+
+/** Validate and normalize a checkpoint list from user input: finite, positive, ascending, unique,
+ * at most eight. Returns null when nothing usable remains. */
+export function normalizeCostCheckpoints(input: unknown): number[] | null {
+  if (!Array.isArray(input)) return null;
+  const values = [...new Set(input
+    .map((value) => (typeof value === "string" ? Number(value) : value))
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    .map((value) => Math.round(value * 100) / 100)
+    // Positivity is checked AFTER cent rounding: 0.001 would otherwise persist as a $0 checkpoint
+    // that looks configured and never gates.
+    .filter((value) => value >= 0.01))].sort((a, b) => a - b);
+  return values.length > 0 ? values.slice(0, 8) : null;
 }
 
 /**
@@ -375,6 +440,36 @@ export function evaluatePolicies(input: PolicyInput, rules: PolicyRule[]): Polic
       }
       return { rule, decision: "ok" };
     }
+    if (rule.kind === "cost_checkpoint") {
+      if (input.costUsd >= rule.checkpointUsd) {
+        return {
+          rule,
+          decision: "ask",
+          title: `Cost checkpoint — $${input.costUsd.toFixed(2)} of $${rule.checkpointUsd.toFixed(2)}. Continue?`,
+        };
+      }
+      return { rule, decision: "ok" };
+    }
+    if (rule.kind === "cost_unpriced") {
+      if (input.unpriced) {
+        return {
+          rule,
+          decision: "ask",
+          title: "Usage cannot be priced — this model has no rate, so the cost budget cannot be enforced. Continue without it?",
+        };
+      }
+      return { rule, decision: "ok" };
+    }
+    if (rule.kind === "daily_budget") {
+      if (rule.spentUsd >= rule.budgetUsd) {
+        return {
+          rule,
+          decision: "ask",
+          title: `Daily budget reached — $${rule.spentUsd.toFixed(2)} of $${rule.budgetUsd.toFixed(2)} today across your sessions. New turns pause until the day rolls over or an owner or admin raises it.`,
+        };
+      }
+      return { rule, decision: "ok" };
+    }
     // max_tool_calls
     if (input.toolCallCount >= rule.maxCalls) {
       return {
@@ -398,13 +493,15 @@ export function firstAsk(decisions: PolicyDecision[]): PolicyDecision | null {
 
 /** The approval card for an ask — same shape/options the shipped Phase 7 cost gate used. */
 export function approvalForDecision(d: PolicyDecision, sessionId: string, now: number): PendingApproval {
-  const prefix = d.rule.kind === "cost_budget" ? "cost-budget" : "max-tool-calls";
+  const prefix = d.rule.kind.replaceAll("_", "-");
   return {
     requestId: `${prefix}:${sessionId}:${now}`,
     kind: d.rule.kind,
     title: d.title ?? "Guardrail reached. Continue?",
     options: [
-      { optionId: "continue", name: "Continue", kind: "allow_once" },
+      // For daily_budget, Continue re-checks the allowance rather than overriding it: the card
+      // clears only once the day rolled over or an owner or admin raised the budget.
+      { optionId: "continue", name: d.rule.kind === "daily_budget" ? "Check Again" : "Continue", kind: "allow_once" },
       { optionId: "cancel", name: "Stop", kind: "reject_once" },
     ],
   };

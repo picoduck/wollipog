@@ -25,6 +25,14 @@ test("GitHub review sync is a version-gated read", () => {
   );
 });
 
+test("forge review sync is a v106-gated read and legacy GitHub remains available", () => {
+  assert.deepEqual(parseGitAction({ action: "forge_review_sync" }), { action: { kind: "forge_review_sync" } });
+  assert.deepEqual(gitActionAllowed({ kind: "forge_review_sync" }, "running"), { ok: true });
+  assert.deepEqual(gitActionCapability({ kind: "forge_review_sync" }), ["forgeIntegration", "Forge review reconciliation"]);
+  assert.equal(gitActionRequiresLinkedWorktree({ kind: "forge_review_sync" }), true);
+  assert.deepEqual(gitActionCapability({ kind: "github_review_sync" }), ["githubReviewReconciliation", "GitHub review reconciliation"]);
+});
+
 test("gitActionAllowed: summary is a read — allowed even while a turn runs", () => {
   for (const s of ["queued", "running", "input_required", "idle", "completed"] as SessionStatus[]) {
     assert.deepEqual(gitActionAllowed({ kind: "summary" }, s), { ok: true });

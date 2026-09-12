@@ -25,6 +25,7 @@ exports.
 | `RunsIcon` | Lucide | `Workflow` | Generic workflow runs. |
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
+| `ServiceTierIcon` | Lucide | `Zap` | Fast service-tier setting. |
 | `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability. |
 | `UsageIcon` | Lucide | `ChartNoAxesColumn` | Usage metrics. |
 | `ChevronDownIcon` | Lucide | `ChevronDown` | Directional disclosure. |

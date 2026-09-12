@@ -24,7 +24,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { AgentDefinition, ElicitationTransport, SessionLaunchSpec } from "@wollipog/protocol";
-import { deriveCpHttpUrl } from "./conductor.js";
+import { deriveCpHttpUrl } from "./runner-credential-file.js";
 import { effectiveClaudePermissionMode } from "./claude-permission.js";
 import {
   defaultRunnerReentryHost,
@@ -413,7 +413,8 @@ export function provisionClaudeHooks(
   for (const index of staleIndices.reverse()) spec.args.splice(index, 2);
   const hasCurrentSettings = existingIndex >= 0;
   const targetIsHost = !spec.executionTarget || spec.executionTarget.adapter === "host";
-  if (!config.enabled ||
+  if (spec.config?.permissionMode === "orchestrator" ||
+      !config.enabled ||
       config.controlPlaneProtocolVersion == null ||
       config.controlPlaneProtocolVersion < CLAUDE_HOOK_PROTOCOL_VERSION ||
       (spec.context?.kind ?? "native") !== "native" ||

@@ -1,3 +1,4 @@
+import { QuestionPoliciesPanel } from "./components/QuestionPoliciesPanel.js";
 import {
   useCallback,
   useEffect,
@@ -234,7 +235,7 @@ function xtermOwnsKey(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest(".xterm"));
 }
 
-function Shell() {
+export function Shell() {
   const instances = useInstances();
   const reportActiveStatus = instances.reportActiveStatus;
   const activeInstanceKind = instances.activeProfile.kind;
@@ -349,6 +350,13 @@ function Shell() {
     // The scalar route key is the trigger; panel callbacks are intentionally app-state methods.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceLocationKey]);
+  const attentionKey = view.name === "session" && view.attention
+    ? `${viewPath(view)}\0${view.attention.activationId ?? 0}` : null;
+  useEffect(() => {
+    if (attentionKey) rightPanel.show("subagents");
+    // A route change, not unrelated panel state, requests focus/navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attentionKey]);
 
   // Bottom terminal dock visibility (Codex layout: toggled, never an always-visible bar).
   // Migrates the legacy wollipog.shelldock.collapsed pref on first run.
@@ -463,6 +471,9 @@ function Shell() {
         return;
       }
       if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      // Dialogs own Escape before the shell's underlying menus, regardless of
+      // the order their window listeners were mounted.
+      if (document.querySelector('[aria-modal="true"]')) return;
       const backdrops = Array.from(document.querySelectorAll<HTMLElement>(".plus-backdrop, .menu-backdrop"));
       if (backdrops.length) {
         e.preventDefault();
@@ -703,6 +714,7 @@ function Shell() {
               viewMode={view.name === "board" ? "board" : "list"}
               expandedSessionId={view.name === "session" ? view.id : null}
               sourceLocation={view.name === "session" ? view.location : undefined}
+              attentionTarget={view.name === "session" ? view.attention : undefined}
               topbarControls={!isMobile ? sessionPanelControls : undefined}
               rightPanel={rightPanel}
               onOpenTerminal={() => {
@@ -767,10 +779,13 @@ function Shell() {
                   />
                 ),
                 behavior: (
+                  <>
                   <BehaviorPanel
                     agentHarnessDefaults={<AgentHarnessDefaultsPanel discoveryRevision={runners} />}
                     sessionNaming={<SessionNamingPanel />}
                   />
+                  <QuestionPoliciesPanel />
+                  </>
                 ),
                 network: <NetworkPanel tailnet={tailnet} />,
                 experimental: (

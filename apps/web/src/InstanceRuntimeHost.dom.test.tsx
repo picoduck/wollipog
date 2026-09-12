@@ -9,8 +9,10 @@ import type { ApiTransport } from "./api-transport.js";
 import { InstanceRuntimeHost } from "./InstanceRuntimeHost.js";
 import type { InstanceRuntime } from "./instance-runtime.js";
 import type { UiSocket } from "./ui-transport.js";
+import { installDomTestCleanup } from "./dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,

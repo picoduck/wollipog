@@ -6,6 +6,13 @@ export interface InboxKeyActions {
   next: () => void;
   previous: () => void;
   expand: () => void;
+  /** F2: open the selected session with its top-priority request focused (#896). */
+  openTopRequest: () => void;
+  toggleThread: () => void;
+  toggleAllThreads: () => void;
+  goToParent: () => void;
+  expandThread: () => void;
+  collapseThread: () => void;
   fork: () => void;
   nextSplit: () => void;
   previousSplit: () => void;
@@ -26,6 +33,12 @@ const BINDINGS: ReadonlyArray<[ShortcutId, keyof InboxKeyActions]> = [
   ["inbox-next", "next"],
   ["inbox-previous", "previous"],
   ["inbox-expand", "expand"],
+  ["inbox-open-top-request", "openTopRequest"],
+  ["inbox-toggle-thread", "toggleThread"],
+  ["inbox-toggle-all-threads", "toggleAllThreads"],
+  ["inbox-go-to-parent", "goToParent"],
+  ["inbox-expand-thread", "expandThread"],
+  ["inbox-collapse-thread", "collapseThread"],
   ["inbox-fork", "fork"],
   ["inbox-next-split", "nextSplit"],
   ["inbox-previous-split", "previousSplit"],
@@ -54,7 +67,7 @@ export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
       const zone = active instanceof Element ? focusZoneForElement(active) : null;
       if (zone !== null && zone !== "list" && zone !== "detail") return;
       if (active instanceof HTMLElement &&
-          active.matches('button, a[href], input, textarea, select, [role="button"], [role="radio"], [role="checkbox"]') &&
+          active.matches('button, summary, a[href], input, textarea, select, [role="button"], [role="radio"], [role="checkbox"]') &&
           !active.matches(".inbox-list")) return;
       for (const [shortcutId, action] of BINDINGS) {
         if (!matchesShortcut(event, shortcutId)) continue;

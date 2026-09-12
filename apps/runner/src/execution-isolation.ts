@@ -5,10 +5,21 @@ import { cp, mkdir, opendir, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import type { RunnerExecutionIsolation } from "./config.js";
+import { assertExecutionIsolationContextSupported, WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import { runContextCommand } from "./context-command.js";
 import { resolveNative, type ResolvedBinary } from "./discovery/resolve.js";
 import type { SpawnIsolation } from "./spawn.js";
 import { materializeWindowsJobLauncher } from "./windows-job.js";
+import { wslAgentControlLaunch } from "./agent-control.js";
+import {
+  cleanupWslBwrapSessionState,
+  prepareWslBwrapIsolation,
+  provisionWslBwrapSessionState,
+  WSL_BWRAP_LAUNCHER_PATH,
+  type WslBwrapPreparation,
+  type WslBwrapPrepareRequest,
+} from "./wsl-bwrap-launcher.js";
+import { WSL_AGENT_CONTROL_PRIVATE_DIR } from "./wsl-agent-control.js";
 
 interface IsolationDeps {
   platform: NodeJS.Platform;
@@ -25,6 +36,10 @@ interface IsolationDeps {
   copyWsl: (context: Extract<AgentContext, { kind: "wsl" }>, source: ProviderStateLocation, target: ProviderStateLocation) => Promise<void>;
   removeNative: (location: ProviderStateLocation) => Promise<void>;
   removeWsl: (context: Extract<AgentContext, { kind: "wsl" }>, location: ProviderStateLocation) => Promise<void>;
+  cleanupWslSessionState: (distro: string, ownerHash: string, sessionKey: string) => Promise<void>;
+  provisionWslSessionState: (distro: string, ownerHash: string, sessionKey: string, uid: number) =>
+    Promise<{ root: string; provider: string; relay: string }>;
+  prepareWslIsolation: (context: AgentContext, request: WslBwrapPrepareRequest) => Promise<WslBwrapPreparation>;
   existsNative: (path: string) => Promise<boolean>;
   existsWsl: (context: Extract<AgentContext, { kind: "wsl" }>, path: string) => Promise<boolean>;
   forkSizeNative: (location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
@@ -79,6 +94,9 @@ const defaultDeps: IsolationDeps = {
   removeWsl: async (context, location) => {
     await runContextCommand(context, "rm", ["-rf", "--", location.root], { cwd: "/", timeoutMs: 5_000 });
   },
+  cleanupWslSessionState: cleanupWslBwrapSessionState,
+  provisionWslSessionState: provisionWslBwrapSessionState,
+  prepareWslIsolation: prepareWslBwrapIsolation,
   existsNative: async (path) => stat(path).then((value) => value.isDirectory(), () => false),
   existsWsl: async (context, path) => runContextCommand(
     context, "test", ["-d", path], { cwd: "/", timeoutMs: 5_000 },
@@ -111,6 +129,8 @@ export interface IsolationStateOptions {
   /** Session-private roots that may be populated after launch (for example an agent-requested
    * worktree). They are materialized before sandbox construction and never shared across sessions. */
   additionalWritableRoots?: string[];
+  /** Keep the provider's writable filesystem to its private cwd and transcript state. */
+  orchestratorScratchOnly?: boolean;
   /** Stable attested runner/control-plane owner for state outside dataDir (currently WSL). */
   ownerHash?: string;
   /** Canonical shared provider leaf used by Seatbelt when a home component is symlinked. */
@@ -209,22 +229,40 @@ function seatbeltLiteral(value: string): string {
   return `"${posix.normalize(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
+/** Exactly the roots a Seatbelt session may write to. Anything that must REPORT what the sandbox
+ * permits reads this rather than re-deriving it: a second copy of the list drifts, and a caller
+ * told a path is blocked when the profile in fact grants it waits for a relaunch it never needed. */
+export function seatbeltWritableRoots(
+  state: IsolationStateOptions,
+  home: string,
+  nativeTmp = tmpdir(),
+): string[] {
+  const mapping = statePath(state.driver);
+  const paths = new Set(state.orchestratorScratchOnly
+    ? [state.cwd]
+    : [state.cwd, state.dataDir, nativeTmp, ...(state.additionalWritableRoots ?? [])]);
+  if (mapping) paths.add(state.providerStatePath ?? posix.join(
+    absoluteHome(state.env.HOME ?? home, "HOME on macOS"), ...mapping.relative.split("/"),
+  ));
+  return [...paths];
+}
+
 /** A parameter-free Seatbelt profile. It intentionally grants read access for installed CLI,
- * credential, toolchain, and system compatibility while restricting writes to the worktree,
- * runner data, temporary directory, and the provider's real transcript leaf. Unlike bwrap,
- * Seatbelt cannot mount a per-session transcript leaf over the provider's home path. */
+ * credential, toolchain, and system compatibility while restricting writes to the declared
+ * session roots and the provider's real transcript leaf. Unlike bwrap, Seatbelt cannot mount a
+ * per-session transcript leaf over the provider's home path. */
 export function buildSeatbeltProfile(
   state: IsolationStateOptions,
   home: string,
   network: "inherit" | "deny",
   nativeTmp = tmpdir(),
 ): string {
-  const mapping = statePath(state.driver);
-  const paths = new Set([state.cwd, state.dataDir, nativeTmp, ...(state.additionalWritableRoots ?? [])]);
-  if (mapping) paths.add(state.providerStatePath ?? posix.join(
-    absoluteHome(state.env.HOME ?? home, "HOME on macOS"), ...mapping.relative.split("/"),
-  ));
-  const writeRules = [...paths].map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
+  return renderSeatbeltProfile(seatbeltWritableRoots(state, home, nativeTmp), network);
+}
+
+function renderSeatbeltProfile(writableRoots: string[], network: "inherit" | "deny"): string {
+  const writeRules = writableRoots
+    .map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
   return [
     "(version 1)",
     "(deny default)",
@@ -254,28 +292,68 @@ export async function resolveExecutionIsolation(
 ): Promise<SpawnIsolation | undefined> {
   const runtime = { ...defaultDeps, ...deps };
   if (policy.mode === "provider") return undefined;
-  if (context.kind === "wsl") {
-    if (policy.mode !== "bwrap") {
-      throw new Error(`${policy.mode} isolation is native-host only; WSL sessions require bwrap`);
+  if (policy.mode === "bwrap" && context.kind === "wsl" && state) {
+    const bridge = wslAgentControlLaunch(state.sessionId);
+    if (!bridge || bridge.safeLauncherProtocolVersion !== 1 || !state.ownerHash) {
+      throw new Error(WSL_BWRAP_UNAVAILABLE_ERROR);
     }
     const resolved = await runtime.resolveWsl(context);
-    if (!resolved) throw new Error(`bubblewrap is required inside WSL distro ${context.distro} by runner policy`);
-    if (resolved.uid === 0) throw new Error(`bubblewrap isolation refuses root execution inside WSL distro ${context.distro}`);
-    const mapping = state && statePath(state.driver);
-    const writableBinds = mapping ? (() => {
-      const targetHome = absoluteHome(state?.env.HOME ?? resolved.home, "HOME inside WSL");
-      const location = providerStateLocation(wslRunnerStateBase(resolved.home, state.ownerHash), state.driver, state.sessionId)!;
-      return [{
-        source: location.leaf,
-        target: `${targetHome}/${mapping.relative}`,
-      }];
-    })() : [];
-    for (const root of state?.additionalWritableRoots ?? []) writableBinds.push({ source: root, target: root });
-    if (writableBinds.length) await runtime.mkdirWsl(context, writableBinds.flatMap((bind) => [bind.source, bind.target]));
+    if (!resolved || resolved.uid === 0 || resolved.command !== bridge.bwrapRuntime) {
+      throw new Error("target-local WSL launcher prerequisites changed after discovery");
+    }
+    const mapping = statePath(state.driver);
+    const targetHome = absoluteHome(state.env.HOME ?? resolved.home, "HOME inside WSL");
+    const binds: Array<{ mode: "ro" | "rw"; source: string; target: string }> = [];
+    const ensure: string[] = [];
+    const sessionState = await runtime.provisionWslSessionState(
+      context.distro, state.ownerHash, providerStateKey(state.sessionId), resolved.uid,
+    );
+    if (mapping) {
+      const target = posix.join(targetHome, ...mapping.relative.split("/"));
+      ensure.push(target);
+      binds.push({ mode: "rw", source: sessionState.provider, target });
+    }
+    for (const root of state.additionalWritableRoots ?? []) {
+      ensure.push(root);
+      binds.push({ mode: "rw", source: root, target: root });
+    }
+    if (!bridge.socketPath) throw new Error("target-local Agent Control socket was not provisioned");
+    const socketDirectory = sessionState.relay;
+    bridge.socketPath = posix.join(socketDirectory, posix.basename(bridge.socketPath));
+    ensure.push(WSL_AGENT_CONTROL_PRIVATE_DIR);
+    binds.push({ mode: "ro", source: socketDirectory, target: WSL_AGENT_CONTROL_PRIVATE_DIR });
+    const preparation = await runtime.prepareWslIsolation(context, {
+      bwrap: bridge.bwrapRuntime,
+      home: targetHome,
+      cwd: state.cwd,
+      ensure,
+      binds,
+    });
+    const preparedSocket = preparation.binds.find((bind) => bind.mode === "ro" &&
+      bind.source.path === socketDirectory && bind.target.path === WSL_AGENT_CONTROL_PRIVATE_DIR)?.source;
+    if (!preparedSocket) throw new Error("target-local Agent Control socket directory was not attested");
+    bridge.socketDirectory = preparedSocket;
     return {
-      backend: "bwrap", command: resolved.command, args: [], network: policy.network,
-      ...(writableBinds.length ? { writableBinds } : {}),
+      backend: "wsl-bwrap",
+      distro: context.distro,
+      command: WSL_BWRAP_LAUNCHER_PATH,
+      args: [
+        "launch", "--bwrap", bridge.bwrapRuntime,
+        "--home", preparation.home.path, preparation.home.identity,
+        "--cwd", preparation.cwd.path, preparation.cwd.identity,
+        "--network", policy.network,
+        ...preparation.binds.flatMap((bind) => [
+          `--${bind.mode}`, bind.source.path, bind.source.identity, bind.target.path, bind.target.identity,
+        ]),
+      ],
+      cwd: preparation.cwd.path,
+      network: policy.network,
+      wslAgentControl: bridge,
     };
+  }
+  assertExecutionIsolationContextSupported(policy, context);
+  if (context.kind === "wsl") {
+    throw new Error(`${policy.mode} isolation is native-host only; WSL Direct execution is unavailable`);
   }
   if (policy.mode === "seatbelt") {
     if (runtime.platform !== "darwin") throw new Error(`Seatbelt isolation requires native macOS; native ${runtime.platform} sessions fail closed`);
@@ -293,17 +371,18 @@ export async function resolveExecutionIsolation(
       env: { ...state.env, ...(state.env.HOME ? { HOME: home } : {}) },
       ...(providerStatePath ? { providerStatePath: await runtime.realpathNative(providerStatePath) } : {}),
     };
+    const writableRoots = seatbeltWritableRoots(
+      canonicalState,
+      home,
+      await runtime.realpathNative(runtime.nativeTmp()),
+    );
     return {
       backend: "seatbelt",
       command: binary.launch.command,
       args: binary.launch.args,
       network: policy.network,
-      profile: buildSeatbeltProfile(
-        canonicalState,
-        home,
-        policy.network,
-        await runtime.realpathNative(runtime.nativeTmp()),
-      ),
+      profile: renderSeatbeltProfile(writableRoots, policy.network),
+      writableRoots,
     };
   }
   if (policy.mode === "windows-job") {
@@ -322,7 +401,7 @@ export async function resolveExecutionIsolation(
     };
   }
   if (runtime.platform !== "linux") {
-    throw new Error(`bubblewrap isolation requires Linux or WSL; native ${runtime.platform} sessions fail closed`);
+    throw new Error(`bubblewrap isolation requires native Linux; native ${runtime.platform} sessions fail closed`);
   }
   if (runtime.uid() === 0) throw new Error("bubblewrap isolation refuses a root runner");
   const binary = await runtime.resolveNative("bwrap");
@@ -502,10 +581,8 @@ export async function removeExecutionIsolationState(
   if (policy.mode !== "bwrap" || !statePath(driver)) return;
   const runtime = { ...defaultDeps, ...deps };
   if (context.kind === "wsl") {
-    const home = await runtime.resolveWslHome(context);
-    if (!home) throw new Error(`cannot clean isolated provider state inside WSL distro ${context.distro}`);
-    const base = wslRunnerStateBase(home, ownerHash);
-    await runtime.removeWsl(context, providerStateLocation(base, driver, sessionId)!);
+    if (!ownerHash) throw new Error("cannot clean Direct WSL provider state without an attested runner owner");
+    await runtime.cleanupWslSessionState(context.distro, ownerHash, providerStateKey(sessionId));
     return;
   }
   await runtime.removeNative(providerStateLocation(dataDir, driver, sessionId)!);

@@ -172,7 +172,7 @@ test("driver event and stderr integrity failures are contained and exit preserve
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (h.manager as any).onDriverStderr("s_integrity", "late stderr");
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (h.manager as any).onExit("s_integrity", 1);
+      (h.manager as any).onExit("s_integrity", 1, h.client);
     });
     assert.equal(h.store.readMeta("s_integrity")?.status, "failed");
     assert.deepEqual(readFileSync(h.eventsPath), before, "callbacks and exit never append after the latch");
@@ -289,7 +289,7 @@ test("first exit append failure is contained before active ownership is removed"
     assert.doesNotThrow(() => {
       // Exercise the actual driver callback boundary, not only the exit implementation.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (h.manager as any).onDriverExit("s_integrity", 1);
+      (h.manager as any).onDriverExit("s_integrity", 1, h.client);
     });
     assert.equal(h.cancelCalls(), 1);
     assert.equal(h.store.readMeta("s_integrity")?.status, "failed");
@@ -298,6 +298,30 @@ test("first exit append failure is contained before active ownership is removed"
     assert.deepEqual(readFileSync(h.eventsPath), before);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     assert.equal((h.manager as any).active.has("s_integrity"), false);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("provider retirement cleanup failure never escapes the driver exit callback", () => {
+  const h = historyHarness(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const internals = h.manager as any;
+  const retirement = {
+    client: h.client,
+    entry: h.entry,
+    promise: Promise.resolve(),
+    preserveAdmission: false,
+    preserveLock: true,
+    acceptPromptsDuringHandoff: false,
+  };
+  internals.closing.set("s_integrity", retirement);
+  internals.admitted.add("s_integrity");
+  internals.drainAdmissionQueue = () => { throw new Error("unrelated queued session is corrupt"); };
+  try {
+    assert.doesNotThrow(() => internals.onDriverExit("s_integrity", 1, h.client));
+    assert.equal(internals.closing.has("s_integrity"), false);
+    assert.equal(internals.admitted.has("s_integrity"), false);
   } finally {
     h.cleanup();
   }
@@ -376,7 +400,7 @@ test("generic exit cleanup leaves the in-flight durable solely to runPrompt", as
     (h.manager as any).onExit = () => { throw new Error("exit cleanup failed"); };
     assert.doesNotThrow(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (h.manager as any).onDriverExit("s_integrity", 1);
+      (h.manager as any).onDriverExit("s_integrity", 1, h.client);
     });
     assert.deepEqual(current.transitions, ["started"], "exit cleanup must not pre-settle runPrompt ownership");
     resolvePrompt("end_turn");

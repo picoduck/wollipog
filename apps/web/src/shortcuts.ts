@@ -26,6 +26,12 @@ export type ShortcutId =
   | "inbox-next"
   | "inbox-previous"
   | "inbox-expand"
+  | "inbox-open-top-request"
+  | "inbox-toggle-thread"
+  | "inbox-toggle-all-threads"
+  | "inbox-go-to-parent"
+  | "inbox-expand-thread"
+  | "inbox-collapse-thread"
   | "inbox-fork"
   | "inbox-next-split"
   | "inbox-previous-split"
@@ -292,6 +298,54 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: { key: "Enter", bare: true },
   },
   {
+    id: "inbox-open-top-request",
+    group: "Sessions List",
+    label: "Open Top Request",
+    description: "Open the selected session with its highest-priority pending request focused",
+    scope: "Sessions List",
+    binding: { key: "F2", bare: true },
+  },
+  {
+    id: "inbox-toggle-thread",
+    group: "Sessions List",
+    label: "Toggle Thread",
+    description: "Collapse or expand the selected session's child sessions; from a child, collapse its thread and select the parent",
+    scope: "Sessions List",
+    binding: { key: "t", bare: true },
+  },
+  {
+    id: "inbox-toggle-all-threads",
+    group: "Sessions List",
+    label: "Toggle All Threads",
+    description: "Expand every thread if any is collapsed, otherwise collapse every thread",
+    scope: "Sessions List",
+    binding: { key: "t", shift: true, bare: true },
+  },
+  {
+    id: "inbox-go-to-parent",
+    group: "Sessions List",
+    label: "Go to Parent",
+    description: "Select the parent of the selected child session",
+    scope: "Sessions List",
+    binding: { key: "p", bare: true },
+  },
+  {
+    id: "inbox-expand-thread",
+    group: "Sessions List",
+    label: "Expand Thread",
+    description: "Expand the selected session's thread, or select its first child when already expanded",
+    scope: "Sessions List",
+    binding: { key: "ArrowRight", bare: true, displayKey: "→" },
+  },
+  {
+    id: "inbox-collapse-thread",
+    group: "Sessions List",
+    label: "Collapse Thread",
+    description: "Collapse the selected session's thread, or select the parent from a child",
+    scope: "Sessions List",
+    binding: { key: "ArrowLeft", bare: true, displayKey: "←" },
+  },
+  {
     id: "inbox-fork",
     group: "Sessions List",
     label: "Fork Conversation",
@@ -511,7 +565,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-reply",
     group: "Session Reading",
     label: "Reply to Session",
-    description: "Focus the session composer",
+    description: "Focus the composer, entering Answer Mode for a pending question",
     scope: "Session Reading",
     binding: { key: "r", bare: true },
   },

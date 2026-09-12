@@ -88,6 +88,24 @@ test("pairingLinks: brackets an IPv6 host so the URL stays valid", () => {
   assert.deepEqual(links, ["http://[fd00::1]:4317/#pair=TOK", "http://[fd00::2]:4317/#pair=TOK"]);
 });
 
+test("pairingLinks: a configured public origin is the link, even for a loopback bind behind a proxy", () => {
+  const base = { hosts: [], port: 4317, webServed: true, boundBeyondLoopback: false };
+  const proxied = pairingLinks("TOK", { ...base, publicOrigin: "https://box.tailnet.ts.net" });
+  assert.deepEqual(proxied, { links: ["https://box.tailnet.ts.net/#pair=TOK"], blocked: null });
+  // A trailing slash or a sub-path is normalised, nothing else is invented.
+  assert.deepEqual(pairingLinks("TOK", { ...base, publicOrigin: "https://box.example/" }).links, ["https://box.example/#pair=TOK"]);
+  assert.deepEqual(pairingLinks("TOK", { ...base, publicOrigin: "https://box.example/wollipog/" }).links, ["https://box.example/wollipog/#pair=TOK"]);
+  // The public origin wins over the guessed LAN addresses when both exist.
+  const both = pairingLinks("TOK", { ...base, hosts: ["10.0.0.1"], boundBeyondLoopback: true, publicOrigin: "https://box.example" });
+  assert.deepEqual(both.links, ["https://box.example/#pair=TOK"]);
+  // Garbage or non-http origins fall back to the bind-derived logic, so a bad setting never yields a dead link.
+  for (const bad of ["not a url", "ftp://box.example", "https://user:pw@box.example", "https://box.example/?q=1", null, undefined]) {
+    assert.deepEqual(pairingLinks("TOK", { ...base, hosts: ["10.0.0.1"], boundBeyondLoopback: true, publicOrigin: bad }).links, ["http://10.0.0.1:4317/#pair=TOK"], String(bad));
+  }
+  // Loopback bind without a public origin still names both fixes.
+  assert.match(pairingLinks("TOK", base).blocked!, /CONTROL_PLANE_PUBLIC_ORIGIN.*CONTROL_PLANE_HOST/u);
+});
+
 test("pairingLinks: never offers a dead link — each blocker names its fix", () => {
   const base = { hosts: ["10.0.0.1"], port: 4317, webServed: true, boundBeyondLoopback: true };
   // No bundle → the link would 404.

@@ -20,6 +20,7 @@ export type ClaudeTaskLifecycleState = "terminal" | "incomplete" | "unknown";
 export interface ClaudeBackgroundWorkInspection {
   incompleteArtifacts: ClaudeTaskArtifact[];
   terminalTaskIds: Set<string>;
+  terminalTaskStatuses?: Map<string, "completed" | "failed" | "killed">;
 }
 
 const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
@@ -77,10 +78,14 @@ export function inspectClaudeBackgroundWork(
     .map((name) => ({ id: name.slice(0, -".output".length), outputFile: join(tasksDir, name) }))
     .filter(({ id }) => transcript == null || !providerTranscriptProvesTaskTerminal(transcript, id));
   const terminalTaskIds = new Set<string>();
+  const terminalTaskStatuses = new Map<string, "completed" | "failed" | "killed">();
   if (transcript != null) {
-    for (const id of knownIds) if (providerTranscriptProvesTaskTerminal(transcript, id)) terminalTaskIds.add(id);
+    for (const id of knownIds) {
+      const status = providerTranscriptTaskTerminalStatus(transcript, id);
+      if (status) { terminalTaskIds.add(id); terminalTaskStatuses.set(id, status); }
+    }
   }
-  return { incompleteArtifacts, terminalTaskIds };
+  return { incompleteArtifacts, terminalTaskIds, terminalTaskStatuses };
 }
 
 type ContextCommandRunner = (
@@ -168,10 +173,14 @@ export async function inspectClaudeBackgroundWorkInContext(
     .map((name) => ({ id: name.slice(0, -".output".length), outputFile: `${tasksDir}/${name}` }))
     .filter(({ id }) => transcript == null || !providerTranscriptProvesTaskTerminal(transcript, id));
   const terminalTaskIds = new Set<string>();
+  const terminalTaskStatuses = new Map<string, "completed" | "failed" | "killed">();
   if (transcript != null) {
-    for (const id of knownIds) if (providerTranscriptProvesTaskTerminal(transcript, id)) terminalTaskIds.add(id);
+    for (const id of knownIds) {
+      const status = providerTranscriptTaskTerminalStatus(transcript, id);
+      if (status) { terminalTaskIds.add(id); terminalTaskStatuses.set(id, status); }
+    }
   }
-  return { incompleteArtifacts, terminalTaskIds };
+  return { incompleteArtifacts, terminalTaskIds, terminalTaskStatuses };
 }
 
 /** Read only the provider ledger when reconciling an already-known task. Output text is never
@@ -195,15 +204,26 @@ export function discoverClaudeTaskLifecycle(
 }
 
 function providerTranscriptProvesTaskTerminal(transcript: string, taskId: string): boolean {
+  return providerTranscriptTaskTerminalStatus(transcript, taskId) !== undefined;
+}
+
+function providerTranscriptTaskTerminalStatus(
+  transcript: string, taskId: string,
+): "completed" | "failed" | "killed" | undefined {
   let latestTerminal = -1;
+  let status: "completed" | "failed" | "killed" | undefined;
   const marker = `<task-id>${taskId}</task-id>`;
   for (let cursor = transcript.indexOf(marker); cursor >= 0; cursor = transcript.indexOf(marker, cursor + marker.length)) {
     const end = transcript.indexOf("</task-notification>", cursor);
     if (end < 0) break;
     const notification = transcript.slice(cursor, end);
-    if (/<status>(?:completed|failed|killed)<\/status>/i.test(notification)) latestTerminal = cursor;
+    const match = /<status>(completed|failed|killed)<\/status>/i.exec(notification);
+    if (match) {
+      latestTerminal = cursor;
+      status = match[1]!.toLowerCase() as typeof status;
+    }
   }
-  if (latestTerminal < 0) return false;
+  if (latestTerminal < 0) return undefined;
 
   // A stopped task explicitly has no completion record and remains recoverable. A later launch or
   // resume of the same id also invalidates an earlier terminal notification.
@@ -212,5 +232,5 @@ function providerTranscriptProvesTaskTerminal(transcript: string, taskId: string
     transcript.lastIndexOf(`"taskId":"${taskId}"`),
     transcript.lastIndexOf(`"resumedAgentId":"${taskId}"`),
   );
-  return latestTerminal >= latestLaunch;
+  return latestTerminal >= latestLaunch ? status : undefined;
 }

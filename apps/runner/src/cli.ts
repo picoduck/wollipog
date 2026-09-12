@@ -8,18 +8,24 @@
  * where TLA is a build error.
  */
 
-if (process.argv.includes("--state-doctor")) {
+import { detectRunnerSea } from "./runner-reentry.js";
+import { resolveRunnerEntry } from "./runner-entry.js";
+
+const entry = resolveRunnerEntry(process.argv, detectRunnerSea());
+
+if (entry.mode === "--state-doctor") {
   void import("./state-doctor.js").then((m) => m.runStateDoctor(process.argv)).catch((error) => {
     console.error(`[state-doctor] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   });
-} else if (process.argv.includes("--policy-hook")) {
+} else if (entry.mode === "--policy-hook") {
   void import("./policy-hook.js").then((m) => m.runPolicyHookCli(process.argv, process.env));
-} else if (process.argv.includes("--conductor-mcp")) {
-  void import("./conductor-mcp.js").then((m) => m.runConductorMcp(process.argv, process.env));
-} else if (process.argv.includes("--agent-control-mcp")) {
+} else if (entry.mode === "--conductor-mcp") {
+  console.error("The Conductor MCP server is retired. Use the session-scoped Wollipog MCP server.");
+  process.exitCode = 1;
+} else if (entry.mode === "--agent-control-mcp") {
   void import("./wollipog-cli.js").then((m) => m.runAgentControlMcp(process.env));
-} else if (process.argv.includes("--wollipog-cli") || /(?:^|[\\/])wollipog(?:\.exe)?$/iu.test(process.argv[0] ?? "")) {
+} else if (entry.mode === "--wollipog-cli") {
   void import("./wollipog-cli.js").then(async (m) => {
     process.exitCode = await m.runWollipogCli(process.argv, process.env);
   });

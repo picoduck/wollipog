@@ -17,7 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { stageRunnerCredentialFile } from "./conductor.js";
+import { stageRunnerCredentialFile } from "./runner-credential-file.js";
 import { fetchPromptImageReference } from "./prompt-image-fetch.js";
 import {
   acquireRunnerDataDirLease,

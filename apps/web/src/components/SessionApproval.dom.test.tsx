@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { clearQuestionDrafts } from "../question-response.js";
+import { claimQuestionResponseOperation, clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
 import { SessionQuestionBanner } from "./SessionApproval.js";
 
@@ -29,6 +29,139 @@ for (const [name, value] of Object.entries({
 
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
 
+function deferredAnswer() {
+  let resolve!: (session: SessionView) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<SessionView>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+for (const action of ["submit", "dismiss"] as const) {
+  for (const transition of ["clear", "replace", "remount", "return", "unchanged"] as const) {
+    for (const result of ["resolve", "reject"] as const) {
+      test(`delayed form ${action} ${result} respects ownership after ${transition}`, async () => {
+        const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+        domWindow.document.body.append(container as never);
+        const root = createRoot(container);
+        const answer = deferredAnswer();
+        const updates: SessionView[] = [];
+        const calls: Parameters<ApiClient["answerQuestion"]>[1][] = [];
+        const client = { ...api, answerQuestion: (_id, body) => { calls.push(body); return answer.promise; } } as ApiClient;
+        const returned = { id: "session-1" } as SessionView;
+        const render = (requestId: string | null) => root.render(<ApiProvider client={client}>
+          {requestId && <SessionQuestionBanner sessionId="session-1" requestId={requestId}
+            questions={[{ id: "note", question: `Question ${requestId}`, options: [], allowOther: true }]}
+            runnerOnline onSessionUpdate={(session) => updates.push(session)} />}
+        </ApiProvider>);
+        try {
+          setQuestionResponseStyle("interactive", domWindow as never);
+          await act(async () => render("question-old"));
+          await act(async () => setInputValue(container.querySelector("input")!, "Old Draft"));
+          await act(async () => container.querySelector<HTMLButtonElement>(`[data-session-request-control=${action}]`)!.click());
+          assert.equal(calls.length, 1);
+          assert.equal(calls[0]!.action, action);
+          assert.deepEqual(calls[0]!.answers, action === "submit" ? { note: "Old Draft" } : {});
+          if (transition === "clear" || transition === "remount") await act(async () => render(null));
+          if (transition === "replace" || transition === "return") await act(async () => render("question-new"));
+          if (transition === "remount" || transition === "return") await act(async () => render("question-old"));
+          const replaced = transition !== "clear" && transition !== "unchanged";
+          const replacement = container.querySelector<HTMLInputElement>("input");
+          if (replaced) {
+            await act(async () => setInputValue(replacement!, "Replacement Draft"));
+            replacement!.focus();
+          }
+          await act(async () => {
+            if (result === "resolve") answer.resolve(returned);
+            else answer.reject(new Error("Old answer rejected"));
+            await tick();
+          });
+          assert.deepEqual(updates, transition === "unchanged" && result === "resolve" ? [returned] : []);
+          assert.equal(container.querySelector('[role="alert"]')?.textContent ?? "",
+            transition === "unchanged" && result === "reject" ? "Could not answer the question: Old answer rejected" : "");
+          if (replaced) {
+            assert.equal(replacement!.value, "Replacement Draft");
+            assert.equal(domWindow.document.activeElement, replacement);
+            assert.equal(container.querySelector("section")!.getAttribute("aria-busy"), "false");
+            assert.deepEqual(storedQuestionDrafts("session-1", transition === "replace" ? "question-new" : "question-old"),
+              { note: { kind: "other", value: "Replacement Draft" } });
+          }
+          const release = claimQuestionResponseOperation("session-1", "question-old");
+          assert.ok(release, "every settled response releases its own lease even when retired");
+          release();
+        } finally {
+          answer.resolve(returned);
+          await act(async () => root.unmount());
+          container.remove();
+        }
+      });
+    }
+  }
+}
+
+for (const action of ["submit", "dismiss"] as const) {
+  test(`retired form ${action} cleanup preserves a replacement operation and newer same-key lease`, async () => {
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    const old = deferredAnswer();
+    const current = deferredAnswer();
+    let calls = 0;
+    const client = { ...api, answerQuestion: () => (++calls === 1 ? old.promise : current.promise) } as ApiClient;
+    let newerLease: (() => void) | null = null;
+    try {
+      const questions = [{ id: "note", question: "Optional note", options: [], allowOther: true, required: false }];
+      await renderBanner(root, questions, true, client, "question-old");
+      await act(async () => container.querySelector<HTMLButtonElement>(`[data-session-request-control=${action}]`)!.click());
+      await renderBanner(root, questions, true, client, "question-new");
+      await act(async () => container.querySelector<HTMLButtonElement>(`[data-session-request-control=${action}]`)!.click());
+      assert.equal(calls, 2, "a replacement request can start while its predecessor is pending");
+      newerLease = claimQuestionResponseOperation("session-1", "question-old", Date.now() + 60_001);
+      assert.ok(newerLease, "expired old lease can be replaced independently");
+      await act(async () => { old.resolve({} as SessionView); await tick(); });
+      assert.equal(container.querySelector("section")!.getAttribute("aria-busy"), "true");
+      assert.equal(claimQuestionResponseOperation("session-1", "question-old"), null,
+        "old finally must not release a newer lease for its key");
+      assert.equal(claimQuestionResponseOperation("session-1", "question-new"), null,
+        "old finally must not release the replacement request lease");
+      await act(async () => { current.reject(new Error("Current failure")); await tick(); });
+      assert.match(container.querySelector('[role="alert"]')!.textContent!, /Current failure/);
+      assert.equal(container.querySelector("section")!.getAttribute("aria-busy"), "false");
+    } finally {
+      old.resolve({} as SessionView);
+      current.resolve({} as SessionView);
+      newerLease?.();
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+}
+
+test("retired form validation cannot focus the replacement question", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const originalRaf = domWindow.requestAnimationFrame;
+  let focusCallback: FrameRequestCallback | undefined;
+  domWindow.requestAnimationFrame = ((callback: FrameRequestCallback) => { focusCallback = callback; return 1; }) as unknown as typeof originalRaf;
+  try {
+    const questions = [{ id: "note", question: "Required note", options: [], allowOther: true }];
+    await renderBanner(root, questions, true, api, "question-old");
+    await act(async () => container.querySelector("section")!.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+      key: "Enter", ctrlKey: true, bubbles: true,
+    }) as never));
+    assert.ok(focusCallback);
+    await renderBanner(root, questions, true, api, "question-new");
+    const dismiss = container.querySelector<HTMLButtonElement>('[data-session-request-control="dismiss"]')!;
+    dismiss.focus();
+    focusCallback(0);
+    assert.equal(domWindow.document.activeElement, dismiss);
+  } finally {
+    domWindow.requestAnimationFrame = originalRaf;
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 afterEach(() => {
   for (const requestId of ["question-1", "question-old", "question-new", "question-virtualized"]) {
     clearQuestionDrafts("session-1", requestId);
@@ -46,6 +179,7 @@ async function renderBanner(
   runnerOnline: boolean,
   client: ApiClient = api,
   requestId = "question-1",
+  recovery?: { reason: "provider_restart"; action?: "resume_answer" },
 ) {
   await act(async () => {
     root.render(
@@ -54,12 +188,59 @@ async function renderBanner(
           sessionId="session-1"
           requestId={requestId}
           questions={questions}
+          recoveryReason={recovery?.reason}
+          recoveryAction={recovery?.action}
           runnerOnline={runnerOnline}
         />
       </ApiProvider>,
     );
   });
 }
+
+test("a resumable recovered question keeps its preserved form answerable", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  const client = {
+    ...api,
+    answerQuestion: async (_sessionId: string, action: Parameters<ApiClient["answerQuestion"]>[1]) => {
+      calls.push(structuredClone(action));
+      return {} as SessionView;
+    },
+  } as ApiClient;
+  const questions: AgentQuestion[] = [{
+    id: "language",
+    question: "Choose a language",
+    options: [{ label: "TypeScript" }, { label: "Python" }],
+  }];
+
+  try {
+    await renderBanner(root, questions, true, client, "question-1", {
+      reason: "provider_restart",
+      action: "resume_answer",
+    });
+    assert.match(container.textContent ?? "", /resume the existing agent conversation and deliver these answers once/);
+    assert.match(container.textContent ?? "", /Prior tool calls will not be replayed/);
+    const choice = container.querySelector<HTMLButtonElement>('[role="radio"]');
+    assert.ok(choice);
+    assert.equal(choice.disabled, false);
+    await act(async () => { choice.click(); });
+    assert.equal(submitButton(container).disabled, false);
+    await act(async () => {
+      submitButton(container).click();
+      await tick();
+    });
+    assert.deepEqual(calls, [{
+      requestId: "question-1",
+      answers: { language: "TypeScript" },
+      action: "submit",
+    }]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
 
 function submitButton(container: HTMLDivElement): HTMLButtonElement {
   const button = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
@@ -272,7 +453,7 @@ test("keyboard choice selection clears an Other draft and submits the visible fi
   }
 });
 
-test("style changes preserve compatible drafts and submit exact labels with Ctrl+Enter", async () => {
+test("Composer Response keeps the transcript card as context without card-owned response fields", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -281,53 +462,17 @@ test("style changes preserve compatible drafts and submit exact labels with Ctrl
     question: "Choose a language",
     options: [{ label: "TypeScript" }, { label: "Python" }],
   }];
-  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
-  const client = {
-    ...api,
-    answerQuestion: async (_sessionId: string, action: Parameters<ApiClient["answerQuestion"]>[1]) => {
-      calls.push(structuredClone(action));
-      return {} as SessionView;
-    },
-  } as ApiClient;
 
   try {
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
-    await renderBanner(root, questions, true, client);
-    const firstChoice = container.querySelector<HTMLButtonElement>('[role="radio"]');
-    assert.ok(firstChoice);
-    await act(async () => { firstChoice.click(); });
-
-    await act(async () => { setQuestionResponseStyle("text", domWindow as never); });
-    const input = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(input);
-    assert.equal(input.value, "TypeScript");
-    assert.ok(input.list, "fixed choices expose native keyboard autocomplete suggestions");
-    const offeredChoices = container.querySelector<HTMLOListElement>(".question-text-options");
-    assert.ok(offeredChoices?.id);
-    assert.ok(input.getAttribute("aria-describedby")?.split(" ").includes(offeredChoices.id),
-      "the response field describes the visible number and label choices");
-    assert.deepEqual([...offeredChoices.querySelectorAll("li")].map((item) => item.textContent?.trim()), [
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderBanner(root, questions, true);
+    assert.equal(container.querySelector(".question-input"), null);
+    assert.equal(container.querySelector(".approval-actions button")?.textContent?.trim(), "Dismiss D");
+    assert.match(container.textContent ?? "", /Respond through Answer Mode in the Session composer/);
+    assert.deepEqual([...container.querySelectorAll(".question-text-options li")].map((item) => item.textContent?.trim()), [
       "TypeScript",
       "Python",
     ]);
-
-    await act(async () => { setInputValue(input, "2"); });
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
-    assert.equal(container.querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim(), "●Python");
-
-    await act(async () => { setQuestionResponseStyle("text", domWindow as never); });
-    const textInput = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(textInput);
-    textInput.focus();
-    await act(async () => {
-      textInput.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
-        key: "Enter",
-        ctrlKey: true,
-        bubbles: true,
-      }) as never);
-      await tick();
-    });
-    assert.deepEqual(calls, [{ requestId: "question-1", answers: { language: "Python" }, action: "submit" }]);
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     await act(async () => { root.unmount(); });
@@ -335,105 +480,17 @@ test("style changes preserve compatible drafts and submit exact labels with Ctrl
   }
 });
 
-test("invalid text submission preserves responses, explains every error, and focuses the first invalid field", async () => {
+test("Composer Response does not advertise Answer Mode without a question schema", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const questions: AgentQuestion[] = [
-    { id: "language", question: "Choose a language", options: [{ label: "TypeScript" }, { label: "Python" }] },
-    {
-      id: "checks",
-      question: "Choose two checks",
-      multiSelect: true,
-      minSelections: 2,
-      options: [{ label: "Unit Tests" }, { label: "Browser Tests" }],
-    },
-  ];
-
   try {
-    setQuestionResponseStyle("text", domWindow as never);
-    await renderBanner(root, questions, true);
-    const inputs = [...container.querySelectorAll<HTMLInputElement>(".question-text-input")];
-    assert.equal(inputs.length, 2);
-    await act(async () => {
-      setInputValue(inputs[0]!, "not offered");
-      setInputValue(inputs[1]!, "1");
-    });
-    inputs[1]!.focus();
-    await act(async () => {
-      inputs[1]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
-        key: "Enter",
-        metaKey: true,
-        bubbles: true,
-      }) as never);
-      await tick();
-    });
-
-    assert.equal(inputs[0]!.value, "not offered");
-    assert.equal(inputs[1]!.value, "1");
-    assert.equal(container.querySelectorAll(".question-field-error").length, 2);
-    assert.match(container.textContent ?? "", /displayed number or unambiguous option label/);
-    assert.match(container.textContent ?? "", /Select at least 2 options/);
-    assert.equal(domWindow.document.activeElement, inputs[0]);
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderBanner(root, [], true);
+    assert.doesNotMatch(container.textContent ?? "", /Press R|\/respond/);
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
-test("a replacement request clears text drafts even when question ids repeat", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  const questions: AgentQuestion[] = [{
-    id: "language",
-    question: "Choose a language",
-    options: [{ label: "TypeScript" }, { label: "Python" }],
-  }];
-
-  try {
-    setQuestionResponseStyle("text", domWindow as never);
-    await renderBanner(root, questions, true, api, "question-old");
-    const input = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(input);
-    await act(async () => { setInputValue(input, "1"); });
-    assert.equal(input.value, "1");
-
-    await renderBanner(root, questions, true, api, "question-new");
-    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "");
-    assert.equal(submitButton(container).disabled, true);
-  } finally {
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
-    await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
-test("text drafts survive unmount and remount for transcript virtualization", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const questions: AgentQuestion[] = [{
-    id: "language",
-    question: "Choose a language",
-    options: [{ label: "TypeScript" }, { label: "Python" }],
-  }];
-
-  try {
-    setQuestionResponseStyle("text", domWindow as never);
-    const firstRoot = createRoot(container);
-    await renderBanner(firstRoot, questions, true, api, "question-virtualized");
-    const input = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(input);
-    await act(async () => { setInputValue(input, "2"); });
-    await act(async () => { firstRoot.unmount(); });
-
-    const secondRoot = createRoot(container);
-    await renderBanner(secondRoot, questions, true, api, "question-virtualized");
-    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "2");
-    await act(async () => { secondRoot.unmount(); });
-  } finally {
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     container.remove();
   }
 });
@@ -610,9 +667,10 @@ test("Interactive numeric Other submits prose without applying hidden ordinal sy
   }
 });
 
-test("secret drafts survive mounted style changes but are not recovered after virtualization", async () => {
+test("Composer Response never renders secret entry controls in the transcript card", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
+  const root = createRoot(container);
   const questions: AgentQuestion[] = [{
     id: "token",
     question: "Enter the token",
@@ -622,26 +680,13 @@ test("secret drafts survive mounted style changes but are not recovered after vi
   }];
 
   try {
-    setQuestionResponseStyle("text", domWindow as never);
-    const firstRoot = createRoot(container);
-    await renderBanner(firstRoot, questions, true, api, "question-virtualized");
-    let input = container.querySelector<HTMLInputElement>(".question-text-input");
-    assert.ok(input);
-    await act(async () => { setInputValue(input!, "page-only-secret"); });
-    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
-    input = container.querySelector<HTMLInputElement>(".question-input");
-    assert.equal(input?.value, "page-only-secret", "mounted style changes preserve the secret response");
-    await act(async () => { setQuestionResponseStyle("text", domWindow as never); });
-    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "page-only-secret");
-    await act(async () => { firstRoot.unmount(); });
-
-    const secondRoot = createRoot(container);
-    await renderBanner(secondRoot, questions, true, api, "question-virtualized");
-    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "");
-    assert.equal(submitButton(container).disabled, true);
-    await act(async () => { secondRoot.unmount(); });
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderBanner(root, questions, true, api, "question-virtualized");
+    assert.equal(container.querySelector("input"), null);
+    assert.match(container.textContent ?? "", /Respond through Answer Mode/);
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
+    await act(async () => { root.unmount(); });
     container.remove();
   }
 });

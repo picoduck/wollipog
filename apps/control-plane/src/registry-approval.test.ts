@@ -44,3 +44,30 @@ test("manual-only entries cannot be approved and only approved entries can be re
   assert.match(validateRegistryApproval([agent("approval-required")], "gemini", { ...body, action: "revoke" }).error, /not currently approved/);
   assert.equal(validateRegistryApproval([agent("approved")], "gemini", { ...body, action: "revoke" }).ok, true);
 });
+
+test("Registry approval rejects invalid actions, versions, and agent identities", () => {
+  for (const action of [undefined, "deny", null]) {
+    const result = validateRegistryApproval([agent("approval-required")], "gemini", { ...body, action });
+    assert.equal(result.status, 400);
+    assert.match(result.error, /action must be approve or revoke/);
+  }
+
+  for (const invalid of [
+    { ...body, schemaVersion: 1 },
+    { action: "approve", schemaVersion: "1.0.0", confirmation: "explicit" },
+  ]) {
+    const result = validateRegistryApproval([agent("approval-required")], "gemini", invalid);
+    assert.equal(result.status, 400);
+    assert.match(result.error, /schemaVersion and adapterVersion are required/);
+  }
+
+  const { registry: _registry, ...withoutRegistry } = agent("approval-required");
+  for (const [agents, agentId] of [
+    [[agent("approval-required")], "missing"],
+    [[withoutRegistry], "gemini"],
+  ] as const) {
+    const result = validateRegistryApproval([...agents], agentId, body);
+    assert.equal(result.status, 404);
+    assert.match(result.error, /not found on this runner/);
+  }
+});

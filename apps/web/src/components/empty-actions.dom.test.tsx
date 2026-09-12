@@ -17,6 +17,7 @@ import { AutomationsView } from "./AutomationsView.js";
 import { Board } from "./Board.js";
 import { RunnersView } from "./RunnersView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 /**
  * What the empty-state actions actually DO.
@@ -29,6 +30,7 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
  */
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -148,6 +150,19 @@ const nextPoll = () => new Promise((resolve) => setTimeout(resolve, 5_100));
 const buttonLabelled = (container: HTMLElement, text: string) =>
   [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === text);
 
+/**
+ * Automation cards are collapsed disclosures (#793): Edit, Delete, and the rest of the management
+ * actions only exist in the DOM once a card is open. These tests are about editor and deletion
+ * behaviour rather than the disclosure, so they open every rendered card first.
+ */
+const expandAllCards = async (container: HTMLElement) => {
+  for (const toggle of [...container.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]) {
+    if (toggle.getAttribute("aria-expanded") === "false") {
+      await act(async () => { fireDomEvent.click(toggle); });
+    }
+  }
+};
+
 const automation = (id: string, name: string): AutomationSchedule => ({
   automationId: id, name, cron: "0 9 * * 1-5", timezone: "UTC", enabled: true,
   misfirePolicy: { kind: "skip" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
@@ -175,6 +190,7 @@ test("the empty state's New Automation creates, even after an edit was cancelled
   } as unknown as Partial<ApiClient>, <AutomationsView />);
 
   await act(async () => { await Promise.resolve(); });
+  await expandAllCards(container);
   const edit = buttonLabelled(container, "Edit");
   assert.ok(edit, "the seeded automation renders with an Edit button");
   await act(async () => { fireDomEvent.click(edit!); });
@@ -227,6 +243,7 @@ test("deleting the automation being edited closes the editor", async () => {
   } as unknown as Partial<ApiClient>, <AutomationsView />);
 
   await act(async () => { await Promise.resolve(); });
+  await expandAllCards(container);
   await act(async () => { fireDomEvent.click(buttonLabelled(container, "Edit")!); });
   assert.ok(container.querySelector(".automation-editor"), "the editor is open on the automation");
 
@@ -346,6 +363,7 @@ test("an older poll cannot close an editor opened from a newer one", async () =>
   // A later refresh starts and completes with both automations while the first is still pending.
   items = [automation("automation-1", "Nightly"), automation("automation-2", "Weekly")];
   await act(async () => { await nextPoll(); });
+  await expandAllCards(container);
   const edits = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Edit");
   assert.equal(edits.length, 2, "both automations render before the stale poll lands");
   await act(async () => { fireDomEvent.click(edits[1]!); });
@@ -379,6 +397,7 @@ test("a workflow-definition failure cannot keep a deleted automation on screen",
   } as unknown as Partial<ApiClient>, <AutomationsView />);
 
   await act(async () => { await Promise.resolve(); });
+  await expandAllCards(container);
   await act(async () => { fireDomEvent.click(buttonLabelled(container, "Edit")!); });
   await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete")!); });
   await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
@@ -406,6 +425,7 @@ test("deleting the edited automation leaves the others alone", async () => {
   } as unknown as Partial<ApiClient>, <AutomationsView />);
 
   await act(async () => { await Promise.resolve(); });
+  await expandAllCards(container);
   const edits = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Edit");
   await act(async () => { fireDomEvent.click(edits[1]!); });
   const deletes = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Delete");

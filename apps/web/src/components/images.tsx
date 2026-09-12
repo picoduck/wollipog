@@ -4,9 +4,12 @@ import {
   MAX_PROMPT_IMAGES,
   MAX_PROMPT_IMAGE_TOTAL_BASE64_BYTES,
   PROMPT_IMAGE_MIME_TYPES,
+  MAX_WORKSPACE_REFERENCES,
   isPromptImageReference,
+  isWorkspaceReference,
   type PromptImage,
   type PromptImageInput,
+  type WorkspaceReference,
 } from "@wollipog/protocol";
 import { PromptImageView } from "./PromptImageView.js";
 
@@ -56,7 +59,7 @@ export function usePastedImages(
     const next = [...imagesRef.current];
     let total = next.reduce((n, img) => n + (isPromptImageReference(img) ? Math.ceil(img.sizeBytes / 3) * 4 : img.data.length), 0);
     for (const img of valid) {
-      if (next.length >= MAX_PROMPT_IMAGES) {
+      if (next.filter((attachment) => !isWorkspaceReference(attachment)).length >= MAX_PROMPT_IMAGES) {
         onError?.(`At most ${MAX_PROMPT_IMAGES} images may be attached.`);
         break;
       }
@@ -107,31 +110,79 @@ export function usePastedImages(
     setImages(next);
   }, []);
 
-  return { images, onPaste, addFiles, remove, clear, replace };
+  const addWorkspaceReference = useCallback((reference: WorkspaceReference) => {
+    const currentReferences = imagesRef.current.filter(isWorkspaceReference);
+    if (currentReferences.length >= MAX_WORKSPACE_REFERENCES) {
+      onError?.(`At most ${MAX_WORKSPACE_REFERENCES} workspace references may be attached.`);
+      return "limit" as const;
+    }
+    if (currentReferences.some((candidate) => candidate.targetFingerprint === reference.targetFingerprint &&
+        candidate.kind === reference.kind && candidate.startLine === reference.startLine &&
+        candidate.endLine === reference.endLine && candidate.side === reference.side)) return "duplicate" as const;
+    onUserChange?.();
+    const next = [...imagesRef.current, reference];
+    imagesRef.current = next;
+    setImages(next);
+    return "added" as const;
+  }, [onError, onUserChange]);
+
+  return { images, onPaste, addFiles, addWorkspaceReference, remove, clear, replace };
+}
+
+function workspaceReferenceLabel(reference: WorkspaceReference): string {
+  const lines = reference.startLine === undefined
+    ? ""
+    : `:${reference.startLine}${reference.endLine === reference.startLine ? "" : `-${reference.endLine}`}`;
+  const side = reference.kind === "diff" ? ` · ${reference.side === "left" ? "Base" : "Worktree"}` : "";
+  return `${reference.path}${lines}${side}`;
 }
 
 export function ImageStrip({
   images,
   onRemove,
+  onInspectReference,
 }: {
   images: PromptImageInput[];
   onRemove: (i: number) => void;
+  onInspectReference?: (reference: WorkspaceReference) => void;
 }) {
   if (!images.length) return null;
   return (
     <div className="image-strip">
       {images.map((img, i) => (
-        <div className="image-thumb" key={i}>
-          <PromptImageView image={img} alt={`attachment ${i + 1}`} />
-          <button
-            className="image-remove"
-            type="button"
-            onClick={() => onRemove(i)}
-            aria-label="Remove Image"
-          >
-            ✕
-          </button>
-        </div>
+        isWorkspaceReference(img) ? (
+          <div className="workspace-reference-chip" key={img.artifactId}>
+            <button
+              className="workspace-reference-open"
+              type="button"
+              onClick={() => onInspectReference?.(img)}
+              aria-label={`Inspect Workspace Reference ${workspaceReferenceLabel(img)}`}
+              title="Inspect Workspace Reference"
+            >
+              <span aria-hidden="true">@</span>{workspaceReferenceLabel(img)}
+            </button>
+            <button
+              className="workspace-reference-remove"
+              type="button"
+              onClick={() => onRemove(i)}
+              aria-label={`Remove Workspace Reference ${workspaceReferenceLabel(img)}`}
+            >
+              ✕
+            </button>
+          </div>
+        ) : (
+          <div className="image-thumb" key={i}>
+            <PromptImageView image={img} alt={`attachment ${i + 1}`} />
+            <button
+              className="image-remove"
+              type="button"
+              onClick={() => onRemove(i)}
+              aria-label="Remove Image"
+            >
+              ✕
+            </button>
+          </div>
+        )
       ))}
     </div>
   );

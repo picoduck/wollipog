@@ -6,7 +6,7 @@ import {
   type PromptImage,
   type PromptImageReference,
 } from "@wollipog/protocol";
-import { deriveCpHttpUrl } from "./conductor.js";
+import { deriveCpHttpUrl } from "./runner-credential-file.js";
 
 export interface PromptImageFetchConfig {
   controlPlaneUrl: string;

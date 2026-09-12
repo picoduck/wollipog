@@ -64,6 +64,14 @@ jobs:
           workspaces: apps/desktop/src-tauri
           key: native-${{ matrix.target }}
 
+      - name: Install Cargo Audit
+        if: startsWith(matrix.os, 'ubuntu')
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit Locked Dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: cargo audit --file apps/desktop/src-tauri/Cargo.lock
+
       # tauri-build requires the configured sidecars and frontend directory to exist.
       # Rust tests do not execute or package them, so tiny placeholders avoid the much
       # more expensive Node SEA and frontend production builds in routine native CI.
@@ -82,7 +90,7 @@ jobs:
         run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
 
       - name: Test Native Desktop
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
 
       - name: Lint Native Desktop
-        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --target ${{ matrix.target }} -- -D warnings
+        run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --target ${{ matrix.target }} -- -D warnings

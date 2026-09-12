@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentDefinition, GenerateSessionTitleMessage } from "@wollipog/protocol";
 import {
+  SESSION_NAMING_GENERATION_BUDGET_MS,
+  SESSION_NAMING_PREPARATION_BUDGET_MS,
+  SESSION_NAMING_RUNNER_BUDGET_MS,
+} from "@wollipog/protocol";
+import {
   CODEX_SESSION_NAMING_DISABLED_FEATURES,
   claudeSessionNamingArgs,
   codexSessionNamingArgs,
@@ -10,6 +15,7 @@ import {
   normalizeRunnerSessionTitle,
   SessionNamingExecutor,
   sessionNamingAccountForAgent,
+  sessionNamingPreparationBudgetMs,
 } from "./session-naming.js";
 
 function claudeAgent(): AgentDefinition {
@@ -66,7 +72,7 @@ function request(id = "request-one"): GenerateSessionTitleMessage {
     requestId: id,
     sessionId: "session-one",
     messages: [{ role: "user", text: "Fix the session naming flow" }],
-    timeoutMs: 5_000,
+    timeoutMs: SESSION_NAMING_RUNNER_BUDGET_MS,
   };
 }
 
@@ -229,7 +235,9 @@ test("executor returns only a bounded title and secret-free provider boundary", 
       assert.equal(cwd, "/neutral");
       assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "runner-secret");
       assert.match(prompt, /Fix the session naming flow/);
-      assert.ok(timeoutMs <= 5_000 && timeoutMs >= 4_900, `unexpected remaining timeout ${timeoutMs}`);
+      // Generation keeps its whole allowance; preparation is charged to its own budget.
+      assert.ok(timeoutMs >= SESSION_NAMING_GENERATION_BUDGET_MS && timeoutMs <= SESSION_NAMING_RUNNER_BUDGET_MS,
+        `unexpected remaining timeout ${timeoutMs}`);
       assert.equal(actualIsolation, isolation);
       return "Runner-Hosted Session Naming";
     },
@@ -246,6 +254,155 @@ test("executor returns only a bounded title and secret-free provider boundary", 
   assert.equal(JSON.stringify(result).includes("runner-secret"), false);
   assert.equal(cleaned, 1);
   assert.equal(boundaryCleaned, 1);
+});
+
+test("the naming budget splits an explicit preparation allowance from the generation allowance", () => {
+  assert.equal(SESSION_NAMING_PREPARATION_BUDGET_MS + SESSION_NAMING_GENERATION_BUDGET_MS,
+    SESSION_NAMING_RUNNER_BUDGET_MS, "the chain must account for preparation, not absorb it");
+  assert.ok(SESSION_NAMING_GENERATION_BUDGET_MS > 5_000,
+    "generation alone must outlast the old five-second total budget");
+  assert.equal(sessionNamingPreparationBudgetMs(SESSION_NAMING_RUNNER_BUDGET_MS),
+    SESSION_NAMING_PREPARATION_BUDGET_MS);
+  // A smaller total scales preparation down rather than starving generation of a fixed 3s.
+  assert.equal(sessionNamingPreparationBudgetMs(5_000), 1_000);
+  assert.ok(sessionNamingPreparationBudgetMs(250) <= 250);
+  // Any requested budget stays clamped to the bounded runner maximum.
+  assert.equal(sessionNamingPreparationBudgetMs(10 * 60_000), SESSION_NAMING_PREPARATION_BUDGET_MS);
+});
+
+test("slow preparation is charged to its own allowance and leaves generation the full budget", async () => {
+  // An injected clock keeps this deterministic: no wall-clock waiting, no sleeping test.
+  let clock = 1_000;
+  const observed: number[] = [];
+  const executor = new SessionNamingExecutor({
+    now: () => clock,
+    prepareDirectory: async () => {
+      clock += 1_800;
+      return { cwd: "/neutral", cleanup: async () => {} };
+    },
+    authorize: async () => {
+      clock += 1_000;
+      return { cleanup: async () => {} };
+    },
+    generate: async (_account, _agent, _cwd, _env, _prompt, timeoutMs) => {
+      observed.push(timeoutMs);
+      return "Naming After Slow Preparation";
+    },
+  });
+  const result = await executor.execute(request(), claudeAgent(), {});
+  assert.equal(result.ok, true);
+  assert.equal(result.title, "Naming After Slow Preparation");
+  // 2.8s of isolation and authentication used to leave ~2.2s of a 5s total; the provider now keeps
+  // its whole allowance, so a response just past the old five-second boundary still lands.
+  assert.equal(observed.length, 1);
+  assert.ok(observed[0]! >= SESSION_NAMING_GENERATION_BUDGET_MS,
+    `preparation must not consume the generation allowance (got ${observed[0]})`);
+  assert.ok(observed[0]! > 5_100, "the provider budget must outlast the old five-second boundary");
+});
+
+test("preparation that overruns its allowance fails closed instead of starving generation", async () => {
+  let clock = 1_000;
+  let generated = 0;
+  const executor = new SessionNamingExecutor({
+    now: () => clock,
+    prepareDirectory: async () => {
+      clock += SESSION_NAMING_PREPARATION_BUDGET_MS + 500;
+      return { cwd: "/neutral", cleanup: async () => {} };
+    },
+    generate: async () => {
+      generated += 1;
+      return "Never Generated";
+    },
+  });
+  const result = await executor.execute(request(), claudeAgent(), {});
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "timed_out");
+  assert.equal(result.phase, "isolation");
+  assert.equal(generated, 0, "an overrun preparation must not hand the provider a sliver of budget");
+});
+
+test("a stalled preparation step stays bounded and releases its late result", async () => {
+  let released = 0;
+  let settle: ((value: { cwd: string; cleanup(): Promise<void> }) => void) | undefined;
+  const executor = new SessionNamingExecutor({
+    prepareDirectory: () => new Promise((resolve) => { settle = resolve; }),
+    generate: async () => "Never Generated",
+  });
+  // The smallest accepted total keeps the bound short; the point is that it is bounded at all.
+  const result = await executor.execute({ ...request(), timeoutMs: 250 }, claudeAgent(), {});
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "timed_out");
+  assert.equal(result.phase, "isolation");
+  settle!({ cwd: "/neutral", cleanup: async () => { released += 1; } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(released, 1, "a late preparation result is cleaned up rather than leaked");
+});
+
+test("a stalled teardown cannot turn a generated title into a transport timeout", async () => {
+  let cleaned = 0;
+  const executor = new SessionNamingExecutor({
+    // Teardown that never settles. Awaiting it would hold the result past the control plane's
+    // round-trip deadline, and a valid title would come back as a timeout.
+    cleanupBudgetMs: 25,
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: () => new Promise<void>(() => {}) }),
+    authorize: async () => ({ cleanup: async () => { cleaned += 1; } }),
+    generate: async () => "Generated Before Teardown Stalled",
+  });
+  const result = await executor.execute(request(), claudeAgent(), {});
+  assert.equal(result.ok, true);
+  assert.equal(result.ok && result.title, "Generated Before Teardown Stalled");
+  assert.equal(cleaned, 1, "teardown still runs; only waiting for it is bounded");
+});
+
+test("a stalled boundary teardown still lets the neutral directory be cleaned up", async () => {
+  let neutralCleaned = 0;
+  const executor = new SessionNamingExecutor({
+    cleanupBudgetMs: 25,
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: async () => { neutralCleaned += 1; } }),
+    // Direct WSL boundary teardown spawns `wsl.exe` with no timeout of its own, so this step can
+    // outlast the budget. Chaining the two would strand the directory for good.
+    authorize: async () => ({ cleanup: () => new Promise<void>(() => {}) }),
+    generate: async () => "Generated Before Boundary Stalled",
+  });
+  const result = await executor.execute(request(), claudeAgent(), {});
+  assert.equal(result.ok, true);
+  assert.equal(neutralCleaned, 1, "the directory is cleaned even though the boundary never settles");
+});
+
+test("executor preflight rejects before preparing a target-local naming directory", async () => {
+  let prepared = 0;
+  let generated = 0;
+  let rejectPreflight = true;
+  const executor = new SessionNamingExecutor({
+    rateLimit: 1,
+    preflight: () => {
+      if (rejectPreflight) throw new Error("execution context unavailable");
+    },
+    prepareDirectory: async () => {
+      prepared++;
+      return { cwd: "/must-not-exist", cleanup: async () => {} };
+    },
+    generate: async () => { generated++; return "Valid Native Title"; },
+  });
+  assert.deepEqual(await executor.execute(request("preflight"), claudeAgent(), {}), {
+    type: "generate_session_title_result",
+    requestId: "preflight",
+    ok: false,
+    code: "provider_failed",
+    phase: "isolation",
+  });
+  assert.deepEqual({ prepared, generated }, { prepared: 0, generated: 0 });
+
+  rejectPreflight = false;
+  assert.deepEqual(await executor.execute(request("native-after-rejection"), claudeAgent(), {}), {
+    type: "generate_session_title_result",
+    requestId: "native-after-rejection",
+    ok: true,
+    title: "Valid Native Title",
+    provider: "claude",
+    billingSource: "subscription",
+  });
+  assert.deepEqual({ prepared, generated }, { prepared: 1, generated: 1 });
 });
 
 test("executor fails closed under concurrency/rate pressure and sanitizes provider errors", async () => {

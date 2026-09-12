@@ -1,5 +1,40 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+for (const action of ["submit", "dismiss"] as const) {
+  for (const result of ["resolve", "reject"] as const) {
+    for (const transition of ["replace", "clear and remount"] as const) {
+      test(`late Interactive Form ${action} ${result} cannot disturb a question after ${transition}`, async ({ page }) => {
+        await page.setViewportSize(transition === "replace" ? { width: 1280, height: 800 } : { width: 390, height: 844 });
+        await page.goto(`/agent-questions-e2e.html?hold=1${result === "reject" ? "&failure=1" : ""}`);
+        if (action === "submit") await page.getByRole("radio", { name: /TypeScript/ }).click();
+        await page.getByRole("button", { name: action === "submit" ? "Submit" : "Dismiss", exact: true }).click();
+        const form = page.getByRole("region", { name: "Agent Questions" });
+        await expect(form).toHaveAttribute("aria-busy", "true");
+        if (transition === "clear and remount") {
+          await page.evaluate(() => window.clearAgentQuestion());
+          await expect(form).toHaveCount(0);
+        }
+        await page.evaluate(() => window.replaceAgentQuestion());
+        const fresh = page.getByRole("radio", { name: /Another Fresh Answer/ });
+        await fresh.click();
+        await expect(fresh).toBeFocused();
+        await page.evaluate(() => window.releaseAgentQuestion());
+        await expect(fresh).toBeChecked();
+        await expect(fresh).toBeFocused();
+        await expect(form).toHaveAttribute("aria-busy", "false");
+        await expect(page.getByRole("alert")).toHaveCount(0);
+        await page.getByRole("button", { name: "Submit", exact: true }).click();
+        if (result === "resolve") await expect(page.getByRole("status")).toHaveText("Question Answered");
+        else await expect(page.getByRole("alert")).toContainText("The runner rejected this answer");
+        expect(await page.evaluate(() => window.agentQuestionCalls.map(({ requestId, action, answers }) => ({ requestId, action, answers })))).toEqual([
+          { requestId: "ask-1", action, answers: action === "submit" ? { language: "TypeScript" } : {} },
+          { requestId: "ask-2", action: "submit", answers: { replacement: "Another Fresh Answer" } },
+        ]);
+      });
+    }
+  }
+}
+
 const geometry = (locator: Locator) => locator.evaluate((element) => {
   const rect = element.getBoundingClientRect();
   return {
@@ -9,6 +44,27 @@ const geometry = (locator: Locator) => locator.evaluate((element) => {
     left: rect.left,
     height: rect.height,
   };
+});
+
+test("late composer answers cannot erase a question received after external clearing", async ({ page }) => {
+  await page.goto("/agent-questions-e2e.html?style=composer&hold=1");
+  const response = page.locator(".composer-answer-input");
+  await response.fill("1");
+  await response.press("Enter");
+  await expect(response).toBeDisabled();
+  await page.evaluate(() => window.clearAgentQuestion());
+  await expect(response).toHaveCount(0);
+  await page.evaluate(() => window.replaceAgentQuestion());
+  await expect(response).toBeEnabled();
+  await response.fill("2");
+  await page.evaluate(() => window.releaseAgentQuestion());
+  await expect(response).toHaveValue("2");
+  await response.press("Enter");
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  expect(await page.evaluate(() => window.agentQuestionCalls.map(({ requestId, answers }) => ({ requestId, answers })))).toEqual([
+    { requestId: "ask-1", answers: { language: "TypeScript" } },
+    { requestId: "ask-2", answers: { replacement: "Another Fresh Answer" } },
+  ]);
 });
 
 async function expectInsideViewport(locator: Locator, page: Page) {
@@ -27,6 +83,64 @@ async function answerLongSet(page: Page) {
   await page.getByRole("radio", { name: /Overnight/ }).click();
 }
 
+const signedEvidenceUrl = "https://evidence.example/private/mobile-capture.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=temporary-access-key&X-Amz-Signature=very-long-private-signature#full-resolution";
+
+test("320 px Interactive Form safely formats rich text and keeps resolved questions compact", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.goto("/agent-questions-e2e.html?set=rich-single");
+
+  const bar = page.getByRole("region", { name: "Agent Questions" });
+  await expect(bar.locator(".question-text strong")).toHaveText("one");
+  await expect(bar.locator(".question-text code")).toHaveText("staging");
+  await expect(bar.locator(".question-text li")).toHaveCount(2);
+  const evidence = bar.getByRole("link", { name: "evidence.example/mobile-capture.png" });
+  await expect(evidence).toHaveAttribute("href", signedEvidenceUrl);
+  await expect(bar.locator("img, video")).toHaveCount(0);
+  expect(await bar.innerText()).not.toContain("X-Amz-Signature");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+
+  await page.getByRole("radio", { name: "Staging" }).click();
+  await page.getByRole("button", { name: "Submit" }).click();
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  const history = page.locator(".tl-question");
+  await expect(history.locator("summary")).toContainText("Choose one deployment target.");
+  expect((await geometry(history)).height).toBeLessThan(80);
+  expect(await history.innerText()).not.toContain("X-Amz-Signature");
+  await history.locator("summary").click();
+  await expect(history.locator(".question-history-body")).toBeVisible();
+  await expect(history.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveAttribute("href", signedEvidenceUrl);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+});
+
+test("390 px Composer Answer Mode formats multi-question text and discloses the complete outcome", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=rich&style=composer");
+
+  const composer = page.locator(".composer-answer");
+  await expect(composer.locator(".composer-answer-question strong")).toHaveText("one");
+  await expect(composer.locator(".composer-answer-question li")).toHaveCount(2);
+  await expect(composer.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveAttribute("href", signedEvidenceUrl);
+  expect(await composer.innerText()).not.toContain("X-Amz-Signature");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+
+  const input = page.locator(".composer-answer-input");
+  await input.fill("1");
+  await input.press("Enter");
+  await expect(page.getByText("Answering Question 2 of 2")).toBeVisible();
+  await input.fill("1, 2");
+  await input.press("Enter");
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  const history = page.locator(".tl-question");
+  await expect(history.locator("summary")).toContainText("(+1 more)");
+  expect((await geometry(history)).height).toBeLessThan(80);
+  await history.locator("summary").click();
+  await expect(history.locator(".question-history-item")).toHaveCount(2);
+  await expect(history.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveCount(2);
+  await expect(history.locator("img, video")).toHaveCount(0);
+  expect(await history.innerText()).not.toContain("X-Amz-Signature");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
 test("desktop questions select and submit the exact current answers", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/agent-questions-e2e.html");
@@ -43,27 +157,78 @@ test("desktop questions select and submit the exact current answers", async ({ p
     sessionId: "agent-question-session",
     requestId: "ask-1",
     answers: { language: "TypeScript" },
+    action: "submit",
   }]);
 });
 
-test("desktop Text Entry submits exact structured form answers using only the keyboard", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/agent-questions-e2e.html?set=forms&style=text");
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test(`restart recovery stays explicit and dismissible on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/agent-questions-e2e.html?recovery=1");
 
-  const responses = page.locator(".question-text-input");
-  await expect(responses).toHaveCount(5);
-  await responses.nth(0).fill("2");
-  await responses.nth(0).press("Tab");
-  await responses.nth(1).fill("1, Browser Tests");
-  await responses.nth(2).fill("itHub");
-  await responses.nth(2).press("Home");
-  await responses.nth(2).press("Shift+G");
-  await responses.nth(2).press("End");
-  await responses.nth(2).pressSequentially("!");
-  await expect(responses.nth(2)).toHaveValue("GitHub!");
-  await responses.nth(3).fill("s3cret");
-  await responses.nth(4).fill("3");
-  await responses.nth(4).press("Control+Enter");
+    await expect(page.getByText("Agent Question Recovery Required")).toBeVisible();
+    await expect(page.getByText(/original answer channel is no longer available/)).toBeVisible();
+    await expect(page.getByRole("radio", { name: /TypeScript/ })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Submit" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Dismiss and Continue" }).click();
+
+    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([{
+      sessionId: "agent-question-session",
+      requestId: "ask-1",
+      answers: {},
+      action: "dismiss",
+    }]);
+  });
+
+  test(`resumable restart recovery submits its preserved form on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/agent-questions-e2e.html?recovery=1&resume=1");
+
+    await expect(page.getByText("Agent Question Recovery Required")).toBeVisible();
+    await expect(page.getByText(/resume the existing agent conversation and deliver these answers once/)).toBeVisible();
+    await expect(page.getByText(/Prior tool calls will not be replayed/)).toBeVisible();
+    const choice = page.getByRole("radio", { name: /TypeScript/ });
+    await expect(choice).toBeEnabled();
+    await expectInsideViewport(choice, page);
+    await choice.click();
+    await page.getByRole("button", { name: "Submit" }).click();
+
+    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([{
+      sessionId: "agent-question-session",
+      requestId: "ask-1",
+      answers: { language: "TypeScript" },
+      action: "submit",
+    }]);
+  });
+}
+
+test("desktop Composer Response submits a multi-question flow using only the keyboard", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/agent-questions-e2e.html?set=forms&style=composer");
+
+  const response = page.locator(".composer-answer-input");
+  await expect(page.getByText("Answering Question 1 of 5")).toBeVisible();
+  await response.fill("2");
+  await response.press("Enter");
+  await response.fill("1, Browser Tests");
+  await response.press("Enter");
+  await response.fill("itHub");
+  await response.press("Home");
+  await response.press("Shift+G");
+  await response.press("End");
+  await response.pressSequentially("!");
+  await expect(response).toHaveValue("GitHub!");
+  await response.press("Enter");
+  await expect(response).toHaveAttribute("type", "password");
+  await response.fill("s3cret");
+  await response.press("Enter");
+  await response.fill("3");
+  await response.press("Enter");
 
   await expect(page.getByRole("status")).toHaveText("Question Answered");
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
@@ -117,23 +282,56 @@ test("Interactive Form preserves and recovers bounded multi-select choices", asy
   });
 });
 
-test("mobile Text Entry preserves invalid responses, focuses the first error, and resets replacements", async ({ page }) => {
+test("mobile Composer Response preserves invalid input, focus, and replacement boundaries", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/agent-questions-e2e.html?style=text");
-  const response = page.locator(".question-text-input");
+  await page.goto("/agent-questions-e2e.html?style=composer");
+  const response = page.locator(".composer-answer-input");
   await response.fill("not offered");
-  await response.press("Control+Enter");
+  await response.press("Enter");
   await expect(page.getByRole("alert")).toContainText("displayed number or unambiguous option label");
   await expect(response).toHaveValue("not offered");
   await expect(response).toBeFocused();
 
   await page.evaluate(() => window.replaceAgentQuestion());
-  const replacement = page.locator(".question-text-input");
+  const replacement = page.locator(".composer-answer-input");
   await expect(replacement).toHaveValue("");
   await replacement.fill("1");
-  await replacement.press("Control+Enter");
+  await replacement.press("Enter");
   await expect(page.getByRole("status")).toHaveText("Question Answered");
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ replacement: "Fresh Answer" });
+});
+
+test("Composer Response keeps its draft and focus after a submission error", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?style=composer&failure=1");
+  const response = page.locator(".composer-answer-input");
+  await response.fill("2");
+  await response.press("Enter");
+  await expect(page.getByRole("alert")).toContainText("runner rejected this answer");
+  await expect(response).toHaveValue("2");
+  await expect(response).toBeFocused();
+  expect(await page.evaluate(() => window.agentQuestionCalls[0])).toEqual({
+    sessionId: "agent-question-session",
+    requestId: "ask-1",
+    answers: { language: "Python" },
+    action: "submit",
+  });
+});
+
+test("offline Composer Response preserves its draft boundary and recovers after reconnect", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/agent-questions-e2e.html?style=composer&offline=1");
+  const response = page.locator(".composer-answer-input");
+  await expect(response).toHaveAttribute("aria-disabled", "true");
+  await expect(response).toHaveAttribute("readonly", "");
+  await expect(page.locator(".composer-answer-help")).toContainText("Responses are unavailable until the runner reconnects");
+  await page.evaluate(() => window.setAgentQuestionOnline(true));
+  await expect(response).not.toHaveAttribute("aria-disabled", "true");
+  await expect(response).not.toHaveAttribute("readonly", "");
+  await response.fill("1");
+  await response.press("Enter");
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ language: "TypeScript" });
 });
 
 for (const viewport of [
@@ -220,6 +418,7 @@ test("a replacement request cannot submit retained selections", async ({ page })
     sessionId: "agent-question-session",
     requestId: "ask-2",
     answers: { replacement: "Fresh Answer" },
+    action: "submit",
   }]);
 });
 

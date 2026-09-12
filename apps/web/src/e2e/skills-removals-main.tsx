@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, RunnerView } from "@wollipog/protocol";
+import { RUNNER_CAPABILITY_MIN_PROTOCOL, type ControlPlaneToUi, type RunnerView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -13,7 +13,10 @@ import "../styles.css";
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "runner-host",
-  os: "linux",
+  os: new URLSearchParams(location.search).has("macos")
+    ? "macos"
+    : new URLSearchParams(location.search).has("windows") || new URLSearchParams(location.search).has("wslSkills")
+      ? "windows" : "linux",
   version: "1",
   status: "online",
   displayName: "Build Machine",
@@ -27,11 +30,25 @@ const runner: RunnerView = {
       driver: "claude-code",
       available: true,
     },
+    ...(new URLSearchParams(location.search).has("matrix") ? [
+      { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" as const, available: true },
+      { id: "wsl", name: "WSL Codex", command: "codex", args: [], env: {}, driver: "codex" as const, context: { kind: "wsl" as const, distro: "Ubuntu" }, available: true },
+    ] : []),
   ],
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 96,
+  protocolVersion: new URLSearchParams(location.search).has("legacySkills")
+    ? 1
+    : new URLSearchParams(location.search).has("legacyRecovery")
+      ? RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery - 1
+      : new URLSearchParams(location.search).has("wslSkills")
+        ? RUNNER_CAPABILITY_MIN_PROTOCOL.wslMachineSkills
+      : new URLSearchParams(location.search).has("windows")
+        ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillSnapshots
+        : new URLSearchParams(location.search).has("macos")
+          ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillSnapshots
+        : RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery,
 };
 
 const snapshot: ControlPlaneToUi = {
@@ -42,7 +59,8 @@ const snapshot: ControlPlaneToUi = {
     paginatedSessionHistory: false,
     projects: false,
   },
-  runners: [runner],
+  runners: [runner, ...(new URLSearchParams(location.search).has("matrix") ? [{ ...runner, runnerId: "runner-2", displayName: "Other Machine",
+    status: new URLSearchParams(location.search).has("onlineMatrix") ? "online" as const : "offline" as const }] : [])],
   boxes: [],
   sessions: [],
   runs: [],
@@ -123,11 +141,13 @@ const client = {
       id: "skill-1",
       name: "code-review",
       description: "Reviews code",
+      gitSource: { url: "https://github.com/example/skills.git", ref: "stable", subdirectory: "skills", path: "skills/code-review", commit: "a".repeat(64) },
       latestVersion: { id: "v1", digest: "d1", createdAt: reportedAt },
     },
     latestVersion: {
       id: "v1",
       digest: "d1",
+      machineSource: { runnerId: "runner-1", sourceDirectory: ".codex/skills", name: "code-review", digest: "b".repeat(64), importedAt: reportedAt },
       createdAt: reportedAt,
       files: [{
         path: "SKILL.md",
@@ -139,10 +159,17 @@ const client = {
   }),
   listSkillAssignments: async () => ({ assignments: [] }),
   runnerSkills: async () => runnerSkills,
+  getMachineSkillVersionPolicy: async () => ({ policy: null }),
   syncRunnerSkills: async () => {
     await new Promise((resolve) => setTimeout(resolve, 750));
     return runnerSkills.reported!;
   },
+  ...(new URLSearchParams(location.search).has("groups") ? {
+    listSkills: api.listSkills, listSkillGroups: api.listSkillGroups, getSkill: api.getSkill,
+  } : {}),
+  ...(new URLSearchParams(location.search).has("matrix") ? {
+    runnerSkills: api.runnerSkills, getMachineSkillVersionPolicy: api.getMachineSkillVersionPolicy,
+  } : {}),
 } as unknown as ApiClient;
 
 function SkillsWhenReady() {

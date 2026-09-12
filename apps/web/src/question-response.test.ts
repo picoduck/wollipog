@@ -3,6 +3,7 @@ import test from "node:test";
 import type { AgentQuestion } from "@wollipog/protocol";
 import {
   clearQuestionDrafts,
+  claimQuestionResponseOperation,
   isAnswerableAgentQuestion,
   offeredQuestionChoices,
   questionAnswers,
@@ -12,6 +13,34 @@ import {
   storeQuestionDrafts,
   toggleQuestionChoice,
 } from "./question-response.js";
+
+test("question operations are exclusive per request and release for retry", () => {
+  const release = claimQuestionResponseOperation("session-lock", "request-lock");
+  assert.ok(release);
+  assert.equal(claimQuestionResponseOperation("session-lock", "request-lock"), null);
+  const otherRelease = claimQuestionResponseOperation("session-lock", "other-request");
+  assert.ok(otherRelease);
+  otherRelease();
+  release();
+  const retryRelease = claimQuestionResponseOperation("session-lock", "request-lock");
+  assert.ok(retryRelease);
+  release();
+  assert.equal(claimQuestionResponseOperation("session-lock", "request-lock"), null,
+    "a stale duplicate release cannot clear a newer operation claim");
+  retryRelease();
+});
+
+test("a hung question operation lease expires without letting its stale release clear a retry", () => {
+  const firstRelease = claimQuestionResponseOperation("session-lease", "request-lease", 1_000);
+  assert.ok(firstRelease);
+  assert.equal(claimQuestionResponseOperation("session-lease", "request-lease", 60_999), null);
+  const retryRelease = claimQuestionResponseOperation("session-lease", "request-lease", 61_000);
+  assert.ok(retryRelease);
+  firstRelease();
+  assert.equal(claimQuestionResponseOperation("session-lease", "request-lease", 61_001), null,
+    "the superseded operation cannot release the active retry's claim");
+  retryRelease();
+});
 
 const single: AgentQuestion = {
   id: "language",
@@ -24,6 +53,16 @@ test("text responses resolve displayed numbers and case-insensitive exact labels
   assert.deepEqual(resolveQuestionResponse(single, "typescript"), { answer: "TypeScript" });
   assert.match(resolveQuestionResponse(single, "py").error ?? "", /unambiguous option label/);
   assert.match(resolveQuestionResponse(single, "rust").error ?? "", /displayed number/);
+});
+
+test("formatted single-choice labels with punctuation can return through typed-entry parsing", () => {
+  const question: AgentQuestion = {
+    ...single,
+    options: [{ label: "Yes, do it" }, { label: 'Say "later"' }, { label: "8080" }],
+  };
+  assert.deepEqual(resolveQuestionResponse(question, '"Yes, do it"'), { answer: "Yes, do it" });
+  assert.deepEqual(resolveQuestionResponse(question, '"Say ""later"""'), { answer: 'Say "later"' });
+  assert.deepEqual(resolveQuestionResponse(question, '"8080"'), { answer: "8080" });
 });
 
 test("multi-select text responses deterministically resolve comma-separated choices", () => {
@@ -108,7 +147,7 @@ test("choice and Other draft intents validate to provider values without becomin
   };
   assert.deepEqual(questionDraftAnswers([numericOther], {
     workers: { kind: "other", value: "2" },
-  }).answers, { workers: "2" }, "Interactive Other does not apply Text Entry's ordinal syntax");
+  }).answers, { workers: "2" }, "Interactive Other does not apply Composer Response's ordinal syntax");
   assert.deepEqual(questionDraftAnswers([numericOther], {
     workers: { kind: "choice", labels: ["Two Workers"] },
   }).answers, { workers: "Two Workers" }, "fixed choices still retain exact provider labels");
@@ -120,7 +159,7 @@ test("Interactive choices retain exact provider labels without reparsing them as
     options: [{ label: "2" }, { label: "Second Option" }],
   };
   assert.deepEqual(resolveQuestionResponse(numeric, "2"), { answer: "Second Option" },
-    "Text Entry keeps displayed-number syntax");
+    "Composer Response keeps displayed-number syntax");
   assert.deepEqual(questionDraftAnswers([numeric], {
     language: { kind: "choice", labels: ["2"] },
   }).answers, { language: "2" }, "Interactive Form keeps the clicked label");

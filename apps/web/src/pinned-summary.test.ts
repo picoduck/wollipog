@@ -16,6 +16,7 @@ import {
   legacyLocalGitFacts,
   remoteHttpUrl,
   sourceKind,
+  visibleForgeFacts,
 } from "./pinned-summary.js";
 
 const session = (over: Partial<SessionView>): SessionView =>
@@ -28,6 +29,48 @@ const status = (over: Partial<GitStatusInfo>): GitStatusInfo => ({
   ahead: 0,
   remoteUrl: null,
   ...over,
+});
+
+test("retained forge facts transition into and out of the current repository visibility gate", () => {
+  const retainedSummary = {
+    remoteUrl: "https://gitlab.example.test/team/project.git",
+    pr: {
+      number: 7,
+      title: "Retained merge request",
+      url: "https://gitlab.example.test/team/project/-/merge_requests/7",
+      state: "OPENED",
+      provider: "gitlab",
+      kind: "merge_request",
+    },
+    checks: { passing: 1, pending: 0, failing: 0, failingNames: [], url: null },
+    forge: {
+      provider: "gitlab",
+      host: "gitlab.example.test",
+      project: "team/project",
+      authenticated: false,
+      authenticationError: "Sign in to GitLab.",
+      statusError: "GitLab status unavailable.",
+    },
+  } as GitSummaryInfo;
+
+  assert.deepEqual(visibleForgeFacts(retainedSummary, "https://stale.example.test/repo", false), {
+    forge: undefined,
+    remoteUrl: null,
+    pr: null,
+    checks: null,
+  }, "retained forge facts stay hidden outside a repository presentation");
+
+  const currentSummary = {
+    ...retainedSummary,
+    forge: { ...retainedSummary.forge!, authenticationError: undefined, statusError: undefined },
+  };
+  const restored = visibleForgeFacts(currentSummary, null, true);
+  assert.equal(restored.forge?.provider, "gitlab");
+  assert.equal(restored.remoteUrl, "https://gitlab.example.test/team/project.git");
+  assert.equal(restored.pr?.state, "OPENED");
+  assert.equal(restored.checks?.passing, 1);
+  assert.equal(restored.forge?.authenticationError, undefined,
+    "returning to a repository uses current forge information rather than stale errors");
 });
 
 const summary = (over: Partial<GitSummaryInfo>): GitSummaryInfo => ({
@@ -167,18 +210,24 @@ test("fixChecksPrompt: singular/plural + names woven in", () => {
   assert.match(many, /3 failing checks \(a, b\)\./);
   const nameless = fixChecksPrompt({ failing: 2, pending: 0, passing: 0, failingNames: [], url: null });
   assert.match(nameless, /2 failing checks\. /);
+  const mergeRequest = fixChecksPrompt(
+    { failing: 1, pending: 0, passing: 0, failingNames: [], url: null },
+    "merge_request",
+  );
+  assert.match(mergeRequest, /^The merge request has 1 failing check\./u);
 });
 
-test("sourceKind: github means the HOST is exactly github.com", () => {
+test("sourceKind: hosted forge badges require an exact host", () => {
   assert.equal(sourceKind("git@github.com:o/r.git"), "github");
   assert.equal(sourceKind("https://github.com/o/r"), "github");
-  assert.equal(sourceKind("https://gitlab.com/o/r.git"), "git");
+  assert.equal(sourceKind("https://gitlab.com/o/r.git"), "gitlab");
   assert.equal(sourceKind(null), null);
   assert.equal(sourceKind(undefined), null);
   // Lookalike hosts must not get the GitHub badge.
   assert.equal(sourceKind("https://notgithub.com/o/r"), "git");
   assert.equal(sourceKind("git@mygithub.com:o/r.git"), "git");
   assert.equal(sourceKind("https://github.com.evil.example/o/r"), "git");
+  assert.equal(sourceKind("https://gitlab.com.evil.example/o/r"), "git");
 });
 
 test("remoteHttpUrl: https passes through with .git stripped; scp-ssh converts; junk is null", () => {

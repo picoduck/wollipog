@@ -6,6 +6,13 @@
 #
 # Grouping is the point, not cadence. Several of these dependencies cannot move independently, and
 # ungrouped pull requests for them would each fail on their own.
+#
+# The limits are deliberately above one measured weekly batch without making the queue unbounded.
+# In #831, npm had five open pull requests plus nine uncovered packages (fourteen individual
+# updates in the worst case), so its limit is fifteen. Cargo accumulated six open version-update
+# pull requests, so ten leaves comparable headroom there. The scheduled dependency-queue-health
+# workflow separately fails when a pull request remains open for more than seven days or an npm
+# update has no pull request or recorded deferral.
 version: 2
 
 updates:
@@ -15,7 +22,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Chicago"
+    open-pull-requests-limit: 15
     labels:
       - "dependencies"
     commit-message:
@@ -59,6 +69,10 @@ updates:
       # acp-session-context.test.ts both assert the value, including that it matches the manifest.
       # A bump is a deliberate protocol-attestation change, not a dependency refresh.
       - dependency-name: "@agentclientprotocol/sdk"
+      # TypeScript 7 removes the stable compiler API used by two guardrail tests. ADR 0005 and
+      # #349 record the plan to separate the build compiler from a pinned test-time parser before
+      # this update resumes.
+      - dependency-name: "typescript"
       # Pinned with a recorded rationale in pnpm-workspace.yaml: the runner loads the exact 1.1
       # signed-package prebuild as an SEA asset, which is why its install scripts stay disabled.
       - dependency-name: "node-pty"
@@ -67,7 +81,10 @@ updates:
     directory: "/apps/desktop/src-tauri"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Chicago"
+    open-pull-requests-limit: 10
     labels:
       - "dependencies"
     commit-message:

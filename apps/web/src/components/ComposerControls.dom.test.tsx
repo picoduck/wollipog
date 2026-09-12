@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { SessionConfig } from "@wollipog/protocol";
 import {
   ApprovalsMenuChoices,
+  ModelEffortMenuChoices,
   type PermissionModeDetails,
 } from "./ComposerControls.js";
 import { handleMenuKeyDown } from "./interactions.js";
@@ -105,6 +106,114 @@ test("permission details are keyboard reachable and do not select the mode", asy
     await act(async () => { modeButton.click(); });
     assert.deepEqual(applied, [{ permissionMode: "danger-full-access" }]);
     assert.equal(closeCount, 1);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("the Context Window group offers provider-stated variants and switches only the model id", async () => {
+  const applied: Partial<SessionConfig>[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  let staged: string | undefined;
+  const render = (
+    contextChoice: Parameters<typeof ModelEffortMenuChoices>[0]["contextChoice"],
+    effortVal = "low",
+    agentEffortLevels: readonly string[] = ["low", "high"],
+  ) => act(async () => {
+    root.render(
+      <div role="menu" onKeyDown={(event) => handleMenuKeyDown(event, () => undefined)}>
+        <ModelEffortMenuChoices
+          models={[{ id: "opus[1m]", displayName: "Opus 5" }, { id: "sonnet", displayName: "Sonnet 5" }]}
+          modelVal="opus[1m]"
+          selectedModel={{ id: "opus[1m]", displayName: "Opus 5" }}
+          contextChoice={contextChoice}
+          modelEfforts={["low", "high"]}
+          agentEffortLevels={agentEffortLevels}
+          effortVal={effortVal}
+          pendingEffort={() => staged}
+          apply={(patch) => applied.push(patch)}
+        />
+      </div>,
+    );
+  });
+  const choice = {
+    baseModelId: "opus",
+    options: [
+      { id: "opus", contextWindow: 200_000, label: "200K" },
+      { id: "opus[1m]", contextWindow: 1_000_000, label: "1M" },
+    ],
+    selectedId: "opus[1m]",
+  };
+  try {
+    await render(choice);
+    const group = container.querySelector('[role="group"][aria-label="Context Window"]');
+    assert.ok(group, "a real choice renders a Context Window group");
+    const radios = [...group!.querySelectorAll('[role="menuitemradio"]')] as HTMLButtonElement[];
+    assert.deepEqual(radios.map((radio) => radio.textContent), ["200K", "1M"]);
+    assert.deepEqual(radios.map((radio) => radio.getAttribute("aria-checked")), ["false", "true"]);
+    assert.equal(radios[0]!.title, "200,000 tokens; applies to the next turn");
+    await act(async () => { radios[0]!.click(); });
+    // The effort has to be sent explicitly: the control plane reads a model-only patch as "no
+    // effort chosen" and resolves an explicit `low` back to the model's default effort.
+    assert.deepEqual(applied, [{ model: "opus", effort: "low", serviceTier: "" }],
+      "a window switch changes the model id and carries the explicit effort along");
+
+    applied.length = 0;
+    // A variant that advertises a narrower effort set must not be sent an effort it would reject.
+    await render({
+      ...choice,
+      options: [
+        { ...choice.options[0]!, efforts: ["low", "high"] },
+        { ...choice.options[1]!, efforts: ["high"] },
+      ],
+      selectedId: "opus",
+    }, "low");
+    const asymmetric = [...container
+      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+    await act(async () => { asymmetric[1]!.click(); });
+    // An explicit reset, not an omitted key: omitting it would leave `low` staged in the composer's
+    // pending config, which then rides along with the next prompt and is rejected as unsupported.
+    assert.deepEqual(applied, [{ model: "opus[1m]", effort: "", serviceTier: "" }],
+      "the 1M variant does not advertise low, so the switch clears it and its own default applies");
+
+    applied.length = 0;
+    // An effort chosen moments ago is staged for the next prompt but not yet in `effortVal`, which
+    // only catches up after setConfig round-trips. The switch must carry the newer choice, not
+    // reset it: read it at click time.
+    staged = "high";
+    await render(choice, "low");
+    const racing = [...container
+      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+    await act(async () => { racing[0]!.click(); });
+    assert.deepEqual(applied, [{ model: "opus", effort: "high", serviceTier: "" }],
+      "a just-staged effort survives a window switch made before the session view catches up");
+    staged = undefined;
+
+    applied.length = 0;
+    // Neither variant advertises its own efforts, so both inherit the agent's levels. The session
+    // still shows a persisted `low` that discovery has since dropped; it must not be carried over.
+    await render(choice, "low", ["high"]);
+    const stale = [...container
+      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+    await act(async () => { stale[0]!.click(); });
+    assert.deepEqual(applied, [{ model: "opus", effort: "", serviceTier: "" }],
+      "an effort the agent no longer advertises is cleared rather than sent");
+
+    applied.length = 0;
+    await render(choice, "");
+    const defaultEffortRadios = [...container
+      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+    await act(async () => { defaultEffortRadios[0]!.click(); });
+    assert.deepEqual(applied, [{ model: "opus", effort: "", serviceTier: "" }],
+      "an unset effort stays unset so the new model's own default applies");
+
+    await render(null);
+    assert.equal(container.querySelector('[role="group"][aria-label="Context Window"]'), null,
+      "no group without a real provider-listed choice");
+    assert.ok(container.querySelector('[role="group"][aria-label="Model"]'));
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

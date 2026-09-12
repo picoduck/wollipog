@@ -12,6 +12,7 @@ import {
   CONTROL_PLANE_API_VERSION,
   PROTOCOL_VERSION,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type ControlPlaneInstanceInfo,
   type RunnerView,
   type SessionView,
@@ -30,6 +31,8 @@ interface SeededControlPlane {
   workspaceName: string;
   sessionTitle: string;
   deviceToken: string;
+  operatorToken: string;
+  agentToken: string;
 }
 
 function seedControlPlane(database: string, seed: SeededControlPlane, includeBox = false): void {
@@ -60,6 +63,15 @@ function seedControlPlane(database: string, seed: SeededControlPlane, includeBox
         path: `/workspaces/${seed.workspaceName}`,
       }],
     }, now);
+    const identity = db.localIdentityContext();
+    const operatorUserId = `operator_${seed.hostname}`;
+    db.createIdentityMember({
+      userId: operatorUserId,
+      displayName: `${seed.hostname} Operator`,
+      organizationId: identity.organizationId,
+      role: "operator",
+      now: now + 1,
+    });
     db.createSession({
       id: SHARED_SESSION_ID,
       runnerId: SHARED_RUNNER_ID,
@@ -70,13 +82,28 @@ function seedControlPlane(database: string, seed: SeededControlPlane, includeBox
       useWorktree: false,
       driver: "acp",
       config: {},
-      now: now + 1,
+      scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: operatorUserId } },
+      now: now + 2,
     });
+    assert.equal(db.setAgentControlCredential(
+      SHARED_SESSION_ID,
+      SHARED_RUNNER_ID,
+      hashToken(seed.agentToken),
+      now + 3,
+    ), true);
     db.createDevice({
       id: `device_${seed.hostname}`,
       name: `${seed.hostname} Test Device`,
       tokenHash: hashToken(seed.deviceToken),
-      now: now + 2,
+      now: now + 4,
+    });
+    db.createDevice({
+      id: `operator_device_${seed.hostname}`,
+      name: `${seed.hostname} Operator Device`,
+      tokenHash: hashToken(seed.operatorToken),
+      userId: operatorUserId,
+      organizationId: identity.organizationId,
+      now: now + 5,
     });
   } finally {
     db.close();
@@ -115,6 +142,7 @@ function startControlPlane(port: number, database: string): { child: ChildProces
       CONTROL_PLANE_PORT: String(port),
       CONTROL_PLANE_DB: database,
       CONTROL_PLANE_TOKEN,
+      CONTROL_PLANE_USAGE_PRICING_URL: "off",
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -125,12 +153,20 @@ function startControlPlane(port: number, database: string): { child: ChildProces
   return { child, logs: () => output };
 }
 
-async function waitForChildExit(child: ChildProcess, timeoutMs = 10_000): Promise<number | null> {
-  if (child.exitCode !== null) return child.exitCode;
-  return await Promise.race([
-    new Promise<number | null>((resolvePromise) => child.once("exit", resolvePromise)),
-    delay(timeoutMs).then(() => { throw new Error("child did not exit in time"); }),
-  ]);
+async function waitForChildExit(child: ChildProcess, logs: () => string, timeoutMs = 10_000): Promise<number | null> {
+  // Called synchronously after spawn, before close can fire.
+  return await new Promise<number | null>((resolvePromise, reject) => {
+    const timer = setTimeout(() => {
+      child.removeListener("close", onClose);
+      reject(new Error(`child ${child.pid} did not close within ${timeoutMs}ms: ${logs()}`));
+    }, timeoutMs);
+    const onClose = (code: number | null) => {
+      clearTimeout(timer);
+      resolvePromise(code);
+    };
+    // close, unlike exit, includes the final stdout/stderr diagnostics.
+    child.once("close", onClose);
+  });
 }
 
 async function openWebSocket(url: string): Promise<WebSocket> {
@@ -238,6 +274,8 @@ async function printPairingUrl(
         NO_COLOR: "1",
         CONTROL_PLANE_PORT: String(port),
         CONTROL_PLANE_DB: database,
+        // Recovery is read-only and must not depend on unrelated startup validation succeeding.
+        CONTROL_PLANE_PUBLIC_ORIGIN: "not-an-origin",
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -342,12 +380,16 @@ test("two real control planes isolate identical ids and persist identity and dat
     workspaceName: "First Workspace",
     sessionTitle: "First Control Plane Session",
     deviceToken: "first-device-token",
+    operatorToken: "first-operator-token",
+    agentToken: "first-agent-token",
   };
   const secondSeed: SeededControlPlane = {
     hostname: "second-host",
     workspaceName: "Second Workspace",
     sessionTitle: "Second Control Plane Session",
     deviceToken: "second-device-token",
+    operatorToken: "second-operator-token",
+    agentToken: "second-agent-token",
   };
   const children = new Set<ChildProcess>();
   t.after(async () => {
@@ -380,8 +422,9 @@ test("two real control planes isolate identical ids and persist identity and dat
   for (const port of [firstPort, secondPort]) {
     const response = await fetch(`http://127.0.0.1:${port}/healthz`);
     assert.equal(response.status, 200);
-    const health = await response.json() as { service?: unknown };
+    const health = await response.json() as { service?: unknown; protocolVersion?: unknown };
     assert.equal(health.service, WOLLIPOG_CONTROL_PLANE_SERVICE);
+    assert.equal(health.protocolVersion, undefined, "the unauthenticated health probe does not fingerprint protocol support");
   }
   for (const info of [firstInfo, secondInfo]) {
     assert.equal(info.service, WOLLIPOG_CONTROL_PLANE_SERVICE);
@@ -394,6 +437,36 @@ test("two real control planes isolate identical ids and persist identity and dat
 
   const directLoopbackAnonymous = await fetch(`http://127.0.0.1:${firstPort}/api/instance`);
   assert.equal(directLoopbackAnonymous.status, 401, "loopback no longer substitutes for authentication");
+  const anonymousCompatibility = await fetch(`http://127.0.0.1:${firstPort}/api/compatibility`);
+  assert.equal(anonymousCompatibility.status, 401);
+  const compatibility = await fetch(`http://127.0.0.1:${firstPort}/api/compatibility`, {
+    headers: { authorization: `Bearer ${firstSeed.deviceToken}` },
+  });
+  assert.equal(compatibility.status, 200);
+  assert.equal((await compatibility.json() as { protocolVersion?: unknown }).protocolVersion, PROTOCOL_VERSION);
+  const operatorCompatibility = await fetch(`http://127.0.0.1:${firstPort}/api/compatibility`, {
+    headers: { authorization: `Bearer ${firstSeed.operatorToken}` },
+  });
+  assert.equal(operatorCompatibility.status, 200, "an organization member can read compatibility metadata");
+  const liveDb = ControlPlaneDb.open(firstDb);
+  try {
+    liveDb.updateSessionStatus(SHARED_SESSION_ID, "running", Date.now());
+    assert.equal(liveDb.setAgentControlCredential(
+      SHARED_SESSION_ID,
+      SHARED_RUNNER_ID,
+      hashToken(firstSeed.agentToken),
+      Date.now(),
+    ), true);
+  } finally {
+    liveDb.close();
+  }
+  const scopedAgentCompatibility = await fetch(`http://127.0.0.1:${firstPort}/api/compatibility`, {
+    headers: {
+      authorization: `Bearer ${firstSeed.agentToken}`,
+      [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: SHARED_SESSION_ID,
+    },
+  });
+  assert.equal(scopedAgentCompatibility.status, 200, "a user-scoped session credential can preflight its CLI");
   const unauthenticated = await fetch(`http://127.0.0.1:${firstPort}/api/instance`, {
     headers: { "x-forwarded-for": "203.0.113.42" },
   });
@@ -447,7 +520,8 @@ test("two real control planes isolate identical ids and persist identity and dat
   await assertSeededPayload(secondPort, secondSeed);
 });
 
-test("a duplicate start leaves the live control plane's runner, box, session, and shells untouched", { timeout: 60_000 }, async (t) => {
+for (const failureMode of ["shared database", "occupied port", "SQLite contention"] as const) {
+test(`a duplicate start with ${failureMode} leaves the live control plane's runner, box, session, and shells untouched`, { timeout: 60_000 }, async (t) => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-duplicate-start-"));
   const port = await reservePort();
   const database = join(temp, "control-plane.db");
@@ -456,8 +530,28 @@ test("a duplicate start leaves the live control plane's runner, box, session, an
     workspaceName: "Shared Workspace",
     sessionTitle: "Live Shared Session",
     deviceToken: "duplicate-start-device-token",
+    operatorToken: "duplicate-start-operator-token",
+    agentToken: "duplicate-start-agent-token",
   };
   seedControlPlane(database, seed, true);
+  if (failureMode === "SQLite contention") {
+    const fixtureDb = ControlPlaneDb.open(database);
+    try {
+      fixtureDb.createAutomation({
+        automationId: "automation_after_contention",
+        spec: {
+          name: "Resume After Contention", cron: "* * * * *", timezone: "UTC", enabled: false,
+          misfirePolicy: { kind: "fire_once" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
+          limits: { maxCostUsd: 1, maxToolCalls: 10 }, notifications: { pushEvents: [] },
+          action: { kind: "prompt_session", sessionId: SHARED_SESSION_ID,
+            request: { text: "Automation resumed after contention" } },
+        },
+        nextFireAt: null, actor: { kind: "system", id: "integration" }, now: Date.now(),
+      });
+    } finally {
+      fixtureDb.close();
+    }
+  }
 
   const children = new Set<ChildProcess>();
   const sockets = new Set<WebSocket>();
@@ -511,12 +605,38 @@ test("a duplicate start leaves the live control plane's runner, box, session, an
 
   const beforeDuplicate = sharedRows(database);
   assert.equal(beforeDuplicate.session_shells[0]?.status, "running");
-  const duplicate = startControlPlane(port, database);
-  children.add(duplicate.child);
-  const duplicateExit = await waitForChildExit(duplicate.child);
-  children.delete(duplicate.child);
-  assert.notEqual(duplicateExit, 0, duplicate.logs());
-  assert.match(duplicate.logs(), /EADDRINUSE/);
+  // A distinct, fully seeded database isolates port rejection from writes by the first server.
+  // In the shared-database cases, DB initialization/recovery runs before listen(), so a busy
+  // writer may reject startup before the occupied-port check can run.
+  const duplicateDatabase = failureMode === "occupied port" ? join(temp, "duplicate.db") : database;
+  if (failureMode === "occupied port") seedControlPlane(duplicateDatabase, seed);
+  const lock = failureMode === "SQLite contention" ? new DatabaseSync(database) : undefined;
+  let duplicateExit: number | null;
+  let duplicateLogs = "";
+  try {
+    // WAL permits the first server's readers while this deterministic writer lock is held.
+    lock?.exec("BEGIN IMMEDIATE");
+    if (lock) {
+      // Synchronize with an actual periodic write, not a sleep that can miss the 5s timer.
+      // Before the fix, that tick escaped as uncaughtException and shut down the first server.
+      const deadline = Date.now() + 10_000;
+      while (!first.logs().includes('"msg":"automation tick deferred"') && Date.now() < deadline) {
+        assert.equal(first.child.exitCode, null, first.logs());
+        await delay(25);
+      }
+      assert.match(first.logs(), /"msg":"automation tick deferred"/, "automation timer observed the held writer lock");
+    }
+    const duplicate = startControlPlane(port, duplicateDatabase);
+    children.add(duplicate.child);
+    duplicateExit = await waitForChildExit(duplicate.child, duplicate.logs);
+    children.delete(duplicate.child);
+    duplicateLogs = duplicate.logs();
+  } finally {
+    if (lock) {
+      if (lock.isTransaction) lock.exec("ROLLBACK");
+      lock.close();
+    }
+  }
 
   assert.deepEqual(
     sharedRows(database),
@@ -541,4 +661,34 @@ test("a duplicate start leaves the live control plane's runner, box, session, an
   assert.equal(promptResponse.status, 200, promptBody);
   assert.doesNotMatch(promptBody, /runner is offline/i);
   assert.equal((await promptDelivery).text, "Still connected after duplicate start");
+
+  if (lock) {
+    // A caught tick must remain scheduled: prove the next unlocked tick delivers real work.
+    const automationDelivery = waitForSocketMessage(runner, (message) =>
+      message.type === "durable_session_command" &&
+      (message.command as Record<string, unknown> | undefined)?.text === "Automation resumed after contention", 10_000);
+    // If a fixture write fails, preserve that failure without a later unhandled waiter rejection.
+    void automationDelivery.catch(() => {});
+    const liveDb = new DatabaseSync(database);
+    try {
+      // Setup writes may briefly overlap a normal first-server write after the forced lock ends.
+      liveDb.exec("PRAGMA busy_timeout=1000; BEGIN IMMEDIATE");
+      liveDb.prepare("UPDATE sessions SET status='idle' WHERE id=?").run(SHARED_SESSION_ID);
+      liveDb.prepare("UPDATE automations SET enabled=1, next_fire_at=? WHERE automation_id=?")
+        .run(Date.now(), "automation_after_contention");
+      liveDb.exec("COMMIT");
+    } finally {
+      liveDb.close();
+    }
+    const delivered = await automationDelivery;
+    assert.equal((delivered.command as Record<string, unknown>).sessionId, SHARED_SESSION_ID);
+  }
+
+  // Keep failure diagnostics after BOTH safety invariants: an unexpected startup error must not
+  // prevent us from checking shared rows or delivery through the original runner connection.
+  assert.notEqual(duplicateExit, 0, duplicateLogs);
+  assert.match(duplicateLogs, failureMode === "occupied port" ? /EADDRINUSE/
+    : failureMode === "SQLite contention" ? /database is locked/
+    : /EADDRINUSE|database is locked/);
 });
+}

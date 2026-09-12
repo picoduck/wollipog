@@ -53,6 +53,34 @@ function nextTask(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+test("orchestrator starts after an earlier cancellation but never after cancellation during its probe", async () => {
+  for (const cancelDuringProbe of [false, true]) {
+    const child = fakeAgentProcess();
+    let finishProbe!: (args: string[]) => void;
+    let spawns = 0;
+    const driver = new CodexDriver({
+      command: "codex", args: [], cwd: "/tmp/work", env: {},
+      config: { permissionMode: "orchestrator" }, context: { kind: "native" },
+    }, { onEvent() {}, onStderr() {}, onExit() {} }, {
+      spawn() { spawns++; return child; }, kill() {},
+      orchestratorMcpArgs: () => new Promise((resolve) => { finishProbe = resolve; }),
+    });
+    try {
+      driver.cancel();
+      const turn = driver.prompt("a new turn");
+      if (cancelDuringProbe) driver.cancel();
+      finishProbe([]);
+      await nextTask();
+      assert.equal(spawns, cancelDuringProbe ? 0 : 1);
+      if (!cancelDuringProbe) {
+        child.stdout.emit("data", JSON.stringify({ type: "turn.completed" }) + "\n");
+        child.emit("close", 0);
+      }
+      assert.equal(await turn, cancelDuringProbe ? "cancelled" : "end_turn");
+    } finally { driver.dispose(); }
+  }
+});
+
 test("thread.started sets the threadId and returns null", () => {
   const { driver } = makeDriver();
   assert.equal(threadIdOf(driver), null);
@@ -84,6 +112,29 @@ test("resumeId pre-seeds the threadId so the next turn resumes (Phase 2)", () =>
   const driver = new CodexDriver(opts, cb);
   assert.equal(threadIdOf(driver), "thread-resumed");
   assert.equal(driver.agentSessionId(), "thread-resumed");
+});
+
+test("an Orchestrator resume explicitly re-pins scratch cwd and sandbox", async () => {
+  const child = fakeAgentProcess();
+  let spawnedArgs: string[] = [];
+  const driver = new CodexDriver({
+    command: "codex", args: [], cwd: "/private/scratch", env: {},
+    config: { permissionMode: "orchestrator" }, context: { kind: "native" },
+    resumeId: "thread-from-old-project-cwd",
+  }, { onEvent() {}, onStderr() {}, onExit() {} }, {
+    spawn(options) { spawnedArgs = options.args; return child; },
+    kill() {}, orchestratorMcpArgs: async () => [],
+  });
+  try {
+    const turn = driver.prompt("continue planning");
+    await nextTask();
+    assert.deepEqual(spawnedArgs.slice(0, 6), [
+      "exec", "-C", "/private/scratch", "-s", "workspace-write", "resume",
+    ]);
+    child.stdout.emit("data", JSON.stringify({ type: "turn.completed" }) + "\n");
+    child.emit("close", 0);
+    assert.equal(await turn, "end_turn");
+  } finally { driver.dispose(); }
 });
 
 test("thread.started without thread_id leaves threadId unchanged", () => {

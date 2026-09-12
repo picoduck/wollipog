@@ -8,6 +8,7 @@ import {
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_FILES,
   SKILL_MAX_TOTAL_BYTES,
+  runnerSupportsProtocol,
   validSkillFilePath,
   validSkillName,
   type AgentDefinition,
@@ -178,12 +179,13 @@ export function parseSkillAgentSelector(value: unknown): SkillAgentSelector | nu
 /** Drivers whose harness skill directories the runner knows how to link in MVP. */
 const SKILL_TARGET_DRIVERS = new Set<string>(["claude-code", "codex", "codex-app-server"]);
 
-function agentEligibleForSkills(agent: AgentDefinition): boolean {
+function agentEligibleForSkills(agent: AgentDefinition, wslEnabled: boolean): boolean {
   // The synthesized conductor shares its donor Claude's harness directory, so as a skills
   // target it is the same directory twice: "all"/driver selectors would double-target it and
   // mixed per-agent policies would report a conflict that is really one directory.
   return agent.id !== "conductor" &&
-    SKILL_TARGET_DRIVERS.has(agent.driver ?? "acp") && (agent.context?.kind ?? "native") === "native";
+    SKILL_TARGET_DRIVERS.has(agent.driver ?? "acp") &&
+    ((agent.context?.kind ?? "native") === "native" || (agent.context?.kind === "wsl" && wslEnabled));
 }
 
 function selectorMatchesAgent(selector: SkillAgentSelector, agent: AgentDefinition): boolean {
@@ -212,8 +214,8 @@ export interface DesiredSkillSnapshotEntry extends Omit<SkillSyncEntry, "files">
  * overrides an instance-scoped one, and within a scope an `agent` selector overrides `driver`
  * overrides `all`. A winning assignment with enabled=false removes the skill for exactly the
  * agents it matches (the skill itself stays desired for the machine while any enabled machine-wide
- * assignment still matches, so the canonical ~/.agents/skills link survives). Only native-context
- * claude-code / codex / codex-app-server agents ever become link targets.
+ * assignment still matches, so the canonical ~/.agents/skills link survives). Supported native
+ * agents become link targets on every capable runner; WSL agents join only at protocol 125.
  *
  * Ownership containment: a skill only deploys to a machine when the skill's ownership audience is
  * contained within the machine's (the same scopeAudienceContainedWithMembership rule projects use
@@ -231,9 +233,10 @@ export function resolveDesiredSkillSnapshot(
   if (!runner) return [];
   const runnerScope = db.runnerScope(runnerId);
   if (!runnerScope) return [];
-  const eligibleAgents = runner.agents.filter(agentEligibleForSkills);
+  const wslEnabled = runnerSupportsProtocol(runner.protocolVersion, "wslMachineSkills");
+  const eligibleAgents = runner.agents.filter((agent) => agentEligibleForSkills(agent, wslEnabled));
   const bySkill = new Map<string, SkillAssignmentView[]>();
-  for (const assignment of db.listSkillAssignmentsForRunner(runnerId)) {
+  for (const assignment of [...db.listSkillAssignmentsForRunner(runnerId), ...db.listExpandedSkillGroupAssignments(runnerId)]) {
     const list = bySkill.get(assignment.skillId) ?? [];
     list.push(assignment);
     bySkill.set(assignment.skillId, list);
@@ -248,7 +251,8 @@ export function resolveDesiredSkillSnapshot(
     for (const agent of eligibleAgents) {
       const winner = assignments
         .filter((assignment) => selectorMatchesAgent(assignment.agentSelector, agent))
-        .sort((a, b) => assignmentRank(b) - assignmentRank(a) || b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : -1))[0];
+        .sort((a, b) => assignmentRank(b) - assignmentRank(a) || Number(!!a.groupId) - Number(!!b.groupId) ||
+          b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : -1))[0];
       if (winner?.enabled) {
         targets.push({ agentId: agent.id, invocation: winner.invocation as SkillInvocationPolicy });
       }
@@ -259,10 +263,14 @@ export function resolveDesiredSkillSnapshot(
     const desired = targets.length > 0 ||
       assignments.some((assignment) => assignment.enabled && assignment.agentSelector.kind === "all");
     if (!desired) continue;
+    const policy = db.getMachineSkillVersion(skillId, runnerId);
+    const version = policy?.versionId ? policy.version : skill.latestVersion;
+    // A broken explicit pin must never silently advance to latest.
+    if (!version) continue;
     entries.push({
       name: skill.name,
-      versionId: skill.latestVersion.id,
-      versionDigest: skill.latestVersion.digest,
+      versionId: version.id,
+      versionDigest: version.digest,
       targets,
     });
   }

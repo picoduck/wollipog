@@ -3,6 +3,7 @@ import {
   parseSourceLocation,
   runnerSupportsProtocol,
   type EditorSourceLocation,
+  type CreateWorkspaceReferenceRequest,
   type SessionFileEntry,
   type SessionView,
   type SourceLocation,
@@ -52,6 +53,7 @@ export function FilesBrowser({
   location,
   onOpenLocation,
   onClearLocation,
+  onAttachWorkspaceReference,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -59,6 +61,7 @@ export function FilesBrowser({
   location?: SourceLocation;
   onOpenLocation: (location: SourceLocation) => void;
   onClearLocation: () => void;
+  onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
 }) {
   const api = useApi();
   const instances = useInstances();
@@ -72,6 +75,7 @@ export function FilesBrowser({
   const [symbolDraft, setSymbolDraft] = useState(location?.symbol ?? "");
   const [note, setNote] = useState<string | null>(null);
   const [editorBusy, setEditorBusy] = useState(false);
+  const [attachBusy, setAttachBusy] = useState(false);
   const [selectedEditor, setSelectedEditor] = useState<string | null>(() => {
     return loadBrowserStorageValue("wollipog.editor.lastUsed");
   });
@@ -212,6 +216,32 @@ export function FilesBrowser({
     if (!next) return flashNote("Enter a symbol of 1-256 printable characters.");
     onOpenLocation(next);
   };
+  const attachCurrentTarget = async () => {
+    if (!file || file.binary || !onAttachWorkspaceReference) return;
+    const selection = viewerRef.current?.ownerDocument.getSelection();
+    const selectedLines: number[] = [];
+    if (selection && !selection.isCollapsed && viewerRef.current &&
+        selection.anchorNode && selection.focusNode && viewerRef.current.contains(selection.anchorNode) &&
+        viewerRef.current.contains(selection.focusNode)) {
+      const lineFor = (node: Node): number | null => {
+        const element = node instanceof Element ? node : node.parentElement;
+        const line = element?.closest<HTMLElement>("[data-source-line]")?.dataset.sourceLine;
+        const parsed = Number(line);
+        return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+      };
+      const anchor = lineFor(selection.anchorNode);
+      const focus = lineFor(selection.focusNode);
+      if (anchor !== null && focus !== null) selectedLines.push(anchor, focus);
+    }
+    setAttachBusy(true);
+    try {
+      await onAttachWorkspaceReference(selectedLines.length
+        ? { path: file.path, kind: "lines", startLine: Math.min(...selectedLines), endLine: Math.max(...selectedLines) }
+        : { path: file.path, kind: "file" });
+    } finally {
+      setAttachBusy(false);
+    }
+  };
 
   const crumbs = crumbsFor(file ? file.path.split("/").slice(0, -1).join("/") : path);
   const disabled = !runnerOnline || busy;
@@ -321,6 +351,11 @@ export function FilesBrowser({
               </button>
             )}
             <button className="btn ghost sm" type="button" onClick={() => void copyLink()}>Copy Link</button>
+            {onAttachWorkspaceReference && !file.binary && (
+              <button className="btn ghost sm" type="button" disabled={attachBusy || !runnerOnline} onClick={() => void attachCurrentTarget()}>
+                {attachBusy ? "Attaching…" : "Attach to Prompt"}
+              </button>
+            )}
             <span className="muted source-file-size">{formatBytes(file.size)}</span>
           </div>
           {note && <div className="hint" role="status">{note}</div>}

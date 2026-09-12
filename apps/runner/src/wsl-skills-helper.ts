@@ -1,0 +1,749 @@
+/** Fixed in-distro filesystem adapter. JSON carries only validated desired state and store paths;
+ * no payload value is evaluated as Python or shell source. */
+export const WSL_SKILLS_HELPER = String.raw`#!/usr/bin/env python3
+import ctypes, datetime, hashlib, json, os, re, stat, sys, uuid
+
+NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+DIGEST = re.compile(r"^[0-9a-f]{64}$")
+LEASE_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+MAX_ENTRIES = 256
+MAX_MD = 65536
+MAX_LEASE_RECORDS = 16
+MAX_COMPACTION_SIBLINGS = 64
+MAX_COMPACTION_RECORDS = 4096
+MAX_CLEANUP_ALIAS_SCAN_ENTRIES = 4096
+MAX_CLEANUP_ALIASES = 128
+RENAME_EXCHANGE = 2
+DRIVER_DIRS = {"claude-code": ".claude/skills", "codex": ".codex/skills", "codex-app-server": ".codex/skills"}
+COMPACTION = re.compile(r"^\.mutable-home\.compact-([0-9a-f-]{36})-([0-9a-f]{64})-([0-9a-f]{32})$")
+CLEANUP_PROOF = re.compile(r"^\.mutable-home\.cleanup-([0-9a-f]{32})\.json$")
+PUBLICATION_TEMP = re.compile(r"^\.provider-home-lease-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$")
+diagnostics = []
+
+def fail(message):
+    raise RuntimeError(message)
+
+def diagnose(message):
+    value = re.sub(r"[\x00-\x1f\x7f]+", " ", str(message)).strip()[:500]
+    if value and value not in diagnostics and len(diagnostics) < 16: diagnostics.append(value)
+
+def open_root(path):
+    resolved = os.path.realpath(path)
+    return os.open(resolved, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW), resolved
+
+def child_dir(parent, name, create=False, mode=0o755, strict=True):
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        fail("invalid path segment")
+    if create:
+        try: os.mkdir(name, mode, dir_fd=parent)
+        except FileExistsError: pass
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode) or strict and (info.st_uid != os.geteuid() or info.st_mode & 0o022):
+        os.close(fd); fail("unsafe directory ownership")
+    return fd
+
+def walk_dir(root, relative, create=False):
+    fd = os.dup(root)
+    try:
+        for segment in relative.split("/"):
+            next_fd = child_dir(fd, segment, create)
+            os.close(fd); fd = next_fd
+        return fd
+    except:
+        os.close(fd); raise
+
+def fd_path(fd):
+    return os.path.realpath("/proc/self/fd/%d" % fd)
+
+def bounded_json():
+    raw = sys.stdin.buffer.read(4 * 1024 * 1024 + 1)
+    if len(raw) > 4 * 1024 * 1024: fail("request too large")
+    return json.loads(raw.decode("utf-8"))
+
+def lease_value(owner, state, previous=None):
+    return {"version": 2, "state": state, "ownerHash": owner, "leaseId": str(uuid.uuid4()),
+        "previousLeaseId": previous[0] if previous else None, "previousRecordHash": previous[1] if previous else None,
+        "pid": os.getpid(), "hostname": os.uname().nodename, "provider": "wsl-skills",
+        "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+
+def lease_bytes(value):
+    return json.dumps(value, separators=(",", ":")).encode() + b"\n"
+
+def read_lease_record(lock, name):
+    marker = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=lock)
+    try:
+        info = os.fstat(marker)
+        # Native publication briefly gives the immutable record a second hard link while the
+        # destination is made durable. More links would permit an unexpected mutable alias.
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink not in (1, 2) or info.st_size > 4096: fail("provider home lease is unsafe")
+        raw = os.read(marker, info.st_size + 1)
+        value = json.loads(raw.decode("utf-8"))
+    finally: os.close(marker)
+    if not isinstance(value, dict) or not DIGEST.fullmatch(value.get("ownerHash", "")): fail("provider home lease is invalid")
+    lease_id = value.get("leaseId", "")
+    if (not isinstance(lease_id, str) or not LEASE_ID.fullmatch(lease_id) or
+        not isinstance(value.get("pid"), int) or isinstance(value.get("pid"), bool) or value["pid"] <= 0 or value["pid"] > 9007199254740991 or
+        not isinstance(value.get("hostname"), str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", value.get("provider", "")) or
+        not isinstance(value.get("createdAt"), str)): fail("provider home lease is invalid")
+    if value.get("version") == 1:
+        pass
+    elif value.get("version") == 2 and value.get("state") in ("active", "released"):
+        previous_id, previous_hash = value.get("previousLeaseId"), value.get("previousRecordHash")
+        if previous_id is not None and (not isinstance(previous_id, str) or not LEASE_ID.fullmatch(previous_id)):
+            fail("provider home lease is invalid")
+        if previous_hash is not None and not DIGEST.fullmatch(previous_hash): fail("provider home lease is invalid")
+    else: fail("provider home lease is invalid")
+    return value, hashlib.sha256(raw).hexdigest()
+
+def read_lease_chain(lock, include_records=False):
+    entries = sorted(os.listdir(lock))
+    if not entries: fail("provider home lease is incomplete")
+    if "lease.json" in entries:
+        marker = "lease.json"
+        value, record_hash = read_lease_record(lock, marker)
+        if value.get("version") != 1: fail("provider home lease is incomplete or foreign")
+    else:
+        genesis = [name for name in entries if re.fullmatch(r"lease-([0-9a-f-]+)\.json", name)]
+        if len(genesis) != 1: fail("provider home lease is incomplete or foreign")
+        marker = genesis[0]
+        value, record_hash = read_lease_record(lock, marker)
+        if (value.get("version") != 2 or value.get("state") != "active" or value.get("previousLeaseId") is not None or
+            value.get("previousRecordHash") is not None or marker != "lease-%s.json" % value["leaseId"]):
+            fail("provider home lease is incomplete or foreign")
+    consumed, seen, records = {marker}, set(), {}
+    while True:
+        if value["leaseId"] in seen: fail("provider home lease is incomplete or foreign")
+        seen.add(value["leaseId"])
+        records[value["leaseId"]] = (record_hash, value)
+        next_marker = "next-%s.json" % value["leaseId"]
+        if next_marker not in entries: break
+        successor, successor_hash = read_lease_record(lock, next_marker)
+        if (successor.get("version") != 2 or successor.get("previousLeaseId") != value["leaseId"] or
+            successor.get("previousRecordHash") != record_hash): fail("provider home lease is incomplete or foreign")
+        if successor["state"] == "released" and (value.get("version") != 2 or value.get("state") != "active" or
+            any(successor[key] != value[key] for key in ("ownerHash", "hostname", "pid", "provider"))):
+            fail("provider home lease is incomplete or foreign")
+        if successor["state"] == "active" and (value.get("version") == 1 or value.get("state") == "active") and (
+            successor["ownerHash"] != value["ownerHash"] or successor["hostname"] != value["hostname"]):
+            fail("provider home lease is incomplete or foreign")
+        consumed.add(next_marker)
+        value, record_hash = successor, successor_hash
+    if len(consumed) != len(entries): fail("provider home lease is incomplete or foreign")
+    return (value, record_hash, records) if include_records else (value, record_hash)
+
+def write_all(fd, value):
+    sent = 0
+    while sent < len(value): sent += os.write(fd, value[sent:])
+
+def publish_lease(root, lock, target, value):
+    raw = lease_bytes(value)
+    temp = ".provider-home-lease-%s.tmp" % uuid.uuid4()
+    marker = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root)
+    try:
+        write_all(marker, raw); os.fsync(marker)
+    finally: os.close(marker)
+    try:
+        os.link(temp, target, src_dir_fd=root, dst_dir_fd=lock, follow_symlinks=False)
+        os.fsync(lock)
+    finally:
+        try: os.unlink(temp, dir_fd=root)
+        except FileNotFoundError: pass
+    return hashlib.sha256(raw).hexdigest()
+
+def process_alive(pid):
+    try: os.kill(pid, 0); return True
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    except: return True
+
+def discover_cleanup_proof_aliases(root):
+    # An incomplete inventory cannot prove that a two-link proof has exactly one strict alias.
+    # Return no inventory on mutation or overflow so single-link cleanup can continue safely.
+    aliases = {}
+    scanned = 0
+    retained = 0
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                scanned += 1
+                if scanned > MAX_CLEANUP_ALIAS_SCAN_ENTRIES: return None
+                if not PUBLICATION_TEMP.fullmatch(entry.name): continue
+                retained += 1
+                if retained > MAX_CLEANUP_ALIASES: return None
+                info = entry.stat(follow_symlinks=False)
+                aliases.setdefault((info.st_dev, info.st_ino), []).append(entry.name)
+    except: return None
+    return aliases
+
+def normalize_cleanup_proof(root, proof_name, proof_identity, proof_raw, aliases_by_identity, retained_fd=None):
+    proof_fd = retained_fd if retained_fd is not None else os.open(
+        proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+    try:
+        info = os.fstat(proof_fd)
+        named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+        os.lseek(proof_fd, 0, os.SEEK_SET)
+        if ((info.st_dev, info.st_ino) != proof_identity or
+            (named.st_dev, named.st_ino) != proof_identity or
+            not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+            stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink not in (1, 2) or
+            info.st_size > 4096 or os.read(proof_fd, info.st_size + 1) != proof_raw):
+            fail("compaction cleanup proof changed during recovery")
+        if info.st_nlink == 1: return proof_identity
+        if aliases_by_identity is None: fail("unverified compaction cleanup proof alias")
+        aliases = aliases_by_identity.get(proof_identity, [])
+        if len(aliases) != 1: fail("unverified compaction cleanup proof alias")
+        alias_name = aliases[0]
+        if not PUBLICATION_TEMP.fullmatch(alias_name): fail("unverified compaction cleanup proof alias")
+        alias_fd = os.open(alias_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        try:
+            alias_opened = os.fstat(alias_fd)
+            named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+            alias_named = os.stat(alias_name, dir_fd=root, follow_symlinks=False)
+            if ((alias_opened.st_dev, alias_opened.st_ino) != proof_identity or
+                (named.st_dev, named.st_ino) != proof_identity or named.st_nlink != 2 or
+                (alias_named.st_dev, alias_named.st_ino) != proof_identity or alias_named.st_nlink != 2 or
+                not stat.S_ISREG(alias_opened.st_mode) or alias_opened.st_uid != os.geteuid() or
+                stat.S_IMODE(alias_opened.st_mode) != 0o600 or alias_opened.st_nlink != 2 or
+                alias_opened.st_size != info.st_size or
+                os.read(alias_fd, alias_opened.st_size + 1) != proof_raw):
+                fail("unverified compaction cleanup proof alias")
+            os.unlink(alias_name, dir_fd=root)
+        finally: os.close(alias_fd)
+        os.fsync(root)
+        recovered = os.fstat(proof_fd)
+        named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+        if ((recovered.st_dev, recovered.st_ino) != proof_identity or recovered.st_nlink != 1 or
+            (named.st_dev, named.st_ino) != proof_identity or named.st_nlink != 1):
+            fail("compaction cleanup proof changed during recovery")
+        return proof_identity
+    finally:
+        if retained_fd is None: os.close(proof_fd)
+
+def cleanup_compactions(root, lock):
+    try:
+        _, _, canonical = read_lease_chain(lock, True)
+        names = [name for name in sorted(os.listdir(root)) if COMPACTION.fullmatch(name)]
+    except: return
+    aliases_by_identity = discover_cleanup_proof_aliases(root)
+    for name in names[:MAX_COMPACTION_SIBLINGS]:
+        candidate = None
+        try:
+            match = COMPACTION.fullmatch(name)
+            info = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (not match or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or
+                stat.S_IMODE(info.st_mode) != 0o700): continue
+            candidate = child_dir(root, name)
+            opened = os.fstat(candidate)
+            named = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                fail("compaction journal changed during cleanup")
+            entries = sorted(os.listdir(candidate))
+            if len(entries) > MAX_COMPACTION_RECORDS: continue
+            lease_id, proof_hash, proof_token = match.group(1), match.group(2), match.group(3)
+            proof_name = ".mutable-home.cleanup-%s.json" % proof_token
+            proof = None
+            proof_identity = None
+            proof_raw = None
+            try:
+                proof_fd = os.open(proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+                try:
+                    proof_info = os.fstat(proof_fd)
+                    if (not stat.S_ISREG(proof_info.st_mode) or proof_info.st_uid != os.geteuid() or
+                        stat.S_IMODE(proof_info.st_mode) != 0o600 or proof_info.st_nlink not in (1, 2) or
+                        proof_info.st_size > 4096): fail("unverified compaction cleanup proof")
+                    proof_raw = os.read(proof_fd, proof_info.st_size + 1)
+                    proof = json.loads(proof_raw.decode("utf-8"))
+                    proof_identity = (proof_info.st_dev, proof_info.st_ino)
+                finally: os.close(proof_fd)
+            except FileNotFoundError: pass
+            for entry in entries:
+                record = os.stat(entry, dir_fd=candidate, follow_symlinks=False)
+                if (not stat.S_ISREG(record.st_mode) or record.st_uid != os.geteuid() or
+                    stat.S_IMODE(record.st_mode) != 0o600 or record.st_nlink != 1):
+                    fail("unverified compaction journal")
+            expected_proof = {"version": 1, "name": name, "leaseId": lease_id, "proofHash": proof_hash,
+                "device": opened.st_dev, "inode": opened.st_ino}
+            if proof is not None:
+                if proof != expected_proof: fail("unverified compaction cleanup proof")
+                for entry in entries:
+                    value, _ = read_lease_record(candidate, entry)
+                    if entry == "lease.json":
+                        valid_name = value.get("version") == 1
+                    elif entry == "lease-%s.json" % value["leaseId"]:
+                        valid_name = (value.get("version") == 2 and value.get("state") == "active" and
+                            value.get("previousLeaseId") is None and value.get("previousRecordHash") is None)
+                    else:
+                        valid_name = (value.get("version") == 2 and value.get("previousLeaseId") is not None and
+                            entry == "next-%s.json" % value["previousLeaseId"])
+                    if not valid_name: fail("unverified compaction journal")
+                proof_identity = normalize_cleanup_proof(
+                    root, proof_name, proof_identity, proof_raw, aliases_by_identity)
+            else:
+                if not entries: fail("unverified compaction journal")
+                canonical_record = canonical.get(lease_id)
+                if canonical_record is None: fail("unverified compaction journal")
+                abandoned, abandoned_hash = read_lease_chain(candidate)
+                if (abandoned["leaseId"] != lease_id or proof_hash not in
+                    (abandoned_hash, canonical_record[0])):
+                    fail("unverified compaction journal")
+                expected = canonical_record[1]
+                if any(abandoned.get(key) != expected.get(key) for key in
+                    ("leaseId", "state", "ownerHash", "hostname", "pid", "provider", "createdAt")):
+                    fail("unverified compaction journal")
+                publish_lease(root, root, proof_name, expected_proof)
+                os.fsync(root)
+                proof_info = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+                proof_identity = (proof_info.st_dev, proof_info.st_ino)
+            named = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                fail("compaction journal changed during cleanup")
+            for entry in entries: os.unlink(entry, dir_fd=candidate)
+            os.fsync(candidate)
+            named = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                fail("compaction journal changed during cleanup")
+            os.close(candidate); candidate = None
+            os.rmdir(name, dir_fd=root)
+            os.fsync(root)
+            proof_info = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+            if proof_identity != (proof_info.st_dev, proof_info.st_ino):
+                fail("compaction cleanup proof changed during cleanup")
+            os.unlink(proof_name, dir_fd=root)
+            os.fsync(root)
+        except: pass
+        finally:
+            if candidate is not None: os.close(candidate)
+    try:
+        proof_names = [name for name in sorted(os.listdir(root)) if CLEANUP_PROOF.fullmatch(name)]
+    except: return
+    for proof_name in proof_names[:MAX_COMPACTION_SIBLINGS]:
+        proof_fd = None
+        try:
+            proof_fd = os.open(proof_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+            info = os.fstat(proof_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+                stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink not in (1, 2) or info.st_size > 4096): continue
+            proof_raw = os.read(proof_fd, info.st_size + 1)
+            proof = json.loads(proof_raw.decode("utf-8"))
+            match = CLEANUP_PROOF.fullmatch(proof_name)
+            candidate_name = proof.get("name") if isinstance(proof, dict) else None
+            candidate_match = COMPACTION.fullmatch(candidate_name) if isinstance(candidate_name, str) else None
+            if (not match or not candidate_match or match.group(1) != candidate_match.group(3) or
+                proof.get("version") != 1 or proof.get("leaseId") != candidate_match.group(1) or
+                proof.get("proofHash") != candidate_match.group(2) or not isinstance(proof.get("device"), int) or
+                not isinstance(proof.get("inode"), int)): continue
+            try: os.stat(candidate_name, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                proof_identity = normalize_cleanup_proof(
+                    root, proof_name, (info.st_dev, info.st_ino), proof_raw, aliases_by_identity, proof_fd)
+                verified = os.fstat(proof_fd)
+                named = os.stat(proof_name, dir_fd=root, follow_symlinks=False)
+                os.lseek(proof_fd, 0, os.SEEK_SET)
+                if ((verified.st_dev, verified.st_ino) != proof_identity or
+                    (named.st_dev, named.st_ino) != proof_identity or
+                    not stat.S_ISREG(verified.st_mode) or verified.st_uid != os.geteuid() or
+                    stat.S_IMODE(verified.st_mode) != 0o600 or verified.st_nlink != 1 or
+                    verified.st_size > 4096 or os.read(proof_fd, verified.st_size + 1) != proof_raw):
+                    fail("compaction cleanup proof changed during cleanup")
+                os.unlink(proof_name, dir_fd=root)
+                os.fsync(root)
+        except: pass
+        finally:
+            if proof_fd is not None: os.close(proof_fd)
+
+def acquire_lease(home_fd, owner):
+    root = walk_dir(home_fd, ".agent-manager/provider-home-leases-v1", True)
+    try:
+        try:
+            os.mkdir("mutable-home.lock", 0o700, dir_fd=root)
+            lock = child_dir(root, "mutable-home.lock")
+            try:
+                value = lease_value(owner, "active")
+                publish_lease(root, lock, "lease-%s.json" % value["leaseId"], value)
+                os.fsync(root)
+                cleanup_compactions(root, lock)
+                return root, lock, value["leaseId"]
+            except:
+                os.close(lock)
+                try: os.rmdir("mutable-home.lock", dir_fd=root)
+                except: pass
+                raise
+        except FileExistsError:
+            lock = child_dir(root, "mutable-home.lock")
+            try:
+                existing, existing_hash = read_lease_chain(lock)
+                if not (existing.get("version") == 2 and existing.get("state") == "released"):
+                    if existing["hostname"] != os.uname().nodename: fail("provider home is leased by another host")
+                    if process_alive(existing["pid"]): fail("provider home is already in use")
+                    if existing["ownerHash"] != owner: fail("provider home is leased by another runner owner")
+                confirmed, confirmed_hash = read_lease_chain(lock)
+                if confirmed["leaseId"] != existing["leaseId"] or confirmed_hash != existing_hash:
+                    fail("provider home lease changed during recovery")
+                value = lease_value(owner, "active", (confirmed["leaseId"], confirmed_hash))
+                try: publish_lease(root, lock, "next-%s.json" % confirmed["leaseId"], value)
+                except FileExistsError: fail("provider home lease changed during recovery")
+                published, _ = read_lease_chain(lock)
+                if published.get("state") != "active" or published["leaseId"] != value["leaseId"]:
+                    fail("provider home lease changed during recovery")
+                cleanup_compactions(root, lock)
+                return root, lock, value["leaseId"]
+            except:
+                os.close(lock); raise
+    except:
+        os.close(root); raise
+
+def exchange_directories(root, left, right):
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+        return renameat2(root, os.fsencode(left), root, os.fsencode(right), RENAME_EXCHANGE) == 0
+    except: return False
+
+def compact_lease(root, lock, current, current_hash):
+    if len(os.listdir(lock)) <= MAX_LEASE_RECORDS: return lock
+    temporary = ".mutable-home.compact-%s-%s-%s" % (current["leaseId"], current_hash, uuid.uuid4().hex)
+    fresh = None
+    exchange_attempted = False
+    try:
+        os.mkdir(temporary, 0o700, dir_fd=root)
+        fresh = child_dir(root, temporary)
+        genesis = dict(current)
+        genesis.update({"previousLeaseId": None, "previousRecordHash": None})
+        publish_lease(root, fresh, "lease-%s.json" % genesis["leaseId"], genesis)
+        compacted, _ = read_lease_chain(fresh)
+        if compacted["leaseId"] != current["leaseId"] or compacted.get("state") != "active":
+            fail("provider home lease compaction failed")
+        os.fsync(fresh); os.fsync(root)
+        exchange_attempted = True
+        if not exchange_directories(root, temporary, "mutable-home.lock"):
+            fail("provider home lease compaction is unavailable")
+    except:
+        if fresh is not None:
+            try:
+                for name in os.listdir(fresh): os.unlink(name, dir_fd=fresh)
+            except: pass
+            os.close(fresh)
+        try: os.rmdir(temporary, dir_fd=root)
+        except: pass
+        # Compaction is an availability optimization. If this kernel lacks atomic directory
+        # exchange, preserve the valid old chain and keep appending. This intentionally favors
+        # lease integrity and reconciliation availability over the configured journal bound.
+        diagnose("Provider-home lease journal compaction %s; the valid journal remains append-only beyond %d records. Check WSL filesystem support for renameat2(RENAME_EXCHANGE)." %
+            ("is unavailable" if exchange_attempted else "failed before exchange", MAX_LEASE_RECORDS))
+        return lock
+    try: os.fsync(root)
+    except: pass
+    os.close(lock)
+    cleanup_compactions(root, fresh)
+    return fresh
+
+def release_lease(lease):
+    root, lock, lease_id = lease
+    try:
+        current, current_hash = read_lease_chain(lock)
+        if current.get("version") != 2 or current.get("state") != "active" or current["leaseId"] != lease_id:
+            fail("provider home lease changed before release")
+        lock = compact_lease(root, lock, current, current_hash)
+        current, current_hash = read_lease_chain(lock)
+        released = dict(current)
+        released.update({"state": "released", "leaseId": str(uuid.uuid4()), "previousLeaseId": current["leaseId"],
+            "previousRecordHash": current_hash, "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+        try: publish_lease(root, lock, "next-%s.json" % current["leaseId"], released)
+        except FileExistsError: fail("provider home lease changed before release")
+    finally:
+        os.close(lock); os.close(root)
+
+def load_owned(state_fd):
+    try: fd = os.open("links.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=state_fd)
+    except FileNotFoundError: return set()
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 524288: return set()
+        value = json.loads(os.read(fd, info.st_size + 1).decode("utf-8"))
+        links = value.get("links") if value.get("version") == 1 else None
+        if not isinstance(links, list) or len(links) > 4096 or not all(isinstance(x, str) for x in links): return set()
+        return set(links)
+    except: return set()
+    finally: os.close(fd)
+
+def save_owned(state_fd, owned):
+    value = json.dumps({"version": 1, "links": sorted(owned)}, separators=(",", ":")).encode()
+    temp = ".links-%s.tmp" % uuid.uuid4().hex
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=state_fd)
+    try: write_all(fd, value); os.fsync(fd)
+    finally: os.close(fd)
+    os.rename(temp, "links.json", src_dir_fd=state_fd, dst_dir_fd=state_fd)
+    os.fsync(state_fd)
+
+def owned_shape(relative):
+    if not isinstance(relative, str): return None
+    parts = relative.split("/")
+    if len(parts) != 3 or not NAME.match(parts[2]): return None
+    if parts[:2] == [".agents", "skills"]: return (".agents/skills", parts[2])
+    if parts[0] in (".claude", ".codex") and parts[1] == "skills": return (parts[0] + "/skills", parts[2])
+    return None
+
+def prune_owned(home_fd, owned):
+    # A manifest path is removal authority. Drop malformed paths and paths which no longer hold
+    # a symlink before a later pass can mistake user-created content for runner-owned state.
+    for relative in list(owned):
+        shape = owned_shape(relative)
+        if shape is None:
+            owned.discard(relative); continue
+        try:
+            parent = walk_dir(home_fd, shape[0])
+            try:
+                info = os.stat(shape[1], dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISLNK(info.st_mode): owned.discard(relative)
+            finally: os.close(parent)
+        except: pass
+
+def validated_bindings(value):
+    if not isinstance(value, list) or len(value) > 256: fail("invalid WSL skill bindings")
+    result = {}
+    for item in value:
+        if not isinstance(item, dict): fail("invalid WSL skill binding")
+        agent_id, driver, relative = item.get("agentId"), item.get("driver"), item.get("relDir")
+        if not isinstance(agent_id, str) or not agent_id or len(agent_id) > 256 or any(ord(c) < 32 for c in agent_id):
+            fail("invalid WSL skill agent")
+        if driver not in DRIVER_DIRS or relative != DRIVER_DIRS[driver] or agent_id in result:
+            fail("invalid WSL skill binding")
+        result[agent_id] = {"agentId": agent_id, "driver": driver, "relDir": relative}
+    return result
+
+def link_probe(parent_fd, name, store_root, canonical=None, owned=False):
+    try: info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError: return ("missing", None)
+    if not stat.S_ISLNK(info.st_mode): return ("occupied", None)
+    try: target = os.readlink(name, dir_fd=parent_fd)
+    except: return ("occupied", None)
+    resolved = os.path.normpath(os.path.join(fd_path(parent_fd), target))
+    if resolved == store_root or resolved.startswith(store_root + "/"): return ("store", resolved)
+    if canonical is not None and resolved == canonical: return (("canonical" if owned else "canonical-unowned"), resolved)
+    return ("foreign", resolved)
+
+def ensure_link(home_fd, relative, target, store_root, canonical, owned):
+    parent_rel, name = relative.rsplit("/", 1)
+    parent = None
+    try:
+        parent = walk_dir(home_fd, parent_rel, True)
+        kind, resolved = link_probe(parent, name, store_root, canonical, relative in owned)
+        if kind == "occupied": return (False, "conflict", "an unmanaged file or directory already exists at ~/" + relative)
+        if kind == "foreign": return (False, "conflict", "an unmanaged symlink already exists at ~/" + relative)
+        if kind == "canonical-unowned" and resolved != target:
+            return (False, "conflict", "an unmanaged symlink already exists at ~/" + relative)
+        if kind in ("store", "canonical", "canonical-unowned") and resolved == target:
+            owned.add(relative); return (True, None, None)
+        temp = ".%s.tmp-%s" % (name, uuid.uuid4().hex)
+        try:
+            os.symlink(target, temp, dir_fd=parent)
+            os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
+        finally:
+            try: os.unlink(temp, dir_fd=parent)
+            except FileNotFoundError: pass
+        kind, resolved = link_probe(parent, name, store_root, canonical, True)
+        if resolved != target or kind not in ("store", "canonical"): fail("link verification failed")
+        owned.add(relative); return (True, None, None)
+    except Exception as error:
+        return (False, "error", "could not create the skill link at ~/%s: %s" % (relative, str(error)))
+    finally:
+        if parent is not None: os.close(parent)
+
+def unlink_owned(home_fd, relative, store_root, canonical, owned, direct_store=False):
+    parent_rel, name = relative.rsplit("/", 1)
+    try: parent = walk_dir(home_fd, parent_rel)
+    except: return False
+    try:
+        kind, _ = link_probe(parent, name, store_root, canonical, relative in owned)
+        if kind == "store" and (direct_store or relative in owned) or kind == "canonical" and relative in owned:
+            os.unlink(name, dir_fd=parent); owned.discard(relative); return True
+        return False
+    finally: os.close(parent)
+
+def version_path(store_fd, store_root, name, digest):
+    first = child_dir(store_fd, name, strict=False)
+    try:
+        second = child_dir(first, digest, strict=False)
+        try:
+            path = fd_path(second)
+            if path != store_root + "/" + name + "/" + digest: fail("store version escaped its root")
+            return path
+        finally: os.close(second)
+    finally: os.close(first)
+
+def frontmatter(content, fallback):
+    try: text = content.decode("utf-8")
+    except: return {"name": fallback}
+    lines = text[:MAX_MD].splitlines()
+    if not lines or lines[0].strip() != "---": return {"name": fallback}
+    result = {"name": fallback}
+    for line in lines[1:129]:
+        if line.strip() in ("---", "..."): return result
+        match = re.match(r"^(name|description)\s*:\s*(.*)$", line)
+        if match:
+            value = re.sub(r"\s+", " ", match.group(2)).strip().strip("\"'")[:280]
+            if match.group(1) == "name":
+                if NAME.fullmatch(value): result["name"] = value
+            elif value: result["description"] = value
+    return {"name": fallback}
+
+def scan_dir(home_fd, relative, store_root, canonical_dir, owned):
+    try: directory = walk_dir(home_fd, relative)
+    except: return []
+    found = []
+    try:
+        for name in sorted(os.listdir(directory))[:MAX_ENTRIES]:
+            kind, _ = link_probe(directory, name, store_root, canonical_dir + "/" + name, relative + "/" + name in owned)
+            if kind in ("store", "canonical"): continue
+            if kind in ("foreign", "canonical-unowned"):
+                if NAME.match(name): found.append({"name": name})
+                continue
+            if kind != "occupied" or not NAME.match(name): continue
+            try:
+                skill = child_dir(directory, name)
+                try:
+                    md = os.open("SKILL.md", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=skill)
+                    try:
+                        info = os.fstat(md)
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1: continue
+                        meta = frontmatter(os.read(md, MAX_MD), name)
+                    finally: os.close(md)
+                finally: os.close(skill)
+                found.append(meta)
+            except: pass
+    finally: os.close(directory)
+    return found
+
+def reconcile(spec):
+    owner = spec.get("ownerHash", "")
+    if not DIGEST.match(owner): fail("invalid owner")
+    home_fd, home = open_root(os.environ.get("HOME", ""))
+    store_fd, store_root = open_root(spec.get("storeRoot", ""))
+    if store_root != spec.get("storeRoot"): fail("store root is not canonical")
+    state = walk_dir(home_fd, ".agent-manager/runner-instances/%s/skills" % owner, True)
+    lease = None
+    try:
+        owned = load_owned(state)
+        skills = spec.get("skills", [])
+        if not isinstance(skills, list) or len(skills) > 4096: fail("invalid WSL skill manifest")
+        needs_lease = bool(skills or owned)
+        if needs_lease: lease = acquire_lease(home_fd, owner)
+        prune_owned(home_fd, owned)
+        bindings = validated_bindings(spec.get("bindings", []))
+        canonical_dir = home + "/.agents/skills"
+        deployed, removals = [], []
+        canonical_keep = set()
+        harness_keep = {relative: set() for relative in set(DRIVER_DIRS.values())}
+        for skill in skills:
+            name, digest = skill.get("name"), skill.get("versionDigest")
+            row = {"name": str(name), "digest": str(digest), "links": []}
+            if not isinstance(name, str) or not NAME.match(name) or not isinstance(digest, str) or not DIGEST.match(digest):
+                if isinstance(name, str) and NAME.match(name):
+                    canonical_keep.add(name)
+                    for keep in harness_keep.values(): keep.add(name)
+                row["error"] = "invalid WSL skill manifest"; deployed.append(row); continue
+            targets = skill.get("targets")
+            if not isinstance(targets, list):
+                canonical_keep.add(name)
+                for keep in harness_keep.values(): keep.add(name)
+                row["error"] = "invalid WSL skill targets"; deployed.append(row); continue
+            plans, manual_unsupported = {}, []
+            for target in targets:
+                agent_id, invocation = target.get("agentId"), target.get("invocation")
+                binding = bindings.get(agent_id)
+                if not binding:
+                    row["links"].append({"agentId": str(agent_id), "status": "unsupported", "detail": "this WSL agent is not present on the runner"}); continue
+                if invocation == "manual" and binding["driver"] != "claude-code":
+                    manual_unsupported.append((agent_id, binding["relDir"])); continue
+                if invocation not in ("agent", "manual"):
+                    row["links"].append({"agentId": str(agent_id), "status": "error", "detail": "invalid invocation policy"}); continue
+                plan = plans.setdefault(binding["relDir"], {"agent": [], "manual": []})
+                plan[invocation].append(agent_id); harness_keep[binding["relDir"]].add(name)
+            if not plans:
+                for agent_id, _ in manual_unsupported:
+                    row["links"].append({"agentId": agent_id, "status": "unsupported", "detail": "Manual-only invocation is not supported for this agent."})
+                deployed.append(row); continue
+            try:
+                base = version_path(store_fd, store_root, name, digest)
+                manual = version_path(store_fd, store_root, name, digest + "-manual") if any(p["manual"] for p in plans.values()) else None
+            except Exception as error:
+                canonical_keep.add(name)
+                for keep in harness_keep.values(): keep.add(name)
+                row["error"] = "WSL skill store unavailable: " + str(error)
+                for target in targets: row["links"].append({"agentId": str(target.get("agentId")), "status": "error", "detail": "the skill version is unavailable inside this WSL distro"})
+                deployed.append(row); continue
+            canonical_keep.add(name)
+            canonical_rel = ".agents/skills/" + name
+            canonical_ok, canonical_status, canonical_detail = ensure_link(home_fd, canonical_rel, base, store_root, None, owned)
+            if not canonical_ok: row["error"] = "canonical link: " + canonical_detail
+            targeted = set(t.get("agentId") for t in targets)
+            linked_dirs = set()
+            for rel_dir, plan in plans.items():
+                mixed = bool(plan["agent"] and plan["manual"])
+                use_manual = bool(plan["manual"] and not plan["agent"])
+                relative = rel_dir + "/" + name
+                if use_manual:
+                    outcome = ensure_link(home_fd, relative, manual, store_root, canonical_dir + "/" + name, owned)
+                elif not canonical_ok:
+                    removed = unlink_owned(home_fd, relative, store_root, canonical_dir + "/" + name, owned)
+                    if removed:
+                        harness_keep[rel_dir].discard(name)
+                        removals.append({"path": "~/%s (WSL %s)" % (relative, spec["distro"]),
+                            "reason": "The canonical location it routes through is conflicted."})
+                        outcome = (False, "error", "the canonical location is conflicted, so this harness link was removed")
+                    else:
+                        outcome = (False, canonical_status, "canonical link: " + canonical_detail)
+                else:
+                    outcome = ensure_link(home_fd, relative, canonical_dir + "/" + name, store_root, canonical_dir + "/" + name, owned)
+                linked_ids = plan["manual"] if use_manual else plan["agent"] + ([] if mixed else plan["manual"])
+                for agent_id in linked_ids:
+                    row["links"].append({"agentId": agent_id, "status": "linked"} if outcome[0] else
+                        {"agentId": agent_id, "status": outcome[1], "detail": outcome[2]})
+                if outcome[0]:
+                    linked_dirs.add(rel_dir)
+                    for other in bindings.values():
+                        if other["relDir"] == rel_dir and other["agentId"] not in targeted:
+                            row["links"].append({"agentId": other["agentId"], "status": "linked", "detail": "Shared harness directory; also visible to this agent."})
+                if mixed:
+                    for agent_id in plan["manual"]:
+                        row["links"].append({"agentId": agent_id, "status": "conflict", "detail": "another agent shares this WSL harness directory and requires model invocation for this skill"})
+            for agent_id, rel_dir in manual_unsupported:
+                row["links"].append({"agentId": agent_id, "status": "conflict", "detail": "Manual-only invocation is not supported for this agent and the skill is still visible through the shared harness directory."} if rel_dir in linked_dirs else
+                    {"agentId": agent_id, "status": "unsupported", "detail": "Manual-only invocation is not supported for this agent."})
+            deployed.append(row)
+        if spec.get("allowRemovals") is True:
+            for relative in list(owned):
+                parts = relative.split("/")
+                remove, canonical, direct = False, None, False
+                if len(parts) == 3 and parts[:2] == [".agents", "skills"] and NAME.match(parts[2]):
+                    remove, direct = parts[2] not in canonical_keep, True
+                elif len(parts) == 3 and parts[0] in (".claude", ".codex") and parts[1] == "skills" and NAME.match(parts[2]):
+                    rel_dir = parts[0] + "/skills"
+                    remove = rel_dir in harness_keep and parts[2] not in harness_keep[rel_dir]
+                    canonical = canonical_dir + "/" + parts[2]
+                if remove and unlink_owned(home_fd, relative, store_root, canonical, owned, direct):
+                    removals.append({"path": "~/%s (WSL %s)" % (relative, spec["distro"]), "reason": "No longer in the desired skill list."})
+        if needs_lease: save_owned(state, owned)
+        unmanaged = []
+        cache = {}
+        for binding in bindings.values():
+            rel_dir = binding["relDir"]
+            if rel_dir not in cache: cache[rel_dir] = scan_dir(home_fd, rel_dir, store_root, canonical_dir, owned)
+            found = cache[rel_dir]
+            for item in found:
+                row = {"agentId": binding["agentId"], "name": item["name"]}
+                if item.get("description"): row["description"] = item["description"]
+                unmanaged.append(row)
+        return {"deployed": deployed, "unmanaged": unmanaged, "removedLinks": removals, "warnings": diagnostics}
+    finally:
+        if lease is not None: release_lease(lease)
+        os.close(state); os.close(store_fd); os.close(home_fd)
+
+try:
+    print(json.dumps(reconcile(bounded_json()), separators=(",", ":")))
+except Exception as error:
+    print(json.dumps({"error": str(error)}, separators=(",", ":")))
+    sys.exit(1)
+`;

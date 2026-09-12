@@ -5,11 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   READ_FILE_CAP,
+  createWorkspaceReference,
+  inspectWorkspaceReferenceDiff,
   listSessionFiles,
   normalizeRelPath,
+  parseWslWorkspaceReferenceSearch,
   readSessionFile,
+  resolveWorkspaceReference,
+  searchWorkspaceReferences,
+  workspaceReferenceDiffContent,
   wslListArgs,
   wslReadArgs,
+  wslSearchArgs,
 } from "./session-files.js";
 
 const NATIVE = { kind: "native" } as const;
@@ -132,6 +139,154 @@ test("nativeRead: content, size, binary detection, cap, and guards", async () =>
   }
 });
 
+test("workspace reference search is bounded to the session root and skips symlinks", async (t) => {
+  const root = makeFixture();
+  const outside = mkdtempSync(join(tmpdir(), "wollipog-files-outside-"));
+  try {
+    writeFileSync(join(outside, "secret-match.txt"), "secret");
+    try {
+      symlinkSync(outside, join(root, "outside-link"), "dir");
+    } catch {
+      t.skip("symlinks unavailable (Windows without developer mode)");
+      return;
+    }
+    const found = await searchWorkspaceReferences(NATIVE, root, "inner");
+    assert.deepEqual(found.results, [{ path: "sub/inner.md", isDirectory: false }]);
+    const escaped = await searchWorkspaceReferences(NATIVE, root, "secret-match");
+    assert.deepEqual(escaped.results, []);
+    await assert.rejects(() => readSessionFile(NATIVE, root, "outside-link/secret-match.txt"), /cannot read file/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("native workspace search distinguishes exactly 50 flat-root matches from a 51st match", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-search-boundary-"));
+  try {
+    for (let index = 0; index < 50; index += 1) {
+      writeFileSync(join(root, `match-${String(index).padStart(2, "0")}.txt`), "");
+    }
+    const exact = await searchWorkspaceReferences(NATIVE, root, "match-");
+    assert.equal(exact.results.length, 50);
+    assert.equal(exact.truncated, false);
+
+    writeFileSync(join(root, "match-50.txt"), "");
+    const overflow = await searchWorkspaceReferences(NATIVE, root, "match-");
+    assert.equal(overflow.results.length, 50);
+    assert.equal(overflow.truncated, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace references bind root, target content, ranges, and diff identity", async () => {
+  const root = makeFixture();
+  try {
+    const first = await createWorkspaceReference(NATIVE, root, {
+      path: "sub/inner.md", kind: "lines", startLine: 1, endLine: 1,
+    });
+    assert.equal(first.path, "sub/inner.md");
+    assert.equal(first.kind, "lines");
+    writeFileSync(join(root, "sub", "inner.md"), "# changed\n");
+    const changed = await createWorkspaceReference(NATIVE, root, {
+      path: "sub/inner.md", kind: "lines", startLine: 1, endLine: 1,
+    });
+    assert.notEqual(changed.targetFingerprint, first.targetFingerprint);
+    const diff = await createWorkspaceReference(NATIVE, root, {
+      path: "deleted.ts", kind: "diff", startLine: 7, endLine: 9,
+      side: "left", diffScope: "uncommitted", diffHash: "c".repeat(64),
+    });
+    assert.equal(diff.side, "left");
+    assert.equal(diff.diffHash, "c".repeat(64));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("directory reference resolution traverses once for native and WSL contexts", async () => {
+  for (const context of [NATIVE, { kind: "wsl", distro: "Ubuntu" } as const]) {
+    let rootFingerprintCalls = 0;
+    let directoryTreeCalls = 0;
+    const resolved = await resolveWorkspaceReference(context, "/session/root", {
+      path: "docs",
+      kind: "directory",
+    }, {
+      rootFingerprint: async (receivedContext, receivedRoot) => {
+        rootFingerprintCalls += 1;
+        assert.deepEqual(receivedContext, context);
+        assert.equal(receivedRoot, "/session/root");
+        return "root-fingerprint";
+      },
+      directoryTree: async (receivedContext, receivedRoot, receivedPath) => {
+        directoryTreeCalls += 1;
+        assert.deepEqual(receivedContext, context);
+        assert.equal(receivedRoot, "/session/root");
+        assert.equal(receivedPath, "docs");
+        return { content: "docs/guide.md (5 bytes)", truncated: false };
+      },
+    });
+    assert.equal(rootFingerprintCalls, 1);
+    assert.equal(directoryTreeCalls, 1);
+    assert.equal(resolved.directoryTree?.content, "docs/guide.md (5 bytes)");
+    assert.equal(resolved.reference.rootFingerprint, "root-fingerprint");
+  }
+});
+
+test("invalid structured diff scopes are rejected before Git inspection", async () => {
+  let gitInspections = 0;
+  await assert.rejects(
+    () => inspectWorkspaceReferenceDiff({
+      path: "source.ts",
+      kind: "diff",
+      startLine: 1,
+      endLine: 1,
+      side: "right",
+      diffHash: "d".repeat(64),
+      diffScope: "unsupported" as "uncommitted",
+    }, async () => {
+      gitInspections += 1;
+      throw new Error("Git must not run");
+    }),
+    /diff reference identity is invalid/,
+  );
+  assert.equal(gitInspections, 0);
+});
+
+test("diff references resolve the exact selected side and reject gaps", async () => {
+  const root = makeFixture();
+  try {
+    const diffHash = "d".repeat(64);
+    const right = await createWorkspaceReference(NATIVE, root, {
+      path: "sub/inner.md", kind: "diff", startLine: 10, endLine: 12,
+      side: "right", diffScope: "uncommitted", diffHash,
+    });
+    const diff = {
+      scope: "uncommitted" as const,
+      diffHash,
+      stats: { filesChanged: 1, insertions: 1, deletions: 1 },
+      files: [{
+        path: "sub/inner.md",
+        status: "modified" as const,
+        binary: false,
+        hunks: [{
+          header: "@@ -10,3 +10,3 @@", oldStart: 10, oldCount: 3, newStart: 10, newCount: 3,
+          lines: [
+            { status: " " as const, text: "same" },
+            { status: "-" as const, text: "old" },
+            { status: "+" as const, text: "new" },
+            { status: " " as const, text: "tail" },
+          ],
+        }],
+      }],
+    };
+    assert.equal(workspaceReferenceDiffContent(diff, right), "10  same\n11 +new\n12  tail");
+    assert.throws(() => workspaceReferenceDiffContent(diff, { ...right, startLine: 9 }), /every selected diff line/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /* ------------------------------- WSL argv shapes ------------------------------ */
 
 test("wslListArgs/wslReadArgs: paths ride as positional args, never inside the script", () => {
@@ -150,4 +305,32 @@ test("wslListArgs/wslReadArgs: paths ride as positional args, never inside the s
   const read = wslReadArgs("Ubuntu", "/r", "f.txt", 2048);
   assert.equal(read[9], "2048"); // cap as $3
   assert.ok(read[5]!.includes('"$3"'));
+  const list = wslListArgs("Ubuntu", "/r", "sub");
+  assert.match(list[5]!, /\[ -L "\$e" \].*readlink -f.*case "\$x"/, "symlinks are resolved and contained rather than hidden");
+});
+
+test("wslSearchArgs: preserves find grouping and emits type metadata in one bounded process", () => {
+  const args = wslSearchArgs("Ubuntu", "/home/u/repo", 20_000);
+  assert.deepEqual(args.slice(0, 5), ["-d", "Ubuntu", "--exec", "sh", "-c"]);
+  assert.match(args[5]!, /\\\( -type f -o -type d \\\)/, "the shell receives escaped find grouping");
+  assert.match(args[5]!, /-printf "%y\\t%P\\n"/, "one traversal returns both type and path");
+  assert.equal(args[7], "/home/u/repo");
+  assert.equal(args[8], "20001", "one sentinel row distinguishes a capped traversal");
+});
+
+test("WSL search parsing bounds matches and reports both result and traversal truncation", () => {
+  const exactMatches = Array.from({ length: 50 }, (_, index) => `f\tsrc/item-${index}\n`).join("");
+  const exact = parseWslWorkspaceReferenceSearch(exactMatches, "src");
+  assert.equal(exact.results.length, 50);
+  assert.equal(exact.truncated, false);
+
+  const matches = Array.from({ length: 51 }, (_, index) => `${index % 2 ? "d" : "f"}\tsrc/item-${index}\n`).join("");
+  const resultBound = parseWslWorkspaceReferenceSearch(matches, "src");
+  assert.equal(resultBound.results.length, 50);
+  assert.equal(resultBound.results[1]?.isDirectory, true);
+  assert.equal(resultBound.truncated, true);
+
+  const visitBound = parseWslWorkspaceReferenceSearch("f\tone\nf\ttwo\nf\tthree\n", "o", 2);
+  assert.deepEqual(visitBound.results.map((candidate) => candidate.path), ["one", "two"]);
+  assert.equal(visitBound.truncated, true);
 });

@@ -9,8 +9,72 @@ import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
-import type { McpFetch } from "./conductor-mcp.js";
+import type { McpFetch } from "./session-management-mcp.js";
 import { runWollipogCli } from "./wollipog-cli.js";
+
+test("CLI alias never reparses a later internal marker as its entry mode", async () => {
+  for (const argv of [
+    ["wollipog", "session", "prompt", "s_child", "--wollipog-cli"],
+    ["node", "cli.js", "session", "prompt", "s_child", "--wollipog-cli"],
+  ]) {
+    let stderr = "";
+    const code = await runWollipogCli(
+      argv,
+      {},
+      { stdout: () => assert.fail("unexpected CLI output"), stderr: (text) => { stderr += text; } },
+      async () => assert.fail("malformed prompt must not issue a request"),
+    );
+    assert.equal(code, 2);
+    assert.match(stderr, /session prompt requires an id and text/u);
+  }
+});
+
+test("CLI consumes an internal marker only at the SEA application boundary", async () => {
+  let stdout = "";
+  assert.equal(await runWollipogCli(
+    ["wollipog-runner.exe", "--wollipog-cli", "--version"],
+    {},
+    { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("unexpected CLI error") },
+  ), 0);
+  assert.match(stdout, /protocol v\d+/u);
+});
+
+test("CLI archive posts archived true and rejects self without issuing a mutation", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    const body = url.endsWith("/api/compatibility") ? { protocolVersion: PROTOCOL_VERSION }
+      : { id: "child", archived: true };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "parent" };
+  const io = { stdout: () => {}, stderr: () => {} };
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "session", "archive", "child", "--json"], env, io, fetch), 0);
+  assert.equal(calls[1]!.url, "http://cp/api/sessions/child/archive");
+  assert.deepEqual(JSON.parse(calls[1]!.body!), { archived: true });
+  calls.length = 0;
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "session", "archive", "parent", "--json"], env, io, fetch), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+});
+
+test("CLI archive JSON distinguishes pending, failed, completed and unknown progress", async () => {
+  for (const archiveStatus of ["stop_pending", "stop_failed", null, undefined]) {
+    let stdout = "";
+    const fetch: McpFetch = async (url) => {
+      const compatibility = url.endsWith("/api/compatibility");
+      return { ok: true, status: compatibility || !archiveStatus ? 200 : 202,
+        text: async () => JSON.stringify(compatibility ? { protocolVersion: PROTOCOL_VERSION }
+          : { id: "child", archived: archiveStatus === null, archiveStatus }) };
+    };
+    const code = await runWollipogCli(["node", "cli.js", "--wollipog-cli", "session", "archive", "child", "--json"],
+      { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "parent" },
+      { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("unexpected CLI error") }, fetch);
+    assert.equal(code, 0);
+    const session = JSON.parse(stdout).session;
+    assert.equal(session.archiveStatus, archiveStatus);
+    assert.equal(session.archived, archiveStatus === null);
+  }
+});
 
 test("CLI emits stable JSON and authenticates list requests as the exact session", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-cli-"));
@@ -22,7 +86,7 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
     const calls: Array<{ url: string; init: Parameters<McpFetch>[1] }> = [];
     const fetch: McpFetch = async (url, init) => {
       calls.push({ url, init });
-      const body = url.endsWith("/healthz")
+      const body = url.endsWith("/api/compatibility")
         ? { protocolVersion: PROTOCOL_VERSION }
         : { sessions: [{ id: "s_child", status: "running", runnerId: "r1", title: "Child" }] };
       return { ok: true, status: 200, text: async () => JSON.stringify(body) };
@@ -45,11 +109,16 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
     assert.deepEqual(JSON.parse(stdout), {
       sessions: [{
         id: "s_child", title: "Child", status: "running", runnerId: "r1", workspaceId: null,
-        agentId: null, runId: null, costBudgetUsd: null, maxToolCalls: null, pendingApproval: null,
+        agentId: null, runId: null, costBudgetUsd: null, costCheckpointsUsd: null, costCheckpointApprovedUsd: null, maxToolCalls: null, pendingApproval: null,
         archived: false,
+        parentSessionId: null,
+        maxChildSessions: null,
       }],
     });
     assert.equal(calls[1]!.url, "http://127.0.0.1:4317/api/sessions");
+    assert.equal(calls[0]!.url, "http://127.0.0.1:4317/api/compatibility");
+    assert.equal(calls[0]!.init?.headers?.authorization, "Bearer session-secret");
+    assert.equal(calls[0]!.init?.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], "s_parent");
     assert.equal(calls[1]!.init?.headers?.authorization, "Bearer session-secret");
     assert.equal(calls[1]!.init?.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], "s_parent");
   } finally {
@@ -61,7 +130,7 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
   const requests: Array<{ url: string; method?: string; body?: string; headers?: Record<string, string> }> = [];
   const fetch: McpFetch = async (url, init) => {
     requests.push({ url, method: init?.method, body: init?.body, headers: init?.headers });
-    if (url.endsWith("/healthz")) {
+    if (url.endsWith("/api/compatibility")) {
       return { ok: true, status: 200, text: async () => JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) };
     }
     return { ok: true, status: 200, text: async () => JSON.stringify({ id: "s_new", status: "starting", runnerId: "r1", title: "New" }) };
@@ -97,10 +166,39 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
   assert.match(JSON.parse(incompatible).error, /incompatible/);
 });
 
+test("CLI exposes restart and all live guardrail controls", async () => {
+  const requests: Array<{ url: string; body?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    requests.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(
+      url.endsWith("/api/compatibility") ? { protocolVersion: PROTOCOL_VERSION }
+        : { id: "child", status: "starting", maxChildSessions: 9 },
+    ) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "token", WOLLIPOG_SESSION_ID: "parent" };
+  const io = { stdout: () => {}, stderr: () => assert.fail("unexpected CLI error") };
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "session", "restart", "child", "--json"], env, io, fetch,
+  ), 0);
+  assert.equal(requests[1]!.url, "http://cp/api/sessions/child/restart");
+  requests.length = 0;
+  assert.equal(await runWollipogCli([
+    "node", "cli.js", "--wollipog-cli", "session", "guardrails", "child",
+    "--cost-budget", "0", "--max-tool-calls", "0", "--max-child-sessions", "9", "--json",
+  ], env, io, fetch), 0);
+  assert.equal(requests[1]!.url, "http://cp/api/sessions/child/config");
+  assert.deepEqual(JSON.parse(requests[1]!.body!), {
+    costBudgetUsd: 0, maxToolCalls: 0, maxChildSessions: 9,
+  });
+});
+
 test("CLI keeps v100 core commands compatible while gating worktree commands on v101", async () => {
   const requests: string[] = [];
   const fetch: McpFetch = async (url) => {
     requests.push(url);
+    if (url.endsWith("/api/compatibility")) {
+      return { ok: false, status: 404, text: async () => "not found" };
+    }
     return {
       ok: true,
       status: 200,
@@ -127,7 +225,13 @@ test("CLI keeps v100 core commands compatible while gating worktree commands on 
     fetch,
   ), 1);
   assert.match(JSON.parse(output).error, /requires v101/);
-  assert.deepEqual(requests, ["http://cp/healthz", "http://cp/api/sessions", "http://cp/healthz"]);
+  assert.deepEqual(requests, [
+    "http://cp/api/compatibility",
+    "http://cp/healthz",
+    "http://cp/api/sessions",
+    "http://cp/api/compatibility",
+    "http://cp/healthz",
+  ]);
 });
 
 test("CLI gates destructive worktree discard on v102 without disabling v101 selection", async () => {
@@ -137,7 +241,7 @@ test("CLI gates destructive worktree discard on v102 without disabling v101 sele
     return {
       ok: true,
       status: 200,
-      text: async () => JSON.stringify(url.endsWith("/healthz")
+      text: async () => JSON.stringify(url.endsWith("/api/compatibility")
         ? { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees }
         : { session: { id: "s1" } }),
     };
@@ -158,9 +262,9 @@ test("CLI gates destructive worktree discard on v102 without disabling v101 sele
   ), 1);
   assert.match(JSON.parse(output).error, /requires v102/);
   assert.deepEqual(requests, [
-    "http://cp/healthz",
+    "http://cp/api/compatibility",
     "http://cp/api/sessions/s1/worktrees/select",
-    "http://cp/healthz",
+    "http://cp/api/compatibility",
   ]);
 });
 
@@ -178,7 +282,7 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
     const requests: Array<{ url: string; method?: string }> = [];
     const fetch: McpFetch = async (url, init) => {
       requests.push({ url, method: init?.method });
-      if (url.endsWith("/healthz")) {
+      if (url.endsWith("/api/compatibility")) {
         return { ok: true, status: 200, text: async () => JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) };
       }
       const session = { id: "s_child", status: "completed", runnerId: "r1", title: "Child" };
@@ -207,7 +311,7 @@ test("CLI recognizes installed POSIX and Windows alias invocation names", async 
     const requests: string[] = [];
     const fetch: McpFetch = async (url) => {
       requests.push(url);
-      const body = url.endsWith("/healthz")
+      const body = url.endsWith("/api/compatibility")
         ? { protocolVersion: PROTOCOL_VERSION }
         : { sessions: [] };
       return { ok: true, status: 200, text: async () => JSON.stringify(body) };
@@ -220,7 +324,7 @@ test("CLI recognizes installed POSIX and Windows alias invocation names", async 
       fetch,
     ), 0, executable);
     assert.deepEqual(JSON.parse(output), { sessions: [] });
-    assert.deepEqual(requests, ["http://cp/healthz", "http://cp/api/sessions"]);
+    assert.deepEqual(requests, ["http://cp/api/compatibility", "http://cp/api/sessions"]);
   }
 });
 
@@ -231,7 +335,7 @@ test("CLI worktree commands adapt to the shared MCP operations", async () => {
     return {
       ok: true,
       status: 200,
-      text: async () => JSON.stringify(url.endsWith("/healthz")
+      text: async () => JSON.stringify(url.endsWith("/api/compatibility")
         ? { protocolVersion: PROTOCOL_VERSION }
         : { worktree: { id: "wt", path: "/repo/wt", branch: "fix/583", source: "created" }, session: { id: "s1" } }),
     };
@@ -246,7 +350,11 @@ test("CLI worktree commands adapt to the shared MCP operations", async () => {
   ), 0);
   assert.equal(JSON.parse(output).worktree.branch, "fix/583");
   assert.equal(requests[1]!.url, "http://cp/api/sessions/s1/worktrees");
-  assert.deepEqual(JSON.parse(requests[1]!.body!), { branch: "fix/583", baseRef: "origin/main" });
+  assert.deepEqual(JSON.parse(requests[1]!.body!), {
+    branch: "fix/583",
+    baseRef: "origin/main",
+    progress: true,
+  });
 
   output = "";
   assert.equal(await runWollipogCli(

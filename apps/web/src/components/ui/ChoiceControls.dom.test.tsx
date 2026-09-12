@@ -284,3 +284,48 @@ test("two groups with the same label do not share a description id", () => {
   assert.equal(ids.length, 2);
   assert.notEqual(ids[0], ids[1], "an id derived from the label is the same id for both groups");
 });
+
+test("a card's status joins the title row and the accessible name", () => {
+  // §11.1 names "options that need descriptions or status" as this primitive's remit, and the
+  // Location pickers are the status half: a machine name alone does not say whether it is local or
+  // SSH, or whether it can host a session. The status has to reach a screen reader, because it is
+  // the whole basis for choosing between two otherwise identical names.
+  const html = render(
+    <ChoiceCards
+      label="Project Location"
+      value="loc-1"
+      onChange={() => undefined}
+      options={[
+        { value: "loc-1", title: "runner-1", status: <span>Local</span>, description: "/repos/app" },
+        {
+          value: "loc-2",
+          title: "runner-2",
+          status: <span>SSH</span>,
+          description: "/srv/app",
+          disabled: true,
+          disabledReason: "Runner Offline — this Location cannot host a session right now.",
+        },
+      ]}
+    />,
+  );
+  assert.match(html, /ui-choice-card-status/);
+  // Inside the title, not the description: a badge that wraps under a path reads as part of it.
+  assert.match(html, /ui-choice-card-title[^>]*>runner-1<span class="ui-choice-card-status"/);
+  // Both the status and the reason are rendered, so the name announces "runner-2, SSH, …, Offline".
+  assert.match(html, /SSH/);
+  assert.match(html, /Runner Offline — this Location cannot host a session/);
+});
+
+test("a card without a status renders no status element at all", () => {
+  // An empty wrapper would still take the title row's gap, so an option with no status would sit
+  // a few pixels wider than one with. Absence has to mean absence.
+  const html = render(
+    <ChoiceCards
+      label="Mode"
+      value="a"
+      onChange={() => undefined}
+      options={[{ value: "a", title: "Alpha" }]}
+    />,
+  );
+  assert.doesNotMatch(html, /ui-choice-card-status/);
+});

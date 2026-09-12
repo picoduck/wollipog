@@ -18,8 +18,10 @@ import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { SessionDetail } from "./SessionDetail.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+installDomTestCleanup(domWindow);
 Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
   configurable: true,
   value() {
@@ -859,6 +861,9 @@ test("scrolling near the partial window head loads one earlier page and requires
     await scrollReader(fixture.scroller, 500);
     assert.equal(pages.tailCalls.length, 1, "scrolling away from the head does not page");
 
+    // A reader gesture stays armed only through its own scroll stream; once that stream has gone
+    // quiet, a later saved-anchor restoration cannot inherit it.
+    await flushAsyncWork(250);
     await scrollReader(fixture.scroller, 120, false);
     assert.equal(pages.tailCalls.length, 1, "saved-anchor restoration cannot inherit earlier intent");
 
@@ -1320,6 +1325,311 @@ test("an automatic load failure keeps an understandable manual retry path", asyn
     setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 3_200, scrollTop: 1_600 });
     await scrollReader(fixture.scroller, 1_560);
     assert.equal(pages.tailCalls.length, 3, "a manual prepend uses the same settle gate");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+async function openBoundedWindow(pages: ReturnType<typeof pageController>, fixture: Fixture) {
+  const openingWindow = fixture.events.slice(-8);
+  await act(async () => {
+    pages.releaseTail({
+      events: openingWindow,
+      eventEpoch: 0,
+      nextBefore: openingWindow[0]!.seq,
+      hasMoreOlder: true,
+      cacheComplete: true,
+    });
+  });
+  await flushAsyncWork();
+  assert.equal(pages.tailCalls.length, 1, "opening reads only the bounded tail window");
+  return openingWindow;
+}
+
+/** One gesture, many scroll events: a smooth-scrolling browser answers a wheel tick or reading
+ * key with a stream whose early events are still above the trigger zone. */
+async function streamReaderScroll(scroller: HTMLElement, scrollTops: number[]) {
+  for (const scrollTop of scrollTops) {
+    await act(async () => {
+      scroller.scrollTop = scrollTop;
+      scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    });
+    await flushAsyncWork(16);
+  }
+}
+
+test("a reading key whose scroll stream starts above the trigger still loads when it lands at the head", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 700 });
+
+    await act(async () => {
+      fireDomEvent.keyDown(fixture.scroller, { key: "PageUp" });
+    });
+    await streamReaderScroll(fixture.scroller, [520, 360, 210, 90, 0]);
+
+    assert.equal(pages.tailCalls.length, 2, "the gesture that lands on the head requests the earlier page");
+    assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a wheel tick whose scroll stream starts above the trigger still loads when it lands inside it", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 300 });
+
+    await act(async () => {
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -120 });
+    });
+    await streamReaderScroll(fixture.scroller, [260, 200, 150, 120]);
+
+    assert.equal(pages.tailCalls.length, 2, "the tick that lands inside the trigger zone requests the earlier page");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a scroll stream that turns back downward releases the reader's intent", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 700 });
+
+    await act(async () => {
+      fireDomEvent.keyDown(fixture.scroller, { key: "PageUp" });
+    });
+    await streamReaderScroll(fixture.scroller, [520, 360, 500, 120]);
+
+    assert.equal(pages.tailCalls.length, 1, "forward movement is never a request for history");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a wheel tick that produces no scroll stream expires before a later layout scroll", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 1_200 });
+
+    await act(async () => {
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
+    });
+    await flushAsyncWork(250);
+    await scrollReader(fixture.scroller, 120, false);
+
+    assert.equal(pages.tailCalls.length, 1, "a quiet gesture cannot arm a later programmatic scroll");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a downward wheel tick never arms earlier pagination", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 300 });
+
+    await act(async () => {
+      fireDomEvent.wheel(fixture.scroller, { deltaY: 120 });
+    });
+    await streamReaderScroll(fixture.scroller, [120]);
+
+    assert.equal(pages.tailCalls.length, 1, "reading forward inside the trigger zone does not page");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("upward wheel input at the head loads the next page without a scroll event", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 0 });
+
+    await act(async () => {
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "a wheel tick at the head requests the earlier page directly");
+    assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq);
+
+    await act(async () => {
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "repeated ticks while the page is in flight cannot duplicate it");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("upward wheel input above the head leaves the request to its scroll stream", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 100 });
+
+    await act(async () => {
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1, "input that still has a scroll event coming does not page early");
+
+    await streamReaderScroll(fixture.scroller, [60]);
+    assert.equal(pages.tailCalls.length, 2, "its scroll stream requests the page once it arrives");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an upward reading key at the head loads the next page without a scroll event", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 0 });
+
+    await act(async () => {
+      fireDomEvent.keyDown(fixture.scroller, { key: "ArrowUp" });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "an upward reading key at the head requests the earlier page directly");
+
+    await act(async () => {
+      fireDomEvent.keyDown(fixture.scroller, { key: "ArrowDown" });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "a downward reading key never pages");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a downward finger drag at the head loads the next page without a scroll event", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 0 });
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchstart", 100) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchmove", 110) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchend") as never);
+    });
+    await flushAsyncWork(250);
+    assert.equal(pages.tailCalls.length, 1, "a short touch is a tap or a jitter, never a request for history");
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchstart", 100) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchmove", 118) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchmove", 140) as never);
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "a genuine downward drag at the head requests the earlier page");
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchmove", 170) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchend") as never);
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "the rest of the drag cannot duplicate the in-flight request");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a scrollbar press stays armed until the button is released", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 900 });
+
+    await act(async () => {
+      fireDomEvent.pointerDown(fixture.scroller, { pointerType: "mouse", button: 0 });
+    });
+    // The drag begins well after the idle window a wheel tick would get.
+    await flushAsyncWork(250);
+    await streamReaderScroll(fixture.scroller, [600, 300, 120]);
+    assert.equal(pages.tailCalls.length, 2, "a held scrollbar drag that reaches the trigger zone pages");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an upward Session Reading claim at the head loads the next page, a downward one never arms", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 0 });
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(
+        new domWindow.CustomEvent(VIRTUAL_VIEWPORT_INTENT_EVENT, { detail: { direction: "down" } }) as never,
+      );
+    });
+    await streamReaderScroll(fixture.scroller, [40]);
+    assert.equal(pages.tailCalls.length, 1, "a downward programmatic claim cannot arm pagination");
+
+    await act(async () => {
+      fixture.scroller.scrollTop = 0;
+      fixture.scroller.dispatchEvent(
+        new domWindow.CustomEvent(VIRTUAL_VIEWPORT_INTENT_EVENT, { detail: { direction: "up" } }) as never,
+      );
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "an upward claim at the head requests the earlier page directly");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a nested scroller that can still move upward consumes head input instead of paging", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await openBoundedWindow(pages, fixture);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 0 });
+    const output = domWindow.document.createElement("pre") as unknown as HTMLElement;
+    fixture.scroller.append(output as never);
+    setScrollerMetrics(output, { clientHeight: 200, scrollHeight: 600, scrollTop: 120 });
+
+    await act(async () => {
+      fireDomEvent.wheel(output, { deltaY: -40 });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1, "a tool output scrolling up inside the transcript is not a request for history");
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchstart", 100) as never);
+      output.dispatchEvent(touchInputEvent("touchmove", 118) as never);
+      output.dispatchEvent(touchInputEvent("touchmove", 140) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchend") as never);
+    });
+    await flushAsyncWork(250);
+    assert.equal(pages.tailCalls.length, 1, "a finger drag inside that output is consumed by it as well");
+
+    output.scrollTop = 0;
+    await act(async () => {
+      fireDomEvent.wheel(output, { deltaY: -40 });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "once the output cannot move, the same gesture reaches the transcript head");
   } finally {
     await unmountFixture(fixture);
   }

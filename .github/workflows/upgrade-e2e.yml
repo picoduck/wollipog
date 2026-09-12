@@ -1,0 +1,81 @@
+name: Upgrade End-to-End
+
+# Installs a release headlessly with the published installer, runs it under systemd in system mode
+# on a disposable Ubuntu VM, upgrades it to another release with `wollipog service upgrade`, forces a
+# rollback, and purges. Runs automatically when a release is published (upgrading from the previous
+# published release) and on demand for any pair of tags, including a draft from the release
+# workflow's throwaway dry run.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      to_tag:
+        description: "Release to upgrade to (vX.Y.Z[-suffix]). A draft created for a real tag works; a branch-dispatched v0.0.0-test.N throwaway does not, because its executables report the source version"
+        required: true
+        type: string
+      from_tag:
+        description: "Release to install first (default: to_tag, upgraded with --force)"
+        required: false
+        type: string
+
+permissions:
+  # Reading a draft release (and its assets) through the API needs write-level release access;
+  # the job only downloads and never creates, edits, or deletes anything on GitHub.
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  upgrade-e2e:
+    name: Upgrade End-to-End (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the release pair
+        id: tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TO: ${{ inputs.to_tag }}
+          INPUT_FROM: ${{ inputs.from_tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = release ]; then
+            to="$RELEASE_TAG"
+            # The newest earlier published, non-prerelease release that can actually be installed
+            # headlessly and upgraded from: it must carry the control-plane asset (releases before
+            # that have neither the asset nor `service upgrade`). Until one exists, rehearse on the
+            # published release itself with --force.
+            from=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" | jq -r --arg to "$to" \
+              '[.[] | select(.draft == false and .prerelease == false and .tag_name != $to and (.assets | any(.name == "wollipog-control-plane-x86_64-unknown-linux-gnu")))] | sort_by(.published_at) | reverse | .[0].tag_name // empty')
+            [ -n "$from" ] || from="$to"
+          else
+            to="$INPUT_TO"
+            from="${INPUT_FROM:-$to}"
+          fi
+          for tag in "$from" "$to"; do
+            printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "::error::tag $tag must look like v1.2.3"; exit 1; }
+          done
+          echo "from=$from" >>"$GITHUB_OUTPUT"
+          echo "to=$to" >>"$GITHUB_OUTPUT"
+          echo "Upgrading $from -> $to"
+
+      - name: Run the upgrade end-to-end check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WOLLIPOG_E2E_CONFIRM: "1"
+          WOLLIPOG_E2E_FROM_TAG: ${{ steps.tags.outputs.from }}
+          WOLLIPOG_E2E_TO_TAG: ${{ steps.tags.outputs.to }}
+          WOLLIPOG_E2E_USER: runner
+        run: sudo --preserve-env=GH_TOKEN,WOLLIPOG_E2E_CONFIRM,WOLLIPOG_E2E_FROM_TAG,WOLLIPOG_E2E_TO_TAG,WOLLIPOG_E2E_USER bash scripts/upgrade-e2e.sh
+
+      - name: Service logs on failure
+        if: failure()
+        run: sudo journalctl -u wollipog-control-plane.service -u wollipog-runner.service --no-pager -n 200 || true

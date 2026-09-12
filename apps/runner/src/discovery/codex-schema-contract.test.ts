@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawnSync } from "../test-support/bounded-child-process.js";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import {
   CODEX_APP_SERVER_CONTRACT_FINGERPRINT,
@@ -22,6 +22,7 @@ interface ExpectedShape {
   discriminatedVariants?: Record<string, Record<string, string[] | ExpectedShape>>;
   variantRefs?: string[];
   propertyRefs?: Record<string, string>;
+  propertyTypes?: Record<string, string>;
   enumValues?: string[];
   enumValuesInVariants?: string[];
 }
@@ -34,6 +35,9 @@ function synthesizeShape(expected: ExpectedShape): Record<string, unknown> {
     required: expected.required ?? [],
     properties: {
       ...Object.fromEntries((expected.properties ?? []).map((name) => [name, {}])),
+      ...Object.fromEntries(
+        Object.entries(expected.propertyTypes ?? {}).map(([name, type]) => [name, { type }]),
+      ),
       ...Object.fromEntries(
         Object.entries(expected.propertyRefs ?? {}).map(([property, name]) => [property, { $ref: `#/definitions/${name}` }]),
       ),
@@ -87,6 +91,38 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     }
     const ok = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
     assert.equal(ok.status, 0, ok.stderr);
+
+    // Pin the fields used to recover a steering coordinate, not unrelated response payloads.
+    const startResponsePath = join(dir, "v2", "TurnStartResponse.json");
+    const startResponse = JSON.parse(readFileSync(startResponsePath, "utf8"));
+    const checkStartResponse = (schema: unknown) => {
+      writeFileSync(startResponsePath, JSON.stringify(schema));
+      return spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    };
+    const assertStartDrift = (mutate: (schema: typeof startResponse) => void, diagnostic: RegExp) => {
+      const changed = structuredClone(startResponse);
+      mutate(changed);
+      const result = checkStartResponse(changed);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, diagnostic);
+    };
+    assertStartDrift((schema) => { delete schema.properties.turn; }, /TurnStartResponse.*property removed: turn/);
+    assertStartDrift((schema) => { schema.properties.turn = {}; }, /TurnStartResponse.*property reference removed: turn -> Turn/);
+    assertStartDrift((schema) => { delete schema.definitions.Turn.properties.id; }, /TurnStartResponse.*property removed: id/);
+    assertStartDrift((schema) => { schema.definitions.Turn.properties.id.type = "number"; }, /TurnStartResponse.*property type changed: id/);
+    assertStartDrift((schema) => { delete schema.definitions.Turn.properties.status; }, /TurnStartResponse.*property removed: status/);
+    assertStartDrift((schema) => { schema.definitions.Turn.properties.status = {}; }, /TurnStartResponse.*property reference removed: status -> TurnStatus/);
+    assertStartDrift((schema) => { schema.definitions.TurnStatus.enum = ["completed"]; }, /TurnStartResponse.*enum value removed: inProgress/);
+    // The fixture does not require items/error or freeze the set of terminal statuses.
+    assert.deepEqual(Object.keys(startResponse.definitions.Turn.properties).sort(), ["id", "status"]);
+    const extendedResponse = structuredClone(startResponse);
+    extendedResponse.properties.futureMetadata = { type: "object" };
+    extendedResponse.definitions.Turn.properties.items = { type: "array" };
+    extendedResponse.definitions.TurnStatus.enum.push("futureTerminalStatus");
+    const extended = checkStartResponse(extendedResponse);
+    assert.equal(extended.status, 0, extended.stderr);
+    const restored = checkStartResponse(startResponse);
+    assert.equal(restored.status, 0, restored.stderr);
 
     // Collaboration prompt is visible title input but remains optional. The object-form variant
     // fixture must synthesize and detect its removal without promoting it into `required`.

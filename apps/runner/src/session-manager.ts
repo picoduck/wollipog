@@ -13,6 +13,9 @@
  * the same session at once.
  */
 
+import { buildConversationHandoff, handoffDestinationError, type ConversationHandoffDraft } from "@wollipog/protocol";
+import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
+import { UnclassifiedRejectionJournal } from "./drivers/unclassified-rejection-journal.js";
 import type {
   AgentCapabilities,
   AgentContext,
@@ -24,22 +27,31 @@ import type {
   EditQueuedPromptMessage,
   EditQueuedPromptResultMessage,
   ExternalSessionDescriptor,
+  GovernanceTrippedMessage,
   InvokeSessionCommandMessage,
   InterruptTurnResultReason,
   PromptImage,
   PromptImageInput,
   PromptImageReference,
+  ProviderHistoryRecoveryMode,
+  WorkspaceReference,
   QueuedPromptDraft,
   QueuedPromptEditFailureReason,
   ReadQueuedPromptMessage,
   ReadQueuedPromptResultMessage,
+  RunnerCapacityBlocker,
+  RunnerCapacityConfiguration,
+  RunnerCapacityState,
   RunnerToControlPlane,
   SessionConfig,
   SessionCommandInvocationErrorCode,
   SessionEventPayload,
+  PolicyHookDecisionEvent,
   SessionLaunchSpec,
   SessionSnapshot,
   SessionStatus,
+  SessionWorktreeIsolationNotice,
+  SessionWorktreeProgressPhase,
   SessionWorktreeView,
   ResolveSteeringAttemptMessage,
   ResolveSteeringAttemptResultMessage,
@@ -48,14 +60,18 @@ import type {
   SteerSessionResultMessage,
 } from "@wollipog/protocol";
 import {
+  addPendingRequest, removePendingRequest, pendingRequests,
   isPromptImageReference,
+  isWorkspaceReference,
   PROTOCOL_VERSION,
   providerSupportsConversationFork,
   runnerSupportsProtocol,
   validatePromptImageInputs,
+  validateQuestionAnswers,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type {
@@ -66,7 +82,7 @@ import type {
 } from "./drivers/driver.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { BoxAdmission, type AdmissionRequest } from "./box-admission.js";
-import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext } from "./claude-background-work.js";
+import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from "./config.js";
 import type { RunnerAdmissionPolicy, RunnerExecutionIsolation } from "./config.js";
 import { executionTargetLaunchError } from "./execution-target.js";
@@ -80,6 +96,9 @@ import {
   resolveExecutionIsolation,
   verifyExecutionIsolationForkState,
 } from "./execution-isolation.js";
+import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
+import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
+import { supportsNativeOrchestratorBoundary } from "./orchestrator-preset.js";
 import type { SpawnIsolation } from "./spawn.js";
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
@@ -94,13 +113,21 @@ import {
   type CheckpointRefOwnershipClaim,
   type CheckpointRefOwnershipRecord,
 } from "./checkpoint-ref-ownership.js";
-import { anchorForkRef, anchorTurnRef, captureWorktreeTree, deleteTurnRef, deleteTurnRefs, isMissingGitRepositoryError, readTurnRef, resetWorktreeIndex, restoreWorktreeToTree, synchronizeCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
+import { anchorForkRef, anchorTurnRef, captureWorktreeTree, deleteTurnRef, deleteTurnRefs, gitDiff, isMissingGitRepositoryError, readTurnRef, resetWorktreeIndex, restoreWorktreeToTree, synchronizeCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
 import {
+  readSessionFile,
+  inspectWorkspaceReferenceDiff,
+  resolveWorkspaceReference,
+  workspaceReferenceDiffContent,
+} from "./session-files.js";
+import {
+  HISTORY_PAGE_MAX_EVENTS,
   SessionStore,
   isAdoptedSession,
   metaToSnapshot,
   type DurableBackgroundJob,
   type SessionMeta,
+  type StoredEvent,
 } from "./session-store.js";
 import { SessionCommandAuthorityRegistry } from "./session-command-authority.js";
 import type {
@@ -109,20 +136,31 @@ import type {
   ProviderCredentialScope,
 } from "./provider-auth-recovery.js";
 import {
+  compareProviderAuthIdentity,
+  describeProviderAuthIdentityMismatch,
+  mergeProviderAuthIdentityEvidence,
+} from "./provider-auth-recovery.js";
+import {
   createWorktree,
   createRequestedWorktree,
   attachRequestedWorktree,
   fetchRemoteDefaultBase,
+  readRepositoryDefaultBranch,
   createWorktreeFromTree,
   captureTurnDiff,
   discardWorktreeIfSafe,
+  isLegacyWslSessionWorktreePath,
+  registeredSessionWorktree,
+  sessionWorktreeBranch,
   isGitRepo,
   nativeRepositoryPathIsUnavailable,
+  pathWithin,
   removeRequestedWorktreeBoundary,
   removeWorktree,
   requestedWorktreeBoundary,
   sameWorktreePath,
   worktreeHead,
+  mergedWorktreePullRequestForBranch,
   worktreePullRequestState,
   worktreeDiff,
   WorktreeCleanupJournal,
@@ -139,6 +177,32 @@ type Send = (msg: RunnerToControlPlane) => void;
 type Logger = (msg: string) => void;
 export type AcpContextResolver = (spec: SessionLaunchSpec) => SessionLaunchSpec["acpSessionContext"];
 export type PromptImageResolver = (sessionId: string, references: PromptImageReference[]) => Promise<PromptImage[]>;
+export type SafeWslLaunchAuthorizer = (meta: Pick<SessionMeta,
+  "agentId" | "command" | "args" | "driver" | "context" | "config" | "executionTarget"
+>) => boolean;
+
+/** ACP provider modes/config remain authoritative for ordinary sessions. An Orchestrator session
+ * keeps its runner-owned preset while still accepting live model and effort updates. */
+export function preserveAcpOrchestratorSessionState(
+  current: SessionConfig,
+  state: { capabilities: AgentCapabilities; config: SessionConfig },
+): { capabilities: AgentCapabilities; config: SessionConfig } {
+  const orchestrator = current.permissionMode === "orchestrator";
+  return {
+    capabilities: {
+      ...state.capabilities,
+      ...(orchestrator
+        ? { permissionModes: ["orchestrator"], elicitation: { orchestrator: ["none" as const] } }
+        : {}),
+    },
+    config: {
+      ...current,
+      model: state.config.model,
+      effort: state.config.effort,
+      permissionMode: orchestrator ? "orchestrator" : state.config.permissionMode,
+    },
+  };
+}
 
 export interface SessionLaunchPreparation {
   /** True only when this launch performed a fresh, authoritative provider catalog read. */
@@ -258,6 +322,12 @@ interface QueuedPrompt {
   syntheticRecovery?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
+  /** Submit-only continuation for a structured question whose process-owned callback was lost. */
+  recoveredQuestion?: {
+    requestId: string;
+    recoveryId: string;
+    answers: Record<string, string | string[]>;
+  };
 }
 
 interface QueueEditReceipt {
@@ -337,6 +407,15 @@ interface ActiveSession {
   steeringAvailable?: boolean;
   /** A prompt turn is in flight (the agent session can only run one at a time). */
   running: boolean;
+  /** Claude began a provider-owned turn while the runner queue was idle. Kept separate from
+   * `running`, whose ownership includes the queue drain and its process-wide lock. */
+  providerInitiatedTurnActive?: boolean;
+  /** Opaque coordinate published to the control plane so a provider-owned turn can use the same
+   * stale-safe Stop contract without aliasing a queued runner prompt id. */
+  providerInitiatedTurnId?: string;
+  /** Requests opened by the provider-owned turn. Settlement clears only these, preserving cards
+   * owned by authentication recovery, governance, or a recovered structured question. */
+  providerInitiatedRequestIds?: Set<string>;
   /** A cancel arrived before the agent process existed (during the pre-prompt turn snapshot) —
    * the driver-level cancel has nothing to kill there, so the next turn start honors this flag. */
   cancelRequested?: boolean;
@@ -349,14 +428,26 @@ interface ActiveSession {
   currentBackgroundJobIds?: string[];
   backgroundPromptAccepted?: boolean;
   backgroundAssistantMessagePersisted?: boolean;
-  /** A successful turn-only interruption preserves the remaining FIFO but does not run it until
-   * a later explicit prompt unambiguously asks the session to continue. */
+  /** A turn-only interruption fences the remaining FIFO until the interrupted turn reaches a
+   * safe settlement boundary. It is released automatically after cancellation is acknowledged. */
   holdQueuedPromptsAfterInterrupt?: boolean;
+  /** A control-plane card (checkpoint, unpriced, daily budget) is holding the queue. Its own flag,
+   * because the interrupt hold above is cleared when a provider completes before the interrupt
+   * takes effect, and that settle must not release work a card is still parking. */
+  controlPlaneHold?: boolean;
   /** Distinct invocation ids are rebuilt once from the durable event log when a tool guardrail is
    * armed, then maintained in memory on normalized tool events. */
   toolCallIds?: Set<string>;
+  /** Exact tool ids and native policy decisions observed during this provider turn. These bounded
+   * indexes preserve the causal fence and acknowledgement idempotency even when a noisy turn has
+   * pushed the matching events beyond the durable recovery scan. */
+  policyHookToolCallIds?: Set<string>;
+  policyHookDecisionEvents?: Map<string, { payload: PolicyHookDecisionEvent; eventSeq: number }>;
   /** A runner-side threshold cancelled this turn. Queued prompts remain held until CP re-arms. */
   governanceTripped?: "cost_budget" | "max_tool_calls";
+  /** Exact content-free crossing evidence. Pin every field in memory so a reconnect cannot report
+   * a later metadata edit as though it were the threshold that actually cancelled this turn. */
+  governanceTrip?: Omit<GovernanceTrippedMessage, "type" | "sessionId">;
   /** Request-scoped option semantics for live permission asks. The current approval card can be
    * cleared by a settled status or replaced while this driver still owns the original request, so
    * it cannot classify a later successful resolution. This retains only option ids/kinds in the
@@ -389,15 +480,75 @@ interface ActiveSession {
   /** A provider credential failure cancelled the current turn. Existing FIFO work stays held until
    * a new user prompt explicitly asks the runner to revalidate the exact installation. */
   authenticationBlocked?: boolean;
+  /** The provider rejected its own stored conversation history. Unlike an authentication block
+   * this never clears in place: the FIFO stops draining permanently and the session can only be
+   * continued by recovering it into a new conversation. */
+  historyQuarantined?: boolean;
+  /** A validated worktree selection made after this process launched. The current turn keeps its
+   * original OS cwd, then the drain resumes the same conversation inside the selected worktree
+   * before admitting another turn. */
+  pendingWorktreeRebind?: string;
+  /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
+  seatbeltWritableRoots?: readonly string[];
+}
+
+interface ProviderRetirement {
+  client: Driver;
+  entry: ActiveSession;
+  promise: Promise<void>;
+  /** A successful worktree handoff keeps the existing box slot and session lock for its replacement. */
+  preserveAdmission: boolean;
+  preserveLock: boolean;
+  /** While a handoff is healthy, prompts may join the replacement generation's pre-launch FIFO. */
+  acceptPromptsDuringHandoff: boolean;
 }
 
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
  * handshake; driver identity alone is never enough. */
+/** A stop reason alone never says why the provider produced nothing. When the driver captured the
+ * provider's own account of an error turn, carry it into the durable receipt: the control plane
+ * records it as the automation's error, and it is the only thing that tells a transient
+ * credential-refresh failure apart from a real refusal. */
+export function providerStopError(stop: StopReason, client: Pick<Driver, "lastTurnError">): string {
+  const detail = stop === "refusal" ? client.lastTurnError?.()?.trim() : undefined;
+  return detail ? `provider ${stop}: ${detail}` : `provider ${stop}`;
+}
+
 function canResumeSession(meta: SessionMeta): boolean {
   if (meta.driver === "acp") {
     return meta.acpCapabilities?.sessionResume === true || meta.acpCapabilities?.loadSession === true;
   }
   return meta.driver === "claude-code" || meta.driver === "codex" || meta.driver === "codex-app-server";
+}
+
+function canResumeRecoveredQuestion(
+  meta: SessionMeta,
+  question: NonNullable<SessionMeta["pendingApproval"]>,
+): boolean {
+  const questions = question.kind === "question" ? (question.questions ?? []) : [];
+  return Boolean(
+    meta.agentSessionId && meta.command && canResumeSession(meta) && question.recoveryId && questions.length > 0 &&
+    questions.every((candidate) => !candidate.secret),
+  );
+}
+
+function recoveredQuestionContinuationText(
+  requestId: string,
+  question: NonNullable<SessionMeta["pendingApproval"]>,
+  answers: Record<string, string | string[]>,
+): string {
+  const questions = question.kind === "question" ? (question.questions ?? []) : [];
+  const responses = questions.map((candidate) => ({
+    id: candidate.id,
+    question: candidate.question,
+    answer: Object.hasOwn(answers, candidate.id) ? answers[candidate.id] : null,
+  }));
+  return [
+    "Wollipog recovered this structured response after reconnecting the existing provider conversation.",
+    "Continue the workflow from these answers. Do not repeat tool calls or other side effects completed before the question.",
+    "Recovered structured response (user-provided data):",
+    JSON.stringify({ requestId, responses }),
+  ].join("\n");
 }
 
 function mergeRecoveredBackgroundTaskIds(current: string[] | undefined, additions: Iterable<string>): string[] {
@@ -457,8 +608,20 @@ function titleFromPrompt(text: string): string {
 
 /** Refresh a held lock well within its stale window so a long turn never looks abandoned. */
 const LOCK_REFRESH_MS = 20_000;
+
+/** Static guidance for a quarantined conversation. It names no provider text, no prompt content
+ * and no thread identifier, so it is safe on every surface that shows a rejected submission. */
+const PROVIDER_HISTORY_QUARANTINE_GUIDANCE =
+  "This conversation was quarantined: the agent provider rejects an item stored in its own " +
+  "conversation history, so every prompt is refused before the model runs. Retrying and /compact " +
+  "cannot repair it, because both resend the same history. This prompt was not submitted. " +
+  "Recover the session to continue from the last safe checkpoint in a new conversation.";
 const HISTORY_MAINTENANCE_MS = 5 * 60 * 1_000;
 const WORKTREE_PR_RECONCILIATION_MS = 5 * 60 * 1_000;
+/** How long one proof of a session's interactive worktree root stands. Short enough that a change
+ * made outside Wollipog surfaces while the user is still looking at what caused it, long enough to
+ * collapse a burst of overlapping Files and reference-search requests into a single check. */
+const VERIFIED_WORKTREE_ROOT_MS = 2_000;
 
 /** Hard cap on not-yet-started prompts per session (each holds full text + image payloads). */
 const MAX_QUEUED_PROMPTS = 100;
@@ -475,6 +638,17 @@ const ORPHAN_RECOVERY_PROMPT =
 const BACKGROUND_CONTINUATION_PROMPT =
   "Managed background jobs reached their terminal barrier. Consume every queued task notification and deliver the parent workflow's final user-visible result without waiting for another user message.";
 const MAX_RETAINED_DELIVERED_BACKGROUND_JOBS = 128;
+
+/** Recompute the live aggregate after a delivery receipt changes only part of the inventory. */
+function managedBackgroundWorkState(
+  jobs: readonly DurableBackgroundJob[],
+): "running" | "continuation_pending" | undefined {
+  if (jobs.some((job) => job.continuationRequired && !job.assistantResultPersistedAt &&
+      !job.continuationMissingResultAt)) {
+    return "continuation_pending";
+  }
+  return jobs.some((job) => !job.terminalStatus) ? "running" : undefined;
+}
 const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
 const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
 
@@ -502,6 +676,33 @@ const STEERING_SUBMISSION_TIMEOUT_MS = 10_000;
 const MAX_STEERING_TERMINALS_PER_SESSION = 1_024;
 const MAX_UNRESOLVED_STEERING_ATTEMPTS_PER_SESSION = 50;
 const MAX_STEERING_RESULT_MESSAGE_CHARS = 4_096;
+const MAX_WORKSPACE_REFERENCE_CONTEXT_BYTES = 512 * 1024;
+
+function boundedWorkspaceReferenceJson(
+  metadata: Record<string, unknown>,
+  content: string,
+  maxBytes: number,
+  alreadyTruncated: boolean,
+): string {
+  const serialize = (value: string, truncated: boolean) => JSON.stringify({ ...metadata, content: value, truncated }, null, 2);
+  const complete = serialize(content, alreadyTruncated);
+  if (Buffer.byteLength(complete, "utf8") <= maxBytes) return complete;
+  let low = 0;
+  let high = content.length;
+  let best = "";
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = serialize(content.slice(0, middle), true);
+    if (Buffer.byteLength(candidate, "utf8") <= maxBytes) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (!best) throw new Error("workspace reference metadata exceeds the provider context limit");
+  return best;
+}
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -525,6 +726,7 @@ function normalizedConfig(config: SessionConfig | undefined): SessionConfig {
   return {
     ...(config?.model ? { model: config.model } : {}),
     ...(config?.effort ? { effort: config.effort } : {}),
+    ...(config?.serviceTier ? { serviceTier: config.serviceTier } : {}),
     ...(config?.permissionMode ? { permissionMode: config.permissionMode } : {}),
     ...(config?.costBudgetUsd != null ? { costBudgetUsd: config.costBudgetUsd } : {}),
     ...(config?.maxToolCalls != null ? { maxToolCalls: config.maxToolCalls } : {}),
@@ -574,6 +776,9 @@ export class SessionManager {
   /** Prompts known not to have reached turn/start when app-server crashed. A recovery launch
    * consumes these; the in-flight prompt is deliberately absent because delivery is ambiguous. */
   private readonly recoveryQueues = new Map<string, QueuedPrompt[]>();
+  /** Sessions whose control-plane hold outlived their process: recovery must not drain their
+   * queue, and the replacement entry inherits the hold, until the control plane releases it. */
+  private readonly recoveryHolds = new Set<string>();
   /** Prompts received after a session was materialized but before capacity admission. They must
    * join the original launch instead of starting a competing resume generation. Durable command
    * lifecycles make this in-memory FIFO recoverable after a runner restart. */
@@ -589,7 +794,18 @@ export class SessionManager {
   /** Provider logout is asynchronous; fence prompts and other provider/worktree operations. */
   private readonly loggingOut = new Set<string>();
   /** Explicit stop waits for ACP session/close before this session may launch again. */
-  private readonly closing = new Map<string, { client: Driver; promise: Promise<void> }>();
+  private readonly closing = new Map<string, ProviderRetirement>();
+  /** A turn-boundary worktree move owns a retiring provider even after it leaves `active`.
+   * Unlike an ordinary close, prompts may join its pre-launch FIFO while the conversation reopens. */
+  private readonly worktreeRebindings = new Map<string, {
+    entry: ActiveSession;
+    promise: Promise<void>;
+    /** Exact target captured once provider launch preparation begins. A later selection may move
+     * durable metadata again, but cleanup must keep fencing the cwd already handed to launch(). */
+    launchingWorktreePath?: string;
+  }>();
+  /** Deletions that installed their durable tombstone but remain fenced on exact-client exit. */
+  private readonly pendingDeletions = new Set<string>();
   private readonly deleting = new Set<string>();
   /** Process-lifetime tombstone: a late start command/continuation may never recreate a deleted id. */
   private readonly deleted = new Set<string>();
@@ -603,6 +819,16 @@ export class SessionManager {
    * a fast replacement finishing so an older continuation can still identify that replacement. */
   private readonly latestLaunchGenerations = new Map<string, number>();
   private nextLaunchGeneration = 0;
+  /** Generation whose launch was refused because its persisted worktree failed verification. A
+   * tree we just refused to identify is not proven to be this launch's own garbage, so start()
+   * must retain it instead of force-reaping whatever now sits at that path. */
+  private readonly worktreeVerificationRefusals = new Map<string, number>();
+  /** Last positive proof of a session's shells/TUI/Files root, by the identity it proved. */
+  private readonly verifiedWorktreeRoots = new Map<string, { identity: string; at: number }>();
+  /** Proofs currently in flight, so a burst that arrives before the first finishes shares it. */
+  private readonly provingWorktreeRoots = new Map<string, { identity: string; proof: Promise<string | null> }>();
+  /** Injectable so a test can hold a proof open; production always uses the real prover. */
+  private proveRegisteredWorktree: typeof registeredSessionWorktree = registeredSessionWorktree;
   /** Ephemeral approval timers. Only durations leave the runner; request/session ids never do. */
   private readonly approvalStarted = new Map<string, number>();
   private readonly cleanupJournal: WorktreeCleanupJournal;
@@ -629,6 +855,8 @@ export class SessionManager {
   private readonly forkingTargets = new Set<string>();
   private readonly boxAdmission: BoxAdmission;
   private readonly stateDir: string;
+  /** Evidence for widening the provider-history classifier (#876). Nothing reads it to decide. */
+  private readonly unclassifiedRejections: UnclassifiedRejectionJournal;
   private readonly providerStateReconcileTimer: ReturnType<typeof setInterval>;
   private readonly historyMaintenanceTimer: ReturnType<typeof setInterval>;
   private readonly worktreePullRequestReconcileTimer: ReturnType<typeof setInterval>;
@@ -646,9 +874,11 @@ export class SessionManager {
     bypasses: number;
     resolve: (admitted: boolean) => void;
   }> = [];
+  private readonly admissionWaitReasons = new Map<string, string>();
+  private lastCapacityState = "";
   /** Worktree preparation intentionally precedes process admission so an initial Native TUI can
    * materialize while the provider is capacity-queued. Bound those git subprocesses separately. */
-  private readonly worktreePreparationLimit: number;
+  private worktreePreparationLimit: number;
   private readonly worktreePreparationAdmission: BoxAdmission;
   private readonly worktreePreparations = new Set<number>();
   private readonly worktreePreparationKeys = new Map<number, string>();
@@ -663,6 +893,7 @@ export class SessionManager {
   /** Test seam for the expensive subprocess; production always uses createWorktree. */
   private createSessionWorktree: typeof createWorktree = createWorktree;
   /** Test seams keep forge availability and destructive Git behavior deterministic. */
+  private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
   /** Test seam keeps provider-home discovery deterministic without writing into a real Claude home. */
@@ -672,8 +903,23 @@ export class SessionManager {
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: ProviderHomeLeaseRegistry;
   private readonly providerAuthOperations = new Set<string>();
+  private readonly providerAuthRevalidations = new Map<string, Promise<void>>();
+  private readonly providerAuthAutomaticAttempted = new Set<string>();
   /** Create/attach/select all merge durable session inventory, so serialize them per session. */
   private readonly worktreeOperations = new Map<string, Promise<unknown>>();
+  /** Decisions can reach the runner while Claude's matching tool frame is still buffered. Hold
+   * them briefly so their durable sequence follows that exact tool id instead of racing ahead. */
+  private readonly pendingPolicyHookDecisions = new Map<string, {
+    payload: PolicyHookDecisionEvent;
+    resolves: Array<(result: { accepted: boolean; auditId: string; eventSeq?: number; error?: string }) => void>;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  /** Exact duplicate create requests join one operation, including after a control-plane retry. */
+  private readonly worktreeCreates = new Map<string, {
+    promise: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }>;
+    observers: Set<(phase: SessionWorktreeProgressPhase) => void>;
+    phase?: SessionWorktreeProgressPhase;
+  }>();
 
   constructor(
     private send: Send,
@@ -683,7 +929,7 @@ export class SessionManager {
     private readonly resolveLaunch?: LaunchResolver,
     private readonly createDriver: typeof makeDriver = makeDriver,
     private readonly dataDir?: string,
-    private readonly maxConcurrentSessions = DEFAULT_MAX_CONCURRENT_SESSIONS,
+    private maxConcurrentSessions = DEFAULT_MAX_CONCURRENT_SESSIONS,
     private readonly onAgentAuthUpdate?: (
       agentId: string,
       update: { status?: "authenticated" | "unauthenticated"; capabilities?: AcpRuntimeCapabilities },
@@ -716,11 +962,14 @@ export class SessionManager {
     ) => void,
     /** Exact operator-configured Project Location roots eligible for existing-worktree attach. */
     private readonly configuredProjectPaths: string[] = [],
+    /** Fresh runner-local catalog authorization for the one target-local WSL launcher path. */
+    private readonly authorizeSafeWslLaunch?: SafeWslLaunchAuthorizer,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
+    this.unclassifiedRejections = new UnclassifiedRejectionJournal(this.stateDir);
     this.providerStateCleanupJournal = new ProviderStateCleanupJournal(this.stateDir);
     this.checkpointRefOwnership = new CheckpointRefOwnershipLedger(this.stateDir);
     this.boxAdmission = new BoxAdmission(this.stateDir, maxConcurrentSessions);
@@ -738,6 +987,59 @@ export class SessionManager {
       WORKTREE_PR_RECONCILIATION_MS,
     );
     this.worktreePullRequestReconcileTimer.unref?.();
+  }
+
+  private capacityRevision = 0;
+  private capacityAuthority: RunnerCapacityState["authority"] = "runner_local";
+
+  /** Apply only a monotonic control-plane configuration. Existing leases are never released. */
+  configureCapacity(configuration: RunnerCapacityConfiguration): boolean {
+    if (!Number.isInteger(configuration.configuredUnits) || configuration.configuredUnits < 1 ||
+        configuration.configuredUnits > 256 || !Number.isSafeInteger(configuration.revision) ||
+        configuration.revision < 1 || configuration.revision < this.capacityRevision) return false;
+    if (configuration.revision === this.capacityRevision) {
+      return configuration.configuredUnits === this.maxConcurrentSessions;
+    }
+    this.capacityRevision = configuration.revision;
+    this.capacityAuthority = "control_plane";
+    this.maxConcurrentSessions = configuration.configuredUnits;
+    this.worktreePreparationLimit = configuration.configuredUnits;
+    this.boxAdmission.setLimit(configuration.configuredUnits);
+    this.worktreePreparationAdmission.setLimit(configuration.configuredUnits);
+    this.drainAdmissionQueue();
+    this.drainWorktreePreparationQueue();
+    this.reportCapacity();
+    return true;
+  }
+
+  capacityState(): RunnerCapacityState {
+    const grouped = new Map<string, RunnerCapacityBlocker>();
+    for (const entry of this.admissionQueue) {
+      const blocker = this.capacityBlocker(entry.request);
+      const key = JSON.stringify([blocker.kind, blocker.agentId ?? null, blocker.targetId ?? null,
+        blocker.limitUnits, blocker.requiredUnits]);
+      const previous = grouped.get(key);
+      grouped.set(key, { ...blocker, waitingSessions: (previous?.waitingSessions ?? 0) + 1 });
+    }
+    const usedUnits = this.boxAdmission.usedCapacity();
+    return {
+      configuredUnits: this.maxConcurrentSessions,
+      revision: this.capacityRevision,
+      authority: this.capacityAuthority,
+      usedUnits,
+      availableUnits: Math.max(0, this.maxConcurrentSessions - usedUnits),
+      queuedSessions: this.admissionQueue.length,
+      blockers: [...grouped.values()],
+    };
+  }
+
+  reportCapacity(force = false): void {
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "machineRunnerCapacity")) return;
+    const status = this.capacityState();
+    const serialized = JSON.stringify(status);
+    if (!force && serialized === this.lastCapacityState) return;
+    this.lastCapacityState = serialized;
+    this.send({ type: "runner_capacity_status", status });
   }
 
   private checkpointOwnerHash(meta: Pick<SessionMeta, "checkpointRefVersion">): string | undefined {
@@ -791,12 +1093,40 @@ export class SessionManager {
   }
 
   private async activateWorktree(meta: SessionMeta, worktree: SessionWorktreeView): Promise<SessionSnapshot> {
+    // Every worktree switch funnels through here — select, create, and attach alike — so the
+    // quarantine guard belongs at this choke point rather than on one entry. The recovery
+    // checkpoint is attributed to the worktree it was taken in, and a quarantined session can never
+    // complete the provider rebind a switch requires, so activating another worktree would leave
+    // the advertised recovery pointing at one the fork then refuses.
+    if (this.store.readMeta(meta.sessionId)?.providerHistoryBlock) {
+      throw new Error("this session's provider conversation is quarantined — recover it before changing worktrees");
+    }
     // A request can arrive during the current provider turn. Anchor that turn's remaining diff at
     // the newly selected tree so capture/checkpoint logic never compares two different worktrees.
     const baseTree = await withGitExecutionContext(meta.context, () => captureWorktreeTree(worktree.path));
     const latest = this.store.readMeta(meta.sessionId);
     if (!latest || !this.sessionCanOpen(meta.sessionId)) {
       throw new Error("session disappeared while its requested worktree was activating");
+    }
+    // The capture above is awaited, so a live provider can quarantine its history inside that
+    // window. Recheck against the fresh metadata before mutating worktreePath, or the switch lands
+    // anyway and strands the recovery checkpoint on the previous worktree.
+    if (latest.providerHistoryBlock) {
+      throw new Error("this session's provider conversation is quarantined — recover it before changing worktrees");
+    }
+    const live = this.active.get(meta.sessionId);
+    if (live && !sameWorktreePath(live.context, live.cwd, worktree.path)) {
+      this.captureAgentSessionId(meta.sessionId, live.client);
+      const resumable = this.store.readMeta(meta.sessionId);
+      if (!resumable) {
+        throw new Error("session disappeared while its requested worktree was activating");
+      }
+      if (!resumable.agentSessionId && resumable.seq > 0) {
+        throw new Error("the running provider has not established a resumable conversation; retry worktree selection after this turn");
+      }
+      if (resumable.agentSessionId && !canResumeSession(resumable)) {
+        throw new Error("the running provider does not support resuming this conversation in another worktree; stop it before selecting a different worktree");
+      }
     }
     const priorActive = latest.worktreePath
       ? this.attributedWorktreeForPath(latest, latest.worktreePath)
@@ -821,18 +1151,45 @@ export class SessionManager {
     });
     if (!updated) throw new Error("session disappeared while its requested worktree was activating");
     const active = this.active.get(meta.sessionId);
-    if (active) active.worktree = { path: worktree.path, branch: worktree.branch, created: false };
+    if (active) {
+      active.worktree = { path: worktree.path, branch: worktree.branch, created: false };
+      active.pendingWorktreeRebind = sameWorktreePath(active.context, active.cwd, worktree.path)
+        ? undefined
+        : worktree.path;
+      if (active.pendingWorktreeRebind && !active.running) {
+        setImmediate(() => this.scheduleDrain(meta.sessionId));
+      }
+    }
     const snapshot = this.snapshot(updated);
     this.send({ type: "session_runtime_updated", snapshot });
     return snapshot;
   }
 
   /** Session-scoped operation seam consumed by the local CLI/MCP service. */
-  async requestWorktree(
+  requestWorktree(
     sessionId: string,
     request: { baseRef?: string; branch: string },
+    onProgress?: (phase: SessionWorktreeProgressPhase) => void,
   ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }> {
-    return this.runWorktreeOperation(sessionId, async () => {
+    const key = JSON.stringify([sessionId, request.baseRef ?? null, request.branch]);
+    const existing = this.worktreeCreates.get(key);
+    if (existing) {
+      if (onProgress) {
+        existing.observers.add(onProgress);
+        if (existing.phase) onProgress(existing.phase);
+      }
+      return existing.promise;
+    }
+    const observers = new Set<(phase: SessionWorktreeProgressPhase) => void>();
+    if (onProgress) observers.add(onProgress);
+    const report = (phase: SessionWorktreeProgressPhase): void => {
+      const entry = this.worktreeCreates.get(key);
+      if (entry) entry.phase = phase;
+      for (const observer of observers) {
+        try { observer(phase); } catch { /* Progress must never fail the Git operation. */ }
+      }
+    };
+    const operation = this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
       if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
@@ -843,8 +1200,13 @@ export class SessionManager {
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
         allowedProjectPaths: this.configuredProjectPaths,
+        onProgress: report,
       };
-      const baseRef = request.baseRef ?? await fetchRemoteDefaultBase(meta.repoPath, options);
+      // When no base is chosen we ask the remote, and that answer is authoritative for BOTH the
+      // base ref and the repository's default branch. `git fetch` never refreshes the locally
+      // tracked remote HEAD, so preferring this avoids stamping a default that moved after clone.
+      const advertised = request.baseRef ? null : await fetchRemoteDefaultBase(meta.repoPath, options);
+      const baseRef = request.baseRef ?? advertised!.ref;
       const created = await createRequestedWorktree(meta.repoPath, sessionId, {
         baseRef,
         branch: request.branch,
@@ -856,9 +1218,20 @@ export class SessionManager {
         if (!existing) {
           throw new Error("requested worktree already exists without ownership by this session");
         }
-        const canonical = { ...existing, path: created.path };
+        const canonical: SessionWorktreeView = { ...existing, path: created.path };
+        // An idempotent retry still asked the remote, so it still learned the current default and
+        // must apply it — the same refresh rule as attach. Where the caller chose the base we
+        // contacted nobody and learned nothing, so the stored value is left exactly as it was
+        // rather than replaced by a local read that `git fetch` never updates.
+        if (advertised) canonical.defaultBranch = advertised.branch;
+        report("activating");
         return { worktree: canonical, snapshot: await this.activateWorktree(meta, canonical) };
       }
+      // Stamped once, here, and persisted with the record: `attributedWorktrees` rebuilds views
+      // synchronously and must never reach for Git to do it. The advertised branch wins when we
+      // have one; the local read is the fallback for a caller-chosen base, which never contacts
+      // the remote and so can only offer the possibly stale tracked HEAD.
+      const defaultBranch = advertised?.branch ?? await readRepositoryDefaultBranch(meta.repoPath, options);
       const worktree: SessionWorktreeView = {
         id: created.path.split(/[\\/]/u).at(-1)!,
         path: created.path,
@@ -866,8 +1239,10 @@ export class SessionManager {
         baseRef: created.baseRef,
         baseCommit: created.baseCommit,
         source: "created",
+        ...(defaultBranch ? { defaultBranch } : {}),
       };
       try {
+        report("activating");
         return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
       } catch (error) {
         if (created.created) {
@@ -880,13 +1255,23 @@ export class SessionManager {
         throw error;
       }
     });
+    let tracked!: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }>;
+    tracked = operation.finally(() => {
+      if (this.worktreeCreates.get(key)?.promise === tracked) this.worktreeCreates.delete(key);
+    });
+    this.worktreeCreates.set(key, { promise: tracked, observers });
+    return tracked;
   }
 
   /** Attach an operator-located, Git-registered worktree and make it the active Git target. */
   async attachWorktree(
     sessionId: string,
     path: string,
-  ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }> {
+  ): Promise<{
+    worktree: SessionWorktreeView;
+    snapshot: SessionSnapshot;
+    isolation: SessionWorktreeIsolationNotice;
+  }> {
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -897,12 +1282,12 @@ export class SessionManager {
         context: meta.context,
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
-        // A running platform sandbox cannot gain a new external mount. Its pre-bound session
-        // directory remains attachable; provider isolation can use configured external Locations.
-        allowedProjectPaths: this.executionIsolation.mode === "provider"
-          ? this.configuredProjectPaths
-          : [],
+        // Platform isolation no longer narrows WHAT may be attached. A running sandbox still
+        // cannot gain a new external mount, so the result reports that the path becomes writable
+        // at the next launch instead of refusing a worktree the repository legitimately registers.
+        allowedProjectPaths: this.configuredProjectPaths,
       });
+      const isolation = await this.attachIsolationNotice(meta, attached.path);
       // Re-attaching an already-attributed runner-owned tree must never launder it into an
       // operator-owned record that session deletion would deliberately retain.
       const existing = this.attributedWorktrees(meta)
@@ -910,15 +1295,74 @@ export class SessionManager {
       if (existing && existing.branch !== attached.branch) {
         throw new Error("worktree branch changed since it was linked to this session");
       }
-      const worktree: SessionWorktreeView = existing ? { ...existing, path: attached.path } : {
-        id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
-        path: attached.path,
-        branch: attached.branch,
-        baseCommit: attached.baseCommit,
-        source: "attached",
-      };
-      return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
+      // Only the execution context matters here; the read touches no worktree root or project path.
+      const attachedDefaultBranch = await readRepositoryDefaultBranch(meta.repoPath, { context: meta.context });
+      const worktree: SessionWorktreeView = existing
+        // Re-attaching refreshes the default branch without disturbing the rest of the record: the
+        // repository's default can move (`git remote set-head`) long after the worktree was linked.
+        ? { ...existing, path: attached.path }
+        : {
+          id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
+          path: attached.path,
+          branch: attached.branch,
+          baseCommit: attached.baseCommit,
+          source: "attached",
+        };
+      // A refresh REPLACES rather than fills in. When the repository stops advertising a default,
+      // the record has to stop claiming one too, or the row keeps hiding a base ref on evidence
+      // that no longer exists — and the contract on the field is that absent means unknown.
+      if (attachedDefaultBranch) worktree.defaultBranch = attachedDefaultBranch;
+      else delete worktree.defaultBranch;
+      return { worktree, snapshot: await this.activateWorktree(meta, worktree), isolation };
     });
+  }
+
+  /** State, never guess, what a platform sandbox does with a path attached mid-session. A bwrap or
+   * Seatbelt boundary is bound at launch: a live provider keeps the roots it was given, so a
+   * worktree outside them is readable but not writable until the relaunch that a worktree switch
+   * already schedules. With no live process, the next launch binds it before anything can write. */
+  private async attachIsolationNotice(
+    meta: SessionMeta,
+    path: string,
+  ): Promise<SessionWorktreeIsolationNotice> {
+    const mode = this.executionIsolation.mode;
+    const platformIsolated = mode === "bwrap" || mode === "seatbelt";
+    if (!platformIsolated) return { writableNow: true, writableAtNextLaunch: true };
+    const live = this.active.get(meta.sessionId);
+    // With nothing running there is no sandbox to be outside of: the runner performs the session's
+    // Git actions on the host itself.
+    if (!live) return { writableNow: true, writableAtNextLaunch: true };
+    // The next launch chdirs into the selected worktree, and every sandbox binds its own cwd
+    // writable, so the attached path is always writable then — that is what makes "next launch" a
+    // real remedy rather than a hope.
+    const writableAtNextLaunch = true;
+    // Direct WSL gets no requested-worktree boundary at all (`requestedWorktreeIsolation` returns
+    // no roots for it), and the target-local launcher read-only-binds `/` with only the launch cwd
+    // writable. Claiming otherwise would have an agent attempt edits this turn and collect
+    // permission failures, which is worse than saying plainly that it must wait for the relaunch.
+    if (meta.context.kind === "wsl") {
+      return { writableNow: pathWithin(meta.context, path, live.cwd), writableAtNextLaunch };
+    }
+    // Seatbelt pathnames are realpath-resolved when the profile is built. Keep using that immutable
+    // launch snapshot: resolving HOME, a transcript symlink, or even cwd again after launch can
+    // follow a retargeted alias to a path the live profile never granted. A missing snapshot is
+    // conservatively unwritable rather than an optimistic promise that fails mid-turn.
+    if (mode === "seatbelt") {
+      return {
+        writableNow: live.seatbeltWritableRoots?.some((root) => pathWithin(meta.context, path, root)) ?? false,
+        writableAtNextLaunch,
+      };
+    }
+    const boundary = await requestedWorktreeBoundary(meta.repoPath, meta.sessionId, {
+      context: meta.context,
+      dataDir: this.dataDir,
+      ownerHash: this.runnerOwnerHash,
+    }, false);
+    const writableRoots = [boundary, live.cwd];
+    return {
+      writableNow: writableRoots.some((root) => pathWithin(meta.context, path, root)),
+      writableAtNextLaunch,
+    };
   }
 
   /** Select one already-attributed worktree as the target for every session Git action. */
@@ -944,12 +1388,18 @@ export class SessionManager {
     });
   }
 
-  async linkWorktreePullRequest(sessionId: string, worktreePath: string, url: string): Promise<void> {
+  async linkWorktreePullRequest(
+    sessionId: string,
+    worktreePath: string,
+    url: string,
+    provider?: "github" | "gitlab",
+    kind?: "pull_request" | "merge_request",
+  ): Promise<void> {
     await this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta?.worktrees) return;
       const worktrees = meta.worktrees.map((worktree) => sameWorktreePath(meta.context, worktree.path, worktreePath)
-        ? { ...worktree, pullRequest: { url, state: "open" as const } }
+        ? { ...worktree, pullRequest: { url, state: "open" as const, ...(provider ? { provider } : {}), ...(kind ? { kind } : {}) } }
         : worktree);
       const updated = this.store.patchMeta(sessionId, { worktrees });
       if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
@@ -958,8 +1408,18 @@ export class SessionManager {
 
   private liveWorktreeUsesPath(sessionId: string, path: string): boolean {
     const active = this.active.get(sessionId);
+    const rebind = this.worktreeRebindings.get(sessionId);
+    const rebinding = rebind?.entry;
+    const rebindingSelection = rebinding ? this.store.readMeta(sessionId)?.worktreePath : undefined;
     return (!!active && (sameWorktreePath(active.context, active.cwd, path) ||
-      (!!active.worktree && sameWorktreePath(active.context, active.worktree.path, path)))) ||
+      (!!active.worktree && sameWorktreePath(active.context, active.worktree.path, path)) ||
+      (!!active.pendingWorktreeRebind &&
+        sameWorktreePath(active.context, active.pendingWorktreeRebind, path)))) ||
+      (!!rebinding && (sameWorktreePath(rebinding.context, rebinding.cwd, path) ||
+        (!!rebinding.worktree && sameWorktreePath(rebinding.context, rebinding.worktree.path, path)))) ||
+      (!!rebinding && !!rebindingSelection && sameWorktreePath(rebinding.context, rebindingSelection, path)) ||
+      (!!rebinding && !!rebind?.launchingWorktreePath &&
+        sameWorktreePath(rebinding.context, rebind.launchingWorktreePath, path)) ||
       this.closing.has(sessionId);
   }
 
@@ -976,15 +1436,106 @@ export class SessionManager {
     return this.active.delete(sessionId);
   }
 
+  /** Recover linkage for worktrees whose PR was opened outside Wollipog. The forge helper accepts
+   * only an exact merged-head proof, and the session lane keeps a concurrent explicit link from
+   * being overwritten while that proof is fetched. */
+  private async discoverUnlinkedMergedWorktree(
+    sessionId: string,
+    path: string,
+  ): Promise<void> {
+    const initial = this.store.readMeta(sessionId);
+    if (!initial) return;
+    const worktree = this.attributedWorktrees(initial)
+      .find((item) => sameWorktreePath(initial.context, item.path, path));
+    if (!worktree || worktree.source === "attached" || worktree.pullRequest) return;
+    const discovered = await this.discoverMergedWorktreePullRequest(
+      worktree.path,
+      worktree.branch,
+      { context: initial.context },
+    );
+    if (!discovered) return;
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    const current = this.attributedWorktrees(latest)
+      .find((item) => sameWorktreePath(latest.context, item.path, path));
+    if (!current || current.pullRequest || current.branch !== worktree.branch || current.source === "attached") return;
+    const worktrees = this.attributedWorktrees(latest).map((item) =>
+      sameWorktreePath(latest.context, item.path, path)
+        ? { ...item, pullRequest: discovered }
+        : item);
+    const updated = this.store.patchMeta(sessionId, { worktrees });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
   private async discardWorktreeLocked(
     sessionId: string,
     path: string,
+    options: { refreshMergedHead?: boolean } = {},
   ): Promise<{ removed: boolean; reason?: string; snapshot?: SessionSnapshot }> {
-    const meta = this.store.readMeta(sessionId);
-    if (!meta || !this.sessionCanOpen(sessionId)) return { removed: false, reason: "session is unavailable" };
-    const worktree = this.attributedWorktrees(meta)
-      .find((item) => sameWorktreePath(meta.context, item.path, path));
+    const initialMeta = this.store.readMeta(sessionId);
+    if (!initialMeta || !this.sessionCanOpen(sessionId)) {
+      return { removed: false, reason: "session is unavailable" };
+    }
+    let meta = initialMeta;
+    let worktree = this.attributedWorktrees(initialMeta)
+      .find((item) => sameWorktreePath(initialMeta.context, item.path, path));
     if (!worktree) return { removed: false, reason: "worktree is not linked to this session" };
+    if (worktree.source === "attached") {
+      return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
+    }
+    if (options.refreshMergedHead !== false && !worktree.pullRequest) {
+      await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path);
+      const latest = this.store.readMeta(sessionId);
+      if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
+      const current = this.attributedWorktrees(latest)
+        .find((item) => sameWorktreePath(latest.context, item.path, path));
+      if (!current) {
+        return { removed: false, reason: "the worktree record was removed while checking forge state" };
+      }
+      meta = latest;
+      worktree = current;
+    }
+    const recordedMergedHead = worktree.pullRequest?.state === "merged" &&
+      typeof worktree.pullRequest.headOid === "string" &&
+      /^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid)
+      ? worktree.pullRequest.headOid
+      : undefined;
+    if (options.refreshMergedHead !== false && worktree.pullRequest?.state === "merged" && !recordedMergedHead) {
+      const legacyPullRequest = worktree.pullRequest;
+      const verified = await this.resolveWorktreePullRequestState(
+        worktree.path,
+        legacyPullRequest.url,
+        { context: meta.context, provider: legacyPullRequest.provider },
+      );
+      const latest = this.store.readMeta(sessionId);
+      if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
+      const current = this.attributedWorktrees(latest)
+        .find((item) => sameWorktreePath(latest.context, item.path, path));
+      if (!current) {
+        return { removed: false, reason: "the worktree record was removed while checking forge state" };
+      }
+      meta = latest;
+      worktree = current;
+      if (verified?.state === "merged" && verified.headOid) {
+        if (current.pullRequest?.state !== "merged" ||
+            current.pullRequest.url !== legacyPullRequest.url) {
+          return { removed: false, reason: "worktree linkage changed while checking forge state" };
+        }
+        const worktrees = this.attributedWorktrees(latest).map((item) => sameWorktreePath(latest.context, item.path, path)
+          ? { ...item, pullRequest: { ...current.pullRequest!, state: "merged" as const, headOid: verified.headOid } }
+          : item);
+        const updated = this.store.patchMeta(sessionId, { worktrees });
+        if (!updated) return { removed: false, reason: "session became unavailable while checking forge state" };
+        const refreshed = this.attributedWorktrees(updated)
+          .find((item) => sameWorktreePath(updated.context, item.path, path));
+        if (!refreshed) {
+          return { removed: false, reason: "the worktree record was removed while checking forge state" };
+        }
+        meta = updated;
+        worktree = refreshed;
+        this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      }
+    }
     const source = worktree.source;
     if (source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
@@ -999,8 +1550,28 @@ export class SessionManager {
       return { removed: false, reason: "the worktree is still active in a provider process" };
     }
     const cleanupLeaseOwner = `${this.lockOwner}:cleanup:${randomUUID()}`;
+    // The lease is per session, not per worktree. While this session's own provider runs it holds
+    // the lease for the worktree it is using; that must not stop the session from discarding a
+    // finished sibling worktree, which liveWorktreeUsesPath() above already proved unused here.
+    // Only the exact owner recorded on this process's active entry qualifies: a lease held by
+    // another process, or by a launch that has not published its active entry yet, still blocks.
+    // The lease is transferred to the cleanup owner (never left unheld), so a provider that exits
+    // mid-cleanup cannot free it for a sibling runner to launch into the worktree being removed;
+    // it is handed back to the provider afterwards if the provider is still running.
+    let transferredFrom: string | null = null;
     if (!this.store.acquireWorktreeLease(sessionId, cleanupLeaseOwner)) {
-      return { removed: false, reason: "the worktree is leased by another runner process" };
+      const holder = this.store.readWorktreeLease(sessionId);
+      const ownProvider = this.active.get(sessionId)?.worktreeLeaseOwner;
+      if (!holder || holder.pid !== process.pid) {
+        return { removed: false, reason: "the worktree is leased by another runner process" };
+      }
+      if (!ownProvider || holder.owner !== ownProvider) {
+        return { removed: false, reason: "the worktree is leased by a provider process of this session that is still starting" };
+      }
+      if (!this.store.transferWorktreeLease(sessionId, ownProvider, cleanupLeaseOwner)) {
+        return { removed: false, reason: "the worktree lease changed hands while cleanup was starting" };
+      }
+      transferredFrom = ownProvider;
     }
     try {
       // Close the local race with a provider launch that acquired its durable lease while this
@@ -1016,6 +1587,9 @@ export class SessionManager {
           context: meta.context,
           dataDir: this.dataDir,
           ownerHash: this.runnerOwnerHash,
+          ...(worktree.pullRequest?.state === "merged" && worktree.pullRequest.headOid
+            ? { verifiedMergedHead: worktree.pullRequest.headOid }
+            : {}),
         },
       );
       if (!result.removed) {
@@ -1054,7 +1628,19 @@ export class SessionManager {
       this.send({ type: "session_runtime_updated", snapshot });
       return { removed: true, snapshot };
     } finally {
-      this.store.releaseWorktreeLease(sessionId, cleanupLeaseOwner);
+      const provider = this.active.get(sessionId);
+      if (transferredFrom && provider?.worktreeLeaseOwner === transferredFrom) {
+        // The provider is still running: give it back its lease. If the hand-back itself fails
+        // (disk error), the lease stays held under the cleanup owner and is tied to the running
+        // provider, so retirement releases it and the provider is never left unprotected.
+        if (!this.store.transferWorktreeLease(sessionId, cleanupLeaseOwner, transferredFrom)) {
+          provider.worktreeLeaseOwner = cleanupLeaseOwner;
+        }
+      } else {
+        // No transfer, or the provider went away during cleanup (its own release was a no-op
+        // because the lease was ours): free the lease so the session can launch again.
+        this.store.releaseWorktreeLease(sessionId, cleanupLeaseOwner);
+      }
     }
   }
 
@@ -1070,6 +1656,44 @@ export class SessionManager {
     });
   }
 
+  /** Give a row that predates `worktreeBranch` the identity it always implied, so the field is read
+   * rather than reconstructed. Rides the worktree reconciliation sweep because that pass already
+   * holds this session's worktree lane — `patchMeta` replaces the whole document, so writing from
+   * outside the lane could drop a concurrent launch's `worktreePath` — and already pays for git per
+   * session, making one porcelain listing marginal.
+   *
+   * It records only what the derivation already claims. Persisting whatever Git reports would bless
+   * a worktree someone switched to another branch and permanently retire the fail-closed check that
+   * catches exactly that, so a divergence is left unrecorded and keeps failing at launch. The guard
+   * is the first line, so the pass costs nothing once a row has converged and nothing at all for
+   * rows written since the field existed. */
+  private async recordLegacyWorktreeBranch(meta: SessionMeta): Promise<void> {
+    if (!meta.worktreePath || meta.worktreeBranch !== undefined) return;
+    const path = meta.worktreePath;
+    let actual: string;
+    try {
+      actual = (await registeredSessionWorktree(meta.repoPath, path, {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+      })).branch;
+    } catch {
+      // Unreachable distro, unmounted volume, pruned worktree: the row simply does not converge
+      // this pass. Leaving the field absent keeps the derivation answering for it.
+      return;
+    }
+    if (actual !== this.expectedWorktreeBranch(meta, path, undefined)) {
+      this.log(`session ${boundedSessionIdForLog(meta.sessionId)} worktree is not on the branch its layout implies; leaving its identity underived`);
+      return;
+    }
+    // Re-read after the git round trip: this lane excludes worktree mutations, but a prompt or
+    // status write from elsewhere can still have replaced the document underneath.
+    const latest = this.store.readMeta(meta.sessionId);
+    if (!latest || latest.worktreeBranch !== undefined ||
+        !latest.worktreePath || !sameWorktreePath(latest.context, latest.worktreePath, path)) return;
+    this.store.patchMeta(meta.sessionId, { worktreeBranch: actual });
+  }
+
   /** Conservative startup/periodic reconciliation. Forge failures retain state, while a durable
    * terminal state is remembered so dirty or active trees can be retried after they become safe. */
   async reconcileWorktreePullRequests(): Promise<void> {
@@ -1081,34 +1705,64 @@ export class SessionManager {
           await this.runWorktreeOperation(candidate.sessionId, async () => {
             let meta = this.store.readMeta(candidate.sessionId);
             if (!meta || !this.sessionCanOpen(candidate.sessionId)) return;
-            const linkedPaths = this.attributedWorktrees(meta)
-              .filter((worktree) => worktree.pullRequest)
+            await this.recordLegacyWorktreeBranch(meta);
+            meta = this.store.readMeta(candidate.sessionId) ?? meta;
+            const candidatePaths = this.attributedWorktrees(meta)
+              .filter((worktree) => worktree.pullRequest || worktree.source !== "attached")
               .map((worktree) => worktree.path);
-            for (const path of linkedPaths) {
+            for (const path of candidatePaths) {
               meta = this.store.readMeta(candidate.sessionId);
               if (!meta) continue;
               const reconciliationContext = meta.context;
-              const worktree = this.attributedWorktrees(meta)
+              let worktree = this.attributedWorktrees(meta)
                 .find((item) => sameWorktreePath(reconciliationContext, item.path, path));
+              if (worktree && !worktree.pullRequest) {
+                await this.discoverUnlinkedMergedWorktree(candidate.sessionId, path);
+                const refreshedMeta = this.store.readMeta(candidate.sessionId);
+                if (!refreshedMeta) continue;
+                meta = refreshedMeta;
+                worktree = this.attributedWorktrees(refreshedMeta)
+                  .find((item) => sameWorktreePath(refreshedMeta.context, item.path, path));
+              }
               if (!worktree?.pullRequest) continue;
               let state = worktree.pullRequest.state;
-              if (state === "open") {
+              const needsMergedHead = worktree.source !== "attached" && state === "merged" &&
+                !/^[a-f0-9]{40,64}$/u.test(worktree.pullRequest.headOid ?? "");
+              if (state === "open" || needsMergedHead) {
                 const verified = await this.resolveWorktreePullRequestState(
                   worktree.path,
                   worktree.pullRequest.url,
-                  { context: meta.context },
+                  { context: meta.context, provider: worktree.pullRequest.provider },
                 );
-                if (!verified || verified === "open") continue;
-                state = verified;
-                const worktrees = this.attributedWorktrees(meta).map((item) => sameWorktreePath(reconciliationContext, item.path, path)
-                  ? { ...item, pullRequest: { ...worktree.pullRequest!, state } }
-                  : item);
-                const updated = this.store.patchMeta(candidate.sessionId, { worktrees });
-                if (!updated) continue;
-                this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+                if (state === "open" && (!verified || verified.state === "open")) continue;
+                if (state === "open" && verified) state = verified.state;
+                const canPersist = verified &&
+                  (!needsMergedHead || (verified.state === "merged" && verified.headOid));
+                if (canPersist) {
+                  const latest = this.store.readMeta(candidate.sessionId);
+                  if (!latest) continue;
+                  const current = this.attributedWorktrees(latest)
+                    .find((item) => sameWorktreePath(latest.context, item.path, path));
+                  if (current?.pullRequest?.url !== worktree.pullRequest.url ||
+                      current.pullRequest.state !== worktree.pullRequest.state) continue;
+                  const worktrees = this.attributedWorktrees(latest).map((item) =>
+                    sameWorktreePath(latest.context, item.path, path)
+                      ? {
+                        ...item,
+                        pullRequest: {
+                          ...current.pullRequest!,
+                          state,
+                          ...(state === "merged" && verified.headOid ? { headOid: verified.headOid } : {}),
+                        },
+                      }
+                      : item);
+                  const updated = this.store.patchMeta(candidate.sessionId, { worktrees });
+                  if (!updated) continue;
+                  this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+                }
               }
               if (state === "merged" || state === "closed") {
-                await this.discardWorktreeLocked(candidate.sessionId, path);
+                await this.discardWorktreeLocked(candidate.sessionId, path, { refreshMergedHead: false });
               }
             }
           });
@@ -1147,6 +1801,7 @@ export class SessionManager {
     sourceId: string,
   ): Promise<SubscriptionUsageProbeAuthorization> {
     const context = agent.context ?? { kind: "native" as const };
+    assertExecutionIsolationContextSupported(this.executionIsolation, context);
     const cwd = context.kind === "wsl"
       ? "/tmp"
       : join(this.stateDir, "subscription-usage-probes", sourceId);
@@ -1174,12 +1829,18 @@ export class SessionManager {
   /** Put metadata-only naming helpers behind the same runner-owned process and provider-HOME
    * boundaries as ordinary sessions. Seatbelt's shared provider store also uses its existing
    * cross-process exclusive admission group; overload fails closed instead of queueing a title. */
+  preflightSessionNamingExecution(agent: AgentDefinition): void {
+    const context = agent.context ?? { kind: "native" as const };
+    assertExecutionIsolationContextSupported(this.executionIsolation, context);
+  }
+
   async prepareSessionNamingExecution(
     agent: AgentDefinition,
     env: Record<string, string>,
     cwd: string,
   ): Promise<SessionNamingExecutionAuthorization> {
     const context = agent.context ?? { kind: "native" as const };
+    this.preflightSessionNamingExecution(agent);
     const driver = agent.driver ?? "acp";
     const taskId = `session-naming:${randomUUID()}`;
     const provider = driver === "claude-code"
@@ -1253,7 +1914,7 @@ export class SessionManager {
       if (stored.status === "stopped") continue;
       const meta = this.discoverOrphanedClaudeWork(stored);
       const automatic = automaticClaudeRecoveryAllowed(meta);
-      if (automatic && meta.orphanedWork && !meta.orphanedWork.recoveryAttemptedAt) {
+      if (automatic && meta.orphanedWork) {
         this.scheduleOrphanRecovery(meta.sessionId);
       } else {
         this.scheduleContextOrphanDiscovery(meta, automatic);
@@ -1274,6 +1935,15 @@ export class SessionManager {
         this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion),
         protocolVersion,
       ));
+  }
+
+  /** Re-publish runner-owned queue holds after reconnect. The notice is deliberately idempotent:
+   * the control plane deduplicates its deterministic request id and retains the existing card. */
+  reportGovernanceTrips(): void {
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "governanceTripReporting")) return;
+    for (const [sessionId, entry] of this.active) {
+      if (entry.governanceTrip) this.reportGovernanceTrip(sessionId, entry);
+    }
   }
 
   /** Pre-negotiation register metadata. History is published only after the peer version is known. */
@@ -1334,6 +2004,120 @@ export class SessionManager {
     );
   }
 
+  /** Recover the newest question that durable history still shows as unresolved. A later user turn
+   * or permission request proves the old question is no longer the active interaction, even when
+   * an older runner failed to append an explicit replacement resolution. */
+  private unresolvedQuestionFromHistory(sessionId: string): {
+    scanned: boolean;
+    question: SessionMeta["pendingApproval"];
+    resolvedQuestionIds: ReadonlySet<string>;
+  } {
+    const resolved = new Set<string>();
+    const tail = this.store.logTailSeqResult(sessionId);
+    if (!tail.ok) return { scanned: false, question: null, resolvedQuestionIds: resolved };
+    const durableTail = tail.seq;
+    if (durableTail === 0) return { scanned: true, question: null, resolvedQuestionIds: resolved };
+    let cursor = durableTail;
+    let logEpoch: number | undefined;
+    let throughSeq: number | undefined;
+    while (cursor > 0) {
+      let span = Math.min(200, cursor);
+      let events: StoredEvent[] | null = null;
+      while (span > 0) {
+        const page = this.store.readEventPage(sessionId, {
+          afterSeq: cursor - span,
+          limit: span,
+          ...(logEpoch === undefined ? {} : { logEpoch, throughSeq: throughSeq! }),
+        });
+        if (!page.ok) return { scanned: false, question: null, resolvedQuestionIds: resolved };
+        if (logEpoch === undefined) {
+          logEpoch = page.page.logEpoch;
+          throughSeq = page.page.throughSeq;
+          if (throughSeq !== cursor) {
+            cursor = throughSeq;
+            break;
+          }
+        }
+        if (page.events.at(-1)?.seq === cursor) {
+          events = page.events;
+          break;
+        }
+        if (span === 1) return { scanned: false, question: null, resolvedQuestionIds: resolved };
+        span = Math.max(1, Math.floor(span / 2));
+      }
+      if (!events) continue;
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const payload = events[index]!.payload;
+        if (payload.kind === "question_resolved") {
+          resolved.add(payload.requestId);
+          continue;
+        }
+        if (payload.kind === "question_request") {
+          // A resolved newer question replaced every older pending question, so once its request
+          // is reached there is nothing earlier that can still be actionable.
+          if (resolved.has(payload.requestId)) {
+            return { scanned: true, question: null, resolvedQuestionIds: resolved };
+          }
+          return {
+            scanned: true,
+            question: {
+              requestId: payload.requestId,
+              recoveryId: `question:${logEpoch}:${events[index]!.seq}`,
+              title: payload.questions[0]?.question ?? "The agent has a question",
+              options: [],
+              kind: "question",
+              questions: payload.questions,
+            },
+            resolvedQuestionIds: resolved,
+          };
+        }
+        if (
+          payload.kind === "user_message" || payload.kind === "agent_message" ||
+          payload.kind === "agent_thought" || payload.kind === "tool_call" ||
+          payload.kind === "permission_request" || payload.kind === "conversation_checkpoint" ||
+          payload.kind === "turn_interrupted"
+        ) return { scanned: true, question: null, resolvedQuestionIds: resolved };
+      }
+      cursor = events[0]!.seq - 1;
+    }
+    return { scanned: true, question: null, resolvedQuestionIds: resolved };
+  }
+
+  /** Reconcile exact concurrent identities against durable events before recovering callbacks.
+   * Pages bound memory even when the owning request is far back in the transcript. */
+  private recoveredWorkerQuestions(sessionId: string, pending: SessionMeta["pendingApproval"]): {
+    requests: ReturnType<typeof pendingRequests>; verified: boolean;
+  } {
+    const requests = new Map(pendingRequests(pending).filter((request) => request.kind === "question")
+      .map((request) => [request.requestId, request]));
+    const expectedIds = new Set(requests.keys());
+    let afterSeq = 0;
+    let generation: { logEpoch: number; throughSeq: number } | undefined;
+    for (;;) {
+      const page = this.store.readEventPage(sessionId, { afterSeq, limit: 200, ...generation });
+      if (!page.ok) return { requests: [...requests.values()], verified: false };
+      generation ??= { logEpoch: page.page.logEpoch, throughSeq: page.page.throughSeq };
+      for (const event of page.events) {
+        if (event.payload.kind === "question_request" && expectedIds.has(event.payload.requestId)) {
+          const payload = event.payload;
+          requests.set(payload.requestId, {
+            requestId: payload.requestId, kind: "question", options: [],
+            questions: payload.questions, title: payload.questions[0]?.question ?? "The agent has a question",
+            ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+            recoveryId: `question:${generation.logEpoch}:${event.seq}`,
+          });
+        }
+        if (event.payload.kind === "question_resolved") requests.delete(event.payload.requestId);
+      }
+      const last = page.events.at(-1)?.seq;
+      if (last == null) return { requests: [...requests.values()], verified: generation.throughSeq === 0 };
+      if (last >= generation.throughSeq) break;
+      if (last <= afterSeq) return { requests: [...requests.values()], verified: false };
+      afterSeq = last;
+    }
+    return { requests: [...requests.values()], verified: true };
+  }
+
   /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
    * snapshots we report are honest — they remain resumable. */
   reconcileStore(): void {
@@ -1383,15 +2167,17 @@ export class SessionManager {
         };
         reconciled = this.store.patchMeta(m.sessionId, pendingTaskIds.length > 0
           ? { backgroundWorkState: "orphaned", pendingBackgroundTaskIds: pendingTaskIds, orphanedWork: marker }
-          : { backgroundWorkState: "resumed", pendingBackgroundTaskIds: [], orphanedWork: undefined }) ?? m;
+          : { backgroundWorkState: undefined, pendingBackgroundTaskIds: [], orphanedWork: undefined }) ?? m;
       } else {
         reconciled = this.discoverOrphanedClaudeWork(m);
       }
       // A durable provider-auth block is authoritative across process restart. Read-only
       // background discovery may still run, but it must not submit an unattended recovery turn.
       reconciled = this.reconcileDeliveredBackgroundContinuations(reconciled);
-      const automatic = !reconciled.providerAuthBlock && automaticClaudeRecoveryAllowed(reconciled);
-      if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork && !reconciled.orphanedWork.recoveryAttemptedAt) {
+      reconciled = this.reconcileMissingBackgroundContinuations(reconciled);
+      const automatic = !reconciled.providerAuthBlock && !reconciled.providerHistoryBlock &&
+        automaticClaudeRecoveryAllowed(reconciled);
+      if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork) {
         this.scheduleOrphanRecovery(m.sessionId);
       } else if (reconciled.status !== "stopped") {
         this.scheduleContextOrphanDiscovery(reconciled, automatic);
@@ -1399,6 +2185,32 @@ export class SessionManager {
       if (reconciled.status !== "stopped" && automatic && this.queuedBackgroundJobIds(reconciled).length) {
         this.scheduleBackgroundContinuation(m.sessionId);
       }
+      const terminal = reconciled.status === "completed" || reconciled.status === "failed" ||
+        reconciled.status === "stopped";
+      let historicalQuestion: SessionMeta["pendingApproval"] = null;
+      let pendingQuestionResolved = false;
+      if (!terminal && !reconciled.providerAuthBlock && !reconciled.pendingApproval &&
+          reconciled.questionRecoveryReconciled !== true) {
+        const recovery = this.unresolvedQuestionFromHistory(m.sessionId);
+        historicalQuestion = recovery.question;
+        if (recovery.scanned) {
+          reconciled = this.store.patchMeta(m.sessionId, { questionRecoveryReconciled: true }) ?? reconciled;
+        }
+      } else if (!terminal && !reconciled.providerAuthBlock &&
+          reconciled.pendingApproval?.kind === "question") {
+        // A crash can land after the resolution event is durable but before its metadata clear.
+        // Prefer that exact durable resolution over the stale pending-card projection.
+        const recovery = this.unresolvedQuestionFromHistory(m.sessionId);
+        pendingQuestionResolved = recovery.resolvedQuestionIds.has(reconciled.pendingApproval.requestId);
+        if (recovery.question?.requestId === reconciled.pendingApproval.requestId) {
+          historicalQuestion = recovery.question;
+        }
+      }
+      const recoverableQuestion = terminal
+        ? null
+        : reconciled.pendingApproval?.kind === "question" && !pendingQuestionResolved
+          ? historicalQuestion ?? reconciled.pendingApproval
+          : historicalQuestion;
       if (reconciled.providerAuthBlock && reconciled.status === "stopped") {
         // Terminal operator intent dominates a stale/incomplete recovery generation.
         this.store.patchMeta(m.sessionId, {
@@ -1412,15 +2224,48 @@ export class SessionManager {
         const block = reconciled.providerAuthBlock.loginOperationId
           ? { ...reconciled.providerAuthBlock, loginOperationId: undefined }
           : reconciled.providerAuthBlock;
-        const projection = this.providerAuthenticationProjection(reconciled, block);
+        const projection = this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId === m.sessionId
+          ? this.providerAuthenticationProjection(reconciled, block)
+          : null;
         this.store.patchMeta(m.sessionId, {
           providerAuthBlock: block,
-          status: "input_required",
+          status: projection ? "input_required" : "idle",
           pendingApproval: projection,
+        });
+      } else if (terminal) {
+        if (reconciled.pendingApproval) this.store.patchMeta(m.sessionId, { pendingApproval: null });
+      } else if (pendingRequests(reconciled.pendingApproval).some((request) => request.ownerToolUseId)) {
+        // The parent conversation's resume coordinate cannot resume an exact child callback.
+        // Preserve child questions for inspection/dismissal, but never offer parent continuation.
+        const recovery = this.recoveredWorkerQuestions(m.sessionId, reconciled.pendingApproval);
+        const recovered = recovery.requests
+          .map(({ additionalRequests: _additional, recoveryAction: _action, ...request }) => ({
+            ...request, recoveryReason: "provider_restart" as const,
+            ...(recovery.verified && !request.ownerToolUseId && canResumeRecoveredQuestion(reconciled, request)
+              ? { recoveryAction: "resume_answer" as const } : {}),
+          }));
+        const [first, ...rest] = recovered;
+        this.store.patchMeta(m.sessionId, {
+          status: first ? "input_required" : "idle",
+          pendingApproval: first ? { ...first, ...(rest.length ? { additionalRequests: rest } : {}) } : null,
+        });
+      } else if (recoverableQuestion) {
+        // A provider response callback cannot survive process loss. Preserve the exact durable
+        // question and request identity as an explicit recovery card instead of making the
+        // transcript claim it is awaiting an answer while the session silently becomes idle.
+        this.store.patchMeta(m.sessionId, {
+          status: "input_required",
+          pendingApproval: {
+            ...recoverableQuestion,
+            recoveryReason: "provider_restart",
+            ...(canResumeRecoveredQuestion(reconciled, recoverableQuestion)
+              ? { recoveryAction: "resume_answer" as const }
+              : {}),
+          },
         });
       } else if (reconciled.status === "starting" || reconciled.status === "running" ||
           reconciled.status === "queued" || reconciled.status === "input_required") {
-        // The process that owned any pending approval is gone — clear the stale card too.
+        // The process that owned any other pending approval is gone — clear the stale card too.
         this.store.patchMeta(m.sessionId, { status: "idle", pendingApproval: null });
       }
       // A crash mid-worktree-setup leaves the pending flag stranded; nothing will resolve it
@@ -1923,6 +2768,24 @@ export class SessionManager {
       return false;
     }
     const context = spec.context ?? { kind: "native" as const };
+    try {
+      this.assertHostIsolationContextSupported({
+        agentId: spec.agentId,
+        command: spec.command,
+        args: spec.args,
+        driver: spec.driver ?? "acp",
+        context,
+        config: spec.config ?? {},
+        executionTarget: spec.executionTarget ?? this.store.readMeta(spec.sessionId)?.executionTarget,
+      });
+    } catch (error) {
+      const message = `execution isolation unavailable: ${errText(error)}`;
+      // A restart rejection must not replace or relabel a still-live provider. New sessions have
+      // no durable row to mutate; their command receipt carries the same precise failure instead.
+      if (this.store.has(spec.sessionId)) this.emitEvent(spec.sessionId, { kind: "error", message });
+      durable?.failed(message, "INVALID_COMMAND");
+      return false;
+    }
     if (this.forking.has(spec.sessionId)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "conversation fork is in progress — wait before restarting" });
       this.emitStatus(spec.sessionId, "idle");
@@ -1936,7 +2799,21 @@ export class SessionManager {
       return false;
     }
     const closing = this.closing.get(spec.sessionId);
-    if (closing) await closing.promise;
+    if (closing) {
+      await closing.promise;
+      if (this.closing.get(spec.sessionId) === closing) {
+        const message = "the previous provider process could not be confirmed stopped";
+        this.emitEvent(spec.sessionId, { kind: "error", message });
+        this.emitStatus(spec.sessionId, "stopped", message);
+        durable?.failed(message, "COMMAND_CANCELLED");
+        return false;
+      }
+    }
+    const rebinding = this.worktreeRebindings.get(spec.sessionId);
+    // Once launch() publishes the replacement entry, an explicit Restart owns cancellation and
+    // retirement directly. Waiting for the encompassing rebind promise could deadlock forever on
+    // a driver initialization promise that ignores disposal.
+    if (rebinding && !this.active.has(spec.sessionId)) await rebinding.promise;
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "session deletion is in progress" });
       this.emitStatus(spec.sessionId, "stopped");
@@ -2069,6 +2946,12 @@ export class SessionManager {
       lastTurnBaseTree: prior?.lastTurnBaseTree,
       turnCount: prior?.turnCount ?? 0,
       forkPoints: prior?.forkPoints ?? {},
+      // A quarantine is a property of the provider conversation, not of this process. Restart
+      // preserves the app-server thread (priorResumeId), so it must preserve the block with it, or
+      // Restart silently becomes a way to resume the poisoned thread and fail again. A restart that
+      // does NOT carry the thread forward starts a clean conversation and correctly drops it.
+      providerHistoryBlock: priorResumeId ? prior?.providerHistoryBlock : undefined,
+      providerHistoryRecoveryOf: priorResumeId ? prior?.providerHistoryRecoveryOf : undefined,
       checkpointWorktreeIds: prior?.checkpointWorktreeIds,
       // Sessions (re)started on this build never carry the old add -A residue forward — and the
       // flag stops the startup migration from ever clearing a user's deliberate staging.
@@ -2150,7 +3033,7 @@ export class SessionManager {
           ownerHash: this.runnerOwnerHash,
           ...(context.kind === "wsl" && prior?.context.kind === "wsl" &&
             prior.context.distro === context.distro && prior.worktreePath &&
-            prior.worktreePath.includes("/.agent-manager/worktrees/")
+            isLegacyWslSessionWorktreePath(prior.worktreePath, repoPath, spec.sessionId)
             ? { legacyWslWorktreePath: prior.worktreePath }
             : {}),
         };
@@ -2409,8 +3292,14 @@ export class SessionManager {
         durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
         return false;
       }
+      // A verification refusal proves the opposite of ownership: the path is missing, unregistered,
+      // or now holds a different branch, so it may hold work this launch never made. Materialization
+      // already opened it to the Native TUI, shells, and Files. Retain it and leave the selection
+      // pointing at it, so the reported error is about a tree the user can still inspect.
+      const unverified = this.worktreeVerificationRefusals.get(spec.sessionId) === launchGeneration;
+      this.worktreeVerificationRefusals.delete(spec.sessionId);
       // The session never started; if WE just created its worktree, it's garbage — reap it.
-      if (worktree && worktreeOwnedByLaunch && !deleted) {
+      if (worktree && worktreeOwnedByLaunch && !deleted && !unverified) {
         const cleanup = launchWorktreeCleanup();
         this.cleanupJournal.add(cleanup);
         this.store.patchMeta(spec.sessionId, { worktreePath: null });
@@ -2451,6 +3340,7 @@ export class SessionManager {
 
   private beginLaunchGeneration(sessionId: string): number {
     this.cancelWorktreePreparationWait(sessionId);
+    this.worktreeVerificationRefusals.delete(sessionId);
     const generation = ++this.nextLaunchGeneration;
     this.launchGenerations.set(sessionId, generation);
     this.latestLaunchGenerations.set(sessionId, generation);
@@ -2599,6 +3489,11 @@ export class SessionManager {
       !this.store.isDeleted(sessionId) && this.store.has(sessionId);
   }
 
+  /** A completed replacement must still invalidate asynchronous TUI launch preparation. */
+  agentTuiLaunchEpoch(sessionId: string): number {
+    return this.latestLaunchGenerations.get(sessionId) ?? 0;
+  }
+
   private acquireAdmission(sessionId: string): Promise<boolean> {
     if (this.admitted.has(sessionId)) return Promise.resolve(true);
     // A restarted start command supersedes an older not-yet-admitted request for this session.
@@ -2606,19 +3501,33 @@ export class SessionManager {
     const request = this.admissionRequest(sessionId);
     if (this.admissionQueue.length === 0 && this.boxAdmission.acquire(request)) {
       this.admitted.add(sessionId);
+      this.admissionWaitReasons.delete(sessionId);
+      this.reportCapacity();
       return Promise.resolve(true);
     }
-    const used = this.boxAdmission.usedCapacity();
-    const quota = request.agentLimit ? `; ${request.agentId} limit ${request.agentLimit}` : "";
-    const targetQuota = request.targetLimit ? `; target limit ${request.targetLimit}` : "";
-    this.emitStatus(
-      sessionId,
-      "queued",
-      `Waiting for runner capacity (${used}/${this.maxConcurrentSessions} units active; weight ${request.weight}${quota}${targetQuota})`,
-    );
     const waiting = new Promise<boolean>((resolve) => this.admissionQueue.push({ request, bypasses: 0, resolve }));
+    this.emitAdmissionWait(request);
     this.drainAdmissionQueue();
     return waiting;
+  }
+
+  private emitAdmissionWait(request: AdmissionRequest): void {
+    const blocker = this.capacityBlocker(request);
+    const serialized = JSON.stringify(blocker);
+    if (this.admissionWaitReasons.get(request.sessionId) === serialized) return;
+    this.admissionWaitReasons.set(request.sessionId, serialized);
+    this.emitStatus(request.sessionId, "queued", blocker.description, undefined, blocker);
+  }
+
+  private capacityBlocker(request: AdmissionRequest): RunnerCapacityBlocker {
+    return this.boxAdmission.blocker(request) ?? {
+      kind: "queue_order",
+      description: "Waiting behind older capacity requests",
+      usedUnits: this.boxAdmission.usedCapacity(),
+      limitUnits: this.maxConcurrentSessions,
+      requiredUnits: request.weight,
+      agentId: request.agentId,
+    };
   }
 
   private cancelAdmissionWait(sessionId: string): boolean {
@@ -2626,10 +3535,12 @@ export class SessionManager {
     if (index < 0) return false;
     const [entry] = this.admissionQueue.splice(index, 1);
     entry?.resolve(false);
+    this.admissionWaitReasons.delete(sessionId);
     if (this.admissionQueue.length === 0 && this.admissionRetryTimer) {
       clearTimeout(this.admissionRetryTimer);
       this.admissionRetryTimer = null;
     }
+    this.reportCapacity();
     return true;
   }
 
@@ -2652,6 +3563,7 @@ export class SessionManager {
         const meta = this.store.readMeta(sessionId);
         if (!meta || meta.status === "stopped") {
           this.admissionQueue.splice(index, 1);
+          this.admissionWaitReasons.delete(sessionId);
           next.resolve(false);
           continue;
         }
@@ -2660,6 +3572,7 @@ export class SessionManager {
           continue;
         }
         this.admissionQueue.splice(index, 1);
+        this.admissionWaitReasons.delete(sessionId);
         for (let prior = 0; prior < index; prior++) this.admissionQueue[prior]!.bypasses++;
         this.admitted.add(sessionId);
         next.resolve(true);
@@ -2667,6 +3580,8 @@ export class SessionManager {
         break;
       }
     }
+    for (const waiting of this.admissionQueue) this.emitAdmissionWait(waiting.request);
+    this.reportCapacity();
     if (this.admissionQueue.length > 0) this.scheduleAdmissionRetry();
   }
 
@@ -2718,8 +3633,12 @@ export class SessionManager {
     launchGeneration?: number,
   ): Promise<void> {
     if (this.executionIsolation.mode !== "bwrap") return;
+    this.assertHostIsolationContextSupported(meta);
     const expectedVersion = meta.context.kind === "wsl" ? 3 : 2;
     if (meta.providerStateVersion === expectedVersion) return;
+    if (meta.context.kind === "wsl") {
+      throw new Error("legacy Direct WSL provider state requires an explicit offline fd-safe migration before launch");
+    }
     // Native v2 already uses the session-owned provider HOME layout. Never stamp it with the WSL
     // v3 marker: an origin/main rollback treats every non-v2 row as legacy and would copy retained
     // shared bytes back over the session partition. A native v3 row may exist from an interrupted
@@ -2776,6 +3695,136 @@ export class SessionManager {
     }
   }
 
+  /** Re-prove a persisted worktree coordinate: still registered with this session's repository,
+   * still healthy, still inside the permitted boundary, and still on `branch` when the session
+   * recorded one. Returns the reason it failed, or null when the path is exactly what was recorded.
+   *
+   * Every execution target is checked, not only `host`: container targets bind-mount this same
+   * host directory into the guest and cloud targets snapshot it, so a path that disappeared or was
+   * recreated locally is a wrong-bytes problem there too, not a remote-only concern.
+   *
+   * `branch` is the session's recorded `worktreeBranch`, absent only on a row that predates the
+   * field. Such a row still implies an identity — the runner's own deterministic name for this
+   * session's worktree — so it is derived rather than skipped, exactly as `attributedWorktrees()`
+   * and safe discard already derive it. The derivation mirrors `createWorktree` exactly, including
+   * which root the path came from, so it names one branch and not a set: accepting the owner-hash
+   * form for a plain path (or the reverse) would let an operator switch a legacy worktree between
+   * the two and launch against the wrong bytes. Anything else fails closed. */
+  private async persistedWorktreeFailure(
+    meta: SessionMeta,
+    path: string,
+    branch: string | undefined,
+  ): Promise<string | null> {
+    try {
+      const verified = await attachRequestedWorktree(meta.repoPath, meta.sessionId, path, {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+        // This exact coordinate was already located and validated by the create/attach operation
+        // that persisted it, so it is not new caller input. Git registration with this repository,
+        // worktree health, and branch identity are all still re-proved.
+        allowedProjectPaths: [path],
+      });
+      return this.worktreeBranchMismatch(meta, path, branch, verified.branch);
+    } catch (error) {
+      return errText(error);
+    }
+  }
+
+  /** The identity a session recorded for the worktree at `path`, or the one its layout implies when
+   * the row predates `worktreeBranch`. Shared so every caller refuses the same drift. */
+  private expectedWorktreeBranch(meta: SessionMeta, path: string, branch: string | undefined): string {
+    return branch ?? sessionWorktreeBranch(meta.sessionId, path, meta.context, this.runnerOwnerHash);
+  }
+
+  private worktreeBranchMismatch(
+    meta: SessionMeta,
+    path: string,
+    branch: string | undefined,
+    actual: string,
+  ): string | null {
+    const expected = this.expectedWorktreeBranch(meta, path, branch);
+    return actual === expected ? null : `it is now on branch ${actual} instead of ${expected}`;
+  }
+
+  /** Re-prove the root a session's shells, Native TUI, and Files browser are about to use. Unlike
+   * the launch check this skips the Project Locations boundary — the coordinate is the session's own
+   * persisted selection, already located by the create/attach that stored it — which also keeps the
+   * boundary's `mkdir` off a read path that a user can trigger by opening a directory. Returns the
+   * reason the root is unusable, or null.
+   *
+   * A positive proof is briefly memoized against the exact identity it proved. These callers are
+   * interactive and overlapping — reference search fires on each typing pause without cancelling
+   * the request already in flight, and the file browser deliberately tolerates fast navigation — so
+   * verifying every one of them would put two subprocesses, and under WSL two `wsl.exe` launches,
+   * behind each keystroke burst. Keying the memo on the path and branch means any selection this
+   * runner makes misses it immediately; only a change made outside Wollipog waits out the window,
+   * and that window is far shorter than the gap between proving a root and using it. Failures are
+   * never memoized, so a repaired worktree recovers on the next request. */
+  async sessionWorktreeRootFailure(meta: SessionMeta): Promise<string | null> {
+    if (!meta.worktreePath) return null;
+    const identity = `${meta.worktreePath}\u0000${meta.worktreeBranch ?? ""}`;
+    const proven = this.verifiedWorktreeRoots.get(meta.sessionId);
+    if (proven?.identity === identity && Date.now() - proven.at < VERIFIED_WORKTREE_ROOT_MS) return null;
+    // A memo of finished proofs alone would miss the case that motivated it: these requests overlap,
+    // so a burst can arrive entirely before the first proof returns, and each caller would start its
+    // own. Share the proof already in flight for the same identity instead.
+    const running = this.provingWorktreeRoots.get(meta.sessionId);
+    if (running?.identity === identity) return running.proof;
+    const entry = { identity, proof: this.proveWorktreeRoot(meta, identity) };
+    this.provingWorktreeRoots.set(meta.sessionId, entry);
+    try {
+      return await entry.proof;
+    } finally {
+      if (this.provingWorktreeRoots.get(meta.sessionId) === entry) {
+        this.provingWorktreeRoots.delete(meta.sessionId);
+      }
+    }
+  }
+
+  private async proveWorktreeRoot(meta: SessionMeta, identity: string): Promise<string | null> {
+    const path = meta.worktreePath!;
+    try {
+      const verified = await this.proveRegisteredWorktree(meta.repoPath, path, {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+      });
+      const mismatch = this.worktreeBranchMismatch(meta, path, meta.worktreeBranch, verified.branch);
+      if (!mismatch) this.verifiedWorktreeRoots.set(meta.sessionId, { identity, at: Date.now() });
+      return mismatch;
+    } catch (error) {
+      return errText(error);
+    }
+  }
+
+  /** Re-prove the persisted worktree selection immediately before provider construction. A refusal
+   * fails only this session and never falls back to the primary workspace; it happens before the
+   * worktree lease, the provider-home lease, and driver construction, so the caller's ordinary
+   * `!launched` unwind settles admission, the session lock, and any durable prompt lifecycle. */
+  private async verifySelectedWorktreeBeforeLaunch(
+    meta: SessionMeta,
+    worktree: WorktreeHandle,
+    launchGeneration: number,
+  ): Promise<boolean> {
+    const detail = await this.persistedWorktreeFailure(meta, worktree.path, meta.worktreeBranch);
+    if (!detail) return true;
+    // Whatever now occupies that path is not provably this launch's own materialization, so the
+    // initial-start cleanup must not force-remove it. Record the refusal before reporting: a stop
+    // arriving in the window below still has to reach the retention decision.
+    this.worktreeVerificationRefusals.set(meta.sessionId, launchGeneration);
+    // Verification awaits Git. A restart or stop can take the session over inside that window, and
+    // the replacement may legitimately own this same worktree — report only while this launch is
+    // still the live one, exactly as the rest of the launch path does after every await.
+    if (!this.launchIsCurrent(meta.sessionId, launchGeneration) ||
+        this.store.readMeta(meta.sessionId)?.status === "stopped") return false;
+    const message = `the selected worktree could not be verified before provider launch: ${detail}` +
+      ` — restore ${worktree.path} or select another worktree for this session`;
+    this.emitEvent(meta.sessionId, { kind: "error", message });
+    this.emitStatus(meta.sessionId, "failed", message);
+    return false;
+  }
+
   private async launch(meta: SessionMeta, resumeId: string | undefined, launchGeneration: number): Promise<boolean> {
     const launchStarted = Date.now();
     const sessionId = meta.sessionId;
@@ -2783,7 +3832,7 @@ export class SessionManager {
     this.revokeSessionCommandAuthority(sessionId);
     const hadCloudHandoffBeforeLaunch = !!meta.cloudAdapterHandoffKey;
     this.emitStatus(sessionId, "starting");
-    const cwd = meta.worktreePath ?? meta.repoPath;
+    let cwd = meta.worktreePath ?? meta.repoPath;
     const worktree: WorktreeHandle | null = meta.worktreePath
       ? { path: meta.worktreePath, branch: meta.worktreeBranch ?? `agent/${sessionId}` }
       : null;
@@ -2791,6 +3840,21 @@ export class SessionManager {
     let isolation: SpawnIsolation | undefined;
     let launchPreparation: void | SessionLaunchPreparation;
     try {
+      // This must precede discovery, authentication, provider-state migration, and worktree-boundary
+      // preparation. Unsupported contexts fail without touching target-local paths or providers.
+      this.assertHostIsolationContextSupported(meta);
+      // Every launch that carries a persisted worktree re-proves it here, immediately before any
+      // discovery, isolation binding, lease, or provider process exists. start() validates its own
+      // prior selection earlier, and worktree rebind validates the replacement it is about to
+      // launch into, but resume and queued app-server recovery previously trusted the stored
+      // worktreePath outright — so a tree removed between turns (a raw `git worktree remove`, an
+      // operator cleanup, a `git worktree move`) reached the provider spawn boundary as a missing
+      // working directory.
+      if (worktree &&
+          !(await this.verifySelectedWorktreeBeforeLaunch(meta, worktree, launchGeneration))) return false;
+      if (meta.config.permissionMode === "orchestrator") {
+        cwd = await this.prepareOrchestratorScratch(meta);
+      }
       const priorCapabilities = meta.capabilities;
       const priorSessionSlashCommands = meta.sessionSlashCommands;
       launchPreparation = await this.prepareLaunch?.(meta);
@@ -2798,6 +3862,14 @@ export class SessionManager {
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+      if (meta.config.permissionMode === "orchestrator") {
+        meta.env = {
+          ...meta.env,
+          ...(meta.context.kind === "native" && process.platform === "win32"
+            ? { TEMP: cwd, TMP: cwd }
+            : { TMPDIR: cwd }),
+        };
+      }
       if (sameSlashCommandCatalog(priorSessionSlashCommands, meta.sessionSlashCommands)) {
         meta.sessionSlashCommands = priorSessionSlashCommands;
       }
@@ -2819,6 +3891,7 @@ export class SessionManager {
         await this.ensureProviderStateLayout(meta, launchGeneration);
       }
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
+      if (isolation?.backend === "wsl-bwrap") cwd = isolation.cwd;
       if (!this.launchIsCurrent(sessionId, launchGeneration)) {
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during isolation setup", launchGeneration);
         return false;
@@ -2858,9 +3931,10 @@ export class SessionManager {
         meta.driver,
         { command: meta.command, args: meta.args, cwd, env: meta.env, config: meta.config, context: meta.context, capabilities: meta.capabilities, resumeId, acpSessionContext: meta.acpSessionContext, isolation, sessionStateDir: this.store.sessionPath(sessionId), initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds },
         {
+        supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
         onEvent: (p) => this.onDriverEvent(sessionId, p),
         onStderr: (t) => this.onDriverStderr(sessionId, t),
-        onExit: (code) => this.onDriverExit(sessionId, code),
+        onExit: (code) => this.onDriverExit(sessionId, code, client),
         onBackgroundWork: (update) => {
           // A retiring driver may emit an exit/null callback after a replacement owns the session.
           if (this.active.get(sessionId)?.client !== client) return;
@@ -2868,9 +3942,15 @@ export class SessionManager {
         },
         onPromptAccepted: () => {
           const live = this.active.get(sessionId);
-          if (live?.client !== client || !live.currentBackgroundJobIds?.length) return;
+          if (live?.client !== client) return;
+          const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
+          if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
+          if (!live.currentBackgroundJobIds?.length) return;
           live.backgroundPromptAccepted = true;
           this.markBackgroundContinuationAccepted(sessionId, live.currentBackgroundJobIds);
+        },
+        onProviderInitiatedTurn: (state, turnId) => {
+          this.onProviderInitiatedTurn(sessionId, client, state, turnId);
         },
         onSessionEstablished: (providerSessionId) => {
           const live = this.active.get(sessionId);
@@ -2886,16 +3966,33 @@ export class SessionManager {
           if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
           this.onProviderAuthenticationFailure(sessionId, meta);
         },
+        onProviderHistoryUnrecoverable: (detail) => {
+          const live = this.active.get(sessionId);
+          if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
+          this.quarantineProviderHistory(sessionId, detail);
+        },
+        onUnclassifiedProviderRejection: (shape) => {
+          // Recorded for every live generation: an observation is not a session action, and
+          // dropping it because a replacement launched would lose exactly the rare evidence this
+          // journal exists to collect.
+          this.unclassifiedRejections.record(meta.driver, shape);
+        },
         onSubscriptionUsage: (update) => {
           if (meta.agentId) {
             this.onSubscriptionUsageUpdate?.(meta.agentId, meta.driver, meta.context, update);
           }
+        },
+        onSteeringTurnChanged: () => {
+          const live = this.active.get(sessionId);
+          if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
+          this.emitQueue(sessionId);
         },
         onSteeringAvailability: (available) => {
           const live = this.active.get(sessionId);
           if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
           if (live.steeringAvailable === available) return;
           live.steeringAvailable = available;
+          this.emitQueue(sessionId);
           const current = this.store.readMeta(sessionId);
           if (current) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(current) });
         },
@@ -2910,8 +4007,9 @@ export class SessionManager {
           if (this.active.get(sessionId)?.client !== client) return;
           const current = this.store.readMeta(sessionId);
           if (!current) return;
+          const preserved = preserveAcpOrchestratorSessionState(current.config, state);
           const capabilities = {
-            ...state.capabilities,
+            ...preserved.capabilities,
             slashCommands: state.capabilities.slashCommands.map((command) => ({
               name: command.name,
               source: command.source,
@@ -2931,12 +4029,7 @@ export class SessionManager {
           }
           this.store.patchMeta(sessionId, {
             capabilities,
-            config: {
-              ...current.config,
-              model: state.config.model,
-              effort: state.config.effort,
-              permissionMode: state.config.permissionMode,
-            },
+            config: preserved.config,
           });
           const updated = this.store.readMeta(sessionId);
           if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
@@ -2945,7 +4038,7 @@ export class SessionManager {
           const current = this.store.readMeta(sessionId);
           if (!current) return;
           this.store.patchMeta(sessionId, {
-            contextTokensUsed: usage.contextTokensUsed,
+            ...(usage.contextTokensUsed != null ? { contextTokensUsed: usage.contextTokensUsed } : {}),
             contextWindow: usage.contextWindow,
             ...(usage.costUsd != null ? { costUsd: Math.max(current.costUsd, usage.costUsd) } : {}),
           });
@@ -2969,6 +4062,15 @@ export class SessionManager {
           const current = this.store.readMeta(sessionId);
           if (!current || current.resolvedModel === model) return;
           this.store.patchMeta(sessionId, { resolvedModel: model });
+          const updated = this.store.readMeta(sessionId);
+          if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        },
+        onServiceTierResolved: (serviceTier) => {
+          const current = this.store.readMeta(sessionId);
+          if (!current || (current.config.serviceTier ?? null) === serviceTier) return;
+          this.store.patchMeta(sessionId, {
+            config: { ...current.config, serviceTier: serviceTier ?? undefined },
+          });
           const updated = this.store.readMeta(sessionId);
           if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
         },
@@ -3000,12 +4102,14 @@ export class SessionManager {
       worktree,
       worktreeLeaseOwner,
       context: meta.context,
+      ...(isolation?.backend === "seatbelt" ? { seatbeltWritableRoots: [...isolation.writableRoots] } : {}),
       status: "starting",
       providerReady: false,
       running: false,
       queue: [],
       permissionOptionKinds: new Map(),
       ...(meta.providerAuthBlock ? { authenticationBlocked: true } : {}),
+      ...(meta.providerHistoryBlock ? { historyQuarantined: true } : {}),
       steerFenceIds: new Set(
         [...retainedPromotions.values()]
           .filter((operation) => !operation.settled)
@@ -3022,6 +4126,9 @@ export class SessionManager {
             ),
           }
         : {}),
+      ...(meta.driver === "claude-code"
+        ? { policyHookToolCallIds: new Set(), policyHookDecisionEvents: new Map() }
+        : {}),
     };
     for (const operation of retainedPromotions.values()) {
       if (operation.settled) continue;
@@ -3036,6 +4143,10 @@ export class SessionManager {
       operation.fenceEntry = entry;
       operation.fenceInstalled = true;
     }
+    // A replacement process inherits the hold its predecessor was under. The marker itself stays
+    // until the recovered queue is consumed or the control plane releases it, so a failed
+    // initialization cannot strand a still-held recovery queue.
+    if (this.recoveryHolds.has(sessionId)) entry.controlPlaneHold = true;
     this.active.set(sessionId, entry);
     this.send({ type: "process_status", sessionId, processStatus: "running", pid: client.pid });
 
@@ -3174,24 +4285,71 @@ export class SessionManager {
     if (meta.executionTarget?.adapter === "cloud") {
       return this.prepareCloudIsolation(meta, cwd, launchGeneration);
     }
+    this.assertHostIsolationContextSupported(meta);
     return this.requestedWorktreeIsolation(meta).then((additionalWritableRoots) => this.resolveIsolation(this.executionIsolation, meta.context, {}, {
       driver: meta.driver,
       dataDir: this.stateDir,
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
+      ...(meta.config.permissionMode === "orchestrator" ? { orchestratorScratchOnly: true } : {}),
       ...(additionalWritableRoots.length ? { additionalWritableRoots } : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
   }
 
+  private assertHostIsolationContextSupported(
+    meta: Pick<SessionMeta, "agentId" | "command" | "args" | "driver" | "context" | "config" | "executionTarget">,
+  ): void {
+    if (meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return;
+    if (meta.context.kind === "native" && meta.config.permissionMode === "orchestrator" &&
+        !supportsNativeOrchestratorBoundary(meta.driver, process.platform, this.executionIsolation.mode)) {
+      throw new Error("Orchestrator launch requires an attested native filesystem boundary for this harness");
+    }
+    if (meta.context.kind === "wsl" && meta.config.permissionMode === "orchestrator") {
+      if (this.executionIsolation.mode === "bwrap" && this.authorizeSafeWslLaunch?.(meta) === true) return;
+      throw new Error("Direct WSL Orchestrator requires the freshly attested target-local bwrap launcher");
+    }
+    assertExecutionIsolationContextSupported(this.executionIsolation, meta.context);
+  }
+
   private async requestedWorktreeIsolation(meta: SessionMeta): Promise<string[]> {
+    if (meta.config.permissionMode === "orchestrator") return [];
     if (this.executionIsolation.mode !== "bwrap" && this.executionIsolation.mode !== "seatbelt") return [];
-    return [await requestedWorktreeBoundary(meta.repoPath, meta.sessionId, {
+    // Direct WSL orchestration creates child worktrees through the runner; the provider never
+    // needs the future requested-worktree boundary writable. Computing that legacy boundary would
+    // itself reopen a mutable WSL HOME pathname before the target-local launcher can hold it.
+    if (meta.context.kind === "wsl") return [];
+    const boundary = await requestedWorktreeBoundary(meta.repoPath, meta.sessionId, {
       context: meta.context,
       dataDir: this.dataDir,
       ownerHash: this.runnerOwnerHash,
-    }, false)];
+    }, false);
+    // An attached worktree is registered by this session's repository but may live anywhere, so
+    // the runner-owned boundary does not contain it. Bind the selected one explicitly: the sandbox
+    // cannot gain the mount later, which is exactly what attach reports as "next launch".
+    const selected = meta.worktreePath;
+    return selected && !pathWithin(meta.context, selected, boundary)
+      ? [boundary, selected]
+      : [boundary];
+  }
+
+  /** A stable session-private cwd gives planning tools somewhere to write without making any
+   * Project Location writable. Native storage lives under the session row and is removed by
+   * SessionStore.remove; Direct WSL uses the launcher's root-owned per-session partition. */
+  async prepareOrchestratorScratch(meta: SessionMeta): Promise<string> {
+    if (meta.config.permissionMode !== "orchestrator") return meta.worktreePath ?? meta.repoPath;
+    if (meta.context.kind === "wsl") {
+      if (!this.runnerOwnerHash) throw new Error("Direct WSL Orchestrator scratch requires an attested runner owner");
+      return `${wslBwrapSessionRoot(this.runnerOwnerHash, providerStateKey(meta.sessionId))}/scratch`;
+    }
+    const scratch = join(this.store.sessionPath(meta.sessionId), "orchestrator-scratch");
+    await mkdir(scratch, { recursive: true, mode: 0o700 });
+    if (!this.store.has(meta.sessionId)) {
+      await rm(this.store.sessionPath(meta.sessionId), { recursive: true, force: true });
+      throw new Error("session disappeared while Orchestrator scratch was being prepared");
+    }
+    return scratch;
   }
 
   private async prepareCloudIsolation(
@@ -3348,6 +4506,7 @@ export class SessionManager {
       return { ok: false, error: errText(error) };
     } finally {
       this.loggingOut.delete(sessionId);
+      this.resumeDeferredWorktreeRebind(sessionId);
     }
   }
 
@@ -3491,9 +4650,12 @@ export class SessionManager {
     reservedOrdinal?: number,
     queueBeforeLaunch = false,
     backgroundJobIds?: string[],
+    recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
-      event.payload.kind === "user_message" && event.payload.commandId === durable.commandId)) {
+      recoveredQuestion
+        ? event.payload.kind === "question_resolved" && event.payload.commandId === durable.commandId
+        : event.payload.kind === "user_message" && event.payload.commandId === durable.commandId)) {
       // The correlated turn marker is written and fsynced before `started`. If a journal write
       // failed at that boundary, replaying could submit the provider turn twice. Fail visibly into
       // uncertainty; an operator can inspect the exact command-tagged event before deciding.
@@ -3501,14 +4663,24 @@ export class SessionManager {
       return false;
     }
     const effectiveConfig = this.snapshotQueuedConfig(sessionId, config);
+    const rebindGeneration = this.launchGenerations.get(sessionId);
+    // A normal rebind exposes its generation-owned pre-launch FIFO so prompts remain accepted.
+    // Stop/cancel deliberately invalidate that generation; until the retiring provider settles,
+    // reject a raced prompt instead of resuming alongside it through the generic inactive path.
+    const stoppedRebindInProgress = this.worktreeRebindings.has(sessionId) &&
+      (rebindGeneration === undefined ||
+        this.preLaunchAdmissionGenerations.get(sessionId) !== rebindGeneration);
+    const closing = this.closing.get(sessionId);
+    const providerCloseBlocksPrompt = !!closing && !closing.acceptPromptsDuringHandoff;
     // A prompt during a file rewind would snapshot (and run the agent over) a half-restored
     // tree — the reentrant store lock can't fence this same-process race, the set does.
     if (
       this.rewinding.has(sessionId) ||
       this.forking.has(sessionId) ||
       this.loggingOut.has(sessionId) ||
-      this.closing.has(sessionId) ||
-      this.deleting.has(sessionId)
+      providerCloseBlocksPrompt ||
+      this.deleting.has(sessionId) ||
+      stoppedRebindInProgress
     ) {
       const operation = this.rewinding.has(sessionId)
         ? "rewind"
@@ -3516,14 +4688,42 @@ export class SessionManager {
           ? "conversation fork"
           : this.loggingOut.has(sessionId)
             ? "agent sign-out"
-            : this.closing.has(sessionId)
+            : providerCloseBlocksPrompt
               ? "provider session close"
-              : "session deletion";
+              : this.deleting.has(sessionId)
+                ? "session deletion"
+                : "worktree rebind shutdown";
       this.emitEvent(sessionId, { kind: "error", message: `a ${operation} is in progress — retry in a moment` });
-      if (this.closing.has(sessionId) || this.deleting.has(sessionId)) {
+      if (providerCloseBlocksPrompt || this.deleting.has(sessionId) || stoppedRebindInProgress) {
         this.emitStatus(sessionId, this.store.readMeta(sessionId)?.status ?? "stopped");
       }
       durable?.failed(`a ${operation} is in progress`, "COMMAND_CANCELLED");
+      return false;
+    }
+    // A quarantined provider conversation rejects every submission before inference, including an
+    // automatic continuation and `/compact`. Refuse before anything else in this method, so a turn
+    // that is never delivered also leaves none of a delivered turn's traces: no retitle, no
+    // adoption authorization, no user event. Retain the attempt so its text is not lost.
+    const quarantined = this.store.readMeta(sessionId);
+    if (quarantined?.providerHistoryBlock) {
+      if (!syntheticRecovery && !quarantined.providerHistoryBlock.retry) {
+        this.store.patchMeta(sessionId, {
+          providerHistoryBlock: {
+            ...quarantined.providerHistoryBlock,
+            retry: {
+              text,
+              images,
+              ...(slashCommand ? { slashCommand } : {}),
+              ...(config ? { config } : {}),
+            },
+          },
+        });
+        // The retained draft is the proof that the turn was preserved instead of delivered.
+        this.store.flush(sessionId);
+      }
+      this.emitEvent(sessionId, { kind: "error", message: PROVIDER_HISTORY_QUARANTINE_GUIDANCE });
+      this.emitStatus(sessionId, quarantined.status === "stopped" ? "stopped" : "idle");
+      durable?.failed(PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
       return false;
     }
     if (!syntheticRecovery) {
@@ -3535,7 +4735,7 @@ export class SessionManager {
     // The first real message names an untitled session (Codex-style). meta.title is the source of
     // truth (snapshots carry it to the control plane), so set it here; the CP also derives the same
     // title live from the user_message event for immediacy.
-    if (!syntheticRecovery && !slashCommand && text.trim()) {
+    if (!syntheticRecovery && !recoveredQuestion && !slashCommand && text.trim()) {
       const meta = this.store.readMeta(sessionId);
       if (
         meta &&
@@ -3552,12 +4752,13 @@ export class SessionManager {
     const projectedAuthenticationBlock = isProviderAuthenticationBlock(persistedMeta?.pendingApproval);
     if ((durableAuthenticationBlock || projectedAuthenticationBlock) && syntheticRecovery) return false;
     if (durableAuthenticationBlock && this.providerAuthRecovery && !syntheticRecovery) {
+      const guidance = this.blockedPromptAuthenticationGuidance(persistedMeta!);
       this.emitEvent(sessionId, {
         kind: "stderr",
-        text: "Authentication is still blocked. Use Recheck Authentication after signing in in the exact provider context.",
+        text: guidance,
       });
       this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-      durable?.failed("provider authentication must be revalidated before retry", "PROVIDER_AUTHENTICATION_REQUIRED");
+      durable?.failed(guidance, "PROVIDER_AUTHENTICATION_REQUIRED");
       return false;
     }
     // Adapters without an exact-context status probe receive the bounded legacy projection only.
@@ -3582,7 +4783,7 @@ export class SessionManager {
         text,
         images,
         slashCommand,
-        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
+        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
       });
       if (!this.recoveryLaunching.has(sessionId)) {
         setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
@@ -3603,7 +4804,7 @@ export class SessionManager {
       durable?.queued();
       this.insertQueuedPrompt(sessionId, queue, {
         id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
-        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
+        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
       });
       this.preLaunchQueues.set(sessionId, queue);
       this.emitQueue(sessionId);
@@ -3623,6 +4824,7 @@ export class SessionManager {
         ordinal,
         queueBeforeLaunch,
         backgroundJobIds,
+        recoveredQuestion,
       ).catch((error) => {
         // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
         // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
@@ -3656,12 +4858,6 @@ export class SessionManager {
     }
     if (entry.authenticationBlocked && !syntheticRecovery) entry.authenticationBlocked = false;
     if (projectedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
-    // Only a user-originated prompt is the explicit resume signal. It may arrive while the
-    // cancelled provider turn is still settling; clearing the hold now lets the current drain
-    // continue into the preserved FIFO as soon as that turn returns.
-    if (entry.holdQueuedPromptsAfterInterrupt && !syntheticRecovery) {
-      this.setInterruptQueueHold(sessionId, entry, false);
-    }
     // Config rides the queue ENTRY (applied when it dequeues in drain()) rather than being
     // applied now: with prompts B(config X) and C(config Y) queued, B must run under X, not Y.
     durable?.queued();
@@ -3671,7 +4867,7 @@ export class SessionManager {
       text,
       images,
       slashCommand,
-      config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
+      config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
     });
     this.emitQueue(sessionId);
     this.scheduleDrain(sessionId);
@@ -3726,6 +4922,12 @@ export class SessionManager {
       lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
       return false;
     }
+    // `/compact` reaches the provider through this lane. Compaction is inference over the stored
+    // history, so a quarantined conversation rejects it exactly like an ordinary prompt.
+    if (entry.historyQuarantined) {
+      lifecycle.failed(PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
+      return false;
+    }
     if (entry.historyIntegrityFailure) {
       lifecycle.failed(entry.historyIntegrityFailure, "INVALID_COMMAND");
       return false;
@@ -3750,10 +4952,6 @@ export class SessionManager {
       lifecycle.failed("session command queue is full", "QUEUE_FULL");
       return false;
     }
-    if (entry.holdQueuedPromptsAfterInterrupt) {
-      this.setInterruptQueueHold(message.sessionId, entry, false);
-    }
-
     lifecycle.queued();
     this.insertQueuedPrompt(message.sessionId, entry.queue, {
       id: randomUUID(),
@@ -3979,7 +5177,7 @@ export class SessionManager {
     if (entry) {
       this.emitQueue(request.sessionId);
       if (entry.queue.length && !entry.running && !entry.governanceTripped &&
-          !entry.holdQueuedPromptsAfterInterrupt && !this.reservedPromotionPrecedesQueue(request.sessionId, entry)) {
+          !this.queueHeld(entry) && !this.reservedPromotionPrecedesQueue(request.sessionId, entry)) {
         this.scheduleDrain(request.sessionId);
       }
     }
@@ -4075,7 +5273,7 @@ export class SessionManager {
           : "Provider command turns cannot be steered.",
       };
     }
-    if (!entry.client.steer) {
+    if (!entry.client.steer || entry.steeringAvailable === false) {
       return {
         eligible: false,
         reason: "unsupported_driver",
@@ -4103,11 +5301,18 @@ export class SessionManager {
         message: "Wait for the current stop request to settle before steering.",
       };
     }
-    if (entry.holdQueuedPromptsAfterInterrupt) {
+    if (this.queueHeld(entry)) {
       return {
         eligible: false,
         reason: "policy_blocked",
-        message: "Send a normal prompt to resume the held queue before steering.",
+        message: "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
+      };
+    }
+    if (entry.client.activeSteeringTurnId && !entry.client.activeSteeringTurnId()) {
+      return {
+        eligible: false,
+        reason: "no_active_provider_turn",
+        message: "Wollipog has not confirmed an active provider turn.",
       };
     }
     if (!entry.running || !entry.activeTurnId) {
@@ -4181,7 +5386,7 @@ export class SessionManager {
       );
     }
     if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
-    if (entry.cancelRequested || entry.interruptRequested || entry.holdQueuedPromptsAfterInterrupt) {
+    if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
     if (entry.governanceTripped) return this.handleDefiniteSteeringFailure(operation, "governance_blocked");
@@ -4196,7 +5401,10 @@ export class SessionManager {
       : source?.text ?? request.text ?? "";
     const imageInputs = source?.images ?? request.images ?? [];
     const materialized = await this.awaitSteeringDeadline(
-      this.materializeSteeringImages(request.sessionId, imageInputs),
+      Promise.all([
+        this.materializeSteeringImages(request.sessionId, imageInputs),
+        this.resolveWorkspaceReferenceText(entry, imageInputs),
+      ]),
       operation.deadlineAt,
       operation.lifecyclePromise,
     );
@@ -4223,7 +5431,7 @@ export class SessionManager {
       );
     }
     if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
-    if (entry.cancelRequested || entry.interruptRequested || entry.holdQueuedPromptsAfterInterrupt) {
+    if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
     }
     if (entry.governanceTripped) return this.handleDefiniteSteeringFailure(operation, "governance_blocked");
@@ -4236,11 +5444,12 @@ export class SessionManager {
     }
 
     operation.providerStarted = true;
+    const [steeringImages, steeringReferenceText] = materialized.value!;
     const providerPromise = entry.client.steer({
       submissionId: request.submissionId,
       deadlineAt: operation.deadlineAt,
-      text: displayText,
-      images: materialized.value,
+      text: `${displayText}${steeringReferenceText}`,
+      images: steeringImages,
     });
     const provider = await this.awaitSteeringDeadline(providerPromise, operation.deadlineAt, operation.lifecyclePromise);
     if (provider.cancelled) {
@@ -4291,17 +5500,83 @@ export class SessionManager {
   }
 
   private async materializeSteeringImages(sessionId: string, inputs: PromptImageInput[]): Promise<PromptImage[]> {
-    const references = inputs.filter(isPromptImageReference);
+    const references = inputs.filter((input): input is PromptImageReference =>
+      isPromptImageReference(input) && !isWorkspaceReference(input));
     const resolved = references.length
       ? await (this.resolvePromptImages?.(sessionId, references) ?? Promise.reject(new Error("prompt image references are unsupported by this runner")))
       : [];
     if (resolved.length !== references.length) throw new Error("prompt image resolver returned an unexpected result count");
     let referenceIndex = 0;
-    const images = inputs.map((image) => isPromptImageReference(image) ? resolved[referenceIndex++]! : image);
+    const images = inputs.filter((image) => !isWorkspaceReference(image))
+      .map((image) => isPromptImageReference(image) ? resolved[referenceIndex++]! : image);
     if (images.some((image) => !image || typeof image.data !== "string")) {
       throw new Error("prompt image resolver returned an incomplete result");
     }
     return images;
+  }
+
+  private async resolveWorkspaceReferenceText(entry: ActiveSession, inputs: PromptImageInput[]): Promise<string> {
+    const references = inputs.filter(isWorkspaceReference);
+    if (!references.length) return "";
+    const meta = this.store.readMeta(entry.sessionId);
+    if (!meta) throw new Error("the session disappeared while workspace references were being validated");
+    const prefix = "\n\nWorkspace references (content was resolved by the runner inside this session's exact execution root):\n";
+    const sections: string[] = [];
+    let remaining = MAX_WORKSPACE_REFERENCE_CONTEXT_BYTES - Buffer.byteLength(prefix, "utf8");
+    for (const reference of references) {
+      const target = {
+        path: reference.path,
+        kind: reference.kind,
+        startLine: reference.startLine,
+        endLine: reference.endLine,
+        side: reference.side,
+        diffHash: reference.diffHash,
+        diffScope: reference.diffScope,
+      };
+      const diff = await inspectWorkspaceReferenceDiff(target, (scope) =>
+        withGitExecutionContext(entry.context, () => gitDiff(entry.cwd, scope, {
+          useWorktree: Boolean(entry.worktree),
+          lastTurnBaseTree: meta.lastTurnBaseTree,
+        })),
+      );
+      const resolved = await resolveWorkspaceReference(entry.context, entry.cwd, target);
+      const current = resolved.reference;
+      if (current.rootFingerprint !== reference.rootFingerprint || current.targetFingerprint !== reference.targetFingerprint) {
+        throw new Error(`${reference.path} is missing, changed, or belongs to a different workspace; remove it and attach it again`);
+      }
+      let content: string;
+      let contentTruncated = false;
+      if (reference.kind === "directory") {
+        const tree = resolved.directoryTree!;
+        content = tree.content;
+        contentTruncated = tree.truncated;
+      } else if (reference.kind === "diff") {
+        content = workspaceReferenceDiffContent(diff!, reference);
+      } else {
+        const file = await readSessionFile(entry.context, entry.cwd, reference.path);
+        if (file.binary) throw new Error(`${reference.path} is binary and cannot be included as prompt text`);
+        contentTruncated = reference.kind === "file" && file.truncated;
+        const allLines = (file.content ?? "").split(/\r?\n/);
+        content = reference.kind === "lines"
+          ? allLines.slice(reference.startLine! - 1, reference.endLine).map((line, index) => `${reference.startLine! + index}: ${line}`).join("\n")
+          : file.content ?? "";
+      }
+      // `sections.join("\n")` contributes one byte between each JSON object. Reserve it before
+      // bounding the next object so the complete provider suffix cannot exceed the aggregate cap.
+      if (sections.length) remaining -= 1;
+      if (remaining < 256) throw new Error("workspace references exceed the bounded provider context limit; remove one or attach a smaller selection");
+      const section = boundedWorkspaceReferenceJson({
+        kind: reference.kind,
+        path: reference.path,
+        ...(reference.startLine === undefined ? {} : { startLine: reference.startLine, endLine: reference.endLine }),
+        ...(reference.side === undefined ? {} : { side: reference.side === "left" ? "base" : "worktree" }),
+        ...(reference.diffScope === undefined ? {} : { diffScope: reference.diffScope, diffIdentity: reference.diffHash }),
+        revision: reference.targetFingerprint,
+      }, content, remaining, contentTruncated);
+      sections.push(section);
+      remaining -= Buffer.byteLength(section, "utf8");
+    }
+    return `${prefix}${sections.join("\n")}`;
   }
 
   private awaitSteeringDeadline<T>(
@@ -4363,6 +5638,31 @@ export class SessionManager {
     return this.makeSteeringResult(operation.request, "rejected", reason, { message });
   }
 
+  /** A quarantined conversation can never drain its FIFO, so a prompt handed back by a steering
+   * promotion must be settled here rather than parked forever. Retain its text if nothing has been
+   * retained yet, exactly like a prompt attempted after the quarantine. Returns true when the
+   * prompt was absorbed and must not be requeued. */
+  private absorbQuarantinedPrompt(sessionId: string, prompt: QueuedPrompt): boolean {
+    const block = this.store.readMeta(sessionId)?.providerHistoryBlock;
+    if (!block) return false;
+    if (!block.retry && !prompt.sessionCommand) {
+      this.store.patchMeta(sessionId, {
+        providerHistoryBlock: {
+          ...block,
+          retry: {
+            text: prompt.text,
+            images: prompt.images,
+            ...(prompt.slashCommand ? { slashCommand: prompt.slashCommand } : {}),
+            ...(prompt.config ? { config: prompt.config } : {}),
+          },
+        },
+      });
+      this.store.flush(sessionId);
+    }
+    this.failQueuedPrompt(prompt, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
+    return true;
+  }
+
   private convertDirectSteeringToQueue(operation: SteeringOperation): string | null {
     const { request } = operation;
     const entry = this.active.get(request.sessionId);
@@ -4373,6 +5673,8 @@ export class SessionManager {
         ? this.recoveryQueueCapacityView(request.sessionId, queue)
         : undefined;
     if (!queue || !capacity || !this.queueCanAccept(capacity, request.text ?? "", request.images ?? [])) return null;
+    // Converting into a quarantined session's FIFO would strand the submission; reject it instead.
+    if (this.store.readMeta(request.sessionId)?.providerHistoryBlock) return null;
     const id = randomUUID();
     this.insertQueuedPrompt(request.sessionId, queue, {
       id,
@@ -4396,6 +5698,11 @@ export class SessionManager {
     }
     if (operation.cancelRequested) {
       source.durable?.failed("queued command was cancelled during steering promotion", "COMMAND_CANCELLED");
+      operation.source = undefined;
+      if (entry) this.emitQueue(operation.request.sessionId);
+      return;
+    }
+    if (this.absorbQuarantinedPrompt(operation.request.sessionId, source)) {
       operation.source = undefined;
       if (entry) this.emitQueue(operation.request.sessionId);
       return;
@@ -4519,8 +5826,8 @@ export class SessionManager {
         this.reservedPromotions(entry).delete(sourceId);
       }
       this.emitQueue(sessionId);
-      if (!this.steerFences(entry).size && entry.queue.length &&
-          !entry.governanceTripped && !entry.holdQueuedPromptsAfterInterrupt) {
+      if (!this.steerFences(entry).size && (entry.queue.length || entry.pendingWorktreeRebind) &&
+          !entry.governanceTripped && !this.queueHeld(entry)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
@@ -4631,7 +5938,7 @@ export class SessionManager {
       text: request.text,
       // A control-plane retry can externalize identical inline bytes into a fresh artifact ID.
       // Hash immutable content identity so that storage allocation does not defeat idempotency.
-      images: request.images.map((image) => isPromptImageReference(image) ? {
+      images: request.images.map((image) => isWorkspaceReference(image) ? image : isPromptImageReference(image) ? {
         mimeType: image.mimeType,
         sizeBytes: image.sizeBytes,
         sha256: image.sha256,
@@ -4779,16 +6086,36 @@ export class SessionManager {
           editRevision: this.queuedPromptEditRevision(q),
         };
       }),
-      ...(entry?.holdQueuedPromptsAfterInterrupt ? { held: true } : {}),
-      ...(entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
+      ...(entry && this.queueHeld(entry) ? { held: true } : {}),
+      ...(entry?.providerInitiatedTurnActive && entry.providerInitiatedTurnId
+        ? { activeTurnId: entry.providerInitiatedTurnId }
+        : entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
     });
   }
 
   /** Publish both edges of the interruption hold so clients never infer it from queue contents. */
+  /** Either hold keeps queued prompts waiting; they are cleared independently. */
+  private queueHeld(entry: ActiveSession): boolean {
+    return Boolean(entry.holdQueuedPromptsAfterInterrupt || entry.controlPlaneHold);
+  }
+
+  private setControlPlaneHold(sessionId: string, entry: ActiveSession, held: boolean): void {
+    if (Boolean(entry.controlPlaneHold) === held) return;
+    entry.controlPlaneHold = held;
+    this.emitQueue(sessionId);
+  }
+
   private setInterruptQueueHold(sessionId: string, entry: ActiveSession, held: boolean): void {
     if (entry.holdQueuedPromptsAfterInterrupt === held) return;
     entry.holdQueuedPromptsAfterInterrupt = held;
     this.emitQueue(sessionId);
+  }
+
+  /** Release only the Stop Turn fence once the interrupted turn has provably settled. Other queue
+   * holds remain independent, so a governance or control-plane boundary still blocks the FIFO. */
+  private settleTurnInterruption(sessionId: string, entry: ActiveSession): void {
+    entry.interruptRequested = false;
+    this.setInterruptQueueHold(sessionId, entry, false);
   }
 
   /** Publish exactly one authoritative queue projection for every stored, non-deleted session
@@ -4828,7 +6155,7 @@ export class SessionManager {
       reserved.cancelRequested = true;
       this.emitQueue(sessionId);
       if (!this.reservedPromotionPrecedesQueue(sessionId, entry) && entry.queue.length &&
-          !entry.running && !entry.governanceTripped && !entry.holdQueuedPromptsAfterInterrupt) {
+          !entry.running && !entry.governanceTripped && !this.queueHeld(entry)) {
         this.scheduleDrain(sessionId);
       }
       return;
@@ -4877,11 +6204,18 @@ export class SessionManager {
   /** Fire-and-forget drains are always observed. Event-history errors are contained at emitEvent;
    * this is a final guard for unexpected driver/config failures so none become unhandled promises. */
   private scheduleDrain(sessionId: string): void {
+    const expectedEntry = this.active.get(sessionId);
     void this.drain(sessionId).catch((error) => {
       try {
         const entry = this.active.get(sessionId);
-        if (!entry || entry.historyIntegrityFailure) return;
         const detail = `session queue drain failed: ${errText(error)}`;
+        // drain() can finish a pending worktree handoff in its finally before this catch runs. A
+        // replacement entry owns a different provider and preserved FIFO; never settle or cancel
+        // that newer generation for an exception thrown by the retired entry's drain.
+        if (!entry || entry !== expectedEntry || entry.historyIntegrityFailure) {
+          this.log(`${detail} (${sessionId}; retired drain)`);
+          return;
+        }
         this.log(`${detail} (${sessionId})`);
         const queued = entry.queue.splice(0);
         this.rejectQueued(queued, detail);
@@ -4910,12 +6244,17 @@ export class SessionManager {
     reservedOrdinal?: number,
     queueBeforeLaunch = false,
     backgroundJobIds?: string[],
+    recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
       this.emitEvent(sessionId, { kind: "error", message: "session is not active on this runner" });
       this.emitStatus(sessionId, "failed");
       durable?.failed("session is not active on this runner", "SESSION_NOT_FOUND");
+      return;
+    }
+    if (this.closing.has(sessionId)) {
+      durable?.failed("the previous provider process could not be confirmed stopped", "COMMAND_CANCELLED");
       return;
     }
     if (syntheticRecovery && (meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta))) {
@@ -4954,7 +6293,7 @@ export class SessionManager {
       }
     }
     const established = meta.agentSessionId != null;
-    if (!established && meta.driver === "claude-code" && meta.seq > 0) {
+    if (!established && meta.driver === "claude-code" && meta.seq > 0 && !meta.handoffPending) {
       this.emitEvent(sessionId, {
         kind: "error",
         message: "this Claude history has no persisted provider conversation id and cannot be continued without risking a replacement conversation",
@@ -4963,7 +6302,7 @@ export class SessionManager {
       durable?.failed("Claude history has no resumable provider conversation id", "INVALID_COMMAND");
       return;
     }
-    if (!established && meta.driver === "codex-app-server" && meta.seq > 0) {
+    if (!established && meta.driver === "codex-app-server" && meta.seq > 0 && !meta.handoffPending) {
       this.emitEvent(sessionId, {
         kind: "error",
         message: "this app-server history has no persisted Codex thread id and cannot be continued without risking a replacement conversation",
@@ -5018,6 +6357,7 @@ export class SessionManager {
         durable,
         syntheticRecovery,
         backgroundJobIds,
+        recoveredQuestion,
       });
       this.preLaunchQueues.set(sessionId, queue);
     }
@@ -5102,7 +6442,7 @@ export class SessionManager {
         // This payload is the proof that the turn was retained before provider submission.
         this.store.flush(sessionId);
       }
-      if (isProviderAuthenticationBlock(blocked?.pendingApproval)) {
+      if (blocked?.providerAuthBlock || isProviderAuthenticationBlock(blocked?.pendingApproval)) {
         durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
       } else {
         durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
@@ -5125,26 +6465,37 @@ export class SessionManager {
         reservedOrdinal,
         false,
         backgroundJobIds,
+        recoveredQuestion,
       );
     }
   }
 
-  /** Persist turn configuration without presenting a model resolved under an older alias. */
+  /** Persist turn configuration without presenting a model resolved under an older alias. The
+   * effective context window was observed for the previous model, so a model or context-window
+   * change drops it until the next turn reports what the provider actually serves. */
   private patchSessionConfig(sessionId: string, config: SessionConfig): void {
     const current = this.store.readMeta(sessionId);
     const modelChanged = current?.config.model !== config.model;
     this.store.patchMeta(sessionId, {
       config,
-      ...(modelChanged ? { resolvedModel: null } : {}),
+      ...(modelChanged ? { resolvedModel: null, contextWindow: undefined } : {}),
     });
   }
 
   /** Run queued prompts one at a time, holding the box lock only while turns are draining. */
   private async drain(sessionId: string): Promise<void> {
     const entry = this.active.get(sessionId);
-    if (!entry || entry.running || entry.governanceTripped || entry.holdQueuedPromptsAfterInterrupt ||
-        this.hasPendingApproval(sessionId) || this.steerFences(entry).size ||
+    if (!entry || entry.running || entry.governanceTripped || this.queueHeld(entry) ||
+        this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
+    if (!this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) return;
+    if (entry.pendingWorktreeRebind) {
+      if (this.worktreeRebindCanProceed(sessionId, entry)) {
+        await this.rebindSelectedWorktree(sessionId, entry);
+        return;
+      }
+      if (!this.promoteQueuedWorktreePrerequisite(sessionId, entry.queue)) return;
+    }
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
       if (!this.emitEvent(sessionId, { kind: "error", message: "this session is being driven by another dashboard" })) {
         return;
@@ -5162,7 +6513,8 @@ export class SessionManager {
     entry.running = true;
     try {
       while (this.active.has(sessionId) && entry.queue.length && !entry.authenticationBlocked &&
-          !this.hasPendingApproval(sessionId)) {
+          !entry.historyQuarantined &&
+          this.promoteQueuedRecoveredAnswer(sessionId, entry.queue)) {
         if (this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry)) break;
         const next = entry.queue.shift()!;
         this.ensureQueueOrdinal(sessionId, next);
@@ -5172,6 +6524,10 @@ export class SessionManager {
         // step so an interrupt received anywhere in pre-provider preparation cannot be erased.
         entry.cancelRequested = false;
         entry.interruptRequested = false;
+        if (entry.policyHookToolCallIds) {
+          entry.policyHookToolCallIds = new Set();
+          entry.policyHookDecisionEvents = new Map();
+        }
         if (next.config && !configsEqual(next.config, this.store.readMeta(sessionId)?.config)) {
           // Apply the config THIS prompt was sent with (see QueuedPrompt.config). Drivers pick
           // config up at turn start, so setting it here is exactly "this turn runs under it".
@@ -5191,6 +6547,12 @@ export class SessionManager {
               this.emitStatus(sessionId, "idle");
               this.failQueuedPrompt(next, "provider cancelled", "COMMAND_CANCELLED");
               entry.activeTurnId = undefined;
+              this.settleTurnInterruption(sessionId, entry);
+              // Leave this drain generation before dispatching another entry. The loop-tail
+              // fences are below this pre-provider branch, so continuing here could skip a
+              // concurrent governance hold or worktree rebind. A fresh drain rechecks every
+              // admission fence once this generation releases its lock.
+              setImmediate(() => this.scheduleDrain(sessionId));
               break;
             }
             if (!this.emitEvent(sessionId, { kind: "error", message: errText(error) }, next.durable)) {
@@ -5222,6 +6584,11 @@ export class SessionManager {
           this.failQueuedPrompt(next, `session queue drain failed: ${errText(error)}`, "INVALID_COMMAND");
           throw error;
         } finally {
+          // This is the universal manager-side turn boundary. Individual prompt/command paths
+          // settle earlier when they need to classify Interrupted, but a pre-provider resolver or
+          // checkpoint failure can return before those sites. Never leave its accepted Stop Turn
+          // fence attached to a drain generation that no longer owns a turn.
+          if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
           entry.currentDurable = undefined;
           entry.currentSessionCommand = undefined;
           entry.sessionCommandProviderStarted = false;
@@ -5231,12 +6598,13 @@ export class SessionManager {
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
         }
-        if (entry.authenticationBlocked) break;
+        if (entry.pendingWorktreeRebind) break;
+        if (entry.authenticationBlocked || entry.historyQuarantined) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
           if (this.active.get(sessionId) !== entry) break;
         }
-        if (entry.governanceTripped || entry.holdQueuedPromptsAfterInterrupt) break;
+        if (entry.governanceTripped || this.queueHeld(entry)) break;
       }
     } finally {
       entry.running = false;
@@ -5258,9 +6626,292 @@ export class SessionManager {
         const pending = entry.governanceRearmPending;
         entry.governanceRearmPending = undefined;
         entry.governanceTripped = pending === "resume" ? undefined : pending;
+        entry.governanceTrip = undefined;
         this.emitStatus(sessionId, "idle");
-        if (!entry.governanceTripped && entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
+        if (!entry.governanceTripped && (entry.queue.length || entry.pendingWorktreeRebind)) {
+          setImmediate(() => this.scheduleDrain(sessionId));
+        }
       }
+      if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
+        await this.rebindSelectedWorktree(sessionId, entry);
+      }
+    }
+  }
+
+  private worktreeRebindCanProceed(sessionId: string, entry: ActiveSession): boolean {
+    const meta = this.store.readMeta(sessionId);
+    // A refused one-shot orphan recovery is terminal: no live provider still owns these task ids,
+    // and billing safety deliberately forbids submitting the recovery prompt again. Keep the
+    // diagnostic metadata visible, but do not turn it into a permanent worktree/queue barrier.
+    const backgroundWorkBlocksRebind =
+      (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
+      !meta?.orphanedWork?.recoveryAttemptedAt;
+    return !entry.running &&
+      this.active.get(sessionId) === entry &&
+      !backgroundWorkBlocksRebind &&
+      !this.rewinding.has(sessionId) &&
+      !this.forking.has(sessionId) &&
+      !this.loggingOut.has(sessionId) &&
+      !this.closing.has(sessionId) &&
+      !this.deleting.has(sessionId) &&
+      !entry.authenticationBlocked &&
+      !entry.historyQuarantined &&
+      !entry.historyIntegrityFailure &&
+      !entry.governanceTripped &&
+      !this.queueHeld(entry) &&
+      !this.hasPendingApproval(sessionId) &&
+      !this.steerFences(entry).size &&
+      !this.reservedPromotionPrecedesQueue(sessionId, entry);
+  }
+
+  private resumeDeferredWorktreeRebind(sessionId: string): void {
+    const entry = this.active.get(sessionId);
+    if (entry?.pendingWorktreeRebind && !entry.running) {
+      setImmediate(() => this.scheduleDrain(sessionId));
+    }
+  }
+
+  /** A deferred rebind holds user work, but its runner-owned prerequisite must cross that barrier.
+   * Preserve ordinary FIFO order while moving only the continuation that can settle background
+   * ownership. A recovered answer already promoted above retains priority when an approval is open. */
+  private promoteQueuedWorktreePrerequisite(sessionId: string, queue: QueuedPrompt[]): boolean {
+    if (this.hasPendingApproval(sessionId)) {
+      return this.queuedPromptResolvesPendingQuestion(sessionId, queue[0]);
+    }
+    const index = queue.findIndex((prompt) => prompt.syntheticRecovery);
+    if (index < 0) return false;
+    if (index > 0) queue.unshift(queue.splice(index, 1)[0]!);
+    return true;
+  }
+
+  /** Retire an idle provider generation and resume its exact conversation in the newly selected
+   * worktree. Prompts accepted during the turn or relaunch remain in the pre-launch FIFO. */
+  private rebindSelectedWorktree(sessionId: string, entry: ActiveSession): Promise<void> {
+    const current = this.worktreeRebindings.get(sessionId);
+    if (current) return current.promise;
+    let promise: Promise<void>;
+    promise = this.performSelectedWorktreeRebind(sessionId, entry).finally(() => {
+      if (this.worktreeRebindings.get(sessionId)?.promise === promise) {
+        this.worktreeRebindings.delete(sessionId);
+      }
+    });
+    this.worktreeRebindings.set(sessionId, { entry, promise });
+    return promise;
+  }
+
+  private async performSelectedWorktreeRebind(sessionId: string, entry: ActiveSession): Promise<void> {
+    const selectedPath = entry.pendingWorktreeRebind;
+    if (!selectedPath || !this.worktreeRebindCanProceed(sessionId, entry)) return;
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || !meta.worktreePath || !sameWorktreePath(meta.context, meta.worktreePath, selectedPath)) {
+      entry.pendingWorktreeRebind = undefined;
+      if (entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
+      return;
+    }
+    this.captureAgentSessionId(sessionId, entry.client);
+    const resumable = this.store.readMeta(sessionId);
+    const resumeId = resumable?.agentSessionId ?? undefined;
+    // Root-cwd sessions do not create worktree checkpoints, so turnCount remains zero even after
+    // provider-visible events. Event sequence is the established resume predicate used by the
+    // normal stopped-session path and prevents a failed first conversation from becoming fresh.
+    const hasConversation = (resumable?.seq ?? 0) > 0;
+    if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
+      entry.pendingWorktreeRebind = undefined;
+      this.emitEvent(sessionId, {
+        kind: "error",
+        message: "the selected worktree cannot resume this provider conversation",
+      });
+      if (entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
+      return;
+    }
+
+    let rebindLockHeld = false;
+    if (resumeId) {
+      if (!this.store.acquireLock(sessionId, this.lockOwner)) {
+        if (!this.emitEvent(sessionId, {
+          kind: "error",
+          message: "this session is being driven by another dashboard",
+        })) return;
+        this.emitStatus(sessionId, "idle");
+        this.rejectQueued(entry.queue, "session is being driven by another runner process");
+        entry.queue.length = 0;
+        this.emitQueue(sessionId);
+        return;
+      }
+      rebindLockHeld = true;
+    }
+
+    const launchGeneration = this.beginLaunchGeneration(sessionId);
+    this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
+    const queued = entry.queue.splice(0);
+    if (queued.length) this.preLaunchQueues.set(sessionId, queued);
+    this.deleteActiveSession(sessionId, entry, false);
+    this.emitQueue(sessionId);
+    let launched = false;
+    let preserveRebindLockForQueue = false;
+    try {
+      try {
+        const retirement = this.beginProviderRetirement(sessionId, entry, {
+          preserveAdmission: true,
+          preserveLock: true,
+          acceptPromptsDuringHandoff: true,
+        });
+        await retirement.promise;
+        if (this.closing.get(sessionId) === retirement) {
+          throw new Error("provider process retirement is unconfirmed");
+        }
+      } catch (error) {
+        const retirement = this.closing.get(sessionId);
+        if (retirement?.client === entry.client) {
+          // The handoff will not continue. Keep both fences until this exact client reports exit,
+          // then let normal retirement completion release them for an explicit retry.
+          retirement.preserveAdmission = false;
+          retirement.preserveLock = false;
+          retirement.acceptPromptsDuringHandoff = false;
+        }
+        this.log(`session ${sessionId} provider disposal failed during worktree rebind: ${errText(error)}`);
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `provider could not switch to the selected worktree: ${errText(error)}`,
+        });
+        if (this.launchIsCurrent(sessionId, launchGeneration) &&
+            this.store.readMeta(sessionId)?.status !== "stopped") this.emitStatus(sessionId, "idle");
+        return;
+      }
+      const fresh = this.store.readMeta(sessionId);
+      if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
+      const selectedWorktree = fresh.worktreePath
+        ? this.attributedWorktreeForPath(fresh, fresh.worktreePath)
+        : undefined;
+      if (!selectedWorktree) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: "the selected worktree no longer has a durable session identity",
+        });
+        if (this.launchIsCurrent(sessionId, launchGeneration) &&
+            this.store.readMeta(sessionId)?.status !== "stopped") this.emitStatus(sessionId, "idle");
+        return;
+      }
+      let verifiedWorktreePath: string;
+      try {
+        const verified = await attachRequestedWorktree(fresh.repoPath, sessionId, selectedWorktree.path, {
+          context: fresh.context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          // This is the exact coordinate persisted by the earlier create/attach operation. Re-prove
+          // Git registration and branch identity after retiring the old provider and immediately
+          // before the replacement process is allowed to launch.
+          allowedProjectPaths: [selectedWorktree.path],
+        });
+        if (verified.branch !== selectedWorktree.branch) {
+          throw new Error("selected worktree branch changed before the provider could launch");
+        }
+        verifiedWorktreePath = verified.path;
+      } catch (error) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `selected worktree could not be verified before provider launch: ${errText(error)}`,
+        });
+        if (this.launchIsCurrent(sessionId, launchGeneration) &&
+            this.store.readMeta(sessionId)?.status !== "stopped") this.emitStatus(sessionId, "idle");
+        return;
+      }
+      if (!this.launchIsCurrent(sessionId, launchGeneration)) return;
+      const rebinding = this.worktreeRebindings.get(sessionId);
+      if (rebinding?.entry === entry) {
+        rebinding.launchingWorktreePath = verifiedWorktreePath;
+      }
+      try {
+        launched = await this.launch(
+          { ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration,
+        );
+      } catch (error) {
+        // launch() contains expected preparation/driver failures. This final boundary keeps an
+        // unexpected cleanup/reporting exception from rejecting the rebind promise into callers
+        // such as delete(), and retires any same-generation entry it published before throwing.
+        this.log(`session ${sessionId} provider launch failed during worktree rebind: ${errText(error)}`);
+        const failedEntry = this.active.get(sessionId);
+        if (failedEntry?.launchGeneration === launchGeneration) {
+          this.deleteActiveSession(sessionId, failedEntry, false);
+          try {
+            const retirement = this.beginProviderRetirement(sessionId, failedEntry);
+            await retirement.promise;
+            if (this.closing.get(sessionId) === retirement) {
+              throw new Error("provider process retirement is unconfirmed");
+            }
+          } catch (disposeError) {
+            this.log(`session ${sessionId} failed replacement disposal: ${errText(disposeError)}`);
+          }
+        }
+        if (this.launchIsCurrent(sessionId, launchGeneration) &&
+            this.store.readMeta(sessionId)?.status !== "stopped") {
+          try {
+            this.emitEvent(sessionId, {
+              kind: "error",
+              message: `provider could not resume in the selected worktree: ${errText(error)}`,
+            });
+            this.emitStatus(sessionId, "failed", errText(error));
+          } catch (reportError) {
+            this.log(`session ${sessionId} worktree rebind failure reporting failed: ${errText(reportError)}`);
+          }
+        }
+        return;
+      }
+      if (launched) {
+        const reboundEntry = this.active.get(sessionId);
+        if (this.store.readMeta(sessionId)?.status === "stopped") {
+          if (reboundEntry) {
+            this.deleteActiveSession(sessionId, reboundEntry, false);
+            try {
+              const retirement = this.beginProviderRetirement(sessionId, reboundEntry);
+              await retirement.promise;
+              if (this.closing.get(sessionId) === retirement) {
+                throw new Error("provider process retirement is unconfirmed");
+              }
+            } catch (disposeError) {
+              this.log(`session ${sessionId} stopped replacement disposal failed: ${errText(disposeError)}`);
+            }
+          }
+          launched = false;
+          return;
+        }
+        const latestSelection = this.store.readMeta(sessionId)?.worktreePath;
+        if (reboundEntry && latestSelection &&
+            !sameWorktreePath(reboundEntry.context, reboundEntry.cwd, latestSelection)) {
+          // Selection can advance while launch() is preparing the captured target and before the
+          // replacement becomes active. Preserve that newest target as another fenced handoff;
+          // otherwise durable Files/Git state would point at a different cwd indefinitely.
+          reboundEntry.pendingWorktreeRebind = latestSelection;
+        }
+        const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
+        this.activatePreLaunchQueue(sessionId);
+        preserveRebindLockForQueue = hasQueuedWork;
+        if (!hasQueuedWork) this.emitStatus(sessionId, "idle");
+        if (reboundEntry?.pendingWorktreeRebind) {
+          setImmediate(() => this.scheduleDrain(sessionId));
+        }
+      }
+    } finally {
+      const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
+      const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
+      const retirementPending = this.closing.has(sessionId);
+      if (!launched && ownsGeneration && !superseded) {
+        this.rejectPreLaunchQueue(
+          sessionId,
+          this.store.readMeta(sessionId)?.status === "stopped"
+            ? "session stopped before the selected-worktree provider resumed"
+            : "provider could not resume in the selected worktree",
+        );
+      }
+      if (this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration) {
+        this.preLaunchAdmissionGenerations.delete(sessionId);
+      }
+      this.finishLaunchGeneration(sessionId, launchGeneration);
+      if (!launched && !superseded && !retirementPending) this.releaseAdmissionIfInactive(sessionId);
+      else if (!launched && !retirementPending && this.store.readMeta(sessionId)?.status === "stopped") {
+        this.releaseAdmissionIfInactive(sessionId);
+      }
+      if (rebindLockHeld && !preserveRebindLockForQueue && !retirementPending) this.clearLock(sessionId);
     }
   }
 
@@ -5271,6 +6922,26 @@ export class SessionManager {
 
   private hasPendingApproval(sessionId: string): boolean {
     return this.store.readMeta(sessionId)?.pendingApproval != null;
+  }
+
+  private queuedPromptResolvesPendingQuestion(sessionId: string, prompt: QueuedPrompt | undefined): boolean {
+    const pending = this.store.readMeta(sessionId)?.pendingApproval;
+    return Boolean(
+      prompt?.recoveredQuestion && pending?.kind === "question" &&
+      pending.recoveryReason === "provider_restart" && pending.recoveryAction === "resume_answer" &&
+      pending.requestId === prompt.recoveredQuestion.requestId &&
+      pending.recoveryId === prompt.recoveredQuestion.recoveryId,
+    );
+  }
+
+  /** A recovered answer resolves the approval barrier itself, so it must run before ordinary work
+   * admitted while the card was visible. The relative FIFO of every other prompt stays intact. */
+  private promoteQueuedRecoveredAnswer(sessionId: string, queue: QueuedPrompt[]): boolean {
+    if (!this.hasPendingApproval(sessionId)) return true;
+    const index = queue.findIndex((prompt) => this.queuedPromptResolvesPendingQuestion(sessionId, prompt));
+    if (index < 0) return false;
+    if (index > 0) queue.unshift(queue.splice(index, 1)[0]!);
+    return true;
   }
 
   private async recordConversationForkPoint(
@@ -5397,14 +7068,37 @@ export class SessionManager {
       queued.durable?.failed("session is not active on this runner", "SESSION_NOT_FOUND");
       return;
     }
-    const { text, images: imageInputs, slashCommand, durable, syntheticRecovery, backgroundJobIds } = queued;
+    const {
+      text,
+      images: imageInputs,
+      slashCommand,
+      durable,
+      syntheticRecovery,
+      backgroundJobIds,
+      recoveredQuestion,
+    } = queued;
+    if (recoveredQuestion) {
+      const pending = this.store.readMeta(sessionId)?.pendingApproval;
+      const invalid = pending?.kind === "question"
+        ? validateQuestionAnswers(pending.questions ?? [], recoveredQuestion.answers, "submit")
+        : "the recovered question is absent";
+      if (pending?.kind !== "question" || pending.requestId !== recoveredQuestion.requestId ||
+          pending.recoveryId !== recoveredQuestion.recoveryId ||
+          pending.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer" || invalid) {
+        durable?.failed(invalid ? `recovered answer is no longer valid: ${invalid}` :
+          "the recovered question is no longer pending", "COMMAND_CANCELLED");
+        return;
+      }
+    }
     // Reserve the continuation generation before the first await. Background lifecycle callbacks
     // can arrive while images/worktree checkpoints are materialized; they must not enqueue a
     // second prompt for the generation already owned by this dequeued turn.
     if (backgroundJobIds?.length) entry.currentBackgroundJobIds = [...backgroundJobIds];
     let images: PromptImage[];
+    let workspaceReferenceText = "";
     try {
-      const references = imageInputs.filter(isPromptImageReference);
+      const references = imageInputs.filter((input): input is PromptImageReference =>
+        isPromptImageReference(input) && !isWorkspaceReference(input));
       const resolved = references.length
         ? await (this.resolvePromptImages?.(sessionId, references) ?? Promise.reject(new Error("prompt image references are unsupported by this runner")))
         : [];
@@ -5412,12 +7106,14 @@ export class SessionManager {
         throw new Error("prompt image resolver returned an unexpected result count");
       }
       let referenceIndex = 0;
-      images = imageInputs.map((image) => isPromptImageReference(image) ? resolved[referenceIndex++]! : image);
+      images = imageInputs.filter((image) => !isWorkspaceReference(image))
+        .map((image) => isPromptImageReference(image) ? resolved[referenceIndex++]! : image);
       if (images.some((image) => !image || typeof image.data !== "string")) {
         throw new Error("prompt image resolver returned an incomplete result");
       }
+      workspaceReferenceText = await this.resolveWorkspaceReferenceText(entry, imageInputs);
     } catch (error) {
-      const detail = `prompt image materialization failed: ${errText(error)}`;
+      const detail = `prompt attachment validation failed: ${errText(error)}`;
       this.emitEvent(sessionId, { kind: "error", message: detail });
       this.emitStatus(sessionId, "idle");
       durable?.failed(detail, "INVALID_COMMAND");
@@ -5430,7 +7126,15 @@ export class SessionManager {
     // The runner (the box) is the source of truth for ALL events including the user's prompt, so it
     // lands in the store + every dashboard's timeline. The control plane no longer appends it.
     const displayText = slashCommand ? `/${slashCommand}${text ? ` ${text}` : ""}`.trim() : text;
-    const userEvent = syntheticRecovery
+    const userEvent = recoveredQuestion
+      ? this.emitEvent(sessionId, {
+          kind: "question_resolved",
+          requestId: recoveredQuestion.requestId,
+          answered: true,
+          resolutionReason: "submitted",
+          ...(durable ? { commandId: durable.commandId } : {}),
+        }, durable)
+      : syntheticRecovery
       ? this.emitEvent(sessionId, {
           kind: "stderr",
           text: backgroundJobIds?.length
@@ -5459,7 +7163,7 @@ export class SessionManager {
     // a failure stores null (overwriting any stale prior sha so multi-turn changes are never
     // mislabeled as one turn) and must never fail the prompt turn. A mid-turn diff read against
     // this snapshot shows "changes so far this turn" — intended.
-    if (entry.worktree) {
+    if (entry.worktree && !recoveredQuestion) {
       let snap: string | null = null;
       try {
         snap = await withGitExecutionContext(entry.context, () => captureWorktreeTree(entry.worktree!.path));
@@ -5528,6 +7232,7 @@ export class SessionManager {
       this.emitEvent(sessionId, { kind: "turn_interrupted" });
       this.emitStatus(sessionId, "idle");
       durable?.failed("command was interrupted before provider submission", "COMMAND_CANCELLED");
+      this.settleTurnInterruption(sessionId, entry);
       return;
     }
     if (syntheticRecovery) {
@@ -5575,20 +7280,24 @@ export class SessionManager {
     }
     try {
       let stop: Awaited<ReturnType<Driver["prompt"]>>;
-      stop = await entry.client.prompt(text, images, slashCommand);
+      stop = await entry.client.prompt(`${text}${workspaceReferenceText}`, images, slashCommand);
       if (entry.historyIntegrityFailure) return;
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
       if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
         this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
         this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       }
-      if (syntheticRecovery && stop !== "cancelled" && stop !== "refusal") {
+      if (syntheticRecovery) {
         if (backgroundJobIds?.length) {
-          if (entry.backgroundPromptAccepted && entry.backgroundAssistantMessagePersisted) {
+          if (stop !== "cancelled" && stop !== "refusal" &&
+              entry.backgroundPromptAccepted && entry.backgroundAssistantMessagePersisted) {
             this.finishBackgroundContinuation(sessionId, backgroundJobIds);
+          } else if (entry.backgroundPromptAccepted) {
+            this.markBackgroundContinuationMissingResult(sessionId, backgroundJobIds);
           }
+        } else if (stop !== "cancelled" && stop !== "refusal") {
+          this.finishOrphanRecovery(sessionId);
         }
-        else this.finishOrphanRecovery(sessionId);
       }
       if (stop !== "cancelled" && stop !== "refusal") {
         this.finishParentTurnBackgroundJobs(sessionId, queued.id);
@@ -5605,6 +7314,11 @@ export class SessionManager {
       }
       await this.recordConversationForkPoint(sessionId, entry, stop, postTurnTree);
       if (entry.historyIntegrityFailure) return;
+      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
+      // A provider result is the terminal turn boundary even when authentication or governance
+      // installs its own independent hold. Clear only the Stop Turn fence before those branches
+      // return; their distinct gates continue to block the FIFO.
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         const block = this.store.readMeta(sessionId)?.providerAuthBlock;
@@ -5616,7 +7330,11 @@ export class SessionManager {
         }
         return;
       }
-      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
+      // Transports without onPromptAccepted still prove a new healthy turn through completion.
+      if (stop !== "cancelled" && stop !== "refusal") {
+        const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
+        if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
+      }
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
         this.emitStatus(sessionId, "idle");
@@ -5628,14 +7346,10 @@ export class SessionManager {
       } else {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
         // or strand the existing FIFO: this was a normal completed turn, not a cancelled one.
-        if (entry.interruptRequested) {
-          entry.interruptRequested = false;
-          this.setInterruptQueueHold(sessionId, entry, false);
-        }
         this.emitStatus(sessionId, "idle");
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
-        durable?.failed(`provider ${stop}`, "COMMAND_CANCELLED");
+        durable?.failed(providerStopError(stop, entry.client), "COMMAND_CANCELLED");
       } else {
         durable?.completed();
       }
@@ -5644,12 +7358,21 @@ export class SessionManager {
       if (backgroundJobIds?.length && !entry.backgroundPromptAccepted) {
         this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
         this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      } else if (backgroundJobIds?.length) {
+        this.markBackgroundContinuationMissingResult(sessionId, backgroundJobIds);
       }
+      entry.currentBackgroundJobIds = undefined;
       if (entry.historyIntegrityFailure) return;
       if (!this.active.has(sessionId)) {
         durable?.uncertain("session stopped while provider execution was in progress");
         return;
       }
+      // An accepted Stop Turn followed by a terminal provider rejection is settled from the
+      // manager's perspective: there is no live promise left that can mutate this turn. Treat the
+      // rejection as the cancellation acknowledgement, while a synchronous cancel() throw is
+      // still rolled back by interruptTurn before reaching this path.
+      const interrupted = !entry.governanceTripped && entry.interruptRequested;
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       if (entry.governanceTripped) {
         this.emitStatus(sessionId, "idle");
         durable?.completed();
@@ -5658,6 +7381,12 @@ export class SessionManager {
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         durable?.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
+        return;
+      }
+      if (interrupted) {
+        this.emitEvent(sessionId, { kind: "turn_interrupted" });
+        this.emitStatus(sessionId, "idle");
+        durable?.failed(providerStopError("cancelled", entry.client), "COMMAND_CANCELLED");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
@@ -5802,6 +7531,7 @@ export class SessionManager {
       await this.rollbackPreparedCommandCheckpoint(sessionId, entry, checkpoint);
       lifecycle.failed("command was interrupted before provider submission", "COMMAND_CANCELLED");
       this.emitStatus(sessionId, "idle");
+      this.settleTurnInterruption(sessionId, entry);
       return;
     }
 
@@ -5928,6 +7658,8 @@ export class SessionManager {
         return;
       }
 
+      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
         const block = this.store.readMeta(sessionId)?.providerAuthBlock;
@@ -5940,7 +7672,6 @@ export class SessionManager {
         return;
       }
 
-      const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
         this.emitStatus(sessionId, "idle");
@@ -5949,14 +7680,10 @@ export class SessionManager {
       } else if (stop === "cancelled") {
         this.emitStatus(sessionId, "stopped");
       } else {
-        if (entry.interruptRequested) {
-          entry.interruptRequested = false;
-          this.setInterruptQueueHold(sessionId, entry, false);
-        }
         this.emitStatus(sessionId, "idle");
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
-        lifecycle.failed(`provider ${stop}`, "COMMAND_CANCELLED");
+        lifecycle.failed(providerStopError(stop, entry.client), "COMMAND_CANCELLED");
       } else {
         lifecycle.completed();
       }
@@ -5966,6 +7693,8 @@ export class SessionManager {
         lifecycle.uncertain("session stopped while provider command execution was in progress");
         return;
       }
+      const interrupted = !entry.governanceTripped && entry.interruptRequested;
+      if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
       // Governance cancellation commonly rejects the provider promise. Match ordinary prompt
       // semantics: the policy turn is parked successfully at idle, not reported as a transport
       // failure whose retry could duplicate already-observed provider work.
@@ -5979,24 +7708,65 @@ export class SessionManager {
         lifecycle.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
         return;
       }
+      if (interrupted) {
+        this.emitEvent(sessionId, { kind: "turn_interrupted" });
+        this.emitStatus(sessionId, "idle");
+        lifecycle.failed(providerStopError("cancelled", entry.client), "COMMAND_CANCELLED");
+        return;
+      }
       this.emitEvent(sessionId, { kind: "error", message: `session command failed: ${errText(error)}` });
       this.emitStatus(sessionId, "failed", errText(error));
       lifecycle.uncertain(`provider command delivery or completion is uncertain: ${errText(error)}`);
     }
   }
 
-  /** Fork a provider conversation without changing the source session. */
+  /** Fork a provider conversation without changing the source session.
+   *
+   * `recovery` marks the one case where the source conversation is already unusable: its provider
+   * rejects its own stored history. Only then may the destination be the same provider, because a
+   * fresh thread — not a different vendor — is what excludes the invalid item. */
   async forkConversation(
     sourceSessionId: string,
     targetSessionId: string,
     turn: number,
     title: string,
     deferHistory = false,
-  ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]> }> {
+    handoff?: { agent: AgentDefinition; config: SessionConfig },
+    recovery = false,
+  ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]>; handoffDraft?: ConversationHandoffDraft; retainedPrompt?: { text: string; images: PromptImageInput[] } }> {
     const source = this.store.readMeta(sourceSessionId);
     if (!source) return { ok: false, error: "source session not found on this box" };
+    try {
+      this.assertHostIsolationContextSupported(source);
+    } catch (error) {
+      return { ok: false, error: `execution isolation unavailable: ${errText(error)}` };
+    }
+    if (this.executionIsolation.mode === "bwrap" && source.context.kind === "wsl") {
+      return { ok: false, error: "Direct WSL conversation fork remains unavailable until target-local fd-safe state copy is supported" };
+    }
+    const quarantine = source.providerHistoryBlock;
+    if (recovery) {
+      if (!quarantine) return { ok: false, error: "this session's provider conversation is not quarantined" };
+      if (quarantine.recoveryTurn === undefined) {
+        return { ok: false, error: "this quarantined conversation has no safe checkpoint to recover from" };
+      }
+      if (turn !== quarantine.recoveryTurn) {
+        return { ok: false, error: "recovery must start from the quarantined session's recorded safe checkpoint" };
+      }
+      if ((quarantine.recovery === "handoff") !== !!handoff) {
+        return { ok: false, error: `this quarantined conversation recovers by ${quarantine.recovery ?? "fork"}` };
+      }
+    } else if (quarantine) {
+      return { ok: false, error: "this session's provider conversation is quarantined — use its recovery action" };
+    }
     const supportsFork = providerSupportsConversationFork(source.driver, source.capabilities);
-    if (!supportsFork) return { ok: false, error: "this provider session does not support conversation fork" };
+    if (!supportsFork && !handoff) return { ok: false, error: "this provider session does not support conversation fork" };
+    if (handoff) {
+      const error = handoffDestinationError(handoff.agent, source.driver, handoff.config, { allowSameProvider: recovery });
+      if (error) return { ok: false, error };
+      if (JSON.stringify(handoff.agent.context ?? { kind: "native" }) !== JSON.stringify(source.context) ||
+          source.executionTarget && source.executionTarget.adapter !== "host") return { ok: false, error: "handoff requires the same host execution context" };
+    }
     if (!source.worktreePath) return { ok: false, error: "conversation fork requires a worktree session" };
     if (this.hasCheckpointRefCleanupForSession(targetSessionId)) {
       try {
@@ -6019,10 +7789,11 @@ export class SessionManager {
     } else if (this.attributedWorktrees(source).length !== 1) {
       return { ok: false, error: `turn ${turn} predates worktree identity and cannot be forked after a worktree switch` };
     }
-    if (source.driver === "claude-code" && turn !== source.turnCount) {
+    if (!handoff && source.driver === "claude-code" && turn !== source.turnCount) {
       return { ok: false, error: "Claude CLI can only fork its current transcript at the matching turn checkpoint" };
     }
     const live = this.active.get(sourceSessionId);
+    if (handoff && (["queued", "starting", "running", "input_required"].includes(source.status) || source.pendingApproval || this.preLaunchQueues.get(sourceSessionId)?.length)) return { ok: false, error: "the source session is busy or has queued input" };
     if (live && (live.running || live.queue.length)) return { ok: false, error: "a turn is running or queued — wait before forking" };
     if (this.loggingOut.has(sourceSessionId)) return { ok: false, error: "agent sign-out is in progress" };
     if (this.deleting.has(sourceSessionId)) return { ok: false, error: "session deletion is in progress" };
@@ -6034,6 +7805,7 @@ export class SessionManager {
       if (!(await this.acquireAdmission(sourceSessionId))) {
         this.forking.delete(sourceSessionId);
         this.forkingTargets.delete(targetSessionId);
+        this.resumeDeferredWorktreeRebind(sourceSessionId);
         return { ok: false, error: "provider transcript store is busy on this macOS runner" };
       }
       seatbeltForkAdmission = true;
@@ -6041,6 +7813,7 @@ export class SessionManager {
         this.releaseAdmission(sourceSessionId);
         this.forking.delete(sourceSessionId);
         this.forkingTargets.delete(targetSessionId);
+        this.resumeDeferredWorktreeRebind(sourceSessionId);
         return { ok: false, error: "source session was removed while waiting for provider isolation" };
       }
     }
@@ -6048,6 +7821,7 @@ export class SessionManager {
       if (seatbeltForkAdmission) this.releaseAdmission(sourceSessionId);
       this.forking.delete(sourceSessionId);
       this.forkingTargets.delete(targetSessionId);
+      this.resumeDeferredWorktreeRebind(sourceSessionId);
       return { ok: false, error: "another runner is driving the source session" };
     }
     const forkLockRefresh = setInterval(
@@ -6060,7 +7834,66 @@ export class SessionManager {
     let worktree: WorktreeHandle | null = null;
     let forkedThreadId: string | null = null;
     let providerStateJournaled = false;
+    // Hand the source's unsent prompt to the caller so the recovered session can offer it as a
+    // composer draft. It stays a draft: neither the runner nor the control plane submits it.
+    //
+    // Workspace references cannot travel. Their rootFingerprint binds them to the source worktree's
+    // canonical path and inode, and recovery creates a different worktree, so sending them in the
+    // child would fail resolution. Drop them and say so rather than handing over a draft that
+    // cannot be sent; the same rule is why buildConversationHandoff refuses them outright.
+    const retainedImages = quarantine?.retry?.images ?? [];
+    const portableImages = retainedImages.filter((image) => !isWorkspaceReference(image));
+    const retainedPrompt = recovery && quarantine?.retry
+      ? {
+          text: portableImages.length === retainedImages.length
+            ? quarantine.retry.text
+            : `${quarantine.retry.text}\n\n[Workspace file references were removed: they belong to the quarantined session's worktree. Re-attach them here.]`,
+          images: portableImages,
+        }
+      : undefined;
+    // Provenance is only true of a session created to recover a quarantine. An ordinary fork of a
+    // recovered session inherits its history, not its rescue, so the spread must not carry it: a
+    // later unrelated quarantine there deserves the cheaper native fork.
+    const recoveryProvenance = recovery
+      ? { providerHistoryRecoveryOf: { fromSessionId: sourceSessionId, mode: handoff ? "handoff" as const : "fork" as const } }
+      : { providerHistoryRecoveryOf: undefined };
     try {
+      if (handoff) {
+        const sourceEvents = this.store.readEvents(sourceSessionId);
+        const cutoff = point.eventSeq ?? sourceEvents.find((event) => event.payload.kind === "conversation_checkpoint" && event.payload.turn === turn)?.seq;
+        if (!cutoff) throw new Error("checkpoint has no durable history boundary");
+        const handoffDraft = buildConversationHandoff(sourceEvents, cutoff, handoff.agent, handoff.config, {
+          privateValues: [source.agentSessionId, source.repoPath, source.worktreePath, ...Object.values(source.env),
+            ...Object.values(source.forkPoints ?? {}).map((checkpoint) => checkpoint.agentTurnId)].filter((value): value is string => typeof value === "string" && value.length > 0),
+        });
+        const worktreeOptions = { context: source.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
+        if (!point.baseCommit) throw new Error("checkpoint has no historical commit base");
+        worktree = await createWorktreeFromTree(source.repoPath, targetSessionId, point.tree, point.baseCommit, worktreeOptions);
+        if (this.deleting.has(targetSessionId) || this.deleted.has(targetSessionId) || this.store.isDeleted(targetSessionId) || !this.store.has(sourceSessionId)) throw new Error("handoff was cancelled");
+        const ownership = this.checkpointRefOwnership.claim({ sessionId: targetSessionId, repoPath: source.repoPath,
+          context: source.context, ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}) });
+        await this.reclaimStaleCheckpointRefOwnership(ownership);
+        if (this.deleted.has(targetSessionId) || this.store.isDeleted(targetSessionId)) throw new Error("handoff was cancelled");
+        const now = Date.now();
+        const target: SessionMeta = {
+          sessionId: targetSessionId, agentId: handoff.agent.id, agentVersion: handoff.agent.version,
+          capabilities: handoff.agent.capabilities, workspaceId: source.workspaceId, repoPath: source.repoPath,
+          worktreePath: worktree.path, worktreeBranch: worktree.branch,
+          driver: handoff.agent.driver!, command: handoff.agent.command, args: [...handoff.agent.args],
+          env: {}, context: source.context, agentSessionId: null, handoffPending: true,
+          status: "idle", title, titleSource: "generated", config: { ...handoff.config },
+          tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+          turnCount: 0, seq: 0, createdAt: now, updatedAt: now,
+          providerStateVersion: source.context.kind === "wsl" ? 3 : 2,
+          ...(this.runnerOwnerHash ? { checkpointRefVersion: 2 as const } : {}),
+          ...recoveryProvenance,
+        };
+        this.store.create(target);
+        this.store.appendEvent(targetSessionId, { kind: "conversation_forked", sourceSessionId, turn,
+          handoff: { sourceAgent: source.agentId ?? source.driver, destinationAgent: handoff.agent.id, disclosure: handoffDraft.disclosure } }, now);
+        this.store.flush(targetSessionId);
+        return { ok: true, snapshot: this.snapshot(this.store.readMeta(targetSessionId)!), events: this.store.readEvents(targetSessionId), handoffDraft, ...(retainedPrompt ? { retainedPrompt } : {}) };
+      }
       if (this.executionIsolation.mode === "bwrap" &&
           source.providerStateVersion !== (source.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(source);
@@ -6085,6 +7918,15 @@ export class SessionManager {
         if (updated && (priorCapabilities !== source.capabilities ||
             priorSessionSlashCommands !== source.sessionSlashCommands)) {
           this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        }
+        // The temporary provider is a real spawn into the source session's persisted worktree, so
+        // it needs the same proof a launch does: the tree can have been removed since the session
+        // last ran, and fork must not create a process in a directory that is no longer it.
+        const unverified = await this.persistedWorktreeFailure(
+          source, source.worktreePath, source.worktreeBranch,
+        );
+        if (unverified) {
+          return { ok: false, error: `source worktree could not be verified before fork: ${unverified}` };
         }
         const isolation = await this.resolveLaunchIsolation(source, source.worktreePath);
         this.providerHomeLeases?.acquire({
@@ -6178,8 +8020,13 @@ export class SessionManager {
         pendingApproval: null,
         providerCredentialScopeId: undefined,
         providerCredentialIdentityId: undefined,
+        providerCredentialIdentityEvidence: undefined,
         providerAuthBlock: undefined,
         providerAuthRetryAttemptedRecoveryId: undefined,
+        // The fork's history stops at the checkpoint, so the source's quarantine is not inherited.
+        // Its provenance is, so a fork poisoned again escalates to a fresh thread.
+        providerHistoryBlock: undefined,
+        ...recoveryProvenance,
         sessionSlashCommands: undefined,
         sessionSlashCommandProvenance: undefined,
         env: {},
@@ -6226,6 +8073,7 @@ export class SessionManager {
         ok: true,
         snapshot,
         ...(deferHistory ? {} : { events: this.store.readEvents(targetSessionId) }),
+        ...(retainedPrompt ? { retainedPrompt } : {}),
       };
     } catch (err) {
       if (forkedThreadId && client?.archiveSession) {
@@ -6259,6 +8107,7 @@ export class SessionManager {
       this.store.releaseLock(sourceSessionId, this.lockOwner);
       this.forking.delete(sourceSessionId);
       this.forkingTargets.delete(targetSessionId);
+      this.resumeDeferredWorktreeRebind(sourceSessionId);
       if (seatbeltForkAdmission) this.releaseAdmissionIfInactive(sourceSessionId);
     }
   }
@@ -6291,24 +8140,29 @@ export class SessionManager {
     this.setInterruptQueueHold(sessionId, entry, false);
     // Driver-level cancel only reaches a live agent process; during the pre-prompt turn snapshot
     // there is none yet, so also flag the entry — runPrompt honors it before spawning.
-    entry.cancelRequested = true;
+    // An idle provider-owned turn already has a live process for cancel() to settle, but it does
+    // not own the runner queue drain. Do not leave a pre-launch fence that would discard the next
+    // explicit prompt after that unsolicited turn is gone.
+    entry.cancelRequested = entry.running;
     entry.client.cancel();
   }
 
   /** Interrupt only the active turn. The session remains promptable and its not-yet-started FIFO
-   * is held until a later explicit prompt resumes it. The disposition lets correlated callers
-   * distinguish an applied interrupt from a raced, stale, or otherwise inapplicable request. */
+   * is held until that turn safely settles, then resumes automatically. The disposition lets
+   * correlated callers distinguish an applied interrupt from a raced, stale, or inapplicable request. */
   interruptTurn(sessionId: string, turnId?: string): InterruptTurnResultReason {
     const entry = this.active.get(sessionId);
     // Launch/admission cancellation is a lifecycle operation and can discard the initial prompt.
     // The control plane rejects queued/starting sessions; a skewed or raced direct message is a
     // safe no-op until an in-process turn actually exists.
     if (!entry) return "session_not_found";
-    if (!entry.running || entry.cancelRequested || entry.governanceTripped) return "turn_not_running";
+    const providerTurnId = entry.providerInitiatedTurnActive ? entry.providerInitiatedTurnId : undefined;
+    const currentTurnId = providerTurnId ?? (entry.running ? entry.activeTurnId : undefined);
+    if (!currentTurnId || entry.cancelRequested || entry.governanceTripped) return "turn_not_running";
     if (entry.interruptRequested) return "already_requested";
     // A delayed request for the previous turn must never cancel a newly dequeued prompt. Missing
     // coordinates preserve the pre-marker v71 behavior for rolling control-plane upgrades.
-    if (turnId !== undefined && entry.activeTurnId !== turnId) return "stale_turn";
+    if (turnId !== undefined && currentTurnId !== turnId) return "stale_turn";
     this.cancelApprovalTelemetry(sessionId);
     entry.interruptRequested = true;
     this.setInterruptQueueHold(sessionId, entry, true);
@@ -6322,18 +8176,75 @@ export class SessionManager {
     return "applied";
   }
 
+  /** Persist the control plane's cumulative priced cost and apply the existing hard budget to the
+   * active turn. Codex reports token usage without USD, so this acknowledgement is the first
+   * authoritative cost the runner can enforce. */
+  syncPricedSessionCost(sessionId: string, costUsd: number): void {
+    if (!Number.isFinite(costUsd) || costUsd < 0) return;
+    const updated = this.store.patchMeta(sessionId, { costUsd });
+    if (!updated) return;
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+
+    const entry = this.active.get(sessionId);
+    const budgetUsd = updated.config.costBudgetUsd;
+    if (!entry || (!entry.running && !entry.providerInitiatedTurnActive) || entry.governanceTripped ||
+        !budgetUsd || costUsd < budgetUsd) return;
+    this.tripGovernance(sessionId, entry, updated, "cost_budget");
+  }
+
   /** Apply the next absolute thresholds after a user continues. Held queued prompts resume only
    * after this message, so a mid-turn trip cannot leak work past the approval boundary. */
   rearmGovernance(
     sessionId: string,
     config: { costBudgetUsd?: number | null; maxToolCalls?: number | null },
-    holdFor?: "cost_budget" | "max_tool_calls",
+    holdFor?: "cost_budget" | "max_tool_calls" | "control_plane",
   ): void {
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
     const costBudgetUsd = config.costBudgetUsd;
     const maxToolCalls = config.maxToolCalls;
-    if (costBudgetUsd === undefined && maxToolCalls === undefined) return;
+    // No live process: whatever the re-arm carries, the hold change applies to what recovery
+    // holds for this session, and a release re-enters recovery. Thresholds ride into the queued
+    // prompts' configs when the replacement process picks them up.
+    if (!this.active.get(sessionId)) {
+      // Recovered prompts carry their own configs, so the new thresholds are written into them
+      // here; the live-entry loop below never sees the recovery map.
+      for (const queued of this.recoveryQueues.get(sessionId) ?? []) {
+        const queuedConfig: SessionConfig = { ...(queued.config ?? this.store.readMeta(sessionId)?.config ?? {}) };
+        if (costBudgetUsd === null) delete queuedConfig.costBudgetUsd;
+        else if (costBudgetUsd !== undefined) queuedConfig.costBudgetUsd = costBudgetUsd;
+        if (maxToolCalls === null) delete queuedConfig.maxToolCalls;
+        else if (maxToolCalls !== undefined) queuedConfig.maxToolCalls = maxToolCalls;
+        queued.config = queuedConfig;
+      }
+      if (holdFor === "control_plane") this.recoveryHolds.add(sessionId);
+      else if (holdFor === undefined && this.recoveryHolds.delete(sessionId) && this.recoveryQueues.has(sessionId)) {
+        setImmediate(() => void this.recoverQueuedAppServer(sessionId));
+      }
+      if (costBudgetUsd === undefined && maxToolCalls === undefined) return;
+    }
+    // A threshold-free re-arm is a hold change alone (v105 control-plane cards): it must neither
+    // be ignored nor touch the per-prompt budgets queued prompts were queued with.
+    if (costBudgetUsd === undefined && maxToolCalls === undefined) {
+      const entry = this.active.get(sessionId);
+      if (!entry) return;
+      if (holdFor === "control_plane") {
+        this.setControlPlaneHold(sessionId, entry, true);
+        if (entry.running && entry.governanceTripped) entry.governanceRearmPending = "resume";
+        else if (!entry.running) {
+          entry.governanceTripped = undefined;
+          entry.governanceTrip = undefined;
+        }
+        return;
+      }
+      if (holdFor === undefined && (entry.controlPlaneHold || this.recoveryHolds.has(sessionId))) {
+        this.recoveryHolds.delete(sessionId);
+        this.setControlPlaneHold(sessionId, entry, false);
+        if (!entry.running && !entry.governanceTripped && !this.queueHeld(entry) &&
+            (entry.queue.length || entry.pendingWorktreeRebind)) this.scheduleDrain(sessionId);
+      }
+      return;
+    }
     if (costBudgetUsd !== undefined && costBudgetUsd !== null && (!Number.isFinite(costBudgetUsd) || costBudgetUsd <= 0)) return;
     if (maxToolCalls !== undefined && maxToolCalls !== null && (!Number.isInteger(maxToolCalls) || maxToolCalls <= 0)) return;
     const merged: SessionConfig = { ...meta.config };
@@ -6344,7 +8255,10 @@ export class SessionManager {
     this.store.patchMeta(sessionId, { config: merged });
     const entry = this.active.get(sessionId);
     if (!entry) return;
-    if (!holdFor) {
+    // A threshold-bearing message is also used for ordinary live config synchronization. Only a
+    // real governance Continue may release a separate Stop-Turn interrupt hold before normal turn
+    // settlement; otherwise a budget edit could bypass the cancellation boundary.
+    if (!holdFor && entry.governanceTripped) {
       entry.interruptRequested = false;
       this.setInterruptQueueHold(sessionId, entry, false);
     }
@@ -6363,17 +8277,45 @@ export class SessionManager {
           .map((event) => (event.payload as Extract<SessionEventPayload, { kind: "tool_call" }>).toolCallId),
       );
     }
+    // A control-plane card holds the queue and nothing else: the live turn keeps running, no
+    // governance trip is recorded (a trip would make a later provider failure look like a
+    // governance settle), and any earlier hard trip is cleared because the thresholds it
+    // enforced have just been re-armed.
+    if (holdFor === "control_plane") {
+      this.setControlPlaneHold(sessionId, entry, true);
+      if (entry.running) {
+        if (entry.governanceTripped) entry.governanceRearmPending = "resume";
+        return;
+      }
+      entry.governanceTripped = undefined;
+      entry.governanceTrip = undefined;
+      this.emitStatus(sessionId, "idle");
+      return;
+    }
+    // A threshold re-arm without a hold releases a control-plane hold too: the card it carried
+    // was answered by the same Continue that sent the new thresholds.
+    if (!holdFor) {
+      this.recoveryHolds.delete(sessionId);
+      this.setControlPlaneHold(sessionId, entry, false);
+    }
     if (entry.running) {
       if (entry.governanceTripped) entry.governanceRearmPending = holdFor ?? "resume";
       else if (holdFor) entry.governanceTripped = holdFor;
       return;
     }
     entry.governanceTripped = holdFor;
-    this.emitStatus(sessionId, "idle");
-    if (!holdFor && entry.queue.length) this.scheduleDrain(sessionId);
+    entry.governanceTrip = undefined;
+    // Ordinary threshold synchronization must not erase a provider-owned question/permission.
+    // The runner store is authoritative for that barrier, just as it is on provider callbacks.
+    this.emitStatus(sessionId, meta.pendingApproval ? "input_required" : "idle");
+    if (!holdFor && (entry.queue.length || entry.pendingWorktreeRebind)) this.scheduleDrain(sessionId);
   }
 
   stop(sessionId: string): void {
+    // Stop is a terminal lifecycle boundary even while launch is suspended in an asynchronous
+    // provider-authentication probe. Fence that generation before the probe can persist a new
+    // recovery block or publish a non-terminal status for the stopped session.
+    this.invalidateLaunchGeneration(sessionId);
     this.revokeSessionCommandAuthority(sessionId);
     this.cancelBackgroundContinuationTimer(sessionId);
     this.discardRecovery(sessionId);
@@ -6385,6 +8327,11 @@ export class SessionManager {
     }
     const entry = this.active.get(sessionId);
     if (!entry) {
+      const rebinding = this.worktreeRebindings.get(sessionId);
+      if (rebinding) {
+        const stopGeneration = this.beginLaunchGeneration(sessionId);
+        this.finishLaunchGeneration(sessionId, stopGeneration);
+      }
       this.rejectPreLaunchQueue(sessionId, "session stopped before runner admission");
       // The rejection re-arm is for failed admissions; this stop is a lifecycle end, so drop it.
       this.cancelBackgroundContinuationTimer(sessionId);
@@ -6402,6 +8349,10 @@ export class SessionManager {
         });
         this.emitStatus(sessionId, "stopped");
       }
+      if (!this.closing.has(sessionId) && !rebinding) {
+        this.releaseAdmissionIfInactive(sessionId);
+      }
+      if (authenticationBlock) this.surfaceProviderAuthentication(authenticationBlock.credentialScopeId);
       return;
     }
     this.store.patchMeta(sessionId, {
@@ -6419,23 +8370,76 @@ export class SessionManager {
     this.rejectQueued(entry.queue, "session stopped before queued command started");
     entry.queue.length = 0;
     this.emitQueue(sessionId); // clear any queued prompts from the dashboard
-    if (entry.client.close) {
-      let promise: Promise<void>;
-      promise = this.closeAndDispose(sessionId, entry.client, true).finally(() => {
-        if (this.closing.get(sessionId)?.promise === promise) this.closing.delete(sessionId);
-        this.releaseActiveWorktreeLease(entry);
-        this.releaseAdmission(sessionId);
-        this.clearLock(sessionId);
-      });
-      this.closing.set(sessionId, { client: entry.client, promise });
-    } else {
-      entry.client.dispose({ forceImmediate: true });
-      this.releaseActiveWorktreeLease(entry);
-      this.releaseAdmission(sessionId);
-      this.clearLock(sessionId);
-    }
+    this.beginProviderRetirement(sessionId, entry);
     // Worktree is intentionally kept so its diff remains reviewable.
     this.emitStatus(sessionId, "stopped");
+    if (authenticationBlock) this.surfaceProviderAuthentication(authenticationBlock.credentialScopeId);
+  }
+
+  private beginProviderRetirement(
+    sessionId: string,
+    entry: ActiveSession,
+    options: {
+      preserveAdmission?: boolean;
+      preserveLock?: boolean;
+      acceptPromptsDuringHandoff?: boolean;
+    } = {},
+  ): ProviderRetirement {
+    const existing = this.closing.get(sessionId);
+    if (existing) {
+      if (existing.client !== entry.client) {
+        throw new Error("cannot retire a different provider while an earlier retirement is pending");
+      }
+      return existing;
+    }
+    const retirement = {
+      client: entry.client,
+      entry,
+      promise: Promise.resolve(),
+      preserveAdmission: options.preserveAdmission ?? false,
+      preserveLock: options.preserveLock ?? false,
+      acceptPromptsDuringHandoff: options.acceptPromptsDuringHandoff ?? false,
+    };
+    this.closing.set(sessionId, retirement);
+    if (!entry.client.close) {
+      try {
+        entry.client.dispose({ forceImmediate: true });
+        this.completeProviderRetirement(sessionId, retirement);
+      } catch (error) {
+        this.log(`session ${sessionId} provider retirement remains unconfirmed: ${errText(error)}`);
+        // Keep `closing` installed as the exact-client fence, but preserve the synchronous Stop
+        // result contract so the control plane does not acknowledge an unconfirmed stop as success.
+        throw error;
+      }
+      return retirement;
+    }
+    retirement.promise = this.closeAndDispose(sessionId, entry.client, true).then(
+      () => this.completeProviderRetirement(sessionId, retirement),
+      (error) => {
+        // No exit proof exists. Retain every ownership boundary until this exact client later
+        // reports exit or runner shutdown successfully disposes it.
+        this.log(`session ${sessionId} provider retirement remains unconfirmed: ${errText(error)}`);
+      },
+    );
+    return retirement;
+  }
+
+  private completeProviderRetirement(
+    sessionId: string,
+    retirement: ProviderRetirement,
+  ): void {
+    if (this.closing.get(sessionId) !== retirement) return;
+    this.closing.delete(sessionId);
+    this.releaseActiveWorktreeLease(retirement.entry);
+    if (!retirement.preserveAdmission) this.releaseAdmission(sessionId);
+    if (!retirement.preserveLock) this.clearLock(sessionId);
+    if (!this.shuttingDown && this.pendingDeletions.delete(sessionId)) {
+      setImmediate(() => {
+        void this.delete(sessionId).catch((error) => {
+          this.log(`deferred deletion retry failed for ${sessionId}: ${errText(error)}`);
+        });
+      });
+    }
   }
 
   /** Permanently delete a session from the box store (the source of truth) so it cannot be
@@ -6488,28 +8492,63 @@ export class SessionManager {
       // idempotent lock/admission release; the deletion journal exclusively owns destructive
       // worktree/provider cleanup.
       this.latestLaunchGenerations.delete(sessionId);
+      this.verifiedWorktreeRoots.delete(sessionId);
+      this.provingWorktreeRoots.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
-      this.releaseAdmissionIfInactive(sessionId);
+      const rebinding = this.worktreeRebindings.get(sessionId);
       this.discardRecovery(sessionId);
       this.cancelApprovalTelemetry(sessionId);
-      const closing = this.closing.get(sessionId);
+      let closing = this.closing.get(sessionId);
       const entry = this.active.get(sessionId);
+      if (!closing && !rebinding) this.releaseAdmissionIfInactive(sessionId);
       this.clearSteeringState(sessionId, "session was deleted before steering settled");
       if (entry) {
-        this.deleteActiveSession(sessionId, entry);
+        this.deleteActiveSession(sessionId, entry, false);
         this.rejectQueued(entry.queue, "session was deleted before queued command started");
         entry.queue.length = 0;
+        if (!closing) {
+          try {
+            closing = this.beginProviderRetirement(sessionId, entry);
+          } catch (error) {
+            // A no-close driver disposes synchronously. If disposal throws, retain the same pending
+            // deletion intent used by the asynchronous-close path before control returns to the
+            // event loop, so an eventual exact-client exit automatically resumes cleanup.
+            closing = this.closing.get(sessionId);
+            if (closing?.client === entry.client) {
+              this.pendingDeletions.add(sessionId);
+              throw error;
+            }
+            // A pathological driver may synchronously emit exact exit and then throw from dispose.
+            // Retirement is already proven in that case, so continue the journaled deletion.
+            this.log(`session ${sessionId} disposal threw after exact exit proof: ${errText(error)}`);
+          }
+        }
       }
-      this.clearLock(sessionId);
-      // The row disappears before the first await below. This makes every lookup/open fail closed
-      // while slow provider, cloud, provider-state, and worktree cleanup continues asynchronously.
-      this.store.remove(sessionId);
-
-      if (closing) await closing.promise;
-      if (entry) {
-        await this.closeAndDispose(sessionId, entry.client, true);
+      if (closing) {
+        await closing.promise;
+        if (this.closing.get(sessionId) === closing) {
+          this.pendingDeletions.add(sessionId);
+          throw new Error("provider process retirement is unconfirmed; destructive cleanup remains fenced");
+        }
+      }
+      // A replacement published by launch() is already in `entry`; deletion retires it directly
+      // above. Do not also wait for the encompassing rebind promise, because a broken driver may
+      // leave initialize()/newSession() pending even after its process has been disposed.
+      if (rebinding && !entry) {
+        await rebinding.promise;
         this.releaseAdmission(sessionId);
       }
+      this.clearLock(sessionId);
+      // The process-local deletion fence and durable tombstone make lookups fail closed while
+      // provider retirement settles. Remove the row only after its exact client has retired so
+      // a failed attempt remains retryable with complete cleanup provenance.
+      this.store.remove(sessionId);
+      if (meta?.providerAuthBlock) this.surfaceProviderAuthentication(meta.providerAuthBlock.credentialScopeId);
+      // A replacement provider is published in `active` before initialization settles. Deletion
+      // captured and retired that exact entry above, so the encompassing rebind promise must no
+      // longer retain the session indefinitely when initialize()/newSession() never resolves.
+      if (rebinding && entry) this.worktreeRebindings.delete(sessionId);
+      this.pendingDeletions.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
       // Checkpoint refs live in the SHARED repo odb (not the worktree dir) — drop them or the
       // anchored trees for a deleted session pin objects forever. Best-effort: the repo may be
@@ -6699,7 +8738,13 @@ export class SessionManager {
    * prompts arriving during the wait must be rejected too, or their edits would be silently
    * overwritten when the queued rewind finally runs. Returns false if already fenced. */
   fenceRewind(sessionId: string): boolean {
-    if (this.rewinding.has(sessionId) || this.loggingOut.has(sessionId) || this.deleting.has(sessionId)) return false;
+    if (
+      this.rewinding.has(sessionId) ||
+      this.loggingOut.has(sessionId) ||
+      this.deleting.has(sessionId) ||
+      this.closing.has(sessionId) ||
+      this.worktreeRebindings.has(sessionId)
+    ) return false;
     this.rewinding.add(sessionId);
     return true;
   }
@@ -6707,11 +8752,17 @@ export class SessionManager {
   /** Release a fence taken by fenceRewind when the rewind will NOT run (expiry). */
   releaseRewindFence(sessionId: string): void {
     this.rewinding.delete(sessionId);
+    this.resumeDeferredWorktreeRebind(sessionId);
   }
 
   async rewind(sessionId: string, turn: number, alreadyFenced = false): Promise<{ ok: boolean; error?: string }> {
-    if (this.loggingOut.has(sessionId)) return { ok: false, error: "agent sign-out is in progress" };
-    if (this.deleting.has(sessionId)) return { ok: false, error: "session deletion is in progress" };
+    const refuseBeforeRewind = (error: string): { ok: false; error: string } => {
+      if (alreadyFenced) this.releaseRewindFence(sessionId);
+      return { ok: false, error };
+    };
+    if (this.loggingOut.has(sessionId)) return refuseBeforeRewind("agent sign-out is in progress");
+    if (this.deleting.has(sessionId)) return refuseBeforeRewind("session deletion is in progress");
+    if (this.closing.has(sessionId)) return refuseBeforeRewind("provider retirement is still in progress");
     // Mark FIRST (synchronously): prompt() consults the set, and the shared lock is reentrant
     // for this process so it can't fence a same-runner prompt out of the restore window.
     if (!alreadyFenced && !this.fenceRewind(sessionId)) {
@@ -6761,6 +8812,7 @@ export class SessionManager {
       return { ok: false, error: errText(err) };
     } finally {
       this.rewinding.delete(sessionId);
+      this.resumeDeferredWorktreeRebind(sessionId);
     }
   }
 
@@ -6850,6 +8902,24 @@ export class SessionManager {
       });
       return;
     }
+    const recoveredMeta = this.store.readMeta(sessionId);
+    const recovered = pendingRequests(recoveredMeta?.pendingApproval).find((request) => request.requestId === requestId);
+    const recoveredStatus = recoveredMeta?.status ?? "idle";
+    if (recovered?.kind === "question" && recovered.requestId === requestId &&
+        recovered.recoveryReason === "provider_restart" && action === "dismiss") {
+      const remaining = removePendingRequest(recoveredMeta?.pendingApproval, requestId);
+      const statusAfterDismiss = remaining ? "input_required" : recoveredStatus === "input_required"
+        ? "idle"
+        : recoveredStatus;
+      this.emitEvent(sessionId, {
+        kind: "question_resolved",
+        requestId,
+        answered: false,
+        resolutionReason: "dismissed",
+      });
+      this.emitStatus(sessionId, statusAfterDismiss);
+      return;
+    }
     this.approvalStarted.delete(`${sessionId}:${requestId}`);
     if (!this.store.has(sessionId)) return;
     // Same dead-target contract as resolvePermission: never fake a resolution for a process
@@ -6860,6 +8930,51 @@ export class SessionManager {
     });
     const status = this.store.readMeta(sessionId)?.status ?? "idle";
     this.emitStatus(sessionId, status);
+  }
+
+  /** Resume an established conversation after its process-owned structured-question callback was
+   * lost. The durable command journal owns deduplication; runPrompt records the one correlated
+   * resolution immediately before invoking the synthesized continuation turn. */
+  answerRecoveredQuestion(
+    sessionId: string,
+    requestId: string,
+    recoveryId: string,
+    answers: Record<string, string | string[]>,
+    durable: DurableCommandLifecycle,
+  ): void {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta) {
+      durable.failed("session is not active on this runner", "SESSION_NOT_FOUND");
+      return;
+    }
+    const pending = meta.pendingApproval;
+    if (pending?.kind !== "question" || pending.requestId !== requestId || pending.recoveryId !== recoveryId ||
+        pending.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer") {
+      durable.failed("the recovered question is no longer pending", "COMMAND_CANCELLED");
+      return;
+    }
+    if (!canResumeRecoveredQuestion(meta, pending)) {
+      durable.failed("the provider conversation cannot safely resume this question", "INVALID_COMMAND");
+      return;
+    }
+    const invalid = validateQuestionAnswers(pending.questions ?? [], answers, "submit");
+    if (invalid) {
+      durable.failed(`invalid recovered answers: ${invalid}`, "INVALID_COMMAND");
+      return;
+    }
+    this.prompt(
+      sessionId,
+      recoveredQuestionContinuationText(requestId, pending, answers),
+      [],
+      undefined,
+      undefined,
+      durable,
+      false,
+      undefined,
+      true,
+      undefined,
+      { requestId, recoveryId, answers },
+    );
   }
 
   /** Stop refreshing and release a session's lock (idempotent). */
@@ -6876,7 +8991,7 @@ export class SessionManager {
   private captureAgentSessionId(sessionId: string, client: Driver): void {
     const aid = client.agentSessionId();
     if (aid && this.store.readMeta(sessionId)?.agentSessionId !== aid) {
-      this.store.patchMeta(sessionId, { agentSessionId: aid });
+      this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined });
     }
   }
 
@@ -6896,12 +9011,19 @@ export class SessionManager {
     return captured?.tree ?? null;
   }
 
-  private onExit(sessionId: string, code: number | null): void {
+  private onExit(sessionId: string, code: number | null, expectedClient: Driver): void {
     const entry = this.active.get(sessionId);
-    if (!entry) return;
+    if (!entry || entry.client !== expectedClient) return;
     this.releaseAdmission(sessionId);
     this.clearLock(sessionId);
     const meta = this.store.readMeta(sessionId);
+    const pendingClaudeTaskIds = meta?.driver === "claude-code" && entry.status !== "stopped"
+      ? [...new Set([
+          ...(meta.pendingBackgroundTaskIds ?? []),
+          ...(meta.orphanedWork?.pendingTaskIds ?? []),
+        ])].sort()
+      : [];
+    const recoverableClaudeWork = pendingClaudeTaskIds.length > 0 && !!meta?.agentSessionId;
     this.cancelApprovalTelemetry(sessionId);
     if (meta && entry.status !== "stopped") {
       this.emitTelemetry(meta, {
@@ -6932,6 +9054,7 @@ export class SessionManager {
         if (meta?.driver === "codex-app-server" && meta.agentSessionId) {
           this.stabilizeRecoveryQueue(sessionId, queued);
           this.recoveryQueues.set(sessionId, queued);
+          if (entry.controlPlaneHold) this.recoveryHolds.add(sessionId);
         } else {
           this.rejectQueued(
             queued,
@@ -6944,6 +9067,17 @@ export class SessionManager {
     }
     if (entry.status !== "stopped") {
       this.restoreUnsubmittedPromotions(sessionId, entry);
+      if (recoverableClaudeWork) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `Claude provider exited with pending background work (${pendingClaudeTaskIds.join(", ")}); relaunching and resuming it automatically.`,
+        });
+      } else if (pendingClaudeTaskIds.length > 0) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `Claude provider exited with pending background work (${pendingClaudeTaskIds.join(", ")}); automatic recovery is unavailable because the provider conversation cannot be resumed.`,
+        });
+      }
       // Keep the entry installed until this append completes: if it is the first integrity
       // failure, failHistoryIntegrity must still own/cancel this session and its durable queue.
       if (!this.emitEvent(sessionId, { kind: "stderr", text: `agent process exited (code ${code})` })) {
@@ -6956,7 +9090,11 @@ export class SessionManager {
       const hadQueueProjection = queued.length > 0 || this.reservedPromotions(entry).size > 0;
       this.deleteActiveSession(sessionId, entry);
       if (hadQueueProjection) this.emitQueue(sessionId);
-      if (recoverableAppServer) {
+      if (recoverableClaudeWork) {
+        this.rejectQueued(queued, "Claude exited before queued command started");
+        this.emitStatus(sessionId, "idle", "Claude exited with pending background work; recovery is resuming automatically");
+        this.scheduleOrphanRecovery(sessionId);
+      } else if (recoverableAppServer) {
         // A crashed turn may already have reached turn/start, so never replay it. The entries
         // still in queue are provably unsubmitted and can safely continue after a fresh process
         // resumes the same durable thread.
@@ -6964,6 +9102,7 @@ export class SessionManager {
         if (queued.length) {
           this.stabilizeRecoveryQueue(sessionId, queued);
           this.recoveryQueues.set(sessionId, queued);
+          if (entry.controlPlaneHold) this.recoveryHolds.add(sessionId);
           setImmediate(() => void this.recoverQueuedAppServer(sessionId));
         }
       } else if (code && code !== 0) {
@@ -6980,14 +9119,24 @@ export class SessionManager {
   /** Driver callbacks are third-party process boundaries and must never surface an exception into
    * the driver's event loop. Event-history failures are contained by emitEvent; this guard also
    * prevents an unrelated exit-cleanup failure from becoming a process-wide uncaught exception. */
-  private onDriverExit(sessionId: string, code: number | null): void {
+  private onDriverExit(sessionId: string, code: number | null, expectedClient: Driver): void {
+    const closing = this.closing.get(sessionId);
+    if (closing?.client === expectedClient) {
+      try {
+        this.completeProviderRetirement(sessionId, closing);
+      } catch (error) {
+        this.log(`provider retirement cleanup failed for ${sessionId}: ${errText(error)}`);
+      }
+      return;
+    }
+    if (this.active.get(sessionId)?.client !== expectedClient) return;
     this.revokeSessionCommandAuthority(sessionId);
     try {
-      this.onExit(sessionId, code);
+      this.onExit(sessionId, code, expectedClient);
     } catch (error) {
       this.log(`agent exit cleanup failed for ${sessionId}: ${errText(error)}`);
       const entry = this.active.get(sessionId);
-      if (!entry) return;
+      if (!entry || entry.client !== expectedClient) return;
       const detail = `agent exit cleanup failed: ${errText(error)}`;
       const queued = entry.queue.splice(0);
       this.rejectQueued(queued, detail);
@@ -7007,12 +9156,19 @@ export class SessionManager {
     if (this.recoveryLaunching.has(sessionId)) return;
     const queued = this.recoveryQueues.get(sessionId);
     if (!queued) return;
+    // A control-plane card is still open: the prompts stay parked in the recovery map until the
+    // control plane releases the hold, which re-enters here.
+    if (this.recoveryHolds.has(sessionId) && !this.active.get(sessionId)) return;
     const alreadyActive = this.active.get(sessionId);
     if (alreadyActive) {
       // A non-recovery entrypoint won the race. Preserve the known-unsubmitted prompts ahead of
       // newer work instead of leaving a stale recovery map that would intercept every prompt.
       for (const prompt of queued) this.insertQueuedPrompt(sessionId, alreadyActive.queue, prompt);
       this.recoveryQueues.delete(sessionId);
+      if (this.recoveryHolds.has(sessionId)) {
+        this.recoveryHolds.delete(sessionId);
+        this.setControlPlaneHold(sessionId, alreadyActive, true);
+      }
       this.emitQueue(sessionId);
       this.scheduleDrain(sessionId);
       return;
@@ -7107,6 +9263,7 @@ export class SessionManager {
     if (queued) this.rejectQueued(queued, "session lifecycle discarded the recovered command queue");
     this.recoveryQueues.delete(sessionId);
     this.recoveryLaunching.delete(sessionId);
+    this.recoveryHolds.delete(sessionId);
   }
 
   /** Returns whether every provider driver was disposed cleanly. When false, some provider process
@@ -7143,15 +9300,31 @@ export class SessionManager {
       }
     }
     this.active.clear();
-    for (const { client } of this.closing.values()) {
+    const shutdownRetirementClients = new Set<Driver>();
+    for (const retirement of [...this.closing.values()]) {
+      shutdownRetirementClients.add(retirement.client);
+      retirement.preserveAdmission = false;
+      retirement.preserveLock = false;
+      retirement.acceptPromptsDuringHandoff = false;
       try {
-        client.dispose();
+        retirement.client.dispose();
+        this.completeProviderRetirement(retirement.entry.sessionId, retirement);
       } catch (error) {
         clean = false;
         this.log(`shutdown dispose failed for a closing session: ${errText(error)}`);
       }
     }
-    this.closing.clear();
+    for (const { entry } of this.worktreeRebindings.values()) {
+      if (shutdownRetirementClients.has(entry.client)) continue;
+      try {
+        entry.client.dispose();
+      } catch (error) {
+        clean = false;
+        this.log(`shutdown dispose failed for a rebinding session: ${errText(error)}`);
+      }
+    }
+    this.worktreeRebindings.clear();
+    this.pendingDeletions.clear();
     this.deleting.clear();
     this.recoveryQueues.clear();
     this.preLaunchQueues.clear();
@@ -7205,21 +9378,33 @@ export class SessionManager {
     status: SessionStatus,
     detail?: string,
     worktreePath?: string | null,
+    capacityWait?: RunnerCapacityBlocker,
   ): void {
+    const authMeta = this.store.readMeta(sessionId);
+    // A durable block holds prompt admission even while its shared probe is silent or another
+    // session owns the credential-scope card. Turn settlement must not create attention alone.
+    if (status === "input_required" && authMeta?.providerAuthBlock && !authMeta.pendingApproval) {
+      status = "idle";
+      detail = undefined;
+    }
     const entry = this.active.get(sessionId);
-    if (entry) entry.status = status;
-    // When a turn settles (idle/stopped/failed/etc.) any pending approval is moot — clear it so the
-    // box snapshot doesn't carry a stale card. The runner stays "running" through an approval, and
-    // "input_required" IS the parked-on-a-card state — wiping the card while keeping that status
-    // would strand a live ask (e.g. the dead-target corrective re-emit racing a parked session in
-    // a shared box store). Mirrors the CP rule: LEAVING input_required clears the card.
-    const settled = status !== "running" && status !== "starting" && status !== "input_required";
-    this.store.patchMeta(sessionId, settled ? { status, pendingApproval: null } : { status });
+    const terminal = status === "completed" || status === "failed" || status === "stopped";
+    const childAttention = !terminal && pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
+      .some((request) => request.ownerToolUseId);
+    const projectedStatus = childAttention ? "input_required" : status;
+    if (entry) entry.status = projectedStatus;
+    // Foreground idle does not end independently owned child callbacks. Keep their snapshot
+    // actionable while the raw foreground status still reaches workflow/pod settlement consumers.
+    const settled = projectedStatus !== "running" && projectedStatus !== "starting" && projectedStatus !== "input_required";
+    this.store.patchMeta(sessionId, settled
+      ? { status: projectedStatus, pendingApproval: null, capacityWait: status === "queued" ? capacityWait : undefined }
+      : { status: projectedStatus, capacityWait: status === "queued" ? capacityWait : undefined });
     this.send({
       type: "session_status",
       sessionId,
       status,
       detail,
+      capacityWait: status === "queued" ? capacityWait : undefined,
       worktreePath,
       controlPlaneLaunchId: this.store.readMeta(sessionId)?.controlPlaneLaunchId,
     });
@@ -7233,6 +9418,7 @@ export class SessionManager {
     error: unknown,
     durable?: DurableCommandLifecycle,
   ): void {
+    const authScopeId = this.store.readMeta(sessionId)?.providerAuthBlock?.credentialScopeId;
     const entry = this.active.get(sessionId);
     const detail = entry?.historyIntegrityFailure ??
       `session history integrity failure: ${errText(error)}`;
@@ -7244,6 +9430,7 @@ export class SessionManager {
         providerAuthBlock: undefined,
       });
       this.send({ type: "session_status", sessionId, status: "failed", detail });
+      if (authScopeId) this.surfaceProviderAuthentication(authScopeId);
       return;
     }
     if (entry.historyIntegrityFailure) {
@@ -7267,6 +9454,7 @@ export class SessionManager {
     }
     this.store.patchMeta(sessionId, { providerAuthBlock: undefined });
     this.emitStatus(sessionId, "failed", detail);
+    if (authScopeId) this.surfaceProviderAuthentication(authScopeId);
     try {
       entry.client.cancel();
     } catch (cancelError) {
@@ -7306,6 +9494,158 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Persist a CP-resolved policy-hook decision in the runner's authoritative sequence space.
+   * Runtime picking/validation is intentional: this command crosses a privileged boundary and
+   * must never smuggle the hook's raw tool input, answers, or policy predicates into history.
+   */
+  async recordPolicyHookDecision(
+    sessionId: string,
+    value: unknown,
+  ): Promise<{ accepted: boolean; auditId: string; eventSeq?: number; error?: string }> {
+    const fail = (auditId: string, error: string) => ({ accepted: false, auditId, error });
+    if (!value || typeof value !== "object" || Array.isArray(value)) return fail("", "decision is malformed");
+    const raw = value as Record<string, unknown>;
+    const auditId = typeof raw.auditId === "string" ? raw.auditId : "";
+    const allowedKeys = new Set([
+      "auditId", "requestId", "stage", "outcome", "actor", "governancePolicyId", "toolCallId",
+    ]);
+    if (Object.keys(raw).some((key) => !allowedKeys.has(key))) return fail(auditId, "decision contains unsafe fields");
+    const bounded = (field: unknown, max: number) => typeof field === "string" &&
+      field.length > 0 && field.length <= max && !/[\x00-\x1f\x7f]/u.test(field);
+    if (!bounded(raw.auditId, 256) || !bounded(raw.requestId, 512) || !bounded(raw.toolCallId, 512)) {
+      return fail(auditId, "decision identity is invalid");
+    }
+    if (raw.stage !== "policy_decision" && raw.stage !== "resolution") {
+      return fail(auditId, "decision stage is not terminal");
+    }
+    if (raw.outcome !== "allowed" && raw.outcome !== "denied" && raw.outcome !== "timed_out" && raw.outcome !== "aborted") {
+      return fail(auditId, "decision outcome is not terminal");
+    }
+    if (!raw.actor || typeof raw.actor !== "object" || Array.isArray(raw.actor)) {
+      return fail(auditId, "decision actor is invalid");
+    }
+    const actor = raw.actor as Record<string, unknown>;
+    if (Object.keys(actor).some((key) => key !== "kind" && key !== "id") ||
+        !["human", "agent", "policy", "system"].includes(String(actor.kind)) ||
+        (actor.id !== undefined && !bounded(actor.id, 256)) ||
+        (raw.governancePolicyId !== undefined && !bounded(raw.governancePolicyId, 256))) {
+      return fail(auditId, "decision provenance is invalid");
+    }
+    if (!this.store.has(sessionId)) return fail(auditId, "session does not exist");
+    const payload: PolicyHookDecisionEvent = {
+      kind: "policy_hook_decision",
+      auditId,
+      requestId: raw.requestId as string,
+      stage: raw.stage,
+      outcome: raw.outcome,
+      actor: {
+        kind: actor.kind as PolicyHookDecisionEvent["actor"]["kind"],
+        ...(typeof actor.id === "string" ? { id: actor.id } : {}),
+      },
+      ...(typeof raw.governancePolicyId === "string" ? { governancePolicyId: raw.governancePolicyId } : {}),
+      toolCallId: raw.toolCallId as string,
+    };
+    const active = this.active.get(sessionId);
+    const activeExisting = active?.policyHookDecisionEvents?.get(auditId);
+    if (activeExisting) {
+      if (JSON.stringify(activeExisting.payload) !== JSON.stringify(payload)) {
+        return fail(auditId, "decision conflicts with the existing audit event");
+      }
+      return { accepted: true, auditId, eventSeq: activeExisting.eventSeq };
+    }
+    if (active?.policyHookToolCallIds?.has(payload.toolCallId)) {
+      return this.appendPolicyHookDecision(sessionId, payload);
+    }
+    // A turn-owned index is complete from its exact boundary, so a miss means the provider event
+    // has not arrived yet. Only launch/restart recovery lacks that proof and pays the durable scan.
+    if (!active?.policyHookToolCallIds) {
+      const tail = this.store.logTailSeq(sessionId);
+      const recent: StoredEvent[] = [];
+      let afterSeq = Math.max(0, tail - 500);
+      let logEpoch: number | undefined;
+      let throughSeq: number | undefined;
+      for (let pageNumber = 0; pageNumber < 3 && afterSeq < tail; pageNumber += 1) {
+        const recoveryPage = this.store.readEventPage(sessionId, {
+          afterSeq,
+          limit: HISTORY_PAGE_MAX_EVENTS,
+          ...(logEpoch === undefined ? {} : { logEpoch, throughSeq }),
+        });
+        if (!recoveryPage.ok) break;
+        recent.push(...recoveryPage.events);
+        if (!recoveryPage.page.hasMore) break;
+        afterSeq = recoveryPage.page.nextAfterSeq;
+        logEpoch = recoveryPage.page.logEpoch;
+        throughSeq = recoveryPage.page.throughSeq;
+      }
+      const existing = recent.find((event) =>
+        event.payload.kind === "policy_hook_decision" && event.payload.auditId === auditId);
+      if (existing) {
+        if (JSON.stringify(existing.payload) !== JSON.stringify(payload)) {
+          return fail(auditId, "decision conflicts with the existing audit event");
+        }
+        return { accepted: true, auditId, eventSeq: existing.seq };
+      }
+      const toolObserved = recent.some((event) =>
+        event.payload.kind === "tool_call" && event.payload.toolCallId === payload.toolCallId);
+      if (toolObserved) return this.appendPolicyHookDecision(sessionId, payload);
+    }
+
+    const pendingKey = `${sessionId}\0${payload.toolCallId}`;
+    const pending = this.pendingPolicyHookDecisions.get(pendingKey);
+    if (pending) {
+      if (JSON.stringify(pending.payload) !== JSON.stringify(payload)) {
+        return fail(auditId, pending.payload.auditId === auditId
+          ? "decision conflicts with the pending audit event"
+          : "another decision is waiting for this tool event");
+      }
+      return new Promise((resolvePromise) => pending.resolves.push(resolvePromise));
+    }
+    if (this.pendingPolicyHookDecisions.size >= 512) {
+      return fail(auditId, "too many decisions are waiting for tool events");
+    }
+    return new Promise((resolvePromise) => {
+      const timer = setTimeout(() => {
+        const current = this.pendingPolicyHookDecisions.get(pendingKey);
+        if (!current || current.payload.auditId !== auditId) return;
+        this.pendingPolicyHookDecisions.delete(pendingKey);
+        const result = fail(auditId, "matching tool event was not observed");
+        for (const resolve of current.resolves) resolve(result);
+      }, 750);
+      timer.unref?.();
+      this.pendingPolicyHookDecisions.set(pendingKey, { payload, resolves: [resolvePromise], timer });
+    });
+  }
+
+  private appendPolicyHookDecision(
+    sessionId: string,
+    payload: PolicyHookDecisionEvent,
+  ): { accepted: boolean; auditId: string; eventSeq?: number; error?: string } {
+    const stored = this.emitEvent(sessionId, payload);
+    if (stored) {
+      const entry = this.active.get(sessionId);
+      if (entry) {
+        (entry.policyHookDecisionEvents ??= new Map()).set(payload.auditId, {
+          payload,
+          eventSeq: stored.seq,
+        });
+      }
+    }
+    return stored
+      ? { accepted: true, auditId: payload.auditId, eventSeq: stored.seq }
+      : { accepted: false, auditId: payload.auditId, error: "decision history append failed" };
+  }
+
+  private flushPolicyHookDecisionAfterToolCall(sessionId: string, toolCallId: string): void {
+    const pendingKey = `${sessionId}\0${toolCallId}`;
+    const pending = this.pendingPolicyHookDecisions.get(pendingKey);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingPolicyHookDecisions.delete(pendingKey);
+    const result = this.appendPolicyHookDecision(sessionId, pending.payload);
+    for (const resolve of pending.resolves) resolve(result);
+  }
+
   private onDriverBackgroundWork(sessionId: string, update: DriverBackgroundWorkUpdate): void {
     const current = this.store.readMeta(sessionId);
     if (!current || current.driver !== "claude-code") return;
@@ -7334,7 +9674,7 @@ export class SessionManager {
       // Artifact-only evidence cannot revive a task whose unattended recovery was already handled.
       // A real provider stream event appears in observedTaskIds and removes its tombstone above.
       updated = this.store.patchMeta(sessionId, {
-        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : "resumed",
+        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : undefined,
         backgroundJobs,
         pendingBackgroundTaskIds: [],
         recoveredBackgroundTaskIds: durableRecoveredTaskIds,
@@ -7395,7 +9735,7 @@ export class SessionManager {
       updated = this.store.patchMeta(sessionId, {
         backgroundWorkState: queuedJobIds.length > 0
           ? "continuation_pending"
-          : current.orphanedWork ? "resumed" : undefined,
+          : undefined,
         backgroundJobs,
         pendingBackgroundTaskIds: [],
         recoveredBackgroundTaskIds: recovered,
@@ -7407,6 +9747,7 @@ export class SessionManager {
     if (updated?.orphanedWork && update.state === "orphaned" && automaticClaudeRecoveryAllowed(updated)) {
       this.scheduleOrphanRecovery(sessionId);
     }
+    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
   }
 
   private mergeDurableBackgroundJobs(
@@ -7494,7 +9835,7 @@ export class SessionManager {
     const updated = this.store.patchMeta(sessionId, hasPending
       ? { pendingBackgroundTaskIds: pending, orphanedWork: undefined }
       : {
-          backgroundWorkState: "resumed",
+          backgroundWorkState: undefined,
           pendingBackgroundTaskIds: [],
           recoveredBackgroundTaskIds: mergeRecoveredBackgroundTaskIds(
             current.recoveredBackgroundTaskIds,
@@ -7511,7 +9852,7 @@ export class SessionManager {
     if (!meta) return;
     const discovered = this.discoverOrphanedClaudeWork(meta);
     const allowed = automatic && automaticClaudeRecoveryAllowed(discovered);
-    if (allowed && discovered.orphanedWork && !discovered.orphanedWork.recoveryAttemptedAt) {
+    if (allowed && discovered.orphanedWork) {
       this.scheduleOrphanRecovery(sessionId);
     }
     else this.scheduleContextOrphanDiscovery(discovered, allowed);
@@ -7632,6 +9973,11 @@ export class SessionManager {
     const jobIds = this.queuedBackgroundJobIds(meta);
     if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
     const entry = this.active.get(sessionId);
+    if (this.backgroundRecoveryHeld(meta)) {
+      if (!entry?.running) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+      this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      return;
+    }
     if (entry?.currentBackgroundJobIds?.some((id) => jobIds.includes(id)) ||
         entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id))) ||
         this.preLaunchQueues.get(sessionId)?.some((prompt) =>
@@ -7722,6 +10068,30 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  /** Provider acceptance is the at-most-once fence. Once that exact turn has ended without a
+   * complete durable result, retain a terminal audit fact instead of replaying or claiming the
+   * continuation is still in flight. */
+  private markBackgroundContinuationMissingResult(sessionId: string, jobIds: string[]): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current?.backgroundJobs) return;
+    const selected = new Set(jobIds);
+    const missingResultAt = Date.now();
+    let changed = false;
+    const backgroundJobs = current.backgroundJobs.map((job) => {
+      if (!selected.has(job.id) || !job.continuationAcceptedAt || job.assistantResultPersistedAt ||
+          job.continuationMissingResultAt) return job;
+      changed = true;
+      return { ...job, continuationMissingResultAt: missingResultAt };
+    });
+    if (!changed) return;
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs,
+      backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
+    });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
+  }
+
   private finishBackgroundContinuation(sessionId: string, jobIds: string[]): void {
     const current = this.store.readMeta(sessionId);
     if (!current?.backgroundJobs) return;
@@ -7762,14 +10132,13 @@ export class SessionManager {
           ...(structuredDeliveryPublishedAt !== undefined ? { structuredDeliveryPublishedAt } : {}),
         }
       : job);
-    const unresolved = backgroundJobs.some((job) => job.continuationRequired &&
-      !job.assistantResultPersistedAt);
     const updated = this.store.patchMeta(sessionId, {
       backgroundJobs,
-      backgroundWorkState: unresolved ? "continuation_pending" : "resumed",
+      backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     if (this.queuedBackgroundJobIds(updated).length > 0) this.scheduleBackgroundContinuation(sessionId);
+    if (!updated?.backgroundWorkState) this.resumeDeferredWorktreeRebind(sessionId);
   }
 
   /** A legacy peer or a disconnected socket can make the durable delivery proof use the
@@ -7840,11 +10209,26 @@ export class SessionManager {
       };
     });
     if (!changed) return meta;
-    const unresolved = backgroundJobs.some((job) => job.continuationRequired &&
-      !job.assistantResultPersistedAt);
     return this.store.patchMeta(meta.sessionId, {
       backgroundJobs,
-      backgroundWorkState: unresolved ? "continuation_pending" : "resumed",
+      backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
+    }) ?? meta;
+  }
+
+  /** A provider process cannot survive runner restart. Accepted continuations with no delivery
+   * proof are therefore terminal, while submitted-only continuations remain conservatively
+   * uncertain and are never replayed. */
+  private reconcileMissingBackgroundContinuations(meta: SessionMeta): SessionMeta {
+    if (!meta.backgroundJobs?.some((job) => job.continuationAcceptedAt &&
+        !job.assistantResultPersistedAt && !job.continuationMissingResultAt)) return meta;
+    const missingResultAt = Date.now();
+    const backgroundJobs = meta.backgroundJobs.map((job) =>
+      job.continuationAcceptedAt && !job.assistantResultPersistedAt && !job.continuationMissingResultAt
+        ? { ...job, continuationMissingResultAt: missingResultAt }
+        : job);
+    return this.store.patchMeta(meta.sessionId, {
+      backgroundJobs,
+      backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
     }) ?? meta;
   }
 
@@ -7862,11 +10246,80 @@ export class SessionManager {
     if (changed) this.store.patchMeta(sessionId, { backgroundJobs });
   }
 
+  /** Automatic background work must not turn a restart into new spending authority. */
+  private backgroundRecoveryHeld(meta: SessionMeta): boolean {
+    const entry = this.active.get(meta.sessionId);
+    if (entry?.governanceTripped || entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId)) return true;
+    if (meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd) return true;
+    if (!meta.config.maxToolCalls) return false;
+    const toolCallIds = entry?.toolCallIds ?? new Set(this.store.readEvents(meta.sessionId)
+      .flatMap((event) => event.payload.kind === "tool_call" ? [event.payload.toolCallId] : []));
+    return toolCallIds.size >= meta.config.maxToolCalls;
+  }
+
   private async runOrphanRecovery(sessionId: string): Promise<void> {
     if (this.shuttingDown || this.orphanRecoveryLaunching.has(sessionId)) return;
     let meta = this.store.readMeta(sessionId);
-    if (!meta?.orphanedWork || meta.driver !== "claude-code") return;
+    if (!meta?.orphanedWork || meta.driver !== "claude-code" || meta.status === "stopped") return;
+    // Terminal receipts settle ownership without a paid recovery turn, including while a
+    // governance ceiling holds that turn. Keep unknown tasks pending; absence is not proof.
+    if (meta.agentSessionId && !this.active.get(sessionId)?.running) {
+      this.orphanRecoveryLaunching.add(sessionId);
+      try {
+        const inspection = await inspectClaudeBackgroundWorkInContext(
+          meta.context, meta.worktreePath ?? meta.repoPath, meta.agentSessionId,
+          meta.pendingBackgroundTaskIds ?? meta.orphanedWork.pendingTaskIds,
+          { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
+            projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(sessionId), "projects"),
+          } : {}) },
+        );
+        const current = this.store.readMeta(sessionId);
+        // A prompt, stop, or replacement during the read invalidates this observation.
+        if (!current || JSON.stringify(current) !== JSON.stringify(meta) || current.status === "stopped" ||
+            !current.orphanedWork || current.agentSessionId !== meta.agentSessionId ||
+            this.active.get(sessionId)?.running) {
+          if (current?.orphanedWork && current.status !== "stopped") {
+            this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+          }
+          return;
+        }
+        if (inspection.terminalTaskIds.size > 0) {
+          this.store.patchMeta(sessionId, {
+            recoveredBackgroundTaskIds: mergeRecoveredBackgroundTaskIds(
+              current.recoveredBackgroundTaskIds, [...inspection.terminalTaskIds],
+            ),
+          });
+          const pending = (current.pendingBackgroundTaskIds ?? current.orphanedWork!.pendingTaskIds)
+            .filter((id) => !inspection.terminalTaskIds.has(id));
+          this.onDriverBackgroundWork(sessionId, {
+            state: pending.length ? "orphaned" : null,
+            pendingTaskIds: pending,
+            reason: current.orphanedWork!.reason,
+            terminalJobs: (current.backgroundJobs ?? [])
+              .filter((job) => inspection.terminalTaskIds.has(job.id))
+              .map((job) => ({
+                id: job.id, toolUseId: job.toolUseId, launchType: job.launchType,
+                startedAt: job.registeredAt, outputFile: job.outputReference,
+                status: inspection.terminalTaskStatuses?.get(job.id) ?? job.terminalStatus ?? "completed",
+                terminalAt: Date.now(), continuationRequired: job.continuationRequired ?? false,
+              })),
+          });
+        }
+        meta = this.store.readMeta(sessionId);
+        if (!meta?.orphanedWork) return;
+      } finally {
+        this.orphanRecoveryLaunching.delete(sessionId);
+      }
+    }
     if (meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta)) return;
+    const entry = this.active.get(sessionId);
+    if (this.backgroundRecoveryHeld(meta)) {
+      // Re-publish the settled runtime so the control plane can restore a lost decision card.
+      // Rechecking receipts is read-only; the ceiling must not launch or queue a recovery turn.
+      if (!entry?.running) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+      this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      return;
+    }
     if (meta.orphanedWork.recoveryAttemptedAt) return;
     if (!meta.command) {
       const launch = this.resolveLaunch?.(meta.driver, meta.context) ?? null;
@@ -7884,8 +10337,8 @@ export class SessionManager {
       this.log(`orphan recovery deferred for ${sessionId}: no resumable Claude launch is available`);
       return;
     }
-    const entry = this.active.get(sessionId);
-    if (entry?.holdQueuedPromptsAfterInterrupt || entry?.running || entry?.queue.some((prompt) => prompt.syntheticRecovery)) {
+    if ((entry && this.queueHeld(entry)) || entry?.running ||
+        entry?.queue.some((prompt) => prompt.syntheticRecovery)) {
       this.scheduleOrphanRecovery(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       return;
     }
@@ -7913,13 +10366,74 @@ export class SessionManager {
     }
   }
 
+  private onProviderInitiatedTurn(
+    sessionId: string,
+    client: Driver,
+    state: "started" | "settled",
+    turnId: string,
+  ): void {
+    const live = this.active.get(sessionId);
+    if (live?.client !== client) return;
+    if (state === "started") {
+      live.providerInitiatedTurnActive = true;
+      live.providerInitiatedTurnId = turnId;
+      live.providerInitiatedRequestIds = new Set();
+    } else {
+      if (live.providerInitiatedTurnId !== turnId) return;
+      live.providerInitiatedTurnActive = false;
+      live.providerInitiatedTurnId = undefined;
+      let pendingApproval = this.store.readMeta(sessionId)?.pendingApproval;
+      for (const requestId of live.providerInitiatedRequestIds ?? []) {
+        pendingApproval = removePendingRequest(pendingApproval, requestId);
+      }
+      live.providerInitiatedRequestIds = undefined;
+      this.store.patchMeta(sessionId, { pendingApproval });
+    }
+    this.emitQueue(sessionId);
+    // A queued runner prompt emits running before its persistent driver waits behind this provider
+    // turn. If the provider then opens an ask, input_required supersedes that earlier status. Restore
+    // the runner-owned status when settlement removes the final ask; runPrompt will not emit it again.
+    const meta = this.store.readMeta(sessionId);
+    if (state === "settled" && live.running && meta?.status === "input_required" && !meta.pendingApproval) {
+      this.emitStatus(sessionId, "running");
+    }
+    // A queued runner prompt owns status through its normal drain. When no drain exists, this
+    // callback is the only lifecycle boundary that can clear an answered provider-owned ask.
+    if (!live.running) {
+      const pending = this.store.readMeta(sessionId)?.pendingApproval;
+      const interrupted = state === "settled" && live.interruptRequested;
+      if (interrupted) {
+        this.emitEvent(sessionId, { kind: "turn_interrupted" });
+        this.settleTurnInterruption(sessionId, live);
+      }
+      this.emitStatus(sessionId, pending ? "input_required" : state === "started" ? "running" : "idle");
+      if (interrupted && (live.queue.length || live.pendingWorktreeRebind)) {
+        setImmediate(() => this.scheduleDrain(sessionId));
+      }
+    }
+  }
+
   /** Persist/relay first, then enforce against the same normalized event stream every dashboard
    * sees. Cancellation is best-effort at the first observable threshold event; the tripped flag
    * keeps the session idle and holds its queue until an explicit v47 re-arm arrives. */
   private onDriverEvent(sessionId: string, payload: SessionEventPayload): void {
     const entry = this.active.get(sessionId);
     if (entry?.historyIntegrityFailure) return;
+    if (entry?.providerInitiatedTurnActive &&
+        (payload.kind === "permission_request" || payload.kind === "question_request")) {
+      entry.providerInitiatedRequestIds?.add(payload.requestId);
+    }
+    const managedAttentionResolution = (payload.kind === "permission_resolved" || payload.kind === "question_resolved") &&
+      pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId);
     if (!this.emitEvent(sessionId, payload)) return;
+    if (payload.kind === "tool_call") {
+      entry?.policyHookToolCallIds?.add(payload.toolCallId);
+      this.flushPolicyHookDecisionAfterToolCall(sessionId, payload.toolCallId);
+    }
+    if (managedAttentionResolution && entry) {
+      this.emitStatus(sessionId, this.store.readMeta(sessionId)?.pendingApproval
+        ? "input_required" : entry.running || entry.providerInitiatedTurnActive ? "running" : "idle");
+    }
     if (entry?.currentBackgroundJobIds?.length && payload.kind === "agent_message" &&
         !payload.parentToolUseId) {
       entry.backgroundAssistantMessagePersisted = true;
@@ -7936,7 +10450,7 @@ export class SessionManager {
         if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
     }
-    if (!entry || !entry.running || entry.governanceTripped) return;
+    if (!entry || (!entry.running && !entry.providerInitiatedTurnActive) || entry.governanceTripped) return;
     const meta = this.store.readMeta(sessionId);
     if (!meta) return;
 
@@ -7962,10 +10476,31 @@ export class SessionManager {
     }
     if (!tripped) return;
 
+    this.tripGovernance(sessionId, entry, meta, tripped);
+  }
+
+  private tripGovernance(
+    sessionId: string,
+    entry: ActiveSession,
+    meta: SessionMeta,
+    tripped: NonNullable<ActiveSession["governanceTripped"]>,
+  ): void {
     entry.governanceTripped = tripped;
-    const detail = tripped === "cost_budget"
-      ? `Runner governance paused this turn at the $${meta.config.costBudgetUsd!.toFixed(2)} cost threshold.`
-      : `Runner governance paused this turn at ${meta.config.maxToolCalls} distinct tool calls.`;
+    const threshold = tripped === "cost_budget" ? meta.config.costBudgetUsd : meta.config.maxToolCalls;
+    if (threshold != null) {
+      entry.governanceTrip = {
+        tripId: randomUUID(),
+        kind: tripped,
+        threshold,
+        observed: tripped === "cost_budget" ? meta.costUsd : entry.toolCallIds?.size ?? 0,
+      };
+      this.reportGovernanceTrip(sessionId, entry);
+    }
+    const detail = threshold == null
+      ? `Runner governance paused this turn after crossing a ${tripped === "cost_budget" ? "cost" : "tool-call"} threshold.`
+      : tripped === "cost_budget"
+        ? `Runner governance paused this turn at the $${threshold.toFixed(2)} cost threshold.`
+        : `Runner governance paused this turn at ${threshold} distinct tool calls.`;
     if (!this.emitEvent(sessionId, { kind: "stderr", text: `${detail} Continue or stop from the approval card.` })) {
       return;
     }
@@ -7976,12 +10511,30 @@ export class SessionManager {
     }
   }
 
+  private reportGovernanceTrip(
+    sessionId: string,
+    entry: ActiveSession,
+  ): void {
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "governanceTripReporting")) return;
+    const trip = entry.governanceTrip;
+    if (!trip) return;
+    this.send({
+      type: "governance_tripped",
+      sessionId,
+      ...trip,
+    });
+  }
+
   private onDriverStderr(sessionId: string, text: string): void {
     if (this.active.get(sessionId)?.historyIntegrityFailure) return;
     this.emitEvent(sessionId, { kind: "stderr", text });
   }
 
   private async preflightProviderAuthentication(meta: SessionMeta, launchGeneration: number): Promise<boolean> {
+    // Provider-native status commands are themselves general provider executions. Direct WSL's
+    // narrow launcher path must not run one outside the prepared boundary before isolation exists.
+    if (this.executionIsolation.mode === "bwrap" && meta.context.kind === "wsl" &&
+        this.authorizeSafeWslLaunch?.(meta) === true) return true;
     const controller = this.providerAuthRecovery;
     const scope = controller?.describe(meta);
     if (!controller || !scope) return true;
@@ -7997,8 +10550,13 @@ export class SessionManager {
     }
     if (observation.status !== "authenticated") return true;
     const expected = current.providerAuthBlock?.expectedIdentityId ?? current.providerCredentialIdentityId;
-    if (expected && observation.identityId && expected !== observation.identityId) {
-      this.parkProviderAuthentication(current, scope, "launch", "not_delivered", true);
+    const expectedEvidence = current.providerAuthBlock?.expectedIdentityEvidence ??
+      current.providerCredentialIdentityEvidence;
+    const identityComparison = compareProviderAuthIdentity(expected, expectedEvidence, observation);
+    if (expected && (!observation.identityId || !identityComparison.matches)) {
+      const reason = describeProviderAuthIdentityMismatch(identityComparison);
+      this.log(`provider account identity mismatch for ${boundedSessionIdForLog(current.sessionId)}: ${reason}`);
+      this.parkProviderAuthentication(current, scope, "launch", "not_delivered", reason);
       return false;
     }
     if (current.providerAuthBlock) {
@@ -8009,12 +10567,115 @@ export class SessionManager {
         "Authentication now responds, but this blocked generation still requires Recheck Authentication.");
       return false;
     }
+    const retainedEvidence = mergeProviderAuthIdentityEvidence(expectedEvidence, observation.identityEvidence);
     this.store.patchMeta(meta.sessionId, {
       providerCredentialScopeId: scope.id,
       ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
+      ...(retainedEvidence ? { providerCredentialIdentityEvidence: retainedEvidence } : {}),
     });
     if (current.agentId) this.onAgentAuthUpdate?.(current.agentId, { status: "authenticated" });
     return true;
+  }
+
+  /**
+   * The provider rejected an item already stored in its own conversation history, so this thread
+   * can never accept another turn: retrying, continuing, and `/compact` all resend the same
+   * history and fail identically before inference runs. Retire the conversation durably and stop
+   * the FIFO instead of returning the session to Awaiting Prompt with a composer that invites
+   * submissions which cannot succeed.
+   *
+   * Nothing here deletes or rewrites the transcript or the provider thread; both stay inspectable.
+   */
+  private quarantineProviderHistory(sessionId: string, detail: PoisonedProviderHistory): void {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || meta.providerHistoryBlock) return;
+    const recoveryTurn = this.latestConversationForkTurn(meta);
+    const recovery = recoveryTurn === undefined
+      ? undefined
+      : this.providerHistoryRecoveryMode(meta, recoveryTurn);
+    const entry = this.active.get(sessionId);
+    // Prompts already queued when the quarantine fires are exactly as undelivered as one attempted
+    // afterwards, and this FIFO can never drain. Settle them all, but keep the first ordinary
+    // prompt's text so recovery carries it forward; a manual provider command is a receipt, not a
+    // composer draft, so it is only settled.
+    const stranded = entry?.queue.splice(0) ?? [];
+    const retained = stranded.find((prompt) => !prompt.sessionCommand);
+    this.store.patchMeta(sessionId, {
+      providerHistoryBlock: {
+        version: 1,
+        reason: detail.reason,
+        detectedAt: Date.now(),
+        detail: {
+          ...(detail.itemIndex === undefined ? {} : { itemIndex: detail.itemIndex }),
+          field: detail.field,
+          ...(detail.limit === undefined ? {} : { limit: detail.limit }),
+          ...(detail.length === undefined ? {} : { length: detail.length }),
+        },
+        ...(recoveryTurn === undefined ? {} : { recoveryTurn }),
+        ...(recovery === undefined ? {} : { recovery }),
+        ...(retained ? {
+          retry: {
+            text: retained.text,
+            images: retained.images,
+            ...(retained.slashCommand ? { slashCommand: retained.slashCommand } : {}),
+            ...(retained.config ? { config: retained.config } : {}),
+          },
+        } : {}),
+      },
+    });
+    // Durable before observable: a crash here must not leave a transcript claiming a quarantine
+    // that the store would not re-enforce on restart, or drop a prompt it promised to retain.
+    this.store.flush(sessionId);
+    if (entry) entry.historyQuarantined = true;
+    for (const queued of stranded) {
+      this.failQueuedPrompt(queued, PROVIDER_HISTORY_QUARANTINE_GUIDANCE, "COMMAND_CANCELLED");
+    }
+    if (stranded.length) this.emitQueue(sessionId);
+  }
+
+  /** The newest completed turn whose conversation checkpoint is still forkable from the session's
+   * current worktree. A refused turn never records one, so the newest recorded checkpoint is the
+   * last provider state known to predate the rejection. */
+  private latestConversationForkTurn(meta: SessionMeta): number | undefined {
+    const active = meta.worktreePath ? this.attributedWorktreeForPath(meta, meta.worktreePath) : undefined;
+    const unambiguous = this.attributedWorktrees(meta).length === 1;
+    let latest: number | undefined;
+    for (const [key, point] of Object.entries(meta.forkPoints ?? {})) {
+      const turn = Number(key);
+      if (!Number.isInteger(turn) || turn < 1 || !point.agentTurnId || !point.tree) continue;
+      // Mirror forkConversation's attribution rules so an offered recovery turn cannot be one the
+      // fork itself would reject.
+      if (point.worktreeId ? point.worktreeId !== active?.id : !unambiguous) continue;
+      if (latest === undefined || turn > latest) latest = turn;
+    }
+    return latest;
+  }
+
+  private providerHistoryRecoveryMode(meta: SessionMeta, recoveryTurn: number): ProviderHistoryRecoveryMode {
+    // A provider fork copies history through the checkpoint. If this session is itself a fork
+    // recovery that got poisoned again, the invalid item predates that checkpoint and only a fresh
+    // thread can exclude it.
+    if (meta.providerHistoryRecoveryOf?.mode === "fork") return "handoff";
+    if (!providerSupportsConversationFork(meta.driver, meta.capabilities)) return "handoff";
+    // The Claude CLI can only fork its current transcript at the matching turn checkpoint.
+    if (meta.driver === "claude-code" && recoveryTurn !== meta.turnCount) return "handoff";
+    return "fork";
+  }
+
+  private blockedPromptAuthenticationGuidance(meta: SessionMeta): string {
+    const scopeId = meta.providerAuthBlock!.credentialScopeId;
+    if (this.providerAuthRevalidations.has(scopeId)) {
+      return "Authentication is being checked automatically. This prompt was not submitted. Wait for recovery to finish, then retry this prompt.";
+    }
+    if (this.providerAuthOperations.has(scopeId)) {
+      return "Authentication recovery is in progress. This prompt was not submitted. Finish the sign-in or authentication check, then retry this prompt.";
+    }
+    if (isProviderAuthenticationBlock(meta.pendingApproval)) {
+      return "Authentication is still blocked. This prompt was not submitted. Follow this session's Authentication Required card, then choose Recheck Authentication and retry this prompt after recovery completes.";
+    }
+    // Scope ownership spans sessions, but runner metadata does not establish their visibility to
+    // this audience. Point to the Inbox without disclosing a peer's title, ID, or private context.
+    return "Authentication is still blocked. This prompt was not submitted. In Inbox, find the Authentication Required card for this provider and runner. Follow its sign-in instructions, then choose Recheck Authentication. If no matching card is accessible, ask the runner owner to complete authentication recovery. Retry this prompt after recovery completes.";
   }
 
   private providerAuthenticationOptions(
@@ -8064,6 +10725,9 @@ export class SessionManager {
     detail?: string,
     inProgress = false,
   ): void {
+    if (this.providerAuthRevalidations.has(block.credentialScopeId) ||
+        this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId !== meta.sessionId) return;
+    if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "unauthenticated" });
     const projection = this.providerAuthenticationProjection(meta, block, detail, inProgress);
     const emitted = this.emitEvent(meta.sessionId, {
       kind: "permission_request",
@@ -8092,7 +10756,7 @@ export class SessionManager {
       title: inProgress ? `Signing In — ${provider}` : `Authentication Required — ${provider}`,
       options: this.providerAuthenticationOptions(block, inProgress),
       kind: "authentication",
-      context: { toolName: provider, input: providerAuthenticationGuidance(meta, block, detail) },
+      context: { toolName: provider, input: providerAuthenticationGuidance(meta, block, detail ?? block.reason) },
     };
   }
 
@@ -8101,7 +10765,8 @@ export class SessionManager {
     scope: ProviderCredentialScope,
     phase: "launch" | "turn",
     delivery: "not_delivered" | "uncertain",
-    identityMismatch = false,
+    identityMismatchReason?: string,
+    silently = false,
   ): void {
     const prior = meta.providerAuthBlock?.credentialScopeId === scope.id ? meta.providerAuthBlock : undefined;
     const block: NonNullable<SessionMeta["providerAuthBlock"]> = {
@@ -8116,15 +10781,104 @@ export class SessionManager {
       ...(prior?.expectedIdentityId ?? meta.providerCredentialIdentityId
         ? { expectedIdentityId: prior?.expectedIdentityId ?? meta.providerCredentialIdentityId }
         : {}),
+      ...(prior?.expectedIdentityEvidence ?? meta.providerCredentialIdentityEvidence
+        ? { expectedIdentityEvidence: prior?.expectedIdentityEvidence ?? meta.providerCredentialIdentityEvidence }
+        : {}),
       ...(prior?.retry ? { retry: prior.retry } : {}),
-      ...(identityMismatch || prior?.identityMismatch ? { identityMismatch: true } : {}),
+      ...(identityMismatchReason ? { identityMismatch: true, reason: identityMismatchReason } : {}),
     };
     this.store.patchMeta(meta.sessionId, {
       providerCredentialScopeId: scope.id,
       providerAuthBlock: block,
     });
     this.store.flush(meta.sessionId);
-    this.emitProviderAuthenticationCard(meta, block);
+    if (!silently) {
+      const owner = this.providerAuthenticationOwner(scope.id);
+      if (owner?.sessionId !== meta.sessionId) {
+        const detail = "Authentication recovery is currently owned by another session using this provider credential scope. Wait for that recovery to finish or use its Authentication Required card if one appears.";
+        this.emitEvent(meta.sessionId, { kind: "stderr", text: detail });
+        this.emitStatus(meta.sessionId, "idle", detail);
+      } else {
+        this.emitProviderAuthenticationCard(meta, block);
+      }
+    }
+  }
+
+  private providerAuthenticationOwner(scopeId: string): SessionMeta | undefined {
+    const candidates = this.store.listSessions().filter((meta) =>
+      meta.status !== "stopped" && meta.providerAuthBlock?.credentialScopeId === scopeId);
+    return candidates.find((meta) => meta.pendingApproval?.kind === "authentication") ??
+      candidates.sort((a, b) => a.providerAuthBlock!.detectedAt - b.providerAuthBlock!.detectedAt ||
+        a.sessionId.localeCompare(b.sessionId))[0];
+  }
+
+  private surfaceProviderAuthentication(scopeId: string): void {
+    const owner = this.providerAuthenticationOwner(scopeId);
+    if (owner?.providerAuthBlock && owner.pendingApproval?.kind !== "authentication") {
+      this.emitProviderAuthenticationCard(owner, owner.providerAuthBlock);
+    }
+  }
+
+  private revalidateProviderAuthenticationSilently(scopeId: string): void {
+    if (this.providerAuthRevalidations.has(scopeId)) return;
+    if (this.providerAuthAutomaticAttempted.has(scopeId) || this.providerAuthOperations.has(scopeId) ||
+        this.providerAuthenticationOwner(scopeId)?.pendingApproval?.kind === "authentication") {
+      this.surfaceProviderAuthentication(scopeId);
+      return;
+    }
+    this.providerAuthAutomaticAttempted.add(scopeId);
+    // Defer until cancellation and the caller's durable retry bookkeeping have completed.
+    const operation = Promise.resolve().then(async () => {
+      const owner = this.providerAuthenticationOwner(scopeId);
+      if (!owner?.providerAuthBlock || !this.providerAuthRecovery || this.shuttingDown) return;
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let observation: ProviderAuthObservation;
+      try {
+        observation = await Promise.race([
+          (async (): Promise<ProviderAuthObservation> => {
+            await this.prepareLaunch?.(owner);
+            if (timedOut || this.shuttingDown || this.providerAuthRecovery!.describe(owner)?.id !== scopeId) {
+              return { status: "unknown" };
+            }
+            return this.providerAuthRecovery!.revalidate(owner);
+          })(),
+          new Promise<ProviderAuthObservation>((resolve) => {
+            timer = setTimeout(() => {
+              timedOut = true;
+              resolve({ status: "unknown" });
+            }, 20_000);
+            timer.unref();
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      if (this.shuttingDown || observation.status !== "authenticated" || !observation.identityId) return;
+      const current = this.store.readMeta(owner.sessionId);
+      if (!current?.providerAuthBlock || current.providerAuthBlock.recoveryId !== owner.providerAuthBlock.recoveryId ||
+          !compareProviderAuthIdentity(
+            current.providerAuthBlock.expectedIdentityId,
+            current.providerAuthBlock.expectedIdentityEvidence,
+            observation,
+          ).matches) return;
+      if (!await this.waitForAuthenticationTurnSettlement(owner.sessionId)) return;
+      if (this.shuttingDown ||
+          this.store.readMeta(owner.sessionId)?.providerAuthBlock?.recoveryId !== current.providerAuthBlock.recoveryId) return;
+      await this.completeProviderAuthentication(
+        owner.sessionId,
+        current.providerAuthBlock,
+        observation,
+        false,
+        "auth:automatic-retry",
+      );
+    }).catch((error) => {
+      this.log(`automatic provider authentication revalidation failed: ${errText(error)}`);
+    }).finally(() => {
+      this.providerAuthRevalidations.delete(scopeId);
+      if (!this.shuttingDown) this.surfaceProviderAuthentication(scopeId);
+    });
+    this.providerAuthRevalidations.set(scopeId, operation);
   }
 
   private onProviderAuthenticationFailure(sessionId: string, launchMeta: SessionMeta): void {
@@ -8132,16 +10886,22 @@ export class SessionManager {
     const meta = this.store.readMeta(sessionId);
     if (!entry || !meta || entry.authenticationBlocked || entry.historyIntegrityFailure) return;
     entry.authenticationBlocked = true;
-    if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "unauthenticated" });
-    const scope = this.providerAuthRecovery?.describe(launchMeta);
+    const scope = this.executionIsolation.mode === "bwrap" && launchMeta.context.kind === "wsl" &&
+      this.authorizeSafeWslLaunch?.(launchMeta) === true
+      ? null
+      : this.providerAuthRecovery?.describe(launchMeta);
     if (scope) {
       this.parkProviderAuthentication(
         meta,
         scope,
         entry.providerReady ? "turn" : "launch",
         entry.providerReady ? "uncertain" : "not_delivered",
+        undefined,
+        true,
       );
+      this.revalidateProviderAuthenticationSilently(scope.id);
     } else {
+      if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "unauthenticated" });
       const provider = providerDisplayName(meta.driver);
       const guidance = providerAuthenticationGuidance(meta);
       const emitted = this.emitEvent(sessionId, {
@@ -8167,11 +10927,12 @@ export class SessionManager {
   }
 
   private async waitForAuthenticationTurnSettlement(sessionId: string): Promise<boolean> {
+    const settled = () => !this.active.get(sessionId)?.running && !this.launchGenerations.has(sessionId);
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      if (!this.active.get(sessionId)?.running) return true;
+      if (settled()) return true;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    return !this.active.get(sessionId)?.running;
+    return settled();
   }
 
   private async resolveProviderAuthentication(
@@ -8216,6 +10977,7 @@ export class SessionManager {
         });
       }
       this.emitStatus(sessionId, current.status === "stopped" ? "stopped" : "idle");
+      if (block) this.surfaceProviderAuthentication(block.credentialScopeId);
       return;
     }
     const controller = this.providerAuthRecovery;
@@ -8261,12 +11023,21 @@ export class SessionManager {
       }
       const expected = block.expectedIdentityId;
       const acceptingCurrent = optionId === "auth:accept-current";
-      if (!acceptingCurrent && (!expected || !observation.identityId || expected !== observation.identityId)) {
-        block = { ...block, identityMismatch: true };
+      const identityComparison = compareProviderAuthIdentity(
+        expected,
+        block.expectedIdentityEvidence,
+        observation,
+      );
+      if (!acceptingCurrent && (!expected || !observation.identityId || !identityComparison.matches)) {
+        const reason = expected
+          ? describeProviderAuthIdentityMismatch(identityComparison)
+          : "The provider is authenticated, but this session has no recorded account identity to compare. Confirm the current account explicitly for this session.";
+        if (expected) {
+          this.log(`provider account identity mismatch for ${boundedSessionIdForLog(sessionId)}: ${reason}`);
+        }
+        block = { ...block, identityMismatch: true, reason };
         this.store.patchMeta(sessionId, { providerAuthBlock: block });
-        this.emitProviderAuthenticationCard(meta, block, expected && observation.identityId
-          ? "A different provider account is authenticated. Confirm it explicitly for this session or sign in to the original account."
-          : "The provider could not prove the original account identity. Confirm the current account explicitly for this session.");
+        this.emitProviderAuthenticationCard(meta, block, reason);
         return;
       }
       if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
@@ -8278,9 +11049,11 @@ export class SessionManager {
         block,
         observation,
         acceptingCurrent,
+        optionId,
       );
     } finally {
       this.providerAuthOperations.delete(block.credentialScopeId);
+      this.surfaceProviderAuthentication(block.credentialScopeId);
     }
   }
 
@@ -8289,12 +11062,17 @@ export class SessionManager {
     targetBlock: NonNullable<SessionMeta["providerAuthBlock"]>,
     observation: ProviderAuthObservation,
     targetOnly: boolean,
+    targetResolutionOptionId: string,
   ): Promise<void> {
     const candidates = targetOnly
       ? this.store.listSessions().filter((meta) => meta.sessionId === targetSessionId)
       : this.store.listSessions().filter((meta) =>
           meta.providerAuthBlock?.credentialScopeId === targetBlock.credentialScopeId &&
-          meta.providerAuthBlock.expectedIdentityId === observation.identityId);
+          compareProviderAuthIdentity(
+            meta.providerAuthBlock.expectedIdentityId,
+            meta.providerAuthBlock.expectedIdentityEvidence,
+            observation,
+          ).matches);
     for (const candidate of candidates) {
       let meta = this.store.readMeta(candidate.sessionId);
       if (!meta) continue;
@@ -8330,6 +11108,9 @@ export class SessionManager {
         meta.providerAuthRetryAttemptedRecoveryId !== block.recoveryId
         ? block.retry
         : undefined;
+      const retainedEvidence = targetOnly
+        ? observation.identityEvidence
+        : mergeProviderAuthIdentityEvidence(block.expectedIdentityEvidence, observation.identityEvidence);
       // A persisted retry can carry an ordinal greater than this process's fresh in-memory
       // high-water. Observe it before clearing the durable block: once prompts are admitted again,
       // every newer prompt must sort after the retained pre-crash work even if it races this
@@ -8337,7 +11118,8 @@ export class SessionManager {
       if (retry) this.ensureQueueOrdinal(meta.sessionId, retry);
       this.store.patchMeta(meta.sessionId, {
         providerCredentialScopeId: block.credentialScopeId,
-        ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
+        providerCredentialIdentityId: observation.identityId,
+        providerCredentialIdentityEvidence: retainedEvidence,
         providerAuthBlock: undefined,
         pendingApproval: null,
         status: "idle",
@@ -8348,11 +11130,15 @@ export class SessionManager {
       const entry = this.active.get(meta.sessionId);
       if (entry) entry.authenticationBlocked = false;
       if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "authenticated" });
-      this.emitEvent(meta.sessionId, {
-        kind: "permission_resolved",
-        requestId: providerAuthenticationRequestId(block),
-        optionId: retry ? "auth:automatic-retry" : "auth:revalidated",
-      });
+      if (meta.pendingApproval?.requestId === providerAuthenticationRequestId(block)) {
+        this.emitEvent(meta.sessionId, {
+          kind: "permission_resolved",
+          requestId: providerAuthenticationRequestId(block),
+          optionId: meta.sessionId === targetSessionId
+            ? targetResolutionOptionId
+            : "auth:automatic-retry",
+        });
+      }
       if (retry) {
         // Admit the retained prompt synchronously after its tombstone is durable. The provider
         // launch remains asynchronous, but no newer prompt can win the admission boundary between
@@ -8452,7 +11238,10 @@ export class SessionManager {
       this.store.patchMeta(sessionId, { preview: null });
     } else if (payload.kind === "permission_request") {
       const prior = this.store.readMeta(sessionId)?.pendingApproval?.requestId;
-      if (prior && prior !== payload.requestId) this.approvalStarted.delete(`${sessionId}:${prior}`);
+      if (prior && prior !== payload.requestId && !payload.ownerToolUseId &&
+          !pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId)) {
+        this.approvalStarted.delete(`${sessionId}:${prior}`);
+      }
       if (trackApprovalLatency) {
         this.approvalStarted.set(`${sessionId}:${payload.requestId}`, Date.now());
         this.rememberPermissionOptionKinds(sessionId, payload.requestId, payload.options);
@@ -8460,29 +11249,34 @@ export class SessionManager {
       // Persist the pending approval AND the input_required status so a hydrating dashboard files
       // the card under Needs Input (not Running) and fires its notification.
       this.store.patchMeta(sessionId, {
-        pendingApproval: {
+        pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, {
           requestId: payload.requestId,
           title: payload.title,
           options: payload.options,
           ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
           ...(payload.context ? { context: payload.context } : {}),
-        },
+          ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+        }),
         status: "input_required",
       });
     } else if (payload.kind === "question_request") {
       const prior = this.store.readMeta(sessionId)?.pendingApproval?.requestId;
-      if (prior && prior !== payload.requestId) this.approvalStarted.delete(`${sessionId}:${prior}`);
+      if (prior && prior !== payload.requestId && !payload.ownerToolUseId &&
+          !pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId)) {
+        this.approvalStarted.delete(`${sessionId}:${prior}`);
+      }
       if (trackApprovalLatency) this.approvalStarted.set(`${sessionId}:${payload.requestId}`, Date.now());
       // Structured agent question — same approval slot, kind "question" (the web renders a
       // question card; answers ride answer_question, not resolve_permission).
       this.store.patchMeta(sessionId, {
-        pendingApproval: {
+        pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, {
           requestId: payload.requestId,
           title: payload.questions[0]?.question ?? "The agent has a question",
           options: [],
           kind: "question",
           questions: payload.questions,
-        },
+          ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
+        }),
         status: "input_required",
       });
     } else if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
@@ -8491,7 +11285,8 @@ export class SessionManager {
         this.forgetPermissionOptionKinds(sessionId, payload.requestId);
       }
       // Card answered — the turn resumes, so clear the approval and restore the running status.
-      this.store.patchMeta(sessionId, { pendingApproval: null, status: "running" });
+      const pendingApproval = removePendingRequest(this.store.readMeta(sessionId)?.pendingApproval, payload.requestId);
+      this.store.patchMeta(sessionId, { pendingApproval, status: pendingApproval ? "input_required" : "running" });
     } else if (payload.kind === "token_usage" && !payload.parentToolUseId) {
       // Subagent usage is retained in the event log for UI rollups; the parentless provider result
       // is the authoritative total and already includes delegated work.

@@ -102,9 +102,9 @@ test("the Question Response Style row defaults to Interactive Form and announces
 
     assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), null);
     assert.equal(optionByName("Interactive Form").getAttribute("aria-checked"), "true");
-    await act(async () => { optionByName("Text Entry").click(); });
-    assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), "text");
-    assert.equal(optionByName("Text Entry").getAttribute("aria-checked"), "true");
+    await act(async () => { optionByName("Composer Response").click(); });
+    assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), "composer");
+    assert.equal(optionByName("Composer Response").getAttribute("aria-checked"), "true");
     await act(async () => { optionByName("Interactive Form").click(); });
     assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), "interactive");
     assert.equal(optionByName("Interactive Form").getAttribute("aria-checked"), "true");
