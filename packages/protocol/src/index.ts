@@ -372,6 +372,8 @@
 // 134: managed background continuations record a durable terminal missing-result boundary after
 //      provider acceptance. The control plane keeps that audit evidence separately from a user's
 //      idempotent acknowledgement, so accepted in-flight work is never mislabeled or replayed.
+// 134: runner capacity reports batch filesystem diagnostics, bound high-cardinality blocker groups,
+//      and may expose separate active-turn, resident-process, and retained-session dimensions.
 export const PROTOCOL_VERSION = 134;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
@@ -609,6 +611,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   hostAdminDoctor: 117,
   /** Revisioned per-Machine capacity configuration, live resize, and usage/queue reporting. */
   machineRunnerCapacity: 132,
+  /** Bounded blocker overflow plus opt-in active-turn and idle-process capacity dimensions. */
+  runnerCapacityDimensions: 134,
 } as const;
 
 /* ========================================================================== */
@@ -1588,6 +1592,10 @@ export interface RunnerRuntimeInfo {
   admission?: {
     agentLimits: Record<string, number>;
     agentWeights: Record<string, number>;
+    /** Optional cross-process foreground/background turn ceiling. Omission follows process capacity. */
+    activeTurnLimit?: number;
+    /** Opt-in pressure policy; retain preserves the historical resident-process behavior. */
+    idleProcessPolicy?: "retain" | "park_when_needed";
   };
   executionIsolation?: {
     mode: "provider" | "bwrap" | "seatbelt" | "windows-job";
@@ -1603,7 +1611,9 @@ export type RunnerCapacityBlockerKind =
   | "target_quota"
   | "exclusive_group"
   | "request_weight"
-  | "queue_order";
+  | "queue_order"
+  | "active_turn_capacity"
+  | "diagnostic_overflow";
 
 /** Content-free explanation of the exact admission boundary holding one or more sessions. */
 export interface RunnerCapacityBlocker {
@@ -1623,6 +1633,24 @@ export interface RunnerCapacityConfiguration {
   revision: number;
 }
 
+export interface RunnerCapacityDimension {
+  used: number;
+  limit: number | null;
+  available: number | null;
+}
+
+/** Protocol v134 resource dimensions. Resident capacity remains weighted; active turns include
+ * authoritative background work; retained sessions count all safe resumable conversations; and
+ * parked sessions are the retained subset without a resident process. A null retained limit
+ * deliberately means unbounded durable retention. */
+export interface RunnerCapacityDimensions {
+  activeTurns: RunnerCapacityDimension;
+  residentProcessUnits: RunnerCapacityDimension;
+  retainedSessions: RunnerCapacityDimension;
+  parkedSessions: number;
+  idleProcessPolicy: "retain" | "park_when_needed";
+}
+
 /** Runner-authored live lease accounting projected into Machine settings. */
 export interface RunnerCapacityState extends RunnerCapacityConfiguration {
   authority: "runner_local" | "control_plane";
@@ -1630,6 +1658,7 @@ export interface RunnerCapacityState extends RunnerCapacityConfiguration {
   availableUnits?: number;
   queuedSessions?: number;
   blockers?: RunnerCapacityBlocker[];
+  dimensions?: RunnerCapacityDimensions;
   reportedAt?: number;
 }
 

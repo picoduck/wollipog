@@ -1316,6 +1316,13 @@ test("Machine Runner Capacity is durable, conflict-safe, and re-established afte
   const temp = mkdtempSync(join(tmpdir(), "wollipog-runner-capacity-"));
   const location = join(temp, "control-plane.sqlite");
   let db: ControlPlaneDb | undefined;
+  const dimensions = {
+    activeTurns: { used: 3, limit: 24, available: 21 },
+    residentProcessUnits: { used: 20, limit: 24, available: 4 },
+    retainedSessions: { used: 18, limit: null, available: null },
+    parkedSessions: 2,
+    idleProcessPolicy: "retain" as const,
+  };
   try {
     db = ControlPlaneDb.open(location);
     db.registerRunner(meta({ runtime: {
@@ -1337,6 +1344,7 @@ test("Machine Runner Capacity is durable, conflict-safe, and re-established afte
       usedUnits: 20,
       availableUnits: 4,
       queuedSessions: 2,
+      dimensions,
       blockers: [{
         kind: "agent_quota",
         description: "claude is using 4 of 4 provider slots",
@@ -1356,6 +1364,7 @@ test("Machine Runner Capacity is durable, conflict-safe, and re-established afte
       usedUnits: 20,
       availableUnits: 4,
       queuedSessions: 1,
+      dimensions,
       blockers: [{
         kind: "not-a-real-limit" as never,
         description: "untrusted",
@@ -1391,12 +1400,91 @@ test("Machine Runner Capacity is durable, conflict-safe, and re-established afte
       usedUnits: 0,
       availableUnits: 16,
       queuedSessions: 0,
+      dimensions: {
+        activeTurns: { used: 0, limit: 16, available: 16 },
+        residentProcessUnits: { used: 0, limit: 16, available: 16 },
+        retainedSessions: { used: 0, limit: null, available: null },
+        parkedSessions: 0,
+        idleProcessPolicy: "retain",
+      },
       blockers: [],
     }, 201), false, "a stale runner-local report cannot override the durable control-plane setting");
   } finally {
     db?.close();
     rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test("capacity dimensions and overflow diagnostics are accepted only from protocol-v134 runners", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const runtime = {
+    dataDir: "/data",
+    worktreeRoot: "/data/worktrees",
+    maxConcurrentSessions: 8,
+    admission: {
+      agentLimits: {},
+      agentWeights: {},
+      activeTurnLimit: 2,
+      idleProcessPolicy: "park_when_needed" as const,
+    },
+  };
+  db.registerRunner(meta({ runtime }), 100, PROTOCOL_VERSION);
+  const status = {
+    configuredUnits: 8,
+    revision: 0,
+    authority: "runner_local" as const,
+    usedUnits: 6,
+    availableUnits: 2,
+    queuedSessions: 300,
+    blockers: [{
+      kind: "diagnostic_overflow" as const,
+      description: "45 additional capacity bottlenecks are summarized",
+      usedUnits: 6,
+      limitUnits: 8,
+      requiredUnits: 1,
+      waitingSessions: 300,
+    }],
+    dimensions: {
+      activeTurns: { used: 2, limit: 2, available: 0 },
+      residentProcessUnits: { used: 6, limit: 8, available: 2 },
+      retainedSessions: { used: 9, limit: null, available: null },
+      parkedSessions: 3,
+      idleProcessPolicy: "park_when_needed" as const,
+    },
+  };
+  assert.equal(db.updateRunnerCapacityStatus("runner-1", status, 110), true);
+  assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+    ...status,
+    dimensions: { idleProcessPolicy: "park_when_needed", parkedSessions: 0 } as never,
+  }, 111), false, "a partial untrusted dimensions object is rejected without throwing");
+  assert.equal(db.updateRunnerCapacityStatus("runner-1", {
+    ...status,
+    dimensions: { ...status.dimensions, activeTurns: null } as never,
+  }, 112), false, "a malformed nested dimension is rejected without throwing");
+
+  db.createSession(newSession());
+  db.updateSessionStatus("sess-1", "queued", 120);
+  assert.equal(db.setSessionCapacityWait("sess-1", {
+    kind: "active_turn_capacity",
+    description: "Active Turn Capacity is 2 of 2 turns used",
+    usedUnits: 2,
+    limitUnits: 2,
+    requiredUnits: 1,
+    agentId: "acp-agent",
+  }), true);
+  assert.equal(db.getSession("sess-1")?.capacityWait?.kind, "active_turn_capacity");
+  assert.equal(db.setSessionCapacityWait("sess-1", {
+    kind: "diagnostic_overflow",
+    description: "aggregate only",
+    usedUnits: 1,
+    limitUnits: 1,
+    requiredUnits: 1,
+  }), false, "the aggregate overflow sentinel is never valid as one session's reason");
+
+  db.registerRunner(meta({ runnerId: "legacy", runtime }), 130, PROTOCOL_VERSION - 1);
+  assert.equal(db.updateRunnerCapacityStatus("legacy", status, 140), false,
+    "a rolling-deployment peer cannot introduce fields or enum members outside its vocabulary");
+  db.close();
 });
 
 test("Codex app-server compatibility diagnostics round-trip and old rows may omit them", () => {

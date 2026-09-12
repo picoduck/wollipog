@@ -16,7 +16,9 @@ Operators can add exact agent-id policy in `runner.config.json`:
   "maxConcurrentSessions": 8,
   "admission": {
     "agentLimits": { "claude": 2, "codex": 4 },
-    "agentWeights": { "claude": 3, "codex": 2 }
+    "agentWeights": { "claude": 3, "codex": 2 },
+    "activeTurnLimit": 4,
+    "idleProcessPolicy": "park_when_needed"
   }
 }
 ```
@@ -24,6 +26,37 @@ Operators can add exact agent-id policy in `runner.config.json`:
 In this example, one Claude process consumes three of eight units and at most two Claude processes
 may run. Unlisted agents retain weight 1 and no provider-specific limit. Keys must be exact agent ids;
 values are positive integers, weights cannot exceed box capacity, and each map is capped at 64 entries.
+
+`activeTurnLimit` is optional and bounds simultaneous provider turns across runner processes sharing
+the data directory. Runner-authoritative detached work retains the same permit from its parent turn
+through any required continuation, so the count cannot drop merely because the provider returned
+while its work remained active. The limit must be between 1 and Machine capacity. When omitted, it
+follows Machine capacity and adds no narrower boundary. `idleProcessPolicy` defaults to `retain`, preserving the
+historical warm-process behavior. Opting into `park_when_needed` lets the runner retire the oldest
+eligible idle provider when resident capacity blocks new work. Only a provider with a verified
+resume coordinate is eligible; active turns, background work, approvals, queued commands, and
+unresumable providers are never pressure-parked. Parking is disabled while connected to a pre-v134
+control plane, because that peer cannot confirm the expanded capacity state.
+
+The Machine view defines the three dimensions independently:
+
+- **Active Turns** counts provider turns plus runner-authoritative detached work and has the
+  `activeTurnLimit` ceiling.
+- **Resident Process Units** counts weighted live provider processes and has the existing Runner
+  Capacity ceiling.
+- **Retained Resumable Sessions** counts durable, safely resumable conversations whether their
+  provider process is resident or parked. Its limit is explicitly unlimited: Wollipog never deletes
+  durable sessions to satisfy capacity. **Parked Sessions** is the retained subset without a
+  resident provider process.
+
+A parked session remains idle and retains its provider resume identity, transcript, configuration,
+worktree and checkpoints. Its next prompt enters the same resident-process admission queue as a new
+session, then resumes the established provider conversation. Claude, Codex exec, and Codex app-server
+sessions are eligible after establishing a provider identity. ACP is eligible only when its live
+capabilities prove `sessionResume` or `loadSession`; other providers remain resident. Input-required
+and approval states, queued provider commands, provider-owned steering, authentication recovery,
+and background/detached work all block parking. Shells and Native TUI processes are independent of
+the provider-process lease: parking does not stop them or change their preserved session worktree.
 
 ## Enforcement and Fairness
 
@@ -40,8 +73,16 @@ the box idle. An older entry may be bypassed at most eight times; after that, ca
 until it can start or is cancelled. The runner reports configured, used, available, and queued units,
 plus the actual boundary blocking each waiter: Machine capacity, agent quota, execution-target quota,
 exclusive provider state, a request whose weight exceeds the configured capacity, or bounded-fairness
-queue order. Queued session cards and search results preserve that exact reason. Stop cancels a waiter
-before any agent process launches.
+queue order. Protocol-v134 peers also report active turns, resident process units, retained resumable
+sessions, parked sessions, and the idle-process policy. Queued session cards and search results
+preserve the exact reason, including Active Turn Capacity. Stop cancels a waiter before any agent
+process launches.
+
+Capacity reporting takes one bounded diagnostic observation per filesystem lease root and reuses it
+across the queue. Reports contain at most 256 blocker objects. If exact groups exceed
+that bound, one actionable example of every represented boundary is retained, remaining slots follow
+queue order, and the final `diagnostic_overflow` entry accounts for every omitted waiter. Run
+`pnpm benchmark:admission` for the repeatable 50,000-waiter, 256-unit regression benchmark.
 
 Increases take effect live and reconsider all capacity and worktree-preparation waiters immediately.
 Decreases never stop running sessions or revoke their leases. When current use is above the new

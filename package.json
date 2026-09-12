@@ -34,6 +34,7 @@
     "test": "node --import tsx --test --test-timeout=300000 \"apps/**/src/**/*.test.ts\" \"apps/**/src/**/*.test.tsx\" \"apps/**/scripts/**/*.test.mjs\" \"packages/**/src/**/*.test.ts\" \"packages/**/src/**/*.test.tsx\" \"scripts/**/*.test.mjs\"",
     "test:e2e": "playwright test",
     "test:e2e:production": "playwright test --config playwright.production.config.ts",
+    "benchmark:admission": "node --import tsx apps/runner/scripts/admission-diagnostics-benchmark.ts",
     "test:watch": "node --import tsx --test --test-timeout=300000 --watch \"apps/**/src/**/*.test.ts\" \"apps/**/src/**/*.test.tsx\"",
     "check:codex-schema": "node scripts/check-codex-app-server-schema.mjs",
     "check:rust": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check && cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib"

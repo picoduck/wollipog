@@ -126,6 +126,7 @@ import {
   type RunnerCapacityBlocker,
   type RunnerCapacityConfiguration,
   type RunnerCapacityState,
+  type RunnerRuntimeInfo,
   type RunnerCredentialView,
   type RunnerStatus,
   type RunnerView,
@@ -4742,14 +4743,18 @@ export class ControlPlaneDb {
 
   updateRunnerCapacityStatus(runnerId: string, status: RunnerCapacityState, now: number): boolean {
     const runner = this.getRunner(runnerId);
+    const supportsDimensions = runnerSupportsProtocol(runner?.protocolVersion, "runnerCapacityDimensions");
     if (!runner || !Number.isInteger(status.configuredUnits) || status.configuredUnits < 1 ||
         status.configuredUnits > 256 || !Number.isSafeInteger(status.revision) || status.revision < 0 ||
         !Number.isSafeInteger(status.usedUnits) || status.usedUnits! < 0 ||
         status.availableUnits !== Math.max(0, status.configuredUnits - status.usedUnits!) ||
         !Number.isSafeInteger(status.queuedSessions) || status.queuedSessions! < 0 ||
         !Array.isArray(status.blockers) || status.blockers.length > 256 ||
-        status.blockers.some((blocker) => !validRunnerCapacityBlocker(blocker, true)) ||
-        status.blockers.reduce((sum, blocker) => sum + blocker.waitingSessions!, 0) !== status.queuedSessions) return false;
+        status.blockers.some((blocker) => !validRunnerCapacityBlocker(blocker, true, supportsDimensions)) ||
+        status.blockers.reduce((sum, blocker) => sum + blocker.waitingSessions!, 0) !== status.queuedSessions ||
+        (supportsDimensions
+          ? !validRunnerCapacityDimensions(status.dimensions, status, runner.runtime?.admission)
+          : status.dimensions !== undefined)) return false;
     const configured = this.machineRunnerCapacityConfiguration(runnerId);
     const expectedUnits = configured?.configuredUnits ?? runner.runtime?.maxConcurrentSessions;
     const expectedRevision = configured?.revision ?? 0;
@@ -10166,7 +10171,11 @@ export class ControlPlaneDb {
         backgroundWorkStateForStorage(snap.backgroundWorkState),
         snap.backgroundWorkTracking ?? null,
         snap.historyQuarantine ? JSON.stringify(snap.historyQuarantine) : null,
-        capacityWaitForStorage(snap.status, snap.capacityWait),
+        capacityWaitForStorage(
+          snap.status,
+          snap.capacityWait,
+          runnerSupportsProtocol(this.getRunner(runnerId)?.protocolVersion, "runnerCapacityDimensions"),
+        ),
         snap.status,
         snap.useWorktree ? 1 : 0,
         snap.worktreePath,
@@ -10355,7 +10364,14 @@ export class ControlPlaneDb {
         // whatever is stored; the empty-string sentinel is a supporting runner saying the
         // conversation is healthy, which NULLIF turns into a real clear.
         historyQuarantineForStorage(snap.historyQuarantine),
-        capacityWaitForStorage(status, snap.capacityWait),
+        capacityWaitForStorage(
+          status,
+          snap.capacityWait,
+          runnerSupportsProtocol(
+            existing ? this.getRunner(existing.runner_id)?.protocolVersion : null,
+            "runnerCapacityDimensions",
+          ),
+        ),
         snap.preview,
         pendingJson,
         snap.worktreePath,
@@ -11112,7 +11128,14 @@ export class ControlPlaneDb {
   }
 
   setSessionCapacityWait(id: string, wait: SessionView["capacityWait"]): boolean {
-    if (wait && !validRunnerCapacityBlocker(wait, false)) return false;
+    const owner = this.stmt("SELECT runner_id FROM sessions WHERE id=?").get(id) as
+      | { runner_id: string }
+      | undefined;
+    const supportsDimensions = runnerSupportsProtocol(
+      owner ? this.getRunner(owner.runner_id)?.protocolVersion : null,
+      "runnerCapacityDimensions",
+    );
+    if (wait && !validRunnerCapacityBlocker(wait, false, supportsDimensions)) return false;
     const result = this.stmt("UPDATE sessions SET capacity_wait=? WHERE id=? AND status='queued'")
       .run(wait ? JSON.stringify(wait) : null, id);
     return Number(result.changes) > 0;
@@ -19145,7 +19168,11 @@ const RUNNER_CAPACITY_BLOCKER_KINDS = new Set([
   "queue_order",
 ]);
 
-function validRunnerCapacityBlocker(value: unknown, aggregate: boolean): value is RunnerCapacityBlocker {
+function validRunnerCapacityBlocker(
+  value: unknown,
+  aggregate: boolean,
+  dimensions = false,
+): value is RunnerCapacityBlocker {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const blocker = value as Partial<RunnerCapacityBlocker>;
   const validIdentity = (identity: unknown) => identity === undefined ||
@@ -19153,7 +19180,10 @@ function validRunnerCapacityBlocker(value: unknown, aggregate: boolean): value i
   const validWaiting = blocker.waitingSessions === undefined
     ? !aggregate
     : Number.isSafeInteger(blocker.waitingSessions) && blocker.waitingSessions >= 1;
-  return typeof blocker.kind === "string" && RUNNER_CAPACITY_BLOCKER_KINDS.has(blocker.kind) &&
+  return typeof blocker.kind === "string" &&
+    (RUNNER_CAPACITY_BLOCKER_KINDS.has(blocker.kind) ||
+      (dimensions && blocker.kind === "active_turn_capacity") ||
+      (dimensions && aggregate && blocker.kind === "diagnostic_overflow")) &&
     typeof blocker.description === "string" && blocker.description.length >= 1 &&
     blocker.description.length <= 512 && !/[\0-\x1f\x7f]/.test(blocker.description) &&
     Number.isSafeInteger(blocker.usedUnits) && blocker.usedUnits! >= 0 &&
@@ -19162,8 +19192,37 @@ function validRunnerCapacityBlocker(value: unknown, aggregate: boolean): value i
     validIdentity(blocker.agentId) && validIdentity(blocker.targetId) && validWaiting;
 }
 
-function capacityWaitForStorage(status: SessionStatus, value: unknown): string | null {
-  return status === "queued" && validRunnerCapacityBlocker(value, false) ? JSON.stringify(value) : null;
+function validRunnerCapacityDimensions(
+  value: unknown,
+  status: RunnerCapacityState,
+  policy?: RunnerRuntimeInfo["admission"],
+): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const dimensions = value as Partial<NonNullable<RunnerCapacityState["dimensions"]>>;
+  if (dimensions.idleProcessPolicy !== "retain" && dimensions.idleProcessPolicy !== "park_when_needed" ||
+      !Number.isSafeInteger(dimensions.parkedSessions) || dimensions.parkedSessions! < 0) return false;
+  const bounded = (dimension: unknown): boolean => {
+    if (!dimension || typeof dimension !== "object" || Array.isArray(dimension)) return false;
+    const item = dimension as { used?: unknown; limit?: unknown; available?: unknown };
+    return Number.isSafeInteger(item.used) && (item.used as number) >= 0 &&
+      Number.isSafeInteger(item.limit) && (item.limit as number) >= 1 &&
+      item.available === Math.max(0, (item.limit as number) - (item.used as number));
+  };
+  const retained = dimensions.retainedSessions;
+  if (!retained || typeof retained !== "object" || Array.isArray(retained)) return false;
+  const activeTurnLimit = policy?.activeTurnLimit ?? status.configuredUnits;
+  const idleProcessPolicy = policy?.idleProcessPolicy ?? "retain";
+  return bounded(dimensions.activeTurns) && dimensions.activeTurns!.limit === activeTurnLimit &&
+    bounded(dimensions.residentProcessUnits) &&
+    dimensions.residentProcessUnits!.limit === status.configuredUnits &&
+    dimensions.residentProcessUnits!.used === status.usedUnits &&
+    Number.isSafeInteger(retained.used) && retained.used >= 0 && retained.limit === null &&
+    retained.available === null && dimensions.parkedSessions! <= retained.used &&
+    dimensions.idleProcessPolicy === idleProcessPolicy;
+}
+
+function capacityWaitForStorage(status: SessionStatus, value: unknown, dimensions = false): string | null {
+  return status === "queued" && validRunnerCapacityBlocker(value, false, dimensions) ? JSON.stringify(value) : null;
 }
 
 function parseJson<T>(raw: string | null): T | null {

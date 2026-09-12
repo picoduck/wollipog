@@ -836,10 +836,41 @@ function MachineSettingsDialog({
               <p className="machine-capacity-summary">
                 {runner.capacity.usedUnits} of {runner.capacity.configuredUnits} Units Used · {runner.capacity.queuedSessions} Sessions Queued
               </p>
+              {runner.capacity.dimensions && (
+                <>
+                  <dl className="runner-meta runner-system-meta" aria-label="Capacity Dimensions">
+                    <div>
+                      <dt>Active Turns</dt>
+                      <dd>{runner.capacity.dimensions.activeTurns.used} of {runner.capacity.dimensions.activeTurns.limit}</dd>
+                    </div>
+                    <div>
+                      <dt>Resident Process Units</dt>
+                      <dd>
+                        {runner.capacity.dimensions.residentProcessUnits.used} of {runner.capacity.dimensions.residentProcessUnits.limit}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Retained Resumable Sessions</dt>
+                      <dd>{runner.capacity.dimensions.retainedSessions.used} (Unlimited)</dd>
+                    </div>
+                    <div><dt>Parked Sessions</dt><dd>{runner.capacity.dimensions.parkedSessions}</dd></div>
+                    <div>
+                      <dt>Idle Process Policy</dt>
+                      <dd>{runner.capacity.dimensions.idleProcessPolicy === "park_when_needed"
+                        ? "Park When Needed"
+                        : "Retain Idle Processes"}</dd>
+                    </div>
+                  </dl>
+                  <p className="hint">
+                    Active Turns include authoritative background work. Active Turn Capacity and idle-process
+                    parking are configured in <code>runner.config.json</code>.
+                  </p>
+                </>
+              )}
               {!!runner.capacity.blockers?.length && (
                 <ul className="machine-capacity-blockers" aria-label="Current Capacity Bottlenecks">
-                  {runner.capacity.blockers.map((blocker) => (
-                    <li key={`${blocker.kind}:${blocker.agentId ?? ""}:${blocker.targetId ?? ""}`}>
+                  {runner.capacity.blockers.map((blocker, index) => (
+                    <li key={`${blocker.kind}:${blocker.agentId ?? ""}:${blocker.targetId ?? ""}:${index}`}>
                       {blocker.description} · {blocker.waitingSessions} Waiting
                     </li>
                   ))}

@@ -17,6 +17,14 @@ export interface AdmissionRequest {
   exclusiveGroup?: string;
 }
 
+/** One bounded diagnostic read. Each filesystem-backed lease root is scanned at most once no
+ * matter how many queued requests share it. Admission itself remains authoritative: this snapshot
+ * is explanatory only and is never used to grant a lease. */
+export interface AdmissionObservation {
+  readonly usedCapacity: number;
+  usedSlots(root: string): number;
+}
+
 /** Cross-process slot leases under the shared runner data directory. Atomic slot-directory
  * creation enforces the box ceiling; dead process owners are reclaimed after crashes. */
 export class BoxAdmission {
@@ -167,14 +175,26 @@ export class BoxAdmission {
     return Math.max(0, this.limit - this.usedCapacity());
   }
 
+  observe(): AdmissionObservation {
+    const counts = new Map<string, number>();
+    const usedSlots = (root: string): number => {
+      const observed = counts.get(root);
+      if (observed !== undefined) return observed;
+      const used = this.usedSlots(root);
+      counts.set(root, used);
+      return used;
+    };
+    return { usedCapacity: usedSlots(this.root), usedSlots };
+  }
+
   /** Explain the first lease boundary acquire() evaluates without mutating admission state. */
-  blocker(request: AdmissionRequest): RunnerCapacityBlocker | null {
+  blocker(request: AdmissionRequest, observation = this.observe()): RunnerCapacityBlocker | null {
     if (this.held.has(request.sessionId)) return null;
     if (!Number.isInteger(request.weight) || request.weight < 1 || request.weight > this.limit) {
       return {
         kind: "request_weight",
         description: `${request.agentId} requires ${request.weight} units but Runner Capacity is ${this.limit}`,
-        usedUnits: this.usedCapacity(),
+        usedUnits: observation.usedCapacity,
         limitUnits: this.limit,
         requiredUnits: request.weight,
         agentId: request.agentId,
@@ -182,7 +202,7 @@ export class BoxAdmission {
     }
     if (request.exclusiveGroup) {
       const root = join(this.root, "exclusive", createHash("sha256").update(request.exclusiveGroup).digest("hex"));
-      const used = this.usedSlots(root);
+      const used = observation.usedSlots(root);
       if (used >= 1) return {
         kind: "exclusive_group",
         description: `${request.agentId} is waiting for its exclusive provider slot`,
@@ -194,7 +214,7 @@ export class BoxAdmission {
     }
     if (request.targetId && request.targetLimit) {
       const root = join(this.root, "targets", createHash("sha256").update(request.targetId).digest("hex"));
-      const used = this.usedSlots(root);
+      const used = observation.usedSlots(root);
       if (used >= request.targetLimit) return {
         kind: "target_quota",
         description: `Execution target ${request.targetId} is using ${used} of ${request.targetLimit} slots`,
@@ -206,7 +226,7 @@ export class BoxAdmission {
     }
     if (request.agentLimit !== undefined) {
       const root = join(this.root, "providers", createHash("sha256").update(request.agentId).digest("hex"));
-      const used = this.usedSlots(root);
+      const used = observation.usedSlots(root);
       if (used >= request.agentLimit) return {
         kind: "agent_quota",
         description: `${request.agentId} is using ${used} of ${request.agentLimit} provider slots`,
@@ -216,7 +236,7 @@ export class BoxAdmission {
         agentId: request.agentId,
       };
     }
-    const used = this.usedCapacity();
+    const used = observation.usedCapacity;
     if (used + request.weight > this.limit) return {
       kind: "runner_capacity",
       description: `Runner Capacity is ${used} of ${this.limit} units used; this session needs ${request.weight}`,

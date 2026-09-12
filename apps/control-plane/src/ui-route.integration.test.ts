@@ -590,6 +590,13 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       usedUnits: 12,
       availableUnits: 12,
       queuedSessions: 2,
+      dimensions: {
+        activeTurns: { used: 2, limit: 24, available: 22 },
+        residentProcessUnits: { used: 12, limit: 24, available: 12 },
+        retainedSessions: { used: 3, limit: null, available: null },
+        parkedSessions: 3,
+        idleProcessPolicy: "retain",
+      },
       blockers: [{
         kind: "agent_quota",
         description: "agent-1 is using 4 of 4 provider slots",

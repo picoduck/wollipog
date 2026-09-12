@@ -37,6 +37,10 @@ export interface RunnerAdmissionPolicy {
   agentLimits: Record<string, number>;
   /** Box-capacity units consumed by one live process for an exact agent id. */
   agentWeights: Record<string, number>;
+  /** Maximum simultaneous provider turns. Omission follows maxConcurrentSessions. */
+  activeTurnLimit?: number;
+  /** Whether resumable idle providers may be retired when resident capacity is exhausted. */
+  idleProcessPolicy?: "retain" | "park_when_needed";
 }
 
 export interface RunnerSkillRetention {
@@ -308,6 +312,16 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
   const rawAdmission: Partial<RunnerAdmissionPolicy> = overrides.admission ?? file.admission ?? {};
   const agentLimits = validateAdmissionMap("agentLimits", rawAdmission.agentLimits, 256);
   const agentWeights = validateAdmissionMap("agentWeights", rawAdmission.agentWeights, maxConcurrentSessions);
+  const activeTurnLimit = rawAdmission.activeTurnLimit;
+  if (activeTurnLimit !== undefined && (!Number.isInteger(activeTurnLimit) || activeTurnLimit < 1 ||
+      activeTurnLimit > maxConcurrentSessions)) {
+    throw new Error("runner config: admission.activeTurnLimit must be an integer from 1 to maxConcurrentSessions");
+  }
+  const idleProcessPolicy = rawAdmission.idleProcessPolicy;
+  if (idleProcessPolicy !== undefined && idleProcessPolicy !== "retain" &&
+      idleProcessPolicy !== "park_when_needed") {
+    throw new Error("runner config: admission.idleProcessPolicy must be 'retain' or 'park_when_needed'");
+  }
   const rawSkillRetention: Partial<RunnerSkillRetention> =
     overrides.skillRetention ?? file.skillRetention ?? {};
   const removedSkillDays = rawSkillRetention.removedSkillDays ?? 7;
@@ -399,7 +413,12 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
     agents,
     dataDir: resolveWorkspacePath(overrides.dataDir ?? file.dataDir ?? resolve(homedir(), ".agent-manager")),
     maxConcurrentSessions,
-    admission: { agentLimits, agentWeights },
+    admission: {
+      agentLimits,
+      agentWeights,
+      ...(activeTurnLimit === undefined ? {} : { activeTurnLimit }),
+      ...(idleProcessPolicy === undefined ? {} : { idleProcessPolicy }),
+    },
     skillRetention: { removedSkillDays, previousVersionMinutes },
     executionIsolation: {
       mode: rawIsolation.mode,

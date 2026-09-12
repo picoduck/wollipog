@@ -393,11 +393,15 @@ test("resolveConfig validates provider quotas and weighted admission", () => {
     admission: {
       agentLimits: { claude: 2 },
       agentWeights: { claude: 3, codex: 2 },
+      activeTurnLimit: 4,
+      idleProcessPolicy: "park_when_needed",
     },
   });
   assert.deepEqual(cfg.admission, {
     agentLimits: { claude: 2 },
     agentWeights: { claude: 3, codex: 2 },
+    activeTurnLimit: 4,
+    idleProcessPolicy: "park_when_needed",
   });
   assert.throws(() => resolveConfig({
     runnerId: "x", controlPlaneUrl: "ws://x", maxConcurrentSessions: 2,
@@ -411,6 +415,14 @@ test("resolveConfig validates provider quotas and weighted admission", () => {
     runnerId: "x", controlPlaneUrl: "ws://x",
     admission: { agentLimits: { claude: 0 }, agentWeights: {} },
   }), /agentLimits\.claude/);
+  assert.throws(() => resolveConfig({
+    runnerId: "x", controlPlaneUrl: "ws://x", maxConcurrentSessions: 2,
+    admission: { agentLimits: {}, agentWeights: {}, activeTurnLimit: 3 },
+  }), /activeTurnLimit.*1 to maxConcurrentSessions/);
+  assert.throws(() => resolveConfig({
+    runnerId: "x", controlPlaneUrl: "ws://x",
+    admission: { agentLimits: {}, agentWeights: {}, idleProcessPolicy: "eager" as never },
+  }), /idleProcessPolicy.*retain.*park_when_needed/);
 });
 
 test("ACP Registry discovery is feature-gated and constrained by an explicit operator allowlist", () => {

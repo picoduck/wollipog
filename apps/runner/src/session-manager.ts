@@ -81,7 +81,7 @@ import type {
   StopReason,
 } from "./drivers/driver.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
-import { BoxAdmission, type AdmissionRequest } from "./box-admission.js";
+import { BoxAdmission, type AdmissionObservation, type AdmissionRequest } from "./box-admission.js";
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS } from "./config.js";
 import type { RunnerAdmissionPolicy, RunnerExecutionIsolation } from "./config.js";
@@ -501,6 +501,10 @@ interface ProviderRetirement {
   preserveLock: boolean;
   /** While a handoff is healthy, prompts may join the replacement generation's pre-launch FIFO. */
   acceptPromptsDuringHandoff: boolean;
+  /** Pressure parking preserves the durable idle session and is reflected in capacity accounting. */
+  parking: boolean;
+  /** Temporary launch generation that accepts prompts while a pressure park is retiring. */
+  parkingGeneration?: number;
 }
 
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
@@ -854,6 +858,23 @@ export class SessionManager {
    * age-based reconciliation away from those partitions until the fork publishes or rolls back. */
   private readonly forkingTargets = new Set<string>();
   private readonly boxAdmission: BoxAdmission;
+  /** Cross-process provider-turn accounting. The default follows resident capacity, so legacy
+   * configurations gain truthful accounting without gaining a narrower admission boundary. */
+  private readonly activeTurnAdmission: BoxAdmission;
+  private activeTurnLimit: number;
+  private readonly activeTurnLimitConfigured: boolean;
+  private readonly idleProcessPolicy: "retain" | "park_when_needed";
+  private readonly activeTurnWaiters = new Map<string, AdmissionRequest>();
+  private readonly activeTurnAdmitted = new Set<string>();
+  private activeTurnRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** At most one pressure retirement may be unconfirmed. This prevents one admission burst from
+   * retiring every eligible warm process before the first released unit is observed. */
+  private readonly parkingSessions = new Set<string>();
+  /** Lazily reconciled durable-session inventory. The first v134 report may scan the store; hot
+   * turn-boundary reports remain O(1) in retained-session count. */
+  private capacityInventoryInitialized = false;
+  private readonly retainedResumableSessions = new Set<string>();
+  private readonly parkedResumableSessions = new Set<string>();
   private readonly stateDir: string;
   /** Evidence for widening the provider-history classifier (#876). Nothing reads it to decide. */
   private readonly unclassifiedRejections: UnclassifiedRejectionJournal;
@@ -973,6 +994,10 @@ export class SessionManager {
     this.providerStateCleanupJournal = new ProviderStateCleanupJournal(this.stateDir);
     this.checkpointRefOwnership = new CheckpointRefOwnershipLedger(this.stateDir);
     this.boxAdmission = new BoxAdmission(this.stateDir, maxConcurrentSessions);
+    this.activeTurnLimitConfigured = admissionPolicy.activeTurnLimit !== undefined;
+    this.activeTurnLimit = admissionPolicy.activeTurnLimit ?? maxConcurrentSessions;
+    this.idleProcessPolicy = admissionPolicy.idleProcessPolicy ?? "retain";
+    this.activeTurnAdmission = new BoxAdmission(join(this.stateDir, "active-turns"), this.activeTurnLimit);
     this.worktreePreparationLimit = Math.max(1, maxConcurrentSessions);
     this.worktreePreparationAdmission = new BoxAdmission(
       join(this.stateDir, "worktree-preparation"),
@@ -992,6 +1017,35 @@ export class SessionManager {
   private capacityRevision = 0;
   private capacityAuthority: RunnerCapacityState["authority"] = "runner_local";
 
+  private ensureCapacityInventory(): void {
+    if (this.capacityInventoryInitialized) return;
+    this.retainedResumableSessions.clear();
+    this.parkedResumableSessions.clear();
+    this.capacityInventoryInitialized = true;
+    for (const meta of this.store.listSessions()) {
+      this.refreshCapacityInventorySession(meta.sessionId);
+    }
+  }
+
+  private refreshCapacityInventorySession(sessionId: string): void {
+    if (!this.capacityInventoryInitialized) return;
+    const meta = this.store.readMeta(sessionId);
+    const retained = !!meta && !this.store.isDeleted(sessionId) &&
+      !!meta.agentSessionId && canResumeSession(meta);
+    if (retained) this.retainedResumableSessions.add(sessionId);
+    else this.retainedResumableSessions.delete(sessionId);
+    if (retained && !this.active.has(sessionId) && !this.closing.has(sessionId)) {
+      this.parkedResumableSessions.add(sessionId);
+    } else {
+      this.parkedResumableSessions.delete(sessionId);
+    }
+  }
+
+  private forgetCapacityInventorySession(sessionId: string): void {
+    this.retainedResumableSessions.delete(sessionId);
+    this.parkedResumableSessions.delete(sessionId);
+  }
+
   /** Apply only a monotonic control-plane configuration. Existing leases are never released. */
   configureCapacity(configuration: RunnerCapacityConfiguration): boolean {
     if (!Number.isInteger(configuration.configuredUnits) || configuration.configuredUnits < 1 ||
@@ -1003,6 +1057,10 @@ export class SessionManager {
     this.capacityRevision = configuration.revision;
     this.capacityAuthority = "control_plane";
     this.maxConcurrentSessions = configuration.configuredUnits;
+    if (!this.activeTurnLimitConfigured) {
+      this.activeTurnLimit = configuration.configuredUnits;
+      this.activeTurnAdmission.setLimit(configuration.configuredUnits);
+    }
     this.worktreePreparationLimit = configuration.configuredUnits;
     this.boxAdmission.setLimit(configuration.configuredUnits);
     this.worktreePreparationAdmission.setLimit(configuration.configuredUnits);
@@ -1013,33 +1071,80 @@ export class SessionManager {
   }
 
   capacityState(): RunnerCapacityState {
+    const supportsDimensions = runnerSupportsProtocol(
+      this.controlPlaneProtocolVersion(),
+      "runnerCapacityDimensions",
+    );
+    if (supportsDimensions) this.ensureCapacityInventory();
+    const observation = this.boxAdmission.observe();
+    const activeTurnObservation = this.activeTurnAdmission.observe();
     const grouped = new Map<string, RunnerCapacityBlocker>();
-    for (const entry of this.admissionQueue) {
-      const blocker = this.capacityBlocker(entry.request);
-      const key = JSON.stringify([blocker.kind, blocker.agentId ?? null, blocker.targetId ?? null,
+    const addBlocker = (blocker: RunnerCapacityBlocker): void => {
+      const agentRelevant = blocker.kind === "agent_quota" || blocker.kind === "exclusive_group" ||
+        blocker.kind === "request_weight";
+      const targetRelevant = blocker.kind === "target_quota";
+      const normalized = {
+        ...blocker,
+        ...(agentRelevant ? {} : { agentId: undefined }),
+        ...(targetRelevant ? {} : { targetId: undefined }),
+      };
+      const key = JSON.stringify([normalized.kind, normalized.agentId ?? null, normalized.targetId ?? null,
         blocker.limitUnits, blocker.requiredUnits]);
       const previous = grouped.get(key);
-      grouped.set(key, { ...blocker, waitingSessions: (previous?.waitingSessions ?? 0) + 1 });
+      grouped.set(key, { ...normalized, waitingSessions: (previous?.waitingSessions ?? 0) + 1 });
+    };
+    for (const entry of this.admissionQueue) {
+      addBlocker(this.capacityBlocker(entry.request, observation));
     }
-    const usedUnits = this.boxAdmission.usedCapacity();
+    for (const request of this.activeTurnWaiters.values()) {
+      addBlocker(this.activeTurnBlocker(request, activeTurnObservation));
+    }
+    const blockers = this.boundCapacityBlockers([...grouped.values()], observation.usedCapacity);
+    const queuedSessions = this.admissionQueue.length + this.activeTurnWaiters.size;
     return {
       configuredUnits: this.maxConcurrentSessions,
       revision: this.capacityRevision,
       authority: this.capacityAuthority,
-      usedUnits,
-      availableUnits: Math.max(0, this.maxConcurrentSessions - usedUnits),
-      queuedSessions: this.admissionQueue.length,
-      blockers: [...grouped.values()],
+      usedUnits: observation.usedCapacity,
+      availableUnits: Math.max(0, this.maxConcurrentSessions - observation.usedCapacity),
+      queuedSessions,
+      blockers,
+      ...(supportsDimensions
+        ? {
+            dimensions: {
+              activeTurns: {
+                used: activeTurnObservation.usedCapacity,
+                limit: this.activeTurnLimit,
+                available: Math.max(0, this.activeTurnLimit - activeTurnObservation.usedCapacity),
+              },
+              residentProcessUnits: {
+                used: observation.usedCapacity,
+                limit: this.maxConcurrentSessions,
+                available: Math.max(0, this.maxConcurrentSessions - observation.usedCapacity),
+              },
+              retainedSessions: {
+                used: this.retainedResumableSessions.size,
+                limit: null,
+                available: null,
+              },
+              parkedSessions: this.parkedResumableSessions.size,
+              idleProcessPolicy: this.idleProcessPolicy,
+            },
+          }
+        : {}),
     };
   }
 
   reportCapacity(force = false): void {
     if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "machineRunnerCapacity")) return;
+    if (force) this.capacityInventoryInitialized = false;
     const status = this.capacityState();
     const serialized = JSON.stringify(status);
     if (!force && serialized === this.lastCapacityState) return;
-    this.lastCapacityState = serialized;
     this.send({ type: "runner_capacity_status", status });
+    // A synchronous transport refusal must not suppress the next correction/retry as though this
+    // snapshot had been accepted. Reconnect still forces a full reconciliation frame.
+    this.lastCapacityState = serialized;
   }
 
   private checkpointOwnerHash(meta: Pick<SessionMeta, "checkpointRefVersion">): string | undefined {
@@ -1433,7 +1538,13 @@ export class SessionManager {
     const active = this.active.get(sessionId);
     if (!active || (expected && active !== expected)) return false;
     if (releaseLease) this.releaseActiveWorktreeLease(active);
-    return this.active.delete(sessionId);
+    const deleted = this.active.delete(sessionId);
+    if (deleted) {
+      this.cancelActiveTurnWait(sessionId);
+      this.releaseActiveTurn(sessionId);
+      this.refreshCapacityInventorySession(sessionId);
+    }
+    return deleted;
   }
 
   /** Recover linkage for worktrees whose PR was opened outside Wollipog. The forge helper accepts
@@ -2588,6 +2699,7 @@ export class SessionManager {
       updatedAt: now,
     };
     this.store.create(meta);
+    this.refreshCapacityInventorySession(sessionId);
     this.log(`adopted external session ${sessionId} (${descriptor.driver} ${descriptor.agentSessionId})`);
     this.recoverOrphanedWork(sessionId, false);
     return true;
@@ -2979,6 +3091,7 @@ export class SessionManager {
         meta.worktreePending = shouldUseWorktree;
       }
       this.store.create(meta);
+      this.refreshCapacityInventorySession(spec.sessionId);
     });
     durable?.queued();
     if (launchAssertionError) {
@@ -3519,15 +3632,210 @@ export class SessionManager {
     this.emitStatus(request.sessionId, "queued", blocker.description, undefined, blocker);
   }
 
-  private capacityBlocker(request: AdmissionRequest): RunnerCapacityBlocker {
-    return this.boxAdmission.blocker(request) ?? {
+  private capacityBlocker(request: AdmissionRequest, observation?: AdmissionObservation): RunnerCapacityBlocker {
+    return this.boxAdmission.blocker(request, observation) ?? {
       kind: "queue_order",
       description: "Waiting behind older capacity requests",
-      usedUnits: this.boxAdmission.usedCapacity(),
+      usedUnits: observation?.usedCapacity ?? this.boxAdmission.usedCapacity(),
       limitUnits: this.maxConcurrentSessions,
       requiredUnits: request.weight,
       agentId: request.agentId,
     };
+  }
+
+  /** Preserve at least one exact example of every actionable boundary before filling the bounded
+   * report in queue order. The final aggregate owns every omitted waiter, keeping totals exact. */
+  private boundCapacityBlockers(
+    blockers: RunnerCapacityBlocker[],
+    usedUnits: number,
+  ): RunnerCapacityBlocker[] {
+    if (blockers.length <= 256) return blockers;
+    const requiredKinds: RunnerCapacityBlocker["kind"][] = [
+      "runner_capacity",
+      "agent_quota",
+      "target_quota",
+      "exclusive_group",
+      "request_weight",
+      "queue_order",
+      "active_turn_capacity",
+    ];
+    const selected = new Set<RunnerCapacityBlocker>();
+    for (const kind of requiredKinds) {
+      const representative = blockers.find((blocker) => blocker.kind === kind);
+      if (representative) selected.add(representative);
+    }
+    for (const blocker of blockers) {
+      if (selected.size >= 255) break;
+      selected.add(blocker);
+    }
+    const retained = blockers.filter((blocker) => selected.has(blocker));
+    const omitted = blockers.filter((blocker) => !selected.has(blocker));
+    retained.push({
+      kind: runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "runnerCapacityDimensions")
+        ? "diagnostic_overflow"
+        : "runner_capacity",
+      description: `${omitted.length} additional capacity bottlenecks are summarized`,
+      usedUnits,
+      limitUnits: this.maxConcurrentSessions,
+      requiredUnits: 1,
+      waitingSessions: omitted.reduce((sum, blocker) => sum + (blocker.waitingSessions ?? 0), 0),
+    });
+    return retained;
+  }
+
+  private activeTurnRequest(sessionId: string): AdmissionRequest {
+    const meta = this.store.readMeta(sessionId);
+    return { sessionId, agentId: meta?.agentId ?? meta?.driver ?? "unknown", weight: 1 };
+  }
+
+  private activeTurnBlocker(
+    request: AdmissionRequest,
+    observation = this.activeTurnAdmission.observe(),
+  ): RunnerCapacityBlocker {
+    return {
+      kind: runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "runnerCapacityDimensions")
+        ? "active_turn_capacity"
+        : "runner_capacity",
+      description: `Active Turn Capacity is ${observation.usedCapacity} of ${this.activeTurnLimit} turns used`,
+      usedUnits: observation.usedCapacity,
+      limitUnits: this.activeTurnLimit,
+      requiredUnits: 1,
+      agentId: request.agentId,
+    };
+  }
+
+  private acquireActiveTurn(sessionId: string): boolean {
+    if (this.activeTurnAdmitted.has(sessionId)) return true;
+    const request = this.activeTurnRequest(sessionId);
+    if (this.activeTurnAdmission.acquire(request)) {
+      this.activeTurnWaiters.delete(sessionId);
+      this.activeTurnAdmitted.add(sessionId);
+      this.reportCapacity();
+      return true;
+    }
+    if (!this.activeTurnWaiters.has(sessionId)) {
+      this.activeTurnWaiters.set(sessionId, request);
+      const blocker = this.activeTurnBlocker(request);
+      this.emitStatus(sessionId, "queued", blocker.description, undefined, blocker);
+      this.reportCapacity();
+    }
+    this.scheduleActiveTurnRetry();
+    return false;
+  }
+
+  private cancelActiveTurnWait(sessionId: string): void {
+    if (!this.activeTurnWaiters.delete(sessionId)) return;
+    if (this.activeTurnWaiters.size === 0 && this.activeTurnRetryTimer) {
+      clearTimeout(this.activeTurnRetryTimer);
+      this.activeTurnRetryTimer = null;
+    }
+    this.reportCapacity();
+  }
+
+  private releaseActiveTurn(sessionId: string): void {
+    if (!this.activeTurnAdmitted.delete(sessionId)) return;
+    this.activeTurnAdmission.release(sessionId);
+    this.reportCapacity();
+    for (const waitingSessionId of this.activeTurnWaiters.keys()) {
+      setImmediate(() => this.scheduleDrain(waitingSessionId));
+    }
+  }
+
+  /** A provider turn and its runner-authoritative detached work share one active-work permit.
+   * Continuation-pending work keeps the permit too: releasing it between the detached result and
+   * its required continuation would make the Machine under-report work it is committed to finish. */
+  private hasAuthoritativeBackgroundWork(meta: SessionMeta | null | undefined): boolean {
+    return !!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length ||
+      !!meta?.backgroundJobs?.some((job) => !job.terminalStatus ||
+        job.continuationRequired && !job.assistantResultPersistedAt);
+  }
+
+  private settleActiveWorkPermit(sessionId: string, entry: ActiveSession): void {
+    if (entry.running || entry.providerInitiatedTurnActive ||
+        this.hasAuthoritativeBackgroundWork(this.store.readMeta(sessionId))) return;
+    this.releaseActiveTurn(sessionId);
+  }
+
+  private reconcileAuthoritativeBackgroundWorkPermit(sessionId: string, entry: ActiveSession): void {
+    if (!this.hasAuthoritativeBackgroundWork(this.store.readMeta(sessionId))) {
+      this.settleActiveWorkPermit(sessionId, entry);
+      return;
+    }
+    if (this.activeTurnAdmitted.has(sessionId)) return;
+    if (this.activeTurnAdmission.acquire(this.activeTurnRequest(sessionId))) {
+      this.activeTurnAdmitted.add(sessionId);
+      this.reportCapacity();
+      return;
+    }
+    // A well-behaved driver reports detached work while its parent turn still owns a permit. If a
+    // provider violates that ordering, do not pretend the configured active-work ceiling held.
+    this.emitEvent(sessionId, {
+      kind: "error",
+      message: "authoritative background work began outside the available Active Turn Capacity and was cancelled",
+    });
+    try {
+      entry.client.cancel();
+    } catch (error) {
+      this.log(`background-work capacity cancellation failed for ${sessionId}: ${errText(error)}`);
+    }
+  }
+
+  private scheduleActiveTurnRetry(): void {
+    if (this.activeTurnRetryTimer || this.activeTurnWaiters.size === 0) return;
+    this.activeTurnRetryTimer = setTimeout(() => {
+      this.activeTurnRetryTimer = null;
+      for (const sessionId of this.activeTurnWaiters.keys()) this.scheduleDrain(sessionId);
+      if (this.activeTurnWaiters.size > 0) this.scheduleActiveTurnRetry();
+    }, 250);
+    this.activeTurnRetryTimer.unref?.();
+  }
+
+  private idleProviderCanPark(sessionId: string, entry: ActiveSession): boolean {
+    const meta = this.store.readMeta(sessionId);
+    return !!meta && entry.status === "idle" && !entry.running && !entry.providerInitiatedTurnActive &&
+      entry.queue.length === 0 && !entry.pendingWorktreeRebind && !entry.authenticationBlocked &&
+      !entry.historyQuarantined && !entry.historyIntegrityFailure && !entry.governanceTripped &&
+      !this.queueHeld(entry) && !this.hasPendingApproval(sessionId) && !this.steerFences(entry).size &&
+      this.reservedPromotions(entry).size === 0 && !meta.backgroundWorkState &&
+      !(meta.pendingBackgroundTaskIds?.length) &&
+      !(meta.backgroundJobs ?? []).some((job) => !job.terminalStatus) &&
+      !!meta.agentSessionId && canResumeSession(meta) && !this.closing.has(sessionId) &&
+      !this.rewinding.has(sessionId) && !this.forking.has(sessionId) && !this.loggingOut.has(sessionId) &&
+      !this.deleting.has(sessionId);
+  }
+
+  private parkOneIdleProvider(): boolean {
+    if (this.idleProcessPolicy !== "park_when_needed" || this.parkingSessions.size > 0 ||
+        !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "runnerCapacityDimensions")) return false;
+    const candidate = [...this.active.entries()]
+      .filter(([sessionId, entry]) => this.idleProviderCanPark(sessionId, entry))
+      .sort(([left], [right]) =>
+        (this.store.readMeta(left)?.updatedAt ?? 0) - (this.store.readMeta(right)?.updatedAt ?? 0))[0];
+    if (!candidate) return false;
+    const [sessionId, entry] = candidate;
+    if (!this.store.acquireLock(sessionId, this.lockOwner) || !this.idleProviderCanPark(sessionId, entry)) {
+      this.store.releaseLock(sessionId, this.lockOwner);
+      return false;
+    }
+    this.captureAgentSessionId(sessionId, entry.client);
+    const resumable = this.store.readMeta(sessionId);
+    if (!resumable?.agentSessionId || !canResumeSession(resumable)) {
+      this.store.releaseLock(sessionId, this.lockOwner);
+      return false;
+    }
+    const parkingGeneration = this.beginLaunchGeneration(sessionId);
+    this.preLaunchAdmissionGenerations.set(sessionId, parkingGeneration);
+    this.parkingSessions.add(sessionId);
+    this.deleteActiveSession(sessionId, entry, false);
+    this.log(`parking idle provider ${sessionId} to release resident process capacity`);
+    this.beginProviderRetirement(sessionId, entry, {
+      parking: true,
+      parkingGeneration,
+      acceptPromptsDuringHandoff: true,
+    });
+    this.refreshCapacityInventorySession(sessionId);
+    this.reportCapacity();
+    return true;
   }
 
   private cancelAdmissionWait(sessionId: string): boolean {
@@ -3582,6 +3890,13 @@ export class SessionManager {
     }
     for (const waiting of this.admissionQueue) this.emitAdmissionWait(waiting.request);
     this.reportCapacity();
+    if (this.admissionQueue.length > 0) {
+      const observation = this.boxAdmission.observe();
+      if (this.admissionQueue.some((entry) =>
+        this.capacityBlocker(entry.request, observation).kind === "runner_capacity")) {
+        this.parkOneIdleProvider();
+      }
+    }
     if (this.admissionQueue.length > 0) this.scheduleAdmissionRetry();
   }
 
@@ -4148,6 +4463,8 @@ export class SessionManager {
     // initialization cannot strand a still-held recovery queue.
     if (this.recoveryHolds.has(sessionId)) entry.controlPlaneHold = true;
     this.active.set(sessionId, entry);
+    this.refreshCapacityInventorySession(sessionId);
+    this.reportCapacity();
     this.send({ type: "process_status", sessionId, processStatus: "running", pid: client.pid });
 
     try {
@@ -6496,7 +6813,12 @@ export class SessionManager {
       }
       if (!this.promoteQueuedWorktreePrerequisite(sessionId, entry.queue)) return;
     }
+    // Schedulers may race with cancellation or interruption and leave an empty generation. Do not
+    // claim—or queue for—an active-work permit when there is no provider work to dispatch.
+    if (entry.queue.length === 0) return;
+    if (!this.acquireActiveTurn(sessionId)) return;
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
+      this.settleActiveWorkPermit(sessionId, entry);
       if (!this.emitEvent(sessionId, { kind: "error", message: "this session is being driven by another dashboard" })) {
         return;
       }
@@ -6605,6 +6927,9 @@ export class SessionManager {
           if (this.active.get(sessionId) !== entry) break;
         }
         if (entry.governanceTripped || this.queueHeld(entry)) break;
+        // Keep the legacy eager drain when nobody else needs the active-work permit. Once another
+        // session is waiting, release after this turn so a deep local FIFO cannot starve it.
+        if (this.activeTurnWaiters.size > 0) break;
       }
     } finally {
       entry.running = false;
@@ -6618,6 +6943,7 @@ export class SessionManager {
         this.lockTimers.delete(sessionId);
         this.store.releaseLock(sessionId, this.lockOwner);
       }
+      this.settleActiveWorkPermit(sessionId, entry);
       if (
         !entry.historyIntegrityFailure &&
         entry.governanceRearmPending &&
@@ -6634,6 +6960,9 @@ export class SessionManager {
       }
       if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
+      } else if (this.active.get(sessionId) === entry && entry.queue.length &&
+          !entry.governanceTripped && !this.queueHeld(entry)) {
+        setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
   }
@@ -7889,6 +8218,7 @@ export class SessionManager {
           ...recoveryProvenance,
         };
         this.store.create(target);
+        this.refreshCapacityInventorySession(targetSessionId);
         this.store.appendEvent(targetSessionId, { kind: "conversation_forked", sourceSessionId, turn,
           handoff: { sourceAgent: source.agentId ?? source.driver, destinationAgent: handoff.agent.id, disclosure: handoffDraft.disclosure } }, now);
         this.store.flush(targetSessionId);
@@ -8044,6 +8374,7 @@ export class SessionManager {
         updatedAt: now,
       };
       this.store.create(target);
+      this.refreshCapacityInventorySession(targetSessionId);
       const sourceEvents = this.store.readEvents(sourceSessionId);
       const cutoffSeq = point.eventSeq ?? sourceEvents.find(
         (event) => event.payload.kind === "conversation_checkpoint" && event.payload.turn === turn,
@@ -8099,6 +8430,7 @@ export class SessionManager {
         await this.reapWorktree(cleanup, true);
       }
       if (this.store.has(targetSessionId)) this.store.remove(targetSessionId);
+      this.forgetCapacityInventorySession(targetSessionId);
       await this.cleanupProviderState(targetSessionId, source.driver, source.context, providerStateJournaled);
       return { ok: false, error: errText(err) };
     } finally {
@@ -8383,6 +8715,8 @@ export class SessionManager {
       preserveAdmission?: boolean;
       preserveLock?: boolean;
       acceptPromptsDuringHandoff?: boolean;
+      parking?: boolean;
+      parkingGeneration?: number;
     } = {},
   ): ProviderRetirement {
     const existing = this.closing.get(sessionId);
@@ -8399,6 +8733,8 @@ export class SessionManager {
       preserveAdmission: options.preserveAdmission ?? false,
       preserveLock: options.preserveLock ?? false,
       acceptPromptsDuringHandoff: options.acceptPromptsDuringHandoff ?? false,
+      parking: options.parking ?? false,
+      ...(options.parkingGeneration === undefined ? {} : { parkingGeneration: options.parkingGeneration }),
     };
     this.closing.set(sessionId, retirement);
     if (!entry.client.close) {
@@ -8430,9 +8766,15 @@ export class SessionManager {
   ): void {
     if (this.closing.get(sessionId) !== retirement) return;
     this.closing.delete(sessionId);
+    if (retirement.parking) this.parkingSessions.delete(sessionId);
     this.releaseActiveWorktreeLease(retirement.entry);
     if (!retirement.preserveAdmission) this.releaseAdmission(sessionId);
     if (!retirement.preserveLock) this.clearLock(sessionId);
+    if (retirement.parking) {
+      this.refreshCapacityInventorySession(sessionId);
+      this.resumePromptsQueuedDuringParking(sessionId, retirement);
+      this.reportCapacity();
+    }
     if (!this.shuttingDown && this.pendingDeletions.delete(sessionId)) {
       setImmediate(() => {
         void this.delete(sessionId).catch((error) => {
@@ -8440,6 +8782,44 @@ export class SessionManager {
         });
       });
     }
+  }
+
+  private resumePromptsQueuedDuringParking(sessionId: string, retirement: ProviderRetirement): void {
+    const generation = retirement.parkingGeneration;
+    if (generation === undefined || !this.launchIsCurrent(sessionId, generation)) return;
+    const queued = this.preLaunchQueues.get(sessionId) ?? [];
+    this.preLaunchQueues.delete(sessionId);
+    this.preLaunchAdmissionGenerations.delete(sessionId);
+    this.finishLaunchGeneration(sessionId, generation);
+    if (queued.length === 0 || this.shuttingDown) return;
+    setImmediate(() => {
+      for (const [index, prompt] of queued.entries()) {
+        const durable = prompt.durable
+          ? {
+              commandId: prompt.durable.commandId,
+              queued: () => {},
+              started: (userEventSeq?: number) => prompt.durable!.started(userEventSeq),
+              completed: () => prompt.durable!.completed(),
+              failed: (error: string, code?: DurableSessionCommandErrorCode) =>
+                prompt.durable!.failed(error, code),
+              uncertain: (error: string) => prompt.durable!.uncertain(error),
+            }
+          : undefined;
+        this.prompt(
+          sessionId,
+          prompt.text,
+          prompt.images,
+          prompt.slashCommand,
+          prompt.config,
+          durable,
+          prompt.syntheticRecovery,
+          prompt.ordinal,
+          index === 0,
+          prompt.backgroundJobIds,
+          prompt.recoveredQuestion,
+        );
+      }
+    });
   }
 
   /** Permanently delete a session from the box store (the source of truth) so it cannot be
@@ -8543,6 +8923,7 @@ export class SessionManager {
       // provider retirement settles. Remove the row only after its exact client has retired so
       // a failed attempt remains retryable with complete cleanup provenance.
       this.store.remove(sessionId);
+      this.forgetCapacityInventorySession(sessionId);
       if (meta?.providerAuthBlock) this.surfaceProviderAuthentication(meta.providerAuthBlock.credentialScopeId);
       // A replacement provider is published in `active` before initialization settles. Deletion
       // captured and retired that exact entry above, so the encompassing rebind promise must no
@@ -8992,6 +9373,8 @@ export class SessionManager {
     const aid = client.agentSessionId();
     if (aid && this.store.readMeta(sessionId)?.agentSessionId !== aid) {
       this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined });
+      this.refreshCapacityInventorySession(sessionId);
+      this.reportCapacity();
     }
   }
 
@@ -9341,6 +9724,11 @@ export class SessionManager {
     this.approvalStarted.clear();
     if (this.admissionRetryTimer) clearTimeout(this.admissionRetryTimer);
     this.admissionRetryTimer = null;
+    if (this.activeTurnRetryTimer) clearTimeout(this.activeTurnRetryTimer);
+    this.activeTurnRetryTimer = null;
+    this.activeTurnWaiters.clear();
+    this.activeTurnAdmitted.clear();
+    this.activeTurnAdmission.releaseAll();
     for (const waiter of this.admissionQueue.splice(0)) waiter.resolve(false);
     for (const waiter of this.worktreePreparationQueue.splice(0)) waiter.resolve(false);
     if (this.worktreePreparationRetryTimer) clearTimeout(this.worktreePreparationRetryTimer);
@@ -9743,6 +10131,8 @@ export class SessionManager {
       });
     }
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    const entry = this.active.get(sessionId);
+    if (entry) this.reconcileAuthoritativeBackgroundWorkPermit(sessionId, entry);
     if (queuedJobIds.length > 0) this.scheduleBackgroundContinuation(sessionId);
     if (updated?.orphanedWork && update.state === "orphaned" && automaticClaudeRecoveryAllowed(updated)) {
       this.scheduleOrphanRecovery(sessionId);
@@ -10375,6 +10765,21 @@ export class SessionManager {
     const live = this.active.get(sessionId);
     if (live?.client !== client) return;
     if (state === "started") {
+      const sharedRunnerTurn = this.activeTurnAdmitted.has(sessionId);
+      if (!sharedRunnerTurn && !this.activeTurnAdmission.acquire(this.activeTurnRequest(sessionId))) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: "provider-initiated work exceeded Active Turn Capacity and was cancelled",
+        });
+        try {
+          client.cancel();
+        } catch (error) {
+          this.log(`provider-initiated turn capacity cancellation failed for ${sessionId}: ${errText(error)}`);
+        }
+      } else if (!sharedRunnerTurn) {
+        this.activeTurnAdmitted.add(sessionId);
+        this.reportCapacity();
+      }
       live.providerInitiatedTurnActive = true;
       live.providerInitiatedTurnId = turnId;
       live.providerInitiatedRequestIds = new Set();
@@ -10382,6 +10787,7 @@ export class SessionManager {
       if (live.providerInitiatedTurnId !== turnId) return;
       live.providerInitiatedTurnActive = false;
       live.providerInitiatedTurnId = undefined;
+      this.settleActiveWorkPermit(sessionId, live);
       let pendingApproval = this.store.readMeta(sessionId)?.pendingApproval;
       for (const requestId of live.providerInitiatedRequestIds ?? []) {
         pendingApproval = removePendingRequest(pendingApproval, requestId);
