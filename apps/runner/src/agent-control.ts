@@ -14,7 +14,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { runnerSupportsProtocol, type AcpMcpStdioServer, type AgentDefinition, type SessionLaunchSpec } from "@wollipog/protocol";
+import {
+  runnerSupportsProtocol,
+  type AcpMcpStdioServer,
+  type AgentContext,
+  type AgentDefinition,
+  type SessionLaunchSpec,
+} from "@wollipog/protocol";
 import { deriveControlPlaneHttpUrl } from "./control-plane-transport.js";
 import {
   defaultRunnerReentryHost,
@@ -56,13 +62,19 @@ const STAGED_AGENT_CONTROL_FILE_PATTERN =
 
 export interface AgentControlHost extends RunnerReentryHost {
   configDir: string;
+  platform?: NodeJS.Platform;
   installWslHelper?: (distro: string) => Promise<void>;
   installWslLauncher?: (distro: string) => Promise<void>;
 }
 
 export function defaultAgentControlHost(dataDir: string): AgentControlHost {
   return { ...defaultRunnerReentryHost(), configDir: resolve(dataDir, "agent-control"),
-    installWslHelper, installWslLauncher: installWslBwrapLauncher };
+    platform: process.platform, installWslHelper, installWslLauncher: installWslBwrapLauncher };
+}
+
+function projectPathMatchesContext(path: string, context: AgentContext, platform: NodeJS.Platform): boolean {
+  if (context.kind === "wsl") return path.startsWith("/");
+  return platform === "win32" ? /^[A-Za-z]:[\\/]/u.test(path) || path.startsWith("\\\\") : path.startsWith("/");
 }
 
 const wslLaunches = new Map<string, WslAgentControlLaunch>();
@@ -235,7 +247,8 @@ export function provisionAgentControl(
     spec.workspacePath,
     spec.repoPath,
     spec.worktreePath ?? undefined,
-  ].filter((path): path is string => typeof path === "string" && path.length > 0))];
+  ].filter((path): path is string => typeof path === "string" && path.length > 0 &&
+    projectPathMatchesContext(path, context, host.platform ?? process.platform)))];
   const structuredDriver = ["codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp");
   const orchestratorAgent = config.orchestratorAgent;
   const wslAgentControl = orchestratorAgent?.wslAgentControl;

@@ -70,7 +70,8 @@ import {
   validateQuestionAnswers,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type {
@@ -3855,6 +3856,14 @@ export class SessionManager {
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+      if (meta.config.permissionMode === "orchestrator") {
+        meta.env = {
+          ...meta.env,
+          ...(meta.context.kind === "native" && process.platform === "win32"
+            ? { TEMP: cwd, TMP: cwd }
+            : { TMPDIR: cwd }),
+        };
+      }
       if (sameSlashCommandCatalog(priorSessionSlashCommands, meta.sessionSlashCommands)) {
         meta.sessionSlashCommands = priorSessionSlashCommands;
       }
@@ -4326,6 +4335,10 @@ export class SessionManager {
     }
     const scratch = join(this.store.sessionPath(meta.sessionId), "orchestrator-scratch");
     await mkdir(scratch, { recursive: true, mode: 0o700 });
+    if (!this.store.has(meta.sessionId)) {
+      await rm(this.store.sessionPath(meta.sessionId), { recursive: true, force: true });
+      throw new Error("session disappeared while Orchestrator scratch was being prepared");
+    }
     return scratch;
   }
 

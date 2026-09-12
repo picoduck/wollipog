@@ -69,17 +69,20 @@ refusal of project writes and implementation commands. Advertise it only where t
 enforce that boundary; unsupported adapters must fail closed. ACP transport availability alone does
 not establish tool restriction capability.
 
-The initial implementation supports native host Codex and Claude Code. Codex disables native
+The initial implementation supports native host Codex and Claude Code where their boundaries can be
+verified. Native Windows Codex is withheld because Windows Job Objects do not attest filesystem
+confinement for its newly enabled shell. Codex disables native
 extensions, hooks, ambient MCP servers, multi-agent tools, and browser/computer/image tools. It
 keeps shell and live web search available under a no-approval workspace-write sandbox whose sole
 project-independent writable root is a session-private scratch directory. Claude Code receives
 Read, Grep, Glob, WebFetch, WebSearch, and an explicit Bash allowlist for read-only Git and bounded
 GitHub issue coordination; Write, Edit, Agent, and Task remain disabled, hooks and settings sources
-remain empty, and permission mode is `dontAsk`. Configured Project Locations are supplied as
-read-only context. Both harnesses start in scratch, may read user skills and project files, and may
-use the reduced runner-owned Wollipog MCP server; the control plane independently permits mutations
-only on trusted descendants. Unsupported or unverifiable configurations fail closed. Neither the
-user nor a child can switch this preset on an existing session.
+remain empty, and permission mode is `dontAsk`, which must be advertised by the installed CLI.
+Configured Project Locations in the agent's execution namespace are supplied as read-only context.
+Both harnesses start in scratch, use it for temporary files, may read user skills and project files,
+and may use the reduced runner-owned Wollipog MCP server; the control plane independently permits
+mutations only on trusted descendants. Unsupported or unverifiable configurations fail closed.
+Neither the user nor a child can switch this preset on an existing session.
 
 The preset is a cooperative safety boundary for trusted planning agents, not a hostile-model
 sandbox. In particular, networked shell access can clone a repository into scratch and credentials

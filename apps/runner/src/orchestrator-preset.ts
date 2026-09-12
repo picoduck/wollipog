@@ -17,14 +17,14 @@ const CLAUDE_AGENT_ACP_REPOSITORY = "https://github.com/agentclientprotocol/clau
 
 const ORCHESTRATOR_CLAUDE_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash"];
 const ORCHESTRATOR_CLAUDE_BASH_RULES = [
-  "git log", "git log *", "git diff", "git diff *", "git show", "git show *",
-  "git blame *", "git status", "git status *", "git worktree list", "git worktree list *",
-  "git branch", "git branch *",
-  "gh issue list", "gh issue list *", "gh issue view *", "gh issue status", "gh issue status *",
-  "gh issue edit * --add-assignee *", "gh issue edit * --remove-assignee *",
-  "gh issue edit * --add-label *", "gh issue edit * --remove-label *", "gh issue comment *",
-  "gh pr list", "gh pr list *", "gh pr view *", "gh pr checks *", "gh pr diff *", "gh pr status",
-  "gh pr status *",
+  "git log", "git log:*", "git diff", "git diff:*", "git show", "git show:*",
+  "git blame:*", "git status", "git status:*", "git worktree list", "git worktree list:*",
+  "git branch", "git branch -a", "git branch -r", "git branch -v", "git branch -vv", "git branch --show-current",
+  "gh issue list", "gh issue list:*", "gh issue view:*", "gh issue status", "gh issue status:*",
+  "gh issue edit --add-assignee:*", "gh issue edit --remove-assignee:*",
+  "gh issue edit --add-label:*", "gh issue edit --remove-label:*", "gh issue comment:*",
+  "gh pr list", "gh pr list:*", "gh pr view:*", "gh pr checks:*", "gh pr diff:*", "gh pr status",
+  "gh pr status:*",
 ];
 
 export function orchestratorInstructions(projectPaths: readonly string[]): string {
@@ -39,7 +39,7 @@ export function orchestratorInstructions(projectPaths: readonly string[]): strin
     "GitHub writes are limited to assigning or unassigning issues, changing issue labels, and posting plan or status comments.",
     "Do not edit project files, run builds, tests, or typechecks in a project location, commit, push, create branches or worktrees for yourself, open pull requests, merge, or perform control-plane mutations outside descendant session management.",
     "If a requested operation is outside that boundary, explain that the Orchestrator preset refuses it and delegate the implementation to a child session.",
-  ].join("\n");
+  ].join(" ");
 }
 
 function claudeAllowedTools(): string[] {
@@ -113,7 +113,7 @@ export function orchestratorAcpSessionMeta(projectPaths: readonly string[] = [])
         settings: { disableAllHooks: true },
         hooks: {},
         mcpServers: {},
-        additionalDirectories: [],
+        additionalDirectories: [...new Set(projectPaths.filter(Boolean))],
       },
     },
   };
@@ -143,11 +143,17 @@ export function withOrchestratorPreset(
         (host.platform ?? process.platform) === "win32") {
       if (!verifiedNativeClaudeGitBashPath(agent.env ?? {}, { env: host.env, exists: host.exists })) return agent;
     }
+    // Windows Job Objects do not attest filesystem confinement. Claude's narrow command patterns
+    // remain enforceable there, but a Codex shell must not be advertised without a proven sandbox.
+    if (contextKind === "native" && (host.platform ?? process.platform) === "win32" &&
+        (agent.driver === "codex" || agent.driver === "codex-app-server")) return agent;
     if (acpSupported && !agent.capabilities) {
       return { ...agent, capabilities: acpOrchestratorCapabilities() };
     }
     if (!agent.capabilities) return agent;
-    if (agent.driver === "claude-code" && !agent.capabilities.permissionModes?.includes("default")) return agent;
+    if (agent.driver === "claude-code" &&
+        !(agent.capabilities.permissionModes?.includes("default") &&
+          agent.capabilities.permissionModes.includes("dontAsk"))) return agent;
     return { ...agent, capabilities: {
       ...agent.capabilities,
       permissionModes: [...new Set([...(agent.capabilities.permissionModes ?? []), ORCHESTRATOR_PRESET])],
@@ -192,7 +198,6 @@ export function orchestratorLaunchArgs(
     "-c", "sandbox_workspace_write.writable_roots=[]",
     "-c", "sandbox_workspace_write.network_access=true",
     "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
-    "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
     "-c", 'approval_policy="never"',
     "-c", 'web_search="live"',
     "-c", `developer_instructions=${toml(instructions)}`,

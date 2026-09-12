@@ -9,6 +9,7 @@ import { provisionAgentControl } from "./agent-control.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { waitForPendingKills } from "./spawn.js";
 import { openWindowsConpty } from "./windows-conpty.js";
+import { orchestratorLaunchArgs } from "./orchestrator-preset.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -139,6 +140,18 @@ test("Windows cmd shim launch rejects percent expansion", () => {
   );
 });
 
+test("Windows Claude Orchestrator TUI argv carries a single-line system prompt", () => {
+  const args = orchestratorLaunchArgs("claude-code", {
+    command: "runner.exe", args: ["--agent-control-mcp"], env: {},
+  }, ["C:\\repo"]);
+  const launch = agentTuiLaunch(meta({ driver: "claude-code", args }), {
+    platform: "win32", comspec: "cmd.exe",
+  });
+  assert.ok(launch);
+  assert.equal(args.some((arg) => /[\r\n]/u.test(arg)), false);
+  assert.match(launch.args.at(-1) ?? "", /append-system-prompt/);
+});
+
 test("orchestrator TUIs rebuild credentials and restrictions without mutating durable metadata", async () => {
   const dir = mkdtempSync(join(tmpdir(), "orchestrator-tui-"));
   try {
@@ -167,6 +180,7 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
       assert.ok(launch);
       assert.equal(launch.cwd, "/scratch");
       assert.equal(launch.env?.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
+      assert.equal(launch.env?.[process.platform === "win32" ? "TEMP" : "TMPDIR"], "/scratch");
       assert.ok(launch.env?.WOLLIPOG_SESSION_TOKEN_FILE);
       assert.equal(JSON.stringify(source), original);
       if (driver === "claude-code") {

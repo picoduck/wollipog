@@ -137,7 +137,7 @@ test("ACP orchestrator sends restrictions and refuses client execution services"
   assert.deepEqual(request.mcpServers.map((server: { name: string }) => server.name), ["wollipog"]);
   assert.deepEqual(request._meta.claudeCode.options.tools, ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash"]);
   assert.ok(request._meta.claudeCode.options.allowedTools.includes("mcp__wollipog__*"));
-  assert.ok(request._meta.claudeCode.options.allowedTools.includes("Bash(git show *)"));
+  assert.ok(request._meta.claudeCode.options.allowedTools.includes("Bash(git show:*)"));
   assert.equal(request._meta.claudeCode.options.permissionMode, "dontAsk");
   assert.deepEqual(request._meta.claudeCode.options.settingSources, []);
   assert.deepEqual(request._meta.claudeCode.options.settings, { disableAllHooks: true });

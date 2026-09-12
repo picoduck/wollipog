@@ -33,6 +33,10 @@ export async function prepareAgentTuiLaunch(
   const cwd = await dependencies.prepareScratch(meta);
   const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
   await dependencies.provision(prepared);
+  prepared.env = {
+    ...prepared.env,
+    ...(process.platform === "win32" ? { TEMP: cwd, TMP: cwd } : { TMPDIR: cwd }),
+  };
   if (prepared.driver !== "claude-code") {
     prepared.args.push(...await (dependencies.probe ?? codexOrchestratorMcpArgs)(
       prepared, cwd,

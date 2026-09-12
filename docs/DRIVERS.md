@@ -130,6 +130,10 @@ and a root-owned per-session state anchor plus a target-local HOME lease bounds 
 scratch, and relay lifetime. Direct WSL provider mode, generic ACP, conversation fork/state adoption, and WSL Native TUI
 remain fail-closed. Use a supported native, container, or cloud execution target for those modes.
 
+Native Windows Claude may use the Orchestrator preset only when Git for Windows and `dontAsk` are
+verified. Native Windows Codex does not advertise it because a Job Object alone cannot attest the
+scratch-only filesystem boundary required for the preset's shell.
+
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
 owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never
 updated or deleted automatically: it has no trustworthy owner metadata and may still be used by an

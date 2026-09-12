@@ -279,10 +279,7 @@ export function claudeCapabilityError(
     return `Claude Code effort ${JSON.stringify(config.effort)} was not verified for this installation.`;
   }
   const mode = effectiveClaudePermissionMode(config);
-  // "orchestrator" is advertised only after Wollipog verifies the native harness and supplies
-  // its runner-owned dontAsk launch boundary; provider discovery does not advertise that synthetic
-  // mode or necessarily enumerate dontAsk itself.
-  if (config.permissionMode !== "orchestrator" && !(capabilities.permissionModes ?? []).includes(mode)) {
+  if (!(capabilities.permissionModes ?? []).includes(mode)) {
     return `Claude Code permission mode ${JSON.stringify(mode)} was not verified for this installation.`;
   }
   if (images.length && !capabilities.supportsImages) {

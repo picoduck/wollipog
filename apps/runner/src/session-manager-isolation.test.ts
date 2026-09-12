@@ -308,6 +308,8 @@ test("Orchestrator scratch is session-private and removed with native session st
     writeFileSync(join(scratch, "plan.md"), "private planning state");
     store.remove("s1");
     assert.equal(existsSync(scratch), false);
+    await assert.rejects(manager.prepareOrchestratorScratch(row), /session disappeared/);
+    assert.equal(existsSync(store.sessionPath("s1")), false, "a delete/prepare race leaves no recreated scratch tree");
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -382,7 +384,7 @@ test("safe Direct WSL uses one scratch cwd for isolation, driver construction, a
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
     assert.deepEqual(isolationInput, {
-      driver: "codex-app-server", dataDir: join(root, ".runner-data"), env: {},
+      driver: "codex-app-server", dataDir: join(root, ".runner-data"), env: { TMPDIR: scratch },
       sessionId: "s1", cwd: scratch, orchestratorScratchOnly: true, ownerHash,
     });
     assert.equal(captured?.cwd, scratch);
