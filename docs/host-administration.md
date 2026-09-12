@@ -54,6 +54,12 @@ wollipog admin runner-credential revoke --runner <runner-id> [--yes] [--json]
 Common options: `--url <loopback origin>`, `--token-file <path>`, `--json` for stable output.
 Exit code 0 is success, 1 is an operational failure, and 2 is a usage or fail-closed refusal.
 
+For frequent operator workflows, `wollipog doctor` aliases `admin doctor`, while `wollipog pair create`,
+`pair list`, and `pair revoke` alias the corresponding `admin device` commands. `wollipog pair url`
+aliases `admin pairing-url`. Every option and safety rule is identical through an alias.
+In particular, `pair create` mints a new one-time credential, while `pair url` recovers the existing
+bootstrap pairing URL. Run `wollipog help pair` or `wollipog help admin` for command-line help.
+
 ### `admin pairing-url`
 
 Prints the loopback startup link `http://127.0.0.1:<port>/#pair=<token>` from the protected
