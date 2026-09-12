@@ -95,6 +95,10 @@ test("foreground idle preserves child attention and final child resolution publi
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const shortDelay = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
+const identityEvidence = (fields: Partial<Record<"email" | "orgId" | "authMethod" | "apiProvider", string>>) => ({
+  version: 1 as const,
+  fields,
+});
 const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -183,6 +187,7 @@ function harness(
   const store = new SessionStore(root);
   store.create(stored(root, metaOverrides));
   const sent: RunnerToControlPlane[] = [];
+  const logs: string[] = [];
   const launches: Array<{ kind: AgentDriverKind; options: DriverOptions }> = [];
   const prompts: string[] = [];
   const disposals: Array<Parameters<Driver["dispose"]>[0]> = [];
@@ -240,7 +245,7 @@ function harness(
   };
   const manager = new SessionManager(
     (message) => sent.push(message),
-    () => {},
+    (message) => logs.push(message),
     store,
     "runner",
     undefined,
@@ -269,6 +274,7 @@ function harness(
     root,
     store,
     sent,
+    logs,
     launches,
     prompts,
     disposals,
@@ -1335,6 +1341,213 @@ test("wrong-account revalidation fails closed and uncertain delivery is never re
     assert.equal(h.store.readMeta("resume-session")?.providerCredentialIdentityId, "account-b");
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
     assert.deepEqual(h.prompts, ["possibly delivered"], "uncertain provider delivery is never replayed");
+    assert.equal(
+      h.store.readEvents("resume-session").findLast((event) => event.payload.kind === "permission_resolved")?.payload.optionId,
+      "auth:accept-current",
+      "the durable audit records the operator's submitted decision",
+    );
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("matching account evidence survives a partial observation across relaunch contexts", async () => {
+  const expectedEvidence = identityEvidence({
+    email: "same-email",
+    orgId: "same-org",
+    authMethod: "same-method",
+    apiProvider: "same-provider",
+  });
+  const observedEvidence = identityEvidence({
+    email: "same-email",
+    authMethod: "same-method",
+    apiProvider: "same-provider",
+  });
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ({
+      status: "authenticated",
+      identityId: "partial-aggregate",
+      identityEvidence: observedEvidence,
+    }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialScopeId: "shared-scope",
+    providerCredentialIdentityId: "full-aggregate",
+    providerCredentialIdentityEvidence: expectedEvidence,
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "continue after restart");
+    for (let index = 0; index < 8; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.deepEqual(h.store.readMeta("resume-session")?.providerCredentialIdentityEvidence, expectedEvidence,
+      "a partial observation must not erase a previously proven account field");
+    assert.deepEqual(h.prompts, ["continue after restart"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("recheck without a recorded account asks for explicit acceptance without claiming a mismatch", async () => {
+  const authenticated = {
+    status: "authenticated" as const,
+    identityId: "current-aggregate",
+    identityEvidence: identityEvidence({ email: "current-email", orgId: "current-org" }),
+  };
+  const observations = [{ status: "unauthenticated" as const }, authenticated, authenticated];
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => observations.shift() ?? authenticated,
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native" },
+    Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained before first sign-in");
+    for (let index = 0; index < 8; index += 1) await tick();
+    const requestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+    h.manager.resolvePermission("resume-session", requestId, "auth:revalidate");
+    for (let index = 0; index < 8; index += 1) await tick();
+
+    const confirmation = h.store.readMeta("resume-session")!;
+    assert.equal(confirmation.providerAuthBlock?.identityMismatch, true);
+    assert.equal(confirmation.pendingApproval?.options[0]?.name, "Use Current Account");
+    assert.match(confirmation.pendingApproval?.context?.input ?? "", /no recorded account identity/i);
+    assert.doesNotMatch(confirmation.pendingApproval?.context?.input ?? "", /account identity mismatch/i);
+    assert.ok(h.logs.every((line) => !/account identity mismatch/i.test(line)));
+
+    h.manager.resolvePermission("resume-session", requestId, "auth:accept-current");
+    for (let index = 0; index < 12; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.deepEqual(h.prompts, ["retained before first sign-in"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("accepting an authenticated observation without an account anchor clears the stale baseline", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: true }),
+    revalidate: async () => ({ status: "authenticated" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialScopeId: "shared-scope",
+    providerCredentialIdentityId: "stale-aggregate",
+    providerCredentialIdentityEvidence: identityEvidence({ email: "stale-email", orgId: "stale-org" }),
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained across explicit acceptance");
+    for (let index = 0; index < 8; index += 1) await tick();
+    const blocked = h.store.readMeta("resume-session")!;
+    assert.equal(blocked.providerAuthBlock?.identityMismatch, true);
+    assert.equal(blocked.pendingApproval?.options[0]?.name, "Use Current Account");
+
+    h.manager.resolvePermission(
+      "resume-session",
+      blocked.pendingApproval!.requestId,
+      "auth:accept-current",
+    );
+    for (let index = 0; index < 20 && h.prompts.length === 0; index += 1) await shortDelay();
+    const accepted = h.store.readMeta("resume-session")!;
+    assert.equal(accepted.providerCredentialIdentityId, undefined);
+    assert.equal(accepted.providerCredentialIdentityEvidence, undefined);
+    assert.equal(accepted.providerAuthBlock, undefined);
+    assert.deepEqual(h.prompts, ["retained across explicit acceptance"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("genuine account changes park with redacted field evidence in block and log", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ({
+      status: "authenticated",
+      identityId: "changed-aggregate",
+      identityEvidence: identityEvidence({
+        email: "changed-email",
+        authMethod: "same-method",
+        apiProvider: "same-provider",
+      }),
+    }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialScopeId: "shared-scope",
+    providerCredentialIdentityId: "expected-aggregate",
+    providerCredentialIdentityEvidence: identityEvidence({
+      email: "expected-email",
+      orgId: "expected-org",
+      authMethod: "same-method",
+      apiProvider: "same-provider",
+    }),
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "must stay retained");
+    for (let index = 0; index < 8; index += 1) await tick();
+    const blocked = h.store.readMeta("resume-session")!;
+    assert.equal(blocked.providerAuthBlock?.identityMismatch, true);
+    assert.match(blocked.providerAuthBlock?.reason ?? "", /email differed/i);
+    assert.match(blocked.providerAuthBlock?.reason ?? "", /orgId.*missing from the current observation/i);
+    assert.doesNotMatch(blocked.providerAuthBlock?.reason ?? "", /expected-email|changed-email/);
+    assert.ok(h.logs.some((line) => /email differed/i.test(line)));
+    assert.ok(h.logs.every((line) => !/expected-email|changed-email/.test(line)));
+    assert.match(blocked.pendingApproval?.context?.input ?? "", /email differed/i);
+    assert.deepEqual(h.prompts, []);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a sibling held behind the surfaced authentication card exposes the wait", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ({ status: "unauthenticated" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native" },
+    Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  h.store.create(stored(h.root, {
+    sessionId: "held-sibling",
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+  }));
+  try {
+    h.manager.prompt("resume-session", "first retained prompt");
+    for (let index = 0; index < 5; index += 1) await tick();
+    h.manager.prompt("held-sibling", "second retained prompt");
+    for (let index = 0; index < 8; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.status, "input_required");
+    assert.equal(h.store.readMeta("held-sibling")?.pendingApproval, null);
+    assert.equal(h.store.readMeta("held-sibling")?.status, "idle");
+    const heldEvents = h.store.readEvents("held-sibling");
+    assert.ok(heldEvents.some((event) =>
+      event.payload.kind === "stderr" && /owned by another session.*if one appears/i.test(event.payload.text)));
+    assert.ok(h.sent.some((message) =>
+      message.type === "session_status" && message.sessionId === "held-sibling" &&
+      message.status === "idle" && /owned by another session.*if one appears/i.test(message.detail ?? "")));
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -1493,6 +1706,46 @@ test("Stop clears durable authentication recovery and restart reconciliation pre
     assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
     assert.deepEqual(h.prompts, []);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("Stop during provider authentication preflight cannot revive the terminal session", async () => {
+  const preflight = deferred<{
+    status: "unauthenticated";
+  }>();
+  let revalidationStarted = false;
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => {
+      revalidationStarted = true;
+      return preflight.promise;
+    },
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained before Stop");
+    for (let index = 0; index < 8 && !revalidationStarted; index += 1) await tick();
+    assert.equal(revalidationStarted, true);
+
+    h.manager.stop("resume-session");
+    preflight.resolve({ status: "unauthenticated" });
+    for (let index = 0; index < 4; index += 1) await tick();
+
+    assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    assert.equal(h.prompts.length, 0);
+    assert.equal((h.manager as any).admitted.has("resume-session"), false);
+    assert.equal(h.manager.capacityState().usedUnits, 0);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

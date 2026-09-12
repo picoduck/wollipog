@@ -275,6 +275,10 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       },
       providerCredentialScopeId: "scope-a",
       providerCredentialIdentityId: "account-a",
+      providerCredentialIdentityEvidence: {
+        version: 1,
+        fields: { email: "email-a", orgId: "org-a" },
+      },
       providerAuthBlock: {
         version: 1,
         recoveryId: "source-recovery",
@@ -314,6 +318,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     assert.equal(claudeTarget.sessionSlashCommandProvenance, undefined);
     assert.equal(claudeTarget.providerCredentialScopeId, undefined);
     assert.equal(claudeTarget.providerCredentialIdentityId, undefined);
+    assert.equal(claudeTarget.providerCredentialIdentityEvidence, undefined);
     assert.equal(claudeTarget.providerAuthBlock, undefined);
     assert.equal(claudeTarget.providerAuthRetryAttemptedRecoveryId, undefined);
     assert.equal(forkSources.at(-1), "claude-source-uuid");

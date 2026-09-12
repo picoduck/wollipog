@@ -11,7 +11,11 @@ import {
   LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
 } from "./drivers/claude-code.js";
 import { killTree, spawnAgent, type AgentProcess } from "./spawn.js";
-import type { SessionMeta } from "./session-store.js";
+import type {
+  ProviderAuthIdentityEvidence,
+  ProviderAuthIdentityField,
+  SessionMeta,
+} from "./session-store.js";
 
 export type ProviderAuthStatus = "authenticated" | "unauthenticated" | "unknown";
 
@@ -26,6 +30,17 @@ export interface ProviderAuthObservation {
   status: ProviderAuthStatus;
   /** Opaque runner-local digest. It is persisted only in SessionMeta and never enters snapshots. */
   identityId?: string;
+  /** Runner-keyed per-field digests. Values and hashes never enter logs, events, or snapshots. */
+  identityEvidence?: ProviderAuthIdentityEvidence;
+}
+
+export interface ProviderAuthIdentityComparison {
+  matches: boolean;
+  evidenceAvailable: boolean;
+  differingFields: ProviderAuthIdentityField[];
+  expectedMissingFields: ProviderAuthIdentityField[];
+  observedMissingFields: ProviderAuthIdentityField[];
+  sharedAccountFields: Array<Extract<ProviderAuthIdentityField, "email" | "orgId">>;
 }
 
 export interface ProviderAuthRecoveryController {
@@ -46,12 +61,100 @@ const CLAUDE_CREDENTIAL_ENV = [
   "CLAUDE_CODE_USE_VERTEX",
 ] as const;
 const CODEX_CREDENTIAL_ENV = ["OPENAI_API_KEY"] as const;
+const CLAUDE_ACCOUNT_FIELDS = ["email", "orgId", "authMethod", "apiProvider"] as const satisfies readonly ProviderAuthIdentityField[];
+const CLAUDE_ACCOUNT_ANCHORS = ["email", "orgId"] as const;
 
 function digest(value: unknown, key?: string): string {
   const payload = JSON.stringify(value);
   return key
     ? createHmac("sha256", key).update(payload).digest("hex")
     : createHash("sha256").update(payload).digest("hex");
+}
+
+function identityEvidence(
+  account: Record<ProviderAuthIdentityField, string | null>,
+  key?: string,
+): ProviderAuthIdentityEvidence {
+  const fields: ProviderAuthIdentityEvidence["fields"] = {};
+  for (const field of CLAUDE_ACCOUNT_FIELDS) {
+    if (account[field] !== null) fields[field] = digest([field, account[field]], key);
+  }
+  return { version: 1, fields };
+}
+
+export function compareProviderAuthIdentity(
+  expectedIdentityId: string | undefined,
+  expectedEvidence: ProviderAuthIdentityEvidence | undefined,
+  observed: ProviderAuthObservation,
+): ProviderAuthIdentityComparison {
+  if (expectedIdentityId && observed.identityId === expectedIdentityId) {
+    return {
+      matches: true,
+      evidenceAvailable: !!expectedEvidence && !!observed.identityEvidence,
+      differingFields: [],
+      expectedMissingFields: [],
+      observedMissingFields: [],
+      sharedAccountFields: [],
+    };
+  }
+  const observedEvidence = observed.identityEvidence;
+  if (!expectedEvidence || !observedEvidence) {
+    return {
+      matches: false,
+      evidenceAvailable: false,
+      differingFields: [],
+      expectedMissingFields: [],
+      observedMissingFields: [],
+      sharedAccountFields: [],
+    };
+  }
+  const expectedMissingFields = CLAUDE_ACCOUNT_FIELDS.filter((field) => expectedEvidence.fields[field] === undefined);
+  const observedMissingFields = CLAUDE_ACCOUNT_FIELDS.filter((field) => observedEvidence.fields[field] === undefined);
+  const differingFields = CLAUDE_ACCOUNT_FIELDS.filter((field) =>
+    expectedEvidence.fields[field] !== undefined && observedEvidence.fields[field] !== undefined &&
+    expectedEvidence.fields[field] !== observedEvidence.fields[field]);
+  const sharedAccountFields = CLAUDE_ACCOUNT_ANCHORS.filter((field) =>
+    expectedEvidence.fields[field] !== undefined && observedEvidence.fields[field] !== undefined &&
+    expectedEvidence.fields[field] === observedEvidence.fields[field]);
+  return {
+    matches: differingFields.length === 0 && sharedAccountFields.length > 0,
+    evidenceAvailable: true,
+    differingFields,
+    expectedMissingFields,
+    observedMissingFields,
+    sharedAccountFields,
+  };
+}
+
+export function mergeProviderAuthIdentityEvidence(
+  expected: ProviderAuthIdentityEvidence | undefined,
+  observed: ProviderAuthIdentityEvidence | undefined,
+): ProviderAuthIdentityEvidence | undefined {
+  if (!expected) return observed;
+  if (!observed) return expected;
+  return { version: 1, fields: { ...expected.fields, ...observed.fields } };
+}
+
+export function describeProviderAuthIdentityMismatch(comparison: ProviderAuthIdentityComparison): string {
+  const details: string[] = [];
+  if (!comparison.evidenceAvailable) {
+    details.push("field-level evidence is unavailable for the recorded or current observation");
+  } else {
+    if (comparison.differingFields.length) {
+      details.push(`${comparison.differingFields.join(", ")} differed`);
+    }
+    if (comparison.expectedMissingFields.length) {
+      details.push(`${comparison.expectedMissingFields.join(", ")} ${comparison.expectedMissingFields.length === 1 ? "was" : "were"} missing from the recorded observation`);
+    }
+    if (comparison.observedMissingFields.length) {
+      details.push(`${comparison.observedMissingFields.join(", ")} ${comparison.observedMissingFields.length === 1 ? "was" : "were"} missing from the current observation`);
+    }
+    if (!comparison.differingFields.length && !comparison.sharedAccountFields.length) {
+      details.push("the observations share no comparable email or orgId field");
+    }
+  }
+  if (!details.length) details.push("no differing or missing field was identified");
+  return `Provider account identity mismatch: ${details.join("; ")}. Account values are redacted.`;
 }
 
 function providerFamily(driver: AgentDriverKind): "claude" | "codex" | null {
@@ -138,7 +241,13 @@ function claudeObservation(result: ContextCommandResult, digestKey?: string): Pr
     apiProvider: typeof parsed.apiProvider === "string" ? parsed.apiProvider : null,
   };
   const hasAccountIdentity = account.email !== null || account.orgId !== null;
-  return { status: "authenticated", ...(hasAccountIdentity ? { identityId: digest(account, digestKey) } : {}) };
+  return {
+    status: "authenticated",
+    ...(hasAccountIdentity ? {
+      identityId: digest(account, digestKey),
+      identityEvidence: identityEvidence(account, digestKey),
+    } : {}),
+  };
 }
 
 function codexIdentity(meta: SessionMeta, digestKey?: string): string | undefined {
