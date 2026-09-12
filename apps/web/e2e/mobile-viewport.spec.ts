@@ -45,10 +45,10 @@ const KEYBOARD = 300;
 /**
  * What a single element contributes to the screen, isolated from everything around it.
  *
- * Measured by DIFFERENCE: the element's box is captured twice, once as rendered and once with
- * `visibility: hidden` on that element alone, and only positions where the two differ are counted.
- * Layout is preserved by `visibility`, so the second capture is the same region with the mark
- * lifted out — every pixel it still contains belongs to something else.
+ * Measured by DIFFERENCE: the element's box is captured twice, once as rendered and once with zero
+ * group opacity on that element alone, and only positions where the two differ are counted. Opacity
+ * preserves layout and suppresses the complete composited subtree, so the second capture is the
+ * same region with the mark lifted out — every pixel it still contains belongs to something else.
  *
  * Every earlier version of this asked "how much of the capture differs from its most common
  * colour", and each one lost to something that painted inside the box without being the mark:
@@ -67,7 +67,7 @@ const KEYBOARD = 300;
  *
  * The suppression is OBSERVABLE, though, and that is the one thing this technique has to defend.
  * Hiding the mark writes an inline style, and CSS can select on it:
- * `.rail-more-item:has(> span[style*="visibility: hidden"]) { background: var(--text) }` repaints
+ * `.rail-more-item:has(> span[style*="opacity: 0"]) { background: var(--text) }` repaints
  * the row for the reference capture only, and the whole box then reads as high-contrast label ink
  * while the real label sits at `opacity: 0.1`. So the capture covers the mark's PARENT, and
  * everything outside the mark's own box must be byte-identical between the two: if suppressing the
@@ -85,8 +85,6 @@ interface Ink {
   outside: number;
   /** Which positions inside the box the mark paints, packed as `y * 4096 + x`. */
   mask: number[];
-  /** What the mark grew while it was suppressed, if anything. Must be nothing. */
-  decoratedWhileHidden: string | null;
 }
 
 /** Below this a position is unchanged; above it the element put something there. */
@@ -129,26 +127,21 @@ async function inkOf(page: Page, locator: Locator, minContrast: number): Promise
   });
   const shown = (await page.screenshot({ clip: clip.guard, animations: "disabled" })).toString("base64");
   const restore = await locator.evaluate((element) => {
-    const previous = (element as HTMLElement).style.visibility;
-    (element as HTMLElement).style.visibility = "hidden";
+    const style = (element as HTMLElement).style;
+    const previous = {
+      value: style.getPropertyValue("opacity"),
+      priority: style.getPropertyPriority("opacity"),
+    };
+    // Opacity applies to the complete composited group, so a descendant or pseudo-element cannot
+    // opt back in the way SVG children can opt out of inherited visibility in Chromium 153.
+    style.setProperty("opacity", "0", "important");
     return previous;
-  });
-  // Read while suppressed, before the capture that depends on it.
-  const decoratedWhileHidden = await locator.evaluate((element) => {
-    for (const pseudo of ["::before", "::after"] as const) {
-      const style = getComputedStyle(element, pseudo);
-      if (style.content !== "none") return `a ${pseudo} carrying ${style.content}`;
-    }
-    // A descendant that opts back in paints while its suppressed ancestor does not, and the
-    // difference then reads as the ancestor's own ink.
-    for (const child of element.querySelectorAll("*")) {
-      if (getComputedStyle(child).visibility !== "hidden") return `a descendant that stayed visible`;
-    }
-    return null;
   });
   const hidden = (await page.screenshot({ clip: clip.guard, animations: "disabled" })).toString("base64");
   await locator.evaluate((element, previous) => {
-    (element as HTMLElement).style.visibility = previous;
+    const style = (element as HTMLElement).style;
+    if (previous.value) style.setProperty("opacity", previous.value, previous.priority);
+    else style.removeProperty("opacity");
   }, restore);
 
   // Where the mark's box sits inside the guard capture, in CSS pixels.
@@ -236,7 +229,7 @@ async function inkOf(page: Page, locator: Locator, minContrast: number): Promise
   }, {
     a: shown, b: hidden, minContrast, paintContrast: PAINT_CONTRAST, cell: CELL, cellPaint_: CELL_PAINT,
     inset, guardWidth: clip.guard.width,
-  }).then((ink) => ({ ...ink, decoratedWhileHidden }));
+  });
 }
 
 /**
@@ -319,15 +312,6 @@ interface Mark {
 async function expectPainted(page: Page, locator: Locator, label: string, mark: Mark) {
   await expectUndecorated(locator, label);
   const ink = await inkOf(page, locator, mark.minContrast);
-  // The decoration check again, this time as it stood WHILE the mark was suppressed. Running it
-  // only beforehand missed a rule that arms itself on the suppression:
-  // `span[style*="visibility: hidden"]::after { content: ""; visibility: visible; inset: 0;
-  // background: var(--text) }` has `content: none` until the reference capture is taken, then
-  // paints a solid slab exactly inside the mark's box — inside it, so the outside guard sees
-  // nothing, and only while suppressed, so a check that ran before saw nothing either.
-  expect(ink.decoratedWhileHidden,
-    `"${label}" grew ${ink.decoratedWhileHidden} while it was suppressed, so the reference capture is not of its absence`)
-    .toBe(null);
   expect(ink.paint, `"${label}" could not be measured: hiding it changed the layout`).toBeGreaterThanOrEqual(0);
   // Nothing but the mark may respond to the mark being suppressed.
   expect(ink.outside,
@@ -838,8 +822,17 @@ async function expectEveryPrimaryDestinationUsable(page: Page) {
 const RAIL_HEIGHT = { min: 48, max: 96 } as const;
 
 async function expectRailAt(page: Page, occluded: number) {
-  const box = (await page.locator(".app-rail").boundingBox())!;
+  const rail = page.locator(".app-rail");
   const { width, height } = page.viewportSize()!;
+  const expectedBottom = height - occluded;
+  // The stylesheet deliberately retains a 1ms reduced-motion transition so transitionend still
+  // fires. Chromium 153 can expose that interpolation to the first protocol geometry read after
+  // the inset write; wait for the rail's settled position before checking its exact contract.
+  await expect.poll(async () => {
+    const current = await rail.boundingBox();
+    return current ? Math.abs(current.y + current.height - expectedBottom) : Number.POSITIVE_INFINITY;
+  }, { message: `the rail never settled on the ${occluded}px occluded band` }).toBeLessThan(2);
+  const box = (await rail.boundingBox())!;
   expect(box.y + box.height, `the rail's bottom edge must sit on the ${occluded}px occluded band`)
     .toBeGreaterThan(height - occluded - 2);
   expect(box.y + box.height).toBeLessThan(height - occluded + 2);
@@ -971,6 +964,7 @@ test("closing the keyboard puts everything back", async ({ page }) => {
   await openKeyboard(page);
   await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
   await expectInset(page, "");
+  await expectRailAt(page, 0);
 
   const after = (await rail.boundingBox())!;
   expect(Math.round(after.y), "the rail must return to where it started").toBe(Math.round(before.y));
@@ -979,7 +973,6 @@ test("closing the keyboard puts everything back", async ({ page }) => {
   // `translateY(100px)` in the phone media query with a `html[style*="--keyboard-inset"]` override
   // back to `none` put the closed rail 100px below the screen with the whole suite green: every
   // keyboard-open assertion saw the override, and closing returned to the same off-screen place.
-  await expectRailAt(page, 0);
 });
 
 /**

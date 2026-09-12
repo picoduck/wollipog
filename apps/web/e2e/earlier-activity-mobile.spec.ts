@@ -110,16 +110,23 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
     };
     let sampling = true;
     state.__prependSamples = [];
-    const sample = () => {
-      if (!sampling) return;
-      const current = element.querySelector<HTMLElement>(`[data-virtual-key='${anchor.key}']`);
-      state.__prependSamples!.push({
-        offset: current ? current.getBoundingClientRect().top - element.getBoundingClientRect().top : null,
-        scrollTop: element.scrollTop,
+    const samplePaintedFrame = () => {
+      requestAnimationFrame(() => {
+        // Sample from the next task, after this rendering opportunity. Chromium 153 may run this
+        // callback before a later rAF callback applies the pre-paint anchor correction; reading in
+        // the callback itself mistakes that callback ordering for a frame shown to the reader.
+        setTimeout(() => {
+          if (!sampling) return;
+          const current = element.querySelector<HTMLElement>(`[data-virtual-key='${anchor.key}']`);
+          state.__prependSamples!.push({
+            offset: current ? current.getBoundingClientRect().top - element.getBoundingClientRect().top : null,
+            scrollTop: element.scrollTop,
+          });
+          samplePaintedFrame();
+        }, 0);
       });
-      requestAnimationFrame(sample);
     };
-    requestAnimationFrame(sample);
+    samplePaintedFrame();
     state.__stopPrependSamples = () => {
       sampling = false;
       return state.__prependSamples ?? [];
