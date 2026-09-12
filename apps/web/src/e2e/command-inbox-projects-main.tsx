@@ -900,6 +900,18 @@ const client = {
     if (!value) throw new Error("session not found");
     return { session: structuredClone(value) };
   },
+  acknowledgeBackgroundMissingResult: async (id: string, continuationId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    const delivery = value.backgroundDeliveries?.find((candidate) =>
+      candidate.continuationId === continuationId);
+    if (!delivery?.missingResultAt) throw new Error("background delivery is not terminally missing");
+    delivery.missingResultAcknowledgedAt = Date.now();
+    delete delivery.watchdogState;
+    value.updatedAt += 1;
+    pushSession(value);
+    return structuredClone(value);
+  },
   retitleSession: async (id: string) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");

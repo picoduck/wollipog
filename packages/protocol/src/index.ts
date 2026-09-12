@@ -369,7 +369,10 @@
 //      Location is attachable, and the result carries a content-free platform-isolation notice
 //      saying whether the live process can already write there. Older runners omit the notice and
 //      the control plane presents it as unknown.
-export const PROTOCOL_VERSION = 133;
+// 134: managed background continuations record a durable terminal missing-result boundary after
+//      provider acceptance. The control plane keeps that audit evidence separately from a user's
+//      idempotent acknowledgement, so accepted in-flight work is never mislabeled or replayed.
+export const PROTOCOL_VERSION = 134;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -548,6 +551,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   subscriptionUsage: 80,
   managedBackgroundDelivery: 82,
   managedBackgroundInventory: 82,
+  backgroundMissingResultRecovery: 134,
   workerAttention: 108,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
@@ -3646,6 +3650,8 @@ export interface ManagedBackgroundJobSnapshot {
   continuationQueuedAt?: number;
   continuationSubmittedAt?: number;
   continuationAcceptedAt?: number;
+  /** The accepted provider turn ended without a complete durable top-level assistant result. */
+  continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
 }
 
@@ -3667,6 +3673,7 @@ export interface ManagedBackgroundJobView {
   continuationQueuedAt?: number;
   continuationSubmittedAt?: number;
   continuationAcceptedAt?: number;
+  continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
 }
 
@@ -3717,6 +3724,10 @@ export interface BackgroundDeliveryView {
   queuedAt?: number;
   submittedAt?: number;
   acceptedAt?: number;
+  /** Runner proof that the accepted provider turn is terminal without a complete durable result. */
+  missingResultAt?: number;
+  /** Durable user resolution of a terminal missing result; audit evidence remains intact. */
+  missingResultAcknowledgedAt?: number;
   runnerResultPersistedAt?: number;
   transcriptProjectedAt?: number;
   notificationQueuedAt?: number;

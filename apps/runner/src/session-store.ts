@@ -275,6 +275,8 @@ export interface DurableBackgroundJob {
   continuationQueuedAt?: number;
   continuationSubmittedAt?: number;
   continuationAcceptedAt?: number;
+  /** Durable proof that the accepted provider turn ended without a complete assistant result. */
+  continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
   /** Runner-private proof that v82 structured delivery evidence was durably published. */
   structuredDeliveryPublishedAt?: number;
@@ -2835,6 +2837,10 @@ export function metaToSnapshot(
           continuationQueuedAt: job.continuationQueuedAt,
           continuationSubmittedAt: job.continuationSubmittedAt,
           continuationAcceptedAt: job.continuationAcceptedAt,
+          continuationMissingResultAt: runnerSupportsProtocol(
+            controlPlaneProtocolVersion,
+            "backgroundMissingResultRecovery",
+          ) ? job.continuationMissingResultAt : undefined,
           assistantResultPersistedAt: job.assistantResultPersistedAt,
         }))
       : undefined,

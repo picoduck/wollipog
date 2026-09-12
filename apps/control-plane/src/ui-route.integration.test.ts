@@ -921,6 +921,78 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "a paired device can authenticate the real /ui WebSocket route",
   );
 
+  const terminalMissingJobs = Array.from({ length: 33 }, (_, index) => ({
+    id: `route-missing-job-${String(index).padStart(3, "0")}`,
+    parentTurnId: `route-missing-turn-${String(index).padStart(3, "0")}`,
+    runnerId: "runner-ui-route",
+    workspaceId: "workspace-1",
+    context: { kind: "native" as const },
+    launchType: "agent" as const,
+    registeredAt: 1_000 + index,
+    terminalStatus: "completed" as const,
+    terminalObservedAt: 2_000 + index,
+    continuationRequired: true,
+    continuationId: `bgcont-route-${String(index).padStart(3, "0")}`,
+    continuationQueuedAt: 3_000 + index,
+    continuationSubmittedAt: 4_000 + index,
+    continuationAcceptedAt: 5_000 + index,
+    continuationMissingResultAt: 6_000 + index,
+  }));
+  runner.send(JSON.stringify({
+    type: "session_runtime_updated",
+    snapshot: {
+      ...sessionSnapshot("session-target"),
+      backgroundWorkTracking: "managed",
+      backgroundJobs: [
+        ...terminalMissingJobs,
+        {
+          ...terminalMissingJobs[0],
+          id: "route-inflight-job",
+          parentTurnId: "route-inflight-turn",
+          continuationId: "bgcont-route-inflight",
+          continuationMissingResultAt: undefined,
+        },
+      ],
+    },
+  }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; backgroundDeliveries?: unknown[] } | undefined)?.id === "session-target" &&
+      (message.session as { backgroundDeliveries?: unknown[] } | undefined)?.backgroundDeliveries?.length === 32);
+  }
+
+  const boundedAcknowledgement = await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-000/acknowledge-missing-result",
+    { method: "POST" },
+  );
+  assert.equal(boundedAcknowledgement.status, 200, await boundedAcknowledgement.clone().text());
+  const boundedAcknowledgementSession = await boundedAcknowledgement.json() as {
+    backgroundDeliveries?: Array<{ continuationId?: string }>;
+  };
+  assert.equal(boundedAcknowledgementSession.backgroundDeliveries?.length, 32);
+  assert.equal(
+    boundedAcknowledgementSession.backgroundDeliveries?.some((delivery) =>
+      delivery.continuationId === "bgcont-route-000"),
+    false,
+    "a successful acknowledgement remains successful after it leaves the bounded projection",
+  );
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string } | undefined)?.id === "session-target");
+  }
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-000/acknowledge-missing-result",
+    { method: "POST" },
+  )).status, 200, "repeat acknowledgement is idempotent even outside the bounded projection");
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-inflight/acknowledge-missing-result",
+    { method: "POST" },
+  )).status, 409, "a plausibly in-flight continuation cannot be acknowledged");
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/background-deliveries/bgcont-route-absent/acknowledge-missing-result",
+    { method: "POST" },
+  )).status, 404, "an unknown continuation remains indistinguishable from inaccessible history");
+
   const plainStopResponse = await ownerFetch("/api/sessions/session-other/stop", { method: "POST" });
   assert.equal(plainStopResponse.status, 200);
   const plainStopPayload = await plainStopResponse.json() as {

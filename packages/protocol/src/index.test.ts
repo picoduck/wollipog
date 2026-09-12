@@ -154,8 +154,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 133", () => {
-  assert.equal(PROTOCOL_VERSION, 133);
+test("PROTOCOL_VERSION is 134", () => {
+  assert.equal(PROTOCOL_VERSION, 134);
   assert.equal(runnerSupportsProtocol(131, "machineRunnerCapacity"), false);
   assert.equal(runnerSupportsProtocol(132, "machineRunnerCapacity"), true);
   assert.equal(runnerSupportsProtocol(127, "providerHistoryQuarantine"), false);
@@ -227,6 +227,8 @@ test("PROTOCOL_VERSION is 133", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundInventory, 82);
   assert.equal(runnerSupportsProtocol(81, "managedBackgroundInventory"), false);
   assert.equal(runnerSupportsProtocol(82, "managedBackgroundInventory"), true);
+  assert.equal(runnerSupportsProtocol(133, "backgroundMissingResultRecovery"), false);
+  assert.equal(runnerSupportsProtocol(134, "backgroundMissingResultRecovery"), true);
 });
 
 test("worktree create deadlines preserve transport and error-reporting order", () => {
