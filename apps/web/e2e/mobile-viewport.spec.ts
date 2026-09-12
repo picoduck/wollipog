@@ -137,12 +137,21 @@ async function inkOf(page: Page, locator: Locator, minContrast: number): Promise
     style.setProperty("opacity", "0", "important");
     return previous;
   });
-  const hidden = (await page.screenshot({ clip: clip.guard, animations: "disabled" })).toString("base64");
-  await locator.evaluate((element, previous) => {
+  const restoreOpacity = () => locator.evaluate((element, previous) => {
     const style = (element as HTMLElement).style;
     if (previous.value) style.setProperty("opacity", previous.value, previous.priority);
     else style.removeProperty("opacity");
   }, restore);
+  let hidden: string;
+  try {
+    hidden = (await page.screenshot({ clip: clip.guard, animations: "disabled" })).toString("base64");
+  } catch (error) {
+    // Keep a screenshot/protocol failure as the primary error, but do not leave the retained page
+    // in the synthetic hidden state when it is still available for Playwright's failure artifacts.
+    await restoreOpacity().catch(() => undefined);
+    throw error;
+  }
+  await restoreOpacity();
 
   // Where the mark's box sits inside the guard capture, in CSS pixels.
   const inset = {
