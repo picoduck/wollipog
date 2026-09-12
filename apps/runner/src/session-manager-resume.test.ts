@@ -1386,7 +1386,48 @@ test("matching account evidence survives a partial observation across relaunch c
     h.manager.prompt("resume-session", "continue after restart");
     for (let index = 0; index < 8; index += 1) await tick();
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.deepEqual(h.store.readMeta("resume-session")?.providerCredentialIdentityEvidence, expectedEvidence,
+      "a partial observation must not erase a previously proven account field");
     assert.deepEqual(h.prompts, ["continue after restart"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("recheck without a recorded account asks for explicit acceptance without claiming a mismatch", async () => {
+  const authenticated = {
+    status: "authenticated" as const,
+    identityId: "current-aggregate",
+    identityEvidence: identityEvidence({ email: "current-email", orgId: "current-org" }),
+  };
+  const observations = [{ status: "unauthenticated" as const }, authenticated, authenticated];
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => observations.shift() ?? authenticated,
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native" },
+    Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained before first sign-in");
+    for (let index = 0; index < 8; index += 1) await tick();
+    const requestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+    h.manager.resolvePermission("resume-session", requestId, "auth:revalidate");
+    for (let index = 0; index < 8; index += 1) await tick();
+
+    const confirmation = h.store.readMeta("resume-session")!;
+    assert.equal(confirmation.providerAuthBlock?.identityMismatch, true);
+    assert.equal(confirmation.pendingApproval?.options[0]?.name, "Use Current Account");
+    assert.match(confirmation.pendingApproval?.context?.input ?? "", /no recorded account identity/i);
+    assert.doesNotMatch(confirmation.pendingApproval?.context?.input ?? "", /account identity mismatch/i);
+    assert.ok(h.logs.every((line) => !/account identity mismatch/i.test(line)));
+
+    h.manager.resolvePermission("resume-session", requestId, "auth:accept-current");
+    for (let index = 0; index < 12; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.deepEqual(h.prompts, ["retained before first sign-in"]);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -1464,10 +1505,10 @@ test("a sibling held behind the surfaced authentication card exposes the wait", 
     assert.equal(h.store.readMeta("held-sibling")?.status, "idle");
     const heldEvents = h.store.readEvents("held-sibling");
     assert.ok(heldEvents.some((event) =>
-      event.payload.kind === "stderr" && /Authentication Required card.*another session/i.test(event.payload.text)));
+      event.payload.kind === "stderr" && /owned by another session.*Authentication Required card/i.test(event.payload.text)));
     assert.ok(h.sent.some((message) =>
       message.type === "session_status" && message.sessionId === "held-sibling" &&
-      message.status === "idle" && /Authentication Required card.*another session/i.test(message.detail ?? "")));
+      message.status === "idle" && /owned by another session.*Authentication Required card/i.test(message.detail ?? "")));
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

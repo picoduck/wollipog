@@ -135,6 +135,7 @@ import type {
 import {
   compareProviderAuthIdentity,
   describeProviderAuthIdentityMismatch,
+  mergeProviderAuthIdentityEvidence,
 } from "./provider-auth-recovery.js";
 import {
   createWorktree,
@@ -10471,12 +10472,11 @@ export class SessionManager {
         "Authentication now responds, but this blocked generation still requires Recheck Authentication.");
       return false;
     }
+    const retainedEvidence = mergeProviderAuthIdentityEvidence(expectedEvidence, observation.identityEvidence);
     this.store.patchMeta(meta.sessionId, {
       providerCredentialScopeId: scope.id,
       ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
-      ...(observation.identityEvidence
-        ? { providerCredentialIdentityEvidence: observation.identityEvidence }
-        : {}),
+      ...(retainedEvidence ? { providerCredentialIdentityEvidence: retainedEvidence } : {}),
     });
     if (current.agentId) this.onAgentAuthUpdate?.(current.agentId, { status: "authenticated" });
     return true;
@@ -10701,7 +10701,7 @@ export class SessionManager {
     if (!silently) {
       const owner = this.providerAuthenticationOwner(scope.id);
       if (owner?.sessionId !== meta.sessionId) {
-        const detail = "Authentication is blocked while the Authentication Required card is shown for another session using this provider credential scope.";
+        const detail = "Authentication recovery is currently owned by another session using this provider credential scope. Follow the Authentication Required card after the current automatic check finishes.";
         this.emitEvent(meta.sessionId, { kind: "stderr", text: detail });
         this.emitStatus(meta.sessionId, "idle", detail);
       } else {
@@ -10935,8 +10935,12 @@ export class SessionManager {
         observation,
       );
       if (!acceptingCurrent && (!expected || !observation.identityId || !identityComparison.matches)) {
-        const reason = describeProviderAuthIdentityMismatch(identityComparison);
-        this.log(`provider account identity mismatch for ${boundedSessionIdForLog(sessionId)}: ${reason}`);
+        const reason = expected
+          ? describeProviderAuthIdentityMismatch(identityComparison)
+          : "The provider is authenticated, but this session has no recorded account identity to compare. Confirm the current account explicitly for this session.";
+        if (expected) {
+          this.log(`provider account identity mismatch for ${boundedSessionIdForLog(sessionId)}: ${reason}`);
+        }
         block = { ...block, identityMismatch: true, reason };
         this.store.patchMeta(sessionId, { providerAuthBlock: block });
         this.emitProviderAuthenticationCard(meta, block, reason);
@@ -11010,6 +11014,9 @@ export class SessionManager {
         meta.providerAuthRetryAttemptedRecoveryId !== block.recoveryId
         ? block.retry
         : undefined;
+      const retainedEvidence = targetOnly
+        ? observation.identityEvidence
+        : mergeProviderAuthIdentityEvidence(block.expectedIdentityEvidence, observation.identityEvidence);
       // A persisted retry can carry an ordinal greater than this process's fresh in-memory
       // high-water. Observe it before clearing the durable block: once prompts are admitted again,
       // every newer prompt must sort after the retained pre-crash work even if it races this
@@ -11018,9 +11025,7 @@ export class SessionManager {
       this.store.patchMeta(meta.sessionId, {
         providerCredentialScopeId: block.credentialScopeId,
         ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
-        ...(observation.identityEvidence
-          ? { providerCredentialIdentityEvidence: observation.identityEvidence }
-          : {}),
+        providerCredentialIdentityEvidence: retainedEvidence,
         providerAuthBlock: undefined,
         pendingApproval: null,
         status: "idle",

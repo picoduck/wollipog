@@ -126,6 +126,15 @@ export function compareProviderAuthIdentity(
   };
 }
 
+export function mergeProviderAuthIdentityEvidence(
+  expected: ProviderAuthIdentityEvidence | undefined,
+  observed: ProviderAuthIdentityEvidence | undefined,
+): ProviderAuthIdentityEvidence | undefined {
+  if (!expected) return observed;
+  if (!observed) return expected;
+  return { version: 1, fields: { ...expected.fields, ...observed.fields } };
+}
+
 export function describeProviderAuthIdentityMismatch(comparison: ProviderAuthIdentityComparison): string {
   const details: string[] = [];
   if (!comparison.evidenceAvailable) {
@@ -135,15 +144,16 @@ export function describeProviderAuthIdentityMismatch(comparison: ProviderAuthIde
       details.push(`${comparison.differingFields.join(", ")} differed`);
     }
     if (comparison.expectedMissingFields.length) {
-      details.push(`${comparison.expectedMissingFields.join(", ")} was missing from the recorded observation`);
+      details.push(`${comparison.expectedMissingFields.join(", ")} ${comparison.expectedMissingFields.length === 1 ? "was" : "were"} missing from the recorded observation`);
     }
     if (comparison.observedMissingFields.length) {
-      details.push(`${comparison.observedMissingFields.join(", ")} was missing from the current observation`);
+      details.push(`${comparison.observedMissingFields.join(", ")} ${comparison.observedMissingFields.length === 1 ? "was" : "were"} missing from the current observation`);
     }
     if (!comparison.differingFields.length && !comparison.sharedAccountFields.length) {
       details.push("the observations share no comparable email or orgId field");
     }
   }
+  if (!details.length) details.push("no differing or missing field was identified");
   return `Provider account identity mismatch: ${details.join("; ")}. Account values are redacted.`;
 }
 

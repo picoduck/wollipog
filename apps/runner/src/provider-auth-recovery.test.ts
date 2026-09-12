@@ -8,6 +8,7 @@ import { test } from "node:test";
 import {
   compareProviderAuthIdentity,
   describeProviderAuthIdentityMismatch,
+  mergeProviderAuthIdentityEvidence,
   NativeProviderAuthRecovery,
   describeProviderCredentialScope,
 } from "./provider-auth-recovery.js";
@@ -120,6 +121,8 @@ test("partial Claude account observations compare by shared redacted fields with
   const stable = compareProviderAuthIdentity(recorded.identityId, recorded.identityEvidence, partial);
   assert.equal(stable.matches, true);
   assert.deepEqual(stable.observedMissingFields, ["orgId"]);
+  const retained = mergeProviderAuthIdentityEvidence(recorded.identityEvidence, partial.identityEvidence);
+  assert.deepEqual(Object.keys(retained?.fields ?? {}).sort(), ["apiProvider", "authMethod", "email", "orgId"]);
 
   const changed = await controller.revalidate(meta({ driver: "claude-code", command: "claude" }));
   const mismatch = compareProviderAuthIdentity(recorded.identityId, recorded.identityEvidence, changed);
@@ -128,6 +131,12 @@ test("partial Claude account observations compare by shared redacted fields with
   assert.match(describeProviderAuthIdentityMismatch(mismatch), /email differed/);
   assert.equal(describeProviderAuthIdentityMismatch(mismatch).includes("private@example.test"), false);
   assert.equal(describeProviderAuthIdentityMismatch(mismatch).includes("other@example.test"), false);
+  assert.match(describeProviderAuthIdentityMismatch({
+    ...mismatch,
+    differingFields: [],
+    expectedMissingFields: ["email", "orgId"],
+    observedMissingFields: ["authMethod", "apiProvider"],
+  }), /email, orgId were missing.*authMethod, apiProvider were missing/);
 });
 
 test("identity comparison exhaustively rejects every shared field change and requires a matching account anchor", () => {
