@@ -8,6 +8,20 @@ import {
   validateTimeZone,
 } from "./automation-schedule.js";
 
+function asciiCaseVariants(value: string): string[] {
+  const letters = [...value].filter((character) => /[A-Za-z]/.test(character));
+  assert.ok(letters.length < 31, "the exhaustive case-variant generator uses a 32-bit mask");
+  return Array.from({ length: 2 ** letters.length }, (_, mask) => {
+    let letterIndex = 0;
+    return [...value].map((character) => {
+      if (!/[A-Za-z]/.test(character)) return character;
+      const variant = mask & (1 << letterIndex) ? character.toUpperCase() : character.toLowerCase();
+      letterIndex += 1;
+      return variant;
+    }).join("");
+  });
+}
+
 test("strict cron parsing supports lists, ranges, steps, and Sunday alias", () => {
   const parsed = parseCron("*/15 8-10 1,15 * 1-5");
   assert.deepEqual(parsed.minute.values, [0, 15, 30, 45]);
@@ -135,9 +149,10 @@ test("timezone case variants share validation and cron formatter work", () => {
     },
   });
   try {
-    assert.equal(validateTimeZone(" america/chicago "), "America/Chicago");
-    assert.equal(validateTimeZone("AMERICA/CHICAGO"), "America/Chicago");
-    assert.equal(constructions, 1, "a case variant should reuse successful validation");
+    for (const variant of asciiCaseVariants("America/Chicago")) {
+      assert.equal(validateTimeZone(` ${variant} `), "America/Chicago");
+    }
+    assert.equal(constructions, 1, "every ASCII case variant should reuse successful validation");
 
     const after = Date.UTC(2026, 6, 12, 13, 59);
     const expected = Date.UTC(2026, 6, 12, 14, 0);
@@ -152,6 +167,45 @@ test("timezone case variants share validation and cron formatter work", () => {
     });
   } finally {
     Object.defineProperty(Intl, "DateTimeFormat", originalDescriptor);
+    resetTimezoneCachesForTests();
+  }
+});
+
+test("non-ASCII timezone lookalikes stay invalid across cache history", () => {
+  const canonical = "Asia/Bangkok";
+  const invalidLookalikes = ["Asia/Bang\u212Aok", "Asia/Bangko\u212A", "Asia/Bang\u212Ao\u212A"];
+  const kelvinExample = invalidLookalikes.at(-1)!;
+
+  resetTimezoneCachesForTests();
+  try {
+    for (const invalid of invalidLookalikes) {
+      resetTimezoneCachesForTests();
+      assert.throws(() => validateTimeZone(invalid), /unknown IANA timezone/, `${invalid} must be rejected cold`);
+      assert.equal(validateTimeZone(canonical), canonical);
+      assert.throws(() => validateTimeZone(invalid), /unknown IANA timezone/, `${invalid} must be rejected warm`);
+    }
+
+    resetTimezoneCachesForTests();
+    assert.throws(
+      () => validateTimeZone(kelvinExample),
+      /unknown IANA timezone/,
+      "the pinned Kelvin-sign example remains invalid after a cache reset",
+    );
+
+    assert.equal(validateTimeZone(canonical), canonical);
+    const { maxValidationEntries } = timezoneCacheStateForTests();
+    const evictionZones = Intl.supportedValuesOf("timeZone")
+      .filter((zone) => zone.toLowerCase() !== canonical.toLowerCase())
+      .slice(0, maxValidationEntries);
+    assert.equal(evictionZones.length, maxValidationEntries, "the runtime must expose enough zones for eviction");
+    for (const zone of evictionZones) validateTimeZone(zone);
+    assert.equal(timezoneCacheStateForTests().validationEntries, maxValidationEntries);
+    assert.throws(
+      () => validateTimeZone(kelvinExample),
+      /unknown IANA timezone/,
+      "the pinned Kelvin-sign example remains invalid after the colliding valid entry is evicted",
+    );
+  } finally {
     resetTimezoneCachesForTests();
   }
 });
