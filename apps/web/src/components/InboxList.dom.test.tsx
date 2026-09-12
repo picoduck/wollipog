@@ -123,7 +123,10 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
   assert.equal(rows[1]!.getAttribute("aria-selected"), "false");
   assert.equal(rows[0]!.classList.contains("unread"), true);
   assert.equal(rows[0]!.querySelector('[aria-label="Unread Activity"]')?.textContent, "1");
-  assert.equal(rows[0]!.querySelector('[aria-label="Pinned Session"]')?.textContent, "●");
+  const pinned = rows[0]!.querySelector('[aria-label="Pinned Session"]');
+  assert.ok(pinned);
+  assert.ok(pinned.querySelector("svg"), "the pin is a recognizable shape, not the old status dot");
+  assert.equal(pinned.getAttribute("title"), "Pinned Session");
   assert.equal(rows[0]!.children.length, 1,
     "selection must not expand a session row with embedded shortcut actions");
   assert.equal(container.querySelector(".inbox-row-actions"), null);

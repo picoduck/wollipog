@@ -60,6 +60,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   entries: InboxListEntry[];
   selectedSessionId: string | null;
   pinnedSessionIds: ReadonlySet<string>;
+  pinnedAncestorSessionIds?: ReadonlySet<string>;
   /** Test/story override. Production rows subscribe to their own activity entry. */
   activityBySession?: ReadonlyMap<string, SessionActivity>;
   stalledSessionIds: ReadonlySet<string>;
@@ -83,6 +84,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   entries,
   selectedSessionId,
   pinnedSessionIds,
+  pinnedAncestorSessionIds = new Set(),
   activityBySession,
   stalledSessionIds,
   activityNow,
@@ -206,6 +208,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
             unread,
             reminder,
             pinned: pinnedSessionIds.has(session.id),
+            containsPinned: Boolean(thread?.collapsed && pinnedAncestorSessionIds.has(session.id)),
             stalled: stalledSessionIds.has(session.id),
             threadDepth: thread?.depth ?? 0,
             threadLast: thread?.last ?? false,

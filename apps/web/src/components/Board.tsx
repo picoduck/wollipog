@@ -5,7 +5,7 @@ import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { SessionStatusIndicators, Empty, ThreadDot } from "./common.js";
+import { SessionStatusIndicators, Empty, SessionPinIndicator, ThreadDot } from "./common.js";
 import { inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
 import { useLongPress } from "./interactions.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -25,11 +25,12 @@ const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 
  * split, search, and reminder filtering applied by the parent), grouped into status columns.
  * The Machine and Agent filters below are board-local refinements on top of that shared scope.
  */
-export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu }: {
+export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), pinnedSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu }: {
   /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
   sessions: SessionView[];
   stalledSessionIds?: ReadonlySet<string>;
   reminders?: ReadonlyMap<string, SessionReminderView>;
+  pinnedSessionIds?: ReadonlySet<string>;
   /** True while the shared search or a non-All split narrows the scope (changes the empty state). */
   searchActive: boolean;
   /** Widen the shared scope back to every session: clear the search, the split, and reminder mode. */
@@ -259,6 +260,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
                 </div>
                 <BoardColumnBody
                   sessions={list}
+                  pinnedSessionIds={pinnedSessionIds}
                   reminders={reminders}
                   machineName={machineName}
                   runnerOnline={(runnerId) => runners.get(runnerId)?.status === "online"}
@@ -278,6 +280,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
 
 function BoardColumnBody({
   sessions,
+  pinnedSessionIds,
   reminders,
   machineName,
   runnerOnline,
@@ -287,6 +290,7 @@ function BoardColumnBody({
   onSessionMenu,
 }: {
   sessions: SessionView[];
+  pinnedSessionIds: ReadonlySet<string>;
   reminders: ReadonlyMap<string, SessionReminderView>;
   machineName: (runnerId: string) => string;
   runnerOnline: (runnerId: string) => boolean;
@@ -305,6 +309,7 @@ function BoardColumnBody({
         renderItem={(session) => (
           <SessionCard
             session={session}
+            pinned={pinnedSessionIds.has(session.id)}
             reminder={reminders.get(session.id)}
             machineName={machineName(session.runnerId)}
             runnerOnline={runnerOnline(session.runnerId)}
@@ -328,6 +333,7 @@ function BoardColumnBody({
 
 function SessionCard({
   session,
+  pinned,
   reminder,
   machineName,
   runnerOnline,
@@ -337,6 +343,7 @@ function SessionCard({
   onSessionMenu,
 }: {
   session: SessionView;
+  pinned: boolean;
   reminder?: SessionReminderView;
   machineName: string;
   runnerOnline: boolean;
@@ -403,7 +410,10 @@ function SessionCard({
     >
       <div className="card-top">
         <SessionStatusIndicators session={session} disconnected={!runnerOnline} attention="pills" />
-        <span className="card-time">{relativeTime(session.lastEventAt ?? session.updatedAt)}</span>
+        <span className="card-top-trailing">
+          {pinned && <SessionPinIndicator />}
+          <span className="card-time">{relativeTime(session.lastEventAt ?? session.updatedAt)}</span>
+        </span>
       </div>
       <button
         type="button"

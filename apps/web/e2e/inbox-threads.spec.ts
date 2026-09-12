@@ -20,6 +20,17 @@ const titles = (page: Page) => page.locator(".inbox-row-title").allTextContents(
 const grid = (page: Page) => page.getByRole("grid", { name: "Sessions", exact: true });
 const parentRow = (page: Page) => page.locator(".inbox-row-shell", { hasText: "Ship the usage and cost overhaul" });
 
+async function enableTouch(page: Page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  return cdp;
+}
+
+async function tapAt(cdp: Awaited<ReturnType<typeof enableTouch>>, point: { x: number; y: number }) {
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
 test("a family sorts as one unit with the parent first, children indent under it, and every card keeps one height", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await openList(page);
@@ -115,6 +126,27 @@ test("t, Shift+T, p, and the arrows drive the thread, the chevron is the pointer
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
   await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("Running Session");
   expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);
+});
+
+test("a pinned descendant names itself when expanded and only promotes its collapsed parent", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openList(page);
+  const child = page.locator(".inbox-row-shell", { hasText: "#602: Roll the daily budget over" });
+  await child.click({ button: "right" });
+  await page.getByRole("menu", { name: /Session Actions/ }).getByRole("menuitem", { name: "Pin Session" }).click();
+  await expect(child.getByLabel("Pinned Session")).toBeVisible();
+  await expect(parentRow(page).getByLabel("Contains Pinned Session")).toHaveCount(0);
+  await expect(parentRow(page).getByLabel("Pinned Session", { exact: true })).toHaveCount(0);
+
+  await parentRow(page).locator(".inbox-thread-toggle").click();
+  await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
+  await expect(parentRow(page).getByLabel("Contains Pinned Session")).toBeVisible();
+  await expect(parentRow(page).getByLabel("Pinned Session", { exact: true })).toHaveCount(0);
+
+  await parentRow(page).locator(".inbox-thread-toggle").click();
+  await expect(child.getByLabel("Pinned Session")).toBeVisible();
+  await expect(parentRow(page).getByLabel("Contains Pinned Session")).toHaveCount(0);
+  await page.screenshot({ path: `${EVIDENCE}/desktop-pinned-descendant.png`, fullPage: true });
 });
 
 /**
@@ -219,6 +251,47 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   expect(wideThree.signalsOverflowRight).toBeLessThanOrEqual(0.5);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `${EVIDENCE}/phone-expanded.png`, fullPage: true });
+});
+
+test("the mobile thread toggle confines paint beside both provider icons at both densities", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const cdp = await enableTouch(page);
+  for (const provider of ["claude", "openai"] as const) {
+    await page.goto(`${PAGE}&thread-provider=${provider}`);
+    await expect(page.locator(".inbox-toolbar")).toBeVisible();
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    for (const density of ["compact", "comfortable"] as const) {
+      await page.evaluate((value) => {
+        if (value === "comfortable") document.documentElement.dataset.density = value;
+        else delete document.documentElement.dataset.density;
+      }, density);
+      const toggle = parentRow(page).locator(".inbox-thread-toggle");
+      const before = await toggle.getAttribute("aria-expanded");
+      const geometry = await parentRow(page).evaluate((shell) => {
+        const target = shell.querySelector<HTMLElement>(".inbox-thread-toggle")!;
+        const glyph = target.querySelector<HTMLElement>("span")!;
+        const providerIcon = shell.querySelector<HTMLElement>(".inbox-row-sender .agent-icon")!;
+        const targetBox = target.getBoundingClientRect();
+        const glyphBox = glyph.getBoundingClientRect();
+        const iconBox = providerIcon.getBoundingClientRect();
+        return {
+          targetWidth: targetBox.width,
+          glyphRight: glyphBox.right,
+          iconLeft: iconBox.left,
+          targetBackground: getComputedStyle(target).backgroundColor,
+        };
+      });
+      expect(geometry.targetWidth).toBeGreaterThanOrEqual(32);
+      expect(geometry.glyphRight, `${provider}/${density}: painted glyph clears provider`)
+        .toBeLessThanOrEqual(geometry.iconLeft);
+      expect(geometry.targetBackground).toBe("rgba(0, 0, 0, 0)");
+      const box = (await toggle.boundingBox())!;
+      await tapAt(cdp, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+      await expect(toggle).toHaveAttribute("aria-expanded", before === "true" ? "false" : "true");
+      await expect(toggle).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    }
+  }
+  await page.screenshot({ path: `${EVIDENCE}/phone-toggle-clear.png`, fullPage: true });
 });
 
 test("Board cards carry the per-kind pills and the family chip without nesting", async ({ page }) => {

@@ -15,7 +15,22 @@ import {
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
 import { statusMeta, type StatusMeta } from "../format.js";
 import type { SessionChangeStatus } from "../session-status.js";
-import { CheckIcon, CloseIcon, CopyIcon, WarningIcon } from "./Icons.js";
+import { CheckIcon, CloseIcon, CopyIcon, PinIcon, WarningIcon } from "./Icons.js";
+
+/** A compact, non-colour-only pin signal shared by List rows and Board cards. */
+export function SessionPinIndicator({ contains = false }: { contains?: boolean }) {
+  const label = contains ? "Contains Pinned Session" : "Pinned Session";
+  return (
+    <span
+      className={`inbox-pin-indicator${contains ? " contains-pinned" : ""}`}
+      aria-label={label}
+      title={label}
+    >
+      <PinIcon size={12} />
+      {contains && <PinIcon size={7} className="inbox-pin-contained-mark" />}
+    </span>
+  );
+}
 
 let nextModalLayerId = 1;
 const modalLayerStack: number[] = [];

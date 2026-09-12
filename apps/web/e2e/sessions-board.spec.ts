@@ -313,6 +313,68 @@ test("a held finger on a row opens its menu without selecting or opening it", as
     .toHaveText("Queued Session", "the previous press's grace must not swallow the tap");
 });
 
+test("pin indicators keep their shape and card geometry across viewports, densities, and palettes", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openHarness(page);
+  const queued = page.locator(".inbox-row-shell", { hasText: "Queued Session" });
+  await queued.click({ button: "right" });
+  await page.getByRole("menu", { name: "Session Actions for Queued Session" })
+    .getByRole("menuitem", { name: "Pin Session" }).click();
+
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const density of ["compact", "comfortable"] as const) {
+      for (const theme of ["dark", "light"] as const) {
+        for (const scheme of ["wollipog", "github", "one-dark", "dracula", "monokai"] as const) {
+          await page.evaluate(({ density, theme, scheme }) => {
+            if (density === "comfortable") document.documentElement.dataset.density = density;
+            else delete document.documentElement.dataset.density;
+            document.documentElement.dataset.theme = theme;
+            if (scheme === "wollipog") delete document.documentElement.dataset.scheme;
+            else document.documentElement.dataset.scheme = scheme;
+          }, { density, theme, scheme });
+          const geometry = await queued.evaluate((shell) => {
+            const row = shell.querySelector<HTMLElement>(".inbox-row")!;
+            const pin = shell.querySelector<HTMLElement>('[aria-label="Pinned Session"]')!;
+            const icon = pin.querySelector<SVGElement>("svg")!;
+            const pinBox = pin.getBoundingClientRect();
+            const iconBox = icon.getBoundingClientRect();
+            const siblings = [...pin.parentElement!.children]
+              .filter((node) => node !== pin)
+              .map((node) => node.getBoundingClientRect());
+            return {
+              rowHeight: row.getBoundingClientRect().height,
+              pinWidth: pinBox.width,
+              pinHeight: pinBox.height,
+              iconWidth: iconBox.width,
+              iconHeight: iconBox.height,
+              overlapsSignal: siblings.some((box) => pinBox.left < box.right && pinBox.right > box.left),
+            };
+          });
+          const peerHeight = await page.locator(".inbox-row-shell", { hasText: "Running Session" })
+            .locator(".inbox-row").evaluate((row) => row.getBoundingClientRect().height);
+          const context = `${width}/${density}/${scheme}/${theme}`;
+          expect(geometry.pinWidth, context).toBe(18);
+          expect(geometry.pinHeight, context).toBe(18);
+          expect(geometry.iconWidth, context).toBe(12);
+          expect(geometry.iconHeight, context).toBe(12);
+          expect(geometry.overlapsSignal, context).toBe(false);
+          expect(Math.abs(geometry.rowHeight - peerHeight), `${context}: pin does not change row height`).toBeLessThanOrEqual(0.5);
+        }
+      }
+    }
+  }
+
+  await page.getByRole("radio", { name: "Board" }).click();
+  const card = page.locator(".board .card", { hasText: "Queued Session" });
+  await expect(card.getByLabel("Pinned Session")).toBeVisible();
+  const cardHeight = await card.evaluate((node) => node.getBoundingClientRect().height);
+  const peerCardHeight = await page.locator(".board .card", { hasText: "Running Session" })
+    .evaluate((node) => node.getBoundingClientRect().height);
+  expect(Math.abs(cardHeight - peerCardHeight), "the Board badge does not change card height").toBeLessThanOrEqual(0.5);
+  await page.screenshot({ path: test.info().outputPath("pin-indicators-board.png"), fullPage: true });
+});
+
 test("a held finger over a card's approval button opens the menu and never approves", async ({ page }) => {
   await openHarness(page, "/board");
   const cdp = await touchSession(page);
@@ -342,6 +404,8 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(640);
   await pinRow.click();
   await expect(menu).toHaveCount(0, "the action dismisses the touch menu");
+  await expect(queued.getByLabel("Pinned Session")).toBeVisible();
+  await expect(queued.getByLabel("Pinned Session")).toHaveAttribute("title", "Pinned Session");
   await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Queued Session",
     "the exact long-pressed row moves to the top of the ordinary sessions, below the returned reminder");
   expect(harnessPath(page)).toBe("/");
@@ -350,10 +414,12 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await page.reload();
   await expect(page.locator(".inbox-toolbar")).toBeVisible();
   const persistedQueued = page.locator(".inbox-row-shell", { hasText: "Queued Session" });
+  await expect(persistedQueued.getByLabel("Pinned Session")).toBeVisible();
   await persistedQueued.click({ button: "right" });
   menu = page.getByRole("menu", { name: "Session Actions for Queued Session" });
   await expect(menu.getByRole("menuitem", { name: "Unpin Session" })).toBeVisible();
   await menu.getByRole("menuitem", { name: "Unpin Session" }).click();
+  await expect(persistedQueued.getByLabel("Pinned Session")).toHaveCount(0);
   await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Approval Session",
     "unpinning restores the existing Inbox ordering");
 
@@ -364,12 +430,15 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   menu = page.getByRole("menu", { name: "Session Actions for Running Session" });
   await menu.getByRole("menuitem", { name: "Pin Session" }).click();
   await expect(menu).toHaveCount(0);
+  await expect(running.getByLabel("Pinned Session")).toBeVisible();
   expect(harnessPath(page)).toBe("/board");
   await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
 
   await page.reload();
   await expect(page.locator(".board-wrap")).toBeVisible();
-  await page.locator(".board .card", { hasText: "Running Session" }).click({ button: "right" });
+  const persistedRunning = page.locator(".board .card", { hasText: "Running Session" });
+  await expect(persistedRunning.getByLabel("Pinned Session")).toBeVisible();
+  await persistedRunning.click({ button: "right" });
   await expect(page.getByRole("menu", { name: "Session Actions for Running Session" })
     .getByRole("menuitem", { name: "Unpin Session" })).toBeVisible();
 });
