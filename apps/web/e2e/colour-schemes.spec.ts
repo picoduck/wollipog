@@ -31,8 +31,18 @@ async function waitForContrastFixture(
   page: Page,
   expected: { scheme: string; theme: typeof THEMES[number] } = { scheme: "wollipog", theme: "dark" },
 ) {
-  await expect(page.locator("html"), "the fixture must publish its settled scheme and theme")
-    .toHaveAttribute("data-contrast-fixture-ready", `${expected.scheme}/${expected.theme}`);
+  await page.waitForFunction(() => {
+    const root = document.documentElement;
+    return root.hasAttribute("data-contrast-fixture-ready")
+      || root.hasAttribute("data-contrast-fixture-error");
+  });
+  const state = await page.locator("html").evaluate((root) => ({
+    ready: root.getAttribute("data-contrast-fixture-ready"),
+    error: root.getAttribute("data-contrast-fixture-error"),
+  }));
+  expect(state.error, `contrast fixture settlement failed: ${state.error ?? "no error"}`).toBeNull();
+  expect(state.ready, "the fixture must publish its settled scheme and theme")
+    .toBe(`${expected.scheme}/${expected.theme}`);
 }
 
 async function openContrastFixture(
@@ -60,9 +70,22 @@ async function measure(page: Page) {
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) throw new Error("Could not create a color normalization context");
     const parse = (value: string) => {
-      // Let Chromium convert every CSS Color value into sRGB bytes. Numeric extraction worked for
-      // rgb() and color(srgb), but a one-millisecond reduced-motion transition is serialised as
-      // oklab(); reading its lightness and a/b channels as RGB bytes fabricated ~1:1 contrast.
+      const parts = value.match(/-?(?:\d+(?:\.\d*)?|\.\d+)/g)?.map(Number) ?? [];
+      if (/^rgba?\(/.test(value)) {
+        return { r: parts[0] ?? 0, g: parts[1] ?? 0, b: parts[2] ?? 0, a: parts[3] ?? 1 };
+      }
+      if (/^color\(\s*srgb/.test(value)) {
+        return {
+          r: (parts[0] ?? 0) * 255,
+          g: (parts[1] ?? 0) * 255,
+          b: (parts[2] ?? 0) * 255,
+          a: parts[3] ?? 1,
+        };
+      }
+      // Let Chromium convert other CSS Color values into sRGB bytes. A one-millisecond
+      // reduced-motion transition is serialised as oklab(); reading its lightness and a/b channels
+      // as RGB bytes fabricated ~1:1 contrast. Common rgb()/sRGB values stay on the exact path
+      // above, avoiding canvas quantization for translucent tints.
       context.clearRect(0, 0, 1, 1);
       context.fillStyle = "rgb(0 0 0 / 0)";
       context.fillStyle = value;
@@ -197,10 +220,12 @@ async function measure(page: Page) {
 }
 
 test("rendered contrast waits for final fixture styles", async ({ page }) => {
-  await page.goto("/colour-schemes-e2e.html?scheme=wollipog&theme=dark&settleDelayMs=1000");
+  await page.goto("/colour-schemes-e2e.html?scheme=wollipog&theme=dark&settle=manual");
   await expect(page.locator(".slash-item.active")).toBeVisible();
+  await expect(page.locator(".slash-detail-disabled")).toHaveCSS("color", "rgb(18, 26, 36)");
 
   await expect(measure(page)).rejects.toThrow("Contrast fixture is not settled");
+  await page.evaluate(() => window.dispatchEvent(new Event("contrast-fixture-release")));
   await waitForContrastFixture(page);
 
   const { results: measured } = await measure(page);
@@ -208,6 +233,20 @@ test("rendered contrast waits for final fixture styles", async ({ page }) => {
     .filter((entry) => entry.ratio < AA)
     .map((entry) => `${entry.label} is ${entry.ratio.toFixed(2)}:1`);
   expect(failures, "measurement must not sample the fixture's pending cascade").toEqual([]);
+});
+
+test("CSS color-space serialization is normalized before contrast measurement", async ({ page }) => {
+  await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
+  const disabledDetail = page.locator(".slash-detail-disabled");
+  await disabledDetail.evaluate((element) => {
+    (element as HTMLElement).style.transition = "none";
+    (element as HTMLElement).style.color = "oklab(1 0 0)";
+  });
+
+  const { results: measured } = await measure(page);
+  const entry = measured.find((result) => result.label.startsWith("p.slash-detail-disabled"));
+  expect(entry?.foreground).toBe("oklab(1 0 0)");
+  expect(entry?.ratio).toBeGreaterThan(10);
 });
 
 test("settled contrast measurement still reports genuine failures", async ({ page }) => {

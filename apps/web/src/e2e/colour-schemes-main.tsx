@@ -41,10 +41,9 @@ if (scheme === "wollipog") document.documentElement.removeAttribute("data-scheme
 else document.documentElement.setAttribute("data-scheme", scheme);
 
 // Regression-only timing control: keep the exact selectors implicated by the CI failure in a
-// deliberately unfinished cascade after React's content becomes visible. The browser test uses
-// this to prove that visibility is not a sufficient signal for contrast measurement.
-const settleDelayMs = Math.min(Number.parseInt(params.get("settleDelayMs") ?? "0", 10) || 0, 2_000);
-if (settleDelayMs > 0) {
+// deliberately unfinished cascade after React's content becomes visible. The browser test owns
+// the release event, so the pre-settlement assertion has no wall-clock race on a slow runner.
+if (params.get("settle") === "manual") {
   document.documentElement.setAttribute("data-contrast-fixture-pending", "true");
   const pendingStyle = document.createElement("style");
   pendingStyle.textContent = `
@@ -54,10 +53,10 @@ if (settleDelayMs > 0) {
     }
   `;
   document.head.append(pendingStyle);
-  window.setTimeout(() => {
+  window.addEventListener("contrast-fixture-release", () => {
     pendingStyle.remove();
     document.documentElement.removeAttribute("data-contrast-fixture-pending");
-  }, settleDelayMs);
+  }, { once: true });
 }
 
 const nativeRunner: RunnerView = {
