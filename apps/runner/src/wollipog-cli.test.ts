@@ -11,6 +11,146 @@ import {
 } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
 import { runWollipogCli } from "./wollipog-cli.js";
+import { expandCommandAlias, resolveHelp } from "./wollipog-help.js";
+
+async function captureCli(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  let stdout = "";
+  let stderr = "";
+  const code = await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", ...argv],
+    {},
+    { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+    async () => assert.fail("help and fail-closed alias validation must not issue a request"),
+  );
+  return { code, stdout, stderr };
+}
+
+test("CLI root help is identical through help, --help, and -h and covers common operator workflows", async () => {
+  const outputs = await Promise.all([["help"], ["--help"], ["-h"]].map(captureCli));
+  assert.deepEqual(outputs.map(({ code }) => code), [0, 0, 0]);
+  assert.ok(outputs.every(({ stderr }) => stderr === ""));
+  assert.equal(outputs[0]!.stdout, outputs[1]!.stdout);
+  assert.equal(outputs[0]!.stdout, outputs[2]!.stdout);
+  assert.match(outputs[0]!.stdout, /Global Option: --version/u);
+  assert.match(outputs[0]!.stdout, /Root Help Options: --help, -h/u);
+  assert.match(outputs[0]!.stdout, /Help is always text/u);
+  assert.doesNotMatch(outputs[0]!.stdout, /Global Options:.*--help/u);
+  for (const expected of [
+    "session", "worktree", "admin", "service", "help [topic]", "doctor", "update", "pair <command>",
+    "service install", "service status", "pair create", "pair list", "pair revoke", "service logs",
+    "service restart", "runner-credential rotate", "service uninstall", "--version",
+  ]) assert.match(outputs[0]!.stdout, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+});
+
+test("CLI topic help is complete, successful, and side-effect free", async () => {
+  const topics: Array<[string, string[]]> = [
+    ["doctor", ["admin doctor", "--token-file", "--json"]],
+    ["update", ["service upgrade", "--release", "--system", "--json"]],
+    ["pair", ["pair create", "pair list", "pair revoke", "pair url", "one-time", "bootstrap"]],
+    ["service", ["service install", "service status", "service restart", "service logs", "service upgrade", "service uninstall"]],
+    ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
+    ["session", ["session list", "session create", "session wait", "session guardrails"]],
+    ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
+  ];
+  for (const [topic, expected] of topics) {
+    const result = await captureCli(["help", topic]);
+    assert.equal(result.code, 0, topic);
+    assert.equal(result.stderr, "", topic);
+    for (const text of expected) assert.ok(result.stdout.includes(text), `${topic} help omits ${text}`);
+  }
+
+  assert.deepEqual(await captureCli(["help", "help"]), await captureCli(["help"]));
+  const textWithJsonFlag = await captureCli(["help", "pair", "--json"]);
+  assert.equal(textWithJsonFlag.code, 0);
+  assert.match(textWithJsonFlag.stdout, /^Usage: wollipog pair/u);
+});
+
+test("new aliases accept --help without changing established canonical group help behavior", async () => {
+  for (const alias of ["update", "doctor", "pair"]) {
+    const result = await captureCli([alias, "--help"]);
+    assert.equal(result.code, 0, alias);
+    assert.equal(result.stderr, "", alias);
+    assert.match(result.stdout, new RegExp(`Usage: wollipog ${alias}`, "u"));
+  }
+
+  const pairVerb = await captureCli(["pair", "create", "--help"]);
+  assert.equal(pairVerb.code, 0);
+  assert.match(pairVerb.stdout, /Usage: wollipog pair/u);
+
+  for (const group of ["admin", "service"]) {
+    const result = await captureCli([group, "--help"]);
+    assert.equal(result.code, 2, group);
+    assert.equal(result.stdout, "", group);
+    assert.match(result.stderr, new RegExp(`Usage: wollipog ${group}`, "u"));
+  }
+});
+
+test("CLI aliases preserve every argument while delegating to canonical commands", () => {
+  const updateOptions = ["--system", "--release", "v1.2.3", "--force", "--yes", "--json"];
+  assert.deepEqual(expandCommandAlias(["update", ...updateOptions]), ["service", "upgrade", ...updateOptions]);
+
+  const adminOptions = ["--url", "http://127.0.0.1:4317", "--token-file", "/tmp/local-token", "--json"];
+  assert.deepEqual(expandCommandAlias(["doctor", ...adminOptions]), ["admin", "doctor", ...adminOptions]);
+  assert.deepEqual(
+    expandCommandAlias(["pair", "create", "--name", "laptop", "--user", "u1", "--origin", "https://w.example", "--output", "/tmp/pair", ...adminOptions]),
+    ["admin", "device", "create", "--name", "laptop", "--user", "u1", "--origin", "https://w.example", "--output", "/tmp/pair", ...adminOptions],
+  );
+  assert.deepEqual(expandCommandAlias(["pair", "list", ...adminOptions]), ["admin", "device", "list", ...adminOptions]);
+  assert.deepEqual(expandCommandAlias(["pair", "revoke", "d1", "--yes", ...adminOptions]), ["admin", "device", "revoke", "d1", "--yes", ...adminOptions]);
+  assert.deepEqual(expandCommandAlias(["pair", "url", ...adminOptions]), ["admin", "pairing-url", ...adminOptions]);
+  assert.equal(resolveHelp(["pair", "create", "--name", "-h", "--output", "/tmp/pair"]), null);
+});
+
+test("aliases preserve canonical fail-closed output, JSON, and exit codes", async () => {
+  const cases: Array<[string[], string[]]> = [
+    [["doctor"], ["admin", "doctor"]],
+    [["pair", "create", "--name", "laptop"], ["admin", "device", "create", "--name", "laptop"]],
+    [["pair", "list"], ["admin", "device", "list"]],
+    [["pair", "revoke", "d1", "--yes"], ["admin", "device", "revoke", "d1", "--yes"]],
+    [["pair", "url"], ["admin", "pairing-url"]],
+  ];
+  for (const [alias, canonical] of cases) {
+    const options = ["--url", "https://remote.example", "--json"];
+    assert.deepEqual(await captureCli([...alias, ...options]), await captureCli([...canonical, ...options]), alias.join(" "));
+  }
+
+  const conflictingModes = ["--user", "--system", "--json"];
+  assert.deepEqual(
+    await captureCli(["update", ...conflictingModes]),
+    await captureCli(["service", "upgrade", ...conflictingModes]),
+  );
+});
+
+test("unknown help topics and pair verbs return usage without external work", async () => {
+  const unknown = await captureCli(["help", "bogus"]);
+  assert.equal(unknown.code, 2);
+  assert.equal(unknown.stdout, "");
+  assert.match(unknown.stderr, /Unknown help topic `bogus`/u);
+
+  const unknownJson = await captureCli(["help", "bogus", "--json"]);
+  assert.equal(unknownJson.code, 2);
+  assert.equal(unknownJson.stderr, "");
+  assert.match(JSON.parse(unknownJson.stdout).error, /Unknown help topic `bogus`/u);
+
+  const pair = await captureCli(["pair", "bogus", "--json"]);
+  assert.equal(pair.code, 2);
+  assert.equal(pair.stderr, "");
+  assert.match(JSON.parse(pair.stdout).error, /Usage: wollipog pair/u);
+});
+
+test("unknown session and worktree verbs retain contextual command help", async () => {
+  const session = await captureCli(["session", "bogus"]);
+  assert.equal(session.code, 2);
+  assert.match(session.stderr, /Usage: wollipog session/u);
+  assert.match(session.stderr, /session guardrails/u);
+  assert.doesNotMatch(session.stderr, /Common Workflows/u);
+
+  const worktree = await captureCli(["worktree", "bogus"]);
+  assert.equal(worktree.code, 2);
+  assert.match(worktree.stderr, /Usage: wollipog worktree/u);
+  assert.match(worktree.stderr, /worktree discard/u);
+  assert.doesNotMatch(worktree.stderr, /Common Workflows/u);
+});
 
 test("CLI alias never reparses a later internal marker as its entry mode", async () => {
   for (const argv of [

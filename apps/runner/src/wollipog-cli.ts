@@ -17,6 +17,7 @@ import {
 import { VERSION } from "./version.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
+import { expandCommandAlias, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
 
 type Write = (text: string) => void;
 
@@ -79,17 +80,7 @@ function numeric(value: string | undefined): number | undefined {
 }
 
 function usage(): string {
-  return [
-    "Usage: wollipog session <command> [options]",
-    "       wollipog worktree <create|attach|select|discard> [options]",
-    "       wollipog admin <pairing-url|status|user|device|runner-credential> [options]",
-    "       wollipog service <install|status|restart|logs|uninstall> [options]",
-    "Session Commands: list, get, events, create, prompt, wait, stop, restart, archive, guardrails",
-    "Worktree Options: --session <id>, --branch <name>, --base <ref>, --path <absolute-path>",
-    "Admin Commands: run on the control-plane host with its protected local credential; see `wollipog admin`.",
-    "Service Commands: Linux systemd deployment of the control plane and a colocated runner; see `wollipog service`.",
-    "Use --json for stable machine-readable output.",
-  ].join("\n");
+  return rootHelp();
 }
 
 function invocationArgs(argv: string[]): string[] {
@@ -130,7 +121,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         input: { ...(sessionId ? { sessionId } : {}), path },
       };
     }
-    return { error: usage() };
+    return { error: worktreeHelp() };
   }
   if (words[0] !== "session" && words[0] !== "sessions") return { error: usage() };
   const verb = words[1];
@@ -200,7 +191,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
           }
         : { error: "session guardrails requires an id" };
     default:
-      return { error: usage() };
+      return { error: sessionHelp() };
   }
 }
 
@@ -253,12 +244,27 @@ export async function runWollipogCli(
   fetchImpl: McpFetch = globalThis.fetch,
   hostAdminIo: HostAdminIo = { ...defaultHostAdminIo(), stdout: io.stdout, stderr: io.stderr },
 ): Promise<number> {
-  const args = invocationArgs(argv);
-  if (flag(args, "--version")) {
+  const invocation = invocationArgs(argv);
+  if (flag(invocation, "--version")) {
     io.stdout(`${VERSION} (protocol v${PROTOCOL_VERSION})\n`);
     return 0;
   }
+  const help = resolveHelp(invocation);
+  if (help) {
+    const json = flag(invocation, "--json");
+    (help.ok || json ? io.stdout : io.stderr)(help.ok || !json
+      ? `${help.text}\n`
+      : `${JSON.stringify({ error: help.text })}\n`);
+    return help.ok ? 0 : 2;
+  }
+  const args = expandCommandAlias(invocation);
   const json = flag(args, "--json");
+  // A known pair verb expands above. Refuse an incomplete or unknown alias before credential
+  // discovery so even usage mistakes retain the host-administration fail-closed boundary.
+  if (args[0] === "pair") {
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: pairHelp() })}\n` : `${pairHelp()}\n`);
+    return 2;
+  }
   // Host administration authenticates with the control plane's own protected local credential,
   // not a session or device token, so it branches before any session plumbing runs.
   if (positional(args)[0] === "admin") {

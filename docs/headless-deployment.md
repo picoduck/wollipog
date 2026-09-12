@@ -161,6 +161,7 @@ Reinstall is the supported way to regenerate unit files; executables are upgrade
 wollipog service upgrade                 # latest published release
 wollipog service upgrade --release v0.23.0   # an exact tag; with GH_TOKEN a draft made for that tag works too
 wollipog service upgrade --yes --json    # non-interactive, for automation
+wollipog update                          # concise alias for service upgrade
 ```
 
 Upgrade resolves the release (latest, or an exact tag) from GitHub, downloads the runner and
