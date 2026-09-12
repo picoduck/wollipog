@@ -12557,9 +12557,14 @@ body.shell-dock-dragging * {
   color: var(--accent-on-tint);
 }
 .ui-seg-option.is-disabled { color: var(--text-dim); cursor: not-allowed; }
-.ui-select-option.is-active { background: var(--bg-elev-3); }
-.ui-select-option.is-disabled { cursor: not-allowed; }
-.ui-select-option.is-disabled .ui-select-option-body > span:first-child { color: var(--text-dim); }
+.ui-select-option.is-active,
+.ui-searchable-combobox-list .ui-inline-listbox-option.is-active { background: var(--bg-elev-3); }
+.ui-select-option.is-disabled,
+.ui-searchable-combobox-list .ui-inline-listbox-option.is-disabled { cursor: not-allowed; }
+.ui-select-option.is-disabled .ui-select-option-body > span:first-child,
+.ui-searchable-combobox-list .ui-inline-listbox-option.is-disabled .ui-select-option-body > span:first-child {
+  color: var(--text-dim);
+}
 .ui-select-option-reason { color: var(--amber-on-tint); font-size: var(--text-xs); }
 .ui-select-empty { margin: 0; padding: var(--space-3); color: var(--text-dim); font-size: var(--text-sm); }
 .ui-select-trigger[aria-disabled="true"] { cursor: not-allowed; color: var(--text-dim); }
@@ -12576,7 +12581,9 @@ body.shell-dock-dragging * {
 @media (max-width: 760px), (pointer: coarse), (hover: none) {
   .ui-seg-option,
   .ui-select-trigger,
-  .ui-select-option { min-height: 44px; }
+  .ui-select-option,
+  .ui-searchable-combobox-input,
+  .ui-searchable-combobox-list .ui-inline-listbox-option { min-height: 44px; }
   .ui-seg-option { min-width: 44px; }
   .ui-choice-card { min-height: 44px; }
 }
@@ -12670,11 +12677,10 @@ body.shell-dock-dragging * {
   background: var(--on-accent);
 }
 
-.ui-select { position: relative; display: inline-block; }
-.ui-select-trigger {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+.ui-select,
+.ui-searchable-combobox { position: relative; display: inline-block; }
+.ui-select-trigger,
+.ui-searchable-combobox-input {
   min-width: 160px;
   padding: 6px 10px;
   border: 1px solid var(--border);
@@ -12682,9 +12688,17 @@ body.shell-dock-dragging * {
   background: var(--bg-elev);
   color: var(--text);
   font-size: var(--text-base);
+}
+.ui-select-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   cursor: pointer;
 }
 .ui-select-trigger:hover { border-color: var(--border-strong); }
+.ui-searchable-combobox-input { width: 100%; cursor: text; }
+.ui-searchable-combobox-input:hover { border-color: var(--border-strong); }
+.ui-searchable-combobox-input[aria-disabled="true"] { cursor: not-allowed; color: var(--text-dim); }
 .ui-select-value { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-select-value.is-placeholder { color: var(--text-dim); }
 .ui-select-caret { flex: none; color: var(--text-dim); }
@@ -12702,7 +12716,8 @@ body.shell-dock-dragging * {
   background: var(--bg-elev-2);
   box-shadow: var(--elev-2);
 }
-.ui-select-option {
+.ui-select-option,
+.ui-searchable-combobox-list .ui-inline-listbox-option {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -12715,7 +12730,8 @@ body.shell-dock-dragging * {
   text-align: left;
   cursor: pointer;
 }
-.ui-select-option:hover { background: var(--bg-elev-3); }
+.ui-select-option:hover,
+.ui-searchable-combobox-list .ui-inline-listbox-option:hover { background: var(--bg-elev-3); }
 .ui-select-option.is-selected { color: var(--accent-on-tint); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .ui-select-option-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .ui-select-option-desc { color: var(--text-dim); font-size: var(--text-xs); }

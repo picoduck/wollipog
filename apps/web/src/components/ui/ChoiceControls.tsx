@@ -2,6 +2,7 @@ import React, {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -30,6 +31,8 @@ export function InlineListbox<T>({
   getKey,
   renderOption,
   onSelect,
+  onActiveChange,
+  isOptionDisabled,
   className,
   before,
   after,
@@ -41,6 +44,8 @@ export function InlineListbox<T>({
   getKey: (option: T) => string;
   renderOption: (option: T) => ReactNode;
   onSelect: (option: T) => void;
+  onActiveChange?: (index: number) => void;
+  isOptionDisabled?: (option: T) => boolean;
   className?: string;
   before?: ReactNode;
   after?: ReactNode;
@@ -48,21 +53,27 @@ export function InlineListbox<T>({
   return (
     <div className={className} role="listbox" id={id} aria-label={label}>
       {before}
-      {options.map((option, index) => (
-        <button
-          type="button"
-          role="option"
-          id={`${id}-${index}`}
-          aria-selected={index === activeIndex}
-          tabIndex={-1}
-          className={`ui-inline-listbox-option${index === activeIndex ? " is-active" : ""}`}
-          key={getKey(option)}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => onSelect(option)}
-        >
-          {renderOption(option)}
-        </button>
-      ))}
+      {options.map((option, index) => {
+        const optionDisabled = isOptionDisabled?.(option) ?? false;
+        return (
+          <button
+            type="button"
+            role="option"
+            id={`${id}-${index}`}
+            aria-selected={index === activeIndex}
+            aria-disabled={optionDisabled || undefined}
+            tabIndex={-1}
+            className={`ui-inline-listbox-option${index === activeIndex ? " is-active" : ""}`
+              + `${optionDisabled ? " is-disabled" : ""}`}
+            key={getKey(option)}
+            onMouseDown={(event) => event.preventDefault()}
+            onMouseEnter={() => onActiveChange?.(index)}
+            onClick={() => { if (!optionDisabled) onSelect(option); }}
+          >
+            {renderOption(option)}
+          </button>
+        );
+      })}
       {after}
     </div>
   );
@@ -106,7 +117,8 @@ export function Checkbox({
  *
  *   SegmentedControl  2-4 short, mutually exclusive options, always visible. A filter, a mode.
  *   ChoiceCard        options that need a description or an icon to choose between. A preset.
- *   Select            too many to show at once, or the list is data. A project, an agent.
+ *   Select            data-backed options that fit ordinary listbox navigation. A machine.
+ *   SearchableCombobox data-backed options users need to narrow by typing. A project, an agent.
  *
  * All three share one selected treatment — accent border plus a tint — because that is the one the
  * app already used most, so adoption changes the fewest screens.
@@ -355,6 +367,239 @@ export function ChoiceCards<T extends string>({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * SearchableCombobox
+ * ---------------------------------------------------------------------------------------------- */
+
+export interface SearchableComboboxOption<T extends string> {
+  value: T;
+  label: string;
+  /** Visible context that distinguishes duplicate or similarly named choices. */
+  description?: string;
+  /** Additional already-authorized terms that are useful to search but need not be repeated. */
+  keywords?: readonly string[];
+  disabled?: boolean;
+  /** Rendered with the option so an unavailable result explains itself when arrows reach it. */
+  disabledReason?: string;
+}
+
+/**
+ * Filter without inventing metadata: every searchable term is supplied by the caller, which owns
+ * the authorization boundary for Project paths, runner details and other potentially private
+ * context. Terms are ANDed so "dashboard remote" can distinguish duplicate names.
+ */
+export function filterSearchableComboboxOptions<T extends string>(
+  options: readonly SearchableComboboxOption<T>[],
+  query: string,
+): SearchableComboboxOption<T>[] {
+  const terms = query.trim().toLowerCase().split(/\s+/u).filter(Boolean);
+  if (terms.length === 0) return [...options];
+  return options.filter((option) => {
+    const haystack = [
+      option.label,
+      option.description,
+      option.disabledReason,
+      ...(option.keywords ?? []),
+    ].filter((part): part is string => Boolean(part)).join(" ").toLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+/**
+ * An editable list autocomplete built on InlineListbox.
+ *
+ * DOM focus stays on the input while `aria-activedescendant` moves through the popup. Unavailable
+ * options stay in that arrow order so their rendered reason can be inspected, but activation is
+ * refused in both this owner and InlineListbox. Enter belongs to selection only while the popup is
+ * open; once closed it is deliberately untouched so an enclosing form can own default submission.
+ */
+export function SearchableCombobox<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+  describedBy,
+  placeholder = "Search…",
+  emptyLabel = "No Matches",
+  disabled = false,
+  className,
+}: {
+  options: readonly SearchableComboboxOption<T>[];
+  value: T | null;
+  onChange: (value: T) => void;
+  label: string;
+  describedBy?: string;
+  placeholder?: string;
+  emptyLabel?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const generatedId = useId();
+  const listboxId = `${generatedId}-listbox`;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const coarsePointer = useCoarsePointer();
+  const selected = options.find((option) => option.value === value) ?? null;
+  const results = useMemo(
+    () => filterSearchableComboboxOptions(options, searching ? query : ""),
+    [options, query, searching],
+  );
+  // Options may change while open (agent setup and runner availability are live), and filtering can
+  // shrink the list under the previous index. Derive the safe index rather than repairing state in
+  // an effect and rendering one frame with an aria-activedescendant that names nothing.
+  const activeIndex = results.length === 0 ? 0 : Math.min(active, results.length - 1);
+  const inputValue = searching ? query : selected?.label ?? "";
+  const desiredHeight = selectMenuDesiredHeight({
+    optionCount: results.length,
+    maxOptionLines: results.reduce((most, option) => Math.max(most, 1
+      + (option.description ? 1 : 0)
+      + (option.disabled && option.disabledReason ? 1 : 0)), 1),
+    coarsePointer,
+  });
+  const listStyle = useAnchoredMenuStyle(open, inputRef, {
+    desiredHeight,
+    matchTriggerWidth: true,
+  });
+
+  const close = () => {
+    setOpen(false);
+    setSearching(false);
+  };
+  const openAll = () => {
+    const selectedIndex = options.findIndex((option) => option.value === value);
+    setSearching(false);
+    setActive(Math.max(0, selectedIndex));
+    setOpen(true);
+  };
+  const commit = (option: SearchableComboboxOption<T>) => {
+    if (option.disabled) return;
+    onChange(option.value);
+    close();
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (event: Event) => {
+      if (!rootRef.current?.contains(event.target as Node)) close();
+    };
+    const leaveWindow = () => close();
+    document.addEventListener("pointerdown", dismiss, true);
+    document.addEventListener("focusin", dismiss, true);
+    window.addEventListener("blur", leaveWindow);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("focusin", dismiss, true);
+      window.removeEventListener("blur", leaveWindow);
+    };
+  }, [open]);
+
+  const moveActive = (delta: number) => {
+    if (results.length === 0) return;
+    setActive((activeIndex + delta + results.length) % results.length);
+  };
+  const activeOption = results[activeIndex];
+
+  return (
+    <div
+      className={`ui-searchable-combobox${className ? ` ${className}` : ""}`}
+      ref={rootRef}
+    >
+      <input
+        ref={inputRef}
+        type="text"
+        role="combobox"
+        aria-label={label}
+        aria-describedby={describedBy}
+        aria-autocomplete="list"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listboxId : undefined}
+        aria-activedescendant={open && activeOption ? `${listboxId}-${activeIndex}` : undefined}
+        aria-disabled={disabled || undefined}
+        autoComplete="off"
+        className="ui-searchable-combobox-input"
+        placeholder={placeholder}
+        value={inputValue}
+        onFocus={(event) => {
+          if (disabled) return;
+          if (!open) openAll();
+          event.currentTarget.select();
+        }}
+        onClick={() => { if (!disabled && !open) openAll(); }}
+        onChange={(event) => {
+          if (disabled) return;
+          setQuery(event.target.value);
+          setSearching(true);
+          setActive(0);
+          setOpen(true);
+        }}
+        onKeyDown={(event) => {
+          if (disabled || event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (event.key === "Tab") {
+            if (open) close();
+            return;
+          }
+          const plainKey = !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+          if (!plainKey) return;
+          if (event.key === "Escape" && open) {
+            event.preventDefault();
+            event.stopPropagation();
+            close();
+            return;
+          }
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (!open) {
+              openAll();
+              return;
+            }
+            moveActive(event.key === "ArrowDown" ? 1 : -1);
+            return;
+          }
+          if (open && (event.key === "Home" || event.key === "End")) {
+            event.preventDefault();
+            setActive(event.key === "Home" ? 0 : Math.max(0, results.length - 1));
+            return;
+          }
+          if (event.key === "Enter" && open) {
+            event.preventDefault();
+            if (activeOption) commit(activeOption);
+          }
+        }}
+      />
+      {open && (
+        <InlineListbox
+          id={listboxId}
+          label={`${label} Options`}
+          options={results}
+          activeIndex={activeIndex}
+          getKey={(option) => option.value}
+          onActiveChange={setActive}
+          isOptionDisabled={(option) => Boolean(option.disabled)}
+          onSelect={commit}
+          className="ui-searchable-combobox-list ui-select-list"
+          before={results.length === 0
+            ? <p className="ui-select-empty">{emptyLabel}</p>
+            : undefined}
+          renderOption={(option) => (
+            <span className="ui-select-option-body">
+              <span>{option.label}</span>
+              {option.description && <small className="ui-select-option-desc">{option.description}</small>}
+              {option.disabled && option.disabledReason && (
+                <small className="ui-select-option-reason">{option.disabledReason}</small>
+              )}
+            </span>
+          )}
+        />
+      )}
     </div>
   );
 }

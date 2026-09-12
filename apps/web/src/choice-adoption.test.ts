@@ -8,7 +8,7 @@ import { rovingChoiceStop } from "./components/interactions.js";
 /**
  * Phase 6, one screen at a time — and a ratchet so the count can only come down.
  *
- * §11.1 counted seventeen ways this app asks "pick one of N". §29 built three primitives to replace
+ * §11.1 counted seventeen ways this app asks "pick one of N". §29 built shared primitives to replace
  * fifteen of them (two are legitimately tablists and stay). Adoption is per screen, so for a while
  * both the primitive and the bespoke pattern exist side by side — which is the state in which a new
  * screen copies the wrong one, because the old pattern is still visibly in use.
@@ -65,8 +65,8 @@ const PATTERNS = {
   "agent-pick": /agent-pick/g,
   "cbar-opt": /cbar-opt/g,
   // A native select cannot show a description or an icon, and cannot explain a disabled option.
-  // `Select` replaces the ones that are a CHOICE; some of these are ordinary form fields and will
-  // stay, which is why the inventory is per file rather than a prohibition.
+  // `Select` or `SearchableCombobox` replaces the ones that are a CHOICE; some of these are ordinary
+  // form fields and will stay, which is why the inventory is per file rather than a prohibition.
   "native-select": /<select[\s>]/g,
   // Raw choice SEMANTICS, for the control that uses none of the names above. A hand-rolled
   // `role="radiogroup"` with `role="radio"` buttons and a fresh class name contributed nothing to
@@ -281,7 +281,7 @@ test("a fully migrated screen renders a primitive", () => {
   // half — and it looks for a RENDERED element: matching the bare name passed against a screen
   // whose primitive had been renamed and therefore rendered nothing.
   for (const name of FULLY_MIGRATED) {
-    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceCards|Select)[\s/>]/,
+    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceCards|Select|SearchableCombobox)[\s/>]/,
       `${name} is listed as fully migrated but renders no choice primitive`);
   }
 });
