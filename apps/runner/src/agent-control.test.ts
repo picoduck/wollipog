@@ -56,8 +56,12 @@ function spec(driver: SessionLaunchSpec["driver"] = "codex"): SessionLaunchSpec 
 test("orchestrator provisioning restricts native tools and refuses unsupported launch boundaries", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-control-"));
   try {
-    const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root };
-    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION };
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const,
+      orchestratorProjectPaths: ["/other-project", "C:\\other-project"] };
     for (const driver of ["codex", "claude-code"] as const) {
       const launch = spec(driver);
       launch.config = { permissionMode: "orchestrator" };
@@ -67,6 +71,10 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
       provisionAgentControl(launch, control, () => {}, host);
       assert.deepEqual(launch.args, args, "resume is idempotent");
       assert.ok(launch.args.includes(driver === "codex" ? "--strict-config" : "--strict-mcp-config"));
+      if (driver === "claude-code") {
+        assert.deepEqual(launch.args.flatMap((arg, index) => arg === "--add-dir" ? [launch.args[index + 1]] : []),
+          ["/other-project", "/repo"]);
+      }
     }
     const acp = spec("acp");
     acp.command = "npx";
@@ -88,7 +96,7 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
     };
     provisionAgentControl(acp, { ...control, orchestratorAgent: acpAgent }, () => {}, host);
     assert.deepEqual(acp.args, acpAgent.args);
-    assert.equal(acp.acpSessionContext?.additionalDirectories, undefined);
+    assert.deepEqual(acp.acpSessionContext?.additionalDirectories, ["/other-project", "/repo"]);
     assert.deepEqual(acp.acpSessionContext?.mcpServers?.map((server) => server.name), ["wollipog"]);
     const acpMcp = acp.acpSessionContext?.mcpServers?.[0];
     assert.equal(acpMcp?.type, "stdio");
@@ -97,6 +105,14 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
       assert.deepEqual(acpMcp.args, ["--agent-control-mcp"]);
       assert.deepEqual(acpMcp.env?.WOLLIPOG_SESSION_TOKEN_FILE, { fromEnv: "WOLLIPOG_SESSION_TOKEN_FILE" });
     }
+
+    const windows = spec("claude-code");
+    windows.sessionId = "s_windows_refused";
+    windows.workspacePath = "C:\\repo";
+    windows.config = { permissionMode: "orchestrator" };
+    assert.throws(() => provisionAgentControl(windows, control, () => {}, { ...host, platform: "win32" }),
+      /attested native filesystem boundary/);
+    assert.equal(existsSync(agentControlTokenPath(root, windows.sessionId)), false);
 
     const generic = spec("acp");
     generic.sessionId = "s_generic_acp";

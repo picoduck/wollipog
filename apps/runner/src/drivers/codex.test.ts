@@ -114,6 +114,29 @@ test("resumeId pre-seeds the threadId so the next turn resumes (Phase 2)", () =>
   assert.equal(driver.agentSessionId(), "thread-resumed");
 });
 
+test("an Orchestrator resume explicitly re-pins scratch cwd and sandbox", async () => {
+  const child = fakeAgentProcess();
+  let spawnedArgs: string[] = [];
+  const driver = new CodexDriver({
+    command: "codex", args: [], cwd: "/private/scratch", env: {},
+    config: { permissionMode: "orchestrator" }, context: { kind: "native" },
+    resumeId: "thread-from-old-project-cwd",
+  }, { onEvent() {}, onStderr() {}, onExit() {} }, {
+    spawn(options) { spawnedArgs = options.args; return child; },
+    kill() {}, orchestratorMcpArgs: async () => [],
+  });
+  try {
+    const turn = driver.prompt("continue planning");
+    await nextTask();
+    assert.deepEqual(spawnedArgs.slice(0, 6), [
+      "exec", "-C", "/private/scratch", "-s", "workspace-write", "resume",
+    ]);
+    child.stdout.emit("data", JSON.stringify({ type: "turn.completed" }) + "\n");
+    child.emit("close", 0);
+    assert.equal(await turn, "end_turn");
+  } finally { driver.dispose(); }
+});
+
 test("thread.started without thread_id leaves threadId unchanged", () => {
   const { driver } = makeDriver();
   handleEvent(driver, { type: "thread.started", thread_id: "first" });

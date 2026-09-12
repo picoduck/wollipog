@@ -367,7 +367,7 @@ const metadata: RunnerMetadata = {
   version: VERSION,
   // Pre-discovery config rows go out verbatim so live discovery can still authoritatively
   // fill availability and capabilities; supported native agents gain the runner-owned preset.
-  agents: withOrchestratorPreset(configuredAgentDefinitions, { wslIsolationMode: config.executionIsolation.mode }),
+  agents: withOrchestratorPreset(configuredAgentDefinitions, { isolationMode: config.executionIsolation.mode }),
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -571,6 +571,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         registerCredentialAndWait: registerAgentControlCredentialAndWait,
         orchestratorAgent: localAgent,
         executionIsolationMode: config.executionIsolation.mode,
+        orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
       },
       log,
       agentControlHost,
@@ -1111,7 +1112,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       claudeHookFeatureEnabled,
       log,
     );
-    metadata.agents = withOrchestratorPreset(metadata.agents, { wslIsolationMode: config.executionIsolation.mode });
+    metadata.agents = withOrchestratorPreset(metadata.agents, { isolationMode: config.executionIsolation.mode });
     // A definitive native discovery result is newer authoritative evidence than the process-local
     // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
     // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.
@@ -1969,11 +1970,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
         resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
+          executionIsolationMode: config.executionIsolation.mode,
+          prepareScratch: (prepared) => sessions.prepareOrchestratorScratch(prepared),
           provision: async (prepared) => {
             prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
             await provisionAgentControl(prepared, {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
+              executionIsolationMode: config.executionIsolation.mode,
+              orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
             }, log, agentControlHost);
             // Even the no-turn MCP configuration probe may initialize provider HOME.
             sessions.acquireAgentTuiProviderHome(prepared);

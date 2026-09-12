@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriverOptions } from "./drivers/driver.js";
@@ -9,6 +9,8 @@ import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js";
+import { providerStateKey } from "./execution-isolation.js";
+import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
 import { requestedWorktreeBoundary, setStatfsForTests } from "./worktree.js";
 
 /** Cloud placements snapshot the session's real host worktree and launch re-proves that exact
@@ -145,7 +147,6 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     const internals = manager as any;
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
-
     rmSync(homeLink);
     symlinkSync(retargetedHome, homeLink, "dir");
     const currentMeta = store.readMeta("s1");
@@ -172,6 +173,48 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     );
   } finally {
     manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native bwrap Orchestrator binds scratch without a writable project boundary", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-orchestrator-bwrap-"));
+  try {
+    const store = new SessionStore(root);
+    store.create({ ...meta(), config: { permissionMode: "orchestrator" } });
+    let captured: DriverOptions | undefined;
+    let isolationInput: unknown;
+    const factory = (_driver: unknown, opts: DriverOptions) => {
+      captured = opts;
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+      };
+    };
+    const isolation = { backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "allow" as const };
+    const dataDir = join(root, ".runner-data");
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "allow" }, async (_policy, _context, _deps, options) => {
+        isolationInput = options;
+        return isolation;
+      },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    const scratch = join(store.sessionPath("s1"), "orchestrator-scratch");
+    assert.equal(captured?.cwd, scratch);
+    assert.deepEqual(captured?.isolation, isolation);
+    assert.deepEqual(isolationInput, {
+      driver: "claude-code", dataDir, env: { TMPDIR: scratch }, sessionId: "s1", cwd: scratch,
+      orchestratorScratchOnly: true,
+    });
+    manager.shutdownAll();
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -245,6 +288,35 @@ test("strict isolation resolution failure prevents driver construction", async (
   }
 });
 
+test("persisted native Claude Orchestrator refuses provider-only isolation before preparation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-orchestrator-provider-refusal-"));
+  try {
+    const store = new SessionStore(root);
+    store.create({ ...meta(), config: { permissionMode: "orchestrator" } });
+    let prepared = false;
+    let constructed = false;
+    const messages: unknown[] = [];
+    const manager = new SessionManager(
+      (message) => messages.push(message), () => {}, store, "runner", undefined,
+      (() => { constructed = true; throw new Error("must not construct"); }) as never,
+      undefined, 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (manager as any).prepareLaunch = async () => { prepared = true; };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), false);
+    assert.deepEqual({ prepared, constructed }, { prepared: false, constructed: false });
+    assert.match(JSON.stringify(messages), /attested native filesystem boundary/);
+    assert.equal(existsSync(join(store.sessionPath("s1"), "orchestrator-scratch")), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("WSL bwrap rejection precedes preparation, state migration, root resolution, and driver construction", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-isolation-fail-"));
   try {
@@ -293,7 +365,28 @@ test("WSL bwrap rejection precedes preparation, state migration, root resolution
   }
 });
 
-test("safe Direct WSL uses one target-resolved cwd for isolation, driver construction, and session creation", async () => {
+test("Orchestrator scratch is session-private and removed with native session state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-scratch-"));
+  try {
+    const store = new SessionStore(root);
+    const row = { ...meta(), config: { permissionMode: "orchestrator" as const } };
+    store.create(row);
+    const manager = new SessionManager(() => {}, () => {}, store, "runner");
+    const scratch = await manager.prepareOrchestratorScratch(row);
+    assert.equal(scratch, join(store.sessionPath("s1"), "orchestrator-scratch"));
+    assert.equal(existsSync(scratch), true);
+    writeFileSync(join(scratch, "plan.md"), "private planning state");
+    store.remove("s1");
+    assert.equal(existsSync(scratch), false);
+    await assert.rejects(manager.prepareOrchestratorScratch(row), /session disappeared/);
+    assert.equal(existsSync(store.sessionPath("s1")), false, "a delete/prepare race leaves no recreated scratch tree");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("safe Direct WSL uses one scratch cwd for isolation, driver construction, and session creation", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-authoritative-cwd-"));
   try {
     const store = new SessionStore(root);
@@ -311,12 +404,14 @@ test("safe Direct WSL uses one target-resolved cwd for isolation, driver constru
     let captured: DriverOptions | undefined;
     let newSessionCwd: string | undefined;
     let isolationInput: unknown;
+    const ownerHash = "a".repeat(64);
+    const scratch = `${wslBwrapSessionRoot(ownerHash, providerStateKey("s1"))}/scratch`;
     const safeIsolation = {
       backend: "wsl-bwrap" as const,
       distro: "Ubuntu",
       command: "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1",
       args: [],
-      cwd: "/work/canonical",
+      cwd: scratch,
       network: "deny" as const,
       wslAgentControl: {
         protocolVersion: 1 as const,
@@ -353,17 +448,18 @@ test("safe Direct WSL uses one target-resolved cwd for isolation, driver constru
     // launch is authorized, no pre-launch or provider path retains the untrusted requested alias.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (manager as any).authorizeSafeWslLaunch = () => true;
+    (manager as any).runnerOwnerHash = ownerHash;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = manager as any;
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
     assert.deepEqual(isolationInput, {
-      driver: "codex-app-server", dataDir: join(root, ".runner-data"), env: {},
-      sessionId: "s1", cwd: "/work/requested",
+      driver: "codex-app-server", dataDir: join(root, ".runner-data"), env: { TMPDIR: scratch },
+      sessionId: "s1", cwd: scratch, orchestratorScratchOnly: true, ownerHash,
     });
-    assert.equal(captured?.cwd, "/work/canonical");
-    assert.equal(newSessionCwd, "/work/canonical");
-    assert.equal(internals.active.get("s1")?.cwd, "/work/canonical");
+    assert.equal(captured?.cwd, scratch);
+    assert.equal(newSessionCwd, scratch);
+    assert.equal(internals.active.get("s1")?.cwd, scratch);
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

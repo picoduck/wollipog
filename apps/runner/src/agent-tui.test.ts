@@ -9,6 +9,7 @@ import { provisionAgentControl } from "./agent-control.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { waitForPendingKills } from "./spawn.js";
 import { openWindowsConpty } from "./windows-conpty.js";
+import { orchestratorLaunchArgs } from "./orchestrator-preset.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -139,6 +140,18 @@ test("Windows cmd shim launch rejects percent expansion", () => {
   );
 });
 
+test("Windows Claude Orchestrator TUI argv carries a single-line system prompt", () => {
+  const args = orchestratorLaunchArgs("claude-code", {
+    command: "runner.exe", args: ["--agent-control-mcp"], env: {},
+  }, ["C:\\repo"]);
+  const launch = agentTuiLaunch(meta({ driver: "claude-code", args }), {
+    platform: "win32", comspec: "cmd.exe",
+  });
+  assert.ok(launch);
+  assert.equal(args.some((arg) => /[\r\n]/u.test(arg)), false);
+  assert.match(launch.args.at(-1) ?? "", /append-system-prompt/);
+});
+
 test("orchestrator TUIs rebuild credentials and restrictions without mutating durable metadata", async () => {
   const dir = mkdtempSync(join(tmpdir(), "orchestrator-tui-"));
   try {
@@ -148,42 +161,42 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
       let probes = 0;
       const launch = await prepareAgentTuiLaunch(source, {
         controlPlaneProtocolVersion: PROTOCOL_VERSION,
+        executionIsolationMode: "bwrap",
+        platform: "linux",
+        prepareScratch: async () => "/scratch",
         provision: (prepared) => provisionAgentControl(prepared, {
           controlPlaneUrl: "ws://127.0.0.1:8787/runner",
           controlPlaneProtocolVersion: PROTOCOL_VERSION,
+          executionIsolationMode: "bwrap",
           registerCredential: () => {},
         }, () => {}, {
           configDir: dir, execPath: process.execPath, scriptPath: "/runner/cli.ts", execArgv: [], isSea: false,
+          platform: "linux",
         }),
         probe: async (prepared, cwd) => {
           probes++;
-          assert.equal(cwd, "/repo-wt");
+          assert.equal(cwd, "/scratch");
           assert.ok(prepared.args.includes("--strict-config"));
           assert.equal(prepared.env?.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
           return ["-c", "mcp_servers.ambient.enabled=false"];
         },
       });
       assert.ok(launch);
+      assert.equal(launch.cwd, "/scratch");
       assert.equal(launch.env?.WOLLIPOG_PERMISSION_PRESET, "orchestrator");
+      assert.equal(launch.env?.TMPDIR, "/scratch");
       assert.ok(launch.env?.WOLLIPOG_SESSION_TOKEN_FILE);
       assert.equal(JSON.stringify(source), original);
       if (driver === "claude-code") {
         assert.equal(probes, 0);
-        if (process.platform === "win32") {
-          const tail = launch.args.at(-1) ?? "";
-          assert.ok(tail.includes("--strict-mcp-config"));
-          assert.match(tail, /--tools ""/);
-          assert.ok(tail.includes("--setting-sources"));
-        } else {
-          assert.ok(launch.args.includes("--strict-mcp-config"));
-          assert.equal(launch.args[launch.args.indexOf("--tools") + 1], "");
-          assert.ok(launch.args.includes("--setting-sources"));
-        }
+        assert.ok(launch.args.includes("--strict-mcp-config"));
+        assert.match(launch.args[launch.args.indexOf("--tools") + 1] ?? "", /Read/);
+        assert.ok(launch.args.includes("--setting-sources"));
       } else {
         assert.equal(probes, 1);
         const launchText = launch.args.join(" ");
         assert.ok(launchText.includes("mcp_servers.ambient.enabled=false"));
-        assert.match(launchText, /sandbox_mode=.*read-only/);
+        assert.match(launchText, /sandbox_mode=.*workspace-write/);
       }
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -191,10 +204,18 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
 
 test("orchestrator TUI preparation fails closed for old peers, unsupported targets, terminal sessions and probes", async () => {
   const source = meta({ driver: "codex", config: { permissionMode: "orchestrator" } });
-  const dependencies = { controlPlaneProtocolVersion: PROTOCOL_VERSION, provision: () => {} };
+  const dependencies = {
+    controlPlaneProtocolVersion: PROTOCOL_VERSION, platform: "linux" as const,
+    provision: () => {}, prepareScratch: async () => "/scratch",
+  };
   await assert.rejects(prepareAgentTuiLaunch(source, { ...dependencies, controlPlaneProtocolVersion: 111 }), /current native/);
   await assert.rejects(prepareAgentTuiLaunch({ ...source, context: { kind: "wsl", distro: "test" } }, dependencies), /current native/);
   await assert.rejects(prepareAgentTuiLaunch({ ...source, driver: "acp" }, dependencies), /current native/);
+  await assert.rejects(prepareAgentTuiLaunch(source, { ...dependencies, platform: "win32" }),
+    /attested native filesystem boundary/);
+  await assert.rejects(prepareAgentTuiLaunch({ ...source, driver: "claude-code" }, {
+    ...dependencies, platform: "linux", executionIsolationMode: "provider",
+  }), /attested native filesystem boundary/);
   for (const status of ["stopped", "failed", "completed"] as const) {
     await assert.rejects(prepareAgentTuiLaunch({ ...source, status }, dependencies), /active session/);
   }
@@ -206,5 +227,6 @@ test("orchestrator TUI preparation fails closed for old peers, unsupported targe
   }), /credential provisioning failed/);
   assert.deepEqual(await prepareAgentTuiLaunch(meta(), {
     controlPlaneProtocolVersion: 58, provision: () => assert.fail("ordinary TUI must not reprovision"),
+    prepareScratch: async () => assert.fail("ordinary TUI must not prepare scratch"),
   }), agentTuiLaunch(meta()));
 });

@@ -70,7 +70,8 @@ import {
   validateQuestionAnswers,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type {
@@ -96,6 +97,8 @@ import {
   verifyExecutionIsolationForkState,
 } from "./execution-isolation.js";
 import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
+import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
+import { supportsNativeOrchestratorBoundary } from "./orchestrator-preset.js";
 import type { SpawnIsolation } from "./spawn.js";
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
@@ -3849,6 +3852,9 @@ export class SessionManager {
       // working directory.
       if (worktree &&
           !(await this.verifySelectedWorktreeBeforeLaunch(meta, worktree, launchGeneration))) return false;
+      if (meta.config.permissionMode === "orchestrator") {
+        cwd = await this.prepareOrchestratorScratch(meta);
+      }
       const priorCapabilities = meta.capabilities;
       const priorSessionSlashCommands = meta.sessionSlashCommands;
       launchPreparation = await this.prepareLaunch?.(meta);
@@ -3856,6 +3862,14 @@ export class SessionManager {
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+      if (meta.config.permissionMode === "orchestrator") {
+        meta.env = {
+          ...meta.env,
+          ...(meta.context.kind === "native" && process.platform === "win32"
+            ? { TEMP: cwd, TMP: cwd }
+            : { TMPDIR: cwd }),
+        };
+      }
       if (sameSlashCommandCatalog(priorSessionSlashCommands, meta.sessionSlashCommands)) {
         meta.sessionSlashCommands = priorSessionSlashCommands;
       }
@@ -4278,6 +4292,7 @@ export class SessionManager {
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
+      ...(meta.config.permissionMode === "orchestrator" ? { orchestratorScratchOnly: true } : {}),
       ...(additionalWritableRoots.length ? { additionalWritableRoots } : {}),
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     }));
@@ -4287,6 +4302,10 @@ export class SessionManager {
     meta: Pick<SessionMeta, "agentId" | "command" | "args" | "driver" | "context" | "config" | "executionTarget">,
   ): void {
     if (meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return;
+    if (meta.context.kind === "native" && meta.config.permissionMode === "orchestrator" &&
+        !supportsNativeOrchestratorBoundary(meta.driver, process.platform, this.executionIsolation.mode)) {
+      throw new Error("Orchestrator launch requires an attested native filesystem boundary for this harness");
+    }
     if (meta.context.kind === "wsl" && meta.config.permissionMode === "orchestrator") {
       if (this.executionIsolation.mode === "bwrap" && this.authorizeSafeWslLaunch?.(meta) === true) return;
       throw new Error("Direct WSL Orchestrator requires the freshly attested target-local bwrap launcher");
@@ -4295,6 +4314,7 @@ export class SessionManager {
   }
 
   private async requestedWorktreeIsolation(meta: SessionMeta): Promise<string[]> {
+    if (meta.config.permissionMode === "orchestrator") return [];
     if (this.executionIsolation.mode !== "bwrap" && this.executionIsolation.mode !== "seatbelt") return [];
     // Direct WSL orchestration creates child worktrees through the runner; the provider never
     // needs the future requested-worktree boundary writable. Computing that legacy boundary would
@@ -4312,6 +4332,24 @@ export class SessionManager {
     return selected && !pathWithin(meta.context, selected, boundary)
       ? [boundary, selected]
       : [boundary];
+  }
+
+  /** A stable session-private cwd gives planning tools somewhere to write without making any
+   * Project Location writable. Native storage lives under the session row and is removed by
+   * SessionStore.remove; Direct WSL uses the launcher's root-owned per-session partition. */
+  async prepareOrchestratorScratch(meta: SessionMeta): Promise<string> {
+    if (meta.config.permissionMode !== "orchestrator") return meta.worktreePath ?? meta.repoPath;
+    if (meta.context.kind === "wsl") {
+      if (!this.runnerOwnerHash) throw new Error("Direct WSL Orchestrator scratch requires an attested runner owner");
+      return `${wslBwrapSessionRoot(this.runnerOwnerHash, providerStateKey(meta.sessionId))}/scratch`;
+    }
+    const scratch = join(this.store.sessionPath(meta.sessionId), "orchestrator-scratch");
+    await mkdir(scratch, { recursive: true, mode: 0o700 });
+    if (!this.store.has(meta.sessionId)) {
+      await rm(this.store.sessionPath(meta.sessionId), { recursive: true, force: true });
+      throw new Error("session disappeared while Orchestrator scratch was being prepared");
+    }
+    return scratch;
   }
 
   private async prepareCloudIsolation(

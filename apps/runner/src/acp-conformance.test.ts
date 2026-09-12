@@ -120,6 +120,7 @@ test("ACP orchestrator sends restrictions and refuses client execution services"
     }),
     sessionContext: {
       mcpServers: [{ type: "stdio", name: "wollipog", command: "/runner", args: ["--agent-control-mcp"] }],
+      additionalDirectories: ["/read-only-project"],
     },
     mcpEnvironment: {},
     sessionId: "s_orchestrator",
@@ -132,11 +133,16 @@ test("ACP orchestrator sends restrictions and refuses client execution services"
     supportsImages: false,
     ev: { onEvent: () => undefined },
   });
+  (client as any).negotiation.stable.sessionAdditionalDirectories = true;
 
   const request = (client as any).sessionRequest("/workspace") as Record<string, any>;
   assert.deepEqual(request.mcpServers.map((server: { name: string }) => server.name), ["wollipog"]);
-  assert.deepEqual(request._meta.claudeCode.options.tools, []);
-  assert.deepEqual(request._meta.claudeCode.options.allowedTools, ["mcp__wollipog__*"]);
+  assert.deepEqual(request.additionalDirectories, ["/read-only-project"]);
+  assert.deepEqual(request._meta.claudeCode.options.additionalDirectories, ["/read-only-project"]);
+  assert.deepEqual(request._meta.claudeCode.options.tools, ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash"]);
+  assert.ok(request._meta.claudeCode.options.allowedTools.includes("mcp__wollipog__*"));
+  assert.ok(request._meta.claudeCode.options.allowedTools.includes("Bash(git show:*)"));
+  assert.equal(request._meta.claudeCode.options.permissionMode, "dontAsk");
   assert.deepEqual(request._meta.claudeCode.options.settingSources, []);
   assert.deepEqual(request._meta.claudeCode.options.settings, { disableAllHooks: true });
 

@@ -211,7 +211,10 @@ export function buildCodexTurnParams(
 ): Json {
   const mode = cfg.permissionMode || AUTO_REVIEW_MODE;
   if (mode === "orchestrator") {
-    return { threadId, input, approvalPolicy: "never", sandboxPolicy: { type: "readOnly" }, cwd,
+    return { threadId, input, approvalPolicy: "never", sandboxPolicy: {
+      type: "workspaceWrite", writableRoots: [cwd], networkAccess: true,
+      excludeTmpdirEnvVar: true, excludeSlashTmp: true,
+    }, cwd,
       ...(cfg.model && cfg.model !== "default" ? { model: cfg.model } : {}),
       ...(cfg.effort ? { effort: cfg.effort } : {}),
       ...configuredServiceTier(cfg, capabilities) };

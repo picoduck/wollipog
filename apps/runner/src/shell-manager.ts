@@ -57,6 +57,7 @@ export interface ShellLaunch {
 export interface ShellProcessLaunch {
   command: string;
   args: string[];
+  cwd?: string;
   env?: Record<string, string>;
   scrubInheritedEnv?: string[];
   verbatimCommandLine?: string;
@@ -188,12 +189,13 @@ export class ShellManager {
       ? posixPtyCommandLaunch(cols, rows, meta.launch)
       : shellLaunchFor(context, cols, rows);
     const { command, args, pty, ttyFile } = selected;
+    const launchCwd = meta?.launch?.cwd ?? cwd;
     const child = process.platform === "win32" && context.kind === "native"
       ? openWindowsConpty({
           command: meta?.launch?.command ?? command,
           args: meta?.launch?.args ?? args,
           env: meta?.launch?.env,
-          cwd,
+          cwd: launchCwd,
           cols,
           rows,
           scrubInheritedEnv: meta?.launch?.scrubInheritedEnv,
@@ -202,7 +204,7 @@ export class ShellManager {
       : spawnAgent({
           command,
           args,
-          cwd,
+          cwd: launchCwd,
           context,
           env: meta?.launch?.env,
           scrubInheritedEnv: meta?.launch?.scrubInheritedEnv,
