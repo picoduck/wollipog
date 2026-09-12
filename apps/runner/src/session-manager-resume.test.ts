@@ -1434,6 +1434,45 @@ test("recheck without a recorded account asks for explicit acceptance without cl
   }
 });
 
+test("accepting an authenticated observation without an account anchor clears the stale baseline", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: true }),
+    revalidate: async () => ({ status: "authenticated" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialScopeId: "shared-scope",
+    providerCredentialIdentityId: "stale-aggregate",
+    providerCredentialIdentityEvidence: identityEvidence({ email: "stale-email", orgId: "stale-org" }),
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained across explicit acceptance");
+    for (let index = 0; index < 8; index += 1) await tick();
+    const blocked = h.store.readMeta("resume-session")!;
+    assert.equal(blocked.providerAuthBlock?.identityMismatch, true);
+    assert.equal(blocked.pendingApproval?.options[0]?.name, "Use Current Account");
+
+    h.manager.resolvePermission(
+      "resume-session",
+      blocked.pendingApproval!.requestId,
+      "auth:accept-current",
+    );
+    for (let index = 0; index < 20 && h.prompts.length === 0; index += 1) await shortDelay();
+    const accepted = h.store.readMeta("resume-session")!;
+    assert.equal(accepted.providerCredentialIdentityId, undefined);
+    assert.equal(accepted.providerCredentialIdentityEvidence, undefined);
+    assert.equal(accepted.providerAuthBlock, undefined);
+    assert.deepEqual(h.prompts, ["retained across explicit acceptance"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("genuine account changes park with redacted field evidence in block and log", async () => {
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "shared-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
@@ -1505,10 +1544,10 @@ test("a sibling held behind the surfaced authentication card exposes the wait", 
     assert.equal(h.store.readMeta("held-sibling")?.status, "idle");
     const heldEvents = h.store.readEvents("held-sibling");
     assert.ok(heldEvents.some((event) =>
-      event.payload.kind === "stderr" && /owned by another session.*Authentication Required card/i.test(event.payload.text)));
+      event.payload.kind === "stderr" && /owned by another session.*if one appears/i.test(event.payload.text)));
     assert.ok(h.sent.some((message) =>
       message.type === "session_status" && message.sessionId === "held-sibling" &&
-      message.status === "idle" && /owned by another session.*Authentication Required card/i.test(message.detail ?? "")));
+      message.status === "idle" && /owned by another session.*if one appears/i.test(message.detail ?? "")));
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

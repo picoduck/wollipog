@@ -10690,8 +10690,7 @@ export class SessionManager {
         ? { expectedIdentityEvidence: prior?.expectedIdentityEvidence ?? meta.providerCredentialIdentityEvidence }
         : {}),
       ...(prior?.retry ? { retry: prior.retry } : {}),
-      ...(identityMismatchReason || prior?.identityMismatch ? { identityMismatch: true } : {}),
-      ...(identityMismatchReason ?? prior?.reason ? { reason: identityMismatchReason ?? prior?.reason } : {}),
+      ...(identityMismatchReason ? { identityMismatch: true, reason: identityMismatchReason } : {}),
     };
     this.store.patchMeta(meta.sessionId, {
       providerCredentialScopeId: scope.id,
@@ -10701,7 +10700,7 @@ export class SessionManager {
     if (!silently) {
       const owner = this.providerAuthenticationOwner(scope.id);
       if (owner?.sessionId !== meta.sessionId) {
-        const detail = "Authentication recovery is currently owned by another session using this provider credential scope. Follow the Authentication Required card after the current automatic check finishes.";
+        const detail = "Authentication recovery is currently owned by another session using this provider credential scope. Wait for that recovery to finish or use its Authentication Required card if one appears.";
         this.emitEvent(meta.sessionId, { kind: "stderr", text: detail });
         this.emitStatus(meta.sessionId, "idle", detail);
       } else {
@@ -11024,7 +11023,7 @@ export class SessionManager {
       if (retry) this.ensureQueueOrdinal(meta.sessionId, retry);
       this.store.patchMeta(meta.sessionId, {
         providerCredentialScopeId: block.credentialScopeId,
-        ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
+        providerCredentialIdentityId: observation.identityId,
         providerCredentialIdentityEvidence: retainedEvidence,
         providerAuthBlock: undefined,
         pendingApproval: null,
