@@ -11,7 +11,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
-import { INBOX_COLLAPSED_THREADS_KEY } from "../inbox.js";
+import { INBOX_COLLAPSED_THREADS_KEY, type InboxSplit } from "../inbox.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, saveSeen } from "../sessions-seen.js";
 import type { RightPanelState } from "./RightPanel.js";
@@ -215,25 +215,39 @@ function rowTitles(container: HTMLDivElement): string[] {
   return [...container.querySelectorAll(".inbox-row-title")].map((row) => row.textContent ?? "");
 }
 
-test("reminder-filtered splits reconcile blocked and stalled counts with visible rows", () => {
-  const visible = session("visible", 3, { status: "input_required" });
-  const hidden = session("hidden", 2);
+test("reminder-filtered Project splits keep Active and Snoozed counts mutually exclusive", () => {
+  const blocked = session("blocked", 3, { status: "input_required" });
+  const snoozed = session("snoozed", 2);
   const ordinary = session("ordinary", 1);
-  const reminders = new Map([[hidden.id, reminder(hidden.id)]]);
-  const [split] = filterInboxSplitsForReminderMode([{
+  const reminders = new Map([
+    [blocked.id, reminder(blocked.id)],
+    [snoozed.id, reminder(snoozed.id)],
+  ]);
+  const baseSplit = {
     key: null,
     kind: "all",
     name: "All",
     project: null,
-    sessions: [visible, hidden, ordinary],
+    sessions: [blocked, snoozed, ordinary],
     count: 3,
     blockedCount: 1,
     stalledCount: 2,
-  }], reminders, "ordinary", new Set([hidden.id, ordinary.id]));
+  } satisfies InboxSplit;
+  const [activeSplit] = filterInboxSplitsForReminderMode(
+    [baseSplit], reminders, "ordinary", new Set([snoozed.id, ordinary.id]),
+  );
+  const [snoozedSplit] = filterInboxSplitsForReminderMode(
+    [baseSplit], reminders, "snoozed", new Set([snoozed.id, ordinary.id]),
+  );
 
-  assert.deepEqual(split?.sessions.map((candidate) => candidate.id), [visible.id, ordinary.id]);
-  assert.equal(split?.blockedCount, 1);
-  assert.equal(split?.stalledCount, 1, "a snoozed stalled row must not remain in visible aggregates");
+  assert.deepEqual(activeSplit?.sessions.map((candidate) => candidate.id), [ordinary.id]);
+  assert.equal(activeSplit?.count, 1);
+  assert.equal(activeSplit?.blockedCount, 0, "snoozed attention must not remain in Active aggregates");
+  assert.equal(activeSplit?.stalledCount, 1, "a snoozed stalled row must not remain in Active aggregates");
+  assert.deepEqual(snoozedSplit?.sessions.map((candidate) => candidate.id), [blocked.id, snoozed.id]);
+  assert.equal(snoozedSplit?.count, 2);
+  assert.equal(snoozedSplit?.blockedCount, 1);
+  assert.equal(snoozedSplit?.stalledCount, 1);
 });
 
 function selectedRowTitle(container: HTMLDivElement): string | null {
@@ -451,7 +465,7 @@ test("Active and Snoozed badges follow the selected Project split and live remin
 
 });
 
-test("reminder membership, scoped badges, and visible retention reasons reconcile live in list and board", async () => {
+test("reminder membership stays exclusive while scoped attention reconciles in Snoozed list and board", async () => {
   mobileViewport = true;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
@@ -461,16 +475,16 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
     createSocket: () => socket,
     close() {},
   };
-  const omitted = session("omitted", 70, { pendingApproval: undefined as never });
-  const ordinary = session("ordinary", 60);
-  const orphaned = session("orphaned", 50, { backgroundWorkState: "orphaned" });
-  const watchdog = session("watchdog", 40, {
+  const watchdog = session("watchdog", 80, {
     backgroundDeliveries: [{
       deliveryId: "delivery-watchdog",
       continuationId: "continuation-watchdog",
       watchdogState: "terminal_without_continuation",
     } as never],
   });
+  const orphaned = session("orphaned", 75, { backgroundWorkState: "orphaned" });
+  const omitted = session("omitted", 70, { pendingApproval: undefined as never });
+  const ordinary = session("ordinary", 60);
   const failed = session("failed", 30, { status: "failed" });
   const input = session("input", 20, { status: "input_required" });
   const unsnoozed = session("unsnoozed", 10);
@@ -508,10 +522,15 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
     });
   });
 
-  // The session waiting on input leads (#896 orders urgency before recency); the rest keep recency.
-  assert.deepEqual(rowTitles(container), ["Session input", "Session orphaned", "Session watchdog", "Session failed", "Session unsnoozed"]);
-  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 5 Sessions");
+  assert.deepEqual(rowTitles(container), ["Session unsnoozed"]);
+  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 1 Session");
   assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 6 Sessions");
+  assert.doesNotMatch(container.textContent ?? "", /Background Work Orphaned|Result Pending/);
+
+  await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
+  assert.deepEqual(rowTitles(container), [
+    "Session input", "Session watchdog", "Session orphaned", "Session omitted", "Session ordinary", "Session failed",
+  ]);
   assert.match(container.textContent ?? "", /Background Work Orphaned/);
   assert.match(container.textContent ?? "", /Result Pending/);
   assert.ok(container.querySelector('[aria-label="Attention: Background Work Orphaned"]'));
@@ -520,13 +539,12 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
   assert.ok(watchdogPill.classList.contains("background-delivery-pending"));
   assert.equal(watchdogPill.classList.contains("blocked"), false);
 
-  await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
-  assert.deepEqual(rowTitles(container), [
-    "Session input", "Session omitted", "Session ordinary", "Session orphaned", "Session watchdog", "Session failed",
-  ]);
-
   await act(async () => { (container.querySelector('[title="Active"]') as HTMLButtonElement).click(); });
   await renderView("board");
+  assert.deepEqual([...container.querySelectorAll(".card")].map((card) => card.textContent?.includes("Session unsnoozed")), [true]);
+  assert.equal(container.querySelector('.card [aria-label="Reminder: Snoozed"]'), null);
+
+  await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")));
   assert.ok(container.querySelector('.card [aria-label="Attention: Background Work Orphaned"]'));
   const boardWatchdogPill = container.querySelector('.card [aria-label^="Background Work: Result Pending."]');
@@ -538,16 +556,25 @@ test("reminder membership, scoped badges, and visible retention reasons reconcil
   await act(async () => {
     socket.push({ type: "session_upsert", session: { ...orphaned, backgroundWorkState: "resumed", updatedAt: 80 } });
   });
-  assert.equal([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")), false,
-    "clearing the final attention reason removes the still-snoozed card from Active");
-  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 4 Sessions");
+  assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")),
+    "clearing attention must leave the pending reminder in Snoozed");
+  assert.equal(container.querySelector('.card [aria-label="Attention: Background Work Orphaned"]'), null);
+  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 1 Session");
 
   await act(async () => {
     socket.push({ type: "session_reminder_removed", userId: "user", sessionId: ordinary.id });
   });
+  assert.equal([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session ordinary")), false,
+    "removing a reminder immediately removes the session from Snoozed");
+  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 2 Sessions");
+  assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 5 Sessions");
+
+  await act(async () => { (container.querySelector('[title="Active"]') as HTMLButtonElement).click(); });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session ordinary")),
     "removing the reminder returns the idle session without navigation");
-  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 5 Sessions");
+  assert.equal([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")), false,
+    "an attention update must not leak a pending reminder back into Active");
+  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 2 Sessions");
   assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 5 Sessions");
 
 });
@@ -906,6 +933,7 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
     });
   });
 
+  await act(async () => { container.querySelector<HTMLButtonElement>('[title="Snoozed"]')!.click(); });
   await act(async () => { container.querySelector<HTMLButtonElement>(".inbox-row")!.click(); });
   const snooze = [...container.querySelectorAll<HTMLButtonElement>('button[aria-label="Snooze"]')]
     .at(0)!;

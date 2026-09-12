@@ -68,6 +68,30 @@ test("the reminder and mode controls use scoped badges and compact mobile icons"
   expect(geometry.contained).toBe(true);
 });
 
+test("pending snooze excludes attention from Active across list, board, search, and counts", async ({ page }) => {
+  await openHarness(page);
+  const active = page.getByRole("radio", { name: "Active, 4 Sessions" });
+  const snoozed = page.getByRole("radio", { name: "Snoozed, 1 Session" });
+  await expect(page.locator(".inbox-row-shell", { hasText: "Snoozed Session" })).toHaveCount(0);
+
+  const search = page.locator(".inbox-search input");
+  await search.fill("Snoozed Session");
+  await expect(page.locator(".inbox-row-shell", { hasText: "Snoozed Session" })).toHaveCount(0);
+
+  await snoozed.click();
+  const row = page.locator(".inbox-row-shell", { hasText: "Snoozed Session" });
+  await expect(row).toBeVisible();
+  await expect(row.locator('[aria-label="Attention: Approval Required"]')).toBeVisible();
+  await expect(row.locator('[aria-label="Reminder: Snoozed"]')).toBeVisible();
+  await expect(active).toHaveAttribute("aria-checked", "false");
+
+  await page.getByRole("radio", { name: "Board" }).click();
+  const card = page.locator(".board .card", { hasText: "Snoozed Session" });
+  await expect(card).toBeVisible();
+  await expect(card.getByRole("button", { name: "Allow" })).toBeVisible();
+  await expect(card.locator('[aria-label="Reminder: Snoozed"]')).toBeVisible();
+});
+
 test("the Inbox footer centers readable counts on phones and keeps shortcuts trailing on desktop", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openHarness(page);
