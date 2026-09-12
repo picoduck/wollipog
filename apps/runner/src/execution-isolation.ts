@@ -282,6 +282,25 @@ function renderSeatbeltProfile(writableRoots: string[], network: "inherit" | "de
   ].join("\n");
 }
 
+async function canonicalizeSeatbeltAdditionalWritableRoots(
+  roots: readonly string[] | undefined,
+  realpathNative: IsolationDeps["realpathNative"],
+): Promise<string[] | undefined> {
+  if (!roots) return undefined;
+  const canonical: string[] = [];
+  for (const [index, root] of roots.entries()) {
+    try {
+      canonical.push(await realpathNative(root));
+    } catch {
+      throw new Error(
+        `Seatbelt isolation could not resolve additional writable root ${index + 1}; ` +
+        "ensure it exists and is accessible before launch",
+      );
+    }
+  }
+  return canonical;
+}
+
 /** Resolve the configured runner-owned boundary in the target process namespace. Failure is
  * terminal for the session: a strict policy must never silently fall back to provider mode. */
 export async function resolveExecutionIsolation(
@@ -364,11 +383,15 @@ export async function resolveExecutionIsolation(
     const mapping = statePath(state.driver);
     const providerStatePath = mapping ? posix.join(home, ...mapping.relative.split("/")) : undefined;
     if (providerStatePath) await runtime.mkdirNative([providerStatePath]);
+    const additionalWritableRoots = state.orchestratorScratchOnly
+      ? undefined
+      : await canonicalizeSeatbeltAdditionalWritableRoots(state.additionalWritableRoots, runtime.realpathNative);
     const canonicalState = {
       ...state,
       dataDir: await runtime.realpathNative(state.dataDir),
       cwd: await runtime.realpathNative(state.cwd),
       env: { ...state.env, ...(state.env.HOME ? { HOME: home } : {}) },
+      additionalWritableRoots,
       ...(providerStatePath ? { providerStatePath: await runtime.realpathNative(providerStatePath) } : {}),
     };
     const writableRoots = seatbeltWritableRoots(

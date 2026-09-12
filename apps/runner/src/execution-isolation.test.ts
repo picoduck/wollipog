@@ -76,6 +76,91 @@ test("native macOS and Windows policies resolve only their audited platform adap
   ), /native-host only.*WSL Direct execution is unavailable/);
 });
 
+test("Seatbelt canonicalizes additional writable roots for both its profile and live snapshot", async () => {
+  const alias = "/Users/me/Work/current";
+  const canonical = "/Volumes/worktrees/issue-1023";
+  const isolation = await resolveExecutionIsolation(
+    { mode: "seatbelt", network: "deny" }, { kind: "native" }, {
+      platform: "darwin",
+      nativeHome: () => "/Users/me",
+      nativeTmp: () => "/private/var/folders/tmp",
+      realpathNative: async (path) => path === alias ? canonical : path,
+      resolveNative: async (name) => name === "sandbox-exec" ? {
+        path: "/usr/bin/sandbox-exec", via: "path", launch: { command: "/usr/bin/sandbox-exec", args: [] },
+      } : null,
+    }, {
+      driver: "acp",
+      dataDir: "/Users/me/Library/Application Support/Wollipog",
+      env: {},
+      sessionId: "s1",
+      cwd: "/Users/me/Work/repo",
+      additionalWritableRoots: [alias],
+    },
+  );
+  assert.equal(isolation?.backend, "seatbelt");
+  assert.ok(isolation?.backend === "seatbelt" && isolation.writableRoots.includes(canonical));
+  assert.equal(isolation?.backend === "seatbelt" && isolation.writableRoots.includes(alias), false);
+  assert.match(isolation?.backend === "seatbelt" ? isolation.profile : "", /Volumes\/worktrees\/issue-1023/u);
+  assert.doesNotMatch(isolation?.backend === "seatbelt" ? isolation.profile : "", /Users\/me\/Work\/current/u);
+});
+
+test("Seatbelt reports an actionable path-free error for an unresolvable additional root", async () => {
+  const privateAlias = "/Users/private-person/secret-alias";
+  await assert.rejects(() => resolveExecutionIsolation(
+    { mode: "seatbelt", network: "deny" }, { kind: "native" }, {
+      platform: "darwin",
+      nativeHome: () => "/Users/me",
+      nativeTmp: () => "/private/var/folders/tmp",
+      realpathNative: async (path) => {
+        if (path === privateAlias) throw new Error(`ENOENT: ${privateAlias}`);
+        return path;
+      },
+      resolveNative: async (name) => name === "sandbox-exec" ? {
+        path: "/usr/bin/sandbox-exec", via: "path", launch: { command: "/usr/bin/sandbox-exec", args: [] },
+      } : null,
+    }, {
+      driver: "acp",
+      dataDir: "/Users/me/Library/Application Support/Wollipog",
+      env: {},
+      sessionId: "s1",
+      cwd: "/Users/me/Work/repo",
+      additionalWritableRoots: [privateAlias],
+    },
+  ), (error) => {
+    assert.match((error as Error).message, /additional writable root 1.*exists and is accessible/u);
+    assert.doesNotMatch((error as Error).message, /private-person|secret-alias/u);
+    return true;
+  });
+});
+
+test("Orchestrator Seatbelt never resolves additional roots excluded from its profile", async () => {
+  const ignored = "/Users/me/Work/ignored";
+  const isolation = await resolveExecutionIsolation(
+    { mode: "seatbelt", network: "deny" }, { kind: "native" }, {
+      platform: "darwin",
+      nativeHome: () => "/Users/me",
+      nativeTmp: () => "/private/var/folders/tmp",
+      realpathNative: async (path) => {
+        if (path === ignored) throw new Error("ignored roots must not be resolved");
+        return path;
+      },
+      resolveNative: async (name) => name === "sandbox-exec" ? {
+        path: "/usr/bin/sandbox-exec", via: "path", launch: { command: "/usr/bin/sandbox-exec", args: [] },
+      } : null,
+    }, {
+      driver: "acp",
+      dataDir: "/Users/me/Library/Application Support/Wollipog",
+      env: {},
+      sessionId: "s1",
+      cwd: "/Users/me/Work/scratch",
+      additionalWritableRoots: [ignored],
+      orchestratorScratchOnly: true,
+    },
+  );
+  assert.equal(isolation?.backend, "seatbelt");
+  assert.doesNotMatch(isolation?.backend === "seatbelt" ? isolation.profile : "", /Users\/me\/Work\/ignored/u);
+});
+
 test("Seatbelt profile escapes paths and limits its writable surface", () => {
   const profile = buildSeatbeltProfile({
     driver: "codex-app-server",

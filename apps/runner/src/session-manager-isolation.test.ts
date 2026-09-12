@@ -177,6 +177,65 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
   }
 });
 
+test("Seatbelt attach notices pin a symlinked additional root to its launch target", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-seatbelt-additional-root-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    const dataDir = join(root, "runner-data");
+    const nativeTmp = join(root, "native-tmp");
+    const originalAdditional = join(root, "additional-original");
+    const retargetedAdditional = join(root, "additional-retargeted");
+    const additionalLink = join(root, "additional-current");
+    for (const path of [repo, dataDir, nativeTmp, originalAdditional, retargetedAdditional]) mkdirSync(path);
+    symlinkSync(originalAdditional, additionalLink, "dir");
+
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta(), repoPath: repo, driver: "acp" });
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+      prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+    });
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "seatbelt", network: "deny" },
+      async (policy, context, _deps, state) => resolveExecutionIsolation(policy, context, {
+        platform: "darwin",
+        nativeHome: () => root,
+        nativeTmp: () => nativeTmp,
+        resolveNative: async (name) => name === "sandbox-exec" ? {
+          path: "/usr/bin/sandbox-exec", via: "path",
+          launch: { command: "/usr/bin/sandbox-exec", args: [] },
+        } : null,
+      }, state ? { ...state, additionalWritableRoots: [additionalLink] } : state),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    const liveRoots = internals.active.get("s1").seatbeltWritableRoots as string[];
+    assert.ok(liveRoots.includes(originalAdditional), "the live snapshot pins the canonical launch target");
+    assert.equal(liveRoots.includes(additionalLink), false, "the live snapshot does not retain the mutable alias");
+
+    rmSync(additionalLink);
+    symlinkSync(retargetedAdditional, additionalLink, "dir");
+    const currentMeta = store.readMeta("s1");
+    assert.deepEqual(
+      await internals.attachIsolationNotice(currentMeta, join(additionalLink, "attached")),
+      { writableNow: false, writableAtNextLaunch: true },
+    );
+    assert.deepEqual(
+      await internals.attachIsolationNotice(currentMeta, join(originalAdditional, "attached")),
+      { writableNow: true, writableAtNextLaunch: true },
+    );
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("native bwrap Orchestrator binds scratch without a writable project boundary", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-orchestrator-bwrap-"));
   try {
