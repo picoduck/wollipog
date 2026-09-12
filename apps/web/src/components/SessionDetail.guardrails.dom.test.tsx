@@ -4,9 +4,11 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ParentControlMode, SessionConfig, SessionView } from "@wollipog/protocol";
+import type { DescendantRequestView, ParentControlMode, SessionConfig, SessionView } from "@wollipog/protocol";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { ComposerPlusMenu } from "./SessionDetail.js";
+import { api, type ApiClient } from "../api.js";
+import { ApiProvider } from "../api-context.js";
+import { ComposerPlusMenu, useDescendantRequestPolling } from "./SessionDetail.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -165,5 +167,141 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+function descendantRequest(title: string): DescendantRequestView {
+  return {
+    sessionId: `session-${title}`,
+    sessionTitle: title,
+    runnerId: "runner",
+    runnerOnline: true,
+    occurrenceId: `request-${title}`,
+    request: {
+      requestId: `provider-${title}`,
+      occurrenceId: `request-${title}`,
+      kind: "question",
+      title: "Question",
+      options: [],
+      questions: [{ id: "q", header: "Next", question: "What next?", options: [] }],
+    },
+  };
+}
+
+test("descendant polling coalesces intervals and rejects superseded responses", async () => {
+  const requests: Array<Deferred<{ requests: DescendantRequestView[] }> & { signal?: AbortSignal }> = [];
+  const client = {
+    ...api,
+    descendantRequests: async (_sessionId: string, signal?: AbortSignal) => {
+      const request = { ...deferred<{ requests: DescendantRequestView[] }>(), signal };
+      requests.push(request);
+      return request.promise;
+    },
+  } as ApiClient;
+  let intervalHandler: (() => void) | undefined;
+  const originalSetInterval = domWindow.setInterval;
+  const originalClearInterval = domWindow.clearInterval;
+  Object.defineProperty(domWindow, "setInterval", {
+    configurable: true,
+    value: ((handler: () => void) => {
+      intervalHandler = handler;
+      return 1 as unknown as ReturnType<typeof domWindow.setInterval>;
+    }) as unknown as typeof domWindow.setInterval,
+  });
+  Object.defineProperty(domWindow, "clearInterval", {
+    configurable: true,
+    value: (() => {}) as typeof domWindow.clearInterval,
+  });
+  let requestReferenceChanges = 0;
+  function Harness({ sessionId, enabled }: { sessionId: string; enabled: boolean }) {
+    const polling = useDescendantRequestPolling({ sessionId, enabled });
+    const priorRequests = React.useRef(polling.requests);
+    React.useEffect(() => {
+      if (priorRequests.current === polling.requests) return;
+      requestReferenceChanges += 1;
+      priorRequests.current = polling.requests;
+    }, [polling.requests]);
+    return <div>
+      <button onClick={polling.refreshAfterResolution}>Refresh After Resolution</button>
+      <span>{polling.requests.map((request) => request.sessionTitle).join(",")}</span>
+    </div>;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (sessionId: string, enabled: boolean) => root.render(
+    <ApiProvider client={client}><Harness sessionId={sessionId} enabled={enabled} /></ApiProvider>,
+  );
+  try {
+    await act(async () => render("parent-a", true));
+    assert.equal(requests.length, 1);
+    await act(async () => intervalHandler?.());
+    assert.equal(requests.length, 1, "a slow request coalesces the next interval poll");
+
+    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    assert.equal(requests.length, 2, "a resolution forces an immediate replacement request");
+    assert.equal(requests[0]!.signal?.aborted, true);
+    await act(async () => {
+      requests[1]!.resolve({ requests: [descendantRequest("new")] });
+      await requests[1]!.promise;
+    });
+    assert.equal(container.querySelector("span")?.textContent, "new");
+    await act(async () => {
+      requests[0]!.resolve({ requests: [descendantRequest("stale")] });
+      await requests[0]!.promise;
+    });
+    assert.equal(container.querySelector("span")?.textContent, "new",
+      "a superseded response cannot overwrite the current list");
+
+    const referenceChangesAfterNewResult = requestReferenceChanges;
+    await act(async () => intervalHandler?.());
+    await act(async () => {
+      requests[2]!.resolve({ requests: [descendantRequest("new")] });
+      await requests[2]!.promise;
+    });
+    assert.equal(requestReferenceChanges, referenceChangesAfterNewResult,
+      "a structurally unchanged poll retains the current state reference");
+
+    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    await act(async () => {
+      requests[3]!.reject(new Error("offline"));
+      await requests[3]!.promise.catch(() => {});
+    });
+    assert.equal(container.querySelector("span")?.textContent, "",
+      "a current request failure clears stale request controls");
+
+    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    await act(async () => render("parent-b", true));
+    assert.equal(requests[4]!.signal?.aborted, true, "changing sessions aborts the old request");
+    assert.equal(requests.length, 6);
+    assert.equal(container.querySelector("span")?.textContent, "");
+    await act(async () => render("parent-b", false));
+    assert.equal(requests[5]!.signal?.aborted, true, "disabling Parent Control aborts the request");
+    assert.equal(container.querySelector("span")?.textContent, "");
+    await act(async () => render("parent-b", true));
+    assert.equal(requests.length, 7);
+    await act(async () => root.unmount());
+    assert.equal(requests[6]!.signal?.aborted, true, "unmounting aborts the active request");
+  } finally {
+    if (container.isConnected) await act(async () => root.unmount());
+    container.remove();
+    Object.defineProperty(domWindow, "setInterval", { configurable: true, value: originalSetInterval });
+    Object.defineProperty(domWindow, "clearInterval", { configurable: true, value: originalClearInterval });
   }
 });

@@ -72,10 +72,12 @@ test("cancelTurn posts to the encoded non-terminal turn endpoint", async () => {
 
 test("Parent Control setting and descendant reads use encoded session-scoped endpoints", async () => {
   const calls: Array<{ path: string; method: string; body: unknown }> = [];
+  const signals: Array<AbortSignal | null | undefined> = [];
   const client = createApiClient({
     instanceId: "instance-a",
     publicOrigin: "https://instance-a.example.test",
     async request(path, init) {
+      signals.push(init?.signal);
       calls.push({
         path,
         method: init?.method ?? "GET",
@@ -89,7 +91,9 @@ test("Parent Control setting and descendant reads use encoded session-scoped end
   });
 
   await client.setParentControl("parent/1", "questions");
-  assert.deepEqual(await client.descendantRequests("parent/1"), { requests: [] });
+  const controller = new AbortController();
+  assert.deepEqual(await client.descendantRequests("parent/1", controller.signal), { requests: [] });
+  assert.equal(signals[1], controller.signal);
   assert.deepEqual(calls, [
     {
       path: "/api/sessions/parent%2F1/parent-control",

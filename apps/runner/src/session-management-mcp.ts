@@ -487,7 +487,13 @@ export const TOOLS: McpTool[] = [
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests`,
       );
       if (!r.ok) return errorResult(r.message);
-      return textResult({ requests: capArray(r.data?.requests, 128) });
+      const requests = Array.isArray(r.data?.requests) ? r.data.requests : [];
+      const limit = 128;
+      return textResult({
+        requests: requests.slice(0, limit),
+        truncated: requests.length > limit,
+        limit,
+      });
     },
   },
   {

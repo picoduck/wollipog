@@ -561,6 +561,64 @@ export function SessionDetail(props: SessionDetailProps) {
   return <SessionDetailLoaded {...props} session={session} />;
 }
 
+export function useDescendantRequestPolling({
+  sessionId,
+  enabled,
+}: {
+  sessionId: string;
+  enabled: boolean;
+}): {
+  requests: DescendantRequestView[];
+  refreshAfterResolution: () => void;
+} {
+  const api = useApi();
+  const [requests, setRequests] = useState<DescendantRequestView[]>([]);
+  const generationRef = useRef(0);
+  const inFlightRef = useRef<AbortController | null>(null);
+  const refresh = useCallback((supersede = false) => {
+    if (!enabled) {
+      generationRef.current += 1;
+      inFlightRef.current?.abort();
+      inFlightRef.current = null;
+      setRequests((current) => current.length ? [] : current);
+      return;
+    }
+    if (inFlightRef.current && !supersede) return;
+    inFlightRef.current?.abort();
+    const controller = new AbortController();
+    const generation = ++generationRef.current;
+    inFlightRef.current = controller;
+    void api.descendantRequests(sessionId, controller.signal).then(
+      ({ requests: next }) => {
+        if (controller.signal.aborted || generation !== generationRef.current) return;
+        setRequests((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+      },
+      () => {
+        if (controller.signal.aborted || generation !== generationRef.current) return;
+        setRequests((current) => current.length ? [] : current);
+      },
+    ).finally(() => {
+      if (inFlightRef.current === controller) inFlightRef.current = null;
+    });
+  }, [api, enabled, sessionId]);
+  const refreshAfterResolution = useCallback(() => refresh(true), [refresh]);
+  useEffect(() => {
+    setRequests((current) => current.length ? [] : current);
+  }, [sessionId]);
+  useEffect(() => {
+    refresh();
+    if (!enabled) return;
+    const timer = window.setInterval(refresh, 2_000);
+    return () => {
+      window.clearInterval(timer);
+      generationRef.current += 1;
+      inFlightRef.current?.abort();
+      inFlightRef.current = null;
+    };
+  }, [enabled, refresh]);
+  return { requests, refreshAfterResolution };
+}
+
 function SessionDetailLoaded({
   sessionId,
   sourceLocation,
@@ -652,24 +710,13 @@ function SessionDetailLoaded({
   const richGitSupported = runnerSupportsProtocol(runner?.protocolVersion, "gitVisibility");
   const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
   const conn = useStoreSelector((s) => s.conn);
-  const [descendantRequests, setDescendantRequests] = useState<DescendantRequestView[]>([]);
-  const refreshDescendantRequests = useCallback(() => {
-    if (mode !== "expanded" || conn !== "online" || (session.parentControl ?? "off") === "off") {
-      setDescendantRequests([]);
-      return;
-    }
-    void api.descendantRequests(sessionId).then(
-      ({ requests }) => setDescendantRequests((current) =>
-        JSON.stringify(current) === JSON.stringify(requests) ? current : requests),
-      () => setDescendantRequests((current) => current.length ? [] : current),
-    );
-  }, [api, conn, mode, session.parentControl, sessionId]);
-  useEffect(() => {
-    refreshDescendantRequests();
-    if (mode !== "expanded" || conn !== "online" || (session.parentControl ?? "off") === "off") return;
-    const timer = window.setInterval(refreshDescendantRequests, 2_000);
-    return () => window.clearInterval(timer);
-  }, [conn, mode, refreshDescendantRequests, session.parentControl]);
+  const {
+    requests: descendantRequests,
+    refreshAfterResolution: refreshDescendantRequestsAfterResolution,
+  } = useDescendantRequestPolling({
+    sessionId,
+    enabled: mode === "expanded" && conn === "online" && (session.parentControl ?? "off") !== "off",
+  });
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
   const recoveryRevision = useStoreSelector((s) =>
@@ -4187,7 +4234,7 @@ function SessionDetailLoaded({
                       recoveryReason={item.request.recoveryReason}
                       recoveryAction={item.request.recoveryAction}
                       runnerOnline={item.runnerOnline}
-                      onSessionUpdate={refreshDescendantRequests}
+                      onSessionUpdate={refreshDescendantRequestsAfterResolution}
                       showKeyHints={false}
                     />
                   ) : (
@@ -4200,7 +4247,7 @@ function SessionDetailLoaded({
                         pendingApproval: item.request,
                       }}
                       runnerOnline={item.runnerOnline}
-                      onSessionUpdate={refreshDescendantRequests}
+                      onSessionUpdate={refreshDescendantRequestsAfterResolution}
                       showKeyHints={false}
                     />
                   )}

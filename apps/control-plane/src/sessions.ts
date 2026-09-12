@@ -215,7 +215,7 @@ const SESSION_COMMAND_RECEIPT_CODES = new Set([
 ]);
 
 const HUMAN_ONLY_PARENT_CONTROL_REQUEST =
-  /(?:^|[^a-z0-9])(?:account|auth(?:enticate|entication)?|credentials?|device|identity|login|logout|password|secrets?|tokens?)(?:[^a-z0-9]|$)/iu;
+  /(?:^|[^a-z0-9])(?:account|api[\s_-]*keys?|auth(?:enticate|entication)?|authorization(?:[\s_-]*headers?)?|bearer|cookies?|credentials?|device|identity|login|logout|mfa|oauth2?|passphrases?|password|secrets?|ssh[\s_-]*keys?|tokens?|2fa)(?:[^a-z0-9]|$)/iu;
 const EMAIL_IDENTITY_PARENT_CONTROL_REQUEST =
   /(?:^|[^a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?:[^a-z0-9.-]|$)/iu;
 
@@ -4840,7 +4840,7 @@ export class SessionsService {
     if (!parent) return fail("session not found", 404);
     const mode = parent.parentControl ?? "off";
     if (mode === "off") return fail("Parent Control is off", 403);
-    const requests = this.db.listSessionDescendants(parentSessionId).flatMap((session): DescendantRequestView[] => {
+    const requests = this.db.listSessionDescendantRequestCandidates(parentSessionId).flatMap((session): DescendantRequestView[] => {
       if (!canAccess(session.id)) return [];
       if (!runnerSupportsProtocol(
         this.db.getRunner(session.runnerId)?.protocolVersion,
