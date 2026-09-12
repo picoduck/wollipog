@@ -44,6 +44,17 @@ test("orchestrator capability requires a native harness or discovery-verified WS
   assert.equal(withOrchestratorPreset([{ ...agent, context: { kind: "wsl", distro: "Ubuntu" },
     capabilities: { ...agent.capabilities!, permissionModes: ["read-only", "orchestrator"] } }])[0]!
     .capabilities!.permissionModes!.includes("orchestrator"), false, "stale configured capability cannot self-attest the bridge");
+
+  const claude = { ...agent, driver: "claude-code" as const,
+    capabilities: { ...agent.capabilities!, permissionModes: ["default", "dontAsk"] } };
+  assert.equal(withOrchestratorPreset([claude], { platform: "linux", isolationMode: "provider" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false);
+  assert.equal(withOrchestratorPreset([claude], { platform: "linux", isolationMode: "bwrap" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), true);
+  const staleClaude = { ...claude, capabilities: { ...claude.capabilities,
+    permissionModes: ["default", "dontAsk", "orchestrator"] } };
+  assert.equal(withOrchestratorPreset([staleClaude], { platform: "linux", isolationMode: "provider" })[0]!
+    .capabilities!.permissionModes!.includes("orchestrator"), false, "unsupported native isolation strips stale claims");
 });
 
 test("Codex MCP isolation probes an in-distro WSL binary through exact argv", () => {
@@ -104,11 +115,11 @@ test("only the exact audited native Claude ACP adapter advertises orchestrator",
     source: "config",
   };
   assert.equal(supportsClaudeAgentAcpOrchestrator(configured), true);
-  const advertised = withOrchestratorPreset([configured])[0]!.capabilities!;
+  const advertised = withOrchestratorPreset([configured], { isolationMode: "bwrap" })[0]!.capabilities!;
   assert.deepEqual(advertised.permissionModes, ["orchestrator"]);
   assert.equal(advertised.supportsImages, true);
   assert.equal(advertised.supportsApprovals, true);
-  const secondAdvertisement = withOrchestratorPreset([configured])[0]!.capabilities!;
+  const secondAdvertisement = withOrchestratorPreset([configured], { isolationMode: "bwrap" })[0]!.capabilities!;
   assert.notEqual(advertised.permissionModes, secondAdvertisement.permissionModes,
     "catalog advertisements do not share mutable capability arrays");
   for (const unsupported of [

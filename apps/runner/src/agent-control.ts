@@ -44,6 +44,7 @@ import {
   orchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
   supportsClaudeAgentAcpOrchestrator,
+  supportsNativeOrchestratorBoundary,
 } from "./orchestrator-preset.js";
 
 const TOKEN_PREFIX = "wollipoga_";
@@ -258,6 +259,11 @@ export function provisionAgentControl(
     orchestratorAgent.args.every((arg, index) => arg === wslBaseArgs[index]) &&
     orchestratorAgent.driver === spec.driver && orchestratorAgent.context?.kind === "wsl" &&
     orchestratorAgent.context.distro === context.distro;
+  if (orchestrator && nativeHostExecution && !supportsNativeOrchestratorBoundary(
+    spec.driver ?? "acp", host.platform ?? process.platform, config.executionIsolationMode,
+  )) {
+    throw new Error("the Orchestrator preset requires an attested native filesystem boundary for this harness");
+  }
   if (orchestrator && (!targetIsHost || !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionOrchestration") ||
       !(nativeHostExecution ? ["acp", "codex", "codex-app-server", "claude-code"].includes(spec.driver ?? "acp")
         : wslOrchestrator && structuredDriver &&

@@ -26,6 +26,23 @@ const ORCHESTRATOR_CLAUDE_BASH_RULES = [
   "gh pr status:*",
 ];
 
+export type OrchestratorIsolationMode = "provider" | "bwrap" | "seatbelt" | "windows-job";
+
+/** Codex supplies its own audited provider sandbox on POSIX. Claude's Bash allowlist needs an
+ * outer OS filesystem boundary because command prefixes cannot prevent output-file options or
+ * redirection. Native Windows has no attested filesystem boundary for either harness. */
+export function supportsNativeOrchestratorBoundary(
+  driver: SessionLaunchSpec["driver"],
+  platform: NodeJS.Platform,
+  isolationMode: OrchestratorIsolationMode | undefined,
+): boolean {
+  if (platform === "win32") return false;
+  if (driver === "codex" || driver === "codex-app-server") return true;
+  if (driver !== "claude-code" && driver !== "acp") return false;
+  return (platform === "linux" && isolationMode === "bwrap") ||
+    (platform === "darwin" && isolationMode === "seatbelt");
+}
+
 export function orchestratorInstructions(projectPaths: readonly string[]): string {
   const locations = [...new Set(projectPaths.filter(Boolean))];
   return [
@@ -123,14 +140,14 @@ export function orchestratorAcpSessionMeta(projectPaths: readonly string[] = [])
 export function withOrchestratorPreset(
   agents: AgentDefinition[],
   host: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exists?: typeof existsSync;
-    wslIsolationMode?: "provider" | "bwrap" | "seatbelt" | "windows-job" } = {},
+    isolationMode?: OrchestratorIsolationMode; wslIsolationMode?: OrchestratorIsolationMode } = {},
 ): AgentDefinition[] {
   return agents.filter((agent) => agent.id !== "conductor").map((agent) => {
     const acpSupported = supportsClaudeAgentAcpOrchestrator(agent);
     const contextKind = agent.context?.kind ?? "native";
     const wslSupported = contextKind === "wsl" && agent.wslAgentControl?.protocolVersion === 1 &&
       agent.wslAgentControl.safeLauncherProtocolVersion === 1 &&
-      host.wslIsolationMode === "bwrap" &&
+      (host.isolationMode ?? host.wslIsolationMode) === "bwrap" &&
       ["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp");
     if (contextKind === "wsl" && !wslSupported && agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) {
       return { ...agent, capabilities: { ...agent.capabilities,
@@ -138,9 +155,13 @@ export function withOrchestratorPreset(
     }
     if ((contextKind !== "native" && !wslSupported) ||
         (!acpSupported && !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))) return agent;
-    // Windows Job Objects do not attest filesystem confinement, and Claude Bash-prefix rules
-    // cannot prevent an otherwise read-only Git command from redirecting output into a project.
-    if (contextKind === "native" && (host.platform ?? process.platform) === "win32") return agent;
+    if (contextKind === "native" && !supportsNativeOrchestratorBoundary(
+      agent.driver ?? "acp", host.platform ?? process.platform, host.isolationMode ?? host.wslIsolationMode,
+    )) {
+      if (!agent.capabilities?.permissionModes?.includes(ORCHESTRATOR_PRESET)) return agent;
+      return { ...agent, capabilities: { ...agent.capabilities,
+        permissionModes: agent.capabilities.permissionModes.filter((mode) => mode !== ORCHESTRATOR_PRESET) } };
+    }
     if (acpSupported && !agent.capabilities) {
       return { ...agent, capabilities: acpOrchestratorCapabilities() };
     }

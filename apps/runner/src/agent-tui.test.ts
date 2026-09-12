@@ -161,10 +161,12 @@ test("orchestrator TUIs rebuild credentials and restrictions without mutating du
       let probes = 0;
       const launch = await prepareAgentTuiLaunch(source, {
         controlPlaneProtocolVersion: PROTOCOL_VERSION,
+        executionIsolationMode: "bwrap",
         prepareScratch: async () => "/scratch",
         provision: (prepared) => provisionAgentControl(prepared, {
           controlPlaneUrl: "ws://127.0.0.1:8787/runner",
           controlPlaneProtocolVersion: PROTOCOL_VERSION,
+          executionIsolationMode: "bwrap",
           registerCredential: () => {},
         }, () => {}, {
           configDir: dir, execPath: process.execPath, scriptPath: "/runner/cli.ts", execArgv: [], isSea: false,
@@ -213,6 +215,11 @@ test("orchestrator TUI preparation fails closed for old peers, unsupported targe
   await assert.rejects(prepareAgentTuiLaunch(source, { ...dependencies, controlPlaneProtocolVersion: 111 }), /current native/);
   await assert.rejects(prepareAgentTuiLaunch({ ...source, context: { kind: "wsl", distro: "test" } }, dependencies), /current native/);
   await assert.rejects(prepareAgentTuiLaunch({ ...source, driver: "acp" }, dependencies), /current native/);
+  await assert.rejects(prepareAgentTuiLaunch(source, { ...dependencies, platform: "win32" }),
+    /attested native filesystem boundary/);
+  await assert.rejects(prepareAgentTuiLaunch({ ...source, driver: "claude-code" }, {
+    ...dependencies, platform: "linux", executionIsolationMode: "provider",
+  }), /attested native filesystem boundary/);
   for (const status of ["stopped", "failed", "completed"] as const) {
     await assert.rejects(prepareAgentTuiLaunch({ ...source, status }, dependencies), /active session/);
   }

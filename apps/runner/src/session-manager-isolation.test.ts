@@ -288,6 +288,35 @@ test("strict isolation resolution failure prevents driver construction", async (
   }
 });
 
+test("persisted native Claude Orchestrator refuses provider-only isolation before preparation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-orchestrator-provider-refusal-"));
+  try {
+    const store = new SessionStore(root);
+    store.create({ ...meta(), config: { permissionMode: "orchestrator" } });
+    let prepared = false;
+    let constructed = false;
+    const messages: unknown[] = [];
+    const manager = new SessionManager(
+      (message) => messages.push(message), () => {}, store, "runner", undefined,
+      (() => { constructed = true; throw new Error("must not construct"); }) as never,
+      undefined, 1, undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (manager as any).prepareLaunch = async () => { prepared = true; };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), false);
+    assert.deepEqual({ prepared, constructed }, { prepared: false, constructed: false });
+    assert.match(JSON.stringify(messages), /attested native filesystem boundary/);
+    assert.equal(existsSync(join(store.sessionPath("s1"), "orchestrator-scratch")), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("WSL bwrap rejection precedes preparation, state migration, root resolution, and driver construction", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-wsl-isolation-fail-"));
   try {

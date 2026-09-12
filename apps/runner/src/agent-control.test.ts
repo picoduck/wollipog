@@ -58,6 +58,7 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
   try {
     const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root };
     const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const,
       orchestratorProjectPaths: ["/other-project", "C:\\other-project"] };
     for (const driver of ["codex", "claude-code"] as const) {
       const launch = spec(driver);
@@ -104,11 +105,12 @@ test("orchestrator provisioning restricts native tools and refuses unsupported l
     }
 
     const windows = spec("claude-code");
+    windows.sessionId = "s_windows_refused";
     windows.workspacePath = "C:\\repo";
     windows.config = { permissionMode: "orchestrator" };
-    provisionAgentControl(windows, control, () => {}, { ...host, platform: "win32" });
-    assert.deepEqual(windows.args.flatMap((arg, index) => arg === "--add-dir" ? [windows.args[index + 1]] : []),
-      ["C:\\other-project", "C:\\repo"]);
+    assert.throws(() => provisionAgentControl(windows, control, () => {}, { ...host, platform: "win32" }),
+      /attested native filesystem boundary/);
+    assert.equal(existsSync(agentControlTokenPath(root, windows.sessionId)), false);
 
     const generic = spec("acp");
     generic.sessionId = "s_generic_acp";

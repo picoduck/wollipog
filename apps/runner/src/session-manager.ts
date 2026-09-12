@@ -98,6 +98,7 @@ import {
 } from "./execution-isolation.js";
 import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
 import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
+import { supportsNativeOrchestratorBoundary } from "./orchestrator-preset.js";
 import type { SpawnIsolation } from "./spawn.js";
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
@@ -4296,6 +4297,10 @@ export class SessionManager {
     meta: Pick<SessionMeta, "agentId" | "command" | "args" | "driver" | "context" | "config" | "executionTarget">,
   ): void {
     if (meta.executionTarget?.adapter === "container" || meta.executionTarget?.adapter === "cloud") return;
+    if (meta.context.kind === "native" && meta.config.permissionMode === "orchestrator" &&
+        !supportsNativeOrchestratorBoundary(meta.driver, process.platform, this.executionIsolation.mode)) {
+      throw new Error("Orchestrator launch requires an attested native filesystem boundary for this harness");
+    }
     if (meta.context.kind === "wsl" && meta.config.permissionMode === "orchestrator") {
       if (this.executionIsolation.mode === "bwrap" && this.authorizeSafeWslLaunch?.(meta) === true) return;
       throw new Error("Direct WSL Orchestrator requires the freshly attested target-local bwrap launcher");

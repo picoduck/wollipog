@@ -5,7 +5,11 @@ import type { SessionMeta } from "./session-store.js";
 import type { ShellProcessLaunch } from "./shell-manager.js";
 import { windowsCommandLine } from "./windows-conpty.js";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
-import { codexOrchestratorMcpArgs } from "./orchestrator-preset.js";
+import {
+  codexOrchestratorMcpArgs,
+  supportsNativeOrchestratorBoundary,
+  type OrchestratorIsolationMode,
+} from "./orchestrator-preset.js";
 import { windowsCmdInvocationSpec } from "./windows-cmd.js";
 
 const TUI_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
@@ -19,6 +23,8 @@ export async function prepareAgentTuiLaunch(
     provision(meta: SessionMeta): Promise<void> | void;
     prepareScratch(meta: SessionMeta): Promise<string>;
     probe?: typeof codexOrchestratorMcpArgs;
+    platform?: NodeJS.Platform;
+    executionIsolationMode?: OrchestratorIsolationMode;
   },
 ): Promise<ShellProcessLaunch | null> {
   if (meta.config?.permissionMode !== "orchestrator") return agentTuiLaunch(meta);
@@ -26,6 +32,11 @@ export async function prepareAgentTuiLaunch(
       meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host") ||
       !TUI_DRIVERS.has(meta.driver)) {
     throw new Error("Orchestrator Native TUI requires a current native host harness and control plane.");
+  }
+  if (!supportsNativeOrchestratorBoundary(
+    meta.driver, dependencies.platform ?? process.platform, dependencies.executionIsolationMode,
+  )) {
+    throw new Error("Orchestrator Native TUI requires an attested native filesystem boundary for this harness.");
   }
   if (!["idle", "starting", "running", "input_required"].includes(meta.status)) {
     throw new Error("Orchestrator Native TUI requires an active session; resume the session first.");

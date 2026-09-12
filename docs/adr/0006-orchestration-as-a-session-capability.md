@@ -84,6 +84,11 @@ and may use the reduced runner-owned Wollipog MCP server; the control plane inde
 mutations only on trusted descendants. Unsupported or unverifiable configurations fail closed.
 Neither the user nor a child can switch this preset on an existing session.
 
+On native Linux and macOS, Claude Code and the exact Claude Agent ACP adapter advertise this preset
+only with the runner's `bwrap` or `seatbelt` boundary respectively. Native Codex can rely on its
+audited provider sandbox there. Catalog filtering, structured launch, and Native TUI preparation all
+apply the same boundary check so persisted sessions cannot resume under a weaker host policy.
+
 The preset is a cooperative safety boundary for trusted planning agents, not a hostile-model
 sandbox. In particular, networked shell access can clone a repository into scratch and credentials
 available to the provider may permit remote writes. The runner therefore combines filesystem
