@@ -216,6 +216,16 @@ test("terminal missing history remains actionable without a watchdog but yields 
     assert.match(container.textContent ?? "", /Acknowledgement Required/);
     assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 1,
       "terminal missing audit remains resolvable when attention is suppressed");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button")!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(
+      container.querySelector(".background-work-barrier strong")?.textContent,
+      "Missing Result Acknowledged",
+      "the barrier follows the successful optimistic acknowledgement",
+    );
     await act(async () => render({ ...missingDelivery, runnerResultPersistedAt: 30_000 }));
     assert.doesNotMatch(container.textContent ?? "", /Acknowledgement Required/);
     assert.doesNotMatch(container.textContent ?? "", /Result Missing/);

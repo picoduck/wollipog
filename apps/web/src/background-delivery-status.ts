@@ -32,7 +32,7 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
     outstanding: "The result did not arrive in this conversation.",
     recovery: "Wollipog will not repeat an accepted step automatically because that could duplicate work.",
     action: "Acknowledge the missing result to clear immediate attention without retrying the continuation.",
-    diagnostic: "The accepted provider turn ended, but no complete runner result was recorded.",
+    diagnostic: "The accepted provider turn ended without a durable delivery receipt.",
     severity: "missing",
   },
   result_not_projected: {

@@ -10671,6 +10671,26 @@ export class ControlPlaneDb {
     ).run(now, now, sessionId, continuationId).changes) > 0;
   }
 
+  /** Read the exact durable resolution state without relying on the bounded dashboard projection. */
+  backgroundMissingResultResolution(
+    sessionId: string,
+    continuationId: string,
+  ): "missing" | "resolved" | "not_terminal" | undefined {
+    if (!validBackgroundIdentity(sessionId) || !validBackgroundIdentity(continuationId)) return undefined;
+    const row = this.stmt(
+      `SELECT missing_result_at, missing_result_acknowledged_at, runner_result_persisted_at
+         FROM managed_background_deliveries
+        WHERE session_id=? AND continuation_id=?`,
+    ).get(sessionId, continuationId) as {
+      missing_result_at: number | null;
+      missing_result_acknowledged_at: number | null;
+      runner_result_persisted_at: number | null;
+    } | undefined;
+    if (!row) return undefined;
+    if (row.missing_result_acknowledged_at != null || row.runner_result_persisted_at != null) return "resolved";
+    return row.missing_result_at != null ? "missing" : "not_terminal";
+  }
+
   /** A live delivery frame diverted through catch-up hydration by a sequence gap must arm its
    * settlement BEFORE the hydration round-trip: the runner's trailing idle can arrive first, and
    * once the session is idle the projection-time arming would refuse. Creates the durable row

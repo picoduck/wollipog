@@ -92,11 +92,15 @@ function deliveryTimestamp(delivery: BackgroundDeliveryView): number {
   );
 }
 
-function deliveryStage(deliveries: readonly BackgroundDeliveryView[]): string {
+function deliveryStage(
+  deliveries: readonly BackgroundDeliveryView[],
+  locallyAcknowledged: (delivery: BackgroundDeliveryView) => boolean = () => false,
+): string {
   if (deliveries.some((delivery) => delivery.runnerResultPersistedAt != null)) return "Result Delivered";
   if (deliveries.some((delivery) => delivery.missingResultAt != null &&
-      delivery.missingResultAcknowledgedAt == null)) return "Result Missing";
-  if (deliveries.some((delivery) => delivery.missingResultAcknowledgedAt != null)) return "Missing Result Acknowledged";
+      delivery.missingResultAcknowledgedAt == null && !locallyAcknowledged(delivery))) return "Result Missing";
+  if (deliveries.some((delivery) => delivery.missingResultAcknowledgedAt != null ||
+      locallyAcknowledged(delivery))) return "Missing Result Acknowledged";
   if (deliveries.some((delivery) => delivery.acceptedAt != null)) return "Continuation In Flight";
   if (deliveries.some((delivery) => delivery.submittedAt != null)) return "Continuation Submitted";
   if (deliveries.some((delivery) => delivery.queuedAt != null)) return "Continuation Pending";
@@ -263,15 +267,20 @@ export function BackgroundWorkPanel({
             const terminalCount = Math.min(jobCount, Math.max(shownTerminalCount, recordedTerminalCount));
             const groupTruncated = !group.parentTurnKnown || jobCount > group.jobs.length ||
               (session.backgroundJobsTruncated === true && recordedJobCount <= group.jobs.length);
+            const locallyAcknowledgedDelivery = (delivery: BackgroundDeliveryView) =>
+              delivery.continuationId != null && locallyAcknowledged.has(
+                JSON.stringify([session.id, delivery.continuationId]),
+              );
             const deliveryComplete = (groupDeliveries.length > 0 &&
               groupDeliveries.every((delivery) => delivery.runnerResultPersistedAt != null)) ||
               (!groupTruncated && shownDeliveredCount === group.jobs.length);
             const incompleteDeliveryStage = groupDeliveries.some((delivery) =>
               delivery.runnerResultPersistedAt == null && delivery.missingResultAt != null &&
-              delivery.missingResultAcknowledgedAt == null)
+              delivery.missingResultAcknowledgedAt == null && !locallyAcknowledgedDelivery(delivery))
               ? "Result Missing"
               : groupDeliveries.some((delivery) =>
-                delivery.runnerResultPersistedAt == null && delivery.missingResultAcknowledgedAt != null)
+                delivery.runnerResultPersistedAt == null &&
+                (delivery.missingResultAcknowledgedAt != null || locallyAcknowledgedDelivery(delivery)))
                 ? "Missing Result Acknowledged"
                 : groupDeliveries.some((delivery) =>
                   delivery.runnerResultPersistedAt == null && delivery.acceptedAt != null)
@@ -316,7 +325,7 @@ export function BackgroundWorkPanel({
                     ? null
                     : JSON.stringify([session.id, continuationId]);
                   const acknowledged = delivery.missingResultAcknowledgedAt != null ||
-                    (localAcknowledgementKey != null && locallyAcknowledged.has(localAcknowledgementKey));
+                    locallyAcknowledgedDelivery(delivery);
                   const isMissing = delivery.missingResultAt != null;
                   const status = recoveryState
                     ? BACKGROUND_DELIVERY_STATUS[recoveryState]
@@ -391,7 +400,7 @@ export function BackgroundWorkPanel({
                   aria-label={deliveryOnly ? "Delivery Receipt Status" : "Barrier Status"}>
                   <span>{deliveryOnly ? "Delivery Receipt" : "Barrier"}</span>
                   <strong>{deliveryOnly
-                    ? deliveryStage(groupDeliveries)
+                    ? deliveryStage(groupDeliveries, locallyAcknowledgedDelivery)
                     : !group.parentTurnKnown
                       ? "Status Unverified"
                       : terminalCount < jobCount
@@ -408,7 +417,7 @@ export function BackgroundWorkPanel({
                         <div className="background-work-job-title">
                           <strong>Delivery Receipt {deliveryIndex + 1}</strong>
                           <span className="background-work-state">
-                            {deliveryStage([delivery])}
+                            {deliveryStage([delivery], locallyAcknowledgedDelivery)}
                           </span>
                         </div>
                         <dl className="background-work-job-meta">
