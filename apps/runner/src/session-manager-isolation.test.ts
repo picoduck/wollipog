@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriverOptions } from "./drivers/driver.js";
+import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js";
@@ -93,6 +94,84 @@ test("session launch passes one resolved isolation boundary to every driver", as
     manager.shutdownAll();
   } finally {
     setStatfsForTests();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Seatbelt attach notices keep the live launch roots after HOME or its transcript symlink is retargeted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-seatbelt-attach-roots-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    const dataDir = join(root, "runner-data");
+    const nativeTmp = join(root, "native-tmp");
+    const originalHome = join(root, "home-original");
+    const retargetedHome = join(root, "home-retargeted");
+    const originalTranscript = join(root, "transcript-original");
+    const retargetedTranscript = join(root, "transcript-retargeted");
+    const homeLink = join(root, "home-current");
+    mkdirSync(repo);
+    mkdirSync(dataDir);
+    mkdirSync(nativeTmp);
+    mkdirSync(join(originalHome, ".claude"), { recursive: true });
+    mkdirSync(join(retargetedHome, ".claude", "projects", "attached"), { recursive: true });
+    mkdirSync(join(originalTranscript, "attached"), { recursive: true });
+    mkdirSync(join(retargetedTranscript, "attached"), { recursive: true });
+    symlinkSync(originalTranscript, join(originalHome, ".claude", "projects"), "dir");
+    symlinkSync(originalHome, homeLink, "dir");
+
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({ ...meta(), repoPath: repo, env: { HOME: homeLink } });
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+      prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+    });
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "seatbelt", network: "deny" },
+      async (policy, context, _deps, state) => resolveExecutionIsolation(policy, context, {
+        platform: "darwin",
+        nativeHome: () => homeLink,
+        nativeTmp: () => nativeTmp,
+        resolveNative: async (name) => name === "sandbox-exec" ? {
+          path: "/usr/bin/sandbox-exec", via: "path",
+          launch: { command: "/usr/bin/sandbox-exec", args: [] },
+        } : null,
+      }, state),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+
+    rmSync(homeLink);
+    symlinkSync(retargetedHome, homeLink, "dir");
+    const currentMeta = store.readMeta("s1");
+    assert.deepEqual(
+      await internals.attachIsolationNotice(currentMeta, join(retargetedHome, ".claude", "projects", "attached")),
+      { writableNow: false, writableAtNextLaunch: true },
+    );
+    assert.deepEqual(
+      await internals.attachIsolationNotice(currentMeta, join(originalTranscript, "attached")),
+      { writableNow: true, writableAtNextLaunch: true },
+    );
+
+    rmSync(homeLink);
+    symlinkSync(originalHome, homeLink, "dir");
+    rmSync(join(originalHome, ".claude", "projects"));
+    symlinkSync(retargetedTranscript, join(originalHome, ".claude", "projects"), "dir");
+    assert.deepEqual(
+      await internals.attachIsolationNotice(currentMeta, join(retargetedTranscript, "attached")),
+      { writableNow: false, writableAtNextLaunch: true },
+    );
+    assert.deepEqual(
+      await internals.attachIsolationNotice(currentMeta, join(originalTranscript, "attached")),
+      { writableNow: true, writableAtNextLaunch: true },
+    );
+  } finally {
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -253,7 +253,11 @@ export function buildSeatbeltProfile(
   network: "inherit" | "deny",
   nativeTmp = tmpdir(),
 ): string {
-  const writeRules = seatbeltWritableRoots(state, home, nativeTmp)
+  return renderSeatbeltProfile(seatbeltWritableRoots(state, home, nativeTmp), network);
+}
+
+function renderSeatbeltProfile(writableRoots: string[], network: "inherit" | "deny"): string {
+  const writeRules = writableRoots
     .map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
   return [
     "(version 1)",
@@ -363,17 +367,18 @@ export async function resolveExecutionIsolation(
       env: { ...state.env, ...(state.env.HOME ? { HOME: home } : {}) },
       ...(providerStatePath ? { providerStatePath: await runtime.realpathNative(providerStatePath) } : {}),
     };
+    const writableRoots = seatbeltWritableRoots(
+      canonicalState,
+      home,
+      await runtime.realpathNative(runtime.nativeTmp()),
+    );
     return {
       backend: "seatbelt",
       command: binary.launch.command,
       args: binary.launch.args,
       network: policy.network,
-      profile: buildSeatbeltProfile(
-        canonicalState,
-        home,
-        policy.network,
-        await runtime.realpathNative(runtime.nativeTmp()),
-      ),
+      profile: renderSeatbeltProfile(writableRoots, policy.network),
+      writableRoots,
     };
   }
   if (policy.mode === "windows-job") {

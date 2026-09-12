@@ -71,7 +71,6 @@ import {
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type {
@@ -94,7 +93,6 @@ import {
   providerStateKey,
   removeExecutionIsolationState,
   resolveExecutionIsolation,
-  seatbeltWritableRoots,
   verifyExecutionIsolationForkState,
 } from "./execution-isolation.js";
 import { assertExecutionIsolationContextSupported } from "./execution-isolation-policy.js";
@@ -481,6 +479,8 @@ interface ActiveSession {
    * original OS cwd, then the drain resumes the same conversation inside the selected worktree
    * before admitting another turn. */
   pendingWorktreeRebind?: string;
+  /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
+  seatbeltWritableRoots?: readonly string[];
 }
 
 interface ProviderRetirement {
@@ -1332,25 +1332,22 @@ export class SessionManager {
     if (meta.context.kind === "wsl") {
       return { writableNow: pathWithin(meta.context, path, live.cwd), writableAtNextLaunch };
     }
+    // Seatbelt pathnames are realpath-resolved when the profile is built. Keep using that immutable
+    // launch snapshot: resolving HOME, a transcript symlink, or even cwd again after launch can
+    // follow a retargeted alias to a path the live profile never granted. A missing snapshot is
+    // conservatively unwritable rather than an optimistic promise that fails mid-turn.
+    if (mode === "seatbelt") {
+      return {
+        writableNow: live.seatbeltWritableRoots?.some((root) => pathWithin(meta.context, path, root)) ?? false,
+        writableAtNextLaunch,
+      };
+    }
     const boundary = await requestedWorktreeBoundary(meta.repoPath, meta.sessionId, {
       context: meta.context,
       dataDir: this.dataDir,
       ownerHash: this.runnerOwnerHash,
     }, false);
     const writableRoots = [boundary, live.cwd];
-    // Seatbelt grants more than the boundary and the cwd — the runner state directory, the native
-    // temporary directory, and the provider's transcript leaf. Read that list from the same place
-    // the profile is built from rather than restating it here, so the notice cannot drift from what
-    // the sandbox actually permits.
-    if (mode === "seatbelt") {
-      writableRoots.push(...seatbeltWritableRoots({
-        driver: meta.driver,
-        dataDir: this.stateDir,
-        env: meta.env,
-        sessionId: meta.sessionId,
-        cwd: live.cwd,
-      }, homedir()));
-    }
     return {
       writableNow: writableRoots.some((root) => pathWithin(meta.context, path, root)),
       writableAtNextLaunch,
@@ -4031,6 +4028,7 @@ export class SessionManager {
       worktree,
       worktreeLeaseOwner,
       context: meta.context,
+      ...(isolation?.backend === "seatbelt" ? { seatbeltWritableRoots: [...isolation.writableRoots] } : {}),
       status: "starting",
       providerReady: false,
       running: false,
