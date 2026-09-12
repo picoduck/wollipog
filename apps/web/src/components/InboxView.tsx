@@ -1504,6 +1504,7 @@ export function InboxView({
         <SessionContextMenu
           state={sessionMenu}
           sessionTitle={sessions.get(sessionMenu.sessionId)!.title}
+          pinned={pinnedSessions.has(sessionMenu.sessionId)}
           snoozeAvailable={sessionRemindersSupported}
           reminder={reminders.get(sessionMenu.sessionId)}
           onClose={() => setSessionMenu(null)}
@@ -1513,6 +1514,7 @@ export function InboxView({
             const restore = sessionMenu.restoreTarget;
             setRenameSession({ sessionId, returnFocusRef: { get current() { return restore(); } } });
           }}
+          onTogglePin={togglePin}
           onSnooze={(sessionId) => {
             const restore = sessionMenu.restoreTarget;
             setSnoozeReturnFocusRef({ get current() { return restore(); } });

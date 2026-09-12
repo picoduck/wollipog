@@ -231,6 +231,53 @@ test("a held finger over a card's approval button opens the menu and never appro
   await page.keyboard.press("Escape");
 });
 
+test("long-pressed rows and cards pin their target, persist the state, and expose Unpin Session", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 640 });
+  await openHarness(page);
+  let cdp = await touchSession(page);
+  const queued = page.locator(".inbox-row-shell", { hasText: "Queued Session" });
+
+  await longPressUntilMenu(cdp, page, await centerOf(queued));
+  let menu = page.getByRole("menu", { name: "Session Actions for Queued Session" });
+  const pinRow = menu.getByRole("menuitem", { name: "Pin Session" });
+  await expect(pinRow).toBeVisible();
+  const menuBox = (await menu.boundingBox())!;
+  expect(menuBox.y).toBeGreaterThanOrEqual(0);
+  expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(640);
+  await pinRow.click();
+  await expect(menu).toHaveCount(0, "the action dismisses the touch menu");
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Queued Session",
+    "the exact long-pressed row moves to the top of the ordinary sessions, below the returned reminder");
+  expect(harnessPath(page)).toBe("/");
+  await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.locator(".inbox-toolbar")).toBeVisible();
+  const persistedQueued = page.locator(".inbox-row-shell", { hasText: "Queued Session" });
+  await persistedQueued.click({ button: "right" });
+  menu = page.getByRole("menu", { name: "Session Actions for Queued Session" });
+  await expect(menu.getByRole("menuitem", { name: "Unpin Session" })).toBeVisible();
+  await menu.getByRole("menuitem", { name: "Unpin Session" }).click();
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Approval Session",
+    "unpinning restores the existing Inbox ordering");
+
+  await page.locator(".sessions-view-toggle button", { hasText: "Board" }).click();
+  cdp = await touchSession(page);
+  const running = page.locator(".board .card", { hasText: "Running Session" });
+  await longPressUntilMenu(cdp, page, await centerOf(running));
+  menu = page.getByRole("menu", { name: "Session Actions for Running Session" });
+  await menu.getByRole("menuitem", { name: "Pin Session" }).click();
+  await expect(menu).toHaveCount(0);
+  expect(harnessPath(page)).toBe("/board");
+  await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.locator(".board-wrap")).toBeVisible();
+  await page.locator(".board .card", { hasText: "Running Session" }).click({ button: "right" });
+  await expect(page.getByRole("menu", { name: "Session Actions for Running Session" })
+    .getByRole("menuitem", { name: "Unpin Session" })).toBeVisible();
+});
+
 test("touch scrolling through the list never conjures a menu", async ({ page }) => {
   await openHarness(page);
   const cdp = await touchSession(page);
