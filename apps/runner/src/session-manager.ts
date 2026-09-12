@@ -3753,7 +3753,7 @@ export class SessionManager {
   private hasAuthoritativeBackgroundWork(meta: SessionMeta | null | undefined): boolean {
     return !!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length ||
       !!meta?.backgroundJobs?.some((job) => !job.terminalStatus ||
-        job.continuationRequired && !job.assistantResultPersistedAt);
+        job.continuationRequired && !job.assistantResultPersistedAt && !job.continuationMissingResultAt);
   }
 
   private settleActiveWorkPermit(sessionId: string, entry: ActiveSession): void {

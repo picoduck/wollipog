@@ -666,6 +666,62 @@ test("non-running retained background metadata does not cancel a provider at cap
   }
 });
 
+test("a terminal missing-result continuation releases its active-work permit", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-missing-result-capacity-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    store.create({
+      ...meta("missing-result"),
+      status: "idle",
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [{
+        id: "job-1",
+        parentTurnId: "turn-1",
+        runnerId: "runner",
+        workspaceId: "repo",
+        context: { kind: "native" },
+        launchType: "agent",
+        registeredAt: 1,
+        terminalStatus: "completed",
+        terminalObservedAt: 2,
+        continuationRequired: true,
+        continuationId: "bgcont-1",
+        continuationQueuedAt: 3,
+        continuationSubmittedAt: 4,
+        continuationAcceptedAt: 5,
+      }],
+    });
+    store.create({ ...meta("next"), status: "idle" });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, root, 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {}, activeTurnLimit: 1 },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    const entry = {
+      sessionId: "missing-result",
+      running: false,
+      status: "idle",
+      queue: [],
+      client: { dispose: () => {}, cancel: () => {}, agentSessionId: () => null },
+    };
+    internals.active.set("missing-result", entry);
+    assert.equal(internals.acquireActiveTurn("missing-result"), true);
+    internals.markBackgroundContinuationMissingResult("missing-result", ["job-1"]);
+    assert.ok(store.readMeta("missing-result")?.backgroundJobs?.[0]?.continuationMissingResultAt);
+    assert.equal(store.readMeta("missing-result")?.backgroundWorkState, undefined);
+
+    internals.settleActiveWorkPermit("missing-result", entry);
+    assert.equal(manager.capacityState().dimensions?.activeTurns.used, 0);
+    assert.equal(internals.acquireActiveTurn("next"), true,
+      "a terminally missing result cannot starve later sessions");
+    internals.releaseActiveTurn("next");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an undelivered capacity snapshot is retried and reconnect can force reconciliation", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-capacity-report-retry-"));
   try {
